@@ -880,7 +880,7 @@ test("#1301: a closed PR is skipped deterministically in the shared review path"
   assert.ok(output.diff_fingerprint.length > 0);
 });
 
-test("#1301: a merged PR (state closed) is skipped; only an explicit terminal state skips", async () => {
+test("#1301: a merged PR (state closed) is skipped; any non-open state fails closed", async () => {
   const fx = fixture("changed-diff-reviews");
   // GitHub/Forgejo report a merged PR as state "closed" with merged_at set;
   // the shared gate treats it as terminal exactly like a closed one.
@@ -893,14 +893,31 @@ test("#1301: a merged PR (state closed) is skipped; only an explicit terminal st
   });
   assert.equal(merged.should_review, "false");
   assert.equal(merged.skip_reason, "pr-closed");
-  // An unrecognizable state is NOT treated as terminal here (the pulls API
-  // always supplies a real state); it falls through to the draft gate, which
-  // the explicit draft:false clears, so the PR reviews.
+  // Reviewability must be PROVEN on the shared path: an unrecognized state
+  // (even beside an explicit draft:false) is not open, so a malformed/partial
+  // forge PR read refuses deterministically instead of reaching the model.
   const weird = await runPrecheck({
     env: fx.env,
     adapter: new FixtureAdapter("github", { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "archived", draft: false } }),
   });
-  assert.equal(weird.should_review, "true");
+  assert.equal(weird.should_review, "false");
+  assert.equal(weird.skip_reason, "pr-state-unknown");
+  // A missing or non-string state fails closed the same way (#252 boundary:
+  // the absent field itself is the hostile shape, not a benign payload).
+  const missingState: Record<string, unknown> = { ...(fx.platform.pr as Record<string, unknown>), draft: false };
+  delete missingState.state;
+  const missing = await runPrecheck({
+    env: fx.env,
+    adapter: new FixtureAdapter("github", { ...fx.platform, pr: missingState }),
+  });
+  assert.equal(missing.should_review, "false");
+  assert.equal(missing.skip_reason, "pr-state-unknown");
+  const nonString = await runPrecheck({
+    env: fx.env,
+    adapter: new FixtureAdapter("github", { ...fx.platform, pr: { ...(fx.platform.pr as object), state: null, draft: false } }),
+  });
+  assert.equal(nonString.should_review, "false");
+  assert.equal(nonString.skip_reason, "pr-state-unknown");
 });
 
 test("#1301: the closed gate outranks the draft gate on the shared path", async () => {
@@ -922,6 +939,17 @@ test("#1301: even a forced re-review skips a closed PR", async () => {
   });
   assert.equal(output.should_review, "false");
   assert.equal(output.skip_reason, "pr-closed");
+});
+
+test("#1301: even a forced re-review skips an unproven-open PR state", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "archived", draft: false } };
+  const output = await runPrecheck({
+    env: { ...fx.env, FORCE_REVIEW: "true" },
+    adapter: new FixtureAdapter("github", platform),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-state-unknown");
 });
 
 test("runPrecheck carries bypass eligibility on an unchanged skip and the gate honors it", async () => {

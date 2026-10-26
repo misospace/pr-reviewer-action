@@ -28,6 +28,7 @@ function mockPlatform(options: { diff?: string; files?: unknown[]; title?: strin
         number: 7,
         title: options.title ?? "Update README",
         body: options.body ?? "",
+        state: "open",
         draft: false,
         head: { sha: "a".repeat(40), ref: "feature" },
         base: { ref: "main" },

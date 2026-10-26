@@ -58,9 +58,11 @@ export type PrState = "open" | "closed" | "unknown";
  * `merged_at` set), and the Forgejo adapter's GitHub-shaped normalization
  * keeps the API's `open`/`closed`, so `closed` is the single terminal value
  * that already covers a merged PR. A missing or unrecognizable `state` is
- * `unknown`; the comment-command gate treats it as open (the pulls API
- * always supplies one), while callers that must fail closed decide their own
- * side. Only an explicit string `state` is authoritative.
+ * `unknown`, and each caller decides which side uncertainty fails to: the
+ * shared review-admission gate fails closed (only an exact `open` is
+ * reviewable), while the comment-command gate keeps its legacy read of
+ * unknown-as-open (the pulls API always supplies one). Only an explicit
+ * string `state` is authoritative.
  */
 export function derivePrState(raw: unknown): PrState {
   const value = asObject(raw).state;

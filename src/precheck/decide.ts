@@ -401,6 +401,10 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   // The PR object fetched for the fork gate, threaded to the review path
   // below so an accepted comment does not re-fetch it.
   let commentPrObject: unknown | undefined;
+  // True only on the accepted comment-command fall-through: the review path
+  // then keeps the legacy `comment-pr-closed` state read (#1301 review)
+  // instead of the shared path's fail-closed one.
+  let commentCommandPath = false;
   // A `created` `issue_comment` on a PR carrying the re-review command
   // forces a fresh review. The commenter is authorized through the forge
   // API (triage-or-higher), failing closed on any lookup uncertainty — a
@@ -492,7 +496,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
     // meaningless (and the command is spam-able). A payload without a state
     // field is treated as open — the pulls API always supplies one. The
     // #1301 shared-path gate reads the same value through `derivePrState`
-    // (a merged PR reports `closed` on both GitHub and Forgejo).
+    // but fails closed on an unprovable state, unlike this legacy read.
     if (derivePrState(prObject) === "closed") {
       return platformOutputs(
         { should_review: "false", skip_reason: "comment-pr-closed" },
@@ -536,6 +540,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
       );
     }
     forceReview = true;
+    commentCommandPath = true;
     diagnostics(
       `[precheck] ${command} comment command accepted from ${JSON.stringify(commenter)}: forcing a fresh review\n`,
     );
@@ -696,7 +701,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   // where it documents WHY the skip was refused (still should_review=true).
   // The authorized comment branch already fetched the PR for its fork gate;
   // reuse it rather than re-fetching (the PR object is identical by then).
-  return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "", commentPrObject);
+  return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "", commentPrObject, commentCommandPath);
 }
 
 async function reviewPathOutputs(
@@ -707,27 +712,42 @@ async function reviewPathOutputs(
   broadFingerprint: string,
   staleReason: string,
   preFetchedPr?: unknown,
+  commentCommandPath = false,
 ): Promise<PrecheckOutput> {
   const repo = env.REPO ?? "";
   const prObject = preFetchedPr ?? await spec.adapter.getPr();
   const identity = normalizePrIdentity(prObject ?? {});
 
-  // ── #1301 closed/merged gate ───────────────────────────────────────────
+  // ── #1301 closed/merged gate (fail closed) ─────────────────────────────
   // A terminal PR (closed or merged) is never reviewed on ANY path, not
   // only by the comment command: a queued self-hosted re-review generation
   // of a long-merged PR must fail closed at job admission (engine admission
-  // is this function) instead of reaching the model. This mirrors the
-  // shipped `comment-pr-closed` gate and outranks the #961 draft gate, in
-  // the same order the comment-command path applies the two. Only an
-  // explicit terminal `state` is authoritative: an unknown/missing one
-  // reads as open here (a forge PR read always carries it), while the
-  // draft gate below still fails a failed lookup (null) closed as
-  // `pr-draft`. State is read through the configured forge capability.
-  if (derivePrState(prObject) === "closed") {
+  // is this function) instead of reaching the model. And a PR whose state
+  // CANNOT BE PROVEN OPEN is not reviewable either: a malformed/partial
+  // forge PR read (missing or unrecognized `state`) must refuse
+  // deterministically rather than proceed on `draft:false` alone — the same
+  // "reviewability must be proven" doctrine the #961 draft gate applies.
+  // Only an exact `open` proceeds; `closed` (which covers merged: GitHub
+  // and the Forgejo adapter's GitHub-shaped normalization both report a
+  // merged PR as `closed`) skips as `pr-closed`, anything else as
+  // `pr-state-unknown`. This gate outranks the #961 draft gate, matching
+  // the comment-command order (closed outranks draft). State is read
+  // through the configured forge capability. Two carve-outs preserve
+  // already-pinned behavior: a failed lookup (`getPr()` → null) has no
+  // state to read and still falls through to the #961 draft gate (which
+  // fails it closed as `pr-draft`, not relabeled here), and the accepted
+  // comment-command path keeps the legacy `comment-pr-closed` read where a
+  // missing/non-string state reads open — that path already ran its own
+  // closed gate and a fail-closed draft check upstream.
+  const prState = prObject === null || prObject === undefined
+    ? undefined
+    : derivePrState(prObject);
+  if (prState !== undefined && prState !== "open"
+    && !(commentCommandPath && prState === "unknown")) {
     return platformOutputs(
       {
         should_review: "false",
-        skip_reason: "pr-closed",
+        skip_reason: prState === "closed" ? "pr-closed" : "pr-state-unknown",
         diff_fingerprint: broadFingerprint,
         head_sha: identity.headSha,
         base_sha: identity.baseSha,
