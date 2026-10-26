@@ -567,10 +567,15 @@ const INPUT_ABSENCE_CUE_RE = /\b(?:unexpected|not\s+declared|declares?\s+no|decl
  * not what its manifest DECLARES — a declared input may legitimately not be
  * forwarded to a composite step or supported in one mode — so without the
  * noun anchoring them to the input list they must not reach the registry.
+ * The runtime-recognition phrases (`does not appear`, `not recognized`,
+ * `unrecognized`) are excluded for the same reason: they describe runtime
+ * recognition behavior, not manifest declaration, so a "does not recognize
+ * `x`" claim without the noun is not an input-absence claim the registry
+ * can witness (it stays unrecognized rather than being falsely refuted).
  * The noun-containing alternatives of INPUT_ABSENCE_CUE_RE are omitted:
  * they imply the noun is present, so the noun gate governs them.
  */
-const INPUT_ABSENCE_DECLARATION_CUE_RE = /\b(?:not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+(?:declare|appear)|undeclared|unexpected|not\s+recognized|unrecognized)\b/i;
+const INPUT_ABSENCE_DECLARATION_CUE_RE = /\b(?:not\s+declared|declares?\s+no|declared\s+no|does\s+not\s+declare|undeclared|unexpected)\b/i;
 const INPUT_PRESENCE_CUE_RE = /\b(?:declares?|declared|accepts?|accepting|accepted|uses?|exposes?|named|requires?|expects?|has\s+(?:an?\s+)?[a-z-]+\s+inputs?)\b/i;
 /**
  * #1238: the workflow-to-action mapping vocabulary. A clause whose SUBJECT

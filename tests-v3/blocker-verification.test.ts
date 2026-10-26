@@ -559,11 +559,17 @@ test("#1264 no-noun behavior-verb absence claims stay unrecognized", async () =>
   // name, not what its manifest declares: a declared input may legitimately
   // not be forwarded to a composite step or supported in one mode, so
   // without the noun anchoring the claim to the input list the registry
-  // must never decide it.
+  // must never decide it. The runtime-recognition phrases ("does not
+  // appear", "not recognized", "unrecognized") describe runtime behavior
+  // too — the review that flagged the no-noun widening pinned them here so
+  // the registry cannot refute a claim it cannot witness.
   const claims = [
     markerFinding({ message: "The action does not accept `ai-api-key`." }),
     markerFinding({ message: "The action does not forward `github-token` to the composite step it calls." }),
     markerFinding({ message: "The action does not support `run-as` in container mode." }),
+    markerFinding({ message: "The action does not appear to handle `ai-api-key`." }),
+    markerFinding({ message: "The action does not recognize `ai-api-key`." }),
+    markerFinding({ message: "`ai-api-key` is unrecognized by the action." }),
   ];
   const result = await verify(claims, async () => { throw new Error("behavior claims must not read source"); }, new Set(["github-token", "ai-api-key", "run-as"]));
   assert.deepEqual(result.findings, []);
