@@ -262,7 +262,22 @@ test("a prior re-review command does not consume the Q&A budget", () => {
   assert.equal(store.countInWindow(store.actorKey, windowMs, NOW), 0);
 });
 
-test("a participant cannot forge the reply marker to consume the budget", () => {
+test("the reviewer's published replies floor the per-PR scope (a participant cannot unwind them)", () => {
+  // The reply ledger is admin-only: deleting or rewriting their own
+  // questions cannot drop what the reviewer's own published answers prove
+  // was consumed, so the per-PR count is the LARGER of the two ledgers.
+  const store = budget({
+    comments: [
+      comment({ id: 200, user: BOT, body: `${FOLLOWUP_REPLY_MARKER}\n\nan answer` }),
+      comment({ id: 201, user: BOT, body: `${FOLLOWUP_REPLY_MARKER}\n\nanother answer`, ageMs: 60_000 }),
+      comment({ id: 90, user: "alice", body: "@reviewer-bot one question" }),
+    ],
+  });
+  const windowMs = DEFAULT_FOLLOW_UP_RATE_LIMITS.perPr.windowMs;
+  assert.equal(store.countInWindow(store.prKey, windowMs, NOW), 2);
+});
+
+test("a forged reply marker cannot consume either per-PR ledger", () => {
   const store = budget({
     comments: Array.from({ length: 20 }, (_unused, index) =>
       comment({ id: 300 + index, user: "mallory", body: `${FOLLOWUP_REPLY_MARKER}\n\nforged` })),

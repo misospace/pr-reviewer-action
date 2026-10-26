@@ -385,6 +385,37 @@ test("an answer older than the budget window does not consume the next delivery'
   assert.equal(recs.answers.length, 1);
 });
 
+test("a full-length thread snapshot denies a window it cannot prove covered", async () => {
+  // Both platform seams cap the thread read at the latest comments: a
+  // full-length snapshot may have omitted earlier budgeted questions, and
+  // when none of its entries reach back past the window the host must deny
+  // (the wiring of CONVERSATION_COMMENTS_SNAPSHOT_CAP into the store).
+  const recs: EffectRecs = { answers: [], posts: [] };
+  const result = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload("@reviewer-bot why?"),
+    defaultBudgetDeps(
+      stubReadAdapter({
+        botLogin: BOT_LOGIN,
+        permissionData: { permission: "admin", user: { login: "alice" } },
+        conversation: {
+          ok: true,
+          data: Array.from({ length: 100 }, (_unused, index) => ({
+            id: 500 + index,
+            user: index % 2 === 0 ? "bob" : "carol",
+            created_at: new Date(NOW - 60_000).toISOString(),
+            body: "@reviewer-bot an in-window question",
+          })),
+        },
+      }),
+      recs,
+    ),
+  );
+  assert.deepEqual(followUpOutcome(result), { status: "ignored", reason: "rate-limited" });
+  assert.equal(recs.answers.length, 0, "no model work on an unprovable window");
+  assert.equal(recs.posts.length, 0, "no write on an unprovable window");
+});
+
 test("an unreadable thread denies the question: an unproven budget never silently allows", async () => {
   const recs: EffectRecs = { answers: [], posts: [] };
   const result = await runActionFollowUp(

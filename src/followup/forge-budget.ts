@@ -14,16 +14,29 @@
  * on every delivery.
  *
  * What is counted (both only inside the queried window):
- * - the PER-PR scope counts every mention-addressed QUESTION on this PR,
- *   whatever author posted it. Each question is at most one model attempt
- *   (the planner plans once per event and the executor is one-shot, never a
- *   retry), so the question count bounds the PR's follow-up model work
- *   whether or not any attempt SUCCEEDED: a failed model call or a failed
- *   post leaves its question in the thread, so the attempt still consumes
- *   cross-delivery budget and cannot be repeated past the limit. A question
- *   the planner DENIED also sits in the thread and counts too — the store
- *   over-counts rather than under-counts (fail closed), and the per-actor
- *   scope still caps any single account;
+ * - the PER-PR scope is the LARGER of two ledgers:
+ *   - every mention-addressed QUESTION on this PR, whatever author posted
+ *     it. Each question is at most one model attempt (the planner plans once
+ *     per event and the executor is one-shot, never a retry), so the question
+ *     count bounds the PR's follow-up model work whether or not any attempt
+ *     SUCCEEDED: a failed model call or a failed post leaves its question in
+ *     the thread, so the attempt still consumes cross-delivery budget;
+ *   - the reviewer's own published follow-up REPLIES (marker AND proven
+ *     identity). These are the admin-only records a participant cannot edit
+ *     or erase, so the floor survives a participant deleting or rewriting
+ *     their own questions — what the reply ledger says succeeded, stayed
+ *     succeeded.
+ *   The larger of the two keeps both properties: attempts consume (a failed
+ *   attempt cannot be repeated past the limit) and successful work is
+ *   durably floored. Residual, documented honestly: a participant can still
+ *   evade the ATTEMPT bound by deleting their own failed questions (the
+ *   admin-only floor keeps bounding what actually succeeded), and a question
+ *   the planner DENIED — including an unauthorized one — also sits in the
+ *   thread and counts (the store over-counts rather than under-counts;
+ *   mention-spam can throttle the Q&A lane for a window, self-healing, which
+ *   is the accepted cost of never letting comment traffic widen model spend —
+ *   the review pipeline itself is never throttled by this budget). The
+ *   per-actor scope still caps any single account;
  * - the PER-ACTOR scope is per-actor WITHIN the PR and counts THIS actor's
  *   own prior QUESTIONS on this PR — the intent the planner documents ("one
  *   person cannot dominate a PR").
@@ -63,7 +76,7 @@
  * platform seam's normalized comment shape.
  */
 
-import { classifyFollowUpComment } from "./classify.js";
+import { FOLLOWUP_REPLY_MARKER, classifyFollowUpComment } from "./classify.js";
 import type { RateLimitStore } from "./rate-limit.js";
 
 /** The count returned for a scope whose budget headroom cannot be proven.
@@ -162,14 +175,23 @@ export class ForgeFollowUpBudget implements RateLimitStore {
   /** The planner's per-actor scope key (see `planFollowUp`). */
   readonly actorKey: string;
   /** Every mention-addressed question on this PR, whatever author posted
-   * it (epoch millis) — the per-PR scope's durable attempt count. */
+   * it (epoch millis) — the per-PR scope's attempt count. */
   private readonly prQuestionInstants: number[] = [];
+  /** The reviewer's own published follow-up replies (marker AND proven
+   * identity, epoch millis) — the per-PR scope's admin-only floor: a
+   * successful exchange's durable record is authored by the reviewer, so a
+   * participant deleting their own questions cannot unwind it. The per-PR
+   * count is the LARGER of the two, so the question ledger bounds attempts
+   * (failed attempts consume) while the reply ledger bounds what succeeded
+   * against records a participant cannot erase. */
+  private readonly prReplyInstants: number[] = [];
   /** This actor's own prior questions in the thread (epoch millis). */
   private readonly questionInstants: number[] = [];
   /** Question-intent comments whose creation instant the seam could not
    * report: unplaceable in any window, so they count toward BOTH scopes in
-   * EVERY window (conservative — never an under-count). */
-  private readonly unplaceableQuestions = new Set<string>();
+   * EVERY window (conservative — never an under-count; counted, not
+   * deduplicated, so two distinct comments count twice). */
+  private unplaceableQuestions = 0;
   /** The oldest creation instant the snapshot reports (null when it reports
    * none): the reach-back marker the window-coverage proof uses. */
   private oldestObservedMs: number | null = null;
@@ -187,6 +209,7 @@ export class ForgeFollowUpBudget implements RateLimitStore {
     if (!options.readOk) return;
 
     const actor = options.actor.toLowerCase();
+    const botLogin = options.botLogin === null ? null : options.botLogin.toLowerCase();
     for (const raw of options.comments) {
       const comment = projectComment(raw);
       if (comment === null) continue;
@@ -194,11 +217,22 @@ export class ForgeFollowUpBudget implements RateLimitStore {
         && (this.oldestObservedMs === null || comment.createdAtMs < this.oldestObservedMs)) {
         this.oldestObservedMs = comment.createdAtMs;
       }
+      // The reviewer's own published reply: the marker the one authoritative
+      // renderer stamps AND the reviewer's own proven identity — the ledger a
+      // participant cannot edit or erase (forge permissions for the app's own
+      // comments are admin-only). Requiring both keeps a participant from
+      // forging the marker to throttle the lane.
+      const isReply = comment.body.includes(FOLLOWUP_REPLY_MARKER)
+        && botLogin !== null
+        && comment.user.toLowerCase() === botLogin;
+      if (isReply) {
+        if (comment.createdAtMs !== null) this.prReplyInstants.push(comment.createdAtMs);
+        else this.unplaceableQuestions += 1;
+        continue;
+      }
       // The same classifier the planner uses: a prior comment only counts
-      // when it would have triggered the same work. The reviewer's own
-      // publications never classify as questions (the loop guards fire
-      // first), so nobody can forge consumption; a prior re-review command
-      // does not consume the Q&A budget either.
+      // when it would have triggered the same work. A prior re-review
+      // command does not consume the Q&A budget either.
       const intent = classifyFollowUpComment({
         body: comment.body,
         authorLogin: comment.user,
@@ -212,7 +246,7 @@ export class ForgeFollowUpBudget implements RateLimitStore {
       if (options.currentCommentId !== "" && comment.id === options.currentCommentId) continue;
       if (comment.createdAtMs === null) {
         // Unplaceable in any window: count it conservatively in every one.
-        this.unplaceableQuestions.add(comment.id);
+        this.unplaceableQuestions += 1;
         continue;
       }
       this.prQuestionInstants.push(comment.createdAtMs);
@@ -230,22 +264,44 @@ export class ForgeFollowUpBudget implements RateLimitStore {
     // visible outright; an incomplete (latest-N) snapshot proves it only when
     // its oldest entry precedes the window — an in-window event missing from
     // a latest-N snapshot must be OLDER than that entry, which is impossible
-    // then. A window the snapshot cannot prove covered denies every scope.
+    // then (both seams truncate in creation-instant order, the space this
+    // proof reasons in). A window the snapshot cannot prove covered denies
+    // every scope.
     const covered = this.snapshotComplete
       || (this.oldestObservedMs !== null && this.oldestObservedMs <= windowStart);
     if (!covered) return DENY;
-    const source = key === this.prKey
-      ? this.prQuestionInstants
-      : key === this.actorKey
-        ? this.questionInstants
-        : null;
+    if (key === this.prKey) {
+      // The larger of the two ledgers: the question count bounds ATTEMPTS
+      // (a failed model or post attempt still consumes), the reply count is
+      // the admin-only floor a participant cannot unwind; the unplaceable
+      // comments count in every window on top (never an under-count).
+      let questions = 0;
+      for (const instant of this.prQuestionInstants) {
+        if (instant > windowStart && instant <= nowMs) questions += 1;
+      }
+      let replies = 0;
+      for (const instant of this.prReplyInstants) {
+        if (instant > windowStart && instant <= nowMs) replies += 1;
+      }
+      return this.unplaceableQuestions + Math.max(questions, replies)
+        + this.overlayCount(key, windowStart, nowMs);
+    }
+    const source = key === this.actorKey
+      ? this.questionInstants
+      : null;
     // A scope this store does not cover proves no headroom either: a scope
     // key the planner changes can never silently widen the budget.
     if (source === null) return DENY;
-    let count = this.unplaceableQuestions.size;
+    let count = this.unplaceableQuestions;
     for (const instant of source) {
       if (instant > windowStart && instant <= nowMs) count += 1;
     }
+    return count + this.overlayCount(key, windowStart, nowMs);
+  }
+
+  /** The process's own overlay events for `key` inside the window. */
+  private overlayCount(key: string, windowStart: number, nowMs: number): number {
+    let count = 0;
     for (const instant of this.recorded.get(key) ?? []) {
       if (instant > windowStart && instant <= nowMs) count += 1;
     }

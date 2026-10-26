@@ -143,10 +143,22 @@ export function forgejoCommentToStandard(raw: unknown): Record<string, unknown> 
 
 /** Forgejo `list-comments` piped through `jq 'sort_by(.created_at // "") |
  * reverse | .[0:100]'` — note the v2 Forgejo branch is newest-first while
- * the GitHub branch is oldest-first; `pr_thread` re-sorts both. */
+ * the GitHub branch is oldest-first; `pr_thread` re-sorts both. The
+ * latest-N truncation is by PARSED creation instant (string order as the
+ * deterministic tiebreak) so the cap keeps the chronologically latest
+ * comments in the same space the follow-up budget's snapshot-coverage
+ * proof reasons in; on conforming RFC3339 stamps (what both forges emit)
+ * the order is identical to the v2 string sort. Unparseable stamps keep
+ * the v2 newest-first position, so they are the first the cap drops. */
 export function normalizeForgejoConversationComments(rawComments: readonly unknown[]): unknown[] {
   const standard = rawComments.map(forgejoCommentToStandard);
-  return jqSortBy(standard, (item) => jqAlt(item.created_at, "")).reverse().slice(0, CONVERSATION_COMMENTS_SNAPSHOT_CAP);
+  const instant = (item: Record<string, unknown>): number => {
+    const raw = jqAlt(item.created_at, "");
+    const parsed = typeof raw === "string" && raw.trim() !== "" ? Date.parse(raw) : Number.NaN;
+    return Number.isNaN(parsed) ? Number.MAX_SAFE_INTEGER : parsed;
+  };
+  return jqSortBy(standard, (item) => [instant(item), jqAlt(item.created_at, ""), jqAlt(item.id, 0)])
+    .reverse().slice(0, CONVERSATION_COMMENTS_SNAPSHOT_CAP);
 }
 
 // ── Review threads ──────────────────────────────────────────────────────

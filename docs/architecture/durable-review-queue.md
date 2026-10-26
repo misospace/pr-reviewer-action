@@ -256,10 +256,13 @@ The planner's per-PR and per-actor-WITHIN-PR Q&A budget is a `RateLimitStore`
 seam (`src/followup/rate-limit.ts`). The Action lane runs one process per
 webhook delivery, so an in-memory store hands every delivery a fresh budget;
 the forge-backed store (`src/followup/forge-budget.ts`) reads the budget state
-from the PR thread itself — every mention-addressed question on the PR whatever
-author posted it (each question is at most one model attempt, so a failed model
-or post attempt still consumes budget and cannot be repeated past the limit)
-and the questioner's own prior questions — so the window accumulates ACROSS
+from the PR thread itself — the per-PR scope is the LARGER of every
+mention-addressed question on the PR whatever author posted it (each question
+is at most one model attempt, so a failed model or post attempt still consumes
+budget and cannot be repeated past the limit) and the reviewer's own published
+marker replies (the admin-only floor a participant cannot unwind by deleting
+their own questions), and the per-actor scope is the questioner's own prior
+questions — so the window accumulates ACROSS
 deliveries. Both scope keys are PR-scoped (`pr:<platform>:<repo>#<pr>`,
 `actor:<platform>:<repo>#<pr>:<actor>`), so the thread is the COMPLETE state
 behind every key this store answers — no key claims a scope its state cannot
