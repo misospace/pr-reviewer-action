@@ -1,9 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isLowConfidence, reviewerRequestedEscalation, shouldEscalate } from "../src/routing/escalation.js";
+import { isLowConfidence, reviewerRequestedEscalation } from "../src/routing/escalation.js";
 import { anthropicEffortInactiveWarning, anthropicEffortSupported, anthropicEffortSupportInput, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, anthropicStructuredOutputSupportInput, effectiveWireEffort, effectiveWireResponseFormat, laneAnthropicEffortSupported, laneAnthropicStructuredOutputSupported, normalizeReasoningEffort, resolveConfidenceProfile, resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierReasoningEffort, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
 
-const flags = { onIncomplete: true, onRequestChanges: true, onLowConfidence: true, onBlockers: true, onPlanningFailure: true };
 const longReview = "The change is reviewed carefully and the behavior appears correct. No concerns identified in the touched paths.";
 
 test("reviewer request requires strict boolean true and retains only nonblank reason", () => {
@@ -14,30 +13,6 @@ test("reviewer request requires strict boolean true and retains only nonblank re
   assert.deepEqual(reviewerRequestedEscalation({ smart_review_requested: true, smart_review_reason: "  check edge cases  " }), { requested: true, reason: "  check edge cases  " });
   assert.deepEqual(reviewerRequestedEscalation({}), { requested: false, reason: null });
   assert.deepEqual(reviewerRequestedEscalation(null as unknown as Record<string, unknown>), { requested: false, reason: null });
-});
-
-test("shouldEscalate reports each telemetry reason only when enabled and applicable", () => {
-  const base = { review_markdown: longReview, verdict: "approve" };
-  assert.deepEqual(shouldEscalate(base), { escalate: false, reasons: [] });
-  assert.deepEqual(shouldEscalate({ ...base, verdict: "request_changes" }, {}, {}, {}, { onRequestChanges: true }), { escalate: true, reasons: ["fast_request_changes"] });
-  assert.deepEqual(shouldEscalate({ ...base, verdict: "request_changes" }, {}, {}, {}, { onRequestChanges: false }), { escalate: false, reasons: [] });
-  assert.deepEqual(shouldEscalate({ review_markdown: "LGTM." }, {}, {}, {}, { onLowConfidence: true }), { escalate: true, reasons: ["fast_low_confidence"] });
-  assert.deepEqual(shouldEscalate(base, {}, { has_blocker: true }), { escalate: true, reasons: ["tool_or_evidence_blockers"] });
-  assert.deepEqual(shouldEscalate(base, {}, {}, { executed_request_count: 1, tool_results: [{ status: "error" }] }), { escalate: true, reasons: ["tool_or_evidence_blockers"] });
-  assert.deepEqual(shouldEscalate(base, {}, {}, { executed_request_count: 1, tool_results: [{ status: "ok" }] }), { escalate: false, reasons: [] });
-  assert.deepEqual(shouldEscalate(base, {}, {}, { planning_error: "failed" }, { onPlanningFailure: true }), { escalate: true, reasons: ["tool_planning_failed"] });
-  assert.deepEqual(shouldEscalate(base, {}, {}, { error: "failed" }, { onPlanningFailure: true }), { escalate: true, reasons: ["tool_planning_failed"] });
-  assert.deepEqual(shouldEscalate({}, {}, {}, {}, flags), { escalate: true, reasons: ["fast_low_confidence"] });
-});
-
-test("structured required-check dispositions take precedence over legacy prose", () => {
-  const checks = { must_check: ["review auth flow for regression"] };
-  const review_markdown = "The auth behavior is reviewed and confirmed.";
-  const notApplicable = { check: checks.must_check[0], status: "not_applicable", rationale: "This change has no authentication flow." };
-  assert.deepEqual(shouldEscalate({ review_markdown, required_check_dispositions: [notApplicable] }, checks, {}, {}, { onIncomplete: true, onLowConfidence: false }), { escalate: false, reasons: [] });
-  assert.deepEqual(shouldEscalate({ review_markdown, required_check_dispositions: null }, checks, {}, {}, { onIncomplete: true, onLowConfidence: false }), { escalate: true, reasons: ["incomplete_required_checks"] });
-  assert.deepEqual(shouldEscalate({ review_markdown }, checks, {}, {}, { onIncomplete: true, onLowConfidence: false }), { escalate: false, reasons: [] });
-  assert.deepEqual(shouldEscalate({ review_markdown: "No discussion." }, checks, {}, {}, { onIncomplete: true, onLowConfidence: false }), { escalate: true, reasons: ["incomplete_required_checks"] });
 });
 
 test("isLowConfidence detects stubs and substantive Unknowns but not environmental-only uncertainty", () => {

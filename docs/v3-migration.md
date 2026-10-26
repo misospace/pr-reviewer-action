@@ -1236,6 +1236,29 @@ deliberate contract changes shipped with the port:
   (`json.dumps(..., separators=(',', ':'))` / jq object order), which the
   earlier precheck-side port had canonicalized with sorted keys.
 
+## The final v2 keyword-policy deletion (#1252)
+
+After the #680/#750 cutover made structured dispositions authoritative, the
+v2 keyword tables survived only as test-pinned reference code with no
+production callers. #1252 deleted them outright:
+
+- `src/enforcement/completeness.ts`: `CHECK_CONCEPTS`,
+  `fallbackKeywords`, `isAddressed`, and `validateReview` (the v2
+  `is_addressed`/`validate_review` keyword oracle). The live path
+  (`structuredCoverage` → `evaluateRequiredCheckCoverage`) is unchanged;
+  key absence still means every check is conservatively unresolved.
+- `src/routing/escalation.ts`: the `CONCEPTS` keyword table,
+  `legacyCheckAddressed`, and the telemetry-only `shouldEscalate`
+  heuristic (whose onIncomplete branch was the last consumer of the
+  keyword fallback). The live v3 surface is unchanged:
+  `reviewerRequestedEscalation` remains the sole post-primary smart-call
+  trigger (#721), and the `isLowConfidence`/`loadJsonRecord`/
+  `STUB_REVIEW_MIN_CHARS` Unknowns heuristics stay for artifact triage.
+
+The historical keyword table itself survives only in git history (the v2
+sources were already retired); it is no longer mirrored in the TypeScript
+runtime or its fixtures.
+
 Python-only runtime remaining after #680 was the deep-review specialist
 runner/corpus (`scripts/run_specialists.py`, `pr_reviewer/specialist_corpus.py`
 — the #706 backlog) and the v2 shell orchestration (`scripts/run_review.sh`

@@ -2,10 +2,8 @@ export {
   isLowConfidence,
   loadJsonRecord,
   reviewerRequestedEscalation,
-  shouldEscalate,
   STUB_REVIEW_MIN_CHARS,
 } from "./escalation.js";
-export type { EscalationFlags } from "./escalation.js";
 export {
   resolveReviewRoute,
   resolveTierProfiles,
