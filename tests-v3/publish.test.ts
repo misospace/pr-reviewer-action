@@ -1042,6 +1042,104 @@ test("failed and plain fallback native submissions preserve previous findings", 
   }
 });
 
+// ---------------------------------------------------------------------------
+// #1249: a body-only fallback (a rejected commit-bound submission — e.g. an
+// anchor batch that raced a new push) must not drop the findings the inline
+// comments carried. Under a non-strict verdict policy the findings table is
+// not part of the native review body, so the fallback body carries the
+// bounded findings summary; under strict the body already renders it, so no
+// duplicate table may appear.
+// ---------------------------------------------------------------------------
+
+test("#1249: non-strict body-only fallback appends the bounded findings summary", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+  api.reviewResults = [{ ok: false }, { ok: true }];
+  const result = await publishReview(
+    input({ mode: "review_verdict", inlineFindings: true, findings: FINDINGS }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted.length, 2, "the rejected commit-bound batch falls back body-only");
+  const rejected = api.submitted[0]!;
+  assert.equal(rejected.event, "APPROVE");
+  assert.equal(rejected.commit_id, HEAD);
+  assert.equal(rejected.comments?.length, 1, "the rejected batch carried the inline finding");
+  const plain = api.submitted[1]!;
+  assert.equal(plain.commit_id, undefined, "the fallback is not commit-bound");
+  assert.equal(plain.comments, undefined, "the fallback carries no inline comments");
+  assert.ok(plain.body.includes("### Findings"), "the fallback body carries the findings summary");
+  assert.ok(plain.body.includes("a.ts:2"), "the fallback findings row keeps the location");
+  assert.ok(plain.body.includes("A finding"), "the fallback findings row keeps the message");
+  assert.ok(
+    result.messages.some((line) => line.includes("falling back to plain review with the findings summary appended")),
+    "the step messages disclose the compensation",
+  );
+});
+
+test("#1249: strict body-only fallback does not duplicate the findings table", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+  api.reviewResults = [{ ok: false }, { ok: true }];
+  const result = await publishReview(
+    input({ mode: "review_verdict", verdictPolicy: "strict", inlineFindings: true, findings: FINDINGS }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted.length, 2);
+  const plain = api.submitted[1]!;
+  assert.equal(plain.body.split("### Findings").length - 1, 1, "the strict body already carried the table; the fallback must not duplicate it");
+  assert.ok(
+    !result.messages.some((line) => line.includes("findings summary appended")),
+    "no compensation note when the body already carried the findings",
+  );
+});
+
+test("#1249: a non-strict fallback with no findings keeps the body unchanged", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+  api.reviewResults = [{ ok: false }, { ok: true }];
+  const result = await publishReview(input({ mode: "review_verdict" }), api, { diffText: DIFF });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted.length, 2);
+  assert.ok(!api.submitted[1]!.body.includes("### Findings"), "no findings section is appended when there are no findings");
+  assert.ok(
+    !result.messages.some((line) => line.includes("findings summary appended")),
+    "no compensation note when there is nothing to compensate",
+  );
+});
+
+test("#1249: the body-only fallback appends a BOUNDED summary for a hostile finding", async () => {
+  const api = new MockPublishApi();
+  api.reviews = [{ id: 7, body: MARKER, user: { login: "bot" } }];
+  api.reviewResults = [{ ok: false }, { ok: true }];
+  // The first finding is ANCHORABLE (a.ts:2 is in the diff), so the rejected
+  // commit-bound batch really does carry an inline comment — the anchor-race
+  // scenario. The second is un-anchorable and carries the over-long path no
+  // producer bounds. Both messages exceed the summary's 300-char cap.
+  const hostile = [
+    { file: "a.ts", line: 2, severity: "major", message: "m".repeat(2000) },
+    { file: "p".repeat(5000), line: 2, severity: "major", message: "m".repeat(5000) },
+  ];
+  const result = await publishReview(
+    input({ mode: "review_verdict", inlineFindings: true, findings: hostile }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted.length, 2, "the rejected commit-bound batch falls back body-only");
+  const rejected = api.submitted[0]!;
+  assert.equal(rejected.comments?.length, 1, "the rejected batch carried the anchorable inline finding");
+  const plain = api.submitted[1]!;
+  assert.ok(plain.body.includes("### Findings"), "the fallback body still carries the findings summary");
+  assert.ok(!plain.body.includes("p".repeat(1000)), "the over-long path is not published in full");
+  assert.ok(!plain.body.includes("m".repeat(1000)), "the over-long message is not published in full");
+  const summary = plain.body.slice(plain.body.indexOf("### Findings"));
+  assert.ok(summary.length < 5000, `the appended summary is bounded (${summary.length} chars)`);
+});
+
 
 test("cleanup cap skips cleanup but still removes the rerun label", async () => {
   const api = new MockPublishApi();

@@ -84,23 +84,96 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * (50 findings of up to 2000 characters each would overrun a comment). */
 export const FINDINGS_SUMMARY_MAX_ROWS = 50;
 
+/** Cap on the model-controlled severity token rendered in the findings table's
+ * severity column.
+ *
+ * #1249: the body-only native-review fallback publishes this summary, so the
+ * bound is part of a published surface's contract, not this renderer's
+ * internals. A severity outside the known set renders verbatim (the label map
+ * has no entry to fall back on), so without a cap a hostile label would make
+ * the summary unbounded.
+ *
+ * The cap applies to the CONTENT, before table escaping expands it (two-fold
+ * for `\` and `|`, five-fold for `&`/`<`/`>`), so the published cell is at
+ * most roughly five times this. The per-severity counts do NOT render a
+ * severity at all — they render the closed vocabulary only, so they are
+ * bounded without this cap. */
+export const FINDINGS_SUMMARY_MAX_SEVERITY_CHARS = 64;
+
+/** Cap on the model-controlled path rendered in the findings table's location
+ * column. The path is the one findings field no producer bounds: the verdict
+ * normalizer trims it but never caps it, so an over-long path would render
+ * into the published body unbounded. Same convention as the severity cap.
+ *
+ * The cap applies to the PATH only — the line number is appended after it, so
+ * a capped path never loses its line. */
+export const FINDINGS_SUMMARY_MAX_LOCATION_CHARS = 300;
+
+/** Cap on the model-controlled finding message rendered in the findings table's
+ * message column. The cap is applied BEFORE table escaping (escaping expands
+ * `\` and `|` two-fold and `&`/`<`/`>` into entities five-fold), so the
+ * published cell is at most roughly five times this. */
+export const FINDINGS_SUMMARY_MAX_MESSAGE_CHARS = 300;
+
+/** Bound one model-controlled token for the findings summary: the whitespace is
+ * collapsed (so a newline can never forge a heading) and the text is truncated
+ * to `max` characters BEFORE table escaping — escaping expands the text (two-fold
+ * for `\` and `|`, five-fold for `&`/`<`/`>`), and cutting an escape pair in
+ * half would itself be a rendering bug. */
+function boundedSummaryToken(value: string, max: number): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  return text.length > max ? text.slice(0, max) : text;
+}
+
 const SEVERITY_RANK = ["blocker", "major", "minor", "info"] as const;
 
-/** Per-severity counts in rank order, zero entries omitted: `2 major, 4 minor`. */
+/** Per-severity counts in rank order, zero entries omitted: `2 major, 4 minor`.
+ *
+ * The counts ride in a HEADING line (`### Findings (2 major)`), not in a table
+ * cell, so they are never table-escaped: a severity carrying a newline would
+ * otherwise forge a heading of its own, and a severity carrying a comma would
+ * split into a second count token of its own.
+ *
+ * #1249: the heading is therefore rendered from the CLOSED severity vocabulary
+ * only — no model-controlled text reaches it at all. Only the four known
+ * severities render as a count token, and every finding whose severity is
+ * outside the vocabulary is aggregated into one bounded
+ * `N findings of unknown severity` clause (separate from the counts, so it can
+ * never be read as another severity's count).
+ *
+ * Two properties follow, and both are what the counts line needs:
+ *
+ * - BOUNDED: the line's length is a function of the vocabulary size and the
+ *   finding count alone, never of how many distinct severities a run
+ *   produced. Capping each token's length is not enough on its own — a run
+ *   with thousands of distinct severities renders thousands of tokens.
+ * - UNFORGEABLE: a severity cannot inject a token boundary, a count, or a
+ *   clause, because no part of a severity reaches the line.
+ *
+ * Published bytes are unchanged for every finding whose severity is in the
+ * vocabulary, which is every finding the verdict normalizer produces
+ * (`src/model/verdict.ts` maps every severity through its alias table onto
+ * `blocker`/`major`/`minor`/`info`). */
 export function severityCountsLabel(findings: unknown): string {
   if (!Array.isArray(findings)) return "";
   const counts = new Map<string, number>();
+  let unknownSeverity = 0;
   for (const finding of findings) {
     const severity = isRecord(finding) && typeof finding.severity === "string"
       ? finding.severity
       : "info";
-    counts.set(severity, (counts.get(severity) ?? 0) + 1);
+    if ((SEVERITY_RANK as readonly string[]).includes(severity)) {
+      counts.set(severity, (counts.get(severity) ?? 0) + 1);
+    } else {
+      unknownSeverity += 1;
+    }
   }
-  const ordered = [
-    ...SEVERITY_RANK.filter((severity) => counts.has(severity)),
-    ...[...counts.keys()].filter((severity) => !(SEVERITY_RANK as readonly string[]).includes(severity)).sort(),
-  ];
-  return ordered.map((severity) => `${counts.get(severity)} ${severity}`).join(", ");
+  const tokens = SEVERITY_RANK
+    .filter((severity) => counts.has(severity))
+    .map((severity) => `${counts.get(severity)} ${severity}`);
+  if (unknownSeverity === 0) return tokens.join(", ");
+  const clause = `${unknownSeverity} ${unknownSeverity === 1 ? "finding" : "findings"} of unknown severity`;
+  return tokens.length > 0 ? `${tokens.join(", ")}; ${clause}` : clause;
 }
 
 /** Wrap an already-escaped body in a fence-safe inline-code span: the
@@ -128,12 +201,23 @@ function fenceInlineCode(body: string): string {
 /** A path (model-controlled) as one bounded code span: whitespace collapsed
  * and fenced by a backtick run longer than any inside it, so it cannot open
  * markdown structure; pipes are escaped because GFM tables split cells even
- * inside code spans. */
+ * inside code spans. The path is capped BEFORE escaping (an over-long path
+ * would otherwise make the published cell unbounded).
+ *
+ * The cap deliberately does NOT go through `boundedSummaryToken`: that helper
+ * trims its input, and trimming the path here would change what the cell
+ * renders for a whitespace-padded path (`a.ts :5` today, `a.ts:5` after a
+ * trim) — a published-byte change the bound does not need. The cap is applied
+ * to the path alone, and the collapse still runs over the whole cell exactly
+ * as before, so the line number always survives. */
 function locationCell(finding: Record<string, unknown>): string {
   const file = typeof finding.file === "string" ? finding.file : "";
   const line = typeof finding.line === "number" && Number.isFinite(finding.line) ? String(finding.line) : "";
   if (file === "" && line === "") return "";
-  const raw = file === "" ? line : line === "" ? file : `${file}:${line}`;
+  const boundedFile = file.length > FINDINGS_SUMMARY_MAX_LOCATION_CHARS
+    ? file.slice(0, FINDINGS_SUMMARY_MAX_LOCATION_CHARS)
+    : file;
+  const raw = boundedFile === "" ? line : line === "" ? boundedFile : `${boundedFile}:${line}`;
   return fenceInlineCode(escapeTableCell(raw.replace(/\s+/g, " ").trim()));
 }
 
@@ -145,6 +229,23 @@ function locationCell(finding: Record<string, unknown>): string {
  * whitespace collapse, a length cap, and table-cell escaping; a hostile
  * message cannot split the row or forge headings. Returns "" when there is
  * nothing to render.
+ *
+ * #1249: every model-controlled cell is BOUNDED — the severity label (≤
+ * `FINDINGS_SUMMARY_MAX_SEVERITY_CHARS`), the location path (≤
+ * `FINDINGS_SUMMARY_MAX_LOCATION_CHARS`, plus the line number), and the
+ * message (≤ `FINDINGS_SUMMARY_MAX_MESSAGE_CHARS`). The caps apply to the
+ * CONTENT, before table escaping expands it (two-fold for `\` and `|`,
+ * five-fold for `&`/`<`/`>`), so a published cell is at most roughly five
+ * times its cap and the published summary stays bounded even for a hostile
+ * finding. The body-only native-review fallback publishes this summary, so
+ * the bound is a published-surface contract, not this renderer's internals.
+ * The per-severity counts ride in a heading line rather than a table cell, so
+ * they are never table-escaped: no part of a finding's severity reaches that
+ * line at all. The counts render the closed severity vocabulary only, and
+ * every finding outside it is aggregated into one `N findings of unknown
+ * severity` clause, so the heading's length is bounded by the vocabulary size
+ * and the finding count — never by how many distinct severities a run
+ * produced — and no severity can forge a count token or a clause there.
  *
  * Per-surface policy for the message cell (#975 / #988): the strict
  * published body (publish.ts) calls this with no opts, keeping the operator's
@@ -172,12 +273,15 @@ export function renderFindingsSummary(
   ];
   for (const finding of rows.slice(0, FINDINGS_SUMMARY_MAX_ROWS)) {
     const rawSeverity = typeof finding.severity === "string" ? finding.severity : "info";
-    const label = Object.hasOwn(SEVERITY_LABELS, rawSeverity) ? SEVERITY_LABELS[rawSeverity]! : rawSeverity;
+    const label = boundedSummaryToken(
+      Object.hasOwn(SEVERITY_LABELS, rawSeverity) ? SEVERITY_LABELS[rawSeverity]! : rawSeverity,
+      FINDINGS_SUMMARY_MAX_SEVERITY_CHARS,
+    );
     const body = escapeTableCell(
-      sanitizeMarkdown(redactText(String(finding.message ?? "")), linkMode)
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 300),
+      boundedSummaryToken(
+        sanitizeMarkdown(redactText(String(finding.message ?? "")), linkMode),
+        FINDINGS_SUMMARY_MAX_MESSAGE_CHARS,
+      ),
     );
     // #988: fence only non-empty messages; an empty message stays an empty cell.
     const message = opts?.messageAsInlineCode === true && body !== "" ? fenceInlineCode(body) : body;
