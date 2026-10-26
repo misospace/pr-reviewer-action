@@ -11,8 +11,8 @@
  *   4. explicit re-review   — handed straight back to the NORMAL review
  *                             pipeline (its own admission/dedup); never a
  *                             second reviewer, never a verdict here.
- *   5. rate gate (Q&A only) — per-PR and per-actor budgets for open-ended
- *                             questions, recorded atomically.
+ *   5. rate gate (Q&A only) — per-PR and per-actor-within-PR budgets for
+ *                             open-ended questions, recorded atomically.
  *   6. answer               — a bounded discussion prompt.
  *
  * The authority gate mirrors but does NOT replace the review pipeline's own
@@ -161,13 +161,17 @@ export async function planFollowUp(
   if (classification.intent === "rereview") return { action: "rereview" };
 
   // 5. Question rate gate — the open-ended, spam-able model work is bounded
-  // per-PR and per-actor. `repoFullName` is canonical-lowercase at the event
-  // boundary; it is lowercased again here so a hand-built event cannot split one
-  // PR's budget by casing. Recorded only when BOTH scopes still allow.
+  // per-PR and per-actor WITHIN the PR: the actor scope is that actor's own
+  // questions on this PR (the intent "one person cannot dominate a PR"), not a
+  // repo-wide allowance. `repoFullName` is canonical-lowercase at the event
+  // boundary; it is lowercased again here — for both scopes — so a hand-built
+  // event cannot split or share one PR's actor budget by casing. Recorded only
+  // when BOTH scopes still allow.
   const now = deps.clock();
+  const repo = event.repoFullName.toLowerCase();
   const scopes: RateLimitScope[] = [
-    { key: `pr:${event.platform}:${event.repoFullName.toLowerCase()}#${event.prNumber}`, rule: config.rateLimit.perPr },
-    { key: `actor:${event.platform}:${event.actor.toLowerCase()}`, rule: config.rateLimit.perActor },
+    { key: `pr:${event.platform}:${repo}#${event.prNumber}`, rule: config.rateLimit.perPr },
+    { key: `actor:${event.platform}:${repo}#${event.prNumber}:${event.actor.toLowerCase()}`, rule: config.rateLimit.perActor },
   ];
   if (!consumeFollowUpBudget(deps.rateLimitStore, scopes, now).allowed) {
     return ignore("rate-limited");

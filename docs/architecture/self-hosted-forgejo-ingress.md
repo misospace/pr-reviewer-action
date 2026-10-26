@@ -9,7 +9,10 @@ Forgejo repositories over the canonical event/job contracts of #728
 This layer is **not wired into the Action runtime** — `action.yml` is
 unchanged and Action mode behaves exactly as before. It is operator-mode
 (#725) infrastructure: controllers import `src/ingress/` (via its barrel)
-and own their own HTTP server, queue, and worker lifecycle.
+and own their own HTTP server, queue, and worker lifecycle;
+`operator-host.ts` (`createOperatorHost`) is the pre-bound handler — it
+constructs the operator event router (follow-up consumer included) and hands
+it to the webhook handler, so the daemon only supplies the listening socket.
 
 ## Module map
 
@@ -24,6 +27,9 @@ and own their own HTTP server, queue, and worker lifecycle.
 | `capabilities.ts` | GitHub/Forgejo publish-capability matrix and `requireCapability` degradation checks |
 | `dispatch.ts` | Canonical event → deduped review generation (`GenerationLedger`) and the exact-head publication gate |
 | `reconcile.ts` | Missed-webhook reconciliation poll across configured repositories |
+| `followup-host.ts` | Operator-mode follow-up consumer (#1294): one canonical `follow_up` event through the shared planner; all forge I/O through the injected `FollowUpForgeAdapter` |
+| `operator-router.ts` | Operator-mode canonical event router: `follow_up` → the follow-up consumer, every other kind → the daemon's dispatch seam (rejection propagates) |
+| `operator-host.ts` | Production host: constructs the router UNCONDITIONALLY and binds it into `webhook-handler.ts` — the in-repo production caller, so follow-up consumption is never an opt-in the wiring can forget |
 
 ## Trust boundaries (webhook ingress)
 

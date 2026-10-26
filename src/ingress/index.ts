@@ -18,6 +18,9 @@
 //   followup-host.ts     - operator-mode consumer host for canonical `follow_up` events
 //   operator-router.ts   - operator-mode event router: `follow_up` -> the follow-up
 //                           consumer, every other canonical event -> the dispatch seam
+//   operator-host.ts     - operator-mode production host: builds the router unconditionally
+//                           and binds it into the webhook handler (the in-repo production
+//                           caller of the router)
 
 export type { ForgejoWebhookHandlerOptions } from "./webhook-handler.js";
 export {
@@ -94,3 +97,6 @@ export type {
   OperatorEventRouterOptions,
 } from "./operator-router.js";
 export { createOperatorEventRouter } from "./operator-router.js";
+
+export type { OperatorHost, OperatorHostOptions } from "./operator-host.js";
+export { createOperatorHost } from "./operator-host.js";

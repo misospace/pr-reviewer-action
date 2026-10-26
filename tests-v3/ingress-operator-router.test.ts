@@ -328,7 +328,7 @@ test("production binding: a Forgejo comment delivery is consumed by the follow-u
 });
 
 test("without a router the handler still forwards the same delivery to onEvent and never touches the consumer", async (t) => {
-  const { adapter, calls } = makeAdapter(QUESTION);
+  const { calls } = makeAdapter(QUESTION);
   const onEventCalls: CanonicalForgeEvent[] = [];
   const h = await startTestHandler({
     secret: SECRET,

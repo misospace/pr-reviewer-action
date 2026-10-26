@@ -70,14 +70,16 @@ function budget(overrides: {
   botLogin?: string | null;
   actor?: string;
   currentCommentId?: string;
+  repoFullName?: string;
+  prNumber?: number;
 } = {}): ForgeFollowUpBudget {
   const actor = overrides.actor ?? "alice";
   return new ForgeFollowUpBudget({
     comments: overrides.comments ?? [],
     readOk: overrides.readOk ?? true,
     platform: "github",
-    repoFullName: REPO,
-    prNumber: 7,
+    repoFullName: overrides.repoFullName ?? REPO,
+    prNumber: overrides.prNumber ?? 7,
     actor,
     botLogin: overrides.botLogin === undefined ? BOT : overrides.botLogin,
     mentionHandles: overrides.botLogin === null ? [] : [BOT],
@@ -119,7 +121,15 @@ test("the store answers exactly the scope keys the shared planner asks about", a
   assert.equal(plan.action, "answer");
   assert.deepEqual(asked.slice().sort(), [store.actorKey, store.prKey].sort());
   assert.equal(store.prKey, `pr:github:${REPO}#7`);
-  assert.equal(store.actorKey, "actor:github:alice");
+  assert.equal(store.actorKey, `actor:github:${REPO}#7:alice`);
+});
+
+test("the actor key embeds the PR's repo and number (per-actor WITHIN the PR; no repo-wide allowance)", () => {
+  assert.equal(budget().actorKey, `actor:github:${REPO}#7:alice`);
+  // The same actor on a different PR, or in a different repo, is a different
+  // scope: the per-actor budget no longer leaks across PRs.
+  assert.equal(budget({ prNumber: 8 }).actorKey, `actor:github:${REPO}#8:alice`);
+  assert.equal(budget({ repoFullName: "o/other" }).actorKey, `actor:github:o/other#7:alice`);
 });
 
 test("the reviewer's published answers count against the per-PR scope, inside the window only", () => {

@@ -238,23 +238,33 @@ the follow-up consumer and routes events by kind — a `follow_up` delivery to
 the consumer (which plans it through the same shared planner the Action path
 uses), every other canonical event to the daemon's dispatch seam, whose
 rejection propagates to the caller that owns redelivery.
-`createForgejoWebhookHandler` hands a `follow_up` delivery to that router
-instead of forwarding it to `onEvent`, so the ingress itself drives the
-follow-up path; with no router configured the handler behaves exactly as
-before. The GitHub App operator lane has no webhook handler yet (#729
-follow-on work), so the router is the seam that path binds when it lands.
+`src/ingress/operator-host.ts` (`createOperatorHost`) is the in-repo
+PRODUCTION CALLER: it constructs the router UNCONDITIONALLY and binds it into
+`createForgejoWebhookHandler`, so every canonical event the shipped ingress
+accepts is routed by that one router — a `follow_up` delivery through the
+handler's router branch instead of `onEvent`, every other kind through
+`onEvent` into the same router — and follow-up consumption is never an
+opt-in the wiring can forget. The router stays injectable at the low-level
+handler seam (with no router configured that seam behaves exactly as before);
+the HOST is the production binding. The GitHub App operator lane has no
+webhook handler yet (#729 follow-on work), so the router is the seam that
+path binds when it lands.
 
 ### The Q&A budget's durable state
 
-The planner's per-PR/per-actor Q&A budget is a `RateLimitStore` seam
-(`src/followup/rate-limit.ts`). The Action lane runs one process per webhook
-delivery, so an in-memory store hands every delivery a fresh budget; the
-forge-backed store (`src/followup/forge-budget.ts`) reads the budget state
+The planner's per-PR and per-actor-WITHIN-PR Q&A budget is a `RateLimitStore`
+seam (`src/followup/rate-limit.ts`). The Action lane runs one process per
+webhook delivery, so an in-memory store hands every delivery a fresh budget;
+the forge-backed store (`src/followup/forge-budget.ts`) reads the budget state
 from the PR thread itself — the reviewer's published answers and the
 questioner's own prior questions — so the window accumulates ACROSS
-deliveries. An unreadable thread proves no headroom and denies the question
+deliveries. Both scope keys are PR-scoped (`pr:<platform>:<repo>#<pr>`,
+`actor:<platform>:<repo>#<pr>:<actor>`), so the thread is the COMPLETE state
+behind every key this store answers — no key claims a scope its state cannot
+prove. An unreadable thread proves no headroom and denies the question
 (fail closed). The operator lane injects its own store; the durable
-cross-process store of #1295 remains that lane's target.
+cross-process store of #1295 remains that lane's target (cross-RESTART
+durability, not a scope this store under-delivers).
 
 ## Out of scope
 

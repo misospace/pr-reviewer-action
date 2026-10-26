@@ -15,15 +15,17 @@
  * recomputed from it on every delivery.
  *
  * What is counted (both only inside the queried window):
- * - the PER-PR scope counts the reviewer's own follow-up REPLIES on this PR —
- *   one published answer is one unit of model work, which is exactly what the
- *   budget exists to bound;
- * - the PER-ACTOR scope counts THIS actor's own prior QUESTIONS on this PR.
- *   The planner's actor scope is repo-wide, but a single PR thread is the only
- *   state the Action lane can read, so the bound it can prove is the actor's
- *   questions on the PR at hand — which is the intent the planner documents
- *   ("one person cannot dominate a PR"). The repo-wide per-actor bound needs
- *   the durable store of #1295 on the operator lane.
+ * - the PER-PR scope counts the reviewer's own published follow-up REPLIES on
+ *   this PR — one published answer is one unit of model work, which is exactly
+ *   what the budget exists to bound;
+ * - the PER-ACTOR scope is per-actor WITHIN the PR and counts THIS actor's own
+ *   prior QUESTIONS on this PR — the intent the planner documents ("one person
+ *   cannot dominate a PR").
+ * Both scopes the store covers are therefore exactly PR-scoped, so the thread
+ * the platform seam reads is the COMPLETE state for both keys it serves —
+ * nothing the planner asks about under them lives outside this PR. #1295
+ * remains the durable cross-RESTART store target for the operator lane, which
+ * can hold state beyond a single PR thread; it is not a gap in this store.
  *
  * Fail-closed posture:
  * - an UNREADABLE thread proves no budget headroom, so every scope denies —
@@ -143,8 +145,9 @@ export class ForgeFollowUpBudget implements RateLimitStore {
 
   constructor(options: ForgeFollowUpBudgetOptions) {
     this.readOk = options.readOk;
-    this.prKey = `pr:${options.platform}:${options.repoFullName.toLowerCase()}#${options.prNumber}`;
-    this.actorKey = `actor:${options.platform}:${options.actor.toLowerCase()}`;
+    const repo = options.repoFullName.toLowerCase();
+    this.prKey = `pr:${options.platform}:${repo}#${options.prNumber}`;
+    this.actorKey = `actor:${options.platform}:${repo}#${options.prNumber}:${options.actor.toLowerCase()}`;
     if (!options.readOk) return;
 
     const botLogin = options.botLogin === null ? null : options.botLogin.toLowerCase();
