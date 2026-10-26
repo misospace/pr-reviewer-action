@@ -364,6 +364,85 @@ test("strict marker values carry an approve through the unchanged-diff skip", ()
 });
 
 // ---------------------------------------------------------------------------
+// #1265 — the strict unknown-evidence veto is pinned to original
+// blocker/major severity. An unverified minor/info finding stays visible
+// and marked unknown, but never independently forces request_changes.
+// ---------------------------------------------------------------------------
+
+function unverifiedFinding(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    severity: "minor",
+    category: "bug",
+    file: "src/a.ts",
+    line: 4,
+    message: "finding",
+    grounding_status: "unverified",
+    ...overrides,
+  };
+}
+
+test("#1265: an unverified finding capped from blocker or major forces request_changes under strict", () => {
+  for (const cappedFrom of ["blocker", "major"]) {
+    const a = artifact("approve", [unverifiedFinding({ capped_from: cappedFrom })]);
+    const outcome = applyStrictVerdictPolicy(a, { modelVerdict: "approve", forced: false });
+    assert.equal(a.verdict, "request_changes", cappedFrom);
+    assert.equal(outcome.verdict, "request_changes", cappedFrom);
+    assert.equal(outcome.reviewResult, "issues", cappedFrom);
+    assert.equal(outcome.overridden, true, cappedFrom);
+    // The model said approve; the veto belongs to the enforcement layer.
+    assert.equal(a.verdict_source, "enforcement", cappedFrom);
+    assert.ok(
+      a.review_markdown.includes("blocker-verification boundary could not confirm a demoted source claim"),
+      `expected #1016 attribution note for capped_from=${cappedFrom}: ${a.review_markdown}`,
+    );
+  }
+
+  // A live unverified blocker/major finding with no cap recorded (the
+  // pre-#1265 model-authored shape) still forces: the finding is still
+  // severity blocker, so the blocker-count branch owns the verdict.
+  const live = artifact("approve", [unverifiedFinding({ severity: "blocker" })]);
+  delete (live.findings[0] as unknown as Record<string, unknown>).capped_from;
+  const liveOutcome = applyStrictVerdictPolicy(live, { modelVerdict: "approve", forced: false });
+  assert.equal(live.verdict, "request_changes");
+  assert.equal(liveOutcome.reviewResult, "issues");
+  assert.equal(live.verdict_source, "findings");
+});
+
+test("#1265: an unverified minor/info finding never independently forces request_changes", () => {
+  // Unverified but originally minor (capped from minor by another path).
+  const cappedMinor = artifact("approve", [unverifiedFinding({ capped_from: "minor" })]);
+  const cappedMinorOutcome = applyStrictVerdictPolicy(cappedMinor, { modelVerdict: "approve", forced: false });
+  assert.equal(cappedMinor.verdict, "approve");
+  assert.equal(cappedMinorOutcome.reviewResult, "findings");
+  assert.equal(cappedMinor.verdict_source, "model");
+  assert.ok(!cappedMinor.review_markdown.includes(NOTE));
+
+  // Unverified with no cap and minor/info severity: visible, marked
+  // unknown, non-blocking.
+  const liveMinor = artifact("approve", [unverifiedFinding()]);
+  const liveMinorOutcome = applyStrictVerdictPolicy(liveMinor, { modelVerdict: "approve", forced: false });
+  assert.equal(liveMinor.verdict, "approve");
+  assert.equal(liveMinorOutcome.reviewResult, "findings");
+  assert.equal(liveMinor.verdict_source, "model");
+
+  const liveInfo = artifact("approve", [unverifiedFinding({ severity: "info" })]);
+  const liveInfoOutcome = applyStrictVerdictPolicy(liveInfo, { modelVerdict: "approve", forced: false });
+  assert.equal(liveInfo.verdict, "approve");
+  assert.equal(liveInfoOutcome.reviewResult, "findings");
+
+  // The mirror regression of the #811 minor-only table row: a model
+  // request_changes backed only by unverified minor/info findings still
+  // relaxes — the veto must not re-block what severity mapping relaxes.
+  const modelChanges = artifact("request_changes", [
+    unverifiedFinding({ capped_from: "minor" }),
+    unverifiedFinding({ severity: "info" }),
+  ]);
+  const modelChangesOutcome = applyStrictVerdictPolicy(modelChanges, { modelVerdict: "request_changes", forced: false });
+  assert.equal(modelChanges.verdict, "approve");
+  assert.equal(modelChangesOutcome.reviewResult, "findings");
+});
+
+// ---------------------------------------------------------------------------
 // Publish-side rendering (#752 shape, adopted by #811).
 // ---------------------------------------------------------------------------
 
