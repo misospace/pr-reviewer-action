@@ -36,6 +36,18 @@ set -euo pipefail
 # unreachable remote fails the merge step outright, as opposed to a
 # genuinely missing branch on a reachable remote, which must still proceed.
 
+# Prerequisite, checked before any scenario runs (#1143): the merge step
+# and the simulated harvest append below both shell out to python3.
+# Without this gate a host with no Python interpreter dies mid-suite at
+# the first invocation with exit 127, which reads like a harvest/merge
+# regression rather than a missing test prerequisite. Fail fast with an
+# actionable message instead; never shim python3 or downgrade to a
+# passing skip.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required to run this suite (merge step + simulated harvest append)" >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PUSH_SCRIPT="$ROOT_DIR/scripts/push_harvest_branch.sh"
@@ -544,6 +556,20 @@ set +e
 RC=$?
 set -e
 check "omitted EXPECTED_BOT_SHA is rejected (non-zero)" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+
+echo ""
+echo "=== prerequisite regression: missing python3 fails fast with an actionable message ==="
+echo "    Re-runs this suite with an empty PATH (bash invoked by absolute path, so"
+echo "    the interpreter itself still starts) and asserts the python3 gate fires"
+echo "    before any scenario does -- not a mid-suite 127."
+set +e
+PREREQ_OUT="$(env -i PATH="$TMPDIR/definitely-not-on-path" \
+  "$(command -v bash)" "$SCRIPT_DIR/test_push_harvest_branch.sh" 2>&1)"
+PREREQ_RC=$?
+set -e
+check "missing python3 exits non-zero" "$([ "$PREREQ_RC" -ne 0 ] && echo yes || echo no)" "yes"
+check_contains "the failure names the prerequisite" "$PREREQ_OUT" "python3 is required"
+check_not_contains "fails before the first scenario prints" "$PREREQ_OUT" "first run: bot branch"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
