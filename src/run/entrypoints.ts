@@ -13,6 +13,7 @@ import { TangledAtprotoClient, atprotoConfigFromEnv } from "../platform/tangled-
 import { tangledContextFromEnv } from "../platform/tangled.js";
 import { eventLabelName } from "../precheck/decide.js";
 import { publishReview, type PublishInput, type PublishResult, type PublishMode } from "../publish/publish.js";
+import { parseInlineFindingsMax } from "../publish/inline-findings.js";
 import type { PublishPlatformApi } from "../platform/publish-api.js";
 import type { UpstreamLinkMode } from "../publish/sanitize.js";
 import { nonEmpty } from "./run-dir.js";
@@ -420,7 +421,13 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     escalationReason: env.ESCALATION_REASON ?? "",
     cacheHitRatio: env.CACHE_HIT_RATIO ?? "",
     inlineFindings: boolInput(env.INLINE_FINDINGS),
-    inlineFindingsMax: Number(env.INLINE_FINDINGS_MAX ?? "5") || 5,
+    // #1250: the contract default (`inline-findings-max`) is the fallback
+    // when the environment carries no INLINE_FINDINGS_MAX. The action path
+    // always exports the merged contract default, so only the standalone
+    // `publish` CLI — which reads raw env — could fall back to something
+    // else; reusing the shared parser keeps the fallback in one place, so
+    // the CLI cannot drift from the contract.
+    inlineFindingsMax: parseInlineFindingsMax(env.INLINE_FINDINGS_MAX),
     findings: parseJsonish(env.FINDINGS ?? ""),
     cleanupPreviousNativeReviews: env.CLEANUP_PREVIOUS_NATIVE_REVIEWS ?? "",
     // #1161: the deprecated `allow-approve` input is read only so the
