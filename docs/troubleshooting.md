@@ -105,11 +105,9 @@ When the failure shape shows the token cap destroyed the verdict (a truncation, 
 - **Proxies with idle-read timeouts** (e.g. Cloudflare's ~100s edge timer): keep `ai-stream: "true"` (the default) so bytes flow before the timer fires.
 - **Models that reject sampling params**: set `ai-temperature: ""` to omit the field entirely; set `ai-tokens-param: max_completion_tokens` for newer OpenAI reasoning models.
 - **Endpoint not always up** (homelab): configure `ai-fallback-base-url`/`ai-fallback-model` (e.g. a small cloud model), or set `on-model-failure: notice` so the PR gets a visible explanation instead of a bare red check.
-- **Don't burn 10 minutes on a dead endpoint**: the defaults (`ai-primary-retries: "8"`, 15s delay with backoff, 300s request timeout) are tuned for flaky-but-alive endpoints and can spend ~10 minutes before giving up. If your endpoint is either up or down (typical homelab), use a low-retry profile:
+- **Ambiguous failures no longer burn minutes** (#1305): an unrecognized 429, 5xx, or network/timeout failure on the primary lane gets at most one short retry (tier sleeps capped at 5 s) before the configured fallback runs — no low-retry profile is needed. Tune the per-attempt patience with `ai-connect-timeout-sec`/`ai-request-timeout-sec` instead:
 
 ```yaml
-ai-primary-retries: "2"
-ai-primary-retry-delay-sec: "5"
 ai-connect-timeout-sec: "10"
 on-model-failure: notice   # visible explanation instead of a long red check
 ```

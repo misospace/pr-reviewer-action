@@ -2678,7 +2678,8 @@ async function callTier(
   corpusName: string,
   requestArtifact: string,
   responseArtifact: string,
-): Promise<{ ok: boolean; artifact: Record<string, unknown> | null; rawResponse: unknown; terminal?: TerminalProviderReason }> {
+): Promise<{ ok: boolean; artifact: Record<string, unknown> | null; rawResponse: unknown; terminal?: TerminalProviderReason;
+  attempts?: number; elapsedSec?: number; lastFailure?: string }> {
   const { env, ws, log, errorLog, annotate } = input;
   const corpusText = ws.readText(corpusName) ?? "";
   // #998 (#1049 review): an Anthropic effort the operator configured but the
@@ -2725,6 +2726,11 @@ async function callTier(
   // enters artifact/diagnostic state, not only at each consumer.
   const knownSecrets = callKnownSecrets(profile.apiKey, profile.extraHeaders);
 
+  // #1305: wall-clock spend of this tier's attempts, reported on the
+  // fallback-handoff line so the reason for leaving the lane and the time
+  // spent on it are explicit, not reconstructed from timestamps. Measured on
+  // the run's injected clock, like every other timing surface here.
+  const tierStart = input.clock();
   const outcome = await callModelTier(profile, {
     system: env.SYSTEM_PROMPT ?? "",
     user: input.userMessage,
@@ -2802,7 +2808,7 @@ async function callTier(
     const wireFormat = effectiveWireResponseFormat(profile.apiFormat, profile.responseFormat, profile.anthropicStructuredOutputSupported);
     const formatNote = wireFormat === "json_schema" && profile.apiFormat === "anthropic" && stripped === undefined ? ", format=json_schema" : "";
     const raisedNote = outcome.budgetRaisedTo !== undefined ? ` (completion budget raised to ${outcome.budgetRaisedTo} after a token-cap failure)` : "";
-    log(`${profile.label} model attempt ${outcome.attempts}/${profile.retries}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote}${formatNote})${raisedNote}`);
+    log(`${profile.label} model attempt ${outcome.attempts}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote}${formatNote})${raisedNote}`);
     const parsed = parseVerdictResponse(outcome.rawResponse, knownSecrets);
     // Deliberately NOT masked here: the parsed verdict is the review's own
     // content, and its structural fields (severity/category/file/line) drive
@@ -2876,11 +2882,20 @@ async function callTier(
       : { error: detail }, knownSecrets)));
   }
   // #1080: the normalized terminal reason rides the result so the fallback
-  // line below can be truthful about WHY the lane is being left.
+  // line below can be truthful about WHY the lane is being left. #1305 adds
+  // the bounded, content-free attempt accounting: how many attempts the tier
+  // spent, how long they took, and the last failure's kind/status (our own
+  // enums and a status number — never provider prose, so no extra masking).
+  const lastFailure = outcome.status === "transport_exhausted"
+    ? `${outcome.failure.kind}${outcome.failure.status !== undefined ? ` ${outcome.failure.status}` : ""}`
+    : `parse ${outcome.failure.kind}`;
   return {
     ok: false,
     artifact: null,
     rawResponse: null,
+    attempts: outcome.attempts,
+    elapsedSec: Math.round((input.clock() - tierStart) * 10) / 10,
+    lastFailure,
     ...(outcome.status === "transport_exhausted" && outcome.terminal !== undefined ? { terminal: outcome.terminal.reason } : {}),
   };
 }
@@ -3002,11 +3017,18 @@ async function producePrimaryReview(input: ReviewCallInput & {
 
   // #1080: after a TERMINAL provider failure the historical wording ("after
   // retries") is false — no retry ran. Say so, in the same single line, with
-  // the normalized reason; otherwise this line stays byte-identical. The
-  // fallback keeps its own independent profile and credentials either way.
+  // the normalized reason; otherwise this line stays byte-identical.
+  // #1305: the non-terminal line now states the truth explicitly too — the
+  // bounded attempt count, the wall-clock spend, and the last failure's
+  // kind/status — instead of the vague "after retries", so the reason for
+  // fallback and the time spent on primary attempts are always explicit.
+  // The line is masked like every other line in this stage (the static text
+  // can collide with a very short configured key); its variable content is
+  // enum-only, so the mask is belt-and-braces. The fallback keeps its own
+  // independent profile and credentials either way.
   errorLog(primary.terminal !== undefined
     ? `${firstProfile.label}: terminal=${primary.terminal}; bypassing retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`
-    : `${firstProfile.label} model unavailable after retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`);
+    : maskKnownSecrets(`${firstProfile.label} model unavailable after ${primary.attempts ?? "?"} attempt(s) in ${primary.elapsedSec ?? "?"}s (last failure: ${primary.lastFailure ?? "unknown"}); trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`, configuredKnownSecrets(env, profiles)));
   // #368: the fallback re-truncates the initial corpus. #940: the bound is
   // the declared fallback capacity — the fallback window can be smaller
   // than the primary tier's — never above the historical 120000-byte
