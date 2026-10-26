@@ -214,6 +214,22 @@ publisher eventually resolves.
 - **Determinism.** The clock is injected; there are no timers anywhere in
   the module, so the whole controller is testable by advancing time.
 
+## Follow-up consumption (#1294)
+
+`follow_up` job kind now has a production consumer, but it lives OUTSIDE
+this library: `src/followup/controller.ts` plans and executes one canonical
+`follow_up` event, wired in both modes — the Action path
+(`src/run/followup-action.ts`, driven by `actionMain`) and the operator host
+(`src/ingress/followup-host.ts`). Neither consumes `JobRecord`s through
+`ReviewQueueController`: the Action path runs its single delivery in-process
+(a rereview plan falls through to the shipped review pipeline; a comment
+command never enqueues), and the operator consumer mints the rereview
+generation through `dispatchCanonicalEvent` and hands it to the daemon's
+queue via `enqueueRereviewJob` when one exists. The scheduler/store in this
+module stay the future daemon's own machinery — `prIdentityKey` keeping
+`follow_up` and `review` generations independent — and this module remains
+unwired into the running action pipeline.
+
 ## Out of scope
 
 HTTP ingress (#730), executor implementations (#733), and the PostgreSQL

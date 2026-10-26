@@ -77,3 +77,10 @@ export { MemoryGenerationLedger, dispatchCanonicalEvent, gateJobPublication } fr
 
 export type { ReconcileReport, ReconcileOptions } from "./reconcile.js";
 export { reconcileForgejoRepositories } from "./reconcile.js";
+
+export type {
+  FollowUpConsumer,
+  FollowUpConsumerOptions,
+  FollowUpForgeAdapter,
+} from "./followup-host.js";
+export { createFollowUpConsumer } from "./followup-host.js";
