@@ -122,6 +122,12 @@ test("output-token headroom is reserved before deriving byte budgets", () => {
   assert.equal(budgets.primary.maxFiles, Math.trunc((usable * 3 * 15) / 100));
 });
 
+test("#1251: an unset ai-max-tokens reserves headroom from the 16384 contract default", () => {
+  const budgets = resolveTierBudgets({ modelContextTokens: "50000" });
+  const usable = 50000 - (16384 + 2000);
+  assert.equal(budgets.primary.maxCorpus, usable * 3);
+});
+
 test("global override floors at 2000 usable tokens; tier overrides refuse", () => {
   const global = resolveTierBudgets({ modelContextTokens: "9000", aiMaxTokens: "8192" });
   assert.equal(global.primary.maxCorpus, 2000 * 3);

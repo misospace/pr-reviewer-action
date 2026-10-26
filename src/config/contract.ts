@@ -1,3 +1,4 @@
+import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { SECRET_INPUTS } from "./schema.js";
 
 export interface ContractInput {
@@ -149,3 +150,23 @@ function unique(values: readonly string[], label: string): void {
 function rejectUnknown(item: Record<string, unknown>, allowed: readonly string[], path: string): void {
   for (const key of Object.keys(item)) if (!allowed.includes(key)) throw new Error(`${path} has unsupported field '${key}'`);
 }
+
+/** #1251: the contract default for one canonical input id, as `loadConfig`
+ * applies it. The single source for raw-env fallbacks so runtime derivations
+ * never keep a second copy of a contract default. */
+export function contractInputDefault(id: string): string | undefined {
+  const input: ContractInput | undefined = V3_CONTRACT.inputs.find((candidate) => candidate.id === id);
+  return input?.default === undefined ? undefined : String(input.default);
+}
+
+/** #1251: the authoritative raw-env default for AI_MAX_TOKENS, taken from the
+ * `ai-max-tokens` contract default so the runtime fallback cannot diverge
+ * from the contract (it previously did: 8192 here vs 16384 in the contract).
+ * Stage env always carries the config-resolved number, so this only governs
+ * direct/raw-env callers. */
+export const AI_MAX_TOKENS_DEFAULT: number = (() => {
+  const raw = contractInputDefault("ai-max-tokens");
+  const parsed = raw === undefined ? Number.NaN : Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`Contract input 'ai-max-tokens' must have a positive integer default, got ${String(raw)}`);
+  return parsed;
+})();
