@@ -2917,6 +2917,15 @@ export function configuredKnownSecrets(env: StageEnv, profiles: TierProfiles): s
     .sort((a, b) => b.length - a.length);
 }
 
+/**
+ * Historical byte ceiling (#1256) on the fallback recovery request's
+ * re-truncated corpus: `min(this, the declared fallback capacity)` — or this
+ * constant alone when no fallback window is declared. The cap is kept even
+ * when the configured context windows would admit a larger corpus: the
+ * fallback is availability recovery, not a larger-context retry, so it never
+ * receives more than the historical default corpus bound (#940). */
+export const FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES = 120000;
+
 /** review.sh: the primary call (native-verdict fast path, then the standard
  * corpus review) and the fallback on total primary failure. */
 async function producePrimaryReview(input: ReviewCallInput & {
@@ -3010,10 +3019,10 @@ async function producePrimaryReview(input: ReviewCallInput & {
   // #368: the fallback re-truncates the initial corpus. #940: the bound is
   // the declared fallback capacity — the fallback window can be smaller
   // than the primary tier's — never above the historical 120000-byte
-  // constant.
+  // constant (#1256 pins the cap as named policy).
   const fallbackCorpusBudget = budgets.fallback !== null
-    ? Math.min(120000, budgets.fallback.maxCorpus)
-    : 120000;
+    ? Math.min(FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES, budgets.fallback.maxCorpus)
+    : FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES;
   ws.write("review-corpus.fallback.truncated.md", truncateClean(ws.read("review-corpus.md") ?? new Uint8Array(0), fallbackCorpusBudget, "…[content truncated]\n"));
   const fallbackProfile = tierProfileFrom(profiles, "fallback", env);
   const fallback = await callTier("fallback", fallbackProfile, input, "review-corpus.fallback.truncated.md", "ai-request.fallback.json", "ai-response.fallback.json");

@@ -490,7 +490,7 @@ inputs:
     v2_id: fallback_model_context_tokens
     required: false
     default: ""
-    description: "Fallback model context window in tokens; empty inherits model_context_tokens. The fallback reuses the primary review corpus, so when this is set the shared corpus is sized to the smaller of the primary and fallback windows (#922)."
+    description: "Fallback model context window in tokens; empty inherits model_context_tokens. The fallback reuses the primary review corpus, so when this is set the shared corpus is sized to the smaller of the primary and fallback windows (#922). The recovery request re-truncates the corpus to min(120000 bytes, the derived fallback capacity) - the 120k-byte constant is the historical default corpus ceiling, kept even when the declared windows would admit more because fallback is availability recovery, not a larger-context retry (#1256, #940)."
   - id: primary-request-shape
     v2_id: primary_request_shape
     required: false
