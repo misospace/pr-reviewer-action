@@ -115,6 +115,9 @@ test("the store answers exactly the scope keys the shared planner asks about", a
     readPermission: async () => ({ permission: "admin", roleName: "admin", subject: "named", subjectLogin: "alice" }),
     rateLimitStore: recording,
     fetchThreadComments: async () => [],
+    // The #1298 PR-state gate: an open, non-draft PR, so the question still
+    // reaches the rate gate this suite pins.
+    readPrState: async () => ({ state: "open", draft: "not-draft" }),
   };
   const plan = await planFollowUp(
     { event: followUpEvent(), body: "@reviewer-bot why?" },

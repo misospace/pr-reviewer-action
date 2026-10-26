@@ -12,6 +12,7 @@ import { InMemoryRateLimitStore } from "../src/followup/rate-limit.js";
 import { normalizeForgeEvent } from "../src/events/index.js";
 import { authorityReadingFromPayload } from "../src/precheck/comment-authority.js";
 import { FOLLOWUP_ANSWER_MAX_BYTES, type FollowUpRunOutcome } from "../src/followup/controller.js";
+import { derivePrStateReading } from "../src/platform/pr.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 
 // #1294: the Action-mode follow-up host. Events are built through the REAL
@@ -84,19 +85,39 @@ interface StubAdapterOptions {
   permissionData?: unknown;
   /** When set, the permission probe reports this error instead. */
   permissionError?: string;
+  /** The raw PR object the `getPr` seam returns (GitHub pulls shape: `state`,
+   * `draft`) — the #1298 PR-state gate reads through it. Unset defaults to an
+   * open, non-draft PR; an explicit `null` simulates a failed lookup. */
+  pr?: unknown;
+  /** When set, the `getPr` seam reports this error instead. */
+  prThrows?: boolean;
   /** PR-conversation comments for the answer thread context. */
   conversation?: { ok: true; data: unknown[] } | { ok: false; error: string };
 }
 
+/** The seam calls the stub read adapter records (`getPr` — the #1298
+ * PR-state seam; the other served seams are recorded on the effect side). */
+interface StubAdapterCalls {
+  getPr: number;
+}
+
 /** Read-adapter stub: only the seams the follow-up host may call are
- * functional; every other seam throws, so an unexpected read fails the test. */
-function stubReadAdapter(options: StubAdapterOptions = {}): PlatformReadAdapter {
+ * functional; every other seam throws, so an unexpected read fails the test.
+ * `getPr` serves the #1298 PR-state gate: an open, non-draft PR by default
+ * (overridable via `options.pr` / `options.prThrows`), with its calls
+ * recorded in `calls`. */
+function stubReadAdapter(options: StubAdapterOptions = {}): PlatformReadAdapter & { calls: StubAdapterCalls } {
   const unexpected = (name: string) => async (): Promise<never> => {
     throw new Error(`unexpected read seam call: ${name}`);
   };
+  const calls: StubAdapterCalls = { getPr: 0 };
   return {
     platform: options.platform ?? "github",
-    getPr: unexpected("getPr"),
+    getPr: async () => {
+      calls.getPr += 1;
+      if (options.prThrows) throw new Error("PR lookup failed");
+      return options.pr === undefined ? { state: "open", draft: false } : options.pr;
+    },
     getPrDiff: unexpected("getPrDiff"),
     listIssueComments: async () => [],
     listPrReviews: async () => [],
@@ -116,6 +137,7 @@ function stubReadAdapter(options: StubAdapterOptions = {}): PlatformReadAdapter 
     listReviewThreads: unexpected("listReviewThreads"),
     listPrReviewsPaginated: unexpected("listPrReviewsPaginated"),
     externalChecks: unexpected("externalChecks"),
+    calls,
   };
 }
 
@@ -223,13 +245,11 @@ function followUpOutcome(result: { route: string; outcome?: FollowUpRunOutcome }
 test("an authorized mention is answered once and posted exactly once, marker-stamped", async () => {
   const question = "@reviewer-bot why is line 42 a null check?";
   const recs: EffectRecs = { answers: [], posts: [] };
+  const adapter = stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } } });
   const result = await runActionFollowUp(
     githubStage(),
     ghCommentPayload(question),
-    followUpDeps(
-      stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } } }),
-      recs,
-    ),
+    followUpDeps(adapter, recs),
   );
   assert.equal(result.route, "follow-up");
   assert.deepEqual(followUpOutcome(result), { status: "answered", posted: true });
@@ -239,21 +259,21 @@ test("an authorized mention is answered once and posted exactly once, marker-sta
   const posted = recs.posts[0] ?? "";
   assert.ok(posted.startsWith(FOLLOWUP_REPLY_MARKER));
   assert.match(posted, /stub answer/);
+  assert.equal(adapter.calls.getPr, 1, "the open non-draft default passes the PR-state gate with one read");
 });
 
-test("an unauthorized actor is ignored; the model and the write seam are never called", async () => {
+test("an unauthorized actor is ignored; the model, the write seam, and the PR-state seam are never called", async () => {
   const recs: EffectRecs = { answers: [], posts: [] };
+  const adapter = stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "read", user: { login: "alice" } } });
   const result = await runActionFollowUp(
     githubStage(),
     ghCommentPayload("@reviewer-bot hello"),
-    followUpDeps(
-      stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "read", user: { login: "alice" } } }),
-      recs,
-    ),
+    followUpDeps(adapter, recs),
   );
   assert.deepEqual(followUpOutcome(result), { status: "ignored", reason: "unauthorized" });
   assert.equal(recs.answers.length, 0);
   assert.equal(recs.posts.length, 0);
+  assert.equal(adapter.calls.getPr, 0, "an unauthorized question never reaches the PR-state gate");
 });
 
 test("the reviewer's own follow-up reply is dropped by the loop guard, no effects", async () => {
@@ -532,6 +552,77 @@ test("an authorized explicit re-review hands back to the normal pipeline; no mod
   assert.equal(recs.posts.length, 0);
 });
 
+test("a rereview command is handed back even on a closed or draft PR; the PR-state seam is never read", async () => {
+  for (const pr of [{ state: "closed", draft: false }, { state: "open", draft: true }] as const) {
+    const recs: EffectRecs = { answers: [], posts: [] };
+    const adapter = stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } }, pr });
+    const result = await runActionFollowUp(
+      githubStage({ REREVIEW_COMMAND: "/ai-review" }),
+      ghCommentPayload("/ai-review"),
+      followUpDeps(adapter, recs),
+    );
+    assert.equal(result.route, "pipeline");
+    assert.equal(adapter.calls.getPr, 0, "the rereview hand-off never reads PR state");
+    assert.equal(recs.answers.length, 0);
+    assert.equal(recs.posts.length, 0);
+  }
+});
+
+test("an authorized question on a closed PR is ignored; no model, no post, budget untouched", async () => {
+  const recs: EffectRecs = { answers: [], posts: [] };
+  const store = new InMemoryRateLimitStore();
+  const adapter = stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } }, pr: { state: "closed", draft: false } });
+  const result = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload("@reviewer-bot why is line 42 a null check?"),
+    followUpDeps(adapter, recs, { store, clock: () => NOW }),
+  );
+  assert.deepEqual(followUpOutcome(result), { status: "ignored", reason: "pr-closed" });
+  assert.equal(adapter.calls.getPr, 1, "the PR-state gate reads the PR exactly once");
+  assert.equal(recs.answers.length, 0);
+  assert.equal(recs.posts.length, 0);
+  assert.equal(
+    store.countInWindow(`pr:github:${REPO}#7`, DEFAULT_FOLLOW_UP_RATE_LIMITS.perPr.windowMs, NOW),
+    0,
+    "the gate runs before the rate budget: nothing is recorded",
+  );
+});
+
+test("an authorized question on a draft PR is ignored; no model, no post", async () => {
+  const recs: EffectRecs = { answers: [], posts: [] };
+  const adapter = stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } }, pr: { state: "open", draft: true } });
+  const result = await runActionFollowUp(
+    githubStage(),
+    ghCommentPayload("@reviewer-bot what changed in this PR?"),
+    followUpDeps(adapter, recs),
+  );
+  assert.deepEqual(followUpOutcome(result), { status: "ignored", reason: "pr-draft" });
+  assert.equal(recs.answers.length, 0);
+  assert.equal(recs.posts.length, 0);
+});
+
+test("an unprovable PR state fails closed: no model, no post", async () => {
+  for (const options of [
+    { pr: null },
+    { pr: "not-a-pr" },
+    { pr: [] },
+    { pr: {} },
+    { prThrows: true },
+  ] as const) {
+    const recs: EffectRecs = { answers: [], posts: [] };
+    const adapter = stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } }, ...options });
+    const result = await runActionFollowUp(
+      githubStage(),
+      ghCommentPayload("@reviewer-bot why?"),
+      followUpDeps(adapter, recs),
+    );
+    assert.deepEqual(followUpOutcome(result), { status: "ignored", reason: "pr-state-unknown" });
+    assert.equal(adapter.calls.getPr, 1, "the state read is attempted once, then fails closed");
+    assert.equal(recs.answers.length, 0);
+    assert.equal(recs.posts.length, 0);
+  }
+});
+
 test("non-follow-up payloads fall through to the pipeline without touching any dep", async () => {
   const throwing = throwingDeps();
   const pullRequest = {
@@ -595,6 +686,9 @@ test("parity: the host's planner outcome equals a direct planFollowUp call on th
     rateLimitStore: store,
     fetchThreadComments: async () => [],
     latestManagedReview: async () => "",
+    // Bound exactly the way the host does: through the read seam's `getPr`,
+    // never a payload sniff.
+    readPrState: async () => derivePrStateReading(await adapter.getPr()),
   });
 
   // (a) ignored: an unaddressed comment — same reason from both paths.

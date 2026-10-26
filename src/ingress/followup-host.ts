@@ -23,6 +23,11 @@
  * - a body-absent (operator-mode) request reads the comment through
  *   `adapter.readComment` by its canonical comment id; an unreadable body
  *   means unknown intent and is ignored;
+ * - Q&A answers only open, non-draft PRs (#1298): the planner's PR-state
+ *   gate reads through `adapter.readPrState` — the parity-safe capability
+ *   read mirroring the shipped `comment-pr-closed` / `comment-pr-draft`
+ *   comment-command gates — never a payload sniff; an unproven state fails
+ *   closed with no model work and no reply;
  * - a rereview request whose exact head cannot be resolved is refused BEFORE
  *   the generation ledger is touched (no partial generation, no leaked
  *   reservation);
@@ -51,6 +56,7 @@ import {
 } from "../followup/plan.js";
 import type { RateLimitStore } from "../followup/rate-limit.js";
 import type { AuthorityReading } from "../precheck/comment-authority.js";
+import type { PrStateReading } from "../platform/pr.js";
 import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
 import { dispatchCanonicalEvent, type GenerationLedger } from "./dispatch.js";
 
@@ -69,6 +75,13 @@ export interface FollowUpForgeAdapter {
   /** Recent PR conversation comments (raw platform shapes) for the answer
    * context. Only fetched for a question, never for a re-review. */
   fetchThreadComments(repoFullName: string, prNumber: number): Promise<readonly unknown[]>;
+  /** The PR's open/closed + draft state as the parity-safe
+   * {@link PrStateReading} (#1298), derived at the daemon binding from the
+   * forge's own PR read (GitHub pulls shape; the Forgejo client's
+   * `getPullRequest` normalizes to it) — never a webhook-payload sniff.
+   * REQUIRED: the planner's closed/draft gate is policy; a throw or an
+   * `unknown` half fails closed (`pr-state-unknown`). */
+  readPrState(repoFullName: string, prNumber: number): Promise<PrStateReading>;
   /** The latest managed review body (for the answer context), if any;
    * optional capability — absent means the prompt degrades without it. */
   latestManagedReview?(repoFullName: string, prNumber: number): Promise<string>;
@@ -162,6 +175,9 @@ export function createFollowUpConsumer(options: FollowUpConsumerOptions): Follow
         // Forwarded as-is: the planner catches a throwing thread read and
         // degrades to a smaller prompt.
         fetchThreadComments: () => adapter.fetchThreadComments(repoFullName, prNumber),
+        // Forwarded as-is: the planner catches a throwing state read and
+        // fails closed (`pr-state-unknown`) — no model work, no reply.
+        readPrState: () => adapter.readPrState(repoFullName, prNumber),
         // Operator mode: the caller does not already hold the comment body,
         // so the planner reads it by its canonical comment id. Action mode
         // passes the body on the request and omits this.

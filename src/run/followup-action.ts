@@ -30,6 +30,11 @@
  *     collaborator-permission seam with the shared triage-or-higher
  *     predicate; an unreadable, errored, or subject-mismatched reading fails
  *     closed (`permission-unknown` / `unauthorized`).
+ *   - Q&A answers only open, non-draft PRs (#1298): the planner's PR-state
+ *     gate reads through the read seam's `getPr()` capability — the same
+ *     parity-safe source the shipped `comment-pr-closed` / `comment-pr-draft`
+ *     comment-command gates use — never the webhook payload; an unproven
+ *     state fails closed.
  *   - The Q&A budget is enforced ACROSS deliveries, not per process: the
  *     Action runs one process per webhook delivery, so the budget state is
  *     the forge's own PR thread (the PR's mention-addressed questions and
@@ -55,6 +60,7 @@ import type { PlatformReadAdapter } from "../platform/types.js";
 import type { IdentityResolution, TrustedOwnerIdentity } from "../platform/owner-identity.js";
 import { normalizeForgeEvent } from "../events/normalize.js";
 import { authorityReadingFromPayload, type AuthorityReading } from "../precheck/comment-authority.js";
+import { derivePrStateReading, type PrStateReading } from "../platform/pr.js";
 import { lastManagedBody } from "../precheck/decide.js";
 import { resolveTierProfiles } from "../routing/tiers.js";
 import { CONVERSATION_COMMENTS_SNAPSHOT_CAP } from "../platform/normalize.js";
@@ -275,6 +281,17 @@ async function bindPlannerDeps(
     rateLimitStore,
     // The already-read snapshot: the budget and the prompt share one read.
     fetchThreadComments: async (): Promise<readonly unknown[]> => threadComments,
+    // The #1298 PR-state gate reads through the read seam's own capability
+    // (`getPr()` — the GitHub pulls shape both adapters return), never the
+    // webhook payload. A failed or throwing lookup proves nothing and fails
+    // closed as `pr-state-unknown`.
+    readPrState: async (): Promise<PrStateReading> => {
+      try {
+        return derivePrStateReading(await adapter.getPr());
+      } catch {
+        return { state: "unknown", draft: "unknown" };
+      }
+    },
     latestManagedReview: async (): Promise<string> => {
       try {
         const comments = await adapter.listIssueComments();

@@ -11,7 +11,9 @@
  *   call, NO marker reply, and fall through to today's precheck skip wording
  *   (`unrelated-comment`) — the behavior-preserved path;
  * - a model failure posts nothing unrendered and skips as
- *   `follow-up-answer-failed` (fail closed, still green).
+ *   `follow-up-answer-failed` (fail closed, still green);
+ * - a question on a closed/merged or draft PR, or one whose state cannot be
+ *   proven, spends no model work and posts no reply (#1298).
  * The planner gates themselves are covered in `followup-plan.test.ts`, the
  * host bindings in `followup-action-host.test.ts`. */
 import test from "node:test";
@@ -44,13 +46,16 @@ interface ThreadNode {
 
 /** Mock GitHub API: GraphQL viewer identity, the PR conversation thread (the
  * follow-up Q&A budget reads it), the collaborator-permission endpoint (the
- * commenter's permission is configurable), empty review enumerations, and a
- * capturing POST for issue comments. */
+ * commenter's permission is configurable), the PR-state read behind the
+ * #1298 Q&A gate (open and non-draft by default; `pr: null` simulates a
+ * failed lookup), empty review enumerations, and a capturing POST for issue
+ * comments. */
 function startGithubMock(options: {
   permission: string;
   viewerLogin?: string | null;
   postStatus?: number;
   threadNodes?: ThreadNode[];
+  pr?: { state: string; draft: boolean } | null;
 }): Promise<{
   url: string;
   postedBodies: string[];
@@ -76,6 +81,16 @@ function startGithubMock(options: {
     }
     if (url.startsWith("/repos/o/r/collaborators/")) {
       res.end(JSON.stringify({ permission: options.permission, role: options.permission }));
+      return;
+    }
+    if (req.method === "GET" && (url === "/repos/o/r/pulls/7" || url.startsWith("/repos/o/r/pulls/7?"))) {
+      // The #1298 PR-state gate reads the PR through `getPr()`.
+      if (options.pr === null) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ message: "not found" }));
+        return;
+      }
+      res.end(JSON.stringify(options.pr ?? { state: "open", draft: false }));
       return;
     }
     if (url.startsWith("/repos/o/r/issues/7/comments")) {
@@ -170,6 +185,7 @@ async function runCase(options: {
   modelContent?: string;
   postStatus?: number;
   threadNodes?: ThreadNode[];
+  pr?: { state: string; draft: boolean } | null;
 }): Promise<{
   exitCode: number;
   outputs: Record<string, string>;
@@ -193,6 +209,7 @@ async function runCase(options: {
     ...(options.viewerLogin !== undefined ? { viewerLogin: options.viewerLogin } : {}),
     ...(options.postStatus !== undefined ? { postStatus: options.postStatus } : {}),
     ...(options.threadNodes !== undefined ? { threadNodes: options.threadNodes } : {}),
+    ...(options.pr !== undefined ? { pr: options.pr } : {}),
   });
   const eventPath = join(runnerTemp, "event.json");
   writeFileSync(eventPath, commentEvent(options.body));
@@ -328,6 +345,40 @@ test("#1294: a refused comment POST skips green as follow-up-answer-failed (post
     assert.equal(result.modelRequests, 1, "the model ran; only the write failed");
     assert.equal(result.postedBodies.length, 1, "one attempt, and it was the rendered body");
     assert.ok(result.postedBodies[0]!.startsWith(FOLLOWUP_REPLY_MARKER));
+  } finally {
+    await result.cleanup();
+  }
+});
+
+// #1298: the Q&A lane mirrors the shipped comment-command PR-state refusals.
+// An ignored follow-up falls through to the pipeline unchanged (behavior-
+// preserved skip wording), so the observable contract is: NO model call and
+// NO reply write, exit green.
+test("#1298: a question on a merged-shape (closed) or draft PR gets no model call and no reply", async () => {
+  const merged = await runCase({ body: `@${BOT_LOGIN} still relevant?`, pr: { state: "closed", draft: false } });
+  try {
+    assert.equal(merged.modelRequests, 0);
+    assert.equal(merged.postedBodies.length, 0);
+  } finally {
+    await merged.cleanup();
+  }
+  const draft = await runCase({ body: `@${BOT_LOGIN} thoughts?`, pr: { state: "open", draft: true } });
+  try {
+    assert.equal(draft.exitCode, 0);
+    assert.equal(draft.modelRequests, 0, "a draft PR spends no model work");
+    assert.equal(draft.postedBodies.length, 0, "a draft PR gets no reply");
+  } finally {
+    await draft.cleanup();
+  }
+});
+
+test("#1298: an unprovable PR state fails closed — no model call, no reply", async () => {
+  const result = await runCase({ body: `@${BOT_LOGIN} hello?`, pr: null });
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.outputs["should-review"], "false");
+    assert.equal(result.modelRequests, 0, "a PR lookup that proves nothing never answers");
+    assert.equal(result.postedBodies.length, 0);
   } finally {
     await result.cleanup();
   }
