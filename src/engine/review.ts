@@ -2624,10 +2624,15 @@ interface ReviewCallInput {
   readonly signal?: AbortSignal;
 }
 
-function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | "smart", env: StageEnv): TierProfile {
+export function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | "smart", env: StageEnv): TierProfile {
   const resolved = tier === "fallback" ? profiles.fallback : tier === "smart" ? profiles.smart : profiles.primary;
   const aiMaxTokens = Number(env.AI_MAX_TOKENS ?? "8192") || 8192;
   const temperatureRaw = env.AI_TEMPERATURE ?? "0.1";
+  // #1246: an explicit zero is a valid temperature and must reach the wire —
+  // `Number(x) || 0.1` rewrote `ai-temperature: "0"` into 0.1. Empty still
+  // omits the field; config validation rejects non-finite values upstream,
+  // so the finite fallback only guards direct-callers defensively.
+  const temperature = Number(temperatureRaw);
   // #1037: same operator headers on every lane; unset config yields
   // `undefined` and the profile omits the field, keeping requests
   // byte-identical.
@@ -2646,7 +2651,7 @@ function tierProfileFrom(profiles: TierProfiles, tier: "primary" | "fallback" | 
     retryDelaySec: resolved.retryDelaySec,
     shape: tierRequestShape(tier === "smart" ? "smart" : tier === "fallback" ? "fallback" : "primary", env),
     maxTokens: aiMaxTokens,
-    temperature: temperatureRaw === "" ? "" : Number(temperatureRaw) || 0.1,
+    temperature: temperatureRaw === "" ? "" : Number.isFinite(temperature) ? temperature : 0.1,
     responseFormat: resolved.responseFormat,
     tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as TierProfile["tokensParam"],
     // #998: the lane's resolved effort; "" omits the provider field entirely.
