@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse } from "yaml";
 import { TangledNotImplementedError } from "../src/platform/tangled.js";
 import { buildAdapter, buildPublishApi, publishInputFromEnv, publishMain, readEvent } from "../src/run/entrypoints.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
+import { parseInlineFindingsMax } from "../src/publish/inline-findings.js";
 import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
 function mockAdapter(): PlatformReadAdapter {
@@ -43,6 +45,29 @@ function mockAdapter(): PlatformReadAdapter {
 test("publishInputFromEnv reads internal degraded gate-bypass eligibility", () => {
   assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", DEGRADED_GATE_BYPASS: "true" } as NodeJS.ProcessEnv, "github").degradedGateBypass, true);
   assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", DEGRADED_GATE_BYPASS: "false" } as NodeJS.ProcessEnv, "github").degradedGateBypass, false);
+});
+
+// #1250: the standalone `publish` CLI reads raw env — it never sees the
+// merged contract default the action path exports — so its fallback for
+// INLINE_FINDINGS_MAX must be the contract's own default. These assertions
+// pin the two together: changing either side without the other fails here.
+test("#1250: the standalone publish CLI falls back to the contract's inline-findings-max default", () => {
+  const contract = parse(readFileSync("contracts/action-v3.yml", "utf8")) as {
+    inputs: { id: string; default?: unknown }[];
+  };
+  const declared = contract.inputs.find((input) => input.id === "inline-findings-max")?.default;
+  assert.equal(typeof declared, "string", "inline-findings-max must declare a string default");
+  const contractDefault = Number(declared);
+  assert.equal(contractDefault, 20);
+
+  // No INLINE_FINDINGS_MAX in the environment: the CLI's fallback is the
+  // contract default, never a private literal.
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").inlineFindingsMax, contractDefault);
+  // The one fallback site behind it agrees with the contract.
+  assert.equal(parseInlineFindingsMax(undefined), contractDefault);
+  // An explicit value still wins; an unusable one falls back to the contract.
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", INLINE_FINDINGS_MAX: "7" } as NodeJS.ProcessEnv, "github").inlineFindingsMax, 7);
+  assert.equal(publishInputFromEnv({ PUBLISH_MODE: "comment", INLINE_FINDINGS_MAX: "not-a-number" } as NodeJS.ProcessEnv, "github").inlineFindingsMax, contractDefault);
 });
 
 // #1003: a standalone `publish` re-publish must carry the same triage section
