@@ -867,6 +867,63 @@ test("#961: even a forced re-review skips a draft PR", async () => {
   assert.equal(output.skip_reason, "pr-draft");
 });
 
+test("#1301: a closed PR is skipped deterministically in the shared review path", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "closed", draft: false } };
+  const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", platform) });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-closed");
+  // The skip still reports the identity it skipped on (no extra fetch).
+  assert.equal(output.head_sha, "head-abc");
+  assert.equal(output.base_sha, "base-abc");
+  assert.equal(output.is_fork_pr, "false");
+  assert.ok(output.diff_fingerprint.length > 0);
+});
+
+test("#1301: a merged PR (state closed) is skipped; only an explicit terminal state skips", async () => {
+  const fx = fixture("changed-diff-reviews");
+  // GitHub/Forgejo report a merged PR as state "closed" with merged_at set;
+  // the shared gate treats it as terminal exactly like a closed one.
+  const merged = await runPrecheck({
+    env: fx.env,
+    adapter: new FixtureAdapter("github", {
+      ...fx.platform,
+      pr: { ...(fx.platform.pr as object), state: "closed", draft: false, merged_at: "2026-01-01T00:00:00Z" },
+    }),
+  });
+  assert.equal(merged.should_review, "false");
+  assert.equal(merged.skip_reason, "pr-closed");
+  // An unrecognizable state is NOT treated as terminal here (the pulls API
+  // always supplies a real state); it falls through to the draft gate, which
+  // the explicit draft:false clears, so the PR reviews.
+  const weird = await runPrecheck({
+    env: fx.env,
+    adapter: new FixtureAdapter("github", { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "archived", draft: false } }),
+  });
+  assert.equal(weird.should_review, "true");
+});
+
+test("#1301: the closed gate outranks the draft gate on the shared path", async () => {
+  const fx = fixture("changed-diff-reviews");
+  // A terminal PR reports closed regardless of its draft flag, matching the
+  // comment-command path order (closed outranks draft).
+  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "closed", draft: true } };
+  const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", platform) });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-closed");
+});
+
+test("#1301: even a forced re-review skips a closed PR", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "closed", draft: false } };
+  const output = await runPrecheck({
+    env: { ...fx.env, FORCE_REVIEW: "true" },
+    adapter: new FixtureAdapter("github", platform),
+  });
+  assert.equal(output.should_review, "false");
+  assert.equal(output.skip_reason, "pr-closed");
+});
+
 test("runPrecheck carries bypass eligibility on an unchanged skip and the gate honors it", async () => {
   const fx = fixture("unchanged-diff-skip-issues");
   const comment = fx.platform.comments?.[0];

@@ -1,7 +1,7 @@
 import type { PlatformReadAdapter } from "../platform/types.js";
 import type { ExternalCheck } from "../platform/normalize.js";
 import { ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
-import { deriveDraftState, deriveIsFork, normalizePrIdentity } from "../platform/pr.js";
+import { deriveDraftState, deriveIsFork, derivePrState, normalizePrIdentity } from "../platform/pr.js";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import type { ManagedComment, ManagedReview, PlatformAdapter } from "../platform/types.js";
@@ -490,11 +490,10 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
     }
     // A closed PR is not reviewable: publishing a fresh verdict onto it is
     // meaningless (and the command is spam-able). A payload without a state
-    // field is treated as open — the pulls API always supplies one.
-    const prState = typeof (prObject as { state?: unknown }).state === "string"
-      ? String((prObject as { state: string }).state).toLowerCase()
-      : "open";
-    if (prState === "closed") {
+    // field is treated as open — the pulls API always supplies one. The
+    // #1301 shared-path gate reads the same value through `derivePrState`
+    // (a merged PR reports `closed` on both GitHub and Forgejo).
+    if (derivePrState(prObject) === "closed") {
       return platformOutputs(
         { should_review: "false", skip_reason: "comment-pr-closed" },
         resolvedPlatform,
@@ -712,6 +711,32 @@ async function reviewPathOutputs(
   const repo = env.REPO ?? "";
   const prObject = preFetchedPr ?? await spec.adapter.getPr();
   const identity = normalizePrIdentity(prObject ?? {});
+
+  // ── #1301 closed/merged gate ───────────────────────────────────────────
+  // A terminal PR (closed or merged) is never reviewed on ANY path, not
+  // only by the comment command: a queued self-hosted re-review generation
+  // of a long-merged PR must fail closed at job admission (engine admission
+  // is this function) instead of reaching the model. This mirrors the
+  // shipped `comment-pr-closed` gate and outranks the #961 draft gate, in
+  // the same order the comment-command path applies the two. Only an
+  // explicit terminal `state` is authoritative: an unknown/missing one
+  // reads as open here (a forge PR read always carries it), while the
+  // draft gate below still fails a failed lookup (null) closed as
+  // `pr-draft`. State is read through the configured forge capability.
+  if (derivePrState(prObject) === "closed") {
+    return platformOutputs(
+      {
+        should_review: "false",
+        skip_reason: "pr-closed",
+        diff_fingerprint: broadFingerprint,
+        head_sha: identity.headSha,
+        base_sha: identity.baseSha,
+        is_fork_pr: String(deriveIsFork(prObject ?? {})),
+      },
+      resolvedPlatform,
+      effectiveForgejoApiUrl,
+    );
+  }
 
   // ── #961 draft gate ──────────────────────────────────────────────────
   // A draft PR is never reviewed, deterministically: a consumer whose

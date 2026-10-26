@@ -48,6 +48,29 @@ export function deriveIsFork(raw: unknown): boolean {
   return identity.headRepoFullName !== identity.baseRepoFullName;
 }
 
+/** Whether a PR is open or terminal (closed/merged), or the state is
+ * unrecognizable. */
+export type PrState = "open" | "closed" | "unknown";
+
+/**
+ * The ONE PR-state derivation (#1301): a terminal PR is never reviewed.
+ * GitHub reports a merged pull request as `state: "closed"` (with
+ * `merged_at` set), and the Forgejo adapter's GitHub-shaped normalization
+ * keeps the API's `open`/`closed`, so `closed` is the single terminal value
+ * that already covers a merged PR. A missing or unrecognizable `state` is
+ * `unknown`; the comment-command gate treats it as open (the pulls API
+ * always supplies one), while callers that must fail closed decide their own
+ * side. Only an explicit string `state` is authoritative.
+ */
+export function derivePrState(raw: unknown): PrState {
+  const value = asObject(raw).state;
+  if (typeof value !== "string") return "unknown";
+  const state = value.toLowerCase();
+  if (state === "closed") return "closed";
+  if (state === "open") return "open";
+  return "unknown";
+}
+
 /** Which side a caller should fail to when the draft state is uncertain. */
 export type DraftState = "draft" | "not-draft" | "unknown";
 
