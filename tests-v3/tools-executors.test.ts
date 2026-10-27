@@ -93,6 +93,67 @@ test("run_command accepts only exact catalog names and never constructs shell in
   for (const bad of ["cat /etc/passwd", "git_status_short; rm -rf /", "git status", "Git_Status_Short", ""]) assert.equal((await runCommand(bad, context)).error, exact);
 }));
 
+test("git children inherit the allowlisted gitEnv, never the stage environment (#1260)", async () => fixture(async (root) => {
+  // The boundary this test feeds is the stage environment itself: it carries
+  // the run's model API key and forge token plus an ordinary ambient runner
+  // variable, and none of those may reach a git child. The injected
+  // runProcess captures the exact spawn options, so the assertions see what
+  // a real launch would inherit.
+  fs.writeFileSync(path.join(root, "src.ts"), "const X = 1;\n");
+  const captured: Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+  const context: ToolContext = {
+    workspaceRoot: root,
+    deps: {
+      env: {
+        PATH: "/usr/local/bin:/usr/bin:/bin",
+        HOME: "/home/runner",
+        OPENAI_API_KEY: "sk-test-stage-model-key",
+        GITHUB_TOKEN: "ghp-test-stage-forge-token",
+        RUNNER_TRACKING_ID: "ambient-runner-noise",
+      },
+      runProcess: (async (options: any) => {
+        captured.push({ file: options.file, args: options.args ?? [], env: options.env });
+        return { status: "exited", exitCode: 0, signal: null, stdout: Buffer.from(""), stderr: Buffer.from(""), stdoutTruncated: false, stderrTruncated: false, durationMs: 1, termination: null };
+      }) as any,
+    },
+  };
+  const res = await executeToolRequest("run_command", { command: "git_status_short" }, context);
+  assert.equal(res.status, "ok");
+  assert.equal(captured.length, 1);
+  const commandCapture = captured[0]!;
+  // The fixed catalog argv is unchanged — only the environment is minimized.
+  assert.deepEqual([commandCapture.file, ...commandCapture.args], ALLOWED_COMMANDS.git_status_short);
+  for (const key of ["OPENAI_API_KEY", "GITHUB_TOKEN", "RUNNER_TRACKING_ID"]) {
+    assert.equal(commandCapture.env[key], undefined, `${key} must not reach the git child`);
+  }
+  // The allowlist inherits exactly PATH and HOME from the stage env and
+  // forces the neutral git config (#732 policy): no global/system config can
+  // be read, terminal prompting is off, and the XDG git-config path cannot
+  // exist.
+  assert.deepEqual(
+    Object.keys(commandCapture.env).sort(),
+    ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM", "GIT_TERMINAL_PROMPT", "HOME", "PATH", "XDG_CONFIG_HOME"],
+  );
+  assert.equal(commandCapture.env.PATH, "/usr/local/bin:/usr/bin:/bin");
+  assert.equal(commandCapture.env.HOME, "/home/runner");
+  assert.equal(commandCapture.env.GIT_CONFIG_GLOBAL, "/dev/null");
+  assert.equal(commandCapture.env.GIT_CONFIG_SYSTEM, "/dev/null");
+  assert.equal(commandCapture.env.GIT_CONFIG_NOSYSTEM, "1");
+  assert.equal(commandCapture.env.GIT_TERMINAL_PROMPT, "0");
+  // The seam is shared by every executor git child: the bound read_file path
+  // (`git show <rev>:<path>`) must hand its child the identical environment.
+  const sha = "a".repeat(40);
+  const readRes = await executeToolRequest("read_file", { path: "src.ts" }, { ...context, sourceRevision: sha });
+  assert.equal(readRes.status, "ok");
+  assert.equal(captured.length, 2);
+  const showCapture = captured[1]!;
+  assert.deepEqual(showCapture.args, ["show", `${sha}:src.ts`]);
+  assert.deepEqual(Object.keys(showCapture.env).sort(), Object.keys(commandCapture.env).sort());
+  for (const key of ["OPENAI_API_KEY", "GITHUB_TOKEN", "RUNNER_TRACKING_ID"]) {
+    assert.equal(showCapture.env[key], undefined);
+  }
+}));
+
 test("gh endpoint guard applies repo and denied-path policy on repo and root routes", async () => {
   assert.match(validateEndpoint("users/o/r", []).error!, /Repo not allowed/);
   assert.match(validateEndpoint("repos/nope/repo/pulls", [], "o/r").error!, /Repo not allowed/);
