@@ -306,6 +306,10 @@ export function renderFindingsSummary(
     `\n\n_…and ${rows.length} more finding(s) not listed (summary truncated to fit the publish size limit)._\n`,
     "utf8",
   );
+  // The closed-vocabulary heading and the reserved worst-case tail are a few
+  // hundred bytes at most (the heading is bounded by #1249 and the omitted
+  // count by log10(rows.length)), so the loop below can always admit at least
+  // one row under the 32 KiB bound; the bound itself never depends on that.
   let usedBytes = Buffer.byteLength(`\n\n${header.join("\n")}`, "utf8");
   const rendered: string[] = [];
   for (const finding of rows.slice(0, FINDINGS_SUMMARY_MAX_ROWS)) {
