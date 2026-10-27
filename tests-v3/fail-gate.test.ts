@@ -79,9 +79,9 @@ test("#518: the fail-on-request-changes gate is opt-in and runs after publishing
   // qualification-dataflow.test.ts): a future reorder that gated before
   // publishing would fail a review that never posted.
   const source = readFileSync("src/run/action.ts", "utf8");
-  const publishAt = source.indexOf("await publishWith(");
+  const publishAt = source.indexOf("await publishWithOutcome(");
   const gateAt = source.indexOf("const gate = failOnRequestChanges(");
-  assert.ok(publishAt !== -1, "actionMain must call publishWith");
+  assert.ok(publishAt !== -1, "actionMain must call publishWithOutcome");
   assert.ok(gateAt !== -1, "actionMain must call failOnRequestChanges");
   assert.ok(publishAt < gateAt, "publication must precede the fail-on-request-changes gate");
 });

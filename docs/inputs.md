@@ -289,6 +289,7 @@ Diff skip, forced re-review, waiting for CI.
 | `should-review` | Whether the action determined a new LLM review is needed |
 | `skip-reason` | Reason the LLM review was skipped |
 | `diff-fingerprint` | Stable fingerprint of the current pull request patch |
+| `publish-status` | Publication outcome for this run (#1257): 'published' when the review was posted, 'superseded' when a newer push was detected at the publication boundary and the review was withheld (the step still exits successfully), 'failed' when the publication attempt completed with a failure, or empty when publication was not attempted (precheck skipped the run, the follow-up path consumed the event, a plain-issue no-op, or publish-mode does not publish). An uncaught crash before this write leaves the output empty and fails the step itself. The review outputs (verdict, review-result, findings, review-markdown) always describe the review this run produced, whether or not it was published. |
 | `ci-status-skipped` | Whether CI status check was skipped (true) or completed (false) |
 | `ci-status-final` | Final CI state (success/failure) when ci-status-check completed |
 | `cache-hit-ratio` | Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable) |
