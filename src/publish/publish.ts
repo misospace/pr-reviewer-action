@@ -1117,7 +1117,7 @@ function newerPublishedComment(
 
 /** Resolve the cleanup flag exactly like `resolve_cleanup_flag`. */
 export { resolveCleanupFlag } from "./cleanup.js";
-export { renderFindingsSummary, severityCountsLabel, FINDINGS_SUMMARY_MAX_ROWS } from "./outputs.js";
+export { renderFindingsSummary, severityCountsLabel, FINDINGS_SUMMARY_MAX_ROWS, FINDINGS_SUMMARY_MAX_BYTES } from "./outputs.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
