@@ -42,10 +42,17 @@ export type FollowUpIgnoreReason =
   /** The PR is a draft — mirroring the shipped `comment-pr-draft` gate: a
    * question on a draft PR gets no model work and no reply. */
   | "pr-draft"
-  /** The PR-state read could not prove the PR open and non-draft (failed
-   * lookup, or an unrecognizable draft value). Fail closed — like the
+  /** The PR's open/closed state could not be proven (failed lookup, or a
+   * missing/non-string/unrecognized `state`) — the same meaning the review
+   * admission path's `pr-state-unknown` carries (#1301): the state read
+   * proved nothing. Fail closed — uncertainty never answers. */
+  | "pr-state-unknown"
+  /** The PR's draft state could not be proven (a missing or unrecognizable
+   * `draft` value on an otherwise open PR). Distinct from
+   * `pr-state-unknown` (#1310) so an operator can tell an unproven
+   * open/closed state from an unproven draft state. Fail closed — like the
    * `comment-pr-lookup-failed` gate, uncertainty never answers. */
-  | "pr-state-unknown";
+  | "pr-draft-unknown";
 
 /** The classifier's coarse intent for one follow-up comment. */
 export type FollowUpIntent = "ignored" | "rereview" | "question";
