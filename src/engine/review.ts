@@ -98,6 +98,7 @@ import {
   buildPrThreadSection,
   buildRelatedCodeSection,
   buildReviewThreadsSection,
+  buildSyntaxContextSection,
   ciChecksBytes,
   deriveFork,
   extractEnrichmentArtifacts,
@@ -843,6 +844,18 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // anchors. Off by default; a lead-generation hint, not a ledger entry —
   // see the correctness specialist wiring below.
   buildEquivalentPathsSection(ws, env, workspace, relatedInputs === null ? null : relatedInputs.anchors);
+
+  // #764: the optional syntax-aware context stage, from the same anchors.
+  // Off by default; it complements the lexical related-code context above
+  // (never replaces it) and emits evidence only — no findings, no severity,
+  // no obligations, no verdict.
+  buildSyntaxContextSection(
+    ws,
+    env,
+    workspace,
+    relatedInputs === null ? null : relatedInputs.anchors,
+    context.headSha !== "" ? context.headSha : String(pr.headRefOid ?? ""),
+  );
 
   // PR-metadata-derived context (context.sh): linked issues + Linear, the
   // requirement ledger, review threads and human reviews. Built here and

@@ -159,6 +159,9 @@ Context window sizing, enrichment time limits.
 | `allowed-source-hosts` | `github.com,api.github.com,gitlab.com,registry.terraform.io,artifacthub.io` | Comma-separated list of hosts allowed for linked source fetching |
 | `related-code-context` | `true` | Include deterministic related-code context discovered from changed-file anchors |
 | `related-code-max-bytes` | `16000` | Maximum bytes of related-code context included in the review corpus (values below 64 are clamped to 64) |
+| `syntax-context` | `false` | Add a syntax-aware context section (whole touched declarations, definitions of referenced identifiers, callers of touched declarations) next to the lexical related-code context. Off by default: default enablement requires measured quality/token benefit, and the stage scans the local git worktree, so it is disabled on fork pull requests. |
+| `syntax-context-max-bytes` | `8000` | Maximum bytes of the syntax-aware context section included in the review corpus (values outside 1-200000 rejected) |
+| `syntax-context-provider` | `structural` | Syntax provider used for the syntax-aware context section. The dependency-free structural provider is the default; an unknown id degrades to it with a recorded reason. |
 | `harness-obligations` | `false` | Add harness-authored verification obligations (derived from related-code context) to the requirement ledger. Off by default: measured with no recall gain. |
 | `equivalent-paths` | `false` | Detect bounded groups of changed functions/methods that are alternate implementations of the same result (dispatcher branches, adapter siblings, or same-privileged-operation call sites) and give the correctness specialist a compact 'Equivalent Paths to Compare' hint listing each member's file:line, so it checks sibling paths for the same invariants the others enforce. Off by default until measured. |
 | `equivalent-paths-max-bytes` | `6000` | Maximum bytes of the equivalent-paths section included in context |

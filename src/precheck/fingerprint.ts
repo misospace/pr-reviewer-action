@@ -88,6 +88,12 @@ export const EXACT_CONFIG_KEYS: readonly string[] = [
   "TOOL_ENABLE_FOR_FORKS",
   "RELATED_CODE_CONTEXT",
   "RELATED_CODE_MAX_BYTES",
+  // #764: toggling the syntax-aware context stage (or its budget /
+  // provider) changes what the review corpus carries, so it must
+  // invalidate a cached review instead of silently reusing it.
+  "SYNTAX_CONTEXT",
+  "SYNTAX_CONTEXT_MAX_BYTES",
+  "SYNTAX_CONTEXT_PROVIDER",
   "REPO_MAP_CONTEXT",
   "REPO_MAP_MAX_BYTES",
   "PR_THREAD_CONTEXT",

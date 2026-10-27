@@ -989,7 +989,7 @@ const STANDARDS_PATH_RE =
 
 const CORPUS_TITLES = new Set([
   "Changed Manifest Context", "PR Metadata", "PR Classification",
-  "Related Code Context", "Repository Map", "Linked Issue Context", "Unresolved Review Threads",
+  "Related Code Context", "Syntax-Aware Context", "Repository Map", "Linked Issue Context", "Unresolved Review Threads",
   "Outstanding Human Change Requests",
   "PR Files", "Version Hints from Diff", "PR Diff",
   "Tool Harness Findings", "Evidence Providers", "CI Check Results",

@@ -37,6 +37,15 @@ import {
 } from "../context/index.js";
 import { BudgetTracker } from "../context/budget.js";
 import { buildImageProvenanceFromNetwork } from "../context/image-transport.js";
+import {
+  MAX_SYNTAX_BYTES,
+  buildSyntaxContext,
+  clipSyntaxContextMarkdown,
+  renderSyntaxContextJson,
+  renderSyntaxContextMarkdown,
+  resolveSyntaxProvider,
+  syntaxContextToArtifact,
+} from "../context/syntax/index.js";
 import { enforcementView as threadEnforcementView, prepareThreads, renderReviewThreads } from "../context/review-threads.js";
 import { enforcementView as humanEnforcementView, prepareReviews, renderOutstanding } from "../context/human-reviews.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
@@ -397,6 +406,72 @@ export function buildEquivalentPathsSection(
   }
 }
 
+const SYNTAX_CONTEXT_ARTIFACTS = ["syntax-context.json", "syntax-context.md", "syntax-context.truncated.md"] as const;
+
+/** Builds the #764 syntax-aware context artifacts from the anchors the
+ * related-code stage already extracted.
+ *
+ * OFF BY DEFAULT (`SYNTAX_CONTEXT`): the issue's acceptance criterion is
+ * measured quality/token benefit, and the measurement is not in yet. The
+ * stage is EVIDENCE, never authority — it emits context, never findings,
+ * severity, obligations or a verdict.
+ *
+ * A no-op (empty artifacts) when the stage is disabled, when the upstream
+ * anchors are unavailable, or when the build fails: the review then falls
+ * back to the existing lexical related-code context and never breaks. */
+export function buildSyntaxContextSection(
+  ws: RunWorkspace,
+  env: StageEnv,
+  workspace: string,
+  anchors: ChangeAnchorsArtifact | null,
+  headRevision: string | null,
+): void {
+  for (const name of SYNTAX_CONTEXT_ARTIFACTS) ws.write(name, "");
+  if ((env.SYNTAX_CONTEXT ?? "false").toLowerCase() !== "true") return;
+  if (anchors === null) return;
+  const reset = (): void => {
+    for (const name of SYNTAX_CONTEXT_ARTIFACTS) ws.write(name, "");
+  };
+  try {
+    // The registry resolves the provider and reports what it got: an
+    // unknown id degrades to the default provider with a recorded reason
+    // (never an exception).
+    const resolution = resolveSyntaxProvider(env.SYNTAX_CONTEXT_PROVIDER);
+    const context = buildSyntaxContext({
+      workspace,
+      anchors,
+      provider: resolution.provider,
+      providerFallback: resolution.fallback,
+      providerFallbackReason: resolution.reason,
+      headRevision,
+      // The artifact budget is the module's own hard cap; the operator's
+      // `syntax-context-max-bytes` bounds the section that enters the
+      // corpus (same shape as RELATED_CODE_MAX_BYTES).
+      maxBytes: MAX_SYNTAX_BYTES,
+    });
+    const artifact = syntaxContextToArtifact(context);
+    // A degraded build (a provider that failed, an unreadable changed
+    // file, a malformed anchor artifact) carries no trustworthy context:
+    // the section is dropped whole, exactly like the lexical stage drops a
+    // degraded related-code artifact, and the review falls back to the
+    // lexical context. The failure never reaches the corpus.
+    const errors = (artifact as { errors?: unknown }).errors;
+    if (Array.isArray(errors) && errors.length > 0) {
+      reset();
+      return;
+    }
+    ws.write("syntax-context.json", renderSyntaxContextJson(artifact));
+    const markdown = renderSyntaxContextMarkdown(artifact);
+    ws.write("syntax-context.md", markdown);
+    ws.write(
+      "syntax-context.truncated.md",
+      clipSyntaxContextMarkdown(Buffer.from(markdown, "utf8"), Number(env.SYNTAX_CONTEXT_MAX_BYTES ?? "8000") || 8000) ?? new Uint8Array(0),
+    );
+  } catch {
+    reset();
+  }
+}
+
 export async function buildPrThreadSection(ws: RunWorkspace, adapter: PlatformReadAdapter, env: StageEnv, supersededCutoff: string | null): Promise<void> {
   ws.write("pr-thread.json", "");
   ws.write("pr-thread.md", "");
@@ -473,6 +548,7 @@ export function assembleCorpus(
       prJson: ws.read("pr.json"),
       classificationJson: ws.read("classification.json"),
       relatedCodeTruncatedMd: ws.read("related-code.truncated.md"),
+      syntaxContextTruncatedMd: ws.read("syntax-context.truncated.md"),
       repoMapMd: ws.read("repo-map.md"),
       prThreadMd: ws.read("pr-thread.md"),
       reviewThreadsMd: ws.read("review-threads.md"),
