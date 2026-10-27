@@ -12,6 +12,9 @@ import type { TransportFailure } from "./http.js";
  * A real run spent 13m40s in silent primary retries before the already
  * configured fallback succeeded. A retired/deprecated model is the same class
  * of permanent failure and used to be misread as transient (an HTTP 410).
+ * Since #1305 the tier budget itself is bounded (one short retry on an
+ * ambiguous failure), so this classifier is the zero-retry optimization for
+ * recognized permanent conditions, not the only latency guard.
  *
  * Shape of the rule, deliberately narrow and evidence-gated:
  * - only an `http_status` failure carries provider evidence; network,
