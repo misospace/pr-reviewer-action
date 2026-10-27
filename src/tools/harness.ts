@@ -86,6 +86,7 @@ import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from
 import { buildTrackedIndex, executeToolRequest, type ToolContext, type TrackedIndex } from "./executors.js";
 
 import { runProcess } from "../runtime/subprocess.js";
+import { gitEnv } from "../acquisition/git-env.js";
 import { decodeUtf8Ignore } from "../corpus/truncate.js";
 
 // ---------------------------------------------------------------------------
@@ -2198,7 +2199,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       file: "git",
       args: ["ls-files", "-z", "--cached"],
       cwd: input.workspaceRoot,
-      env: env as NodeJS.ProcessEnv,
+      // gitEnv, not the raw stage env: the stage carries model/forge
+      // credentials no tracked-index listing may inherit (#1260).
+      env: gitEnv(env as NodeJS.ProcessEnv),
       timeoutMs: 15000,
       ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
     }).result;
@@ -2220,7 +2223,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       file: "git",
       args: ["rev-parse", "HEAD"],
       cwd: input.workspaceRoot,
-      env: env as NodeJS.ProcessEnv,
+      // gitEnv, not the raw stage env: the stage carries model/forge
+      // credentials no revision probe may inherit (#1260).
+      env: gitEnv(env as NodeJS.ProcessEnv),
       timeoutMs: 15000,
       ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
     }).result;
