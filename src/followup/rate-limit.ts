@@ -17,6 +17,13 @@
  * only after EVERY scope it enforces has allowed), so a denied follow-up cannot
  * consume budget and a caller enforcing several scopes at once does not
  * half-charge any of them.
+ *
+ * Optional atomic capability: a store MAY additionally implement
+ * {@link AtomicMultiScopeRateLimitStore} (the durable store does) to make the
+ * whole multi-scope request one transaction — one lock-held check+commit — so
+ * a crash between scopes cannot persist one scope's charge alone. Stores
+ * WITHOUT the capability are consumed through the same per-scope
+ * check-then-record loop as before, byte-identically.
  */
 
 /** A single-window budget: at most `limit` events per `windowMs` for one key. */
@@ -88,6 +95,36 @@ export interface RateLimitScope {
   rule: RateLimitRule;
 }
 
+/** An OPTIONAL capability a `RateLimitStore` may implement: committing a
+ * multi-scope request as ONE all-or-nothing transaction. The atomic unit is
+ * the WHOLE multi-scope request: the store checks every scope's rule against
+ * its CURRENT state and, ONLY when every scope is under its limit, commits one
+ * event per scope as one indivisible commit — a crash strictly before the
+ * commit persists NOTHING, so a retry after the crash is a FRESH attempt that
+ * charges every scope once (never a double-charge of the interrupted attempt,
+ * never a half-charge of the scopes a crash left behind), and a denied request
+ * writes nothing. Over a store exposing this capability,
+ * `consumeFollowUpBudget` delegates the whole decision to it; stores without
+ * it fall back to the per-scope check-then-record loop (whose atomicity unit
+ * is one scope commit). */
+export interface AtomicMultiScopeRateLimitStore extends RateLimitStore {
+  /** Check every scope's rule against the current durable state and, ONLY
+   * when every scope is under its limit, commit one event per scope as ONE
+   * all-or-nothing transaction: a crash strictly before the commit persists
+   * nothing (a retry is a fresh attempt, never a double-charge of the
+   * interrupted attempt) and a denial writes nothing. */
+  consumeScopesAtomically(scopes: readonly RateLimitScope[], nowMs: number): boolean;
+}
+
+/** The optional atomic-multi-scope capability of `store`, or null when the
+ * store does not implement it (structurally checked, so any store — including
+ * ones defined before the capability existed — keeps working unchanged). */
+function asAtomicMultiScopeStore(store: RateLimitStore): AtomicMultiScopeRateLimitStore | null {
+  return typeof (store as Partial<AtomicMultiScopeRateLimitStore>).consumeScopesAtomically === "function"
+    ? (store as AtomicMultiScopeRateLimitStore)
+    : null;
+}
+
 /** Decide a multi-scope follow-up budget in one atomic pass: allowed only when
  * EVERY scope is under its limit; then record the event for every scope. A
  * denied decision records nothing. Returns whether it was allowed (the caller
@@ -107,6 +144,14 @@ export function consumeFollowUpBudget(
       return { allowed: false };
     }
   }
+  // A store with the atomic capability owns the WHOLE multi-scope request as
+  // ONE transaction — one lock-held check of every scope against its current
+  // state, then one all-or-nothing commit — so a crash between scopes cannot
+  // persist one scope's charge alone. The per-scope checks above stay first:
+  // they are the shared deterministic policy (and their denials — including
+  // fail-closed unprovable state — write nothing and never reach the commit).
+  const atomic = asAtomicMultiScopeStore(store);
+  if (atomic !== null) return { allowed: atomic.consumeScopesAtomically(scopes, nowMs) };
   for (const scope of scopes) store.record(scope.key, nowMs);
   return { allowed: true };
 }

@@ -7,7 +7,11 @@
  * denial, cap eviction, the sidecar lock (busy fails closed, stale is
  * stolen), the commit-failure rethrow + latch, the pre-rename inode
  * ownership proof, shape-class-only diagnostics, the window's future-instant
- * upper bound, and edge-case paths (null bytes, symlinks). */
+ * upper bound, edge-case paths (null bytes, symlinks), and the ATOMIC
+ * multi-scope transaction (`consumeScopesAtomically`): both scopes committed
+ * by one rename, all-or-nothing on commit failure (no half-charge, no
+ * double-charge on retry), pure-replay no-save, and fail-closed input
+ * validation. */
 
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
@@ -17,6 +21,7 @@ import {
   constants as fsConstants,
   existsSync,
   fstatSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
   readdirSync,
@@ -598,4 +603,119 @@ test("a symlinked lock path fails closed and never writes through it", () => {
   rmSync(`${filePath}.lock`);
   assert.equal(consumeFollowUpBudget(store, scopes(1), 1_000).allowed, true);
   assert.equal(store.degradedReason, null);
+});
+
+// ── atomic multi-scope transaction (consumeScopesAtomically) ─────────────
+
+test("an allowed multi-scope consume commits BOTH scopes with one transaction and survives a restart", () => {
+  const { filePath } = scratch("atomic-allowed");
+  const store = makeStore({ filePath });
+  const plan = scopes(2);
+  assert.equal(consumeFollowUpBudget(store, plan, 1_000).allowed, true);
+  // The ledger file holds BOTH events — one rename, no half-commit.
+  const body = JSON.parse(readFileSync(filePath, "utf8"));
+  const ledger = new Map<string, number[]>(
+    body.scopes.map((entry: { key: string; events: number[] }) => [entry.key, entry.events]),
+  );
+  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [1_000]);
+  assert.deepEqual(ledger.get("actor:github:owner/repo#7:alice"), [1_000]);
+  // A fresh store over the same path (the restart) still counts them.
+  const restarted = makeStore({ filePath });
+  assert.equal(restarted.countInWindow("pr:github:owner/repo#7", WINDOW, 2_000), 1);
+  assert.equal(restarted.countInWindow("actor:github:owner/repo#7:alice", WINDOW, 2_000), 1);
+});
+
+test("an atomic denial on one scope leaves the ledger byte-identical", () => {
+  const { filePath } = scratch("atomic-denial");
+  const store = makeStore({ filePath });
+  const plan = [
+    { key: "pr:github:owner/repo#7", rule: rule(2) },
+    { key: "actor:github:owner/repo#7:alice", rule: rule(1) },
+  ];
+  assert.equal(consumeFollowUpBudget(store, plan, 1_000).allowed, true);
+  const bytes = readFileSync(filePath);
+  // The actor is at its limit. Called DIRECTLY so the store's OWN lock-held
+  // denial branch is what is pinned here (the planner's pre-check denial is
+  // separately covered); denied — and NOTHING is written, not even a prune
+  // or a re-serialization of the untouched per-PR scope.
+  assert.equal(store.consumeScopesAtomically(plan, 2_000), false);
+  assert.deepEqual(readFileSync(filePath), bytes,
+    "a denied multi-scope request must not touch durable state at all");
+  const fresh = makeStore({ filePath });
+  assert.equal(fresh.countInWindow("pr:github:owner/repo#7", WINDOW, 2_000), 1);
+});
+
+test("a failed atomic commit is all-or-nothing: the throw charges NEITHER scope, the retry charges both exactly once", () => {
+  const { dir, filePath } = scratch("atomic-commit-fail");
+  const store = makeStore({ filePath });
+  // Replace the LEDGER path with a directory (the existing unreadable-state
+  // fixture): the load inside the lock fails EISDIR — after the lock is
+  // held, before anything can be committed.
+  mkdirSync(filePath);
+  const plan = scopes(2);
+  assert.throws(
+    () => store.consumeScopesAtomically(plan, 1_000),
+    /EISDIR/,
+    "the commit failure must rethrow, never a silently allowed request",
+  );
+  assert.match(String(store.degradedReason), /EISDIR/);
+  // The lock and temp files are SIBLINGS of the ledger path (the ledger path
+  // itself is the directory wedge), so scan the parent for leaked
+  // `rate-limit.json.*` state — a failed commit leaves none behind.
+  const leaked = readdirSync(dir).filter((name) => name.startsWith("rate-limit.json."));
+  assert.deepEqual(leaked, [],
+    "a failed commit leaves no temp or lock behind (neither scope charged)");
+  // The failed commit LATCHED: counts deny until the state is repaired.
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 1_000), Number.MAX_SAFE_INTEGER);
+  // The wedge clears (the directory is removed — the repaired fresh start):
+  // the SAME multi-scope request now charges BOTH scopes exactly once each —
+  // proving the aborted attempt left no half-charge and is not double-billed.
+  rmSync(filePath, { recursive: true, force: true });
+  assert.equal(store.consumeScopesAtomically(plan, 2_000), true);
+  const fresh = makeStore({ filePath });
+  assert.equal(fresh.countInWindow("pr:github:owner/repo#7", WINDOW, 3_000), 1);
+  assert.equal(fresh.countInWindow("actor:github:owner/repo#7:alice", WINDOW, 3_000), 1);
+});
+
+test("a pure replay at the same instant charges once and saves nothing", () => {
+  const { filePath } = scratch("atomic-replay");
+  const store = makeStore({ filePath });
+  const plan = scopes(2);
+  assert.equal(consumeFollowUpBudget(store, plan, 1_000).allowed, true);
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 1_000), 1);
+  const bytes = readFileSync(filePath);
+  // Second consume at the SAME now: every scope is under its limit of 2, the
+  // inserts are exact replays (no-ops), and the ledger is NOT rewritten.
+  assert.equal(consumeFollowUpBudget(store, plan, 1_000).allowed, true);
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 1_000), 1);
+  assert.equal(store.countInWindow("actor:github:owner/repo#7:alice", WINDOW, 1_000), 1);
+  assert.deepEqual(readFileSync(filePath), bytes,
+    "a pure replay must not rewrite the ledger");
+});
+
+test("a zero-limit scope denies through the atomic path and writes nothing", () => {
+  const { filePath } = scratch("atomic-zero-limit");
+  const store = makeStore({ filePath });
+  const plan = [
+    { key: "pr:github:owner/repo#7", rule: rule(2) },
+    { key: "actor:github:owner/repo#7:alice", rule: rule(0) },
+  ];
+  assert.equal(store.consumeScopesAtomically(plan, 1_000), false);
+  assert.ok(!existsSync(filePath), "no ledger may be created for a denied request");
+});
+
+test("malformed input denies through the atomic path with a shape-class reason and no write", () => {
+  const { filePath } = scratch("atomic-bad-input");
+  const store = makeStore({ filePath });
+  // A key outside the identifier grammar.
+  assert.equal(store.consumeScopesAtomically([{ key: "bad key", rule: rule(2) }], 1_000), false);
+  assert.match(String(store.degradedReason), /identifier grammar/);
+  assert.ok(!existsSync(filePath));
+  // A window wider than the retention cannot be proven: deny, explain, and
+  // write nothing.
+  const tight = makeStore({ filePath, retentionMs: 1_000 });
+  const wide = scopes(2).map((scope) => ({ key: scope.key, rule: { limit: 2, windowMs: 1_001 } }));
+  assert.equal(tight.consumeScopesAtomically(wide, 1_000), false);
+  assert.match(String(tight.degradedReason), /retention/);
+  assert.ok(!existsSync(filePath));
 });

@@ -13,29 +13,31 @@
  * charge.
  *
  * Semantics preserved from `consumeFollowUpBudget`:
- * - a DENIED request records nothing: the check never writes, and the record
+ * - a DENIED request records nothing: the check never writes, and the commit
  *   phase runs only after EVERY scope allowed — so a denial (crash or not)
  *   leaves the ledger byte-identical;
  * - a replayed commit at the SAME instant never double-charges: one
  *   (key, instant) is recorded at most once, so re-running the commit of an
- *   interrupted request is a no-op; a retry at a NEWER instant re-charges —
- *   the conservative direction (an attempt consumes budget, the posture the
- *   forge-backed store documents), never a half-charge;
- * - each committed event applies exactly once: every `record` re-reads the
+ *   interrupted single-scope `record` is a no-op;
+ * - the atomicity unit of a multi-scope request is now the WHOLE request when
+ *   it is consumed through {@link DurableRateLimitStore.consumeScopesAtomically}
+ *   — the path `consumeFollowUpBudget` (the planner's) takes over this store:
+ *   one lock-held check of every scope against the same loaded snapshot, then
+ *   ONE atomic rename for the whole group. A crash strictly before the rename
+ *   persists NOTHING, so a retry is a fresh attempt that charges every scope
+ *   exactly once — never a half-charge of the scopes a crash left behind and
+ *   never a double-charge of the interrupted attempt. (`consumeFollowUpBudget`
+ *   still runs its per-scope `countInWindow` rule pre-checks UNLOCKED first —
+ *   the shared deterministic policy, whose denials write nothing; the
+ *   lock-held check here is the authoritative one that the commit follows.)
+ *   The per-scope `record`
+ *   seam method remains the seam's single-scope primitive: direct callers of
+ *   `record` get per-scope commits (one scope per call, the planner unchanged
+ *   by the issue's own scope);
+ * - each committed event applies exactly once: every commit re-reads the
  *   CURRENT durable state under the exclusive lock before appending, so two
  *   concurrent controllers' charges both land (no lost update) and neither is
- *   applied twice. The atomicity unit of a multi-scope request is ONE scope
- *   commit — a crash strictly between the per-PR and per-actor commits leaves
- *   the earlier charge in place, never a half-written file. Residual, stated
- *   against #1295's acceptance exactly: the seam (`record(key, nowMs)`, one
- *   scope per call, the planner unchanged by the issue's own scope) carries
- *   NO request identity, so a crash mid-GROUP cannot be distinguished from a
- *   completed group by any later observer, and a retry at a newer instant
- *   bills the retry as the attempt it is. What the acceptance DOES demand is
- *   held: a DENIAL never half-charges (pinned), CONCURRENT controllers
- *   neither double-count nor half-charge (pinned), and every residual is in
- *   the over-charge direction — the budget fails toward denial, the same
- *   conservative posture the forge-backed store documents.
+ *   applied twice.
  *
  * Fail-closed posture (`countInWindow` never throws — it returns a count no
  * sane limit can reach, so the planner denies the question):
@@ -100,7 +102,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import { MAX_RATE_LIMIT_KEYS, type RateLimitStore } from "./rate-limit.js";
+import { MAX_RATE_LIMIT_KEYS, type RateLimitScope, type RateLimitStore } from "./rate-limit.js";
 
 /** The count returned when the budget cannot be proven: `consumeFollowUpBudget`
  * denies once the count reaches the scope's limit, so any count at or above
@@ -204,6 +206,14 @@ export interface DurableRateLimitStoreOptions {
  * this store both loads and writes (a foreign state in another shape is
  * corrupt, never silently normalized). */
 type Ledger = Map<string, number[]>;
+
+/** The outcome of the lock-held phase of an atomic multi-scope consume:
+ * `denied` covers BOTH an input-validation refusal (its shape-class reason is
+ * already in {@link DurableRateLimitStore.degradedReason}) and an ordinary
+ * count denial (nothing was written either way) — neither may trip the
+ * commit-failure catch, so it travels out of the lock as a VALUE, never a
+ * throw. */
+type AtomicOutcome = { kind: "committed" } | { kind: "denied" };
 
 /** A structural/shape rejection of the durable state. The message names the
  * violated shape class only — never the offending content. */
@@ -325,11 +335,17 @@ function insertInstant(instants: number[], nowMs: number): boolean {
 }
 
 /** Evict scopes (oldest last activity first, ties by key) until the ledger
- * fits `maxKeys`. The just-inserted key is never evicted. */
-function evictToCap(ledger: Ledger, maxKeys: number, freshKey: string): void {
+ * fits `maxKeys`. The keys in `protectedKeys` are never evicted — a
+ * multi-scope commit protects ALL of its transaction's keys, so evicting for
+ * one scope can never evict another scope of the same transaction. */
+function evictToCap(
+  ledger: Ledger,
+  maxKeys: number,
+  protectedKeys: ReadonlySet<string>,
+): void {
   if (ledger.size <= maxKeys) return;
   const ordered = [...ledger.entries()]
-    .filter(([key]) => key !== freshKey)
+    .filter(([key]) => !protectedKeys.has(key))
     .sort(([ka, a], [kb, b]) => {
       const lastA = a[a.length - 1]!;
       const lastB = b[b.length - 1]!;
@@ -522,7 +538,7 @@ export class DurableRateLimitStore implements RateLimitStore {
         const existing = ledger.get(key);
         if (existing === undefined) {
           ledger.set(key, [nowMs]);
-          evictToCap(ledger, this.maxKeys, key);
+          evictToCap(ledger, this.maxKeys, new Set([key]));
         } else if (!insertInstant(existing, nowMs)) {
           // Exact replay of an already-committed (key, instant): charge once.
           return;
@@ -540,6 +556,151 @@ export class DurableRateLimitStore implements RateLimitStore {
       // let this request run model work on an unpersisted charge. The host
       // boundary catches (fixed 500 / action error exit); the latch denies
       // everything until the write path proves healthy again.
+      throw err;
+    }
+  }
+
+  /** Commit one event per scope for a WHOLE multi-scope request as ONE
+   * all-or-nothing transaction, under the same exclusive lock `record` uses:
+   * check every scope's rule against the SAME loaded snapshot and, ONLY when
+   * every scope is under its limit, insert one instant per scope and commit
+   * the ledger with ONE atomic rename. This is the capability
+   * `consumeFollowUpBudget` delegates to over this store — the atomicity unit
+   * is the WHOLE multi-scope request, so a crash strictly before the rename
+   * persists NOTHING and a retry is a fresh attempt that charges every scope
+   * exactly once (never a half-charge, never a double-charge of the
+   * interrupted attempt).
+   *
+   * Failure posture, mirroring `record` exactly:
+   * - input-validation refusals (malformed `nowMs`, a structurally broken
+   *   scope list, a key outside the identifier grammar, a window over the
+   *   retention) happen BEFORE the lock is acquired — they set
+   *   {@link degradedReason} to a shape-class reason and return `false`
+   *   WITHOUT writing, latching, or throwing, and never depend on lock
+   *   availability;
+   * - a corrupt/unreadable ledger inside the lock, and any commit failure
+   *   (lock exhaustion, I/O, a stolen lock), set {@link degradedReason},
+   *   LATCH the store fail-closed, and RETHROW — the charge is not spent and
+   *   the triggering request aborts before the planner returns; and
+   * - an ordinary denial (a scope at or over its limit, including a floored
+   *   limit <= 0 as defense in depth) returns `false` having written nothing.
+   */
+  consumeScopesAtomically(scopes: readonly RateLimitScope[], nowMs: number): boolean {
+    // Input validation FIRST, before the lock is even acquired: a shape-class
+    // refusal writes nothing, latches nothing, and throws nothing (the same
+    // reasons/messages `countInWindow` denies with) — a malformed request
+    // must never depend on lock availability, and a structurally broken
+    // scope list is a refusal, not a programmer-contract throw. The
+    // validated projection below is what the lock-held phase consumes.
+    if (
+      typeof nowMs !== "number" ||
+      !Number.isSafeInteger(nowMs) ||
+      nowMs < 0
+    ) {
+      this.degraded = "rate-limit ledger: malformed count query";
+      return false;
+    }
+    if (!Array.isArray(scopes)) {
+      this.degraded = "rate-limit ledger: malformed count query";
+      return false;
+    }
+    const validated: { key: string; windowMs: number; limit: number }[] = [];
+    for (const scope of scopes) {
+      if (
+        !isPlainObject(scope) ||
+        typeof scope["key"] !== "string" ||
+        !KEY_PATTERN.test(scope["key"]) ||
+        !isPlainObject(scope["rule"])
+      ) {
+        this.degraded = "rate-limit ledger: scope key outside the identifier grammar";
+        return false;
+      }
+      const windowMs = scope["rule"]["windowMs"];
+      if (typeof windowMs !== "number" || !Number.isFinite(windowMs) || windowMs <= 0) {
+        this.degraded = "rate-limit ledger: malformed count query";
+        return false;
+      }
+      // A window wider than the retention cannot be proven against a
+      // pruned ledger: fail closed like `countInWindow` does.
+      if (windowMs > this.retentionMs) {
+        this.degraded = "rate-limit ledger: window exceeds the ledger retention";
+        return false;
+      }
+      const rawLimit = scope["rule"]["limit"];
+      const flooredLimit =
+        typeof rawLimit === "number" ? Math.floor(rawLimit) : Number.NaN;
+      if (!Number.isFinite(flooredLimit) || flooredLimit <= 0) {
+        // Defense in depth — `consumeFollowUpBudget` already validated the
+        // rules; this is an ordinary denial, not an input refusal.
+        return false;
+      }
+      validated.push({ key: scope["key"], windowMs, limit: flooredLimit });
+    }
+    try {
+      const outcome = this.withLock((assertHolder, lockFd) => {
+        // Re-read INSIDE the lock: the check and the commit see the SAME
+        // snapshot, so no concurrent commit can slip between them. A corrupt
+        // or unreadable ledger throws out of the lock — the catch below
+        // latches and rethrows, exactly like `record`'s.
+        const loaded = this.loadLedgerUnlocked();
+        const ledger: Ledger = loaded ?? new Map();
+        this.degraded = null;
+        // Count every scope against the SAME snapshot. A denial consumes
+        // nothing anywhere.
+        for (const scope of validated) {
+          const windowStart = nowMs - scope.windowMs;
+          let count = 0;
+          for (const instant of ledger.get(scope.key) ?? []) {
+            // The window is `(nowMs - windowMs, nowMs]` — the SAME closed
+            // bounds `countInWindow` counts: a future-dated instant never
+            // consumes budget the present has not reached yet.
+            if (instant > windowStart && instant <= nowMs) count += 1;
+          }
+          if (count >= scope.limit) return { kind: "denied" } as AtomicOutcome;
+        }
+        // Every scope allowed: insert one instant per scope. An exact-replay
+        // insert (the same (key, instant) already committed) is a no-op.
+        let changed = false;
+        const transactionKeys = new Set<string>();
+        for (const scope of validated) {
+          transactionKeys.add(scope.key);
+          const existing = ledger.get(scope.key);
+          if (existing === undefined) {
+            ledger.set(scope.key, [nowMs]);
+            changed = true;
+          } else if (insertInstant(existing, nowMs)) {
+            changed = true;
+          }
+        }
+        if (!changed) {
+          // Pure replay of an already-committed request: charge once, save
+          // nothing — the durable state already IS the committed outcome.
+          return { kind: "committed" } as AtomicOutcome;
+        }
+        // ONE eviction for the whole transaction, protecting ALL of its
+        // keys — evicting for one scope can never evict another scope of
+        // the same transaction. If the transaction's own distinct keys
+        // exceed the cap, the committed ledger would be over-cap and
+        // rejected by every later load — deny instead of self-bricking.
+        evictToCap(ledger, this.maxKeys, transactionKeys);
+        if (ledger.size > this.maxKeys) return { kind: "denied" } as AtomicOutcome;
+        pruneLedger(ledger, nowMs, this.retentionMs);
+        assertHolder();
+        this.saveLedger(ledger, lockFd);
+        return { kind: "committed" } as AtomicOutcome;
+      });
+      if (outcome.kind === "denied") return false;
+      this.degraded = null;
+      this.commitUnreliable = false;
+      return true;
+    } catch (err) {
+      this.degraded = err instanceof Error ? err.message : String(err);
+      this.commitUnreliable = true;
+      // Fail the TRIGGERING request closed: the whole group is uncommitted
+      // (a crash before the rename persists nothing), so no scope may be
+      // treated as charged. The host boundary catches (fixed 500 / action
+      // error exit); the latch denies everything until the write path
+      // proves healthy again.
       throw err;
     }
   }

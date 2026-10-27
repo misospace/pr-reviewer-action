@@ -13,6 +13,7 @@ export {
 InMemoryRateLimitStore,
 MAX_RATE_LIMIT_KEYS,
 consumeFollowUpBudget,
+type AtomicMultiScopeRateLimitStore,
 type RateLimitRule,
 type RateLimitScope,
 type RateLimitStore,

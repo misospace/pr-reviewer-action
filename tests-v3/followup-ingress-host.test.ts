@@ -1,5 +1,8 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import path from "node:path";
+import { tmpdir } from "node:os";
 import {
   createFollowUpConsumer,
   type FollowUpConsumer,
@@ -617,4 +620,76 @@ test("a failed PR-identity read only loses cross-trigger dedupe — the rereview
   assert.equal(enqueued[0]!.prId, 0, "the sentinel identity fields are kept on a failed hydration");
   assert.equal(enqueued[0]!.baseSha, "");
   assert.equal(calls.resolvePrIdentity, 1);
+});
+
+// ── production budget-backend wiring (#1295) ─────────────────────────────
+
+const ledgerScratchDirs: string[] = [];
+after(() => {
+  for (const dir of ledgerScratchDirs) rmSync(dir, { recursive: true, force: true });
+});
+
+/** The host configuration MINUS the budget backend (the seam under test). */
+function budgetOptions(
+  adapter: FollowUpForgeAdapter,
+): Omit<FollowUpConsumerOptions, "rateLimitStore" | "rateLimitLedgerPath"> {
+  return {
+    adapter,
+    botLogin: async () => BOT,
+    clock: () => 1_000_000,
+    rereviewCommand: REREVIEW_COMMAND,
+    mentionHandles: MENTION_HANDLES,
+    rateLimit: {
+      perPr: { limit: 1, windowMs: 15 * 60_000 },
+      perActor: { limit: 1, windowMs: 15 * 60_000 },
+    },
+    answer: async () => "a bounded answer",
+    ledger: new MemoryGenerationLedger(),
+  };
+}
+
+test("createFollowUpConsumer requires exactly one budget backend", () => {
+  const { adapter } = makeAdapter();
+  // Neither: the composition cannot enforce a budget it was never given.
+  assert.throws(
+    () => createFollowUpConsumer(budgetOptions(adapter) as FollowUpConsumerOptions),
+    /one of rateLimitStore or rateLimitLedgerPath is required/,
+  );
+  // Both: ambiguous ownership of the budget state is a programmer error.
+  assert.throws(
+    () =>
+      createFollowUpConsumer({
+        ...budgetOptions(adapter),
+        rateLimitStore: new InMemoryRateLimitStore(),
+        rateLimitLedgerPath: "/tmp/unused.json",
+      }),
+    /provide either rateLimitStore or rateLimitLedgerPath, not both/,
+  );
+});
+
+test("rateLimitLedgerPath constructs the durable backend: the budget survives a consumer restart", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "followup-wiring-"));
+  ledgerScratchDirs.push(dir);
+  const filePath = path.join(dir, "rate-limit.json");
+  const question = "@reviewer-bot does the retry loop terminate?";
+  const { adapter } = makeAdapter();
+  // The ledger path IS the production wiring: the host constructs and
+  // injects the durable cross-restart store itself.
+  const first = createFollowUpConsumer({
+    ...budgetOptions(adapter),
+    rateLimitLedgerPath: filePath,
+  });
+  assert.deepEqual(
+    await first.handleEvent(commentEvent(question), question),
+    { status: "answered", posted: true },
+  );
+  // A SECOND consumer constructed over the same ledger path — the restart —
+  // still enforces the spent budget (per-PR limit 1 is consumed above).
+  const restarted = createFollowUpConsumer({
+    ...budgetOptions(adapter),
+    rateLimitLedgerPath: filePath,
+  });
+  const outcome = await restarted.handleEvent(commentEvent(question, "alice", 556), question);
+  assert.deepEqual(outcome, { status: "ignored", reason: "rate-limited" },
+    "the restarted consumer must NOT hand the PR a fresh budget");
 });
