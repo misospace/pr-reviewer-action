@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   buildSyntaxContext,
+  MAX_SYNTAX_CHANGED_RANGES,
   renderSyntaxContextJson,
   renderSyntaxContextMarkdown,
   resolveSyntaxProvider,
@@ -425,6 +425,25 @@ test("the builder bounds the WORK: a file with 20,000 declarations is capped and
   assert.equal(context.truncated, true);
   assert.equal(context.truncatedReason, "declaration cap");
   assert.ok(context.notes.some((note) => note.includes("declaration cap")), "the cap is recorded in the notes");
+});
+
+test("the changed-range cap drops ranges VISIBLY: truncated, a reason and a note", () => {
+  const root = workspace({
+    "src/app.py": "def handle(item):\n    return item\n",
+  });
+  // More changed ranges than the cap keeps: every dropped range is lost
+  // context, so the artifact must not present itself as complete.
+  const ranges: [number, number][] = [];
+  for (let index = 0; index < MAX_SYNTAX_CHANGED_RANGES + 1; index += 1) ranges.push([1, 1]);
+  const context = buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", ranges) });
+
+  assert.equal(context.truncated, true);
+  assert.equal(context.truncatedReason, "anchor changed-range cap");
+  assert.deepEqual(context.errors, [], "a range cap is not a fatal error");
+  assert.ok(
+    context.notes.some((note) => note.includes(`kept ${MAX_SYNTAX_CHANGED_RANGES} of ${ranges.length} changed ranges`)),
+    "the cap is recorded in the notes",
+  );
 });
 
 test("the wall-clock bound stops the collection, keeps what was collected, and is not fatal", () => {

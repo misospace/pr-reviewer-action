@@ -130,6 +130,7 @@ const TRUNCATION_REASON_DEADLINE = "deadline";
 const TRUNCATION_REASON_DECLARATION_CAP = "declaration cap";
 const TRUNCATION_REASON_IDENTIFIER_CAP = "identifier cap";
 const TRUNCATION_REASON_CHANGED_LINE_CAP = "changed-line cap";
+const TRUNCATION_REASON_ANCHOR_RANGE_CAP = "anchor changed-range cap";
 const TRUNCATION_REASON_CANDIDATE_CAP = "candidate cap";
 const TRUNCATION_REASON_ITEM_CAP = "item cap";
 const TRUNCATION_REASON_BYTE_CAP = "byte cap";
@@ -356,7 +357,7 @@ interface AnchorFile {
   changedLines: [number, number][];
 }
 
-function readAnchorFiles(anchors: unknown, errors: string[]): AnchorFile[] {
+function readAnchorFiles(anchors: unknown, errors: string[], build: Build): AnchorFile[] {
   if (!isRecord(anchors)) {
     pushError(errors, "change-anchor artifact is not a JSON object");
     return [];
@@ -382,6 +383,12 @@ function readAnchorFiles(anchors: unknown, errors: string[]): AnchorFile[] {
     if (rawRanges !== undefined && !Array.isArray(rawRanges)) {
       pushError(errors, `change-anchor file has invalid changed_lines: ${path}`);
     } else if (Array.isArray(rawRanges)) {
+      // The changed-range cap drops whole ranges, so the drop must be
+      // VISIBLE: the artifact says it was truncated and why.
+      if (rawRanges.length > MAX_SYNTAX_CHANGED_RANGES) {
+        markTruncated(build, TRUNCATION_REASON_ANCHOR_RANGE_CAP);
+        pushNote(build, `changed-range cap hit for ${path}: kept ${MAX_SYNTAX_CHANGED_RANGES} of ${rawRanges.length} changed ranges`);
+      }
       for (const range of rawRanges.slice(0, MAX_SYNTAX_CHANGED_RANGES)) {
         if (!Array.isArray(range) || range.length < 2) {
           pushError(errors, `change-anchor file has an invalid changed range: ${path}`);
@@ -1013,7 +1020,7 @@ function buildInner(options: SyntaxContextOptions, context: SyntaxContext): Synt
   const maxCandidateFiles = positiveInt(options.maxCandidateFiles, MAX_SYNTAX_CANDIDATE_FILES);
   const call = providerCalls(errors);
 
-  const anchorFiles = readAnchorFiles(options.anchors, errors);
+  const anchorFiles = readAnchorFiles(options.anchors, errors, build);
 
   // The changed files, read at the head checkout.
   const changedFiles = collectChangedFiles(build, workspace, anchorFiles, provider, call);
