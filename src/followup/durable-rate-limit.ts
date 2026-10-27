@@ -751,7 +751,16 @@ export class DurableRateLimitStore implements RateLimitStore {
       }
       renameSync(tmp, this.filePath);
       try {
-        const dirFd = openSync(dir, "r");
+        // The explicit 0600 mode is required even though this open never
+        // CREATES anything (the mode applies only at creation, so it is inert
+        // for the read-only directory fd): the CWE-377 insecure-temporary-file
+        // rule flags ANY `fs.open` on a path under the OS temp dir that carries
+        // no restrictive mode ("Insecure creation of file in the os temp dir",
+        // CodeQL alert 278). The ledger path is operator-supplied and MAY
+        // legitimately live under a temp dir, so the rule fires; the mode
+        // makes the never-world-accessible intent explicit. The temp-file and
+        // lock opens in this file already pass 0600 for the same reason.
+        const dirFd = openSync(dir, "r", 0o600);
         try {
           fsyncSync(dirFd);
         } finally {
