@@ -526,6 +526,121 @@ test("ambiguous input direction is unverified and invalid token shapes are ignor
   assert.ok(invalid.every((finding) => finding.grounding_status === undefined));
 });
 
+test("#1264 an input-absence claim without the noun is refuted when the registry declares the id", async () => {
+  // The claim names the input id and carries the declaration-scoped absence
+  // vocabulary ("does not declare") but never uses the word "input": the
+  // noun prefilters used to reject it, so it survived unverified even
+  // though the registry positively contradicts it.
+  const finding = markerFinding({ message: "The action does not declare `ai-api-key`." });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["github-token", "ai-api-key"]));
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["refuted", "input-declared:ai-api-key"],
+  ]);
+  assert.equal(result.demoted, 1);
+  assert.equal(finding.severity, "minor");
+  assert.equal(finding.capped_from, "blocker");
+  assert.equal(finding.grounding_status, "refuted");
+});
+
+test("#1264 an input-absence claim without the noun is grounded when the registry lacks the id", async () => {
+  const finding = markerFinding({ message: "the action does not declare `unicorn-mode`" });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["github-token"]));
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["grounded", "input-absent:unicorn-mode"],
+  ]);
+  assert.equal(result.demoted, 0);
+  assert.equal(finding.severity, "blocker");
+  assert.equal(finding.capped_from, undefined);
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1264 no-noun behavior-verb absence claims stay unrecognized", async () => {
+  // "accept", "forward" and "support" assert what the action DOES with a
+  // name, not what its manifest declares: a declared input may legitimately
+  // not be forwarded to a composite step or supported in one mode, so
+  // without the noun anchoring the claim to the input list the registry
+  // must never decide it. The runtime-recognition phrases ("does not
+  // appear", "not recognized", "unrecognized") describe runtime behavior
+  // too — the review that flagged the no-noun widening pinned them here so
+  // the registry cannot refute a claim it cannot witness.
+  const claims = [
+    markerFinding({ message: "The action does not accept `ai-api-key`." }),
+    markerFinding({ message: "The action does not forward `github-token` to the composite step it calls." }),
+    markerFinding({ message: "The action does not support `run-as` in container mode." }),
+    markerFinding({ message: "The action does not appear to handle `ai-api-key`." }),
+    markerFinding({ message: "The action does not recognize `ai-api-key`." }),
+    markerFinding({ message: "`ai-api-key` is unrecognized by the action." }),
+  ];
+  const result = await verify(claims, async () => { throw new Error("behavior claims must not read source"); }, new Set(["github-token", "ai-api-key", "run-as"]));
+  assert.deepEqual(result.findings, []);
+  assert.ok(claims.every((finding) => finding.severity === "blocker" && finding.grounding_status === undefined));
+});
+
+test("#1264 a no-noun presence claim stays unrecognized", async () => {
+  // The widening is absence-only: presence cues are far more promiscuous
+  // ("uses", "named", "expects"), so a claim that asserts presence without
+  // the noun keeps the noun gate and the finding stays untouched.
+  const finding = markerFinding({ message: "the action declares `ai-api-key`" });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["ai-api-key"]));
+  assert.deepEqual(result.findings, []);
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1264 a no-noun claim whose direction is ambiguous stays unrecognized", async () => {
+  // The window carries an independent presence cue next to the absence
+  // cue, so the direction is mixed: without the noun the boundary cannot
+  // narrow the claim to absence, and an ambiguous direction must never be
+  // refuted.
+  const finding = markerFinding({ message: "the action sees `x-token` as unexpected in its declared options" });
+  const result = await verify([finding], async () => { throw new Error("input claims must not read source"); }, new Set(["x-token"]));
+  assert.deepEqual(result.findings, []);
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1264 a no-noun workflow-mapping negation stays unrecognized", async () => {
+  // "the workflow does not pass `x` to the action" has no action-metadata
+  // absence cue; the registry widening must not invent workflow-scoped
+  // claims from the mapping vocabulary alone.
+  const finding = markerFinding({
+    file: ".github/workflows/ai_pr_review.yaml",
+    message: "the workflow does not pass `ai-api-key` to the action",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    new Set(["ai-api-key"]),
+    null,
+    null,
+    new Map([[".github/workflows/ai_pr_review.yaml", new Set(["github-token"])]]),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(finding.grounding_status, undefined);
+});
+
+test("#1264 a no-noun mapping negation stays unrecognized even with a sibling declaration cue", async () => {
+  // The first clause carries a declaration-scoped absence cue ("declares
+  // no"), which admits the message past the sentence-level gates, but the
+  // quoted id sits in the WORKFLOW-subject clause whose direction resolves
+  // through the mapping negation alone. The window-level declaration-cue
+  // gate is what keeps that candidate unrecognized; without it the
+  // workflow-subject claim would be decided (unverified, with a cap) even
+  // though the registry does not witness the workflow mapping.
+  const finding = markerFinding({
+    file: ".github/workflows/ai_pr_review.yaml",
+    message: "The action declares no exceptions here, the workflow does not pass `ai-api-key` to it.",
+  });
+  const result = await verify(
+    [finding],
+    async () => { throw new Error("input claims must not read source"); },
+    new Set(["ai-api-key"]),
+    null,
+    null,
+    new Map([[".github/workflows/ai_pr_review.yaml", new Set(["github-token"])]]),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(finding.grounding_status, undefined);
+});
+
 test("gate absence claims without a witness are unverified, sentence-scoped, and require an action subject", async () => {
   // All four cue families must co-occur in ONE sentence; cues split across
   // sentences leave the finding untouched.
@@ -1037,10 +1152,16 @@ test("#1238 review hardening: claims the registry cannot decide are never refute
   // a cue at all, so "The workflow passes the `ai-api-key` input to the
   // action." is classified exactly as it was before the feature: no
   // candidate, no decision. The anti-leak property the case pins still
-  // holds: the second sentence's absence cue did not turn it into an
-  // absence claim.
-  assert.deepEqual(result.findings, []);
-  assert.ok(claims.every((finding) => finding.grounding_status === undefined && finding.severity === "blocker"));
+  // holds: the workflow-mapping cue in the first sentence did not decide
+  // the second sentence's claim. #1264: the second sentence — "The action
+  // does not declare `ai-key`." — names the input id and carries the
+  // action-metadata absence vocabulary without the noun, so it IS an
+  // input-absence claim now; the registry lacks `ai-key`, so the claim is
+  // grounded, never refuted.
+  assert.deepEqual(result.findings.map(({ status, reason }) => [status, reason]), [
+    ["grounded", "input-absent:ai-key"],
+  ]);
+  assert.ok(claims.every((finding) => finding.severity === "blocker" && finding.grounding_status === undefined));
 });
 
 test("#1238 a bare other-action subject downgrades contradiction to unverified", async () => {
