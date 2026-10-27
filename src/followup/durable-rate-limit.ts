@@ -16,15 +16,17 @@
  * - a DENIED request records nothing: the check never writes, and the record
  *   phase runs only after EVERY scope allowed — so a denial (crash or not)
  *   leaves the ledger byte-identical;
- * - a replayed request never double-charges: one (key, instant) is recorded at
- *   most once, so re-running the commit of an interrupted request is a no-op;
+ * - a replayed commit at the SAME instant never double-charges: one
+ *   (key, instant) is recorded at most once, so re-running the commit of an
+ *   interrupted request is a no-op; a retry at a NEWER instant re-charges —
+ *   the conservative direction (an attempt consumes budget, the posture the
+ *   forge-backed store documents), never a half-charge;
  * - each committed event applies exactly once: every `record` re-reads the
  *   CURRENT durable state under the exclusive lock before appending, so two
  *   concurrent controllers' charges both land (no lost update) and neither is
  *   applied twice. The atomicity unit of a multi-scope request is ONE scope
  *   commit — a crash strictly between the per-PR and per-actor commits leaves
- *   the earlier charge in place, the same documented "an attempt consumes
- *   budget" posture as the forge-backed store, never a half-written file.
+ *   the earlier charge in place, never a half-written file.
  *
  * Fail-closed posture (`countInWindow` never throws — it returns a count no
  * sane limit can reach, so the planner denies the question):
@@ -39,10 +41,26 @@
  *   bug can never smuggle secrets or untrusted raw content into stored keys:
  *   durable keys carry only repo/PR/actor identifiers (the planner's
  *   `pr:`/`actor:` scope grammar).
- * - a failed commit marks the store degraded and keeps the reason available
- *   through {@link DurableRateLimitStore.degradedReason} (sanitized: the shape
- *   class only, never file content) instead of throwing, matching the
- *   follow-up lane's total, never-throws consumer contract.
+ * - a failed commit (lock exhaustion, I/O, state that cannot be read inside
+ *   the lock) LATCHES the store: while latched, `countInWindow` DENIES —
+ *   a budget whose state cannot be written must not keep allowing work —
+ *   until a lock probe proves the write path healthy again. The reason stays
+ *   available through {@link DurableRateLimitStore.degradedReason}
+ *   (sanitized: shape class and path only, never file content). `record`
+ *   still only THROWS on programmer-contract violations (malformed key),
+ *   which `countInWindow` already denies, so the follow-up lane's total,
+ *   never-throws consumer contract is preserved end to end.
+ *
+ * Instances sharing one ledger file MUST be configured with the SAME
+ * `retentionMs`/`maxKeys`: a narrower config than the stored state cannot
+ * prove the wider window or validate the over-cap scope count, so the store
+ * denies until the file is repaired or removed (fail closed, never
+ * under-count into an allow). Residual, stated honestly: two DISTINCT
+ * concurrent requests charged by different processes in the SAME millisecond
+ * for the same scope dedupe to one charge (the price of interface-level
+ * replay idempotency), and a process crashing mid-`saveLedger` may leave a
+ * `<file>.tmp.<pid>` remnant — a temp file is never read as state, and
+ * removal is safe.
  */
 
 import {
@@ -55,6 +73,7 @@ import {
   statSync,
   writeSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { MAX_RATE_LIMIT_KEYS, type RateLimitStore } from "./rate-limit.js";
 
@@ -109,6 +128,26 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/** Write the WHOLE buffer, looping over short writes — a short write would
+ * otherwise leave a truncated ledger that every later load denies. */
+function writeAll(fd: number, body: string): void {
+  const buffer = Buffer.from(body, "utf8");
+  let offset = 0;
+  while (offset < buffer.length) {
+    offset += writeSync(fd, buffer, offset);
+  }
+}
+
+/** The lock file's token content, or null when it cannot be read (absent or
+ * mid-creation). Never throws. */
+function readLockToken(lockPath: string): string | null {
+  try {
+    return readFileSync(lockPath, "utf8").trim();
+  } catch {
+    return null;
+  }
+}
+
 /** Configuration for {@link DurableRateLimitStore}. */
 export interface DurableRateLimitStoreOptions {
   /** Path of the durable ledger file. The constructor performs NO I/O. */
@@ -121,9 +160,11 @@ export interface DurableRateLimitStoreOptions {
    * over-cap insert evicts the scope with the OLDEST last activity (ties by
    * key), bounding the ledger deterministically. */
   maxKeys?: number;
-  /** A lock file older than this (mtime vs the injected clock) is abandoned
-   * by its dead holder and stolen (default `DEFAULT_RATE_LIMIT_LOCK_STALE_MS`).
-   * Must exceed a healthy commit's worst-case duration. */
+  /** A lock file older than this (mtime vs the injected clock — the clock and
+   * the state directory's filesystem must agree within this margin) is
+   * abandoned by its dead holder and stolen (default
+   * `DEFAULT_RATE_LIMIT_LOCK_STALE_MS`). Must exceed a healthy commit's
+   * worst-case duration. */
   lockStaleMs?: number;
   /** Lock acquisition attempts before the commit fails closed (default 40). */
   lockAttempts?: number;
@@ -288,6 +329,10 @@ export class DurableRateLimitStore implements RateLimitStore {
   private readonly lockRetryDelayMs: number;
   private readonly clock: () => number;
   private degraded: string | null = null;
+  /** A failed COMMIT latches the store: while set, `countInWindow` denies —
+   * a budget whose writes are not landing must not keep allowing model work —
+   * until a lock probe proves the write path healthy again. */
+  private commitUnreliable = false;
 
   constructor(options: DurableRateLimitStoreOptions) {
     if (typeof options.filePath !== "string" || options.filePath === "") {
@@ -328,28 +373,41 @@ export class DurableRateLimitStore implements RateLimitStore {
   }
 
   /** Why the store last refused to trust the durable state (shape class and
-   * path only, never file content), or null when the last read was healthy.
-   * Readable without side effects so an operator lane can surface WHY a
-   * question was rate-limited. */
+   * path only, never file content), or null when the last check was healthy.
+   * Every DENY path in {@link DurableRateLimitStore.countInWindow} records
+   * its reason here, so an operator lane can surface WHY a question was
+   * rate-limited. Diagnostic text carries absolute paths — never render it
+   * into a forge-visible surface. */
   get degradedReason(): string | null {
     return this.degraded;
   }
 
   /** Count `key`'s events in `(nowMs - windowMs, nowMs]`, exactly the
-   * in-memory store's semantics. NEVER throws: any state the budget cannot
-   * prove — unreadable, corrupt, an untrusted key, a window wider than the
-   * retention — returns a DENY count so the planner ignores the question. */
+   * in-memory store's semantics for well-formed queries. NEVER throws: any
+   * state the budget cannot prove — unwritable (latched), unreadable,
+   * corrupt, an untrusted key or query, a window wider than the retention —
+   * returns a DENY count so the planner ignores the question. */
   countInWindow(key: string, windowMs: number, nowMs: number): number {
     // An untrusted key or a malformed query proves nothing: deny without even
-    // reading state (a future `record` would refuse this key outright).
-    if (typeof key !== "string" || !KEY_PATTERN.test(key)) return DENY;
+    // reading state (a `record` on the SAME malformed input is a programmer
+    // error and throws — but it can never be reached through a denied
+    // count, so the planner lane stays total).
+    if (typeof key !== "string" || !KEY_PATTERN.test(key)) {
+      this.degraded = "rate-limit ledger: scope key outside the identifier grammar";
+      return DENY;
+    }
+    // The SAME instant grammar `record` commits: a count that answers a
+    // query `record` could never charge would silently allow work the
+    // ledger cannot bill — accept here exactly what survives there.
     if (
       typeof windowMs !== "number" ||
       !Number.isFinite(windowMs) ||
       windowMs <= 0 ||
       typeof nowMs !== "number" ||
-      !Number.isFinite(nowMs)
+      !Number.isSafeInteger(nowMs) ||
+      nowMs < 0
     ) {
+      this.degraded = "rate-limit ledger: malformed count query";
       return DENY;
     }
     // A window wider than the retention cannot be proven against a pruned
@@ -357,6 +415,19 @@ export class DurableRateLimitStore implements RateLimitStore {
     if (windowMs > this.retentionMs) {
       this.degraded = "rate-limit ledger: window exceeds the ledger retention";
       return DENY;
+    }
+    // A failed commit latches the budget shut: a ledger that could not be
+    // written must not keep proving headroom. Probe the write path (an
+    // acquire-and-release of the commit lock); only when it is healthy again
+    // may counts be answered again.
+    if (this.commitUnreliable) {
+      try {
+        this.withLock(() => undefined);
+      } catch (err) {
+        this.degraded = err instanceof Error ? err.message : String(err);
+        return DENY;
+      }
+      this.commitUnreliable = false;
     }
     let ledger: Ledger | null;
     try {
@@ -376,13 +447,15 @@ export class DurableRateLimitStore implements RateLimitStore {
   }
 
   /** Commit ONE event for `key` at `nowMs` to durable state. Contract
-   * violations (malformed key or instant) throw; every OTHER failure (lock
-   * contention, I/O, corrupt state) is recorded in {@link degradedReason} and
-   * swallowed, because the follow-up consumer is total and never throws —
-   * the charge is simply not spent, and the next request re-reads the
-   * (untouched) ledger and fails closed on it. A corrupt ledger can never be
-   * reset into a fresh budget by a commit that walks past the corruption: the
-   * commit only ever writes a ledger it just READ and validated. */
+   * violations (malformed key or instant) throw — and `countInWindow` denies
+   * the same inputs before any record, so no planner path can throw. Every
+   * OTHER failure (lock exhaustion, I/O, corrupt state inside the lock) is
+   * recorded in {@link degradedReason} and LATCHES the store fail-closed:
+   * the charge is not spent, and no further request is allowed until the
+   * write path proves healthy again. A corrupt ledger can never be reset
+   * into a fresh budget by a commit that walks past the corruption: the
+   * commit only ever writes a ledger it just READ and validated, and only
+   * while it still verifiably holds the exclusive lock. */
   record(key: string, nowMs: number): void {
     if (typeof key !== "string" || !KEY_PATTERN.test(key)) {
       throw new RangeError(
@@ -399,7 +472,7 @@ export class DurableRateLimitStore implements RateLimitStore {
       );
     }
     try {
-      this.withLock(() => {
+      this.withLock((assertHolder) => {
         // Re-read INSIDE the lock: concurrent commits serialize here, so no
         // charge is lost and none is applied twice.
         const ledger = this.loadLedgerUnlocked();
@@ -408,6 +481,7 @@ export class DurableRateLimitStore implements RateLimitStore {
           // but a corrupted one must not be silently replaced either.
           const fresh: Ledger = new Map();
           fresh.set(key, [nowMs]);
+          assertHolder();
           this.saveLedger(fresh);
           return;
         }
@@ -420,11 +494,14 @@ export class DurableRateLimitStore implements RateLimitStore {
           return;
         }
         pruneLedger(ledger, nowMs, this.retentionMs);
+        assertHolder();
         this.saveLedger(ledger);
       });
       this.degraded = null;
+      this.commitUnreliable = false;
     } catch (err) {
       this.degraded = err instanceof Error ? err.message : String(err);
+      this.commitUnreliable = true;
     }
   }
 
@@ -451,7 +528,7 @@ export class DurableRateLimitStore implements RateLimitStore {
     try {
       const fd = openSync(tmp, "w", 0o600);
       try {
-        writeSync(fd, Buffer.from(body, "utf8"));
+        writeAll(fd, body);
         fsyncSync(fd);
       } finally {
         closeSync(fd);
@@ -482,18 +559,46 @@ export class DurableRateLimitStore implements RateLimitStore {
     }
   }
 
-  /** Run `fn` holding the exclusive sidecar lock: an exclusive-create lock
-   * file, retried up to `lockAttempts` times, stolen once older than
-   * `lockStaleMs` (a dead holder's remnant). Lock exhaustion THROWS — the
-   * caller never writes without the lock, so two live controllers can never
-   * interleave a read-modify-write. */
-  private withLock<T>(fn: () => T): T {
+  /** Run `fn` holding the exclusive sidecar lock. The lock file is created
+   * exclusively (`wx`) with a fresh per-acquisition TOKEN; `fn` receives an
+   * `assertHolder` callback it must invoke immediately before any durable
+   * write, and release unlinks the lock ONLY while the token still proves
+   * THIS acquisition holds it. A lock whose mtime is older than
+   * `lockStaleMs` belongs to a dead holder and is stolen. Consequences:
+   * - a commit whose lock was stolen mid-flight aborts at `assertHolder`
+   *   (never renaming a stale snapshot over the thief's commit), and the
+   *   failed commit latches the store fail-closed;
+   * - a release never unlinks a lock acquired by someone else.
+   * Lock exhaustion THROWS — the caller never writes without the lock. */
+  private withLock<T>(fn: (assertHolder: () => void) => T): T {
     let fd: number | null = null;
+    let token = "";
     for (let attempt = 0; attempt < this.lockAttempts && fd === null; attempt += 1) {
       try {
         fd = openSync(this.lockPath, "wx", 0o600);
+        token = `${process.pid} ${randomUUID()}`;
+        try {
+          writeAll(fd, `${token}\n`);
+        } catch (err) {
+          // The lock exists but its token never landed: release and fail the
+          // whole acquisition — committing without verifiable ownership is
+          // not an option.
+          try {
+            closeSync(fd);
+          } catch {
+            // best effort
+          }
+          try {
+            rmSync(this.lockPath, { force: true });
+          } catch {
+            // best effort
+          }
+          throw err;
+        }
       } catch (err) {
         if (!isNodeError(err) || err.code !== "EEXIST") throw err;
+        fd = null;
+        token = "";
         let mtimeMs: number | null = null;
         try {
           mtimeMs = statSync(this.lockPath).mtimeMs;
@@ -521,19 +626,29 @@ export class DurableRateLimitStore implements RateLimitStore {
         `rate-limit ledger: commit lock busy (${this.lockPath}) after ${this.lockAttempts} attempts`,
       );
     }
+    const assertHolder = (): void => {
+      if (readLockToken(this.lockPath) !== token) {
+        throw new Error(
+          "rate-limit ledger: commit lock was stolen mid-commit; refusing to write",
+        );
+      }
+    };
     try {
-      writeSync(fd, `${process.pid}\n`);
-      return fn();
+      return fn(assertHolder);
     } finally {
       try {
         closeSync(fd);
       } catch {
         // best effort
       }
-      try {
-        rmSync(this.lockPath, { force: true });
-      } catch {
-        // best effort
+      // Ownership-verified release: never unlink a lock another acquisition
+      // holds (a stolen holder's late cleanup must not open a third writer).
+      if (readLockToken(this.lockPath) === token) {
+        try {
+          rmSync(this.lockPath, { force: true });
+        } catch {
+          // best effort
+        }
       }
     }
   }

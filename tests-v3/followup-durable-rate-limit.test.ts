@@ -9,6 +9,7 @@
 
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
@@ -124,7 +125,9 @@ test("a crash mid-group replay completes without double- or half-charging", () =
   // Controller A charged the PR scope, then died before the actor scope.
   const crashed = makeStore({ filePath });
   crashed.record("pr:github:owner/repo#7", 5_000);
-  // The retry (fresh process) replays the WHOLE group at the same instants.
+  // The retry replays the WHOLE group; with the host reusing the event's
+  // instant (deterministic-clock hosts), the committed scope dedupes. A retry
+  // at a NEWER instant re-charges instead — the conservative direction.
   const retry = makeStore({ filePath });
   const plan = scopes(2);
   assert.equal(consumeFollowUpBudget(retry, plan, 5_000).allowed, true);
@@ -237,9 +240,23 @@ test("a key outside the identifier grammar is refused, never stored or counted",
   const store = makeStore({ filePath });
   for (const bad of ["bad key", "quote\"key", "back\\slash", "pct%key", "", "x".repeat(257)]) {
     assert.throws(() => store.record(bad, 1_000), RangeError, `record must refuse ${JSON.stringify(bad)}`);
-    // A missing ledger would COUNT 0; an untrusted key must still DENY.
+    // A missing ledger would COUNT 0; an untrusted key must still DENY —
+    // and explainably (never a silent null reason).
     assert.equal(store.countInWindow(bad, WINDOW, 1_000), Number.MAX_SAFE_INTEGER);
+    assert.match(String(store.degradedReason), /identifier grammar/);
   }
+  assert.ok(!existsSync(filePath));
+});
+
+test("a malformed count query denies (same grammar record commits) and the planner lane stays total", () => {
+  const { filePath } = scratch("bad-query");
+  const store = makeStore({ filePath });
+  assert.equal(store.countInWindow("pr:a", WINDOW, 1_000.5), Number.MAX_SAFE_INTEGER);
+  assert.match(String(store.degradedReason), /malformed count query/);
+  assert.equal(store.countInWindow("pr:a", 0, 1_000), Number.MAX_SAFE_INTEGER);
+  assert.equal(store.countInWindow("pr:a", WINDOW, -5), Number.MAX_SAFE_INTEGER);
+  // A fractional host clock must be DENIED, never throw out of the consume.
+  assert.equal(consumeFollowUpBudget(store, scopes(1), 1_000.5).allowed, false);
   assert.ok(!existsSync(filePath));
 });
 
@@ -282,9 +299,49 @@ test("an over-cap insert evicts the least-recently-active scope, deterministical
 
 // ── sidecar lock ────────────────────────────────────────────────────────
 
-test("a live foreign lock holder makes the commit fail closed without writing", () => {
+test("concurrent PROCESSES commit every charge exactly once (no lost update)", async () => {
+  const { filePath } = scratch("xproc");
+  const modulePath = require.resolve("../src/followup/durable-rate-limit.js");
+  const childScript = `
+    const { DurableRateLimitStore } = require(process.argv[1]);
+    const store = new DurableRateLimitStore({ filePath: process.argv[2], lockRetryDelayMs: 5 });
+    store.record("pr:github:owner/repo#7", 10_000 + Number(process.argv[3]));
+    if (store.degradedReason !== null) {
+      process.stderr.write(String(store.degradedReason));
+      process.exit(1);
+    }
+  `;
+  const launches: Promise<void>[] = [];
+  for (let index = 0; index < 6; index += 1) {
+    launches.push(new Promise<void>((resolve, reject) => {
+      const child = spawn(
+        process.execPath,
+        ["-e", childScript, modulePath, filePath, String(index)],
+        { stdio: ["ignore", "ignore", "pipe"] },
+      );
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      child.on("error", reject);
+      child.on("exit", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`child ${index} exited ${code}: ${stderr}`));
+      });
+    }));
+  }
+  await Promise.all(launches);
+  const store = makeStore({ filePath });
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 20_000), 6,
+    "six concurrent commits must ALL be in the ledger");
+  const body = JSON.parse(readFileSync(filePath, "utf8"));
+  assert.deepEqual(body.scopes[0].events, [10_000, 10_001, 10_002, 10_003, 10_004, 10_005]);
+});
+
+test("a live foreign lock holder fails commits closed and LATCHES the budget shut", () => {
   const { dir, filePath } = scratch("lock-busy");
-  writeFileSync(path.join(dir, "rate-limit.json.lock"), "999999\n");
+  const lockPath = path.join(dir, "rate-limit.json.lock");
+  writeFileSync(lockPath, "999999 wedged-holder\n");
   const store = makeStore({
     filePath,
     lockAttempts: 2,
@@ -294,9 +351,35 @@ test("a live foreign lock holder makes the commit fail closed without writing", 
   store.record("pr:a", 1_000);
   assert.match(String(store.degradedReason), /commit lock busy/);
   assert.ok(!existsSync(filePath), "no commit may happen without the lock");
-  // Reads are unaffected by the lock (atomic rename keeps them consistent).
-  assert.equal(store.countInWindow("pr:a", WINDOW, 1_000), 0);
+  // M1 regression pin: unwritable state must never keep proving headroom.
+  const plan = scopes(1);
+  for (const now of [2_000, 3_000, 4_000, 5_000]) {
+    assert.equal(consumeFollowUpBudget(store, plan, now).allowed, false,
+      "a latched (unwritable) budget must deny EVERY request, not allow them");
+    assert.match(String(store.degradedReason), /commit lock busy/);
+  }
+  // The wedge clears: the probe acquires the lock, counts answer again.
+  rmSync(lockPath);
+  assert.equal(store.countInWindow("pr:a", WINDOW, 6_000), 0);
   assert.equal(store.degradedReason, null);
+  assert.equal(consumeFollowUpBudget(store, plan, 7_000).allowed, true);
+  assert.ok(!existsSync(lockPath), "the probe release removes only its own lock");
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 8_000), 1);
+});
+
+test("a wedged-but-healthy-to-read ledger still latches the budget shut", () => {
+  // The exact M1 fail-open scenario: the READ stays valid the whole time.
+  const { dir, filePath } = scratch("latch");
+  const store = makeStore({ filePath });
+  assert.equal(consumeFollowUpBudget(store, scopes(2), 1_000).allowed, true);
+  // Wedge the write path only: a fresh-mtime foreign lock never goes stale.
+  writeFileSync(path.join(dir, "rate-limit.json.lock"), "999999 wedged\n");
+  const plan = scopes(2);
+  store.record("pr:github:owner/repo#7", 2_000);
+  assert.match(String(store.degradedReason), /commit lock busy/);
+  for (const now of [3_000, 4_000, 5_000, 6_000]) {
+    assert.equal(consumeFollowUpBudget(store, plan, now).allowed, false);
+  }
 });
 
 test("a stale lock (dead holder) is stolen and the commit proceeds", () => {
