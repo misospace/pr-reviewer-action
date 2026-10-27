@@ -446,7 +446,14 @@ export function buildSyntaxContextSection(
   // The comparison is the repository's own: `IS_FORK_PR` is resolved
   // upstream by `deriveFork`, which fails closed to "true" when the PR
   // object cannot be parsed.
-  if (env.IS_FORK_PR === "true") return;
+  //
+  // The check FAILS CLOSED: the stage runs only for an EXPLICIT
+  // non-fork ("false"). Any other value — "TRUE", "1", a non-canonical
+  // spelling an operator's request JSON carried, or a missing flag — is
+  // UNCERTAIN fork state, and uncertain metadata must refuse rather than
+  // proceed (see AGENTS.md, "Fail closed where required"). Every shipped
+  // lane resolves the flag to exactly "true" or "false" before this point.
+  if (env.IS_FORK_PR !== "false") return;
   if ((env.SYNTAX_CONTEXT ?? "false").toLowerCase() !== "true") return;
   if (anchors === null) return;
   const reset = (): void => {

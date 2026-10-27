@@ -76,12 +76,13 @@ Every cap is a hard limit, and every drop is visible.
 |---|---|---|
 | `MAX_SYNTAX_ITEMS` | 40 | items per category and in total |
 | `MAX_SYNTAX_BYTES` | 100,000 | bytes of text the artifact carries: declaration bodies, caller snippets, and every path, name, kind and `referenced_from` site the renderer prints |
-| `MAX_SYNTAX_SECONDS` | 20 | wall-clock seconds of ONE build — a module constant, not configurable |
-| `MAX_SYNTAX_CANDIDATE_FILES` | 200 | repository files considered as candidates |
+| `MAX_SYNTAX_SECONDS` | 20 | wall-clock seconds of ONE build's COLLECTION — a module constant, not configurable. The candidate listing is a subprocess, so its own timeout is bounded by the time the build has left (never more than the remaining budget), and the build cannot outlive its bound because of it |
+| `MAX_SYNTAX_CANDIDATE_FILES` | 200 | repository files considered as candidates. The candidate phase also visits the CHANGED files (bounded by the anchor extractor's own 100-file cap), so at most 300 files are parsed |
 | `MAX_SYNTAX_DECLARATIONS_PER_FILE` | 2,000 | declarations a provider may report for ONE file |
 | `MAX_SYNTAX_IDENTIFIERS_PER_LINE` / `MAX_SYNTAX_REFERENCED_TOTAL` | 50 / 2,000 | identifiers kept per changed line / referenced identifiers tracked in total |
 | `MAX_SYNTAX_BODY_CHARS` / `_LINES`, `MAX_SYNTAX_SNIPPET_CHARS` | 2,000 / 120, 300 | one declaration body, one caller snippet |
-| `MAX_SYNTAX_CHANGED_LINES` / `_RANGES` | 500 / 200 | changed lines scanned |
+| `MAX_SYNTAX_CHANGED_LINES` / `_RANGES` | 500 / 200 | changed lines scanned per changed file / changed line ranges per file |
+| `MAX_SYNTAX_CHANGED_LINES_TOTAL` | 5,000 | changed lines scanned per BUILD, across every changed file — the per-file cap alone would allow 100 files × 500 lines |
 | `MAX_SYNTAX_CHANGED_FILE_CHARS` | 8,000,000 | changed-file content RETAINED in total — the anchor extractor's own file cap (100) times the safe reader's per-file cap (2 MB) would otherwise let a PR hold hundreds of megabytes; past the budget the remaining changed files are skipped, visibly |
 | `syntax-context-max-bytes` | 8,000 (1–200,000) | bytes of the section that enters the corpus. The **effective** ceiling is `min(syntax-context-max-bytes, 100,000)`: the rendered document is itself capped at `MAX_SYNTAX_MARKDOWN_BYTES` (100,000) before the corpus clip |
 
@@ -265,8 +266,11 @@ contained the fix in 2 of 3 sampled real PRs — a blind spot like case B.
   beyond the module-scope rule.
 - Destructuring and annotated Python assignments do **not** shadow: a
   name bound by `a, b = ...` or `x: int = ...` is not treated as a local
-  binding. Declaration extents are **indentation-based** (Python, Go) or
-  brace-based (JS/TS), so a multi-line signature bounds the extent loosely.
+  binding. Declaration extents are **indentation-based for every supported
+  language** (the anchor extractor's own `declarationEnd`), so a body line
+  at column 0 ends the extent early — a JS/TS template literal whose
+  content sits at column 0 truncates the declaration body there — and a
+  multi-line signature bounds the extent loosely.
 - Only **call-shaped** usages count as callers; a reference that is not a
   call (an import, an alias, a decorator) is not a caller. The candidate
   listing is **bounded** (200 files, 2,000 directories): a caller in a file

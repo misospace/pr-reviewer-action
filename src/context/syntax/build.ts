@@ -103,7 +103,12 @@ export const MAX_SYNTAX_SNIPPET_CHARS = 300;
 export const MAX_SYNTAX_ERRORS = 20;
 export const MAX_SYNTAX_NOTES = 10;
 export const MAX_SYNTAX_CHANGED_RANGES = 200;
+/** The changed lines scanned for ONE changed file. */
 export const MAX_SYNTAX_CHANGED_LINES = 500;
+/** The changed lines scanned for ONE build, across every changed file. The
+ * per-file cap alone would allow the anchor extractor's own file cap (100)
+ * times that many lines, so the total work is bounded here too. */
+export const MAX_SYNTAX_CHANGED_LINES_TOTAL = 5_000;
 
 /** How many provider failures are tolerated before the provider is treated
  * as broken for the rest of the build (a provider that throws on every call
@@ -336,7 +341,9 @@ function pushNote(build: Build, message: string): void {
 function noteDeadline(build: Build): void {
   build.context.truncated = true;
   build.context.truncatedReason = TRUNCATION_REASON_DEADLINE;
-  pushNote(build, `wall-clock bound of ${MAX_SYNTAX_SECONDS}s expired; the collection stopped early and the result is incomplete`);
+  // Idempotent: the bound is reported ONCE, however many phases noticed it.
+  if (build.context.notes.some((note) => note.includes("wall-clock bound"))) return;
+  pushNote(build, `wall-clock bound of ${MAX_SYNTAX_SECONDS}s expired; collection stopped early and result incomplete`);
 }
 
 // ---------------------------------------------------------------------------
@@ -459,10 +466,16 @@ function walkCandidatePaths(workspace: string, limit: number): { paths: string[]
  * a repository, a timeout) the walk stands in — and the candidates it
  * finds are UNTRUSTED text: an untracked file is not repository content
  * and must not be stamped as committed source. */
-function listCandidatePaths(workspace: string, limit: number): { paths: string[]; gitBacked: boolean; truncated: boolean } {
+function listCandidatePaths(workspace: string, limit: number, remainingSeconds: number): { paths: string[]; gitBacked: boolean; truncated: boolean } {
   if (limit <= 0) return { paths: [], gitBacked: false, truncated: false };
   try {
-    const tracked = listTrackedFiles(workspace, DEFAULT_GIT_TIMEOUT_SEC);
+    // The listing is bounded by the build's OWN remaining time, so the
+    // subprocess cannot outlive the wall-clock bound the build declares.
+    const gitTimeout = Math.max(
+      1,
+      Math.min(DEFAULT_GIT_TIMEOUT_SEC, MAX_SYNTAX_SECONDS, Math.ceil(remainingSeconds)),
+    );
+    const tracked = listTrackedFiles(workspace, gitTimeout);
     const paths: string[] = [];
     let truncated = false;
     for (const path of tracked) {
@@ -630,7 +643,7 @@ function evidenceOf(
 ): { text: string; provenance: EvidenceProvenance } {
   const source = sourceEvidence(text, path, path, null);
   if (!untrusted) return source;
-  return { text: source.text, provenance: untrustedTextProvenance(path) };
+  return { text: source.text, provenance: untrustedTextProvenance(path, source.provenance.redactionCount) };
 }
 
 function overlaps(changedLines: readonly [number, number][], startLine: number, endLine: number): boolean {
@@ -750,6 +763,7 @@ function collectReferenced(
   call: ProviderCalls,
 ): Map<string, SyntaxContextReference[]> {
   const referenced = new Map<string, SyntaxContextReference[]>();
+  let scannedTotal = 0;
   for (const file of changedFiles) {
     const seen = new Set<string>();
     let scanned = 0;
@@ -757,7 +771,7 @@ function collectReferenced(
       const low = Math.min(start, end);
       const high = Math.max(start, end);
       for (let line = low; line <= high; line += 1) {
-        if (scanned >= MAX_SYNTAX_CHANGED_LINES) {
+        if (scanned >= MAX_SYNTAX_CHANGED_LINES || scannedTotal >= MAX_SYNTAX_CHANGED_LINES_TOTAL) {
           markTruncated(build, TRUNCATION_REASON_CHANGED_LINE_CAP);
           break;
         }
@@ -766,6 +780,7 @@ function collectReferenced(
           return referenced;
         }
         scanned += 1;
+        scannedTotal += 1;
         const names = call(
           `identifiers:${file.path}:${line}`,
           () => provider.identifiersOnLine(file.syntaxFile, line),
@@ -820,7 +835,15 @@ function collectCandidateEvidence(
   // The definitions of the referenced identifiers, looked up in the
   // candidate's name index (never by rescanning the file's declarations
   // for every referenced name).
+  let namesScanned = 0;
   for (const [name, refs] of referenced) {
+    // The provider seam is PUBLIC (a registered provider may be slow), so
+    // this loop checks the wall-clock bound too, not only the caller loop.
+    namesScanned += 1;
+    if ((namesScanned & 0x3f) === 0 && build.deadline.exceeded()) {
+      noteDeadline(build);
+      return;
+    }
     const declarations = candidate.byName.get(name);
     if (declarations === undefined) continue;
     for (const decl of declarations) {
@@ -903,7 +926,13 @@ function collectCandidateEvidencePhase(
   provider: SyntaxProvider,
   call: ProviderCalls,
 ): void {
-  const listing = listCandidatePaths(workspace, limit);
+  if (build.deadline.exceeded()) {
+    // The candidate listing is a SUBPROCESS: it is bounded by the time the
+    // build has left, so it cannot outlive the build's own wall-clock bound.
+    noteDeadline(build);
+    return;
+  }
+  const listing = listCandidatePaths(workspace, limit, build.deadline.remainingSeconds());
   if (!listing.gitBacked) {
     pushNote(build, "candidate listing not git-backed; candidate provenance is untrusted_text");
   }
