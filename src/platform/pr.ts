@@ -115,9 +115,9 @@ export interface PrStateReading {
  * both halves read `unknown`, and the caller fails closed. Mirrors the
  * #1301 admission doctrine: a PR whose state cannot be PROVEN is not
  * reviewable on `draft: false` alone. This layer is only as strict as its
- * inputs: the Forgejo seam currently fabricates `state ?? "open"` /
- * `Boolean(draft)` before this derivation sees the payload — that seam
- * half is #1303's scope, not this reader's.
+ * inputs: the Forgejo seam now carries `state` and `draft` through verbatim
+ * (#1303/#1307) — a partial Forgejo read reaches this derivation as
+ * unprovable and fails closed here, never as a fabricated `open`.
  */
 export function derivePrStateReading(raw: unknown): PrStateReading {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
