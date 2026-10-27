@@ -114,8 +114,8 @@ export interface ActionFollowUpDeps {
    * window it cannot prove covered; an UNREADABLE thread proves no headroom
    * and denies the question: a budget source that cannot be read never
    * silently allows.
-   * The operator lane injects its own store (the durable cross-process store
-   * of #1295). */
+   * The operator lane injects its own store (the durable cross-process
+   * `DurableRateLimitStore` of #1295). */
   rateLimitStore: RateLimitStore;
 }
 

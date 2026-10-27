@@ -272,8 +272,11 @@ platform seams cap the snapshot at the latest comments
 (`CONVERSATION_COMMENTS_SNAPSHOT_CAP`), the host reports snapshot
 completeness, and a failed Forgejo comment page fails the whole read rather
 than silently truncating the ledger. The operator lane injects its own store;
-the durable cross-process store of #1295 remains that lane's target
-(cross-RESTART durability, not a scope this store under-delivers).
+the durable cross-process store of #1295 shipped as
+`DurableRateLimitStore` (`src/followup/durable-rate-limit.ts`): the same
+atomic JSON-snapshot substrate (temp file + fsync + rename) plus a sidecar
+exclusive lock, cross-RESTART per-PR/per-actor budgets, idempotent replays,
+and fail-closed counts on unreadable or corrupt state.
 
 ## Out of scope
 

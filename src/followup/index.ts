@@ -10,13 +10,19 @@ export {
   type ClassifyFollowUpInput,
 } from "./classify.js";
 export {
-  InMemoryRateLimitStore,
-  MAX_RATE_LIMIT_KEYS,
-  consumeFollowUpBudget,
-  type RateLimitRule,
-  type RateLimitScope,
-  type RateLimitStore,
+InMemoryRateLimitStore,
+MAX_RATE_LIMIT_KEYS,
+consumeFollowUpBudget,
+type RateLimitRule,
+type RateLimitScope,
+type RateLimitStore,
 } from "./rate-limit.js";
+export {
+DurableRateLimitStore,
+DEFAULT_RATE_LIMIT_LOCK_STALE_MS,
+DEFAULT_RATE_LIMIT_RETENTION_MS,
+type DurableRateLimitStoreOptions,
+} from "./durable-rate-limit.js";
 export { renderFollowUpReply } from "./reply.js";
 export {
   ForgeFollowUpBudget,

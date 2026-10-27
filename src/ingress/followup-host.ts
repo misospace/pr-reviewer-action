@@ -115,8 +115,8 @@ export interface FollowUpConsumerOptions {
   botLogin: () => Promise<string | null>;
   /** Deterministic clock (epoch ms) for the follow-up rate budget. */
   clock: () => number;
-  /** The follow-up rate budget store, shared per process; the durable store
-   * lands in #1295. */
+  /** The follow-up rate budget store, shared per process; the durable
+   * cross-restart store is `DurableRateLimitStore` (#1295). */
   rateLimitStore: RateLimitStore;
   /** Explicit re-review command (e.g. `/ai-review`); "" disables it. */
   rereviewCommand: string;
