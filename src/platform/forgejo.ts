@@ -263,7 +263,8 @@ export class ForgejoAdapter implements PlatformReadAdapter {
       // #961: only an explicit boolean draft is authoritative — the same
       // "reviewability must be proven" doctrine the state gate applies, so a
       // missing draft is carried through as unknown (the #961 gate fails it
-      // closed as `pr-draft`) rather than defaulted to "not-draft".
+      // closed as `pr-draft-unknown`, #1312) rather than defaulted to
+      // "not-draft".
       draft: data.draft,
       labels: Array.isArray(data.labels)
         ? data.labels.map((label: unknown) => ({ name: isObject(label) ? label.name ?? "" : "" }))

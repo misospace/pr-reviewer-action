@@ -279,8 +279,8 @@ test("forgejo PR projection never fabricates an open state or a not-draft flag (
   const pr = await partial.getPr() as Record<string, unknown>;
   // A partial Forgejo read proves NOTHING about reviewability: `state` and
   // `draft` are carried through verbatim, so the shared admission gate fails
-  // closed (`pr-state-unknown` / `pr-draft`) instead of being handed a
-  // fabricated "open"/"not-draft".
+  // closed (`pr-state-unknown` / `pr-draft-unknown`, #1312) instead of being
+  // handed a fabricated "open"/"not-draft".
   assert.equal(pr.state, undefined, "a missing state must not be defaulted to open");
   assert.equal(pr.draft, undefined, "a missing draft must not be defaulted to not-draft");
   assert.equal(derivePrState(pr), "unknown");
@@ -299,6 +299,18 @@ test("forgejo PR projection never fabricates an open state or a not-draft flag (
   assert.equal(open.draft, false);
   assert.equal(derivePrState(open), "open");
   assert.equal(deriveDraftState(open), "not-draft");
+  // A malformed draft bit is carried through verbatim too — #1312 reads it
+  // as unproven (`pr-draft-unknown`), never as a proven draft or not-draft.
+  const malformed = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    baseUrl: "https://git.example.com",
+    token: "tok",
+    fetchImpl: jsonResponse({ number: 1, title: "t", body: "b", state: "open", draft: "yes", head: { sha: "h1", ref: "f" }, base: { sha: "b1", ref: "m" } }),
+  });
+  const unproven = await malformed.getPr() as Record<string, unknown>;
+  assert.equal(unproven.draft, "yes");
+  assert.equal(deriveDraftState(unproven), "unknown");
 });
 
 test("forgejo permission preflight resolves collaborator, owner, and unknown paths", async () => {

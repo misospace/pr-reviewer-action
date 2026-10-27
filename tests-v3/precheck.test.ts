@@ -1077,12 +1077,14 @@ interface SkipAdapter extends PlatformAdapter {
   externalChecks: (sha: string) => Promise<ExternalCheck[] | null>;
 }
 
-function skipAdapter812(external: ExternalCheck[] | null, body: string, options: { pr?: unknown } = {}): SkipAdapter & { readCount(): number } {
+function skipAdapter812(external: ExternalCheck[] | null, body: string, options: { pr?: unknown; prFails?: boolean } = {}): SkipAdapter & { readCount(): number } {
   let reads = 0;
   return {
     readCount: () => reads,
     platform: "github",
-    getPr: () => Promise.resolve(options.pr ?? { number: 42, state: "open", draft: false, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
+    getPr: () => options.prFails
+      ? Promise.resolve(null)
+      : Promise.resolve(options.pr ?? { number: 42, state: "open", draft: false, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
     getPrDiff: () => Promise.resolve("diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"),
     listIssueComments: () => Promise.resolve([{ id: 1, body, created_at: "2024-01-01T00:00:00Z", author: "pr-reviewer[bot]" }]),
     listPrReviews: () => Promise.resolve([]),
@@ -1142,6 +1144,18 @@ test("#812: a transient external-checks read fails closed — fresh review, neve
   const output = await runPrecheck({ env: skipEnv812(), adapter });
   assert.equal(output.should_review, "true");
   assert.equal(output.skip_reason, "ci-stale-carried-verdict");
+});
+
+test("#1312: a PR lookup failure on the #812 stale re-entry fails the run too", async () => {
+  // The stale-carried-verdict re-entry re-reads the PR through the shared
+  // seam. A null lookup there is the same operational failure as on the
+  // fall-through route: it must reject, never return should_review=true on
+  // an unreadable PR (or fall back to a green skip).
+  const adapter = skipAdapter812([{ name: "ci", state: "success" }], issuesCommentBody812("issues", "failure"), { prFails: true });
+  await assert.rejects(
+    runPrecheck({ env: skipEnv812(), adapter }),
+    /Could not read pull request .*refusing to treat a forge\/API lookup failure as a successful review skip/,
+  );
 });
 
 test("#812: an adapter without the externalChecks seam keeps the exact v2 skip", async () => {
