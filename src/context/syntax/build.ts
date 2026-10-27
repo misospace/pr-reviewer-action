@@ -412,11 +412,18 @@ function readAnchorFiles(anchors: unknown, errors: string[], build: Build): Anch
 // Candidate discovery (bounded, safe, inside the workspace)
 // ---------------------------------------------------------------------------
 
+/** Whether a repository path lives under one of the generated/vendor
+ * directories: its content is not repository source, so it must contribute
+ * nothing — neither as a candidate nor as a changed file. */
+function isGeneratedOrVendoredPath(path: string): boolean {
+  const parts = path.split("/");
+  return parts.slice(0, -1).some((part) => GENERATED_DIRS.has(part));
+}
+
 /** Whether a repository path is a source file a candidate search may read:
  * a supported language, outside the generated/vendor directories. */
 function isCandidatePath(path: string): boolean {
-  const parts = path.split("/");
-  if (parts.slice(0, -1).some((part) => GENERATED_DIRS.has(part))) return false;
+  if (isGeneratedOrVendoredPath(path)) return false;
   return isSupportedLanguage(detectLanguage(path));
 }
 
@@ -717,9 +724,16 @@ function collectChangedFiles(
   call: ProviderCalls,
 ): ChangedFile[] {
   const changedFiles: ChangedFile[] = [];
+  const excluded: string[] = [];
   let retainedChars = 0;
   for (const anchor of anchorFiles) {
     if (anchor.deleted) continue;
+    // A changed file under a generated/vendor directory is not repository
+    // source: it contributes nothing, exactly as in candidate discovery.
+    if (isGeneratedOrVendoredPath(anchor.path)) {
+      excluded.push(anchor.path);
+      continue;
+    }
     const language = detectLanguage(anchor.path);
     if (!isSupportedLanguage(language)) continue;
     if (build.deadline.exceeded()) {
@@ -757,6 +771,14 @@ function collectChangedFiles(
       declarations,
       declared: new Set(declarations.map((decl) => decl.name)),
     });
+  }
+  // The exclusion is recorded ONCE: a vendored dependency bump can change
+  // dozens of files, and one note says it without flooding the note list.
+  if (excluded.length > 0) {
+    pushNote(
+      build,
+      `changed files excluded: ${excluded.length} under generated/vendor directories (${excluded.slice(0, 3).join(", ")})`,
+    );
   }
   return changedFiles;
 }

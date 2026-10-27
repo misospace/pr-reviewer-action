@@ -167,6 +167,7 @@ to the lexical context); a note never does — it says what was left out.
 | the pull request is a fork | the stage refuses in code (`IS_FORK_PR === "true"`): all three artifacts empty; no corpus section — see [The fork boundary](#the-fork-boundary) |
 | provider throws, or the anchor artifact is malformed | the build is degraded (`errors` non-empty); the section is dropped whole — empty artifacts, no corpus section, the review falls back to the lexical context |
 | an unreadable or binary changed file (over the reader's size cap, a symlink, a refused path) | a **per-file skip**: the file is recorded in `notes` and the rest of the section is kept — one oversized file cannot silence the evidence |
+| a changed file under a **generated/vendor** directory (`vendor/`, `dist/`, `build/`, `node_modules/`, `third_party/`) | skipped: such content is **not repository source**, so it contributes no touched declaration, no referenced identifier and no caller — the same exclusion the candidate listing applies, so a vendored file cannot leak into the context through the change. The exclusion is recorded as **one** note naming how many files were excluded, so a vendored dependency bump cannot flood the note list |
 | the candidate listing could not be git-backed | the filesystem walk stands in; the candidate items carry the `untrusted_text` representation and a note says so |
 | a bound bit (declaration cap, identifier cap, candidate cap, item cap, byte cap), or the wall-clock bound expired | the collection is cut, `truncated: true` and `truncated_reason` name the bound (`"deadline"` for the wall-clock bound, which is **not** fatal: what was collected stays, the section is kept and marked incomplete) |
 | unknown provider id | the default provider runs; the artifact records `provider_fallback: true` and `provider_fallback_reason` naming the unknown id |
@@ -278,6 +279,13 @@ contained the fix in 2 of 3 sampled real PRs — a blind spot like case B.
 - A file with more than **2,000 declarations** keeps only its first 2,000
   (the per-file cap), and a build that passes **20 seconds** stops early.
   Both are visible in `truncated_reason` and in the notes.
+- The generated/vendor exclusion matches a **directory NAME** (`vendor`, `dist`,
+  `build`, `node_modules`, `third_party`), so a first-party directory that
+  happens to carry one of those names — a `build/` holding hand-written
+  tooling, an `internal/vendor/` holding a vendored-in package — contributes
+  no syntax context even when it is first-party source. The rule is
+  name-based because nothing in the working tree distinguishes generated
+  output from first-party code that shares the name.
 - The corpus section title (`# Syntax-Aware Context`) and the artifact's
   own title (`# Syntax Context (v1)`) are two level-1 headings, the same
   shape as the lexical section's. The tool-harness planning context knows

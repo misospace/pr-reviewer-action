@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -524,6 +524,134 @@ test("a binary file is detected by a NUL anywhere in it, not only in its first l
   });
   const read = buildSyntaxContext({ workspace: clean, anchors: anchors("src/app.py", [[2, 2]]) });
   assert.equal(read.callers.length, 1, "the text file's call site is found");
+});
+
+test("a changed file under a generated/vendor directory contributes no syntax context", () => {
+  // The candidate listing already excludes these directories; a changed file
+  // under one of them must be excluded the same way, or vendored code would
+  // contribute touched declarations and referenced identifiers. The cases
+  // cover the directory names, a NESTED directory and a path the anchor
+  // artifact normalizes (a backslash separator).
+  const cases = [
+    { dir: "vendor", file: "vendor/lib.py", anchor: "vendor/lib.py" },
+    { dir: "dist", file: "dist/lib.py", anchor: "dist/lib.py" },
+    { dir: "build", file: "build/lib.py", anchor: "build/lib.py" },
+    { dir: "node_modules", file: "node_modules/lib.py", anchor: "node_modules/lib.py" },
+    { dir: "third_party", file: "third_party/lib.py", anchor: "third_party/lib.py" },
+    { dir: "packages/app/vendor", file: "packages/app/vendor/lib.py", anchor: "packages/app/vendor/lib.py" },
+    { dir: "vendor", file: "vendor/lib.py", anchor: "vendor\\lib.py" },
+  ];
+  for (const item of cases) {
+    const root = workspace({
+      "src/app.py": [
+        "from lib.helpers import compute",
+        "",
+        "def run(items):",
+        "    return compute(items)",
+        "",
+      ].join("\n"),
+      "lib/helpers.py": ["def compute(items):", "    return sum(items)", ""].join("\n"),
+      [item.file]: [
+        "from lib.helpers import compute",
+        "",
+        "def vendored(items):",
+        "    return compute(items)",
+        "",
+      ].join("\n"),
+    });
+    const context = buildSyntaxContext({
+      workspace: root,
+      anchors: {
+        version: 1,
+        files: [
+          { path: "src/app.py", language: "python", symbols: [], imports: [], identifiers: [], changed_lines: [[4, 4]] },
+          { path: item.anchor, language: "python", symbols: [], imports: [], identifiers: [], changed_lines: [[4, 4]] },
+        ],
+        anchors: [],
+        truncated: false,
+      },
+    });
+    assert.deepEqual(context.errors, [], `${item.anchor}: the exclusion is not an error`);
+    assert.deepEqual(
+      [...new Set(context.declarations.map((declaration) => declaration.path))],
+      ["src/app.py"],
+      `${item.anchor}: the vendored declaration is not touched context, and the repository's own changed file still is`,
+    );
+    assert.ok(
+      !context.declarations.some((declaration) => declaration.name === "vendored"),
+      `${item.anchor}: the vendored declaration contributes nothing`,
+    );
+    assert.ok(
+      !context.definitions.some((definition) =>
+        definition.referencedFrom.some((reference) => reference.path.startsWith(`${item.dir}/`)),
+      ),
+      `${item.anchor}: the vendored file references nothing`,
+    );
+    const paths = [
+      ...context.declarations.map((declaration) => declaration.path),
+      ...context.definitions.map((definition) => definition.path),
+      ...context.callers.map((caller) => caller.path),
+    ];
+    assert.ok(
+      !paths.some((path) => path.startsWith(`${item.dir}/`)),
+      `${item.anchor}: no item carries a generated/vendor path`,
+    );
+    assert.ok(
+      context.notes.some((note) => note.includes("generated/vendor") && note.includes(item.file)),
+      `${item.anchor}: the exclusion is recorded`,
+    );
+  }
+});
+
+test("a symlinked file contributes nothing: the reader refuses it and the changed file is skipped", () => {
+  const root = workspace({
+    "src/app.py": [
+      "from lib.helpers import compute",
+      "",
+      "def run(items):",
+      "    return compute(items)",
+      "",
+    ].join("\n"),
+  });
+  // The definition is reachable ONLY through a symlink: the real file lives
+  // outside the workspace, so nothing but the link can lead to it.
+  const outside = mkdtempSync(join(tmpdir(), "syntax-context-target-"));
+  writeFileSync(join(outside, "helpers.py"), "def compute(items):\n    return sum(items)\n");
+  mkdirSync(join(root, "lib"), { recursive: true });
+  symlinkSync(join(outside, "helpers.py"), join(root, "lib", "helpers.py"));
+  const context = buildSyntaxContext({
+    workspace: root,
+    anchors: {
+      version: 1,
+      files: [
+        { path: "src/app.py", language: "python", symbols: [], imports: [], identifiers: [], changed_lines: [[4, 4]] },
+        { path: "lib/helpers.py", language: "python", symbols: [], imports: [], identifiers: [], changed_lines: [[1, 1]] },
+      ],
+      anchors: [],
+      truncated: false,
+    },
+  });
+  assert.deepEqual(context.errors, []);
+  assert.equal(context.definitions.length, 0, "the symlink is not read, so its definition is not found");
+  assert.ok(
+    context.notes.some((note) => note.includes("lib/helpers.py")),
+    "the symlinked changed file is skipped and recorded",
+  );
+
+  // The control: the same workspace with a REGULAR file finds the definition,
+  // so the assertion above is about the symlink and not about the fixture.
+  const plain = workspace({
+    "src/app.py": [
+      "from lib.helpers import compute",
+      "",
+      "def run(items):",
+      "    return compute(items)",
+      "",
+    ].join("\n"),
+    "lib/helpers.py": ["def compute(items):", "    return sum(items)", ""].join("\n"),
+  });
+  const read = buildSyntaxContext({ workspace: plain, anchors: anchors("src/app.py", [[4, 4]]) });
+  assert.equal(read.definitions.length, 1, "the regular file's definition is found");
 });
 
 // ---------------------------------------------------------------------------
