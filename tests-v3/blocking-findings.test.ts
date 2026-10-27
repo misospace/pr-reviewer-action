@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BLOCKING_ANNOTATION_LIMIT,
+  BLOCKING_LOCATION_MAX_CHARS,
   blockingGateSummary,
   escapeWorkflowData,
   escapeWorkflowProperty,
   renderBlockingAnnotations,
 } from "../src/run/blocking-findings.js";
+import { safePath } from "../src/findings/safe-path.js";
 import { failOnRequestChanges } from "../src/run/action.js";
 
 function withDir(): { dir: string; cleanup: () => void } {
@@ -111,6 +113,55 @@ test("#1163: a NUL-bearing path renders no annotation and no location in the sum
   assert.deepEqual(renderBlockingAnnotations(findings), ["::error file=ok.ts,line=3::[major] kept"]);
   // The finding still counts; its entry degrades to severity + message.
   assert.equal(blockingGateSummary(findings), "2 blocking finding(s): [blocker] — nul path");
+});
+
+test("#1284 #252: an over-long hostile path stays one bounded annotation line", () => {
+  // The hostile token itself, repeated past the cap: the property escaping
+  // inflates five-fold, so the cap must be applied BEFORE escaping or the
+  // published `file=` value is unbounded even though the path was "capped".
+  const file = `${"a".repeat(40)}%2C%0A::error file=innocent.ts::`.repeat(20);
+  const lines = renderBlockingAnnotations([
+    { severity: "blocker", file, line: 12, message: "over-long path" },
+  ]);
+  assert.equal(lines.length, 1);
+  const line = lines[0]!;
+  assert.ok(!line.includes("\n"), `no raw newline: ${line}`);
+  assert.equal(line.match(/^::error /gm)?.length, 1, line);
+  const property = line.slice("::error ".length, line.indexOf("::[blocker]"));
+  // The path portion is exactly the capped prefix, escaped; the escaping
+  // expansion is bounded by the five-fold ceiling of the cap itself.
+  assert.equal(property, `file=${escapeWorkflowProperty(file.slice(0, BLOCKING_LOCATION_MAX_CHARS))},line=12`);
+  assert.ok(property.length <= BLOCKING_LOCATION_MAX_CHARS * 5 + "file=,line=12".length);
+});
+
+test("#1284: the gate summary bounds the path while the message keeps its own cap", () => {
+  const file = `${"d".repeat(120)}/`.repeat(6) + "x.yml";
+  const bounded = file.slice(0, BLOCKING_LOCATION_MAX_CHARS);
+  const summary = blockingGateSummary([
+    { severity: "blocker", file, line: 42, message: "m".repeat(500) },
+  ]);
+  assert.equal(summary, `1 blocking finding(s): [blocker] ${bounded}:42 — ${"m".repeat(200)}…`);
+  assert.ok(!summary.includes("x.yml"), "the past-cap tail must not render");
+});
+
+test("#1284: a truncated path that would manufacture a traversal fails closed", () => {
+  // `…/...b/secret` is safe (no `..` SEGMENT), but the naive prefix ends in
+  // `/..` — an anchor the shared predicate rejects, so the location is
+  // dropped entirely rather than rendered as a traversal.
+  const head = "y".repeat(BLOCKING_LOCATION_MAX_CHARS - 3);
+  const file = `${head}/...b/secret`;
+  assert.ok(safePath(file), "the full path itself is safe");
+  assert.equal(file.slice(0, BLOCKING_LOCATION_MAX_CHARS), `${head}/..`);
+  assert.deepEqual(renderBlockingAnnotations([{ severity: "blocker", file, line: 1, message: "m" }]), []);
+  assert.equal(blockingGateSummary([{ severity: "blocker", file, line: 1, message: "m" }]), "1 blocking finding(s): [blocker] — m");
+});
+
+test("#1284: a path at exactly the cap renders in full", () => {
+  const file = `${"p".repeat(BLOCKING_LOCATION_MAX_CHARS - "/x.ts".length)}/x.ts`;
+  assert.equal(file.length, BLOCKING_LOCATION_MAX_CHARS);
+  assert.deepEqual(renderBlockingAnnotations([{ severity: "major", file, line: 3, message: "kept" }]), [
+    `::error file=${file},line=3::[major] kept`,
+  ]);
 });
 
 test("the line property appears only for a positive integer", () => {
