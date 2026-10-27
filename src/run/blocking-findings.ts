@@ -63,6 +63,11 @@ interface NormalizedFinding {
  * (`a/.../b` truncated to `a/..`). A bounded value that fails the predicate
  * fails closed to "no location", the same bar as {@link safePath}. */
 function boundedLocation(path: unknown): string {
+  // A UTF-16 slice may split a surrogate pair at the boundary and render one
+  // replacement character — deliberately the same behavior as the pinned
+  // table cap (`FINDINGS_SUMMARY_MAX_LOCATION_CHARS`), and inert: a lone
+  // surrogate is none of `%`/`:`/`,`/CR/LF/NUL/`/`, so it cannot forge or
+  // dodge the workflow-command escaping.
   if (!safePath(path)) return "";
   return path.length <= BLOCKING_LOCATION_MAX_CHARS ? path : safePath(path.slice(0, BLOCKING_LOCATION_MAX_CHARS)) ? path.slice(0, BLOCKING_LOCATION_MAX_CHARS) : "";
 }
