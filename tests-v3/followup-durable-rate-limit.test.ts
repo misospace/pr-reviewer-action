@@ -4,19 +4,26 @@
  * lost or duplicated charge, fail-closed loads (corrupt / wrong version /
  * unknown key / malformed scope / unreadable file vs. the missing-file fresh
  * start), the identifier key grammar, retention pruning and window-coverage
- * denial, cap eviction, and the sidecar lock (busy fails closed, stale is
- * stolen). */
+ * denial, cap eviction, the sidecar lock (busy fails closed, stale is
+ * stolen), the commit-failure rethrow + latch, the pre-rename inode
+ * ownership proof, shape-class-only diagnostics, the window's future-instant
+ * upper bound, and edge-case paths (null bytes, symlinks). */
 
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
+  closeSync,
   existsSync,
+  lstatSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -227,10 +234,37 @@ test("countInWindow on unreadable state returns the deny sentinel and explains",
   const store = makeStore({ filePath: dir });
   assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 1_000), Number.MAX_SAFE_INTEGER);
   assert.match(String(store.degradedReason), /EISDIR/);
-  // A commit against unreadable state fails closed WITHOUT writing through it.
-  store.record("pr:github:owner/repo#7", 1_000);
+  // A commit against unreadable state fails closed WITHOUT writing through
+  // it — and RETHROWS, so the triggering request can never run model work
+  // on an unpersisted charge.
+  assert.throws(() => store.record("pr:github:owner/repo#7", 1_000), /EISDIR/);
   assert.match(String(store.degradedReason), /EISDIR/);
   assert.deepEqual(readdirSync(dir), [], "a failed commit leaves no temp or lock behind");
+});
+
+test("a commit failure RETHROWS through consumeFollowUpBudget: the triggering request never reaches model work", () => {
+  const { dir, filePath } = scratch("rethrow");
+  const lockPath = path.join(dir, "rate-limit.json.lock");
+  writeFileSync(lockPath, "999999 wedged\n");
+  const store = makeStore({
+    filePath,
+    lockAttempts: 2,
+    lockRetryDelayMs: 1,
+    lockStaleMs: 10 * 60_000,
+  });
+  const plan = scopes(2);
+  // The consume itself rejects — the planner never returns an `allowed`
+  // plan whose budget charge did not land.
+  assert.throws(() => consumeFollowUpBudget(store, plan, 1_000), /commit lock busy/);
+  assert.ok(!existsSync(filePath), "no commit may happen without the lock");
+  // The latch holds for every later request until the wedge clears…
+  for (const now of [2_000, 3_000]) {
+    assert.equal(consumeFollowUpBudget(store, plan, now).allowed, false);
+  }
+  // …and once it clears, the SAME request succeeds and charges once.
+  rmSync(lockPath);
+  assert.equal(consumeFollowUpBudget(store, plan, 4_000).allowed, true);
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 4_000), 1);
 });
 
 // ── key grammar (no secrets, no untrusted content) ──────────────────────
@@ -348,7 +382,7 @@ test("a live foreign lock holder fails commits closed and LATCHES the budget shu
     lockRetryDelayMs: 1,
     lockStaleMs: 10 * 60_000,
   });
-  store.record("pr:a", 1_000);
+  assert.throws(() => store.record("pr:a", 1_000), /commit lock busy/);
   assert.match(String(store.degradedReason), /commit lock busy/);
   assert.ok(!existsSync(filePath), "no commit may happen without the lock");
   // M1 regression pin: unwritable state must never keep proving headroom.
@@ -375,7 +409,7 @@ test("a wedged-but-healthy-to-read ledger still latches the budget shut", () => 
   // Wedge the write path only: a fresh-mtime foreign lock never goes stale.
   writeFileSync(path.join(dir, "rate-limit.json.lock"), "999999 wedged\n");
   const plan = scopes(2);
-  store.record("pr:github:owner/repo#7", 2_000);
+  assert.throws(() => store.record("pr:github:owner/repo#7", 2_000), /commit lock busy/);
   assert.match(String(store.degradedReason), /commit lock busy/);
   for (const now of [3_000, 4_000, 5_000, 6_000]) {
     assert.equal(consumeFollowUpBudget(store, plan, now).allowed, false);
@@ -418,4 +452,140 @@ test("a malformed instant is refused at record time", () => {
   assert.throws(() => store.record("pr:a", 1.5), RangeError);
   assert.throws(() => store.record("pr:a", Number.POSITIVE_INFINITY), RangeError);
   assert.ok(!existsSync(filePath));
+});
+
+// ── sanitized diagnostics (shape class only, never file content) ────────
+
+test("diagnostics never echo persisted content: unknown keys and version values stay shape-class only", () => {
+  const { filePath } = scratch("sanitized");
+  const marker = "SECRET-MARKER-7f3a";
+  writeFileSync(filePath, JSON.stringify({
+    version: `v2-${marker}`,
+    scopes: [],
+    [`injected-${marker}`]: 1,
+  }));
+  const store = makeStore({ filePath });
+  assert.equal(store.countInWindow("pr:a", WINDOW, 1_000), Number.MAX_SAFE_INTEGER);
+  const reason = String(store.degradedReason);
+  assert.ok(!reason.includes(marker), `diagnostic echoed persisted content: ${reason}`);
+  assert.match(reason, /rate-limit ledger/);
+  // A SECOND fixture whose key set is valid and only the version is wrong:
+  // the version branch is its own rejection, sanitized the same way.
+  writeFileSync(filePath, JSON.stringify({ version: `v9-${marker}`, scopes: [] }));
+  const again = makeStore({ filePath });
+  assert.equal(again.countInWindow("pr:a", WINDOW, 1_000), Number.MAX_SAFE_INTEGER);
+  const reason2 = String(again.degradedReason);
+  assert.ok(!reason2.includes(marker), `diagnostic echoed persisted content: ${reason2}`);
+  assert.match(reason2, /version must be 1/);
+});
+
+// ── window upper bound (future instants never count) ────────────────────
+
+test("a future-dated instant does not count inside the present window", () => {
+  const { filePath } = scratch("future");
+  const store = makeStore({ filePath });
+  store.record("pr:a", 10_000);
+  // At now=9_000 the recorded instant is in the future: it must not consume
+  // budget the present has not reached (the forge-backed store's bound).
+  assert.equal(store.countInWindow("pr:a", WINDOW, 9_000), 0);
+  // Once the present reaches it, it counts (the window is `(now-w, now]`).
+  assert.equal(store.countInWindow("pr:a", WINDOW, 10_000), 1);
+  assert.equal(store.countInWindow("pr:a", WINDOW, 69_999), 1);
+  // Exactly one window old is OUTSIDE `(nowMs - windowMs, nowMs]`.
+  assert.equal(store.countInWindow("pr:a", WINDOW, 70_000), 0);
+});
+
+// ── pre-rename ownership proof (inode identity at the last moment) ──────
+
+test("saveLedger refuses to rename when the lock file is not the caller's fd", () => {
+  const { dir, filePath } = scratch("ownership");
+  const store = makeStore({ filePath });
+  const internals = store as unknown as {
+    saveLedger(ledger: Map<string, number[]>, lockFd: number): void;
+    lockPath: string;
+  };
+  const openDummy = (): number => {
+    const fd = openSync(path.join(dir, "unrelated.txt"), "w", 0o600);
+    writeSync(fd, Buffer.from("not a lock\n"));
+    return fd;
+  };
+  // No lock file at all: the ownership proof cannot be established — the
+  // rename must not happen and no temp may survive.
+  {
+    const fd = openDummy();
+    assert.throws(
+      () => internals.saveLedger(new Map([["pr:a", [1_000]]]), fd),
+      (err: NodeJS.ErrnoException) => err.code === "ENOENT",
+    );
+    closeSync(fd);
+    assert.ok(!existsSync(filePath));
+    assert.deepEqual(readdirSync(dir).filter((name) => name.includes(".tmp.")), []);
+  }
+  // A lock file that is NOT the fd's inode (a thief's or a foreign file):
+  // the pre-rename identity check aborts the commit.
+  writeFileSync(internals.lockPath, "12345 foreign-holder\n");
+  {
+    const fd = openDummy();
+    assert.throws(
+      () => internals.saveLedger(new Map([["pr:a", [1_000]]]), fd),
+      /stolen|refusing to write/,
+    );
+    closeSync(fd);
+    assert.ok(!existsSync(filePath), "a foreign lock must never admit a commit");
+    assert.deepEqual(readdirSync(dir).filter((name) => name.includes(".tmp.")), []);
+  }
+  rmSync(path.join(dir, "unrelated.txt"));
+});
+
+// ── edge-case paths (null bytes, symlinks) ──────────────────────────────
+
+test("a null-byte path fails closed: count denies, record throws and latches", () => {
+  const { dir } = scratch("nullbyte");
+  const store = makeStore({ filePath: path.join(dir, "bad\u0000name.json") });
+  assert.equal(store.countInWindow("pr:a", WINDOW, 1_000), Number.MAX_SAFE_INTEGER);
+  assert.match(String(store.degradedReason), /rate-limit ledger|ERR|EINVAL|null/);
+  assert.ok(!existsSync(path.join(dir, "bad")), "nothing may be created beside the null-byte name");
+  assert.throws(() => store.record("pr:a", 1_000));
+  // The failed commit latched: even a well-formed later count denies until
+  // the write path proves healthy (it never will for this path).
+  assert.equal(store.countInWindow("pr:a", WINDOW, 2_000), Number.MAX_SAFE_INTEGER);
+});
+
+test("a symlinked ledger path commits safely: the rename REPLACES the symlink, never the target", () => {
+  const { dir, filePath } = scratch("symlink-ledger");
+  const target = path.join(dir, "real-ledger.json");
+  writeFileSync(target, `{"version":1,"scopes":[]}\n`);
+  symlinkSync(target, filePath);
+  const store = makeStore({ filePath });
+  store.record("pr:a", 1_000);
+  const fresh = makeStore({ filePath });
+  assert.equal(fresh.countInWindow("pr:a", WINDOW, 2_000), 1);
+  // POSIX rename does NOT follow the symlink: the commit atomically REPLACES
+  // the symlink at filePath with the regular ledger file, so the operator's
+  // symlinked alias is never written through (and no state can be smuggled
+  // behind it).
+  assert.equal(lstatSync(filePath).isSymbolicLink(), false,
+    "the commit must replace the symlink, not write through it");
+  assert.equal(readFileSync(filePath, "utf8"), `{\n  "version": 1,\n  "scopes": [\n    {\n      "key": "pr:a",\n      "events": [\n        1000\n      ]\n    }\n  ]\n}\n`,
+    "the committed ledger is the regular file at filePath");
+  assert.equal(readFileSync(target, "utf8"), `{"version":1,"scopes":[]}\n`,
+    "the symlink's original target is untouched");
+});
+
+test("a symlinked lock path fails closed and never writes through it", () => {
+  const { dir, filePath } = scratch("symlink-lock");
+  const decoy = path.join(dir, "decoy-target.txt");
+  writeFileSync(decoy, "decoy\n");
+  symlinkSync(decoy, `${filePath}.lock`);
+  const store = makeStore({ filePath, lockAttempts: 2, lockRetryDelayMs: 1 });
+  // `wx` never follows a symlink: the acquisition fails, the commit is
+  // refused, and the budget latches shut — no write may slip through a
+  // planted lock symlink.
+  assert.throws(() => store.record("pr:a", 1_000), /commit lock busy/);
+  assert.ok(!existsSync(filePath), "no ledger write may happen without a real lock");
+  assert.equal(readFileSync(decoy, "utf8"), "decoy\n", "the decoy target is untouched");
+  // Removing the symlink restores the write path (the probe clears the latch).
+  rmSync(`${filePath}.lock`);
+  assert.equal(consumeFollowUpBudget(store, scopes(1), 1_000).allowed, true);
+  assert.equal(store.degradedReason, null);
 });

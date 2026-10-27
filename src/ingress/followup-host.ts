@@ -141,7 +141,9 @@ export interface FollowUpConsumerOptions {
 }
 
 /** One operator-mode follow-up consumer; call `handleEvent` per canonical
- * event. Total: it never throws. */
+ * event. Total over its effects; a store contract violation out of the
+ * planner (a `record` that refuses an unpersistable charge) rejects, and the
+ * webhook handler's boundary catch degrades it. */
 export interface FollowUpConsumer {
   handleEvent(event: CanonicalForgeEvent, body?: string): Promise<FollowUpRunOutcome>;
 }

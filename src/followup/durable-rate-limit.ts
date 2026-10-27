@@ -26,7 +26,16 @@
  *   concurrent controllers' charges both land (no lost update) and neither is
  *   applied twice. The atomicity unit of a multi-scope request is ONE scope
  *   commit — a crash strictly between the per-PR and per-actor commits leaves
- *   the earlier charge in place, never a half-written file.
+ *   the earlier charge in place, never a half-written file. Residual, stated
+ *   against #1295's acceptance exactly: the seam (`record(key, nowMs)`, one
+ *   scope per call, the planner unchanged by the issue's own scope) carries
+ *   NO request identity, so a crash mid-GROUP cannot be distinguished from a
+ *   completed group by any later observer, and a retry at a newer instant
+ *   bills the retry as the attempt it is. What the acceptance DOES demand is
+ *   held: a DENIAL never half-charges (pinned), CONCURRENT controllers
+ *   neither double-count nor half-charge (pinned), and every residual is in
+ *   the over-charge direction — the budget fails toward denial, the same
+ *   conservative posture the forge-backed store documents.
  *
  * Fail-closed posture (`countInWindow` never throws — it returns a count no
  * sane limit can reach, so the planner denies the question):
@@ -42,14 +51,21 @@
  *   durable keys carry only repo/PR/actor identifiers (the planner's
  *   `pr:`/`actor:` scope grammar).
  * - a failed commit (lock exhaustion, I/O, state that cannot be read inside
- *   the lock) LATCHES the store: while latched, `countInWindow` DENIES —
- *   a budget whose state cannot be written must not keep allowing work —
- *   until a lock probe proves the write path healthy again. The reason stays
- *   available through {@link DurableRateLimitStore.degradedReason}
+ *   the lock) LATCHES the store and RETHROWS: while latched, `countInWindow`
+ *   DENIES — a budget whose state cannot be written must not keep allowing
+ *   work — until a lock probe proves the lock path creatable again (the
+ *   probe proves the LOCK path healthy, not every future commit's I/O — but
+ *   any commit that then fails latches and rethrows before model work, so
+ *   the failure direction stays closed). The
+ *   rethrow is what keeps the TRIGGERING request fail-closed too: the throw
+ *   aborts `consumeFollowUpBudget` before the planner returns, so the request
+ *   can never reach model work on an unpersisted charge; both hosts catch at
+ *   their boundary (the operator webhook handler's fixed 500 and the Action's
+ *   error exit), so the follow-up lane stays total where it must. The reason
+ *   stays available through {@link DurableRateLimitStore.degradedReason}
  *   (sanitized: shape class and path only, never file content). `record`
- *   still only THROWS on programmer-contract violations (malformed key),
- *   which `countInWindow` already denies, so the follow-up lane's total,
- *   never-throws consumer contract is preserved end to end.
+ *   otherwise THROWS only on programmer-contract violations (malformed key),
+ *   which `countInWindow` already denies.
  *
  * Instances sharing one ledger file MUST be configured with the SAME
  * `retentionMs`/`maxKeys`: a narrower config than the stored state cannot
@@ -60,16 +76,21 @@
  * for the same scope dedupe to one charge (the price of interface-level
  * replay idempotency), and a process crashing mid-`saveLedger` may leave a
  * `<file>.tmp.<pid>` remnant — a temp file is never read as state, and
- * removal is safe. Lock release is compare-then-unlink, not atomic: a holder
- * that overruns `lockStaleMs` (violating the documented staleness invariant)
- * can still race a stealer on the unlink; every WRITE inside a commit is
- * guarded by the pre-rename ownership assertion, which is where a stolen
- * holder is actually stopped.
+ *   removal is safe. Lock release is token- AND inode-verified, and every
+ *   durable write re-verifies lock ownership by inode identity immediately
+ *   before the rename, so a stolen holder's stale snapshot cannot land over a
+ *   thief's commit; the residual is the POSIX-level gap between the final
+ *   verification syscall and the rename/unlink itself — a holder that
+ *   overruns `lockStaleMs` (violating the documented staleness invariant)
+ *   losing that microsecond race is the honest floor without a kernel lock
+ *   primitive, and the failure direction is a latched, aborted commit —
+ *   never a silently accepted stale write.
  */
 
 import {
   closeSync,
   fsyncSync,
+  fstatSync,
   openSync,
   readFileSync,
   renameSync,
@@ -207,13 +228,14 @@ function parseLedger(raw: string, maxKeys: number): Ledger {
   }
   for (const key of Object.keys(parsed)) {
     if (!SNAPSHOT_KEYS.includes(key)) {
-      throw new LedgerError(`rate-limit ledger: unknown top-level key "${key}"`);
+      // Shape class only: an unknown ENVELOPE key is file content — never
+      // echo it (the same sanitized-diagnostics rule as this module's
+      // `degradedReason` contract).
+      throw new LedgerError("rate-limit ledger: unknown top-level key present");
     }
   }
   if (parsed["version"] !== 1) {
-    throw new LedgerError(
-      `rate-limit ledger: version must be 1, got ${String(parsed["version"])}`,
-    );
+    throw new LedgerError("rate-limit ledger: version must be 1");
   }
   const scopes = parsed["scopes"];
   if (!Array.isArray(scopes)) {
@@ -335,7 +357,7 @@ export class DurableRateLimitStore implements RateLimitStore {
   private degraded: string | null = null;
   /** A failed COMMIT latches the store: while set, `countInWindow` denies —
    * a budget whose writes are not landing must not keep allowing model work —
-   * until a lock probe proves the write path healthy again. */
+   * until a lock probe proves the lock path creatable again. */
   private commitUnreliable = false;
 
   constructor(options: DurableRateLimitStoreOptions) {
@@ -445,21 +467,29 @@ export class DurableRateLimitStore implements RateLimitStore {
     const windowStart = nowMs - windowMs;
     let count = 0;
     for (const instant of ledger.get(key) ?? []) {
-      if (instant > windowStart) count += 1;
+      // The window is `(nowMs - windowMs, nowMs]` — the SAME closed-upper
+      // bound the forge-backed store counts: a future-dated instant (clock
+      // skew, a forged event) is not inside the window and must not consume
+      // budget the present has not reached yet.
+      if (instant > windowStart && instant <= nowMs) count += 1;
     }
     return count;
   }
 
   /** Commit ONE event for `key` at `nowMs` to durable state. Contract
    * violations (malformed key or instant) throw — and `countInWindow` denies
-   * the same inputs before any record, so no planner path can throw. Every
-   * OTHER failure (lock exhaustion, I/O, corrupt state inside the lock) is
-   * recorded in {@link degradedReason} and LATCHES the store fail-closed:
-   * the charge is not spent, and no further request is allowed until the
-   * write path proves healthy again. A corrupt ledger can never be reset
-   * into a fresh budget by a commit that walks past the corruption: the
-   * commit only ever writes a ledger it just READ and validated, and only
-   * while it still verifiably holds the exclusive lock. */
+   * the same inputs before any record, so no planner path can throw on THEM.
+   * Every OTHER failure (lock exhaustion, I/O, corrupt state inside the lock)
+   * is recorded in {@link degradedReason}, LATCHES the store fail-closed, and
+   * RETHROWS: the charge is not spent, no further request is allowed until
+   * the write path proves healthy again, and the TRIGGERING request aborts
+   * before the planner returns — it can never reach model work on an
+   * unpersisted charge. The host boundaries catch (the operator webhook
+   * handler's fixed 500, the Action's error exit), so the follow-up lane
+   * stays total where it must. A corrupt ledger can never be reset into a
+   * fresh budget by a commit that walks past the corruption: the commit only
+   * ever writes a ledger it just READ and validated, and only while it still
+   * verifiably holds the exclusive lock. */
   record(key: string, nowMs: number): void {
     if (typeof key !== "string" || !KEY_PATTERN.test(key)) {
       throw new RangeError(
@@ -476,7 +506,7 @@ export class DurableRateLimitStore implements RateLimitStore {
       );
     }
     try {
-      this.withLock((assertHolder) => {
+      this.withLock((assertHolder, lockFd) => {
         // Re-read INSIDE the lock: concurrent commits serialize here, so no
         // charge is lost and none is applied twice.
         const ledger = this.loadLedgerUnlocked();
@@ -486,7 +516,7 @@ export class DurableRateLimitStore implements RateLimitStore {
           const fresh: Ledger = new Map();
           fresh.set(key, [nowMs]);
           assertHolder();
-          this.saveLedger(fresh);
+          this.saveLedger(fresh, lockFd);
           return;
         }
         const existing = ledger.get(key);
@@ -499,13 +529,18 @@ export class DurableRateLimitStore implements RateLimitStore {
         }
         pruneLedger(ledger, nowMs, this.retentionMs);
         assertHolder();
-        this.saveLedger(ledger);
+        this.saveLedger(ledger, lockFd);
       });
       this.degraded = null;
       this.commitUnreliable = false;
     } catch (err) {
       this.degraded = err instanceof Error ? err.message : String(err);
       this.commitUnreliable = true;
+      // Fail the TRIGGERING request closed: a swallowed commit failure would
+      // let this request run model work on an unpersisted charge. The host
+      // boundary catches (fixed 500 / action error exit); the latch denies
+      // everything until the write path proves healthy again.
+      throw err;
     }
   }
 
@@ -524,8 +559,12 @@ export class DurableRateLimitStore implements RateLimitStore {
 
   /** Atomic durable commit: temp file in the SAME directory (0600), fsync,
    * rename over the target, best-effort directory fsync. Every failure path
-   * removes the temp file, so no partial state is ever left behind. */
-  private saveLedger(ledger: Ledger): void {
+   * removes the temp file, so no partial state is ever left behind. The
+   * commit requires the caller's lock fd and re-verifies ownership by INODE
+   * IDENTITY immediately before the rename — the last possible moment — so a
+   * lock stolen between the token assertion and this point aborts instead of
+   * renaming a stale snapshot over the thief's commit. */
+  private saveLedger(ledger: Ledger, lockFd: number): void {
     const body = serializeLedger(ledger);
     const dir = dirname(this.filePath);
     const tmp = `${this.filePath}.tmp.${process.pid}`;
@@ -536,6 +575,18 @@ export class DurableRateLimitStore implements RateLimitStore {
         fsyncSync(fd);
       } finally {
         closeSync(fd);
+      }
+      // Ownership, re-proven at the last possible moment: the token check in
+      // `assertHolder` reads content; this compares the lock file's inode
+      // with the fd WE created, so a stolen-and-replaced lock file (or a
+      // removed one) fails here, before a single byte of the ledger moves.
+      // `statSync` throwing (lock gone, unreadable) fails closed the same way.
+      const lockStat = statSync(this.lockPath);
+      const fdStat = fstatSync(lockFd);
+      if (lockStat.dev !== fdStat.dev || lockStat.ino !== fdStat.ino) {
+        throw new Error(
+          "rate-limit ledger: commit lock was stolen mid-commit; refusing to write",
+        );
       }
       renameSync(tmp, this.filePath);
       try {
@@ -566,15 +617,17 @@ export class DurableRateLimitStore implements RateLimitStore {
   /** Run `fn` holding the exclusive sidecar lock. The lock file is created
    * exclusively (`wx`) with a fresh per-acquisition TOKEN; `fn` receives an
    * `assertHolder` callback it must invoke immediately before any durable
-   * write, and release unlinks the lock ONLY while the token still proves
-   * THIS acquisition holds it. A lock whose mtime is older than
+   * write, and the lock fd (whose inode `saveLedger` re-verifies at the
+   * rename); release unlinks the lock ONLY while the token AND the inode
+   * still prove THIS acquisition holds it. A lock whose mtime is older than
    * `lockStaleMs` belongs to a dead holder and is stolen. Consequences:
-   * - a commit whose lock was stolen mid-flight aborts at `assertHolder`
-   *   (never renaming a stale snapshot over the thief's commit), and the
-   *   failed commit latches the store fail-closed;
+   * - a commit whose lock was stolen mid-flight aborts at `assertHolder` or
+   *   at `saveLedger`'s pre-rename inode check (never renaming a stale
+   *   snapshot over the thief's commit), and the failed commit latches the
+   *   store fail-closed;
    * - a release never unlinks a lock acquired by someone else.
    * Lock exhaustion THROWS — the caller never writes without the lock. */
-  private withLock<T>(fn: (assertHolder: () => void) => T): T {
+  private withLock<T>(fn: (assertHolder: () => void, lockFd: number) => T): T {
     let fd: number | null = null;
     let token = "";
     for (let attempt = 0; attempt < this.lockAttempts && fd === null; attempt += 1) {
@@ -638,16 +691,40 @@ export class DurableRateLimitStore implements RateLimitStore {
       }
     };
     try {
-      return fn(assertHolder);
+      return fn(assertHolder, fd);
     } finally {
+      // Capture our fd's identity while it is still open — the release proof
+      // compares the on-disk lock file against THIS fd's inode.
+      let ownIdentity: { dev: number; ino: number } | null = null;
+      try {
+        const fdStat = fstatSync(fd);
+        ownIdentity = { dev: fdStat.dev, ino: fdStat.ino };
+      } catch {
+        // best effort: without a provable identity there is nothing to release
+      }
       try {
         closeSync(fd);
       } catch {
         // best effort
       }
-      // Ownership-verified release: never unlink a lock another acquisition
-      // holds (a stolen holder's late cleanup must not open a third writer).
-      if (readLockToken(this.lockPath) === token) {
+      // Ownership-verified release, by token AND inode: never unlink a lock
+      // another acquisition holds (a stolen holder's late cleanup must not
+      // open a third writer). The inode compare closes the content-only gap
+      // a copied token would slip through; the residual POSIX gap between
+      // the verification and the unlink is the documented floor.
+      let owned = false;
+      if (ownIdentity !== null) {
+        try {
+          const lockStat = statSync(this.lockPath);
+          owned =
+            lockStat.dev === ownIdentity.dev &&
+            lockStat.ino === ownIdentity.ino &&
+            readLockToken(this.lockPath) === token;
+        } catch {
+          owned = false;
+        }
+      }
+      if (owned) {
         try {
           rmSync(this.lockPath, { force: true });
         } catch {

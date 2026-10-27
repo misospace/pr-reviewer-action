@@ -322,8 +322,10 @@ async function bindPlannerDeps(
 
 /** Route one Action webhook delivery through the shared follow-up consumer.
  * See the module header for the trust model and the route contract. The
- * follow-up path never throws (the consumer is total); a platform
- * resolution failure propagates exactly as the pipeline's own would. */
+ * follow-up path settles its effects (the consumer is total over them); a
+ * store contract violation out of the planner (a `record` that refuses an
+ * unpersistable charge) rejects exactly as a platform resolution failure
+ * would — the Action's error exit owns it. */
 export async function runActionFollowUp(
   stage: NodeJS.ProcessEnv,
   rawPayload: unknown,
