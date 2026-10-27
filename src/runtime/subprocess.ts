@@ -266,14 +266,20 @@ export function runProcess(options: RunProcessOptions): ProcessHandle {
       // CodeQL js/indirect-command-line-injection: argv-only spawn, no
       // `shell` option, so args/env can never be reinterpreted as shell
       // syntax. `options.env` is always an explicit allowlisted child
-      // environment, never an ambient `process.env` passthrough: git
-      // children go through `gitEnv`/`gitInvocationEnv`
-      // (src/acquisition/git-env.ts — a `buildChildEnv` allowlist plus the
-      // forced neutral git config), gate/evidence/executor-workload children
-      // through `buildChildEnv` per-child allowlists (src/runtime/env.ts).
-      // The tool-harness stage environment carries model/forge credentials,
-      // so `src/tools/` builds its git children's env with `gitEnv` instead
-      // of passing the stage env through (#1260). `options.file` is either a
+      // environment, never an ambient `process.env` passthrough. Per call
+      // site:
+      // - acquisition and tool-path git children (`src/acquisition/*`,
+      //   `src/tools/executors.ts`, `src/tools/harness.ts`) use
+      //   `gitEnv`/`gitInvocationEnv` (src/acquisition/git-env.ts — a
+      //   `buildChildEnv` allowlist plus the forced neutral git config).
+      //   The tool-harness stage environment carries model/forge
+      //   credentials, so it is only ever the allowlist SOURCE, never the
+      //   child env (#1260);
+      // - `src/run/stages.ts` launches its git invocations with an explicit
+      //   PATH/HOME allowlist;
+      // - gate, evidence-provider, and executor workloads use `buildChildEnv`
+      //   per-child allowlists (src/runtime/env.ts).
+      // `options.file` is either a
       // fixed binary (`git`, `process.execPath`) or, for
       // `src/evidence/providers.ts`'s "bash -lc <command>" shape, an
       // operator-configured evidence-provider command from trusted workflow
