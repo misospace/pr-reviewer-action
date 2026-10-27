@@ -126,11 +126,11 @@ inputs:
     required: false
     default: ""
   ai-primary-retries:
-    description: Number of retries for the primary model
+    description: Total-attempt budget for the primary model; an ambiguous transport failure buys at most one short retry regardless (#1305), so values above 2 add nothing
     required: false
     default: "8"
   ai-primary-retry-delay-sec:
-    description: Delay between primary retries in seconds
+    description: Delay between primary retries in seconds; tier retry sleeps are capped at 5 seconds (#1305), so larger values are not waited
     required: false
     default: "15"
   on-model-failure:

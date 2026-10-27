@@ -21,13 +21,19 @@ import { classifyTerminalProviderFailure, type TerminalProviderFailure } from ".
 
 /**
  * Port of the v2 `call_model_tier` retry loop (scripts/model_call.sh): one
- * tier, one retry budget, typed failures. Semantics preserved exactly:
+ * tier, one retry budget, typed failures. Semantics:
  * - the tier's permanent HTTP set (400/401/403/404) fails fast to fallback;
- *   all other statuses, including 5xx such as 524, consume the retry budget;
- * - transport/HTTP failures consume the retry budget with doubling backoff
- *   capped at 120 s;
+ * - #1305: an ambiguous failure — an unrecognized 429, any other retryable
+ *   status, or a transport/network/timeout failure — buys at most ONE
+ *   additional attempt (`TRANSPORT_RETRY_ALLOWANCE`) with a short, capped
+ *   sleep (`TIER_RETRY_MAX_DELAY_SEC`), whatever the configured `retries`
+ *   budget says, and then the tier stops so the caller hands off to the
+ *   configured fallback promptly. No exponential backoff schedule remains at
+ *   tier level: primary-to-fallback latency must not depend on classifying
+ *   provider error prose correctly (#1305 — run 2942 spent ~13m in primary
+ *   retries before a fallback that succeeded in ~20s);
  * - parse/validate failures cap at 2 attempts total regardless of budget
- *   (deterministic failures must not burn 8 tries) and do not grow the
+ *   (deterministic failures must not burn retries) and do not grow the
  *   backoff;
  * - an empty completion (0 completion tokens, v2 exit 3) stops the tier
  *   immediately — the same input cannot produce different output;
@@ -40,19 +46,43 @@ import { classifyTerminalProviderFailure, type TerminalProviderFailure } from ".
  *   configured `retries` of 0: `retries` is the total-attempt budget, and
  *   skipping the call entirely for a degenerate 0 would misreport a real
  *   transport outage as the loop's synthetic default parse failure below;
- * - #1080 adds a SECOND, provider-error-aware permanence rule on top of the
+ * - #1080 adds a provider-error-aware permanence rule on top of the
  *   status-based one: a body the shared terminal classifier recognizes
  *   (quota exhausted, model retired) ends the tier immediately with no further
  *   attempt and no sleep, whatever the status. This is a property of the
  *   EVIDENCE, not of the status — the same 429 that stays retryable for one
  *   provider is terminal for another — and it is the tier-level counterpart of
  *   the transport's own bypass, so a terminal primary reaches the configured
- *   fallback in seconds instead of after 13 minutes of silent retries.
+ *   fallback in seconds. #1305 generalizes the latency guarantee: the
+ *   classifier is now an optimization (zero retries instead of one), not the
+ *   thing correctness depends on.
  */
 
 export const EMPTY_COMPLETION_EXIT = 3;
 export const PARSE_FAIL_CAP = 2;
-export const MAX_RETRY_DELAY_SEC = 120;
+/**
+ * #1305: the maximum number of ADDITIONAL attempts an ambiguous (retryable,
+ * non-terminal) transport failure may buy, regardless of the configured
+ * `retries` budget. A transient first failure gets its retry opportunity;
+ * a lane that keeps failing hands off to the configured fallback after one
+ * short retry instead of holding the review hostage for minutes.
+ *
+ * Stated residual bounds (per ambiguous lane, worst case): the tier's own
+ * backoff is one sleep of at most TIER_RETRY_MAX_DELAY_SEC; each attempt
+ * still runs the transport's own same-request retry tree, which honours a
+ * provider `Retry-After` capped at HTTP_RETRY_MAX_DELAY_SEC per sleep and
+ * waits at most `ai-request-timeout-sec` per in-flight request — the
+ * operator's own patience knob. The exponential schedule this bound replaces
+ * added up to ~8 minutes of pure sleep; these residuals are bounded by
+ * constants and configuration, not by classifying provider prose correctly.
+ */
+export const TRANSPORT_RETRY_ALLOWANCE = 1;
+/**
+ * #1305: the cap on ANY tier-level retry sleep. No exponential backoff
+ * schedule remains at tier level — the configured `ai-primary-retry-delay-sec`
+ * is honoured when it is smaller, never waited past this bound.
+ */
+export const TIER_RETRY_MAX_DELAY_SEC = 5;
 
 /**
  * #1047: the bounded completion-budget raise for an evidence-gated verdict
@@ -212,9 +242,12 @@ export async function callModelTier(
   const sleep = deps.sleep ?? defaultSleep;
   const doCall = deps.call ?? runChatRequest;
 
-  let delay = profile.retryDelaySec;
   let parseFails = 0;
   let attempt = 1;
+  // Counts transport FAILURES, not retries: the first one is not a retry, so
+  // `transportFailures <= TRANSPORT_RETRY_ALLOWANCE` grants exactly the
+  // allowance's worth of extra attempts.
+  let transportFailures = 0;
   let lastParseFailure: VerdictParseFailure | null = null;
   let lastTransportFailure: TransportFailure | null = null;
   // #1047: the last body the endpoint returned (for failure diagnostics) and
@@ -263,17 +296,21 @@ export async function callModelTier(
           ...(terminal !== null ? { terminal } : {}),
         };
       }
-      // Transport or HTTP error: consume the retry budget with doubling
-      // backoff, capped at 120 s. Only sleep/back off when another attempt
-      // is actually coming — a final failed attempt (no budget left) must
-      // never pay the retry delay for a retry that will never happen.
+      // Transport or HTTP error. #1305: an ambiguous failure buys at most
+      // TRANSPORT_RETRY_ALLOWANCE further attempts with a short capped sleep,
+      // whatever the configured budget says — then the tier stops and the
+      // caller hands off to the configured fallback. Only sleep when another
+      // attempt is actually coming — a final failed attempt (no budget left,
+      // or the allowance spent) must never pay a retry delay for a retry
+      // that will never happen.
       lastTransportFailure = outcome.failure;
       attempt++;
-      if (attempt <= totalAttempts) {
-        await sleep(delay);
-        delay = Math.min(delay * 2, MAX_RETRY_DELAY_SEC);
+      transportFailures++;
+      if (attempt <= totalAttempts && transportFailures <= TRANSPORT_RETRY_ALLOWANCE) {
+        await sleep(Math.min(profile.retryDelaySec, TIER_RETRY_MAX_DELAY_SEC));
+        continue;
       }
-      continue;
+      break;
     }
 
     lastRaw = outcome.raw;
@@ -328,8 +365,8 @@ export async function callModelTier(
       }
       attempt++;
       // Same rule as the transport branch: only sleep when a further
-      // attempt is actually going to run.
-      if (attempt <= totalAttempts) await sleep(delay);
+      // attempt is actually going to run, and never past the #1305 cap.
+      if (attempt <= totalAttempts) await sleep(Math.min(profile.retryDelaySec, TIER_RETRY_MAX_DELAY_SEC));
     }
   }
   if (lastTransportFailure) {
