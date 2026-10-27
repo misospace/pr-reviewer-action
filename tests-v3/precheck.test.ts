@@ -833,28 +833,28 @@ test("#961: a ready PR reviews; an absent draft field fails closed", async () =>
   delete absentPr.draft;
   const absent = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", { ...fx.platform, pr: absentPr }) });
   assert.equal(absent.should_review, "false");
-  assert.equal(absent.skip_reason, "pr-draft");
+  assert.equal(absent.skip_reason, "pr-draft-unknown");
 });
 
-test("#961: a shared-path PR lookup failure fails closed as pr-draft", async () => {
+test("#1312: a shared-path PR lookup failure fails the run instead of succeeding as a skip", async () => {
   const fx = fixture("changed-diff-reviews");
-  const output = await runPrecheck({
-    env: fx.env,
-    adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true }),
-  });
-  assert.equal(output.should_review, "false");
-  assert.equal(output.skip_reason, "pr-draft");
-  // The lookup failed, so there is no identity to report.
-  assert.equal(output.head_sha, "");
-  assert.equal(output.base_sha, "");
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true }),
+    }),
+    /Could not read pull request .*refusing to treat a forge\/API lookup failure as a successful review skip/,
+  );
 });
 
-test("#961: an unrecognizable draft value fails closed", async () => {
+test("#1312: missing, null, or non-boolean draft values fail closed as pr-draft-unknown", async () => {
   const fx = fixture("changed-diff-reviews");
-  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft: "yes" } };
-  const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", platform) });
-  assert.equal(output.should_review, "false");
-  assert.equal(output.skip_reason, "pr-draft");
+  for (const draft of [null, "yes", 1]) {
+    const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft } };
+    const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", platform) });
+    assert.equal(output.should_review, "false");
+    assert.equal(output.skip_reason, "pr-draft-unknown");
+  }
 });
 
 test("#961: even a forced re-review skips a draft PR", async () => {
