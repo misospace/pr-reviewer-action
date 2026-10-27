@@ -400,6 +400,114 @@ test("a provider that throws degrades the stage instead of breaking it", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The bounds: work, time and per-file skips
+// ---------------------------------------------------------------------------
+
+test("the builder bounds the WORK: a file with 20,000 declarations is capped and the build stays fast", () => {
+  const root = workspace({
+    "src/app.py": "def handle(item):\n    return item\n",
+  });
+  // A candidate file with 20,000 declarations. Before the cap, the scope
+  // resolution scanned every declaration against every other declaration
+  // of the same file (O(n^2)): this file alone took ~1 s, and a file ten
+  // times larger took ~30 s.
+  const bulk: string[] = [];
+  for (let index = 0; index < 20_000; index += 1) bulk.push(`def fn_${index}(item):`);
+  writeFileSync(join(root, "src", "bulk.py"), `${bulk.join("\n")}\n`);
+
+  const started = Date.now();
+  const context = buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 5_000, `the build took ${elapsed}ms — the declaration cap did not bound the work`);
+  assert.deepEqual(context.errors, []);
+  // The cap is VISIBLE: the artifact says it was truncated and why.
+  assert.equal(context.truncated, true);
+  assert.equal(context.truncatedReason, "declaration cap");
+  assert.ok(context.notes.some((note) => note.includes("declaration cap")), "the cap is recorded in the notes");
+});
+
+test("the wall-clock bound stops the collection, keeps what was collected, and is not fatal", () => {
+  const root = workspace({
+    "src/app.py": "def handle(item):\n    return item\n",
+  });
+  // A clock that jumps past the bound once the provider has answered the
+  // identifier question: the bound is the module constant, only the clock
+  // is injectable.
+  let expired = false;
+  const provider: SyntaxProvider = {
+    id: "expiring",
+    declarations(file) {
+      return structuralSyntaxProvider.declarations(file);
+    },
+    identifiersOnLine(file, line) {
+      expired = true;
+      return structuralSyntaxProvider.identifiersOnLine(file, line);
+    },
+    classify(file, line, name) {
+      return structuralSyntaxProvider.classify(file, line, name);
+    },
+  };
+  const context = buildSyntaxContext({
+    workspace: root,
+    anchors: anchors("src/app.py", [[2, 2]]),
+    provider,
+    monotonic: () => (expired ? 100 : 0),
+  });
+
+  assert.equal(context.truncated, true);
+  assert.equal(context.truncatedReason, "deadline");
+  assert.deepEqual(context.errors, [], "an expired deadline is not a fatal error");
+  assert.ok(context.notes.some((note) => note.includes("wall-clock bound")), "the expiry is recorded");
+  assert.equal(context.declarations.length, 1, "what was already collected stays");
+});
+
+test("an unreadable changed file is a per-file skip, not a fatal error", () => {
+  const root = workspace({
+    "src/app.py": "def handle(item):\n    return item\n",
+  });
+  // A changed file the head reader refuses: over the 2 MiB cap.
+  writeFileSync(join(root, "src", "huge.py"), "x = 1\n".repeat(400_000));
+  const context = buildSyntaxContext({
+    workspace: root,
+    anchors: {
+      version: 1,
+      files: [
+        { path: "src/app.py", language: "python", symbols: [], imports: [], identifiers: [], changed_lines: [[2, 2]] },
+        { path: "src/huge.py", language: "python", symbols: [], imports: [], identifiers: [], changed_lines: [[1, 1]] },
+      ],
+      anchors: [],
+      truncated: false,
+    },
+  });
+  assert.deepEqual(context.errors, [], "an unreadable changed file is not fatal");
+  assert.equal(context.declarations.length, 1, "the readable changed file still contributes");
+  assert.ok(context.notes.some((note) => note.includes("src/huge.py")), "the skipped file is recorded");
+});
+
+test("a binary file is detected by a NUL anywhere in it, not only in its first lines", () => {
+  const root = workspace({
+    "src/app.py": "def handle(item):\n    return item\n",
+  });
+  // 300 clean lines and only THEN a NUL byte: a head-only scan (the first
+  // 200 lines) would read this file as text and its pseudo-declarations
+  // would enter the context.
+  writeFileSync(join(root, "src", "blob.py"), `${"value = 1\n".repeat(300)}\u0000\nhandle(item)\n`);
+  const context = buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
+  assert.deepEqual(context.errors, []);
+  assert.equal(context.callers.length, 0, "a binary file is not read as text");
+
+  // The control: the same file WITHOUT the NUL byte is read, and its call
+  // site is found.
+  const clean = workspace({
+    "src/app.py": "def handle(item):\n    return item\n",
+    "src/blob.py": `${"value = 1\n".repeat(300)}\nhandle(item)\n`,
+  });
+  const read = buildSyntaxContext({ workspace: clean, anchors: anchors("src/app.py", [[2, 2]]) });
+  assert.equal(read.callers.length, 1, "the text file's call site is found");
+});
+
+// ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
 
@@ -450,10 +558,12 @@ test("the JSON renderer emits a parseable, snake_case artifact", () => {
     "definitions",
     "errors",
     "head_revision",
+    "notes",
     "provider_fallback",
     "provider_fallback_reason",
     "provider_id",
     "truncated",
+    "truncated_reason",
   ]);
   const declarations = parsed.declarations as Array<Record<string, unknown>>;
   assert.equal(declarations[0]?.start_line, 1);

@@ -417,8 +417,9 @@ const SYNTAX_CONTEXT_ARTIFACTS = ["syntax-context.json", "syntax-context.md", "s
  * severity, obligations or a verdict.
  *
  * A no-op (empty artifacts) when the stage is disabled, when the upstream
- * anchors are unavailable, or when the build fails: the review then falls
- * back to the existing lexical related-code context and never breaks. */
+ * anchors are unavailable, when the PR is a FORK, or when the build fails:
+ * the review then falls back to the existing lexical related-code context
+ * and never breaks. */
 export function buildSyntaxContextSection(
   ws: RunWorkspace,
   env: StageEnv,
@@ -427,6 +428,25 @@ export function buildSyntaxContextSection(
   headRevision: string | null,
 ): void {
   for (const name of SYNTAX_CONTEXT_ARTIFACTS) ws.write(name, "");
+  // The fork boundary is enforced IN CODE, not by the workflow pin.
+  //
+  // Why the pin alone is not enough: the contract default of
+  // `syntax-context` is "false" — the same value the fork workflow pins —
+  // and `isOperatorExplicit` (src/config/repository-config.ts) treats an
+  // operator value EQUAL to the contract default as "not explicitly set".
+  // A repository's base-ref `.github/pr-reviewer.yml` could therefore set
+  // `syntax-context: "true"` and the pin would not stop it. (`related-code-context`
+  // has no such hole: its default is "true", so the fork's "false" IS
+  // explicit.)
+  //
+  // Why the stage must not run on a fork at all: the privileged fork job
+  // holds the TRUSTED BASE checkout, not the fork head, so a
+  // worktree-scanning section would describe the wrong tree.
+  //
+  // The comparison is the repository's own: `IS_FORK_PR` is resolved
+  // upstream by `deriveFork`, which fails closed to "true" when the PR
+  // object cannot be parsed.
+  if (env.IS_FORK_PR === "true") return;
   if ((env.SYNTAX_CONTEXT ?? "false").toLowerCase() !== "true") return;
   if (anchors === null) return;
   const reset = (): void => {
@@ -450,11 +470,16 @@ export function buildSyntaxContextSection(
       maxBytes: MAX_SYNTAX_BYTES,
     });
     const artifact = syntaxContextToArtifact(context);
-    // A degraded build (a provider that failed, an unreadable changed
-    // file, a malformed anchor artifact) carries no trustworthy context:
-    // the section is dropped whole, exactly like the lexical stage drops a
-    // degraded related-code artifact, and the review falls back to the
-    // lexical context. The failure never reaches the corpus.
+    // A degraded build (a provider that failed, a malformed anchor
+    // artifact) carries no trustworthy context: the section is dropped
+    // whole, exactly like the lexical stage drops a degraded related-code
+    // artifact, and the review falls back to the lexical context. The
+    // failure never reaches the corpus.
+    //
+    // A per-file SKIP (an unreadable changed file, a binary changed file)
+    // is NOT a degradation of this kind: it is recorded as a note and the
+    // rest of the section is kept — one oversized file must not silence
+    // the evidence the other changed files carry.
     const errors = (artifact as { errors?: unknown }).errors;
     if (Array.isArray(errors) && errors.length > 0) {
       reset();
