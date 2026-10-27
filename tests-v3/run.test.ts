@@ -28,6 +28,7 @@ function mockPlatform(options: { diff?: string; files?: unknown[]; title?: strin
         number: 7,
         title: options.title ?? "Update README",
         body: options.body ?? "",
+        state: "open",
         draft: false,
         head: { sha: "a".repeat(40), ref: "feature" },
         base: { ref: "main" },
@@ -1722,6 +1723,91 @@ test("#940: the declared fallback capacity bounds primary and recovery corpora",
     cleanup();
   }
 });
+
+for (const fallbackWindow of [undefined, "400000"]) {
+  test(`#1256: fallback recovery re-truncates the corpus at the historical 120000-byte ceiling (fallback window: ${fallbackWindow ?? "unset"})`, async () => {
+    const primaryServer = await startMockServer((_req, _body, res) => {
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: "primary unavailable" }));
+    });
+    const fallbackServer = await startMockServer((_req, _body, res) => {
+      res.setHeader("Content-Type", "application/json");
+      res.end(verdictBody(baseVerdict({ review_markdown: "Fallback review.\n" })));
+    });
+    const { runDir, cleanup } = withRunDir();
+    try {
+      // The assembled corpus comfortably exceeds the 120000-byte historical
+      // ceiling in both cases: with the fallback window unset the primary
+      // window alone sizes it, and with a large declared fallback window the
+      // derived fallback capacity is ~1.14 MB — far above the ceiling.
+      const filler = (n: number): string => `+padding ${String(n).padStart(6, "0")} of inert context filler for the fallback truncation pin`;
+      const lines: string[] = [
+        "diff --git a/big.txt b/big.txt",
+        "index 0000000..1111111 100644",
+        "--- a/big.txt",
+        "+++ b/big.txt",
+        "@@ -1,2 +1,4000 @@",
+        "+HEAD-SENTINEL-1256 retained at the corpus head",
+      ];
+      let size = lines.join("\n").length;
+      let n = 0;
+      for (; size < 140000; n += 1) {
+        const line = filler(n);
+        lines.push(line);
+        size += line.length + 1;
+      }
+      lines.push("+MID-SENTINEL-1256 beyond the 120000-byte fallback ceiling");
+      size += lines[lines.length - 1]!.length + 1;
+      for (; size < 220000; n += 1) {
+        const line = filler(n);
+        lines.push(line);
+        size += line.length + 1;
+      }
+      const result = await runReview({
+        env: {},
+        inputs: {
+          "github-token": "tok", repo: "o/r", "pr-number": "7",
+          "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+          "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+          "primary-model-context-tokens": "400000", "ai-max-tokens": "16384",
+          ...(fallbackWindow !== undefined ? { "fallback-model-context-tokens": fallbackWindow } : {}),
+          "ai-stream": "false", "review-routing-mode": "auto",
+          "ai-primary-retries": "1", "ai-primary-retry-delay-sec": "0", "tool-mode": "off", "deep-review": "false",
+        },
+        runDir, workspace: runDir,
+        platformAdapter: mockPlatform({
+          diff: `${lines.join("\n")}\n`,
+          files: [{ filename: "src/auth/login.ts", status: "modified", additions: 1, deletions: 1, changes: 2 }],
+        }),
+        sleep: async () => {}, quiet: true,
+      });
+      assert.equal(result.outputs.reviewRoute, "primary");
+      assert.equal(fallbackServer.requests.length, 1);
+      assert.match(result.outputs.reviewMarkdown, /Fallback review\./);
+
+      // The initial corpus itself is NOT bounded by the 120000-byte ceiling —
+      // it fills the (larger) configured context budget.
+      const initialCorpus = readFileSync(join(runDir, "review-corpus.md"));
+      assert.ok(initialCorpus.length > 120000, `the initial corpus must exceed the fallback ceiling, got ${initialCorpus.length}`);
+
+      // The recovery request is re-truncated to the historical 120000-byte cap.
+      const fallbackCorpus = readFileSync(join(runDir, "review-corpus.fallback.truncated.md"));
+      assert.ok(fallbackCorpus.length <= 120000, `the fallback corpus must respect the 120000-byte ceiling, got ${fallbackCorpus.length}`);
+      assert.ok(fallbackCorpus.includes("…[content truncated]"), "the fallback corpus must be visibly truncated");
+      assert.ok(fallbackCorpus.includes("HEAD-SENTINEL-1256"), "the fallback corpus must retain its head");
+      assert.ok(!fallbackCorpus.includes("MID-SENTINEL-1256"), "the fallback corpus must drop content beyond the 120000-byte ceiling");
+
+      const fallbackBody = String(fallbackServer.requests[0]!.body);
+      assert.ok(fallbackBody.includes("HEAD-SENTINEL-1256"), "the recovery request must still carry the corpus head");
+      assert.ok(!fallbackBody.includes("MID-SENTINEL-1256"), "the recovery request must drop content beyond the 120000-byte ceiling");
+    } finally {
+      await primaryServer.close();
+      await fallbackServer.close();
+      cleanup();
+    }
+  });
+}
 
 test("#965: auto native loop starts on primary with the primary context window", async () => {
   let primaryToolCallSent = false;

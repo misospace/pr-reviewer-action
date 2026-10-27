@@ -1601,7 +1601,7 @@ def _review_timeout_sec() -> int:
 
 
 def _fixture_pr_object(pr_json: dict[str, Any], repo_full_name: str | None) -> dict[str, Any]:
-    """Give a fixture PR object the draft state and head/base repo identity it usually omits.
+    """Give a fixture PR object the open/not-draft state and head/base repo identity it usually omits.
 
     `derive_is_fork_pr` fails closed on a missing head repo, so a fixture
     without one was reviewed as a fork and the tool loop was skipped: every
@@ -1610,9 +1610,12 @@ def _fixture_pr_object(pr_json: dict[str, Any], repo_full_name: str | None) -> d
     same-repo PRs); a fixture that states its head or base keeps it.
     The engine-owned admission stage also treats an absent draft as
     unreviewable, so give a fixture without an explicit draft the same
-    not-draft state a real GitHub pulls payload would carry.
+    not-draft state a real GitHub pulls payload would carry — and likewise
+    the open state, which the shared admission gate (#1301) now requires to
+    be provably open.
     """
     pr = dict(pr_json)
+    pr.setdefault("state", "open")
     pr.setdefault("draft", False)
     if not repo_full_name:
         return pr

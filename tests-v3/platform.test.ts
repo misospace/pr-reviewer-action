@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter } from "../src/platform/github.js";
 import { PlatformRequestError, requestText } from "../src/platform/http.js";
-import { deriveIsFork, derivePrStateReading } from "../src/platform/pr.js";
+import { deriveDraftState, deriveIsFork, derivePrState, derivePrStateReading } from "../src/platform/pr.js";
 import { resolvePlatform, type ResolvedPlatform } from "../src/platform/resolve.js";
 import type { PlatformAdapter } from "../src/platform/types.js";
 import type { PublishPlatformName } from "../src/platform/publish-api.js";
@@ -272,6 +272,39 @@ test("forgejo PR normalization never defaults the head repo to the base", async 
   const base = pr.base as Record<string, unknown>;
   assert.equal((head.repo as Record<string, unknown>).full_name, "", "deleted fork repo normalizes to empty → fork");
   assert.equal((base.repo as Record<string, unknown>).full_name, "o/r");
+});
+
+test("forgejo PR projection never fabricates an open state or a not-draft flag (#1301/#1307)", async () => {
+  const partial = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    baseUrl: "https://git.example.com",
+    token: "tok",
+    fetchImpl: jsonResponse({ number: 1, title: "t", body: "b", head: { sha: "h1", ref: "f" }, base: { sha: "b1", ref: "m" } }),
+  });
+  const pr = await partial.getPr() as Record<string, unknown>;
+  // A partial Forgejo read proves NOTHING about reviewability: `state` and
+  // `draft` are carried through verbatim, so the shared admission gate fails
+  // closed (`pr-state-unknown` / `pr-draft`) instead of being handed a
+  // fabricated "open"/"not-draft".
+  assert.equal(pr.state, undefined, "a missing state must not be defaulted to open");
+  assert.equal(pr.draft, undefined, "a missing draft must not be defaulted to not-draft");
+  assert.equal(derivePrState(pr), "unknown");
+  assert.equal(deriveDraftState(pr), "unknown");
+  // An explicit state/draft round-trips unchanged — a real Forgejo payload
+  // always carries both.
+  const explicit = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    baseUrl: "https://git.example.com",
+    token: "tok",
+    fetchImpl: jsonResponse({ number: 1, title: "t", body: "b", state: "open", draft: false, head: { sha: "h1", ref: "f" }, base: { sha: "b1", ref: "m" } }),
+  });
+  const open = await explicit.getPr() as Record<string, unknown>;
+  assert.equal(open.state, "open");
+  assert.equal(open.draft, false);
+  assert.equal(derivePrState(open), "open");
+  assert.equal(deriveDraftState(open), "not-draft");
 });
 
 test("forgejo permission preflight resolves collaborator, owner, and unknown paths", async () => {

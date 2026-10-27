@@ -20,7 +20,7 @@ import { startMockServer } from "./helpers.js";
 function mockPlatform(): PlatformReadAdapter {
   return {
     platform: "github",
-    getPr: async () => ({ number: 7, title: "Update README", body: "", draft: false, head: { sha: "a".repeat(40), ref: "feature" }, base: { ref: "main" }, user: { login: "someone" }, changed_files: 1, additions: 1, deletions: 0 }),
+    getPr: async () => ({ number: 7, title: "Update README", body: "", state: "open", draft: false, head: { sha: "a".repeat(40), ref: "feature" }, base: { ref: "main" }, user: { login: "someone" }, changed_files: 1, additions: 1, deletions: 0 }),
     getPrDiff: async () => "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n",
     listPrFiles: async () => ({ ok: true, data: [{ filename: "README.md", status: "modified", additions: 1, deletions: 0, changes: 1 }] }),
     getIssue: async () => ({ ok: false, error: "not served" }),

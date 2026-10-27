@@ -149,7 +149,7 @@ Context window sizing, enrichment time limits.
 | `model-context-tokens` | empty | The model's real context window in tokens (e.g. 8192, 32768). When set, corpus/diff/file byte budgets are derived from it (reserving ai-max-tokens for output) instead of context-limit-mode — recommended for local models whose windows are smaller than the named modes assume. Empty uses context-limit-mode. |
 | `primary-model-context-tokens` | empty | Primary tier context window in tokens; empty inherits model-context-tokens/context-limit-mode |
 | `smart-model-context-tokens` | empty | Smart tier context window in tokens; empty inherits model-context-tokens/context-limit-mode |
-| `fallback-model-context-tokens` | empty | Fallback model context window in tokens; empty inherits model-context-tokens. The fallback reuses the primary review corpus, so when this is set the shared corpus is sized to the smaller of the primary and fallback windows (#922). |
+| `fallback-model-context-tokens` | empty | Fallback model context window in tokens; empty inherits model-context-tokens. The fallback reuses the primary review corpus, so when this is set the shared corpus is sized to the smaller of the primary and fallback windows (#922). The recovery request re-truncates the corpus to min(120000 bytes, the derived fallback capacity) - the 120k-byte constant is the historical default corpus ceiling, kept even when the declared windows would admit more because fallback is availability recovery, not a larger-context retry (#1256, #940). |
 | `primary-request-shape` | `default` | Primary request layout (default or trailing_task) |
 | `smart-request-shape` | `default` | Smart request layout (default or trailing_task) |
 | `repo-map-context` | `true` | Include a bounded deterministic map of Git-tracked repository structure in the review corpus and native-loop planning context |
@@ -289,6 +289,7 @@ Diff skip, forced re-review, waiting for CI.
 | `should-review` | Whether the action determined a new LLM review is needed |
 | `skip-reason` | Reason the LLM review was skipped |
 | `diff-fingerprint` | Stable fingerprint of the current pull request patch |
+| `publish-status` | Publication outcome for this run (#1257): 'published' when the review was posted, 'superseded' when a newer push was detected at the publication boundary and the review was withheld (the step still exits successfully), 'failed' when the publication attempt completed with a failure, or empty when publication was not attempted (precheck skipped the run, the follow-up path consumed the event, a plain-issue no-op, or publish-mode does not publish). An uncaught crash before this write leaves the output empty and fails the step itself. The review outputs (verdict, review-result, findings, review-markdown) always describe the review this run produced, whether or not it was published. |
 | `ci-status-skipped` | Whether CI status check was skipped (true) or completed (false) |
 | `ci-status-final` | Final CI state (success/failure) when ci-status-check completed |
 | `cache-hit-ratio` | Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable) |

@@ -243,6 +243,7 @@ function mockPlatform(pr: Record<string, unknown>, pinned?: PinnedActionFixture)
     platform: "github",
     getPr: () => Promise.resolve({
       number: 1, title: String(pr.title ?? "t"), body: String(pr.body ?? ""),
+      state: "open",
       draft: false,
       head: { sha: headSha, ref: "feature" }, base: { ref: "main" },
       user: { login: "someone" }, changed_files: files.length || 1,

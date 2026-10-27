@@ -19,10 +19,14 @@
  *
  * Network I/O is injected (`ToolDeps`) so the executors are deterministic and
  * testable; the production wiring binds the platform adapter. Subprocesses run
- * through the typed runtime seam (`runProcess`), never a shell.
+ * through the typed runtime seam (`runProcess`), never a shell, and always
+ * with the allowlisted `gitEnv` child environment — never the stage
+ * environment itself, which carries the run's model API keys and forge
+ * tokens (#1260).
  */
 import fs from "node:fs";
 import path from "node:path";
+import { gitEnv } from "../acquisition/git-env.js";
 import { maskAndTruncate, maskAndTruncateSource, maskAndTruncateSourceDetailed, redactSourceText } from "../context/redact.js";
 import { committedSourceProvenance, sanitizedSourceProvenance, untrustedTextProvenance, type EvidenceProvenance } from "../context/evidence-provenance.js";
 import { isRepositorySkillPath, readRepositorySkill, SKILL_LIMITS, SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
@@ -111,6 +115,10 @@ export type NetworkResponse = { status: number; headers?: Record<string, string>
  * for policy or HTTP errors. `fetch` serves web_fetch/web_search.
  */
 export type ToolDeps = {
+  /** The stage environment: the ambient SOURCE child environments are built
+   * from (every git child gets `gitEnv(stageEnv)`), never the child
+   * environment itself — it carries the run's model API keys and forge
+   * tokens, which must not be inherited by a subprocess (#1260). */
   env: NodeJS.ProcessEnv;
   fetch?: (url: string, init: { headers: Record<string, string>; timeoutMs: number; method?: string; body?: string; redirect?: "manual"; signal?: AbortSignal }) => Promise<NetworkResponse>;
   /** Test/DI seam for the per-hop public-DNS gate; production uses `systemResolver`. */
@@ -261,7 +269,11 @@ const processOutput = async (ctx: ToolContext, argv: readonly string[], timeout:
     file: argv[0]!,
     args: argv.slice(1),
     cwd: ctx.workspaceRoot,
-    env: ctx.deps.env,
+    // Every executor git child (show/grep/log/blame and the run_command
+    // catalog) shares this seam, so the allowlist here covers all of them:
+    // the child gets `gitEnv` built from the stage env (PATH/HOME plus the
+    // forced neutral git config), never the stage env's credentials (#1260).
+    env: gitEnv(ctx.deps.env),
     timeoutMs: timeout * 1000,
     ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
   };

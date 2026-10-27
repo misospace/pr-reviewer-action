@@ -490,7 +490,7 @@ inputs:
     v2_id: fallback_model_context_tokens
     required: false
     default: ""
-    description: "Fallback model context window in tokens; empty inherits model_context_tokens. The fallback reuses the primary review corpus, so when this is set the shared corpus is sized to the smaller of the primary and fallback windows (#922)."
+    description: "Fallback model context window in tokens; empty inherits model_context_tokens. The fallback reuses the primary review corpus, so when this is set the shared corpus is sized to the smaller of the primary and fallback windows (#922). The recovery request re-truncates the corpus to min(120000 bytes, the derived fallback capacity) - the 120k-byte constant is the historical default corpus ceiling, kept even when the declared windows would admit more because fallback is availability recovery, not a larger-context retry (#1256, #940)."
   - id: primary-request-shape
     v2_id: primary_request_shape
     required: false
@@ -936,6 +936,14 @@ outputs:
   - id: diff-fingerprint
     v2_id: diff_fingerprint
     description: "Stable fingerprint of the current pull request patch"
+  # #1257: disambiguates the review verdict outputs from publication. The
+  # review-stage outputs (verdict, review-result, findings, ...) describe the
+  # review this run PRODUCED; a run whose publication was withheld by the
+  # publication-boundary head re-check still exits successfully, so this
+  # output is what tells a consumer nothing was posted.
+  - id: publish-status
+    v2_id: publish_status
+    description: "Publication outcome for this run (#1257): 'published' when the review was posted, 'superseded' when a newer push was detected at the publication boundary and the review was withheld (the step still exits successfully), 'failed' when the publication attempt completed with a failure, or empty when publication was not attempted (precheck skipped the run, the follow-up path consumed the event, a plain-issue no-op, or publish-mode does not publish). An uncaught crash before this write leaves the output empty and fails the step itself. The review outputs (verdict, review-result, findings, review-markdown) always describe the review this run produced, whether or not it was published."
   - id: ci-status-skipped
     v2_id: ci_status_skipped
     description: "Whether CI status check was skipped (true) or completed (false)"
