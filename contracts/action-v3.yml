@@ -936,6 +936,14 @@ outputs:
   - id: diff-fingerprint
     v2_id: diff_fingerprint
     description: "Stable fingerprint of the current pull request patch"
+  # #1257: disambiguates the review verdict outputs from publication. The
+  # review-stage outputs (verdict, review-result, findings, ...) describe the
+  # review this run PRODUCED; a run whose publication was withheld by the
+  # publication-boundary head re-check still exits successfully, so this
+  # output is what tells a consumer nothing was posted.
+  - id: publish-status
+    v2_id: publish_status
+    description: "Publication outcome for this run (#1257): 'published' when the review was posted, 'superseded' when a newer push was detected at the publication boundary and the review was withheld (the step still exits successfully), 'failed' when publication failed, or empty when publication was not attempted (precheck skipped the run, the follow-up path consumed the event, or publish-mode does not publish). The review outputs (verdict, review-result, findings, review-markdown) always describe the review this run produced, whether or not it was published."
   - id: ci-status-skipped
     v2_id: ci_status_skipped
     description: "Whether CI status check was skipped (true) or completed (false)"

@@ -1,4 +1,4 @@
-import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
@@ -20,7 +20,7 @@ import { nonEmpty } from "./run-dir.js";
 import { buildPlatformReadAdapter } from "./platform.js";
 import { partialCoverageOf } from "./review.js";
 import type { PartialCoverage } from "../tools/coverage.js";
-import { isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
+import { formatOutputAssignment, isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 
@@ -511,8 +511,18 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
   };
 }
 
-/** Publish and relay messages; fail-soft (1 only on a failed publication). */
-export async function publishWith(input: PublishInput, seam: ReturnType<typeof buildPublishApi>, runDir?: string): Promise<number> {
+/** #1257: the publish outcome — the fail-soft exit code plus the typed
+ * publication status (`published` / `superseded` / `failed`), so a caller can
+ * distinguish "this run published the review" from "the publication boundary
+ * withheld it for a newer head" instead of inferring it from exit code 0. */
+export interface PublishOutcome {
+  exitCode: number;
+  status: PublishResult["status"];
+}
+
+/** Runs one publication, persists the #1027 findings ledger, relays the
+ * step messages, and reports the outcome. */
+export async function publishWithOutcome(input: PublishInput, seam: ReturnType<typeof buildPublishApi>, runDir?: string): Promise<PublishOutcome> {
   const result: PublishResult = await publishReview(input, seam.api, {
     diffText: seam.platform === "forgejo" ? await seam.diffProvider() : "",
   });
@@ -544,15 +554,35 @@ export async function publishWith(input: PublishInput, seam: ReturnType<typeof b
   }
   for (const message of result.messages) process.stdout.write(`${message}\n`);
   if (result.error) process.stderr.write(`${result.error}\n`);
-  return result.status === "failed" ? 1 : 0;
+  return { exitCode: result.status === "failed" ? 1 : 0, status: result.status };
+}
+
+/** Publish and relay messages; fail-soft (1 only on a failed publication). */
+export async function publishWith(input: PublishInput, seam: ReturnType<typeof buildPublishApi>, runDir?: string): Promise<number> {
+  return (await publishWithOutcome(input, seam, runDir)).exitCode;
+}
+
+/** #1257: append the `publish-status` action output (the declared contract
+ * id, one closed single-line token — the multiline-delimiter path of
+ * `formatOutputAssignment` can never trigger here, but using it keeps the
+ * writer shared). A no-op outside a runner (no path, or the /dev/null
+ * sentinel), same rule as `writeOutputs`. */
+function writePublishStatusOutput(env: NodeJS.ProcessEnv, status: PublishResult["status"]): void {
+  const file = env.GITHUB_OUTPUT ?? "";
+  if (file === "" || file === "/dev/null") return;
+  appendFileSync(file, formatOutputAssignment("publish-status", status));
 }
 
 /** `node dist/index.js publish` — the typed successor of
  * `scripts/publish.sh`. Fail-soft: exit 0 on published/superseded, 1 on
- * failed, matching the v2 dispatcher's semantics. */
+ * failed, matching the v2 dispatcher's semantics. #1257: the exit code alone
+ * cannot distinguish published from superseded (both exit 0), so this step
+ * also writes the `publish-status` output. */
 export async function publishMain(env: NodeJS.ProcessEnv): Promise<number> {
   const seam = buildPublishApi(env);
-  return publishWith(publishInputFromEnv(env, seam.platform), seam, nonEmpty(env.PR_REVIEWER_RUN_DIR));
+  const outcome = await publishWithOutcome(publishInputFromEnv(env, seam.platform), seam, nonEmpty(env.PR_REVIEWER_RUN_DIR));
+  writePublishStatusOutput(env, outcome.status);
+  return outcome.exitCode;
 }
 
 function parseJsonish(raw: string): unknown {
