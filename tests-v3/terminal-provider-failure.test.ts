@@ -365,7 +365,7 @@ test("#1080: a terminal 429 costs one transport attempt and one tier attempt, th
   }
 });
 
-test("#1080: an ordinary 429 with Retry-After still uses the configured retry policy", async () => {
+test("#1305: an ordinary 429 with Retry-After gets one short tier retry, then stops", async () => {
   let served = 0;
   const server = await startMockServer((_req, _body, res) => {
     served += 1;
@@ -388,12 +388,14 @@ test("#1080: an ordinary 429 with Retry-After still uses the configured retry po
     if (outcome.status !== "transport_exhausted") return;
     assert.equal(outcome.terminal, undefined, "a transient 429 is not terminal");
     assert.equal(outcome.nonRetryable, undefined);
-    // 8 tier attempts × the transport's own 3-attempt budget — both budgets
-    // unchanged for a failure the classifier leaves alone.
-    assert.equal(served, 24);
-    assert.equal(outcome.attempts, 8);
-    assert.deepEqual(transportSleeps, new Array(16).fill(2000), "Retry-After honoured, in ms, twice per tier attempt");
-    assert.deepEqual(tierSleeps, [15, 30, 60, 120, 120, 120, 120], "the tier budget still runs with its doubling backoff");
+    // #1305: the tier buys one short retry, not the configured 8-attempt
+    // budget — 2 tier attempts × the transport's own 3-attempt same-request
+    // budget. Latency to fallback no longer depends on classifying the
+    // provider's prose correctly.
+    assert.equal(served, 6);
+    assert.equal(outcome.attempts, 2);
+    assert.deepEqual(transportSleeps, new Array(4).fill(2000), "Retry-After honoured, in ms, twice per tier attempt");
+    assert.deepEqual(tierSleeps, [5], "the one tier retry sleeps short, never exponential");
   } finally {
     await server.close();
   }
@@ -461,7 +463,7 @@ test("#1080: model-unavailable bodies spend one attempt at 400, 404 and 410 alik
   }
 });
 
-test("#1080: a busy 429 at the tier still consumes the retry budget", async () => {
+test("#1305: a busy 429 at the tier stays within the bounded retry allowance", async () => {
   const server = await startMockServer((_req, _res, res) => {
     res.statusCode = 429;
     res.end(json({ error: { message: "The model is busy right now. Please retry." } }));
@@ -482,7 +484,7 @@ test("#1080: a busy 429 at the tier still consumes the retry budget", async () =
     assert.equal(outcome.terminal, undefined);
     assert.equal(outcome.attempts, 2);
     assert.equal(server.requests.length, 6, "2 tier attempts × the transport's own 3-attempt budget");
-    assert.deepEqual([...tierSleeps], [15]);
+    assert.deepEqual([...tierSleeps], [5], "#1305: the retry sleep is capped short, never the configured 15s");
     assert.deepEqual([...transportSleeps], [1000, 2000, 1000, 2000]);
   } finally {
     await server.close();

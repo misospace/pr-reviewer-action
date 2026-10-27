@@ -47,8 +47,8 @@ Fallback endpoint, retries, failure behavior.
 | `ai-fallback-api-format` | empty | Fallback API request/response format; defaults to ai-api-format when blank |
 | `ai-fallback-model` | empty | Optional model name for the fallback analysis pass |
 | `ai-fallback-api-key` | empty | Optional API key for the fallback endpoint; defaults to ai-api-key when blank |
-| `ai-primary-retries` | `8` | Number of retries for the primary model |
-| `ai-primary-retry-delay-sec` | `15` | Delay between primary retries in seconds |
+| `ai-primary-retries` | `8` | Total-attempt budget for the primary model; an ambiguous transport failure buys at most one short retry regardless (#1305), so values above 2 add nothing |
+| `ai-primary-retry-delay-sec` | `15` | Delay between primary retries in seconds; tier retry sleeps are capped at 5 seconds (#1305), so larger values are not waited |
 | `on-model-failure` | `notice` | Behavior when both primary and fallback models fail to return a usable review. 'notice' (default) posts a visible request_changes notice explaining the review could not run (never auto-approves), so a provider outage does not fail the check. 'fail' fails the action step instead. |
 
 ### Verdicts & findings

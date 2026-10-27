@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { callModelTier, produceVerdict, PARSE_FAIL_CAP, MAX_RETRY_DELAY_SEC } from "../src/model/call.js";
+import { callModelTier, produceVerdict, PARSE_FAIL_CAP, TRANSPORT_RETRY_ALLOWANCE, TIER_RETRY_MAX_DELAY_SEC } from "../src/model/call.js";
 import type { TierProfile } from "../src/model/call.js";
 import { RETRYABLE_HTTP_STATUSES, type ChatRequestInput, type ChatRequestOutcome } from "../src/transport/transport.js";
 import { TransportFailure } from "../src/transport/http.js";
@@ -64,7 +64,7 @@ test("success on the first attempt returns the verdict", async () => {
   assert.deepEqual(sleeps, []);
 });
 
-test("transport failures consume the budget with doubling backoff capped at 120s", async () => {
+test("#1305: ambiguous transport failures are bounded to the retry allowance", async () => {
   const sleeps: number[] = [];
   let calls = 0;
   const outcome = await callModelTier(profile({ retries: 4, retryDelaySec: 15 }), CONTEXT, {
@@ -75,10 +75,10 @@ test("transport failures consume the budget with doubling backoff capped at 120s
     },
   });
   assert.equal(outcome.status, "transport_exhausted");
-  assert.equal(calls, 4);
-  // #887 maintainer follow-up: no sleep after the final attempt — there is
-  // no retry coming, so only the 3 backoffs between the 4 attempts happen.
-  assert.deepEqual(sleeps, [15, 30, 60]);
+  assert.equal(calls, 1 + TRANSPORT_RETRY_ALLOWANCE, "the configured budget must not buy more than the #1305 allowance");
+  // #887 maintainer follow-up still holds: no sleep after the final attempt —
+  // and #1305: the one retry's sleep is short, never exponential.
+  assert.deepEqual(sleeps, [5]);
 });
 
 test("#978: non-retryable HTTP statuses fast-fail regardless of the tier retry budget", async () => {
@@ -105,7 +105,7 @@ test("#978: non-retryable HTTP statuses fast-fail regardless of the tier retry b
   }
 });
 
-test("#1006: 5xx outside the transport's retry set keep the tier retry budget", async () => {
+test("#1006: 5xx outside the transport's retry set stay retryable, bounded by the #1305 allowance", async () => {
   assert.equal(RETRYABLE_HTTP_STATUSES.has(524), false, "524 must remain outside the transport's same-request retry set");
   for (const status of [524, 501, 507]) {
     let calls = 0;
@@ -121,13 +121,13 @@ test("#1006: 5xx outside the transport's retry set keep the tier retry budget", 
       },
     });
     assert.equal(outcome.status, "transport_exhausted", `status ${status}`);
-    assert.equal(calls, 3, `status ${status}`);
-    assert.deepEqual(sleeps, [15, 30], `status ${status}`);
+    assert.equal(calls, 1 + TRANSPORT_RETRY_ALLOWANCE, `status ${status}`);
+    assert.deepEqual(sleeps, [TIER_RETRY_MAX_DELAY_SEC], `status ${status}`);
     if (outcome.status === "transport_exhausted") assert.equal(outcome.nonRetryable, undefined, `status ${status}`);
   }
 });
 
-test("#978: retryable HTTP statuses still consume the retry budget", async () => {
+test("#1305: retryable HTTP statuses get one short retry, not the configured budget", async () => {
   for (const status of [429, 500]) {
     let calls = 0;
     const sleeps: number[] = [];
@@ -142,13 +142,13 @@ test("#978: retryable HTTP statuses still consume the retry budget", async () =>
       },
     });
     assert.equal(outcome.status, "transport_exhausted", `status ${status}`);
-    assert.equal(calls, 3, `status ${status}`);
-    assert.deepEqual(sleeps, [15, 30], `status ${status}`);
+    assert.equal(calls, 1 + TRANSPORT_RETRY_ALLOWANCE, `status ${status}`);
+    assert.deepEqual(sleeps, [TIER_RETRY_MAX_DELAY_SEC], `status ${status}`);
     if (outcome.status === "transport_exhausted") assert.equal(outcome.nonRetryable, undefined);
   }
 });
 
-test("#978: network failures and HTTP failures with unknown status still retry", async () => {
+test("#1305: network failures and HTTP failures with unknown status get the same bounded retry", async () => {
   for (const failure of [
     new TransportFailure("network", "network down"),
     new TransportFailure("http_status", "HTTP status unavailable"),
@@ -163,8 +163,8 @@ test("#978: network failures and HTTP failures with unknown status still retry",
       },
     });
     assert.equal(outcome.status, "transport_exhausted");
-    assert.equal(calls, 3);
-    assert.deepEqual(sleeps, [15, 30]);
+    assert.equal(calls, 1 + TRANSPORT_RETRY_ALLOWANCE);
+    assert.deepEqual(sleeps, [TIER_RETRY_MAX_DELAY_SEC]);
     if (outcome.status === "transport_exhausted") assert.equal(outcome.nonRetryable, undefined);
   }
 });
@@ -201,18 +201,101 @@ test("#887: retries: 2 sleeps only between the two attempts, never after the fin
   });
   assert.equal(outcome.status, "transport_exhausted");
   assert.equal(calls, 2);
-  assert.deepEqual(sleeps, [15]);
+  assert.deepEqual(sleeps, [TIER_RETRY_MAX_DELAY_SEC], "#1305: the retry sleep is capped short, never the configured 15s");
 });
 
-test("backoff is capped at MAX_RETRY_DELAY_SEC", async () => {
+test("#1305: an unknown 429 cannot delay fallback by minutes — one short retry, then the tier stops", async () => {
+  // A body that matches NEITHER the terminal allowlist NOR any transient
+  // veto: the exact classification-miss shape run 2942 reproduced. The tier
+  // must not need to classify provider prose correctly to hand off fast.
+  const sleeps: number[] = [];
+  let calls = 0;
+  const outcome = await callModelTier(profile({ retries: 8, retryDelaySec: 15 }), CONTEXT, {
+    sleep: async (s) => { sleeps.push(s); },
+    call: async () => {
+      calls++;
+      return {
+        status: "failure",
+        failure: new TransportFailure("http_status", "HTTP 429", {
+          status: 429,
+          body: JSON.stringify({ error: { message: "request rejected by upstream policy" } }),
+        }),
+      };
+    },
+  });
+  assert.equal(outcome.status, "transport_exhausted");
+  assert.equal(calls, 1 + TRANSPORT_RETRY_ALLOWANCE);
+  assert.deepEqual(sleeps, [TIER_RETRY_MAX_DELAY_SEC]);
+  // The wall-clock/backoff bound itself: even with the default 8-attempt
+  // budget configured, the PURE-transport path's tier sleep total stays
+  // within one capped delay, so the fallback handoff cannot be delayed by
+  // minutes of tier backoff. (Residual latency outside this loop: the
+  // transport's own same-request tree and each attempt's configured request
+  // timeout — bounded by constants and configuration, not by prose
+  // classification.)
+  assert.ok(sleeps.length <= TRANSPORT_RETRY_ALLOWANCE, "no more sleeps than the allowance");
+  assert.ok(sleeps.reduce((a, b) => a + b, 0) <= TIER_RETRY_MAX_DELAY_SEC, "pure-transport tier backoff stays within one capped delay");
+});
+
+test("#1305: mixed transport/parse failures stop at the allowance; the surfaced status follows the last failure class", async () => {
+  // Deliberate ordering semantics, pinned: once the transport allowance is
+  // spent, a later parse failure never runs, so transport→parse→transport
+  // ends the tier BEFORE the second parse attempt.
+  let calls = 0;
+  const outcome = await callModelTier(profile({ retries: 8 }), CONTEXT, {
+    sleep: async () => {},
+    call: async () => {
+      calls++;
+      if (calls === 1 || calls === 3) return transportFailure();
+      return {
+        status: "ok",
+        raw: { choices: [{ message: { content: "not json" }, finish_reason: "stop" }], usage: { completion_tokens: 3 } },
+        response: { id: "", object: "chat.completion", model: "", content: "", toolCalls: [], finishReason: "stop", usage: null, error: undefined },
+      };
+    },
+  });
+  assert.equal(outcome.status, "transport_exhausted");
+  assert.equal(calls, 3);
+});
+
+test("#1305: a transient first failure still gets its retry opportunity", async () => {
+  let calls = 0;
+  const sleeps: number[] = [];
+  const outcome = await callModelTier(profile({ retries: 8, retryDelaySec: 15 }), CONTEXT, {
+    sleep: async (s) => { sleeps.push(s); },
+    call: async () => {
+      calls++;
+      return calls === 1 ? transportFailure() : okResponse();
+    },
+  });
+  assert.equal(outcome.status, "ok");
+  assert.equal(calls, 2);
+  assert.ok(sleeps.length === 1 && sleeps[0] !== undefined && sleeps[0] <= TIER_RETRY_MAX_DELAY_SEC);
+});
+
+test("#1305: retries: 1 — an ambiguous failure makes exactly one attempt with no sleep", async () => {
+  let calls = 0;
+  const sleeps: number[] = [];
+  const outcome = await callModelTier(profile({ retries: 1 }), CONTEXT, {
+    sleep: async (s) => { sleeps.push(s); },
+    call: async () => {
+      calls++;
+      return transportFailure();
+    },
+  });
+  assert.equal(outcome.status, "transport_exhausted");
+  assert.equal(calls, 1);
+  assert.deepEqual(sleeps, []);
+});
+
+test("#1305: tier retry sleeps never grow and never exceed the capped delay", async () => {
   const sleeps: number[] = [];
   await callModelTier(profile({ retries: 6, retryDelaySec: 90 }), CONTEXT, {
     sleep: async (s) => { sleeps.push(s); },
     call: async () => transportFailure(),
   });
-  // #887 maintainer follow-up: no sleep after the 6th (final) attempt.
-  assert.deepEqual(sleeps, [90, 120, 120, 120, 120]);
-  assert.ok(MAX_RETRY_DELAY_SEC === 120);
+  // #887 maintainer follow-up still holds: no sleep after the final attempt.
+  assert.deepEqual(sleeps, [TIER_RETRY_MAX_DELAY_SEC]);
 });
 
 test("parse failures cap at 2 attempts regardless of retry budget", async () => {
@@ -231,7 +314,7 @@ test("parse failures cap at 2 attempts regardless of retry budget", async () => 
   });
   assert.equal(outcome.status, "parse_exhausted");
   assert.equal(calls, PARSE_FAIL_CAP);
-  assert.ok(sleeps.every((s) => s === 15), "parse retries do not grow the backoff");
+  assert.ok(sleeps.every((s) => s === TIER_RETRY_MAX_DELAY_SEC), "parse retries do not grow the backoff and stay within the #1305 cap");
 });
 
 test("empty completion stops the tier immediately with zero further retries", async () => {
