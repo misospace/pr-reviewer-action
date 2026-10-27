@@ -15,8 +15,11 @@
  *                             (#1298): mirrors the shipped `comment-pr-closed`
  *                             / `comment-pr-draft` comment-command gates
  *                             (#961) on a parity-safe capability read; an
- *                             unproven state fails closed. Runs BEFORE the
- *                             rate budget so dead lanes consume nothing.
+ *                             unproven half fails closed (`pr-state-unknown`
+ *                             for the open/closed half, `pr-draft-unknown`
+ *                             for the draft half — distinct reasons #1310).
+ *                             Runs BEFORE the rate budget so dead lanes
+ *                             consume nothing.
  *   6. rate gate (Q&A only) — per-PR and per-actor-within-PR budgets for
  *                             open-ended questions, recorded atomically.
  *   7. answer               — a bounded discussion prompt.
@@ -99,7 +102,8 @@ export interface FollowUpPlanDeps {
    * capability (#1298) — a canonical `PrStateReading`, never a payload
    * sniff. REQUIRED: the closed/draft gate is policy, not context, so a host
    * that cannot read PR state must say so at the type, not silently skip the
-   * gate. A throw or an `unknown` half fails closed (`pr-state-unknown`). */
+   * gate. A throw or an `unknown` half fails closed (`pr-state-unknown`
+   * for the state, `pr-draft-unknown` for the draft — #1310). */
   readPrState: () => Promise<PrStateReading>;
 }
 
@@ -177,10 +181,12 @@ export async function planFollowUp(
   // answer: the same deterministic states the shipped `/ai-review` comment
   // command refuses on (`comment-pr-closed` / `comment-pr-draft`, #961). The
   // state arrives as a parity-safe capability reading (GitHub's comment
-  // payload carries `issue.state`, Forgejo's differs — so neither host
-  // sniffs its payload; the gate lives here instead). Merged PRs report
-  // `closed` on both forges. An unprovable state fails closed like the
-  // comment path's `comment-pr-lookup-failed`: uncertainty never answers.
+   // payload carries `issue.state`, Forgejo's differs — so neither host
+   // sniffs its payload; the gate lives here instead). Merged PRs report
+   // `closed` on both forges. An unprovable half fails closed like the
+   // comment path's `comment-pr-lookup-failed`: uncertainty never answers
+   // (`pr-state-unknown` for the open/closed half, `pr-draft-unknown` for
+   // the draft half — distinct refusals #1310).
   // Before the rate budget, so a dead lane consumes no budget, and AFTER the
   // re-review hand-off, whose admission stays the review pipeline's own.
   let prState: PrStateReading;
@@ -191,7 +197,7 @@ export async function planFollowUp(
   }
   if (prState.state === "unknown") return ignore("pr-state-unknown");
   if (prState.state === "closed") return ignore("pr-closed");
-  if (prState.draft === "unknown") return ignore("pr-state-unknown");
+  if (prState.draft === "unknown") return ignore("pr-draft-unknown");
   if (prState.draft === "draft") return ignore("pr-draft");
 
   // 6. Question rate gate — the open-ended, spam-able model work is bounded

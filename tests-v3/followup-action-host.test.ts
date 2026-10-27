@@ -602,12 +602,17 @@ test("an authorized question on a draft PR is ignored; no model, no post", async
 });
 
 test("an unprovable PR state fails closed: no model, no post", async () => {
-  for (const options of [
-    { pr: null },
-    { pr: "not-a-pr" },
-    { pr: [] },
-    { pr: {} },
-    { prThrows: true },
+  for (const { options, reason } of [
+    { options: { pr: null }, reason: "pr-state-unknown" },
+    { options: { pr: "not-a-pr" }, reason: "pr-state-unknown" },
+    { options: { pr: [] }, reason: "pr-state-unknown" },
+    // #1310: a PR object whose `state` cannot be proven no longer reads
+    // open on `draft: false` alone — the fail-closed branch is reachable.
+    { options: { pr: {} }, reason: "pr-state-unknown" },
+    { options: { pr: { draft: false } }, reason: "pr-state-unknown" },
+    { options: { pr: { state: "merged", draft: false } }, reason: "pr-state-unknown" },
+    { options: { pr: { state: "open" } }, reason: "pr-draft-unknown" },
+    { options: { prThrows: true }, reason: "pr-state-unknown" },
   ] as const) {
     const recs: EffectRecs = { answers: [], posts: [] };
     const adapter = stubReadAdapter({ botLogin: BOT_LOGIN, permissionData: { permission: "admin", user: { login: "alice" } }, ...options });
@@ -616,7 +621,7 @@ test("an unprovable PR state fails closed: no model, no post", async () => {
       ghCommentPayload("@reviewer-bot why?"),
       followUpDeps(adapter, recs),
     );
-    assert.deepEqual(followUpOutcome(result), { status: "ignored", reason: "pr-state-unknown" });
+    assert.deepEqual(followUpOutcome(result), { status: "ignored", reason });
     assert.equal(adapter.calls.getPr, 1, "the state read is attempted once, then fails closed");
     assert.equal(recs.answers.length, 0);
     assert.equal(recs.posts.length, 0);

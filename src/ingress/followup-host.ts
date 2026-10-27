@@ -80,7 +80,8 @@ export interface FollowUpForgeAdapter {
    * forge's own PR read (GitHub pulls shape; the Forgejo client's
    * `getPullRequest` normalizes to it) — never a webhook-payload sniff.
    * REQUIRED: the planner's closed/draft gate is policy; a throw or an
-   * `unknown` half fails closed (`pr-state-unknown`). */
+   * `unknown` half fails closed (`pr-state-unknown` for the state,
+   * `pr-draft-unknown` for the draft — #1310). */
   readPrState(repoFullName: string, prNumber: number): Promise<PrStateReading>;
   /** The latest managed review body (for the answer context), if any;
    * optional capability — absent means the prompt degrades without it. */
@@ -176,7 +177,8 @@ export function createFollowUpConsumer(options: FollowUpConsumerOptions): Follow
         // degrades to a smaller prompt.
         fetchThreadComments: () => adapter.fetchThreadComments(repoFullName, prNumber),
         // Forwarded as-is: the planner catches a throwing state read and
-        // fails closed (`pr-state-unknown`) — no model work, no reply.
+        // fails closed (`pr-state-unknown` for the state, `pr-draft-unknown`
+        // for the draft — #1310) — no model work, no reply.
         readPrState: () => adapter.readPrState(repoFullName, prNumber),
         // Operator mode: the caller does not already hold the comment body,
         // so the planner reads it by its canonical comment id. Action mode
