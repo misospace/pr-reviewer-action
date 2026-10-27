@@ -31,7 +31,8 @@
         "repo": {
           "full_name": "misospace/demo"
         }
-      }
+      },
+      "state": "open"
     },
     "identity": "pr-reviewer[bot]"
   },

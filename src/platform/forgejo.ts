@@ -239,7 +239,12 @@ export class ForgejoAdapter implements PlatformReadAdapter {
       number: data.number ?? prNumber,
       title: data.title ?? "",
       body: data.body ?? "",
-      state: data.state ?? "open",
+      // #1301/#1307: a partial Forgejo read is NOT evidence that the PR is
+      // open. The state is carried through verbatim — only an explicit
+      // string is authoritative — so the shared admission gate fails closed
+      // on an unprovable one (`pr-state-unknown`) instead of receiving a
+      // fabricated "open".
+      state: data.state,
       user: { login: isObject(data.user) ? data.user.login ?? "" : "" },
       head: {
         sha: head.sha ?? "",
@@ -255,7 +260,11 @@ export class ForgejoAdapter implements PlatformReadAdapter {
       created_at: data.created_at ?? "",
       updated_at: data.updated_at ?? "",
       url: data.html_url ?? "",
-      draft: Boolean(data.draft),
+      // #961: only an explicit boolean draft is authoritative — the same
+      // "reviewability must be proven" doctrine the state gate applies, so a
+      // missing draft is carried through as unknown (the #961 gate fails it
+      // closed as `pr-draft`) rather than defaulted to "not-draft".
+      draft: data.draft,
       labels: Array.isArray(data.labels)
         ? data.labels.map((label: unknown) => ({ name: isObject(label) ? label.name ?? "" : "" }))
         : [],
