@@ -140,12 +140,12 @@ inputs:
     v2_id: ai_primary_retries
     required: false
     default: "8"
-    description: "Number of retries for the primary model"
+    description: "Total-attempt budget for the primary model; an ambiguous transport failure buys at most one short retry regardless (#1305), so values above 2 add nothing"
   - id: ai-primary-retry-delay-sec
     v2_id: ai_primary_retry_delay_sec
     required: false
     default: "15"
-    description: "Delay between primary retries in seconds"
+    description: "Delay between primary retries in seconds; tier retry sleeps are capped at 5 seconds (#1305), so larger values are not waited"
   - id: on-model-failure
     v2_id: on_model_failure
     required: false

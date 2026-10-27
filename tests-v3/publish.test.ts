@@ -1265,6 +1265,28 @@ test("cleanup cap skips cleanup but still removes the rerun label", async () => 
   assert.deepEqual(api.dismissed, []);
 });
 
+test("#1254: a rejected rerun-label cleanup never fails a successful publication", async () => {
+  const api = new MockPublishApi();
+  // #1093: the sticky comment is the checkpoint for this mode.
+  api.stickyResult = { ok: true, created: true, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  // The built-in adapters never reject; simulate a non-conforming one whose
+  // optional cleanup promise rejects after the review already published.
+  api.removeLabel = async (label: string) => { api.removedLabels.push(label); throw new Error("unexpected cleanup rejection"); };
+  const result = await publishReview(input({ mode: "review_comment", rerunLabel: "ai-review" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.deepEqual(api.removedLabels, ["ai-review"], "cleanup was attempted after publication");
+  assert.ok(result.messages.some((line) => line.includes("Re-review label cleanup failed unexpectedly")));
+});
+
+test("#1254: a false rerun-label removal degrades to a warning, not a failure", async () => {
+  const api = new MockPublishApi();
+  api.stickyResult = { ok: true, created: true, commentId: 9, updatedAt: "2026-01-01T00:00:00Z" };
+  api.removeLabel = async () => false;
+  const result = await publishReview(input({ mode: "review_comment", rerunLabel: "ai-review" }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.ok(result.messages.some((line) => line.includes("Re-review label cleanup did not complete")));
+});
+
 test("spoofed managed marker in a human review grants no cleanup authority", async () => {
   const api = new MockPublishApi();
   api.reviews = [{ id: 7, body: MARKER, state: "CHANGES_REQUESTED", user: { login: "human" } }];
