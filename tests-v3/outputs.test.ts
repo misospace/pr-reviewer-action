@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   FINDINGS_SUMMARY_MAX_LOCATION_CHARS,
   FINDINGS_SUMMARY_MAX_MESSAGE_CHARS,
+  FINDINGS_SUMMARY_MAX_BYTES,
   FINDINGS_SUMMARY_MAX_ROWS,
   FINDINGS_SUMMARY_MAX_SEVERITY_CHARS,
   REVIEW_STEP_OUTPUT_IDS,
@@ -512,6 +513,97 @@ test("#1249: an over-long message is capped in the message cell", () => {
   assert.ok(
     cell.length <= 5 * FINDINGS_SUMMARY_MAX_MESSAGE_CHARS,
     `the message cell is capped (${cell.length})`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// #1283: the per-cell caps do not bound the summary AGGREGATE — a full table
+// of max-width rows still overruns the forge review-body limit and the
+// publication fails outright. The whole rendered block takes an aggregate
+// byte bound, a byte-budget cut is disclosed the way the row overflow is, and
+// the counts heading rides inside the same bound.
+//
+// The payloads below are the boundary itself, not a paraphrase of it: every
+// cell carries the widest escape ("&" expands five-fold), a severity outside
+// the closed vocabulary (its own count digits stress the heading), and a row
+// count above the row cap (so both disclosure paths are exercised).
+// ---------------------------------------------------------------------------
+
+const worstCaseFindings = Array.from({ length: FINDINGS_SUMMARY_MAX_ROWS + 5 }, () => ({
+  severity: "&".repeat(5000),
+  file: "&".repeat(5000),
+  line: 1,
+  message: "&".repeat(5000),
+}));
+
+test("#1283: a full worst-case table is bounded in aggregate bytes", () => {
+  for (const opts of [undefined, { messageAsInlineCode: true }]) {
+    const summary = renderFindingsSummary(worstCaseFindings, "inert", opts);
+    const bytes = Buffer.byteLength(summary, "utf8");
+    assert.ok(
+      bytes <= FINDINGS_SUMMARY_MAX_BYTES,
+      `the whole rendered block fits the aggregate bound (${bytes} bytes, opts=${JSON.stringify(opts)})`,
+    );
+    const rows = findingDataRows(summary);
+    assert.ok(rows.length > 0, "the bound still renders at least one row");
+    assert.ok(
+      rows.length < FINDINGS_SUMMARY_MAX_ROWS,
+      `the byte budget cuts before the row cap (${rows.length} rows)`,
+    );
+  }
+});
+
+test("#1283: a byte-budget cut is disclosed in the body like the row overflow", () => {
+  const summary = renderFindingsSummary(worstCaseFindings, "inert");
+  const rows = findingDataRows(summary);
+  const notice = /_…and (\d+) more finding\(s\) not listed \(summary truncated to fit the publish size limit\)\._/.exec(summary);
+  assert.ok(notice, "the truncation is disclosed with its size cause");
+  assert.equal(
+    Number(notice[1]),
+    worstCaseFindings.length - rows.length,
+    "the disclosure counts every finding left out, row-cap overflow included",
+  );
+});
+
+test("#1283: the ordinary row-overflow disclosure is unchanged below the byte bound", () => {
+  const findings = Array.from({ length: FINDINGS_SUMMARY_MAX_ROWS + 3 }, (_unused, i) => ({
+    severity: "minor",
+    message: `finding ${i}`,
+  }));
+  const summary = renderFindingsSummary(findings, "inert");
+  assert.ok(summary.includes("_…and 3 more finding(s) not listed._"));
+  assert.ok(!summary.includes("publish size limit"), "no size-cause wording when only the row cap fired");
+  assert.ok(Buffer.byteLength(summary, "utf8") <= FINDINGS_SUMMARY_MAX_BYTES);
+});
+
+test("#1283: an ordinary findings set renders unchanged — no truncation, no notice", () => {
+  const summary = renderFindingsSummary(
+    [{ severity: "minor", file: "a.ts", line: 3, message: "ordinary" }],
+    "inert",
+  );
+  assert.ok(!summary.includes("not listed"));
+  assert.ok(summary.includes("| Minor | `a.ts:3` | ordinary |"));
+});
+
+test("#1283: the counts heading rides inside the aggregate bound", () => {
+  // Thousands of records outside the severity vocabulary stress the heading's
+  // digits (every finding aggregates into one unknown-severity clause), while
+  // max-width cells stress the table.
+  const findings = Array.from({ length: 4000 }, (_unused, i) => ({
+    severity: `unknown-severity-${i}&`.repeat(1),
+    file: "&".repeat(5000),
+    line: 1,
+    message: "&".repeat(5000),
+  }));
+  const summary = renderFindingsSummary(findings, "inert");
+  assert.equal(
+    summary.split("\n").filter((line) => line.startsWith("### Findings")).length,
+    1,
+    "the counts stay on the one heading line",
+  );
+  assert.ok(
+    Buffer.byteLength(summary, "utf8") <= FINDINGS_SUMMARY_MAX_BYTES,
+    `heading + table fit the aggregate bound (${Buffer.byteLength(summary, "utf8")})`,
   );
 });
 

@@ -538,6 +538,7 @@ function mockPlatform(): PlatformReadAdapter {
       number: 7,
       title: "Update README",
       body: "",
+      state: "open",
       draft: false,
       head: { sha: "a".repeat(40), ref: "feature" },
       base: { ref: "main" },

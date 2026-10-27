@@ -13,6 +13,16 @@ import { safePath } from "../findings/safe-path.js";
 /** Cap on the `::error` annotations the gate emits for one run. */
 export const BLOCKING_ANNOTATION_LIMIT = 10;
 
+/** #1284: cap on the model-controlled finding path every blocking renderer
+ * emits (the `file=` annotation property and the gate-summary location).
+ * Mirrors `FINDINGS_SUMMARY_MAX_LOCATION_CHARS` on the published findings
+ * table (#1249/#1281): the cap applies to the CONTENT before escaping,
+ * because the workflow-command property escaping inflates up to five-fold
+ * (`%` → `%25`), so the published annotation line and the gate summary
+ * stay bounded even for a hostile finding. Truncation is a plain prefix
+ * slice, no ellipsis: a location is an anchor, not prose. */
+export const BLOCKING_LOCATION_MAX_CHARS = 300;
+
 /** Escape a workflow-command PROPERTY value (`file=`, `line=`): the runner
  * decodes `%25`/`%0D`/`%0A`/`%3A`/`%2C`; percent first so an already-encoded
  * sequence survives. */
@@ -46,9 +56,27 @@ interface NormalizedFinding {
   message: string;
 }
 
+/** #1284: the render-bounded form of an already-safe path. The full path is
+ * gated by `safePath` FIRST (truncation must never mask a traversal in the
+ * part it drops); then the rendered prefix is re-gated, because a cut
+ * inside a longer segment can manufacture a `..` the full path never had
+ * (`a/.../b` truncated to `a/..`). A bounded value that fails the predicate
+ * fails closed to "no location", the same bar as {@link safePath}. */
+function boundedLocation(path: unknown): string {
+  // A UTF-16 slice may split a surrogate pair at the boundary and render one
+  // replacement character — deliberately the same behavior as the pinned
+  // table cap (`FINDINGS_SUMMARY_MAX_LOCATION_CHARS`), and inert: a lone
+  // surrogate is none of `%`/`:`/`,`/CR/LF/NUL/`/`, so it cannot forge or
+  // dodge the workflow-command escaping.
+  if (!safePath(path)) return "";
+  return path.length <= BLOCKING_LOCATION_MAX_CHARS ? path : safePath(path.slice(0, BLOCKING_LOCATION_MAX_CHARS)) ? path.slice(0, BLOCKING_LOCATION_MAX_CHARS) : "";
+}
+
 /** A usable finding record: an object with a `severity`; `file`/`line`/
  * `message` are normalized leniently (never a throw) — a missing or
- * ill-typed field just means "no location"/"no line"/"empty message". */
+ * ill-typed field just means "no location"/"no line"/"empty message", and
+ * an over-long `file` is truncated to {@link BLOCKING_LOCATION_MAX_CHARS}
+ * (#1284). */
 function normalize(value: unknown): NormalizedFinding | null {
   if (!isRecord(value)) return null;
   const severity = value.severity;
@@ -56,7 +84,7 @@ function normalize(value: unknown): NormalizedFinding | null {
   const line = value.line;
   return {
     severity,
-    file: safePath(value.file) ? value.file : "",
+    file: boundedLocation(value.file),
     line: typeof line === "number" && Number.isSafeInteger(line) && line > 0 ? line : 0,
     message: typeof value.message === "string" ? value.message : "",
   };

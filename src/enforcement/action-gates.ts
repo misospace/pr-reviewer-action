@@ -48,6 +48,15 @@ export const ACTION_GATES: readonly ActionGate[] = [
     // not the re-review label never reviews at all.
     marker: "\"unrelated-label\"",
   },
+  {
+    id: "closed-pr-skip",
+    subjects: ["closed", "merged"],
+    implementation: "src/precheck/decide.ts",
+    // The #1301 closed/merged gate's `skip_reason` value, quoted: a
+    // terminal PR (a merged PR reports `state: "closed"` on both forges) is
+    // never reviewed on the shared admission path.
+    marker: "\"pr-closed\"",
+  },
 ];
 
 /**

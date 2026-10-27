@@ -486,6 +486,29 @@ test("#914: an authorized comment on a closed PR is skipped as comment-pr-closed
   assert.equal(output.skip_reason, "comment-pr-closed");
 });
 
+test("#1301: an authorized comment on a PR with a missing/non-string state reviews (state unknown reads open)", async () => {
+  // The shared `derivePrState` refactor must preserve the comment gate's
+  // original boundary: only an explicit terminal `state` skips; a missing or
+  // non-string one reads as open (the pulls API always supplies one), so the
+  // command is accepted and the PR reviews.
+  const env = baseEnv();
+  const ghApi = { "repos/o/r/collaborators/alice/permission": { permission: "write" } };
+  const missingState = { ...sameRepoPr() as object };
+  delete (missingState as Record<string, unknown>).state;
+  const absent = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", { diff: DIFF, pr: missingState, gh_api: ghApi }),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(absent.should_review, "true");
+  const nonString = await runPrecheck({
+    env,
+    adapter: new FixtureAdapter("github", { diff: DIFF, pr: { ...sameRepoPr() as object, state: null }, gh_api: ghApi }),
+    event: issueCommentEvent("/ai-review", "alice"),
+  });
+  assert.equal(nonString.should_review, "true");
+});
+
 test("#961: an authorized comment on a draft PR is skipped as comment-pr-draft", async () => {
   const env = baseEnv();
   const platform: Platform = {

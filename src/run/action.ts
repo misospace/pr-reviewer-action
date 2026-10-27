@@ -10,7 +10,7 @@ import { requireImplementedBackend } from "../platform/tangled.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { stageEnvFromConfig } from "./env.js";
-import { buildPublishApi, publishInputFromEnv, publishWith, readEvent, type StepEvent } from "./entrypoints.js";
+import { buildPublishApi, publishInputFromEnv, publishWithOutcome, readEvent, type StepEvent } from "./entrypoints.js";
 import { runActionFollowUp } from "./followup-action.js";
 import { publishStepRuns } from "../publish/publish.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
@@ -377,7 +377,14 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
         }
         : {}),
     };
-    publishFailed = (await publishWith(input, seam, runDir)) !== 0;
+    const publish = await publishWithOutcome(input, seam, runDir);
+    // #1257: the review-step outputs describe the review this run PRODUCED;
+    // a superseded publication exits 0 exactly like a published one, so this
+    // output is what disambiguates them for downstream consumers. Written
+    // only when publication was attempted — absent means "not attempted"
+    // (see the publish-status contract description).
+    writeOutputs(env, [["publish-status", publish.status]]);
+    publishFailed = publish.exitCode !== 0;
   }
 
   // ── Re-review label ───────────────────────────────────────────────────

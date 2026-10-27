@@ -115,6 +115,20 @@ export const FINDINGS_SUMMARY_MAX_LOCATION_CHARS = 300;
  * published cell is at most roughly five times this. */
 export const FINDINGS_SUMMARY_MAX_MESSAGE_CHARS = 300;
 
+/** #1283: aggregate bound on the WHOLE rendered findings-summary block — the
+ * counts heading, the table header, every row, and the overflow disclosure —
+ * measured in UTF-8 bytes on the exact string `renderFindingsSummary` returns.
+ *
+ * The per-cell caps (#1249 / #1281) bound every cell individually, but not the
+ * summary as a whole: a full table of max-width rows is 50 × (64 + 300 + 300)
+ * characters before table escaping expands it up to five-fold, which still
+ * overruns the forge review-body limit (~65,536 characters on GitHub) and
+ * makes the publication fail outright. 32,768 bytes is half that limit, so
+ * even the worst-case summary leaves the other half for the rest of the body.
+ * Legitimate runs are unaffected: 50 rows of ordinary findings render well
+ * under 10 KB. */
+export const FINDINGS_SUMMARY_MAX_BYTES = 32_768;
+
 /** Bound one model-controlled token for the findings summary: the whitespace is
  * collapsed (so a newline can never forge a heading) and the text is truncated
  * to `max` characters BEFORE table escaping — escaping expands the text (two-fold
@@ -247,6 +261,17 @@ function locationCell(finding: Record<string, unknown>): string {
  * and the finding count — never by how many distinct severities a run
  * produced — and no severity can forge a count token or a clause there.
  *
+ * #1283: the per-cell caps do not bound the summary AGGREGATE — a full table
+ * of max-width rows still overruns the forge review-body limit and fails the
+ * publication outright. So the whole returned block (counts heading, table
+ * header, rows, and overflow disclosure) is capped at
+ * `FINDINGS_SUMMARY_MAX_BYTES` UTF-8 bytes: rows past the byte budget are
+ * dropped and disclosed in the same `_…and N more finding(s) not listed…_`
+ * line the row overflow uses, with the size cause named. The worst-case
+ * disclosure is reserved up front, so the bound holds for the exact string
+ * returned — and the counts heading, which the block measurement includes,
+ * is bounded by the same contract.
+ *
  * Per-surface policy for the message cell (#975 / #988): the strict
  * published body (publish.ts) calls this with no opts, keeping the operator's
  * `upstream-link-mode` (linkMode) rendering verbatim; the step summary
@@ -265,12 +290,28 @@ export function renderFindingsSummary(
   const rows = findings.filter((item): item is Record<string, unknown> => isRecord(item));
   if (rows.length === 0) return "";
   const counts = severityCountsLabel(rows);
-  const lines = [
+  const header = [
     `### Findings${counts ? ` (${counts})` : ""}`,
     "",
     "| Severity | Location | Finding |",
     "| --- | --- | --- |",
   ];
+  // #1283: the rendered block is bounded in aggregate. Every row is admitted
+  // only while the block still fits `FINDINGS_SUMMARY_MAX_BYTES` WITH room
+  // reserved for the worst-case overflow disclosure (the long wording and the
+  // largest possible omitted count, `rows.length`), so the byte bound holds
+  // for the exact string returned here — including the counts heading, which
+  // the same bound therefore measures.
+  const reservedTailBytes = Buffer.byteLength(
+    `\n\n_…and ${rows.length} more finding(s) not listed (summary truncated to fit the publish size limit)._\n`,
+    "utf8",
+  );
+  // The closed-vocabulary heading and the reserved worst-case tail are a few
+  // hundred bytes at most (the heading is bounded by #1249 and the omitted
+  // count by log10(rows.length)), so the loop below can always admit at least
+  // one row under the 32 KiB bound; the bound itself never depends on that.
+  let usedBytes = Buffer.byteLength(`\n\n${header.join("\n")}`, "utf8");
+  const rendered: string[] = [];
   for (const finding of rows.slice(0, FINDINGS_SUMMARY_MAX_ROWS)) {
     const rawSeverity = typeof finding.severity === "string" ? finding.severity : "info";
     const label = boundedSummaryToken(
@@ -285,10 +326,22 @@ export function renderFindingsSummary(
     );
     // #988: fence only non-empty messages; an empty message stays an empty cell.
     const message = opts?.messageAsInlineCode === true && body !== "" ? fenceInlineCode(body) : body;
-    lines.push(`| ${escapeTableCell(label)} | ${locationCell(finding)} | ${message} |`);
+    const line = `| ${escapeTableCell(label)} | ${locationCell(finding)} | ${message} |`;
+    const lineBytes = Buffer.byteLength(line, "utf8") + 1;
+    if (usedBytes + lineBytes + reservedTailBytes > FINDINGS_SUMMARY_MAX_BYTES) break;
+    usedBytes += lineBytes;
+    rendered.push(line);
   }
-  if (rows.length > FINDINGS_SUMMARY_MAX_ROWS) {
-    lines.push("", `_…and ${rows.length - FINDINGS_SUMMARY_MAX_ROWS} more finding(s) not listed._`);
+  const lines = [...header, ...rendered];
+  const omitted = rows.length - rendered.length;
+  if (omitted > 0) {
+    // Disclose a byte-budget cut the way the row overflow already is, in the
+    // same italic `_…and N more finding(s) not listed…_` line — with the size
+    // cause visible so a reader never mistakes it for the ordinary row cap.
+    const sizeTruncated = rendered.length < Math.min(rows.length, FINDINGS_SUMMARY_MAX_ROWS);
+    lines.push("", sizeTruncated
+      ? `_…and ${omitted} more finding(s) not listed (summary truncated to fit the publish size limit)._`
+      : `_…and ${omitted} more finding(s) not listed._`);
   }
   return `\n\n${lines.join("\n")}\n`;
 }
