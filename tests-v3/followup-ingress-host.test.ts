@@ -324,10 +324,13 @@ test("an authorized question on a draft PR is ignored: no model, no post", async
 });
 
 test("an unprovable PR state fails closed: no model, no post", async () => {
-  for (const options of [
-    { prState: { state: "unknown", draft: "unknown" } },
-    { prState: { state: "open", draft: "unknown" } },
-    { prStateThrows: true },
+  for (const { options, reason } of [
+    { options: { prState: { state: "unknown", draft: "unknown" } }, reason: "pr-state-unknown" },
+    { options: { prState: { state: "unknown", draft: "not-draft" } }, reason: "pr-state-unknown" },
+    // #1310: an unprovable draft is a distinct refusal from an unprovable
+    // open/closed state.
+    { options: { prState: { state: "open", draft: "unknown" } }, reason: "pr-draft-unknown" },
+    { options: { prStateThrows: true }, reason: "pr-state-unknown" },
   ] as const) {
     const { adapter, calls } = makeAdapter(options);
     let answerCalls = 0;
@@ -339,7 +342,7 @@ test("an unprovable PR state fails closed: no model, no post", async () => {
     });
     const question = "@reviewer-bot why?";
     const outcome = await consumer.handleEvent(commentEvent(question), question);
-    assert.deepEqual(outcome, { status: "ignored", reason: "pr-state-unknown" });
+    assert.deepEqual(outcome, { status: "ignored", reason });
     assert.equal(answerCalls, 0);
     assert.equal(calls.postComment.length, 0);
     assert.equal(calls.readPrState.length, 1, "the state read is attempted once, then fails closed");

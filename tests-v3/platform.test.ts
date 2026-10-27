@@ -229,16 +229,22 @@ test("deriveIsFork treats unknown origins as forks", () => {
 
 // ── PR-state derivation (#1298) ──────────────────────────────────────────
 
-test("derivePrStateReading mirrors the comment-command gate and fails closed on non-objects", () => {
+test("derivePrStateReading fails closed on an unprovable state (#1310) and on non-objects", () => {
   // A merged PR reports `closed` on both forges; casing must not dodge it.
   assert.deepEqual(derivePrStateReading({ state: "closed", draft: false }), { state: "closed", draft: "not-draft" });
   assert.equal(derivePrStateReading({ state: "CLOSED", draft: false }).state, "closed");
   assert.deepEqual(derivePrStateReading({ state: "open", draft: true }), { state: "open", draft: "draft" });
-  // A fetched object without a usable `state` reads open (the pulls API
-  // always supplies one — same as the decide.ts gate); draft stays strict:
-  // only an explicit boolean is authoritative.
-  assert.deepEqual(derivePrStateReading({}), { state: "open", draft: "unknown" });
-  assert.equal(derivePrStateReading({ state: 7, draft: false }).state, "open");
+  assert.equal(derivePrStateReading({ state: "Open", draft: false }).state, "open");
+  // #1310: only an explicit `open`/`closed` string is authoritative — a
+  // missing, non-string, or unrecognized `state` proves NOTHING and reads
+  // `unknown` (the #1301 admission doctrine: `draft: false` alone must not
+  // carry a PR through). Draft stays strict too: only an explicit boolean
+  // is authoritative.
+  assert.deepEqual(derivePrStateReading({}), { state: "unknown", draft: "unknown" });
+  assert.deepEqual(derivePrStateReading({ draft: false }), { state: "unknown", draft: "not-draft" });
+  assert.equal(derivePrStateReading({ state: 7, draft: false }).state, "unknown");
+  assert.equal(derivePrStateReading({ state: "merged", draft: false }).state, "unknown", "an unrecognized state string is not open");
+  assert.equal(derivePrStateReading({ state: " open ", draft: false }).state, "unknown", "a padded state string is not silently trimmed to open");
   assert.equal(derivePrStateReading({ state: "open", draft: "true" }).draft, "unknown", "a string draft is not authoritative");
   // A failed lookup (null) or a hostile non-object proves NOTHING.
   assert.deepEqual(derivePrStateReading(null), { state: "unknown", draft: "unknown" });
@@ -279,8 +285,8 @@ test("forgejo PR projection never fabricates an open state or a not-draft flag (
   const pr = await partial.getPr() as Record<string, unknown>;
   // A partial Forgejo read proves NOTHING about reviewability: `state` and
   // `draft` are carried through verbatim, so the shared admission gate fails
-  // closed (`pr-state-unknown` / `pr-draft`) instead of being handed a
-  // fabricated "open"/"not-draft".
+  // closed (`pr-state-unknown` / `pr-draft-unknown`, #1312) instead of being
+  // handed a fabricated "open"/"not-draft".
   assert.equal(pr.state, undefined, "a missing state must not be defaulted to open");
   assert.equal(pr.draft, undefined, "a missing draft must not be defaulted to not-draft");
   assert.equal(derivePrState(pr), "unknown");
@@ -299,6 +305,18 @@ test("forgejo PR projection never fabricates an open state or a not-draft flag (
   assert.equal(open.draft, false);
   assert.equal(derivePrState(open), "open");
   assert.equal(deriveDraftState(open), "not-draft");
+  // A malformed draft bit is carried through verbatim too — #1312 reads it
+  // as unproven (`pr-draft-unknown`), never as a proven draft or not-draft.
+  const malformed = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    baseUrl: "https://git.example.com",
+    token: "tok",
+    fetchImpl: jsonResponse({ number: 1, title: "t", body: "b", state: "open", draft: "yes", head: { sha: "h1", ref: "f" }, base: { sha: "b1", ref: "m" } }),
+  });
+  const unproven = await malformed.getPr() as Record<string, unknown>;
+  assert.equal(unproven.draft, "yes");
+  assert.equal(deriveDraftState(unproven), "unknown");
 });
 
 test("forgejo permission preflight resolves collaborator, owner, and unknown paths", async () => {

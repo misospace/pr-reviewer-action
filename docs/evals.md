@@ -636,13 +636,12 @@ directory whose name cannot collide with the harness's own tree (the checkout
 is `<work_dir>/<repo_full_name with "/" replaced by "-">`).
 
 Since #726 admission is the engine's first stage, the deleted fixture does not
-surface as a fixture error: the adapter serves no PR at all, and the run fails
-closed with skip reason `pr-draft` before any context artifact is written —
-the symptom points at the draft gate rather than at the deleted fixture. That
-cost PR #1117 CI cycles (`validate-python` red on `437d31c`, then again on the
-first fix attempt `ec0a224`). When an offline run skips `pr-draft` on a PR
-that is not a draft, first check whether the fixture directory was inside the
-checkout.
+surface as a later context error: the adapter serves no PR at all. Since #1312
+that is treated as an operational lookup failure and the run fails instead of
+returning a successful `pr-draft` skip. A *readable* fixture PR whose `draft`
+field is missing or malformed still fails closed, but now reports the distinct
+`pr-draft-unknown` reason. This distinction keeps a deleted fixture/API outage
+from masquerading as PR state while preserving fail-closed admission.
 
 The harness's own semantic-corpus entries are unaffected: their fixture
 repository is freshly materialized per entry (`_materialize_semantic_fixture`:

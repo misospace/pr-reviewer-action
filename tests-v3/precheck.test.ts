@@ -833,28 +833,28 @@ test("#961: a ready PR reviews; an absent draft field fails closed", async () =>
   delete absentPr.draft;
   const absent = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", { ...fx.platform, pr: absentPr }) });
   assert.equal(absent.should_review, "false");
-  assert.equal(absent.skip_reason, "pr-draft");
+  assert.equal(absent.skip_reason, "pr-draft-unknown");
 });
 
-test("#961: a shared-path PR lookup failure fails closed as pr-draft", async () => {
+test("#1312: a shared-path PR lookup failure fails the run instead of succeeding as a skip", async () => {
   const fx = fixture("changed-diff-reviews");
-  const output = await runPrecheck({
-    env: fx.env,
-    adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true }),
-  });
-  assert.equal(output.should_review, "false");
-  assert.equal(output.skip_reason, "pr-draft");
-  // The lookup failed, so there is no identity to report.
-  assert.equal(output.head_sha, "");
-  assert.equal(output.base_sha, "");
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true }),
+    }),
+    /Could not read pull request .*refusing to treat a forge\/API lookup failure as a successful review skip/,
+  );
 });
 
-test("#961: an unrecognizable draft value fails closed", async () => {
+test("#1312: missing, null, or non-boolean draft values fail closed as pr-draft-unknown", async () => {
   const fx = fixture("changed-diff-reviews");
-  const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft: "yes" } };
-  const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", platform) });
-  assert.equal(output.should_review, "false");
-  assert.equal(output.skip_reason, "pr-draft");
+  for (const draft of [null, "yes", 1]) {
+    const platform: Platform = { ...fx.platform, pr: { ...(fx.platform.pr as object), state: "open", draft } };
+    const output = await runPrecheck({ env: fx.env, adapter: new FixtureAdapter("github", platform) });
+    assert.equal(output.should_review, "false");
+    assert.equal(output.skip_reason, "pr-draft-unknown");
+  }
 });
 
 test("#961: even a forced re-review skips a draft PR", async () => {
@@ -1077,12 +1077,14 @@ interface SkipAdapter extends PlatformAdapter {
   externalChecks: (sha: string) => Promise<ExternalCheck[] | null>;
 }
 
-function skipAdapter812(external: ExternalCheck[] | null, body: string, options: { pr?: unknown } = {}): SkipAdapter & { readCount(): number } {
+function skipAdapter812(external: ExternalCheck[] | null, body: string, options: { pr?: unknown; prFails?: boolean } = {}): SkipAdapter & { readCount(): number } {
   let reads = 0;
   return {
     readCount: () => reads,
     platform: "github",
-    getPr: () => Promise.resolve(options.pr ?? { number: 42, state: "open", draft: false, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
+    getPr: () => options.prFails
+      ? Promise.resolve(null)
+      : Promise.resolve(options.pr ?? { number: 42, state: "open", draft: false, head: { sha: "head-new", ref: "f" }, base: { ref: "main", sha: "base-new" }, user: { login: "u" } }),
     getPrDiff: () => Promise.resolve("diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"),
     listIssueComments: () => Promise.resolve([{ id: 1, body, created_at: "2024-01-01T00:00:00Z", author: "pr-reviewer[bot]" }]),
     listPrReviews: () => Promise.resolve([]),
@@ -1142,6 +1144,18 @@ test("#812: a transient external-checks read fails closed — fresh review, neve
   const output = await runPrecheck({ env: skipEnv812(), adapter });
   assert.equal(output.should_review, "true");
   assert.equal(output.skip_reason, "ci-stale-carried-verdict");
+});
+
+test("#1312: a PR lookup failure on the #812 stale re-entry fails the run too", async () => {
+  // The stale-carried-verdict re-entry re-reads the PR through the shared
+  // seam. A null lookup there is the same operational failure as on the
+  // fall-through route: it must reject, never return should_review=true on
+  // an unreadable PR (or fall back to a green skip).
+  const adapter = skipAdapter812([{ name: "ci", state: "success" }], issuesCommentBody812("issues", "failure"), { prFails: true });
+  await assert.rejects(
+    runPrecheck({ env: skipEnv812(), adapter }),
+    /Could not read pull request .*refusing to treat a forge\/API lookup failure as a successful review skip/,
+  );
 });
 
 test("#812: an adapter without the externalChecks seam keeps the exact v2 skip", async () => {

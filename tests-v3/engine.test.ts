@@ -86,17 +86,18 @@ function admissionAdapter(options: {
   comments?: { body: string; author?: string }[];
   identity?: string | null;
   ghApi?: (endpoint: string) => Promise<{ data?: unknown; error?: string }>;
+  getPr?: () => Promise<unknown | null>;
 } = {}): PlatformReadAdapter {
   const headSha = options.headSha ?? "a".repeat(40);
   return {
     platform: "github",
-    getPr: async () => ({
+    getPr: options.getPr ?? (async () => ({
       number: 7, title: "Update README", body: "", state: "open", draft: false,
       head: { sha: headSha, ref: "feature", repo: { full_name: "o/r" } },
       base: { sha: "b".repeat(40), ref: "main", repo: { full_name: "o/r" } },
       user: { login: "someone" }, changed_files: 1, additions: 1, deletions: 0,
       html_url: "https://github.com/o/r/pull/7",
-    }),
+    })),
     getPrDiff: async () => options.diff ?? "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n",
     listPrFiles: async () => ({ ok: true, data: [{ filename: "README.md", status: "modified", additions: 1, deletions: 0, changes: 1 }] }),
     getIssue: async () => ({ ok: false, error: "not served" }),
@@ -541,6 +542,24 @@ test("engine admission: a fresh event is admitted and the review runs", async ()
     assert.equal(result.admission.base_sha, "b".repeat(40));
     assert.equal(result.admission.is_fork_pr, "false");
     assert.equal(result.admissionBaseSha, "b".repeat(40));
+  } finally { await server.close(); f.cleanup(); }
+});
+
+test("engine admission: a failed PR lookup fails the run, never a green skip (#1312)", async () => {
+  // Pins the host-level half of the #1312 doctrine: the null lookup rejects
+  // through the engine, so no host adapter can turn a forge/API outage into
+  // a successful no-review result without tripping this test.
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    await assert.rejects(
+      runReviewEngine(
+        admissionRequest(server.url, f.runDir, { event: { name: "pull_request", action: "synchronize" }, eventHeadSha: "a".repeat(40) }),
+        { ...engineDeps(f.root, f.runDir), adapter: admissionAdapter({ getPr: async () => null }) },
+      ),
+      /Could not read pull request .*refusing to treat a forge\/API lookup failure as a successful review skip/,
+    );
+    assert.equal(server.requests.length, 0, "a failed admission lookup must never reach the model");
   } finally { await server.close(); f.cleanup(); }
 });
 
