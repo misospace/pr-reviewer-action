@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -12,7 +12,6 @@ import {
   structuralSyntaxProvider,
   syntaxContextToArtifact,
   type SyntaxFile,
-  type SyntaxProvider,
 } from "../src/context/syntax/index.js";
 import { declarationAt, detectLanguage } from "../src/context/change-anchors.js";
 
@@ -75,7 +74,7 @@ function fenceBlocks(markdown: string): string[][] {
 // The provider
 // ---------------------------------------------------------------------------
 
-test("the structural provider finds declarations and their extents in every supported language", () => {
+test("the structural provider finds declarations and their extents in every supported language", async () => {
   const python = structuralSyntaxProvider.declarations(syntaxFile("app.py", [
     "def handle(item):",
     "    return item",
@@ -147,7 +146,7 @@ test("the structural provider finds declarations and their extents in every supp
   );
 });
 
-test("identifiersOnLine drops keywords, string content, comment content and the declaration's own name", () => {
+test("identifiersOnLine drops keywords, string content, comment content and the declaration's own name", async () => {
   const source = syntaxFile("app.py", [
     "def handle(item):  # calls helper()",
     "    return compute('handle')",
@@ -160,7 +159,7 @@ test("identifiersOnLine drops keywords, string content, comment content and the 
   assert.deepEqual(structuralSyntaxProvider.identifiersOnLine(source, 99), []);
 });
 
-test("classify reads a definition, a call, a use and an absence", () => {
+test("classify reads a definition, a call, a use and an absence", async () => {
   const source = syntaxFile("app.py", [
     "CONFIG = 1",
     "",
@@ -179,7 +178,7 @@ test("classify reads a definition, a call, a use and an absence", () => {
   assert.equal(structuralSyntaxProvider.classify(source, 99, "handle"), "unknown");
 });
 
-test("a local binding that shadows the name is not a caller", () => {
+test("a local binding that shadows the name is not a caller", async () => {
   // A nested function of the same name.
   const nested = syntaxFile("other.py", [
     "def process(items):",
@@ -220,7 +219,7 @@ test("a local binding that shadows the name is not a caller", () => {
 // The builder
 // ---------------------------------------------------------------------------
 
-test("the builder returns the whole declaration the change touches, not just the hunk", () => {
+test("the builder returns the whole declaration the change touches, not just the hunk", async () => {
   const root = workspace({
     "src/app.py": [
       "def handle(item):",
@@ -231,7 +230,7 @@ test("the builder returns the whole declaration the change touches, not just the
       "",
     ].join("\n"),
   });
-  const context = buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
+  const context = await buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
   assert.deepEqual(context.errors, []);
   assert.equal(context.declarations.length, 1);
   const declaration = context.declarations[0];
@@ -249,7 +248,7 @@ test("the builder returns the whole declaration the change touches, not just the
   assert.equal(declaration?.provenance.file, "src/app.py");
 });
 
-test("the builder finds the definition of an identifier a changed line references", () => {
+test("the builder finds the definition of an identifier a changed line references", async () => {
   const root = workspace({
     "src/app.py": [
       "from lib.helpers import compute",
@@ -264,7 +263,7 @@ test("the builder finds the definition of an identifier a changed line reference
       "",
     ].join("\n"),
   });
-  const context = buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[4, 4]]) });
+  const context = await buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[4, 4]]) });
   const definition = context.definitions.find((d) => d.name === "compute");
   assert.ok(definition);
   assert.equal(definition?.path, "lib/helpers.py");
@@ -274,7 +273,7 @@ test("the builder finds the definition of an identifier a changed line reference
   assert.equal(definition?.provenance.revision, null);
 });
 
-test("the builder finds a caller outside the diff and excludes same-name matches in another scope", () => {
+test("the builder finds a caller outside the diff and excludes same-name matches in another scope", async () => {
   const root = workspace({
     "src/app.py": [
       "def handle(item):",
@@ -304,7 +303,7 @@ test("the builder finds a caller outside the diff and excludes same-name matches
       "",
     ].join("\n"),
   });
-  const context = buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
+  const context = await buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
   assert.deepEqual(context.errors, []);
   const callers = context.callers.filter((c) => c.name === "handle");
   // The real caller is found; the local shadow and the sibling module's own
@@ -316,7 +315,7 @@ test("the builder finds a caller outside the diff and excludes same-name matches
   assert.equal(callers[0]?.provenance.revision, null);
 });
 
-test("a credential in a retrieved body is masked and the count rides along in the provenance", () => {
+test("a credential in a retrieved body is masked and the count rides along in the provenance", async () => {
   const root = workspace({
     "src/app.py": [
       "def handle(item):",
@@ -325,7 +324,7 @@ test("a credential in a retrieved body is masked and the count rides along in th
       "",
     ].join("\n"),
   });
-  const context = buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
+  const context = await buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
   const declaration = context.declarations[0];
   assert.ok(!(declaration?.body ?? "").includes("ghp_0123"));
   assert.ok((declaration?.body ?? "").includes("redacted:credential"));
@@ -336,7 +335,7 @@ test("a credential in a retrieved body is masked and the count rides along in th
   assert.equal(declaration?.provenance.revision, null);
 });
 
-test("the builder truncates at the hard caps and says so", () => {
+test("the builder truncates at the hard caps and says so", async () => {
   const root = workspace({
     "src/app.py": [
       "def handle(item):",
@@ -351,7 +350,7 @@ test("the builder truncates at the hard caps and says so", () => {
       "",
     ].join("\n"),
   });
-  const context = buildSyntaxContext({
+  const context = await buildSyntaxContext({
     workspace: root,
     anchors: anchors("src/app.py", [[2, 2]]),
     maxItems: 1,
@@ -360,7 +359,7 @@ test("the builder truncates at the hard caps and says so", () => {
   assert.equal(context.declarations.length + context.definitions.length + context.callers.length, 1);
 });
 
-test("a provider that throws degrades the stage instead of breaking it", () => {
+test("a provider that throws degrades the stage instead of breaking it", async () => {
   const root = workspace({
     "src/app.py": [
       "def handle(item):",
@@ -368,22 +367,16 @@ test("a provider that throws degrades the stage instead of breaking it", () => {
       "",
     ].join("\n"),
   });
-  const throwing: SyntaxProvider = {
-    id: "throwing",
-    declarations() {
-      throw new Error("provider exploded");
-    },
-    identifiersOnLine() {
-      throw new Error("provider exploded");
-    },
-    classify() {
-      throw new Error("provider exploded");
-    },
-  };
-  const context = buildSyntaxContext({
+  // The provider runs in its own worker thread: the runtime loads it from
+  // a MODULE (a worker cannot receive a function), and the module's
+  // factory returns a provider that throws on every call.
+  const context = await buildSyntaxContext({
     workspace: root,
     anchors: anchors("src/app.py", [[2, 2]]),
-    provider: throwing,
+    providerRegistration: {
+      id: "throwing",
+      loader: { kind: "module", module: join(__dirname, "fixtures", "syntax-provider-throwing.js") },
+    },
   });
   assert.deepEqual(context.declarations, []);
   assert.deepEqual(context.definitions, []);
@@ -394,7 +387,7 @@ test("a provider that throws degrades the stage instead of breaking it", () => {
   assert.equal(context.providerId, "throwing");
 
   // A malformed anchor artifact degrades the same way.
-  const malformed = buildSyntaxContext({ workspace: root, anchors: "not an artifact" });
+  const malformed = await buildSyntaxContext({ workspace: root, anchors: "not an artifact" });
   assert.deepEqual(malformed.declarations, []);
   assert.ok(malformed.errors.length > 0);
 });
@@ -403,7 +396,7 @@ test("a provider that throws degrades the stage instead of breaking it", () => {
 // The bounds: work, time and per-file skips
 // ---------------------------------------------------------------------------
 
-test("the builder bounds the WORK: a file with 20,000 declarations is capped and the build stays fast", () => {
+test("the builder bounds the WORK: a file with 20,000 declarations is capped and the build stays fast", async () => {
   const root = workspace({
     "src/app.py": "def handle(item):\n    return item\n",
   });
@@ -416,7 +409,7 @@ test("the builder bounds the WORK: a file with 20,000 declarations is capped and
   writeFileSync(join(root, "src", "bulk.py"), `${bulk.join("\n")}\n`);
 
   const started = Date.now();
-  const context = buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
+  const context = await buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
   const elapsed = Date.now() - started;
 
   assert.ok(elapsed < 5_000, `the build took ${elapsed}ms — the declaration cap did not bound the work`);
@@ -427,7 +420,7 @@ test("the builder bounds the WORK: a file with 20,000 declarations is capped and
   assert.ok(context.notes.some((note) => note.includes("declaration cap")), "the cap is recorded in the notes");
 });
 
-test("the changed-range cap drops ranges VISIBLY: truncated, a reason and a note", () => {
+test("the changed-range cap drops ranges VISIBLY: truncated, a reason and a note", async () => {
   const root = workspace({
     "src/app.py": "def handle(item):\n    return item\n",
   });
@@ -435,7 +428,7 @@ test("the changed-range cap drops ranges VISIBLY: truncated, a reason and a note
   // context, so the artifact must not present itself as complete.
   const ranges: [number, number][] = [];
   for (let index = 0; index < MAX_SYNTAX_CHANGED_RANGES + 1; index += 1) ranges.push([1, 1]);
-  const context = buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", ranges) });
+  const context = await buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", ranges) });
 
   assert.equal(context.truncated, true);
   assert.equal(context.truncatedReason, "anchor changed-range cap");
@@ -446,32 +439,27 @@ test("the changed-range cap drops ranges VISIBLY: truncated, a reason and a note
   );
 });
 
-test("the wall-clock bound stops the collection, keeps what was collected, and is not fatal", () => {
+test("the wall-clock bound stops the collection, keeps what was collected, and is not fatal", async () => {
   const root = workspace({
     "src/app.py": "def handle(item):\n    return item\n",
   });
-  // A clock that jumps past the bound once the provider has answered the
-  // identifier question: the bound is the module constant, only the clock
-  // is injectable.
-  let expired = false;
-  const provider: SyntaxProvider = {
-    id: "expiring",
-    declarations(file) {
-      return structuralSyntaxProvider.declarations(file);
-    },
-    identifiersOnLine(file, line) {
-      expired = true;
-      return structuralSyntaxProvider.identifiersOnLine(file, line);
-    },
-    classify(file, line, name) {
-      return structuralSyntaxProvider.classify(file, line, name);
-    },
-  };
-  const context = buildSyntaxContext({
+  // The provider runs in its own worker thread, so it cannot flip a flag
+  // in the parent's memory: it writes a MARKER FILE and the parent's
+  // injectable clock watches for it. The bound is the module constant,
+  // only the clock is injectable.
+  const marker = join(root, "expiry.marker");
+  const context = await buildSyntaxContext({
     workspace: root,
     anchors: anchors("src/app.py", [[2, 2]]),
-    provider,
-    monotonic: () => (expired ? 100 : 0),
+    providerRegistration: {
+      id: "expiring",
+      loader: {
+        kind: "module",
+        module: join(__dirname, "fixtures", "syntax-provider-expiring.js"),
+        options: { marker },
+      },
+    },
+    monotonic: () => (existsSync(marker) ? 100 : 0),
   });
 
   assert.equal(context.truncated, true);
@@ -481,13 +469,13 @@ test("the wall-clock bound stops the collection, keeps what was collected, and i
   assert.equal(context.declarations.length, 1, "what was already collected stays");
 });
 
-test("an unreadable changed file is a per-file skip, not a fatal error", () => {
+test("an unreadable changed file is a per-file skip, not a fatal error", async () => {
   const root = workspace({
     "src/app.py": "def handle(item):\n    return item\n",
   });
   // A changed file the head reader refuses: over the 2 MiB cap.
   writeFileSync(join(root, "src", "huge.py"), "x = 1\n".repeat(400_000));
-  const context = buildSyntaxContext({
+  const context = await buildSyntaxContext({
     workspace: root,
     anchors: {
       version: 1,
@@ -504,7 +492,7 @@ test("an unreadable changed file is a per-file skip, not a fatal error", () => {
   assert.ok(context.notes.some((note) => note.includes("src/huge.py")), "the skipped file is recorded");
 });
 
-test("a binary file is detected by a NUL anywhere in it, not only in its first lines", () => {
+test("a binary file is detected by a NUL anywhere in it, not only in its first lines", async () => {
   const root = workspace({
     "src/app.py": "def handle(item):\n    return item\n",
   });
@@ -512,7 +500,7 @@ test("a binary file is detected by a NUL anywhere in it, not only in its first l
   // 200 lines) would read this file as text and its pseudo-declarations
   // would enter the context.
   writeFileSync(join(root, "src", "blob.py"), `${"value = 1\n".repeat(300)}\u0000\nhandle(item)\n`);
-  const context = buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
+  const context = await buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]) });
   assert.deepEqual(context.errors, []);
   assert.equal(context.callers.length, 0, "a binary file is not read as text");
 
@@ -522,11 +510,11 @@ test("a binary file is detected by a NUL anywhere in it, not only in its first l
     "src/app.py": "def handle(item):\n    return item\n",
     "src/blob.py": `${"value = 1\n".repeat(300)}\nhandle(item)\n`,
   });
-  const read = buildSyntaxContext({ workspace: clean, anchors: anchors("src/app.py", [[2, 2]]) });
+  const read = await buildSyntaxContext({ workspace: clean, anchors: anchors("src/app.py", [[2, 2]]) });
   assert.equal(read.callers.length, 1, "the text file's call site is found");
 });
 
-test("a changed file under a generated/vendor directory contributes no syntax context", () => {
+test("a changed file under a generated/vendor directory contributes no syntax context", async () => {
   // The candidate listing already excludes these directories; a changed file
   // under one of them must be excluded the same way, or vendored code would
   // contribute touched declarations and referenced identifiers. The cases
@@ -559,7 +547,7 @@ test("a changed file under a generated/vendor directory contributes no syntax co
         "",
       ].join("\n"),
     });
-    const context = buildSyntaxContext({
+    const context = await buildSyntaxContext({
       workspace: root,
       anchors: {
         version: 1,
@@ -603,7 +591,7 @@ test("a changed file under a generated/vendor directory contributes no syntax co
   }
 });
 
-test("a symlinked file contributes nothing: the reader refuses it and the changed file is skipped", () => {
+test("a symlinked file contributes nothing: the reader refuses it and the changed file is skipped", async () => {
   const root = workspace({
     "src/app.py": [
       "from lib.helpers import compute",
@@ -619,7 +607,7 @@ test("a symlinked file contributes nothing: the reader refuses it and the change
   writeFileSync(join(outside, "helpers.py"), "def compute(items):\n    return sum(items)\n");
   mkdirSync(join(root, "lib"), { recursive: true });
   symlinkSync(join(outside, "helpers.py"), join(root, "lib", "helpers.py"));
-  const context = buildSyntaxContext({
+  const context = await buildSyntaxContext({
     workspace: root,
     anchors: {
       version: 1,
@@ -650,7 +638,7 @@ test("a symlinked file contributes nothing: the reader refuses it and the change
     ].join("\n"),
     "lib/helpers.py": ["def compute(items):", "    return sum(items)", ""].join("\n"),
   });
-  const read = buildSyntaxContext({ workspace: plain, anchors: anchors("src/app.py", [[4, 4]]) });
+  const read = await buildSyntaxContext({ workspace: plain, anchors: anchors("src/app.py", [[4, 4]]) });
   assert.equal(read.definitions.length, 1, "the regular file's definition is found");
 });
 
@@ -658,21 +646,22 @@ test("a symlinked file contributes nothing: the reader refuses it and the change
 // The registry
 // ---------------------------------------------------------------------------
 
-test("the registry resolves an unknown provider id to the default with a reason", () => {
+test("the registry resolves an unknown provider id to the default with a reason", async () => {
   const unknown = resolveSyntaxProvider("tree-sitter");
-  assert.equal(unknown.provider.id, "structural");
+  assert.equal(unknown.registration.id, "structural");
+  assert.deepEqual(unknown.registration.loader, { kind: "builtin" });
   assert.equal(unknown.requestedId, "tree-sitter");
   assert.equal(unknown.fallback, true);
   assert.ok((unknown.reason ?? "").includes("tree-sitter"));
 
   const fallback = resolveSyntaxProvider();
-  assert.equal(fallback.provider.id, "structural");
+  assert.equal(fallback.registration.id, "structural");
   assert.equal(fallback.requestedId, "");
   assert.equal(fallback.fallback, false);
   assert.equal(fallback.reason, null);
 
   const named = resolveSyntaxProvider("structural");
-  assert.equal(named.provider.id, "structural");
+  assert.equal(named.registration.id, "structural");
   assert.equal(named.fallback, false);
 });
 
@@ -680,7 +669,7 @@ test("the registry resolves an unknown provider id to the default with a reason"
 // The renderers
 // ---------------------------------------------------------------------------
 
-test("the JSON renderer emits a parseable, snake_case artifact", () => {
+test("the JSON renderer emits a parseable, snake_case artifact", async () => {
   const root = workspace({
     "src/app.py": [
       "def handle(item):",
@@ -689,7 +678,7 @@ test("the JSON renderer emits a parseable, snake_case artifact", () => {
     ].join("\n"),
   });
   const artifact = syntaxContextToArtifact(
-    buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]), headRevision: "abc123" }),
+    await buildSyntaxContext({ workspace: root, anchors: anchors("src/app.py", [[2, 2]]), headRevision: "abc123" }),
   );
   const json = renderSyntaxContextJson(artifact);
   assert.ok(json.endsWith("\n"));
@@ -719,7 +708,7 @@ test("the JSON renderer emits a parseable, snake_case artifact", () => {
   assert.equal((declarations[0]?.provenance as Record<string, unknown>).revision, undefined);
 });
 
-test("the Markdown renderer keeps hostile content inside its fence", () => {
+test("the Markdown renderer keeps hostile content inside its fence", async () => {
   const artifact = {
     artifact_version: "1",
     head_revision: null,
@@ -768,7 +757,7 @@ test("the Markdown renderer keeps hostile content inside its fence", () => {
 // The shared declaration grammar
 // ---------------------------------------------------------------------------
 
-test("declarationAt reports the expected syntactic kinds", () => {
+test("declarationAt reports the expected syntactic kinds", async () => {
   assert.deepEqual(declarationAt("def handle(item):", "python"), ["handle", "high", "function"]);
   assert.deepEqual(declarationAt("class Thing:", "python"), ["Thing", "high", "class"]);
   assert.deepEqual(declarationAt("func Handle(item string) string {", "go"), ["Handle", "high", "function"]);

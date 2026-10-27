@@ -420,13 +420,13 @@ const SYNTAX_CONTEXT_ARTIFACTS = ["syntax-context.json", "syntax-context.md", "s
  * anchors are unavailable, when the PR is a FORK, or when the build fails:
  * the review then falls back to the existing lexical related-code context
  * and never breaks. */
-export function buildSyntaxContextSection(
+export async function buildSyntaxContextSection(
   ws: RunWorkspace,
   env: StageEnv,
   workspace: string,
   anchors: ChangeAnchorsArtifact | null,
   headRevision: string | null,
-): void {
+): Promise<void> {
   for (const name of SYNTAX_CONTEXT_ARTIFACTS) ws.write(name, "");
   // The fork boundary is enforced IN CODE, not by the workflow pin.
   //
@@ -462,12 +462,14 @@ export function buildSyntaxContextSection(
   try {
     // The registry resolves the provider and reports what it got: an
     // unknown id degrades to the default provider with a recorded reason
-    // (never an exception).
+    // (never an exception). The provider itself runs in an isolated worker
+    // thread, so a provider that blocks cannot hold the review past the
+    // stage's wall-clock bound.
     const resolution = resolveSyntaxProvider(env.SYNTAX_CONTEXT_PROVIDER);
-    const context = buildSyntaxContext({
+    const context = await buildSyntaxContext({
       workspace,
       anchors,
-      provider: resolution.provider,
+      providerRegistration: resolution.registration,
       providerFallback: resolution.fallback,
       providerFallbackReason: resolution.reason,
       headRevision,

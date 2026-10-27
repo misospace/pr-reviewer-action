@@ -39,7 +39,6 @@ import {
   renderSyntaxContextMarkdown,
   syntaxContextToArtifact,
   type SyntaxContext,
-  type SyntaxProvider,
 } from "../src/context/syntax/index.js";
 import { buildSyntaxContextSection } from "../src/run/stages.js";
 import { RunWorkspace } from "../src/run/workspace.js";
@@ -226,7 +225,7 @@ async function measure(): Promise<MeasurementRow[]> {
     writeFileSync(join(root, testCase.changedPath), testCase.changedContent);
     const anchors = anchorsFor(root, testCase.changedPath);
     const artifact = await lexicalArtifact(root, anchors, testCase.changedPath);
-    const context = buildSyntaxContext({ workspace: root, anchors });
+    const context = await buildSyntaxContext({ workspace: root, anchors });
 
     // The bytes each path would put into the corpus (clipped the way the
     // pipeline clips them).
@@ -404,10 +403,10 @@ function stageRepo(): { root: string; anchors: ChangeAnchorsArtifact } {
   return { root, anchors: anchorsFor(root, "src/app.py") };
 }
 
-test("#764 stage: disabled writes empty artifacts and the corpus carries no syntax section", () => {
+test("#764 stage: disabled writes empty artifacts and the corpus carries no syntax section", async () => {
   const { root, anchors } = stageRepo();
   const ws = new RunWorkspace(join(root, ".run"), false);
-  buildSyntaxContextSection(ws, stageEnv({}), root, anchors, "abc123");
+  await buildSyntaxContextSection(ws, stageEnv({}), root, anchors, "abc123");
   assert.equal(ws.read("syntax-context.json")?.length, 0);
   assert.equal(ws.read("syntax-context.md")?.length, 0);
   assert.equal(ws.read("syntax-context.truncated.md")?.length, 0);
@@ -415,10 +414,10 @@ test("#764 stage: disabled writes empty artifacts and the corpus carries no synt
   assert.ok(!corpus.includes("# Syntax-Aware Context"));
 });
 
-test("#764 stage: enabled writes the artifacts and the corpus carries the syntax section", () => {
+test("#764 stage: enabled writes the artifacts and the corpus carries the syntax section", async () => {
   const { root, anchors } = stageRepo();
   const ws = new RunWorkspace(join(root, ".run"), false);
-  buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
+  await buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
 
   const json = ws.readText("syntax-context.json") ?? "";
   const artifact = JSON.parse(json) as Record<string, unknown>;
@@ -439,10 +438,10 @@ test("#764 stage: enabled writes the artifacts and the corpus carries the syntax
   assert.ok(relatedAt >= 0 && syntaxAt > relatedAt);
 });
 
-test("#764 stage: an unknown provider id degrades to the default provider and records the reason", () => {
+test("#764 stage: an unknown provider id degrades to the default provider and records the reason", async () => {
   const { root, anchors } = stageRepo();
   const ws = new RunWorkspace(join(root, ".run"), false);
-  buildSyntaxContextSection(
+  await buildSyntaxContextSection(
     ws,
     stageEnv({ SYNTAX_CONTEXT: "true", SYNTAX_CONTEXT_PROVIDER: "tree-sitter" }),
     root,
@@ -456,32 +455,27 @@ test("#764 stage: an unknown provider id degrades to the default provider and re
   assert.equal((artifact.declarations as unknown[]).length, 1, "the default provider still retrieved the context");
 });
 
-test("#764 stage: a provider that throws leaves empty artifacts and never throws", () => {
+test("#764 stage: a provider that throws leaves empty artifacts and never throws", async () => {
   const root = gitRepo({ "src/app.py": "def handle(item):\n    return item\n" });
   writeFileSync(join(root, "src/app.py"), "def handle(item):\n    return item + 1\n");
   const anchors = anchorsFor(root, "src/app.py");
+  // Every provider runs in an isolated worker thread, so the registry holds
+  // a DESCRIPTOR: the module the worker loads and the options it hands to
+  // the module's factory.
   registerSyntaxProvider("throwing", {
     id: "throwing",
-    declarations() {
-      throw new Error("provider exploded");
-    },
-    identifiersOnLine() {
-      throw new Error("provider exploded");
-    },
-    classify() {
-      throw new Error("provider exploded");
-    },
-  } satisfies SyntaxProvider);
+    loader: { kind: "module", module: join(__dirname, "fixtures", "syntax-provider-throwing.js") },
+  });
   const ws = new RunWorkspace(join(root, ".run"), false);
-  assert.doesNotThrow(() => {
-    buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true", SYNTAX_CONTEXT_PROVIDER: "throwing" }), root, anchors, "abc123");
+  await assert.doesNotReject(async () => {
+    await buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true", SYNTAX_CONTEXT_PROVIDER: "throwing" }), root, anchors, "abc123");
   });
   assert.equal(ws.read("syntax-context.json")?.length, 0);
   assert.equal(ws.read("syntax-context.md")?.length, 0);
   assert.equal(ws.read("syntax-context.truncated.md")?.length, 0);
 });
 
-test("#764 stage: a stage-level failure resets every artifact to empty", () => {
+test("#764 stage: a stage-level failure resets every artifact to empty", async () => {
   const { root, anchors } = stageRepo();
   // A workspace whose write of a NON-empty payload fails: the stage's
   // catch must reset the artifacts instead of leaving a half-written
@@ -494,17 +488,17 @@ test("#764 stage: a stage-level failure resets every artifact to empty", () => {
       written.set(name, text);
     },
   } as unknown as RunWorkspace;
-  assert.doesNotThrow(() => {
-    buildSyntaxContextSection(failing, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
+  await assert.doesNotReject(async () => {
+    await buildSyntaxContextSection(failing, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
   });
   assert.deepEqual([...written.keys()].sort(), ["syntax-context.json", "syntax-context.md", "syntax-context.truncated.md"]);
   for (const value of written.values()) assert.equal(value, "");
 });
 
-test("#764 stage: syntax-context-max-bytes caps the corpus section", () => {
+test("#764 stage: syntax-context-max-bytes caps the corpus section", async () => {
   const { root, anchors } = stageRepo();
   const ws = new RunWorkspace(join(root, ".run"), false);
-  buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true", SYNTAX_CONTEXT_MAX_BYTES: "200" }), root, anchors, "abc123");
+  await buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true", SYNTAX_CONTEXT_MAX_BYTES: "200" }), root, anchors, "abc123");
   const truncated = ws.read("syntax-context.truncated.md");
   assert.ok(truncated !== null);
   assert.ok((truncated?.length ?? 0) <= 200, `the truncated section is ${truncated?.length} bytes`);
@@ -519,10 +513,10 @@ test("#764 stage: syntax-context-max-bytes caps the corpus section", () => {
 // The bounds: the fork boundary, the work, the per-file skip
 // ---------------------------------------------------------------------------
 
-test("#764 stage: a fork pull request is refused IN CODE, whatever the flag says", () => {
+test("#764 stage: a fork pull request is refused IN CODE, whatever the flag says", async () => {
   const { root, anchors } = stageRepo();
   const ws = new RunWorkspace(join(root, ".run"), false);
-  buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true", IS_FORK_PR: "true" }), root, anchors, "abc123");
+  await buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true", IS_FORK_PR: "true" }), root, anchors, "abc123");
   // The workflow pin alone is not enough: the contract default of
   // `syntax-context` is "false" — the same value the fork workflow pins —
   // and `isOperatorExplicit` treats a value equal to the contract default
@@ -535,7 +529,7 @@ test("#764 stage: a fork pull request is refused IN CODE, whatever the flag says
   assert.ok(!corpus.includes("# Syntax-Aware Context"), "the corpus carries no syntax section for a fork");
 });
 
-test("#764 stage: a file with 20,000 declarations is capped, fast, and the artifact says so", () => {
+test("#764 stage: a file with 20,000 declarations is capped, fast, and the artifact says so", async () => {
   const root = gitRepo({ "src/app.py": "def handle(item):\n    return item\n" });
   const bulk: string[] = [];
   for (let index = 0; index < 20_000; index += 1) bulk.push(`def fn_${index}(item):`);
@@ -549,7 +543,7 @@ test("#764 stage: a file with 20,000 declarations is capped, fast, and the artif
   const anchors = anchorsFor(root, "src/app.py");
   const ws = new RunWorkspace(join(root, ".run"), false);
   const started = Date.now();
-  buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
+  await buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
   const elapsed = Date.now() - started;
   assert.ok(elapsed < 5_000, `the stage took ${elapsed}ms — the declaration cap did not bound the work`);
   const artifact = JSON.parse(ws.readText("syntax-context.json") ?? "{}") as Record<string, unknown>;
@@ -558,7 +552,7 @@ test("#764 stage: a file with 20,000 declarations is capped, fast, and the artif
   assert.ok((artifact.notes as string[]).some((note) => note.includes("declaration cap")));
 });
 
-test("#764 stage: an unreadable changed file is a per-file skip, not a fatal error", () => {
+test("#764 stage: an unreadable changed file is a per-file skip, not a fatal error", async () => {
   const root = gitRepo({ "src/app.py": "def handle(item):\n    return item\n" });
   writeFileSync(join(root, "src", "app.py"), "def handle(item):\n    return item + 1\n");
   // A changed file the head reader refuses: over the 2 MiB cap.
@@ -573,7 +567,7 @@ test("#764 stage: an unreadable changed file is a per-file skip, not a fatal err
     truncated: false,
   } as unknown as ChangeAnchorsArtifact;
   const ws = new RunWorkspace(join(root, ".run"), false);
-  buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
+  await buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
   const artifact = JSON.parse(ws.readText("syntax-context.json") ?? "{}") as Record<string, unknown>;
   assert.deepEqual(artifact.errors, [], "an unreadable changed file is not fatal");
   assert.equal((artifact.declarations as unknown[]).length, 1, "the readable changed file still contributes");
@@ -583,19 +577,19 @@ test("#764 stage: an unreadable changed file is a per-file skip, not a fatal err
   assert.ok(corpus.includes("# Syntax-Aware Context"), "the section is not dropped");
 });
 
-test("#764 stage: an UNCERTAIN fork flag refuses the stage rather than proceeding", () => {
+test("#764 stage: an UNCERTAIN fork flag refuses the stage rather than proceeding", async () => {
   // Fail closed: only an explicit "false" is a non-fork. A non-canonical
   // spelling ("TRUE") or a missing flag is uncertain metadata, and
   // uncertain state refuses (AGENTS.md, "Fail closed where required").
   for (const flag of ["TRUE", "1", "yes", ""]) {
     const { root, anchors } = stageRepo();
     const ws = new RunWorkspace(join(root, ".run"), false);
-    buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true", IS_FORK_PR: flag }), root, anchors, "abc123");
+    await buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true", IS_FORK_PR: flag }), root, anchors, "abc123");
     assert.equal(ws.read("syntax-context.json")?.length, 0, `IS_FORK_PR=${JSON.stringify(flag)} must refuse`);
   }
 });
 
-test("#764 stage: the retained changed-file content is bounded, and the excess is skipped visibly", () => {
+test("#764 stage: the retained changed-file content is bounded, and the excess is skipped visibly", async () => {
   const root = gitRepo({ "src/app.py": "def handle(item):\n    return item\n" });
   // Each file stays under the safe reader's 2 MB cap, but together they
   // exceed the stage's changed-file content budget: the retained content is
@@ -613,7 +607,7 @@ test("#764 stage: the retained changed-file content is bounded, and the excess i
     truncated: false,
   } as unknown as ChangeAnchorsArtifact;
   const ws = new RunWorkspace(join(root, ".run"), false);
-  buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
+  await buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
   const artifact = JSON.parse(ws.readText("syntax-context.json") ?? "{}") as Record<string, unknown>;
   assert.deepEqual(artifact.errors, [], "exceeding the content budget is not a failure");
   assert.equal(artifact.truncated, true);
@@ -624,7 +618,7 @@ test("#764 stage: the retained changed-file content is bounded, and the excess i
   );
 });
 
-test("#764 stage: candidates are git-tracked when the repository can be asked, and untrusted text when it cannot", () => {
+test("#764 stage: candidates are git-tracked when the repository can be asked, and untrusted text when it cannot", async () => {
   // A git repository: the candidates are tracked files by construction, so
   // their bytes can be vouched for as repository-committed content.
   const root = gitRepo({
@@ -633,7 +627,7 @@ test("#764 stage: candidates are git-tracked when the repository can be asked, a
   });
   writeFileSync(join(root, "src", "app.py"), "def handle(item):\n    return item + 1\n");
   const anchors = anchorsFor(root, "src/app.py");
-  const tracked = buildSyntaxContext({ workspace: root, anchors });
+  const tracked = await buildSyntaxContext({ workspace: root, anchors });
   assert.deepEqual(tracked.notes.filter((note) => note.includes("not git-backed")), []);
   assert.equal(tracked.callers[0]?.provenance.representation, "committed_source");
 
@@ -644,7 +638,7 @@ test("#764 stage: candidates are git-tracked when the repository can be asked, a
   mkdirSync(join(plain, "src"), { recursive: true });
   writeFileSync(join(plain, "src", "app.py"), "def handle(item):\n    return item + 1\n");
   writeFileSync(join(plain, "src", "caller.py"), "from app import handle\n\ndef go(items):\n    return handle(items)\n");
-  const fallback = buildSyntaxContext({ workspace: plain, anchors });
+  const fallback = await buildSyntaxContext({ workspace: plain, anchors });
   assert.ok(fallback.notes.some((note) => note.includes("candidate listing not git-backed")));
   assert.equal(fallback.callers[0]?.provenance.representation, "untrusted_text");
   // The CHANGED file's own items keep the committed-source treatment: the
@@ -694,7 +688,7 @@ function levelOneHeadings(markdown: string): string[] {
   return markdown.split("\n").filter((line) => /^# /.test(line));
 }
 
-test("#764 stage: hostile content in a changed file cannot forge a heading or close a fence (end to end)", () => {
+test("#764 stage: hostile content in a changed file cannot forge a heading or close a fence (end to end)", async () => {
   // The changed file's body carries the boundary tokens THEMSELVES: the
   // fence delimiters, the heading shapes, the instruction text.
   const hostileBody = [
@@ -713,7 +707,7 @@ test("#764 stage: hostile content in a changed file cannot forge a heading or cl
   writeFileSync(join(root, "src", "app.py"), hostileBody);
   const anchors = anchorsFor(root, "src/app.py");
   const ws = new RunWorkspace(join(root, ".run"), false);
-  buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
+  await buildSyntaxContextSection(ws, stageEnv({ SYNTAX_CONTEXT: "true" }), root, anchors, "abc123");
   const corpus = corpusText(ws.read("syntax-context.truncated.md"));
 
   // The hostile text really is in the corpus — otherwise the assertions
@@ -730,7 +724,7 @@ test("#764 stage: hostile content in a changed file cannot forge a heading or cl
   const benignRoot = gitRepo({ "src/app.py": "def handle(item):\n    return item\n" });
   writeFileSync(join(benignRoot, "src", "app.py"), "def handle(item):\n    return value\n");
   const benignWs = new RunWorkspace(join(benignRoot, ".run"), false);
-  buildSyntaxContextSection(
+  await buildSyntaxContextSection(
     benignWs,
     stageEnv({ SYNTAX_CONTEXT: "true" }),
     benignRoot,
@@ -750,7 +744,7 @@ test("#764 stage: hostile content in a changed file cannot forge a heading or cl
   assert.ok(fenced, "the injected text is inside a fenced block");
 });
 
-test("#764 stage: a column-0 fence delimiter in a body cannot close the section's fence", () => {
+test("#764 stage: a column-0 fence delimiter in a body cannot close the section's fence", async () => {
   // The dangerous shape: a fence delimiter at COLUMN 0 — a delimiter only
   // closes a fence when it starts a line, so an indented run (the Python
   // fixture above) cannot exercise it. The renderer picks a delimiter

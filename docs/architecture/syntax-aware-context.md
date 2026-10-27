@@ -31,13 +31,74 @@ suppresses the lexical one.
 `src/context/syntax/types.ts` defines the seam: a provider answers syntax
 questions about **one file** — `declarations(file)`,
 `identifiersOnLine(file, line)` and `classify(file, line, name)` — and
-nothing else. Everything a reviewer would call *policy* — candidate
-discovery, budgets, provenance, filtering, truncation, fallback — belongs
-to the **builder** (`src/context/syntax/build.ts`), not to the provider, so
-a parser-backed provider registers under a new id
-(`registerSyntaxProvider`) and no policy changes shape. The operator-visible
-seam is the `syntax-context-provider` input; an unknown id degrades to the
-default provider with a recorded reason (never an exception).
+nothing else. The interface is unchanged; what changed is **where** the
+provider runs. Every provider runs in an isolated worker thread, and a
+function cannot cross a thread boundary, so the registry
+(`src/context/syntax/registry.ts`) stores a **descriptor** of how to build
+the provider — a `SyntaxProviderRegistration` — and never the provider
+object itself. A registration names a loader: the built-in provider
+(`{kind: "builtin"}`) or a module (`{kind: "module", module, export?,
+options?}`) whose exported **factory** returns the provider. The factory
+is called inside the worker, and the provider implements the same seam
+there. `registerSyntaxProvider(id, registration)` adds one. The registry
+**key** is the id the artifact reports: the registration is stored
+normalized (its `id` becomes the key), so a registration whose own `id`
+differs from the key it was registered under can never make the artifact
+name a provider the operator did not ask for.
+
+Everything a reviewer would call *policy* — candidate discovery, budgets,
+provenance, filtering, truncation, fallback — belongs to the **builder**
+(`src/context/syntax/build.ts`), not to the provider, so a parser-backed
+provider registers under a new id and no policy changes shape.
+
+The operator-visible seam is the `syntax-context-provider` input, and it
+selects a **registered id** and nothing else: the value is looked up in
+the registry (`resolveSyntaxProvider`), so a module path can never reach
+the loader and no untrusted module is ever loaded. An unknown id degrades
+to the built-in provider with a recorded reason (`provider_fallback`,
+`provider_fallback_reason`) — never an exception.
+
+### The provider boundary
+
+The seam is **public**: `registerSyntaxProvider` exists so a
+parser-backed provider can be registered later, and a registered provider
+is untrusted code as far as the wall-clock bound is concerned. Every
+provider call therefore runs in an **isolated worker thread**
+(`src/context/syntax/provider-host.ts` is the parent side,
+`src/context/syntax/provider-main.ts` the worker side), and that boundary
+is what makes the bound *interruptible*:
+
+- the parent bounds every call with a **real** timer (`setTimeout`), not
+  with the injectable monotonic clock, and **terminates** the worker when
+  the bound expires — so a provider that blocks, even synchronously and
+  even forever, cannot hold the review past the advertised cap;
+- that timer is the **ONLY** timer of a provider call. The host owns it:
+  the builder never races a call of its own, so a call has exactly one
+  bound and exactly one termination path. The ceiling is asked for
+  **before every call** — a fixed number is a fixed ceiling, a function is
+  asked afresh — so the effective per-call budget is the smaller of
+  `MAX_SYNTAX_PROVIDER_CALL_MS` and the time the build has left;
+- the worker is terminated on **every** timeout, on **every** path: a
+  timeout that did not kill the worker would leave the provider running
+  while the build had already moved on;
+- a worker that **crashes** (an "error" event) or **exits** is the same
+  failure: the host records the reason, and every later call fails
+  instantly instead of waiting for an answer that will never come;
+- **no file content crosses the thread boundary**. A request carries the
+  repository-relative path (plus the line and the name), and the worker
+  reads the file itself through the repository's own safe reader
+  (`readHeadLines`), which refuses absolute paths, `..`, `.git`
+  components and symlinks — so a path that tries to leave the workspace
+  is refused **in the worker**, not only in the builder;
+- the worker is closed in the builder's `finally`, and `close()` **awaits**
+  the termination, so no worker outlives the build.
+
+The shipped runtime is a **single-file bundle** (`dist/index.js`), so the
+bundle exports the worker entry itself (`src/index.ts`): the worker loads
+that bundle and calls the exported worker. Requiring the bundle inside a
+worker does **not** run the action — the entry is guarded by
+`require.main === module`, and `require.main` is undefined in a worker
+thread.
 
 ### Why the default provider is dependency-free
 
@@ -76,7 +137,9 @@ Every cap is a hard limit, and every drop is visible.
 |---|---|---|
 | `MAX_SYNTAX_ITEMS` | 40 | items per category and in total |
 | `MAX_SYNTAX_BYTES` | 100,000 | bytes of text the artifact carries: declaration bodies, caller snippets, and every path, name, kind and `referenced_from` site the renderer prints |
-| `MAX_SYNTAX_SECONDS` | 20 | wall-clock seconds of ONE build's COLLECTION — a module constant, not configurable. The candidate listing is a subprocess, so its own timeout is bounded by the time the build has left (never more than the remaining budget), and the build cannot outlive its bound because of it |
+| `MAX_SYNTAX_SECONDS` | 20 | wall-clock seconds of ONE build's COLLECTION — a module constant that configuration can only NARROW (`maxSeconds`; a larger value is clamped to the constant). The candidate listing is a subprocess, so its own timeout is bounded by the time the build has left (never more than the remaining budget), and the build cannot outlive its bound because of it. The bound is enforced AGAINST the provider, not merely checked around it |
+| `MAX_SYNTAX_PROVIDER_CALL_MS` | 5,000 | milliseconds of ONE provider call — the ceiling of a single call, applied as the smaller of this value and the time the build has left, and **recomputed before every call**. The timer is real time, the worker is TERMINATED when it expires, and the artifact names this bound (`truncated_reason: "provider call timeout"`) — never the wall-clock deadline |
+| `MAX_SYNTAX_PROVIDER_FAILURES` | 5 | provider failures tolerated before the provider is **disabled** for the rest of the build (a provider that throws on every call must not turn the build into an error loop); the artifact records `syntax provider disabled after repeated failures` |
 | `MAX_SYNTAX_CANDIDATE_FILES` | 200 | repository files considered as candidates. The candidate phase also visits the CHANGED files (bounded by the anchor extractor's own 100-file cap), so at most 300 files are parsed |
 | `MAX_SYNTAX_DECLARATIONS_PER_FILE` | 2,000 | declarations a provider may report for ONE file |
 | `MAX_SYNTAX_IDENTIFIERS_PER_LINE` / `MAX_SYNTAX_REFERENCED_TOTAL` | 50 / 2,000 | identifiers kept per changed line / referenced identifiers tracked in total |
@@ -101,14 +164,44 @@ that runs long stops, what was collected stays, and the artifact says the
 result is incomplete. Expiry is **not** fatal — the section is kept, marked
 incomplete, and `truncated_reason` says `"deadline"` (the deadline reports
 itself as the bound that ended the collection, even when an earlier cap
-also bit). The bound is a module constant on purpose: it cannot be widened
+also bit).
+
+The bound is enforced **against the provider**, not merely checked before
+and after a call. Each provider call is bounded by the smaller of the time
+the build has left and `MAX_SYNTAX_PROVIDER_CALL_MS` (5,000 ms), and that
+timer is **real** time (`setTimeout`), not the injectable monotonic clock,
+so the bound holds against a provider that blocks. It is also the **only**
+timer of a call: the host owns it and terminates the worker when it
+expires, so a call has exactly one bound and one termination path.
+
+A provider call that exceeds its bound is reported as **its own bound**,
+not as the wall-clock deadline — the per-call ceiling is what expired, and
+the deadline may well have had time left. The artifact shows:
+
+- `truncated: true` and `truncated_reason: "provider call timeout"` (a
+  reason of its own, distinct from `"deadline"`; the FIRST bound to bite
+  is the one that is reported, so an earlier reason is never overwritten);
+- an `errors` entry naming the failed call;
+- a note naming the per-call bound that expired
+  (`provider call timeout: the call exceeded its …ms bound (the per-call
+  ceiling is 5000ms); the provider's worker was terminated and the
+  collection stopped early`) — never the "wall-clock bound of Ns expired"
+  note, which belongs to the cooperative wall-clock deadline alone;
+- the collection stops (the provider's worker is gone).
+
+The bound is a module constant on purpose: it cannot be widened
 by an operator input or an environment variable, because a stage that can
 be told to spend minutes of runner time is a stage that can stall a review.
-The per-item caps bound the work the same way: the scope resolution is one
+The `maxSeconds` option is a **programmatic** knob, not an operator
+input: it can only NARROW the bound (a larger value is clamped to
+`MAX_SYNTAX_SECONDS`), so a test can drive expiry deterministically
+without the runtime ever spending longer than the constant. The per-item
+caps bound the work the same way: the scope resolution is one
 linear pass over a file's declarations, a definition lookup reads a name
 index, and the candidate phase holds ONE file at a time (a parsed 2 MB file
-is ~100 MB of memory), so neither the time nor the memory of the phase
-grows with the size of the repository.
+is ~100 MB of memory) — the worker's own parsed-file cache holds ONE file
+too, so neither the time nor the memory of the phase grows with the size
+of the repository.
 
 The section rides in the corpus **body**, right after the lexical
 related-code section and before the diff. The body is truncated from the
@@ -166,10 +259,14 @@ to the lexical context); a note never does — it says what was left out.
 | the lexical related-code stage is disabled | the syntax stage is a no-op: it consumes the anchors the lexical stage already extracted, so `related-code-context: "false"` also silences it |
 | the pull request is a fork | the stage refuses in code (`IS_FORK_PR === "true"`): all three artifacts empty; no corpus section — see [The fork boundary](#the-fork-boundary) |
 | provider throws, or the anchor artifact is malformed | the build is degraded (`errors` non-empty); the section is dropped whole — empty artifacts, no corpus section, the review falls back to the lexical context |
+| a provider call exceeds its bound (the worker is TERMINATED) | the timeout is an `errors` entry, the collection stops, and the artifact marks the result `truncated: true` with `truncated_reason: "provider call timeout"` — **its own bound**, not the wall-clock deadline, whose note it never claims — plus a note naming the per-call bound that expired. A non-empty `errors` list drops the section whole — the review falls back to the lexical context |
+| the provider fails repeatedly | after `MAX_SYNTAX_PROVIDER_FAILURES` (5) failures the provider is **disabled** for the rest of the build (its calls become no-ops) and the artifact records `syntax provider disabled after repeated failures` in `errors` — the section is dropped whole |
+| a provider module cannot be loaded, does not export the factory, or returns something that does not implement the seam | the load fails inside the worker; the failure is an `errors` entry and the build yields no items — the section is dropped whole |
+| the worker crashes or exits | the same: the host records the reason, every later call fails instantly instead of waiting for an answer that will never come, and the build degrades (`errors` non-empty) — the section is dropped whole |
 | an unreadable or binary changed file (over the reader's size cap, a symlink, a refused path) | a **per-file skip**: the file is recorded in `notes` and the rest of the section is kept — one oversized file cannot silence the evidence |
 | a changed file under a **generated/vendor** directory (`vendor/`, `dist/`, `build/`, `node_modules/`, `third_party/`) | skipped: such content is **not repository source**, so it contributes no touched declaration, no referenced identifier and no caller — the same exclusion the candidate listing applies, so a vendored file cannot leak into the context through the change. The exclusion is recorded as **one** note naming how many files were excluded, so a vendored dependency bump cannot flood the note list |
 | the candidate listing could not be git-backed | the filesystem walk stands in; the candidate items carry the `untrusted_text` representation and a note says so |
-| a bound bit (declaration cap, identifier cap, candidate cap, item cap, byte cap), or the wall-clock bound expired | the collection is cut, `truncated: true` and `truncated_reason` name the bound (`"deadline"` for the wall-clock bound, which is **not** fatal: what was collected stays, the section is kept and marked incomplete) |
+| a bound bit (declaration cap, identifier cap, candidate cap, item cap, byte cap), or the wall-clock bound expired | the collection is cut, `truncated: true` and `truncated_reason` name the bound (`"deadline"` for the wall-clock bound, which is **not** fatal: what was collected stays, the section is kept and marked incomplete — unless a provider call exceeded its own bound, which is an error, not a note, and is reported as `"provider call timeout"`) |
 | unknown provider id | the default provider runs; the artifact records `provider_fallback: true` and `provider_fallback_reason` naming the unknown id |
 | corpus byte cap reached | the section is clipped to `syntax-context-max-bytes` with a truncation marker |
 | a stage-level failure (any exception) | caught; all three artifacts reset to empty; the review continues |
@@ -278,7 +375,27 @@ contained the fix in 2 of 3 sampled real PRs — a blind spot like case B.
   beyond the cap is not found.
 - A file with more than **2,000 declarations** keeps only its first 2,000
   (the per-file cap), and a build that passes **20 seconds** stops early.
-  Both are visible in `truncated_reason` and in the notes.
+  Both are visible in `truncated_reason` and in the notes — as `"deadline"`
+  for the wall-clock bound, and as `"provider call timeout"` for a single
+  call that exceeded its own (5,000 ms) ceiling.
+- The worker thread shares the **process heap**, so a provider that
+  allocates without bound can exhaust the process memory. The provider is
+  the runtime's own registered code, not PR-controlled content.
+- The worker is **not a sandbox**: it isolates the wall-clock bound, not
+  the filesystem and not the network. A registered provider has the same
+  access the action itself has — the same environment, the same
+  credentials, the same working tree — and the seam bounds TIME only. The
+  provider module is the runtime's own code, never PR-controlled content
+  and never an operator-supplied path.
+- The worker's parsed-file cache holds **ONE file**
+  (`MAX_SYNTAX_WORKER_CACHED_FILES`), so the candidate phase's "one file
+  at a time" memory property holds: a provider never keeps a parsed form
+  of every file it was handed.
+- A provider that is **terminated** loses its work: the stage degrades
+  rather than waiting for it.
+- A parser-backed provider must ship **with the action**. The registry is
+  code, not configuration — a provider is loaded by module path from a
+  registration, never from an operator input.
 - The generated/vendor exclusion matches a **directory NAME** (`vendor`, `dist`,
   `build`, `node_modules`, `third_party`), so a first-party directory that
   happens to carry one of those names — a `build/` holding hand-written
@@ -297,5 +414,6 @@ contained the fix in 2 of 3 sampled real PRs — a blind spot like case B.
 
 `syntax-context` (boolean, default `false`), `syntax-context-max-bytes`
 (integer, default `8000`, range 1–200,000) and `syntax-context-provider`
-(free-form, default `structural`) are repository-configurable and part of
+(a registered provider id, default `structural`; an unknown id degrades to
+the built-in provider with a recorded reason) are repository-configurable and part of
 the precheck fingerprint. See [`docs/inputs.md`](../inputs.md).

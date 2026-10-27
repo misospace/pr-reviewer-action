@@ -52,3 +52,29 @@ export interface SyntaxProvider {
   /** How an occurrence of `name` on `line` reads. */
   classify(file: SyntaxFile, line: number, name: string): SyntaxUsage;
 }
+
+/** How the runtime LOADS a provider.
+ *
+ * A provider runs in an ISOLATED WORKER THREAD (see `./provider-host.ts`),
+ * and a function cannot cross a thread boundary: the registry therefore
+ * stores a DESCRIPTOR of how to build the provider, not the provider
+ * itself. The provider module implements the `SyntaxProvider` interface
+ * INSIDE the worker; the seam above is unchanged. */
+export type SyntaxProviderLoader =
+  | { readonly kind: "builtin" }
+  | {
+      readonly kind: "module";
+      /** Absolute path or package specifier of the provider module. */
+      readonly module: string;
+      /** The exported factory; "default" when omitted. */
+      readonly export?: string;
+      /** Options handed to the factory. */
+      readonly options?: Record<string, unknown>;
+    };
+
+/** A registered provider: the id the artifact reports and the descriptor
+ * the runtime loads it with. */
+export interface SyntaxProviderRegistration {
+  readonly id: string;
+  readonly loader: SyntaxProviderLoader;
+}

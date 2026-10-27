@@ -849,7 +849,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // Off by default; it complements the lexical related-code context above
   // (never replaces it) and emits evidence only — no findings, no severity,
   // no obligations, no verdict.
-  buildSyntaxContextSection(
+  await buildSyntaxContextSection(
     ws,
     env,
     workspace,

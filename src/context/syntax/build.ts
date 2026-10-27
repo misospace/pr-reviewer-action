@@ -14,9 +14,10 @@
  *
  * Three invariants shape the whole module:
  *   - IT NEVER THROWS. A malformed anchor artifact, an unreadable file, a
- *     provider that throws — each degrades the stage (an `errors` entry, or
- *     fewer items) and never escapes as an exception. The caller (a later
- *     phase) decides what a degraded stage means.
+ *     provider that throws, a provider that blocks, a worker that crashes —
+ *     each degrades the stage (an `errors` entry, or fewer items) and never
+ *     escapes as an exception. The caller (a later phase) decides what a
+ *     degraded stage means.
  *   - EVERY SNIPPET CARRIES PROVENANCE. The text is read from the WORKING
  *     TREE, so no revision is bound (`revision: null`): binding one would
  *     claim a byte-identity the read never established — the same rule and
@@ -30,7 +31,15 @@
  *     is minutes per review). Every collection loop is therefore bounded
  *     by a per-item cap, an index instead of a rescan, and a wall-clock
  *     deadline; the candidate phase holds ONE file at a time, so its
- *     memory does not grow with the repository either. */
+ *     memory does not grow with the repository either.
+ *
+ * The wall-clock bound is enforced against the PROVIDER too, not only
+ * around the collection: every provider call runs in an isolated worker
+ * thread (see `./provider-host.js`) and is bounded by a REAL timer, so a
+ * provider that blocks — even synchronously, even forever — cannot hold the
+ * review past the bound. The builder never passes a provider object
+ * around: it holds a HOST, and the host is closed in a `finally`, so no
+ * worker outlives the build. */
 
 import { readdirSync, type Dirent } from "node:fs";
 import { join } from "node:path";
@@ -40,8 +49,9 @@ import { sourceEvidence } from "../redact.js";
 import { untrustedTextProvenance, type EvidenceProvenance } from "../evidence-provenance.js";
 import { DEFAULT_GIT_TIMEOUT_SEC, listTrackedFiles } from "../repo-map.js";
 import { isSupportedLanguage } from "./grammar.js";
+import { createProviderHost, DEFAULT_PROVIDER_CALL_TIMEOUT_MS, SyntaxProviderTimeoutError, type SyntaxProviderHost } from "./provider-host.js";
 import { resolveSyntaxProvider } from "./registry.js";
-import type { SyntaxDeclaration, SyntaxDeclarationKind, SyntaxFile, SyntaxProvider, SyntaxUsage } from "./types.js";
+import type { SyntaxDeclaration, SyntaxDeclarationKind, SyntaxFile, SyntaxProviderRegistration, SyntaxUsage } from "./types.js";
 
 /** The artifact version of the syntax context. */
 export const SYNTAX_CONTEXT_ARTIFACT_VERSION = "1";
@@ -80,8 +90,27 @@ export const MAX_SYNTAX_REFERENCED_TOTAL = 2_000;
  * can stall a review. The bound is enforced with the repository's own
  * `DeadlineBudget` (a monotonic clock), and expiry is NOT fatal: the
  * collection stops, what was collected stays, and the artifact says the
- * result is incomplete. */
+ * result is incomplete.
+ *
+ * The bound is not just checked BEFORE and AFTER a provider call: every
+ * provider call runs in an isolated worker thread (see `./provider-host.ts`)
+ * and is bounded by a REAL timer, so a provider that blocks — even
+ * synchronously, even forever — cannot hold the review past this bound. */
 export const MAX_SYNTAX_SECONDS = 20;
+
+/** The ceiling of ONE provider call, in milliseconds.
+ *
+ * A provider call is bounded by the SMALLER of this ceiling and the time
+ * the build has left. The timer is REAL time (not the injectable monotonic
+ * clock), because the bound has to hold against a provider that blocks.
+ * The HOST owns that timer (see `./provider-host.ts`): the builder never
+ * races a call of its own, so a call has exactly one bound and exactly one
+ * termination path. */
+export const MAX_SYNTAX_PROVIDER_CALL_MS = DEFAULT_PROVIDER_CALL_TIMEOUT_MS;
+
+/** The smallest wall-clock bound a caller may narrow the build to, in
+ * seconds. A bound below this is not a bound at all. */
+const MIN_SYNTAX_SECONDS = 0.05;
 
 /** The changed-file content retained IN TOTAL, in characters.
  *
@@ -127,6 +156,7 @@ const NOTE_OVERFLOW = `further notes dropped (limit ${MAX_SYNTAX_NOTES})`;
 
 /** The reasons the collection can end early: WHICH bound ended it. */
 const TRUNCATION_REASON_DEADLINE = "deadline";
+const TRUNCATION_REASON_PROVIDER_TIMEOUT = "provider call timeout";
 const TRUNCATION_REASON_DECLARATION_CAP = "declaration cap";
 const TRUNCATION_REASON_IDENTIFIER_CAP = "identifier cap";
 const TRUNCATION_REASON_CHANGED_LINE_CAP = "changed-line cap";
@@ -141,8 +171,10 @@ export interface SyntaxContextOptions {
   workspace: string;
   /** The change-anchor artifact (persisted snake_case shape). */
   anchors: unknown;
-  /** Provider to use; when omitted the registry resolves the default. */
-  provider?: SyntaxProvider;
+  /** The provider REGISTRATION to use; when omitted the registry resolves
+   * the default. The registration says WHICH provider and HOW the runtime
+   * loads it: every provider runs in an isolated worker thread. */
+  providerRegistration?: SyntaxProviderRegistration;
   /** Whether the provider handed in was a FALLBACK for an unknown id.
    * A caller that resolved the provider itself (the stage does) carries the
    * registry's outcome here; the builder cannot know it. Default false. */
@@ -155,6 +187,11 @@ export interface SyntaxContextOptions {
   maxItems?: number;
   maxBytes?: number;
   maxCandidateFiles?: number;
+  /** The wall-clock bound of ONE build, in seconds. NARROWING ONLY: a
+   * larger value is silently clamped to `MAX_SYNTAX_SECONDS`, never above
+   * it. The bound itself is the module constant; this only lets a test
+   * tighten it. */
+  maxSeconds?: number;
   /** The monotonic clock the wall-clock bound is measured against. The
    * BOUND itself is the module constant and cannot be widened here; this
    * only makes the clock injectable so a test can drive expiry
@@ -261,23 +298,51 @@ function pushError(errors: string[], message: string): void {
   errors.push(message.length > 300 ? `${message.slice(0, 297)}...` : message);
 }
 
-/** The provider call seam of one build: it counts failures and stops
- * calling a provider that keeps throwing, so a broken provider degrades the
- * stage instead of stalling it. */
+/** The provider call seam of one build: one bounded call, with the empty
+ * fallback the builder uses when the call could not be answered. */
 interface ProviderCalls {
-  <T>(label: string, call: () => T, fallback: T): T;
+  <T>(label: string, call: () => Promise<T>, fallback: T): Promise<T>;
 }
 
-function providerCalls(errors: string[]): ProviderCalls {
+/** The wall-clock bound of ONE build, narrowed but never widened. */
+function effectiveBoundSeconds(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return MAX_SYNTAX_SECONDS;
+  return Math.min(MAX_SYNTAX_SECONDS, Math.max(MIN_SYNTAX_SECONDS, value));
+}
+
+/** The ceiling of ONE provider call: the smaller of the module ceiling and
+ * the time the build has left. RECOMPUTED before every call, because the
+ * build's own budget shrinks as the collection goes on. */
+function providerCeilingMs(build: Build): number {
+  const remaining = build.deadline.remainingSeconds() * 1000;
+  if (!Number.isFinite(remaining)) return MAX_SYNTAX_PROVIDER_CALL_MS;
+  return Math.max(1, Math.min(Math.floor(remaining), MAX_SYNTAX_PROVIDER_CALL_MS));
+}
+
+/** The provider call seam of one build: it counts failures and stops
+ * calling a provider that keeps failing, so a broken provider degrades the
+ * stage instead of stalling it.
+ *
+ * The call itself is bounded by the HOST (its own real timer, which
+ * terminates the worker when it expires) — the builder never races a call
+ * of its own, so a call has exactly ONE bound. A call that exceeded its
+ * bound is reported as ITS OWN bound ("provider call timeout"), never as
+ * the wall-clock deadline: the per-call ceiling is what expired, and the
+ * artifact says which bound ended the collection. */
+function providerCalls(build: Build): ProviderCalls {
+  const errors = build.context.errors;
   let failures = 0;
   let disabled = false;
-  return <T,>(label: string, call: () => T, fallback: T): T => {
+  return async <T,>(label: string, call: () => Promise<T>, fallback: T): Promise<T> => {
     if (disabled) return fallback;
     try {
-      return call();
+      return await call();
     } catch (error) {
       failures += 1;
       pushError(errors, `${label}: ${messageOf(error)}`);
+      if (error instanceof SyntaxProviderTimeoutError) {
+        noteProviderTimeout(build, error.timeoutMs);
+      }
       if (failures > MAX_SYNTAX_PROVIDER_FAILURES) {
         disabled = true;
         pushError(errors, "syntax provider disabled after repeated failures");
@@ -311,6 +376,15 @@ function emptyContext(): SyntaxContext {
 interface Build {
   context: SyntaxContext;
   deadline: DeadlineBudget;
+  /** The effective wall-clock bound of the build, in seconds. */
+  boundSeconds: number;
+  /** True once the collection must stop: the wall-clock bound expired, or a
+   * provider call exceeded its own bound. */
+  stopped: boolean;
+  /** True once a provider call exceeded its own bound. The per-call ceiling
+   * is then the bound that ended the collection, so the wall-clock deadline
+   * must not claim it. */
+  providerTimedOut: boolean;
 }
 
 /** Record that a bound ended the collection. The FIRST bound to bite is the
@@ -338,13 +412,47 @@ function pushNote(build: Build, message: string): void {
 /** The wall-clock bound expired: stop collecting, keep what was collected,
  * and say so. Expiry is NOT a failure — the partial result stands, marked
  * incomplete. The deadline REPORTS itself as the bound that ended the
- * collection: it is the one that actually stopped the work. */
-function noteDeadline(build: Build): void {
+ * collection: it is the one that actually stopped the work.
+ *
+ * A provider call that exceeded its OWN bound ends the collection too, but
+ * it reports ITSELF (see `noteProviderTimeout`): the per-call ceiling is
+ * what expired, and a deadline that never expired must not be named. */
+function noteDeadline(build: Build, detail?: string): void {
+  build.stopped = true;
+  // A provider timeout already ended the collection: it is the bound that
+  // stopped the work, so the deadline does not claim it.
+  if (build.providerTimedOut) return;
   build.context.truncated = true;
   build.context.truncatedReason = TRUNCATION_REASON_DEADLINE;
   // Idempotent: the bound is reported ONCE, however many phases noticed it.
   if (build.context.notes.some((note) => note.includes("wall-clock bound"))) return;
-  pushNote(build, `wall-clock bound of ${MAX_SYNTAX_SECONDS}s expired; collection stopped early and result incomplete`);
+  pushNote(
+    build,
+    detail ?? `wall-clock bound of ${build.boundSeconds}s expired; collection stopped early and result incomplete`,
+  );
+}
+
+/** A provider call exceeded its OWN bound: the host's timer expired, the
+ * worker was TERMINATED, and the collection stops. The artifact names THIS
+ * bound ("provider call timeout"), not the wall-clock deadline: the deadline
+ * may well still have time left — the per-call ceiling is what expired.
+ *
+ * The first bound to bite is the one that ends the collection, so an
+ * earlier reason is never overwritten. */
+function noteProviderTimeout(build: Build, budgetMs: number): void {
+  build.stopped = true;
+  build.providerTimedOut = true;
+  markTruncated(build, TRUNCATION_REASON_PROVIDER_TIMEOUT);
+  pushNote(
+    build,
+    `provider call timeout: the call exceeded its ${budgetMs}ms bound (the per-call ceiling is ${MAX_SYNTAX_PROVIDER_CALL_MS}ms); the provider's worker was terminated and the collection stopped early`,
+  );
+}
+
+/** Whether the collection must stop: the wall-clock bound expired, or a
+ * provider call exceeded its own bound. */
+function shouldStop(build: Build): boolean {
+  return build.stopped || build.deadline.exceeded();
 }
 
 // ---------------------------------------------------------------------------
@@ -431,16 +539,29 @@ function isCandidatePath(path: string): boolean {
  * never follows a symlink, never leaves the workspace, and never reads a
  * file: it only NAMES them, and the naming is bounded by `limit`.
  *
+ * The walk is also bounded in TIME: the deadline is sampled while it
+ * walks, and an exhausted budget stops the walk (visibly — the listing is
+ * incomplete).
+ *
  * This is the FALLBACK listing: it cannot tell a tracked file from an
  * untracked one (a local virtualenv, build output), so a candidate found
  * this way is untrusted text, never committed source. */
-function walkCandidatePaths(workspace: string, limit: number): { paths: string[]; truncated: boolean } {
-  if (limit <= 0) return { paths: [], truncated: false };
+function walkCandidatePaths(
+  workspace: string,
+  limit: number,
+  deadline: DeadlineBudget,
+): { paths: string[]; truncated: boolean; expired: boolean } {
+  if (limit <= 0) return { paths: [], truncated: false, expired: false };
   const found: string[] = [];
   const pending: string[] = [""];
   let visited = 0;
   let truncated = false;
+  let expired = false;
   while (pending.length > 0 && found.length < limit && visited < MAX_WALK_DIRECTORIES) {
+    if (deadline.exceeded()) {
+      expired = true;
+      break;
+    }
     const relative = pending.pop() as string;
     visited += 1;
     let entries: Dirent[];
@@ -451,6 +572,10 @@ function walkCandidatePaths(workspace: string, limit: number): { paths: string[]
     }
     const sorted = [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const entry of sorted) {
+      if (deadline.exceeded()) {
+        expired = true;
+        break;
+      }
       if (entry.isSymbolicLink()) continue;
       const child = relative === "" ? entry.name : `${relative}/${entry.name}`;
       if (entry.isDirectory()) {
@@ -467,8 +592,9 @@ function walkCandidatePaths(workspace: string, limit: number): { paths: string[]
       }
       found.push(child);
     }
+    if (expired) break;
   }
-  return { paths: found.sort(), truncated };
+  return { paths: found.sort(), truncated, expired };
 }
 
 /** The candidate listing: git-tracked files when the repository can be
@@ -479,15 +605,20 @@ function walkCandidatePaths(workspace: string, limit: number): { paths: string[]
  * repository-committed content. When git cannot answer (no git binary, not
  * a repository, a timeout) the walk stands in — and the candidates it
  * finds are UNTRUSTED text: an untracked file is not repository content
- * and must not be stamped as committed source. */
-function listCandidatePaths(workspace: string, limit: number, remainingSeconds: number): { paths: string[]; gitBacked: boolean; truncated: boolean } {
-  if (limit <= 0) return { paths: [], gitBacked: false, truncated: false };
+ * and must not be stamped as committed source. The walk is bounded by the
+ * build's own deadline too, so it cannot outlive the wall-clock bound. */
+function listCandidatePaths(
+  workspace: string,
+  limit: number,
+  deadline: DeadlineBudget,
+): { paths: string[]; gitBacked: boolean; truncated: boolean; expired: boolean } {
+  if (limit <= 0) return { paths: [], gitBacked: false, truncated: false, expired: false };
   try {
     // The listing is bounded by the build's OWN remaining time, so the
     // subprocess cannot outlive the wall-clock bound the build declares.
     const gitTimeout = Math.max(
       1,
-      Math.min(DEFAULT_GIT_TIMEOUT_SEC, MAX_SYNTAX_SECONDS, Math.ceil(remainingSeconds)),
+      Math.min(DEFAULT_GIT_TIMEOUT_SEC, MAX_SYNTAX_SECONDS, Math.ceil(deadline.remainingSeconds())),
     );
     const tracked = listTrackedFiles(workspace, gitTimeout);
     const paths: string[] = [];
@@ -500,10 +631,10 @@ function listCandidatePaths(workspace: string, limit: number, remainingSeconds: 
       }
       paths.push(path);
     }
-    return { paths: paths.sort(), gitBacked: true, truncated };
+    return { paths: paths.sort(), gitBacked: true, truncated, expired: false };
   } catch {
-    const walked = walkCandidatePaths(workspace, limit);
-    return { paths: walked.paths, gitBacked: false, truncated: walked.truncated };
+    const walked = walkCandidatePaths(workspace, limit, deadline);
+    return { paths: walked.paths, gitBacked: false, truncated: walked.truncated, expired: walked.expired };
   }
 }
 
@@ -610,22 +741,26 @@ function capDeclarations(build: Build, path: string, reported: readonly SyntaxDe
 }
 
 /** Read one candidate file: the safe workspace reader refuses absolute
- * paths, `..`, `.git` and symlinks, and returns null instead of throwing. */
-function readCandidate(
+ * paths, `..`, `.git` and symlinks, and returns null instead of throwing.
+ *
+ * The provider reads the file ITSELF (in its own worker thread, through
+ * the same safe reader), so no file content crosses the thread boundary:
+ * the request carries the path only. */
+async function readCandidate(
   build: Build,
   workspace: string,
   path: string,
-  provider: SyntaxProvider,
+  host: SyntaxProviderHost,
   call: ProviderCalls,
   committed: boolean,
-): CandidateFile | null {
+): Promise<CandidateFile | null> {
   const language = detectLanguage(path);
   if (!isSupportedLanguage(language)) return null;
   const lines = readHeadLines(workspace, path);
   if (lines === null) return null;
   if (looksBinary(lines)) return null;
   const syntaxFile: SyntaxFile = { path, language, lines };
-  const reported = call(`declarations:${path}`, () => provider.declarations(syntaxFile), []);
+  const reported = await call(`declarations:${path}`, () => host.declarations(path), []);
   const declarations = capDeclarations(build, path, reported);
   return {
     path,
@@ -689,15 +824,65 @@ function declarationBody(
 // The build
 // ---------------------------------------------------------------------------
 
-/** Build the syntax context. Never throws. */
-export function buildSyntaxContext(options: SyntaxContextOptions): SyntaxContext {
+/** Build the syntax context. Never throws and never rejects. */
+export async function buildSyntaxContext(options: SyntaxContextOptions): Promise<SyntaxContext> {
   const context = emptyContext();
+  let host: SyntaxProviderHost | null = null;
   try {
-    return buildInner(options, context);
+    // The provider is resolved as before: the caller may hand in a
+    // registration (and the outcome of ITS resolution), otherwise the
+    // registry resolves the default and reports what it got.
+    const given = options.providerRegistration;
+    let registration: SyntaxProviderRegistration;
+    if (given !== undefined && given !== null) {
+      registration = given;
+      context.providerId = typeof given.id === "string" ? given.id : "";
+      // The caller resolved the provider: its fallback outcome is the
+      // caller's to report. Absent options keep the historical values
+      // (no fallback, no reason) byte for byte.
+      context.providerFallback = options.providerFallback === true;
+      context.providerFallbackReason = typeof options.providerFallbackReason === "string" && options.providerFallbackReason !== ""
+        ? options.providerFallbackReason
+        : null;
+    } else {
+      const resolution = resolveSyntaxProvider();
+      registration = resolution.registration;
+      context.providerId = resolution.registration.id;
+      context.providerFallback = resolution.fallback;
+      context.providerFallbackReason = resolution.reason;
+    }
+
+    const boundSeconds = effectiveBoundSeconds(options.maxSeconds);
+    const build: Build = {
+      context,
+      deadline: new DeadlineBudget(boundSeconds, options.monotonic),
+      boundSeconds,
+      stopped: false,
+      providerTimedOut: false,
+    };
+    const workspace = typeof options.workspace === "string" ? options.workspace : "";
+    context.headRevision = typeof options.headRevision === "string" && options.headRevision !== "" ? options.headRevision : null;
+
+    // The provider's worker is started ONCE for the build, and the HOST owns
+    // the only timer of a provider call: the ceiling is asked for BEFORE
+    // every call, so it is the smaller of the module ceiling and the time
+    // the build has left. The worker is terminated when a call exceeds it,
+    // and the worker is closed (and awaited) in the `finally`, so no worker
+    // outlives the build.
+    host = await createProviderHost({
+      registration,
+      workspace,
+      timeoutMs: (): number => providerCeilingMs(build),
+    });
+    return await buildInner(build, options, host);
   } catch (error) {
     const degraded = emptyContext();
     degraded.errors = [messageOf(error)];
     return degraded;
+  } finally {
+    // AWAITED: "no worker outlives the build" is a fact, not a request.
+    // A termination failure must not break the build.
+    await host?.close().catch(() => undefined);
   }
 }
 
@@ -716,13 +901,13 @@ interface ChangedFile {
  * PER-FILE SKIP, not a fatal error: one oversized file must not silence
  * the evidence every other changed file carries. It is recorded as a note;
  * only a provider failure or a malformed anchor artifact is fatal. */
-function collectChangedFiles(
+async function collectChangedFiles(
   build: Build,
   workspace: string,
   anchorFiles: readonly AnchorFile[],
-  provider: SyntaxProvider,
+  host: SyntaxProviderHost,
   call: ProviderCalls,
-): ChangedFile[] {
+): Promise<ChangedFile[]> {
   const changedFiles: ChangedFile[] = [];
   const excluded: string[] = [];
   let retainedChars = 0;
@@ -736,7 +921,7 @@ function collectChangedFiles(
     }
     const language = detectLanguage(anchor.path);
     if (!isSupportedLanguage(language)) continue;
-    if (build.deadline.exceeded()) {
+    if (shouldStop(build)) {
       noteDeadline(build);
       break;
     }
@@ -762,7 +947,7 @@ function collectChangedFiles(
     }
     retainedChars += fileChars;
     const syntaxFile: SyntaxFile = { path: anchor.path, language, lines };
-    const reported = call(`declarations:${anchor.path}`, () => provider.declarations(syntaxFile), []);
+    const reported = await call(`declarations:${anchor.path}`, () => host.declarations(anchor.path), []);
     const declarations = capDeclarations(build, anchor.path, reported);
     changedFiles.push({
       path: anchor.path,
@@ -785,12 +970,12 @@ function collectChangedFiles(
 
 /** The identifiers the changed lines reference, bounded per line and in
  * total. */
-function collectReferenced(
+async function collectReferenced(
   build: Build,
   changedFiles: readonly ChangedFile[],
-  provider: SyntaxProvider,
+  host: SyntaxProviderHost,
   call: ProviderCalls,
-): Map<string, SyntaxContextReference[]> {
+): Promise<Map<string, SyntaxContextReference[]>> {
   const referenced = new Map<string, SyntaxContextReference[]>();
   let scannedTotal = 0;
   for (const file of changedFiles) {
@@ -804,15 +989,15 @@ function collectReferenced(
           markTruncated(build, TRUNCATION_REASON_CHANGED_LINE_CAP);
           break;
         }
-        if (build.deadline.exceeded()) {
+        if (shouldStop(build)) {
           noteDeadline(build);
           return referenced;
         }
         scanned += 1;
         scannedTotal += 1;
-        const names = call(
+        const names = await call(
           `identifiers:${file.path}:${line}`,
-          () => provider.identifiersOnLine(file.syntaxFile, line),
+          () => host.identifiersOnLine(file.path, line),
           [],
         );
         let kept = 0;
@@ -851,14 +1036,14 @@ function collectReferenced(
  * hundred parsed candidates in memory is a memory blowup (a 2 MB file
  * with 100,000 declarations parses to ~100 MB). One candidate at a time
  * keeps the phase bounded in memory as well as in time. */
-function collectCandidateEvidence(
+async function collectCandidateEvidence(
   build: Build,
   candidate: CandidateFile,
   referenced: ReadonlyMap<string, SyntaxContextReference[]>,
   targetsByName: ReadonlyMap<string, Array<{ path: string; line: number }>>,
-  provider: SyntaxProvider,
+  host: SyntaxProviderHost,
   call: ProviderCalls,
-): void {
+): Promise<void> {
   const context = build.context;
 
   // The definitions of the referenced identifiers, looked up in the
@@ -869,16 +1054,16 @@ function collectCandidateEvidence(
     // The provider seam is PUBLIC (a registered provider may be slow), so
     // this loop checks the wall-clock bound too, not only the caller loop.
     namesScanned += 1;
-    if ((namesScanned & 0x3f) === 0 && build.deadline.exceeded()) {
+    if ((namesScanned & 0x3f) === 0 && shouldStop(build)) {
       noteDeadline(build);
       return;
     }
     const declarations = candidate.byName.get(name);
     if (declarations === undefined) continue;
     for (const decl of declarations) {
-      const usage = call(
+      const usage = await call(
         `classify:${candidate.path}:${decl.startLine}:${name}`,
-        () => provider.classify(candidate.syntaxFile, decl.startLine, name),
+        () => host.classify(candidate.path, decl.startLine, name),
         "unknown",
       );
       if (usage !== "definition") continue;
@@ -898,7 +1083,10 @@ function collectCandidateEvidence(
   // The callers of the declarations the diff touched.
   const lines = candidate.syntaxFile.lines;
   for (let index = 0; index < lines.length; index += 1) {
-    if ((index & 0xff) === 0 && build.deadline.exceeded()) {
+    // The deadline is sampled PER LINE: the line scans every target name,
+    // so a coarser sample could let one line overrun the bound. The inner
+    // loop is bounded by the number of touched declarations.
+    if (shouldStop(build)) {
       noteDeadline(build);
       return;
     }
@@ -906,9 +1094,9 @@ function collectCandidateEvidence(
     for (const [name, targets] of targetsByName) {
       if (!line.includes(name)) continue;
       const lineNo = index + 1;
-      const usage = call(
+      const usage = await call(
         `classify:${candidate.path}:${lineNo}:${name}`,
-        () => provider.classify(candidate.syntaxFile, lineNo, name),
+        () => host.classify(candidate.path, lineNo, name),
         "unknown",
       );
       if (usage !== "call") continue;
@@ -946,24 +1134,30 @@ function collectCandidateEvidence(
  * called from the file that defines it), and they come first: their bytes
  * are vouched for by the diff, so they keep the committed-source
  * treatment even when the candidate listing is not git-backed. */
-function collectCandidateEvidencePhase(
+async function collectCandidateEvidencePhase(
   build: Build,
   workspace: string,
   changedFiles: readonly ChangedFile[],
   referenced: ReadonlyMap<string, SyntaxContextReference[]>,
   limit: number,
-  provider: SyntaxProvider,
+  host: SyntaxProviderHost,
   call: ProviderCalls,
-): void {
-  if (build.deadline.exceeded()) {
+): Promise<void> {
+  if (shouldStop(build)) {
     // The candidate listing is a SUBPROCESS: it is bounded by the time the
     // build has left, so it cannot outlive the build's own wall-clock bound.
     noteDeadline(build);
     return;
   }
-  const listing = listCandidatePaths(workspace, limit, build.deadline.remainingSeconds());
+  const listing = listCandidatePaths(workspace, limit, build.deadline);
   if (!listing.gitBacked) {
     pushNote(build, "candidate listing not git-backed; candidate provenance is untrusted_text");
+  }
+  if (listing.expired) {
+    // The walk ran out of time: the listing is incomplete, and the
+    // deadline says so.
+    pushNote(build, "candidate listing stopped early: the wall-clock bound expired during the filesystem walk");
+    noteDeadline(build);
   }
   if (listing.truncated) {
     markTruncated(build, TRUNCATION_REASON_CANDIDATE_CAP);
@@ -981,11 +1175,11 @@ function collectCandidateEvidencePhase(
   for (const file of changedFiles) {
     if (handled.has(file.path)) continue;
     handled.add(file.path);
-    if (build.deadline.exceeded()) {
+    if (shouldStop(build)) {
       noteDeadline(build);
       return;
     }
-    collectCandidateEvidence(build, {
+    await collectCandidateEvidence(build, {
       path: file.path,
       syntaxFile: file.syntaxFile,
       declarations: file.declarations,
@@ -993,59 +1187,40 @@ function collectCandidateEvidencePhase(
       byName: indexByName(file.declarations),
       committed: true,
       seenCallers: new Set<string>(),
-    }, referenced, targetsByName, provider, call);
+    }, referenced, targetsByName, host, call);
   }
 
   for (const path of listing.paths) {
     if (handled.has(path)) continue;
     handled.add(path);
-    if (build.deadline.exceeded()) {
+    if (shouldStop(build)) {
       noteDeadline(build);
       return;
     }
-    const candidate = readCandidate(build, workspace, path, provider, call, listing.gitBacked);
+    const candidate = await readCandidate(build, workspace, path, host, call, listing.gitBacked);
     if (candidate === null) continue;
-    collectCandidateEvidence(build, candidate, referenced, targetsByName, provider, call);
+    await collectCandidateEvidence(build, candidate, referenced, targetsByName, host, call);
   }
 }
 
-function buildInner(options: SyntaxContextOptions, context: SyntaxContext): SyntaxContext {
-  const build: Build = {
-    context,
-    deadline: new DeadlineBudget(MAX_SYNTAX_SECONDS, options.monotonic),
-  };
+async function buildInner(
+  build: Build,
+  options: SyntaxContextOptions,
+  host: SyntaxProviderHost,
+): Promise<SyntaxContext> {
+  const context = build.context;
   const errors = context.errors;
   const workspace = typeof options.workspace === "string" ? options.workspace : "";
-  context.headRevision = typeof options.headRevision === "string" && options.headRevision !== "" ? options.headRevision : null;
-
-  let provider: SyntaxProvider;
-  if (options.provider !== undefined && options.provider !== null) {
-    provider = options.provider;
-    context.providerId = typeof provider.id === "string" ? provider.id : "";
-    // The caller resolved the provider: its fallback outcome is the
-    // caller's to report. Absent options keep the historical values
-    // (no fallback, no reason) byte for byte.
-    context.providerFallback = options.providerFallback === true;
-    context.providerFallbackReason = typeof options.providerFallbackReason === "string" && options.providerFallbackReason !== ""
-      ? options.providerFallbackReason
-      : null;
-  } else {
-    const resolution = resolveSyntaxProvider();
-    provider = resolution.provider;
-    context.providerId = resolution.provider.id;
-    context.providerFallback = resolution.fallback;
-    context.providerFallbackReason = resolution.reason;
-  }
 
   const maxItems = positiveInt(options.maxItems, MAX_SYNTAX_ITEMS);
   const maxBytes = positiveInt(options.maxBytes, MAX_SYNTAX_BYTES);
   const maxCandidateFiles = positiveInt(options.maxCandidateFiles, MAX_SYNTAX_CANDIDATE_FILES);
-  const call = providerCalls(errors);
+  const call = providerCalls(build);
 
   const anchorFiles = readAnchorFiles(options.anchors, errors, build);
 
   // The changed files, read at the head checkout.
-  const changedFiles = collectChangedFiles(build, workspace, anchorFiles, provider, call);
+  const changedFiles = await collectChangedFiles(build, workspace, anchorFiles, host, call);
 
   // 1. The declarations the diff touches.
   for (const file of changedFiles) {
@@ -1068,11 +1243,11 @@ function buildInner(options: SyntaxContextOptions, context: SyntaxContext): Synt
   }
 
   // 2. The identifiers the changed lines reference.
-  const referenced = collectReferenced(build, changedFiles, provider, call);
+  const referenced = await collectReferenced(build, changedFiles, host, call);
 
   // 3. The candidate files: the repository'"'"'s other source files, bounded.
   //    Each candidate is read, mined for its evidence and released again.
-  collectCandidateEvidencePhase(build, workspace, changedFiles, referenced, maxCandidateFiles, provider, call);
+  await collectCandidateEvidencePhase(build, workspace, changedFiles, referenced, maxCandidateFiles, host, call);
 
   applyBudgets(context, maxItems, maxBytes);
   return context;
