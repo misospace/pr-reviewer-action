@@ -541,20 +541,24 @@ test("#961: the closed check outranks the draft check on a comment", async () =>
   assert.equal(output.skip_reason, "comment-pr-closed");
 });
 
-test("#961: an unrecognizable draft value fails closed on a comment too", async () => {
+test("#1312: an unproven draft value is named separately on a comment too", async () => {
   const env = baseEnv();
-  const platform: Platform = {
-    diff: DIFF,
-    pr: { ...sameRepoPr() as object, state: "open", draft: 1 },
-    gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
-  };
-  const output = await runPrecheck({
-    env,
-    adapter: new FixtureAdapter("github", platform),
-    event: issueCommentEvent("/ai-review", "alice"),
-  });
-  assert.equal(output.should_review, "false");
-  assert.equal(output.skip_reason, "comment-pr-draft");
+  for (const draft of [undefined, null, 1]) {
+    const pr = { ...sameRepoPr() as Record<string, unknown>, state: "open" };
+    if (draft === undefined) delete pr.draft;
+    else pr.draft = draft;
+    const output = await runPrecheck({
+      env,
+      adapter: new FixtureAdapter("github", {
+        diff: DIFF,
+        pr,
+        gh_api: { "repos/o/r/collaborators/alice/permission": { permission: "write" } },
+      }),
+      event: issueCommentEvent("/ai-review", "alice"),
+    });
+    assert.equal(output.should_review, "false");
+    assert.equal(output.skip_reason, "comment-pr-draft-unknown");
+  }
 });
 
 // ── The superseded-head gate (#914 review) ────────────────────────────────

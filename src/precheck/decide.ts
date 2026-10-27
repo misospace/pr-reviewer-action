@@ -504,14 +504,18 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
         effectiveForgejoApiUrl,
       );
     }
-    // #961: a draft PR is never reviewed — the command cannot pull a draft
-    // into review any more than it could a closed one. Only an explicit
-    // boolean draft value is authoritative; an uncertain one fails closed,
-    // and a failed PR lookup never reaches this check (comment-pr-lookup-
-    // failed above).
-    if (deriveDraftState(prObject) !== "not-draft") {
+    // #961/#1312: a draft PR is never reviewed — the command cannot pull a
+    // draft into review any more than it could a closed one. Only an explicit
+    // boolean draft value is authoritative. A readable PR whose draft bit is
+    // unproven gets its own capability-degradation reason; a failed lookup
+    // never reaches this check (comment-pr-lookup-failed above).
+    const commentDraftState = deriveDraftState(prObject);
+    if (commentDraftState !== "not-draft") {
       return platformOutputs(
-        { should_review: "false", skip_reason: "comment-pr-draft" },
+        {
+          should_review: "false",
+          skip_reason: commentDraftState === "draft" ? "comment-pr-draft" : "comment-pr-draft-unknown",
+        },
         resolvedPlatform,
         effectiveForgejoApiUrl,
       );
@@ -716,7 +720,18 @@ async function reviewPathOutputs(
 ): Promise<PrecheckOutput> {
   const repo = env.REPO ?? "";
   const prObject = preFetchedPr ?? await spec.adapter.getPr();
-  const identity = normalizePrIdentity(prObject ?? {});
+
+  // #1312: absence of a PR object is an operational read failure, not a fact
+  // about PR state. The ordinary shared admission path must fail the job
+  // rather than converting a forge/API outage into a successful no-review
+  // result. The human-triggered comment-command path keeps its earlier
+  // fail-soft comment-pr-lookup-failed return before it reaches this seam.
+  if (prObject === null || prObject === undefined) {
+    throw new Error(
+      `ERROR: Could not read pull request ${env.PR_NUMBER ?? ""} for ${repo}; refusing to treat a forge/API lookup failure as a successful review skip.`,
+    );
+  }
+  const identity = normalizePrIdentity(prObject);
 
   // ── #1301 closed/merged gate (fail closed) ─────────────────────────────
   // A terminal PR (closed or merged) is never reviewed on ANY path, not
@@ -732,17 +747,14 @@ async function reviewPathOutputs(
   // merged PR as `closed`) skips as `pr-closed`, anything else as
   // `pr-state-unknown`. This gate outranks the #961 draft gate, matching
   // the comment-command order (closed outranks draft). State is read
-  // through the configured forge capability. Two carve-outs preserve
-  // already-pinned behavior: a failed lookup (`getPr()` → null) has no
-  // state to read and still falls through to the #961 draft gate (which
-  // fails it closed as `pr-draft`, not relabeled here), and the accepted
-  // comment-command path keeps the legacy `comment-pr-closed` read where a
-  // missing/non-string state reads open — that path already ran its own
-  // closed gate and a fail-closed draft check upstream.
-  const prState = prObject === null || prObject === undefined
-    ? undefined
-    : derivePrState(prObject);
-  if (prState !== undefined && prState !== "open"
+  // through the configured forge capability. #1312: a failed lookup is no
+  // longer state uncertainty at all — it throws above and fails the run.
+  // The accepted comment-command path keeps the legacy
+  // `comment-pr-closed` read where a missing/non-string state reads open;
+  // that path already ran its own closed gate and a fail-closed draft check
+  // upstream.
+  const prState = derivePrState(prObject);
+  if (prState !== "open"
     && !(commentCommandPath && prState === "unknown")) {
     return platformOutputs(
       {
@@ -763,17 +775,19 @@ async function reviewPathOutputs(
   // workflow forgot the `if: !github.event.pull_request.draft` guard no
   // longer gets a draft reviewed. Checked with the PR object already in
   // hand (no extra fetch). Only an explicit boolean draft value is
-  // authoritative; a missing or unrecognizable one fails closed — a PR
-  // whose reviewability cannot be proven is not reviewed — and so does a
-  // failed PR lookup (getPr null derives unknown). The gate outranks even
-  // a forced re-review (the #231 label, an accepted #914 command) on
+  // authoritative. #1312 separates a proven draft from a readable PR whose
+  // draft bit is unproven: both fail closed, but only the former may claim
+  // `pr-draft`; the latter reports `pr-draft-unknown`. A failed PR lookup
+  // is an operational failure and already threw above. The gate outranks
+  // even a forced re-review (the #231 label, an accepted #914 command) on
   // purpose — marking the PR ready for review is what re-opens it, and
   // the ready transition fires its own review.
-  if (deriveDraftState(prObject) !== "not-draft") {
+  const draftState = deriveDraftState(prObject);
+  if (draftState !== "not-draft") {
     return platformOutputs(
       {
         should_review: "false",
-        skip_reason: "pr-draft",
+        skip_reason: draftState === "draft" ? "pr-draft" : "pr-draft-unknown",
         diff_fingerprint: broadFingerprint,
         head_sha: identity.headSha,
         base_sha: identity.baseSha,

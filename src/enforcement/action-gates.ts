@@ -35,7 +35,9 @@ export const ACTION_GATES: readonly ActionGate[] = [
     id: "draft-skip",
     subjects: ["draft", "drafts"],
     implementation: "src/precheck/decide.ts",
-    // The #961 draft gate's `skip_reason` value, quoted: the unquoted
+    // The #961 proven-draft gate's `skip_reason` value, quoted. #1312
+    // deliberately keeps this exact marker for a real draft; unproven draft
+    // metadata uses the separate `pr-draft-unknown` reason. The unquoted
     // `pr-draft` also occurs inside the comment-command path's
     // `comment-pr-draft`, which is a different gate.
     marker: "\"pr-draft\"",
