@@ -1137,13 +1137,14 @@ class TestRealRuntimeIgnoresCommittedDecoyArtifacts:
         # Engine-owned admission (#726): the runtime's first stage must
         # prove the PR is reviewable before any context stage runs. Without
         # fixture interception this offline run has no credentials, so the
-        # forge reads soft-fail and the admission gates fail closed
-        # ("pr-state-unknown" for the #1301 state gate, "pr-draft" for the
-        # #961 draft gate) before pr-files.json / review-corpus.md are
-        # written. Serve the pinned same-repo, open, not-draft PR identity
-        # through the same semantic-fixture seam the harness corpus uses, so
-        # admission passes offline; the #838 invariant under test (run-dir
-        # seeds win over committed forgeries) is untouched.
+        # forge reads soft-fail: since #1312 a failed PR lookup is an
+        # operational failure that FAILS the run (it no longer green-skips
+        # through the #961 draft gate), so admission can never reach
+        # pr-files.json / review-corpus.md. Serve the pinned same-repo,
+        # open, not-draft PR identity through the same semantic-fixture seam
+        # the harness corpus uses, so admission passes offline; the #838
+        # invariant under test (run-dir seeds win over committed forgeries)
+        # is untouched.
         #
         # The fixture carries `state: "open"` for the same reason the harness
         # corpus fixtures do (`_fixture_pr_object`): a real pulls payload
@@ -1155,10 +1156,10 @@ class TestRealRuntimeIgnoresCommittedDecoyArtifacts:
         # `_prepare_pinned_workspace`, which runs `git clean -ffdx` IN the
         # checkout. An untracked .semantic-fixture/ written there would be
         # wiped before the runtime ever runs, the fixture adapter would then
-        # serve no PR at all, and admission would fail closed again
-        # ("pr-draft" — a failed lookup has no state to read) with no context
-        # artifacts written. The directory name must not collide with the
-        # harness's repo checkout naming
+        # serve no PR at all, and admission would fail as an operational
+        # lookup failure (#1312) with no context artifacts written. The
+        # directory name must not collide with the harness's repo checkout
+        # naming
         # (`<repo_full_name with "/" replaced by "-">`).
         fixture_repo = tmp_path / "pr-identity-fixture"
         (fixture_repo / ".semantic-fixture").mkdir(parents=True)
