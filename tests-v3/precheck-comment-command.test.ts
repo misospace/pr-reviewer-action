@@ -544,7 +544,7 @@ test("#961: the closed check outranks the draft check on a comment", async () =>
 test("#1312: an unproven draft value is named separately on a comment too", async () => {
   const env = baseEnv();
   for (const draft of [undefined, null, 1]) {
-    const pr = { ...sameRepoPr() as Record<string, unknown>, state: "open" };
+    const pr: Record<string, unknown> = { ...sameRepoPr() as Record<string, unknown>, state: "open" };
     if (draft === undefined) delete pr.draft;
     else pr.draft = draft;
     const output = await runPrecheck({
