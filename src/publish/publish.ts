@@ -2145,9 +2145,18 @@ export async function publishReview(
     }
   }
 
-  // Re-review label cleanup: best-effort, never fails the run.
+  // #1254: Re-review label cleanup: best-effort, never fails the run. The
+  // built-in adapters never reject (they return false), but the contract is
+  // enforced here too: an unexpected rejection after a successful publication
+  // is swallowed, never turned into a failed publish.
   if (input.rerunLabel) {
-    await api.removeLabel(input.rerunLabel);
+    try {
+      if (!(await api.removeLabel(input.rerunLabel))) {
+        messages.push("WARN: Re-review label cleanup did not complete (best-effort; publication result unchanged)");
+      }
+    } catch {
+      messages.push("WARN: Re-review label cleanup failed unexpectedly (best-effort; publication result unchanged)");
+    }
   }
 
   // #1116: the tally line ships only with the ledger it counts — every drop
