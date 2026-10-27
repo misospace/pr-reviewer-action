@@ -14,8 +14,9 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   closeSync,
+  constants as fsConstants,
   existsSync,
-  lstatSync,
+  fstatSync,
   mkdtempSync,
   openSync,
   readdirSync,
@@ -563,11 +564,20 @@ test("a symlinked ledger path commits safely: the rename REPLACES the symlink, n
   // POSIX rename does NOT follow the symlink: the commit atomically REPLACES
   // the symlink at filePath with the regular ledger file, so the operator's
   // symlinked alias is never written through (and no state can be smuggled
-  // behind it).
-  assert.equal(lstatSync(filePath).isSymbolicLink(), false,
-    "the commit must replace the symlink, not write through it");
-  assert.equal(readFileSync(filePath, "utf8"), `{\n  "version": 1,\n  "scopes": [\n    {\n      "key": "pr:a",\n      "events": [\n        1000\n      ]\n    }\n  ]\n}\n`,
-    "the committed ledger is the regular file at filePath");
+  // behind it). The race-free way to prove that is a single O_NOFOLLOW open:
+  // it fails with ELOOP if the path is still a symlink, and the fstat/read
+  // below go through the same fd, so the path cannot change between a check
+  // and a use.
+  const committedFd = openSync(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    assert.equal(fstatSync(committedFd).isFile(), true,
+      "the committed ledger is the regular file at filePath");
+    assert.equal(readFileSync(committedFd, "utf8"),
+      `{\n  "version": 1,\n  "scopes": [\n    {\n      "key": "pr:a",\n      "events": [\n        1000\n      ]\n    }\n  ]\n}\n`,
+      "the committed ledger is the regular file at filePath");
+  } finally {
+    closeSync(committedFd);
+  }
   assert.equal(readFileSync(target, "utf8"), `{"version":1,"scopes":[]}\n`,
     "the symlink's original target is untouched");
 });
