@@ -284,7 +284,10 @@ async function bindPlannerDeps(
     // The #1298 PR-state gate reads through the read seam's own capability
     // (`getPr()` — the GitHub pulls shape both adapters return), never the
     // webhook payload. A failed or throwing lookup proves nothing and fails
-    // closed as `pr-state-unknown`.
+    // closed (`pr-state-unknown` for the state, `pr-draft-unknown` for the
+    // draft — #1310); so does a PR object whose `state` cannot be proven:
+    // `derivePrStateReading` is fail closed (#1310), never an open on
+    // `draft: false` alone.
     readPrState: async (): Promise<PrStateReading> => {
       try {
         return derivePrStateReading(await adapter.getPr());

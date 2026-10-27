@@ -321,18 +321,24 @@ test("#1298: a question on a draft PR is ignored", async () => {
 });
 
 test("#1298: an unproven PR state fails closed — no answer on uncertainty", async () => {
-  const cases: Array<() => Promise<{ state: "open" | "closed" | "unknown"; draft: "draft" | "not-draft" | "unknown" }>> = [
-    async () => ({ state: "unknown", draft: "unknown" }),
-    async () => ({ state: "open", draft: "unknown" }),
-    async () => { throw new Error("pr lookup failed"); },
+  const cases: Array<{
+    readPrState: () => Promise<{ state: "open" | "closed" | "unknown"; draft: "draft" | "not-draft" | "unknown" }>;
+    reason: "pr-state-unknown" | "pr-draft-unknown";
+  }> = [
+    { readPrState: async () => ({ state: "unknown", draft: "unknown" }), reason: "pr-state-unknown" },
+    { readPrState: async () => ({ state: "unknown", draft: "not-draft" }), reason: "pr-state-unknown" },
+    // #1310: an unprovable draft is a distinct refusal from an unprovable
+    // open/closed state, so an operator can tell the two apart.
+    { readPrState: async () => ({ state: "open", draft: "unknown" }), reason: "pr-draft-unknown" },
+    { readPrState: async () => { throw new Error("pr lookup failed"); }, reason: "pr-state-unknown" },
   ];
-  for (const readPrState of cases) {
+  for (const { readPrState, reason } of cases) {
     const plan = await planFollowUp(
       { event: ghEvent("@reviewer-bot ping"), body: "@reviewer-bot ping" },
       deps({ readPrState }),
       CONFIG,
     );
-    assert.deepEqual(plan, { action: "ignore", reason: "pr-state-unknown" });
+    assert.deepEqual(plan, { action: "ignore", reason });
   }
 });
 

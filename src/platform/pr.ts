@@ -83,19 +83,27 @@ export interface PrStateReading {
 /**
  * The ONE PR-state derivation (#1298): read open/closed + draft off a
  * platform PR object (the GitHub pulls-API shape; the Forgejo adapter
- * normalizes `state` and `draft` to it at the seam). A successfully fetched
- * PR object with a missing/non-string `state` reads as `open` — the pulls
- * API always supplies one, mirroring the comment-command gate. A null (or
- * otherwise unusable) object — a failed lookup — proves NOTHING: both halves
- * read `unknown`, and the caller fails closed.
+ * normalizes `state` and `draft` to it at the seam). Fail closed (#1310):
+ * only an explicit `open`/`closed` string is authoritative — a missing,
+ * non-string, or unrecognized `state` proves NOTHING and reads `unknown`,
+ * exactly like a null (or otherwise unusable) object (a failed lookup):
+ * both halves read `unknown`, and the caller fails closed. Mirrors the
+ * #1301 admission doctrine: a PR whose state cannot be PROVEN is not
+ * reviewable on `draft: false` alone. This layer is only as strict as its
+ * inputs: the Forgejo seam currently fabricates `state ?? "open"` /
+ * `Boolean(draft)` before this derivation sees the payload — that seam
+ * half is #1303's scope, not this reader's.
  */
 export function derivePrStateReading(raw: unknown): PrStateReading {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { state: "unknown", draft: "unknown" };
   }
   const value = asObject(raw).state;
-  const state: PrOpenState = typeof value === "string"
-    ? (value.toLowerCase() === "closed" ? "closed" : "open")
-    : "open";
+  const normalized = typeof value === "string" ? value.toLowerCase() : "";
+  const state: PrOpenState = normalized === "open"
+    ? "open"
+    : normalized === "closed"
+    ? "closed"
+    : "unknown";
   return { state, draft: deriveDraftState(raw) };
 }
