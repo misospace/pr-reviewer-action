@@ -60,7 +60,11 @@
  * for the same scope dedupe to one charge (the price of interface-level
  * replay idempotency), and a process crashing mid-`saveLedger` may leave a
  * `<file>.tmp.<pid>` remnant — a temp file is never read as state, and
- * removal is safe.
+ * removal is safe. Lock release is compare-then-unlink, not atomic: a holder
+ * that overruns `lockStaleMs` (violating the documented staleness invariant)
+ * can still race a stealer on the unlink; every WRITE inside a commit is
+ * guarded by the pre-rename ownership assertion, which is where a stolen
+ * holder is actually stopped.
  */
 
 import {
