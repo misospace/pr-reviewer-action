@@ -1741,6 +1741,10 @@ test("#1331: quoted symlink diagnostics stop firing while executable command for
     ["ruby backtick command", "tool.rb", ['+out = `readlink -f #{path}`'], true],
     ["command substitution in an echo", "tool.sh", ['+echo "$(readlink "$1")"'], true],
     ["quoted absolute command path", "tool.py", ['+bin_path = "/usr/bin/readlink"'], true],
+    // Token-position boundary: the carried list's last element has no comma,
+    // so the token rule sees none — the exec-argument walk is what keeps it
+    // firing.
+    ["carried argv last element without trailing comma", "tool.py", ['+subprocess.run([', '+\tp,', '+\t"readlink"', '+])'], true],
     // The review correction (#1334): a whitespace-free span in VALUE position
     // is prose, not an argv token, and `$(...)` only recovers where the
     // language itself evaluates it.

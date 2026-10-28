@@ -1194,10 +1194,12 @@ const TEMPLATE_LITERAL_EXTENSIONS = new Set([
  * inert data (#1331 review: Python `message = "$(readlink $1)"` must not
  * fire). The languages that DO evaluate `$(...)` at string-evaluation time —
  * the shell family and PowerShell — are not listed; nor are YAML, Makefile
- * and Dockerfile, whose string content is routinely handed to a shell, and
+ * and Dockerfile, whose string content is routinely handed to a shell
+ * (JSON stays listed, following the backtick precedent already set in
+ * `TEMPLATE_LITERAL_EXTENSIONS` — a data format whose strings are inert), and
  * an unknown or extensionless type recovers too — mistaking a shell
  * substitution for inert string data would hide a real operation, which is
- * the wrong direction to fail in. A string that a non-listed language passes
+ * the wrong direction to fail in. A string that a listed language passes
  * to a shell is still recovered by the exec-argument rule, which is
  * language-agnostic. */
 const COMMAND_SUBSTITUTION_INERT_EXTENSIONS = new Set([
@@ -1205,7 +1207,7 @@ const COMMAND_SUBSTITUTION_INERT_EXTENSIONS = new Set([
   "py", "pyi", "pyw", "rb", "rake", "pl", "pm", "php", "go", "rs",
   "java", "kt", "kts", "scala", "swift", "cs", "c", "h", "cc", "cpp",
   "cxx", "hpp", "hh", "hxx", "m", "mm", "lua", "dart", "ex", "exs",
-  "erl", "hrl", "hs", "jl", "r", "sql", "tcl", "vb", "toml", "ini", "cfg",
+  "erl", "hrl", "hs", "jl", "r", "sql", "tcl", "vb",
 ]);
 
 /** Bounds on the #1331 recovery work, because the scanned text is
@@ -1355,7 +1357,9 @@ function openCallArgumentText(
  *   - the WHOLE argument list of a call that executes text is command content,
  *     not just its first element: `subprocess.run(["bash", "-c",
  *     "readlink -f " + p])`, `os.system("readlink -f '%s'" % p)`, including an
- *     argument list the formatter carried to the following lines.
+ *     argument list the formatter carried to the following lines — with or
+ *     without a trailing comma, so a carried list's LAST element is still
+ *     read by the exec-argument walk even where the token rule sees none.
  * CONTAINMENT: every scanned run is a raw slice of this line or of this call's
  * own argument list, and runs are never concatenated adjacently
  * (`stripQuotedSpans` keeps the quote characters, recovered runs are joined
@@ -1366,14 +1370,21 @@ function openCallArgumentText(
  * DECLARED LIMITS, all in the concealment direction: whitespace-containing
  * quoted text behind a call `EXEC_ARGV_HEAD_PATTERN` does not recognize
  * (`runner.run("readlink -f " + p)`, pinned in the tests) — the same rule
- * covers PowerShell `Invoke-Expression "readlink -f $p"` and an argv list
- * staged in a variable before `subprocess.run(args)`, and a shell command
- * staged the same way — bare or whitespace-containing — and invoked later as
- * `$cmd`, since linking those statements is the taint tracking this model
- * refuses to be (`cmd = "readlink"` no longer fires: a value-position token
- * is prose, so a staged command reads like one); a whitespace-free span that
- * is the sole argument of a non-exec call, on the line or carried to its own
- * line by the formatter (`runner.run("readlink")`); the tail of an
+ * covers PowerShell `Invoke-Expression "readlink -f $p"`, an argv list staged
+ * in a whitespace-containing variable before `subprocess.run(args)` (a
+ * whitespace-free staged list is a `[`-position token and still fires), and a
+ * shell command staged the same way — bare or whitespace-containing — and
+ * invoked later as `$cmd`, since linking those statements is the taint
+ * tracking this model refuses to be (`cmd = "readlink"` no longer fires: a
+ * value-position token is prose, so a staged command reads like one); a
+ * whitespace-free span that is the sole argument of a non-exec call, on the
+ * line or carried to its own line by the formatter
+ * (`runner.run("readlink")`); and — the concealment family the
+ * unrecognized-head rule already declared, widened by the value-position
+ * rule — a whitespace-free quoted command word inside a whitespace-separated
+ * argv the head pattern does not name (`sudo "readlink" "$1"`,
+ * `find . -exec "readlink" {} \;`): list-element position is comma-modeled,
+ * so shell-style whitespace argv conceals it; the tail of an
  * open exec call longer than `MAX_CONSTRUCTION_CONTINUATION_LINES` or
  * `MAX_SYMLINK_RECOVERED_CHARS`; the `(MAX_EXEC_HEADS_PER_LINE + 1)`-th exec
  * call of one line, which cannot contribute once its predecessors consumed
