@@ -749,15 +749,7 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
       }
     }
     const rows: UsageAggregateRow[] = [];
-    let totals = {
-      requestCount: 0,
-      inputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      outputTokens: 0,
-      costMicros: 0,
-      costProvenance: "unknown" as UsageAggregateRow["costProvenance"],
-    };
+    let totals: UsageAggregate["totals"];
     const totalEntries: UsageRecord[] = [];
     for (const [groupKey, entries] of grouped) {
       const [route, role] = groupKey.split("\u0000");
