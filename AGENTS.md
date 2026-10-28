@@ -113,6 +113,7 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/architecture/durable-review-queue.md`](docs/architecture/durable-review-queue.md) — #731 durable review-queue semantics: lifecycle state machine, supersession, leases, recovery (library for the future controller daemon)
 - [`docs/architecture/executor-boundary.md`](docs/architecture/executor-boundary.md) — #733 executor boundary: execution submission/result contract, local reference backend, OCI worker-image contract, conformance suite (library for the future controller daemon)
 - [`docs/architecture/source-evidence-provenance.md`](docs/architecture/source-evidence-provenance.md) — #1015 source-evidence provenance: committed vs sanitized representations, exact-revision authority, safe span verification
+- [`docs/architecture/syntax-aware-context.md`](docs/architecture/syntax-aware-context.md) — #764 optional syntax-aware context stage: provider seam, budgets, provenance, measured recall/noise
 - [`docs/fork-review.md`](docs/fork-review.md) — fork PR privilege separation, threat model, `FORK_*` configuration
 - [`docs/v3-migration.md`](docs/v3-migration.md) — v2→v3 migration state and contract mapping
 - [`docs/repository-config.md`](docs/repository-config.md) — v3 repository config file: keys, base-side trust, narrowing precedence

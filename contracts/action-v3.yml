@@ -370,6 +370,21 @@ inputs:
     default: "6000"
     description: "Maximum bytes of the equivalent-paths section included in context"
     repo-configurable: true
+  - id: syntax-context
+    required: false
+    default: "false"
+    description: "Add a syntax-aware context section (whole touched declarations, definitions of referenced identifiers, callers of touched declarations) next to the lexical related-code context. Off by default: default enablement requires measured quality/token benefit, and the stage scans the local git worktree, so it is disabled on fork pull requests."
+    repo-configurable: true
+  - id: syntax-context-max-bytes
+    required: false
+    default: "8000"
+    description: "Maximum bytes of the syntax-aware context section included in the review corpus (values outside 1-200000 rejected)"
+    repo-configurable: true
+  - id: syntax-context-provider
+    required: false
+    default: "structural"
+    description: "Syntax provider used for the syntax-aware context section. The dependency-free structural provider is the default; an unknown id degrades to it with a recorded reason."
+    repo-configurable: true
   - id: requirement-trace
     v2_id: requirement_trace
     required: false

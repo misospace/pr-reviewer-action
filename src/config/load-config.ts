@@ -7,6 +7,9 @@ type MutableConfig = Record<string, string | number | boolean | ReturnType<typeo
 export const INTEGER_BOUNDS: Readonly<Record<string, readonly [number, number]>> = Object.freeze({
   "repo-map-max-bytes": [1, 200_000],
   "pr-thread-max-bytes": [1, 200_000],
+  // #764: the syntax-aware context section's corpus budget — the same hard
+  // ceiling style as the repo-map budget.
+  "syntax-context-max-bytes": [1, 200_000],
   "deep-review-corpus-max-bytes": [1, 500_000],
   // #701: the tool request budget is bounded by the same hard ceiling the v2
   // harness clamps to — an out-of-range explicit value can never widen it.

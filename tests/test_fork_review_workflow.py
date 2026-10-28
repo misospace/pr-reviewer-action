@@ -264,6 +264,10 @@ def test_fork_feature_policy_pinned_off(fork_text) -> None:
         "approve-forks": "false",
         "related-code-context": "false",
         "repo-map-context": "false",
+        # #764: the syntax-aware context stage scans the local git
+        # worktree too — the trusted BASE checkout here is not the fork
+        # head, so its section would describe the wrong tree.
+        "syntax-context": "false",
         "allowed-source-hosts": "",
     }
     for key, want in expected_off.items():

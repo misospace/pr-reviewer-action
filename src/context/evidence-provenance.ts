@@ -20,8 +20,14 @@ export function sanitizedSourceProvenance(redactionCount: number, file?: string 
   return { representation: "sanitized_source", synthesized: count > 0, redactionCount: count, file: file ?? null, revision: revision ?? null };
 }
 
-export function untrustedTextProvenance(file?: string | null): EvidenceProvenance {
-  return { representation: "untrusted_text", synthesized: false, redactionCount: 0, file: file ?? null, revision: null };
+export function untrustedTextProvenance(file?: string | null, redactionCount = 0): EvidenceProvenance {
+  // The redaction count rides along so a redacted span never claims that
+  // nothing was masked. The representation stays `untrusted_text`: the
+  // bytes are not vouched as repository-committed content, and
+  // `provenanceAttributes` renders no attribute channel for them, so a
+  // literal claim against them still fails closed.
+  const count = Math.max(0, Math.trunc(Number.isFinite(redactionCount) ? redactionCount : 0));
+  return { representation: "untrusted_text", synthesized: false, redactionCount: count, file: file ?? null, revision: null };
 }
 
 export function authorizesLiteralClaim(

@@ -1,6 +1,9 @@
 export const BOOLEAN_INPUTS = new Set([
   "fail-on-request-changes", "inline-findings",
   "ai-stream", "related-code-context", "harness-obligations", "equivalent-paths", "requirement-trace", "linear-enable-for-forks",
+  // #764: the syntax-aware context stage. Off by default — default
+  // enablement requires measured quality/token benefit.
+  "syntax-context",
   "ai-fallback-stream",
   "publish-review-comment", "allow-approve", "approve-forks", "repo-map-context", "pr-thread-context", "review-threads-context",
   "evidence-blocker-enforcement", "evidence-enable-for-forks", "tool-loop-summarize", "tool-failure-enforcement",
@@ -28,6 +31,8 @@ export const BOOLEAN_INPUTS = new Set([
 export const INTEGER_INPUTS = new Set([
   "pr-number", "ai-max-tokens", "ai-primary-retries", "ai-primary-retry-delay-sec", "inline-findings-max",
   "related-code-max-bytes", "equivalent-paths-max-bytes", "linear-issue-timeout-sec", "model-context-tokens", "primary-model-context-tokens",
+  // #764: the syntax-aware context section's corpus byte budget.
+  "syntax-context-max-bytes",
   "smart-model-context-tokens", "fallback-model-context-tokens", "repo-map-max-bytes", "pr-thread-max-bytes", "review-threads-max-bytes", "deep-review-timeout-sec",
   "deep-review-max-tokens", "deep-review-corpus-max-bytes", "enrichment-budget-sec", "image-digest-budget-sec",
   "sarif-max-findings", "evidence-provider-timeout-sec", "evidence-provider-max-output-bytes",
@@ -95,6 +100,8 @@ export const SECRET_INPUTS = new Set([
 
 export const POSITIVE_INTEGER_INPUTS = new Set([
   "ai-max-tokens", "inline-findings-max", "related-code-max-bytes", "equivalent-paths-max-bytes", "linear-issue-timeout-sec",
+  // #764: the syntax-aware context section's corpus byte budget.
+  "syntax-context-max-bytes",
   "model-context-tokens", "primary-model-context-tokens", "smart-model-context-tokens", "fallback-model-context-tokens",
   "deep-review-timeout-sec", "deep-review-max-tokens",
   "sarif-max-findings", "evidence-provider-timeout-sec", "evidence-provider-max-output-bytes",

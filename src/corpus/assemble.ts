@@ -60,6 +60,10 @@ export interface CorpusWorkspace {
   prJson: Uint8Array | null;
   classificationJson: Uint8Array | null;
   relatedCodeTruncatedMd: Uint8Array | null;
+  /** #764: the optional syntax-aware context section (empty unless the
+   * `syntax-context` stage ran). Optional so existing fixtures need no
+   * update: an absent field behaves like `null`. */
+  syntaxContextTruncatedMd?: Uint8Array | null;
   repoMapMd: Uint8Array | null;
   prThreadMd: Uint8Array | null;
   reviewThreadsMd: Uint8Array | null;
@@ -380,6 +384,12 @@ export function buildReviewCorpus(
   );
   if (nonEmpty(ws.relatedCodeTruncatedMd)) {
     pushSection("# Related Code Context", bytes(ws.relatedCodeTruncatedMd));
+  }
+  // #764: the optional syntax-aware context section rides right after the
+  // lexical related-code context it complements. The lexical section stays
+  // the baseline; this one is additional evidence, never a replacement.
+  if (nonEmpty(ws.syntaxContextTruncatedMd)) {
+    pushSection("# Syntax-Aware Context", bytes(ws.syntaxContextTruncatedMd));
   }
   if (nonEmpty(artifacts.get("repo-map.capped.md"))) {
     // repo-map.md carries its own trust-framed "# Repository Map" header.

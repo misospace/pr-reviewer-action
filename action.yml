@@ -301,6 +301,18 @@ inputs:
     description: Maximum bytes of the equivalent-paths section included in context
     required: false
     default: "6000"
+  syntax-context:
+    description: "Add a syntax-aware context section (whole touched declarations, definitions of referenced identifiers, callers of touched declarations) next to the lexical related-code context. Off by default: default enablement requires measured quality/token benefit, and the stage scans the local git worktree, so it is disabled on fork pull requests."
+    required: false
+    default: "false"
+  syntax-context-max-bytes:
+    description: Maximum bytes of the syntax-aware context section included in the review corpus (values outside 1-200000 rejected)
+    required: false
+    default: "8000"
+  syntax-context-provider:
+    description: Syntax provider used for the syntax-aware context section. The dependency-free structural provider is the default; an unknown id degrades to it with a recorded reason.
+    required: false
+    default: "structural"
   requirement-trace:
     description: "Require a per-requirement trace (production enforcement + regression test locations, deterministically verified against the checkout) for every acceptance/normative requirement in the ledger before crediting it; an unverifiable or missing trace marks review coverage incomplete, and an unmet requirement is disclosed in the rendered trace without synthesizing a finding — blocking findings come only from the model's own substantiated violation. Off by default: not yet measured on the real-PR corpus."
     required: false
