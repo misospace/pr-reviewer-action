@@ -11,7 +11,11 @@
  * multi-scope transaction (`consumeScopesAtomically`): both scopes committed
  * by one rename, all-or-nothing on commit failure (no half-charge, no
  * double-charge on retry), pure-replay no-save, and fail-closed input
- * validation. */
+ * validation — plus the STABLE REQUEST IDENTITY (a retry charges nothing,
+ * distinct requests in one millisecond stay distinct charges, a partial
+ * charge denies), the ledger format version 2 (a digest, never the raw
+ * identity; a version-1 ledger is migrated), the ADVISORY directory fsync,
+ * and the EXCLUSIVE, unpredictable commit temp file. */
 
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
@@ -21,6 +25,7 @@ import {
   constants as fsConstants,
   existsSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -33,6 +38,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 
 import {
   consumeFollowUpBudget,
@@ -66,6 +72,25 @@ function makeStore(options: Partial<DurableRateLimitStoreOptions> & { filePath: 
   return new DurableRateLimitStore({ lockRetryDelayMs: 1, ...options });
 }
 
+/** The PERSISTED form of a request identity: a sha-256 digest (64 lowercase
+ * hex chars), never the raw value. */
+const digest = (requestId: string): string =>
+  createHash("sha256").update(requestId, "utf8").digest("hex");
+
+/** The persisted charges of one scope, read back from the ledger file. */
+interface PersistedCharge {
+  at: number;
+  id?: string;
+}
+
+function persistedScopes(filePath: string): Map<string, PersistedCharge[]> {
+  const body = JSON.parse(readFileSync(filePath, "utf8")) as {
+    version: number;
+    scopes: { key: string; events: PersistedCharge[] }[];
+  };
+  return new Map(body.scopes.map((entry) => [entry.key, entry.events]));
+}
+
 // ── restart durability ───────────────────────────────────────────────────
 
 test("per-PR and per-actor budgets survive a process restart and are enforced", () => {
@@ -90,8 +115,8 @@ test("a missing ledger is the well-defined fresh start; a commit is canonical an
   assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 1_000), 0);
   store.record("pr:github:owner/repo#7", 1_000);
   const body = JSON.parse(readFileSync(filePath, "utf8"));
-  assert.equal(body.version, 1);
-  assert.deepEqual(body.scopes, [{ key: "pr:github:owner/repo#7", events: [1_000] }]);
+  assert.equal(body.version, 2);
+  assert.deepEqual(body.scopes, [{ key: "pr:github:owner/repo#7", events: [{ at: 1_000 }] }]);
   assert.deepEqual(readdirSync(dir), ["rate-limit.json"]);
 });
 
@@ -139,19 +164,19 @@ test("a crash mid-group replay completes without double- or half-charging", () =
   const crashed = makeStore({ filePath });
   crashed.record("pr:github:owner/repo#7", 5_000);
   // The retry replays the WHOLE group; with the host reusing the event's
-  // instant (deterministic-clock hosts), the committed scope dedupes. A retry
-  // at a NEWER instant re-charges instead — the conservative direction.
+  // instant (deterministic-clock hosts), the committed scope dedupes. This
+  // charge is IDENTITY-LESS (no request identity was supplied), so it dedupes
+  // by (key, instant) and a retry at a NEWER instant re-charges it. The
+  // PLANNER path always supplies the stable request identity, and there a
+  // retry at a later instant is a NO-OP that charges nothing (pinned by the
+  // retry-idempotency tests below).
   const retry = makeStore({ filePath });
   const plan = scopes(2);
   assert.equal(consumeFollowUpBudget(retry, plan, 5_000).allowed, true);
-  const ledger = new Map<string, number[]>(
-    JSON.parse(readFileSync(filePath, "utf8")).scopes.map(
-      (entry: { key: string; events: number[] }) => [entry.key, entry.events],
-    ),
-  );
-  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [5_000],
+  const ledger = persistedScopes(filePath);
+  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [{ at: 5_000 }],
     "the replay must not double-charge the already-committed scope");
-  assert.deepEqual(ledger.get("actor:github:owner/repo#7:alice"), [5_000],
+  assert.deepEqual(ledger.get("actor:github:owner/repo#7:alice"), [{ at: 5_000 }],
     "the replay must complete the scope the crash skipped");
 });
 
@@ -191,7 +216,10 @@ function corruptCase(name: string, content: string) {
 }
 
 corruptCase("unparseable JSON", "this is not json {{{");
-corruptCase("wrong version", JSON.stringify({ version: 2, scopes: [] }));
+// Version 2 is the current format and version 1 is the migrated legacy
+// format — both are SUPPORTED, so an unsupported version (3) is the corrupt
+// case.
+corruptCase("wrong version", JSON.stringify({ version: 3, scopes: [] }));
 corruptCase("unknown top-level key", JSON.stringify({ version: 1, scopes: [], extra: 1 }));
 corruptCase("scopes not an array", JSON.stringify({ version: 1, scopes: {} }));
 corruptCase("duplicate scope key", JSON.stringify({
@@ -375,7 +403,14 @@ test("concurrent PROCESSES commit every charge exactly once (no lost update)", a
   assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 20_000), 6,
     "six concurrent commits must ALL be in the ledger");
   const body = JSON.parse(readFileSync(filePath, "utf8"));
-  assert.deepEqual(body.scopes[0].events, [10_000, 10_001, 10_002, 10_003, 10_004, 10_005]);
+  assert.deepEqual(body.scopes[0].events, [
+    { at: 10_000 },
+    { at: 10_001 },
+    { at: 10_002 },
+    { at: 10_003 },
+    { at: 10_004 },
+    { at: 10_005 },
+  ]);
 });
 
 test("a live foreign lock holder fails commits closed and LATCHES the budget shut", () => {
@@ -476,13 +511,20 @@ test("diagnostics never echo persisted content: unknown keys and version values 
   assert.ok(!reason.includes(marker), `diagnostic echoed persisted content: ${reason}`);
   assert.match(reason, /rate-limit ledger/);
   // A SECOND fixture whose key set is valid and only the version is wrong:
-  // the version branch is its own rejection, sanitized the same way.
+  // the version branch is its own rejection, sanitized the same way. The
+  // SUPPORTED versions are 1 (migrated legacy) and 2 (current); anything
+  // else — a marker-carrying string or a plain number — is unsupported.
   writeFileSync(filePath, JSON.stringify({ version: `v9-${marker}`, scopes: [] }));
   const again = makeStore({ filePath });
   assert.equal(again.countInWindow("pr:a", WINDOW, 1_000), Number.MAX_SAFE_INTEGER);
   const reason2 = String(again.degradedReason);
   assert.ok(!reason2.includes(marker), `diagnostic echoed persisted content: ${reason2}`);
-  assert.match(reason2, /version must be 1/);
+  assert.match(reason2, /unsupported version/);
+  // A THIRD fixture: a numeric version outside the supported set {1, 2}.
+  writeFileSync(filePath, JSON.stringify({ version: 3, scopes: [] }));
+  const third = makeStore({ filePath });
+  assert.equal(third.countInWindow("pr:a", WINDOW, 1_000), Number.MAX_SAFE_INTEGER);
+  assert.match(String(third.degradedReason), /unsupported version/);
 });
 
 // ── window upper bound (future instants never count) ────────────────────
@@ -578,7 +620,7 @@ test("a symlinked ledger path commits safely: the rename REPLACES the symlink, n
     assert.equal(fstatSync(committedFd).isFile(), true,
       "the committed ledger is the regular file at filePath");
     assert.equal(readFileSync(committedFd, "utf8"),
-      `{\n  "version": 1,\n  "scopes": [\n    {\n      "key": "pr:a",\n      "events": [\n        1000\n      ]\n    }\n  ]\n}\n`,
+      `{\n  "version": 2,\n  "scopes": [\n    {\n      "key": "pr:a",\n      "events": [\n        {\n          "at": 1000\n        }\n      ]\n    }\n  ]\n}\n`,
       "the committed ledger is the regular file at filePath");
   } finally {
     closeSync(committedFd);
@@ -613,12 +655,9 @@ test("an allowed multi-scope consume commits BOTH scopes with one transaction an
   const plan = scopes(2);
   assert.equal(consumeFollowUpBudget(store, plan, 1_000).allowed, true);
   // The ledger file holds BOTH events — one rename, no half-commit.
-  const body = JSON.parse(readFileSync(filePath, "utf8"));
-  const ledger = new Map<string, number[]>(
-    body.scopes.map((entry: { key: string; events: number[] }) => [entry.key, entry.events]),
-  );
-  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [1_000]);
-  assert.deepEqual(ledger.get("actor:github:owner/repo#7:alice"), [1_000]);
+  const ledger = persistedScopes(filePath);
+  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [{ at: 1_000 }]);
+  assert.deepEqual(ledger.get("actor:github:owner/repo#7:alice"), [{ at: 1_000 }]);
   // A fresh store over the same path (the restart) still counts them.
   const restarted = makeStore({ filePath });
   assert.equal(restarted.countInWindow("pr:github:owner/repo#7", WINDOW, 2_000), 1);
@@ -718,4 +757,339 @@ test("malformed input denies through the atomic path with a shape-class reason a
   assert.equal(tight.consumeScopesAtomically(wide, 1_000), false);
   assert.match(String(tight.degradedReason), /retention/);
   assert.ok(!existsSync(filePath));
+});
+
+// ── stable request identity (retry idempotency) ─────────────────────────
+
+test("a retry of an already-charged request is allowed and charges nothing, even at a later instant", () => {
+  const { filePath } = scratch("retry-identity");
+  const store = makeStore({ filePath });
+  const plan = scopes(2);
+  assert.equal(store.consumeScopesAtomically(plan, 1_000, "req-1"), true);
+  // The REDELIVERY carries the SAME identity at a LATER instant: the charge
+  // is already paid, so the retry is allowed (it is not rate-limited — the
+  // work was already admitted) and it charges NOTHING.
+  assert.equal(store.consumeScopesAtomically(plan, 5_000, "req-1"), true);
+  const ledger = persistedScopes(filePath);
+  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [{ at: 1_000, id: digest("req-1") }],
+    "a redelivery must never add a second charge to a scope");
+  assert.deepEqual(ledger.get("actor:github:owner/repo#7:alice"), [{ at: 1_000, id: digest("req-1") }],
+    "a redelivery must never add a second charge to a scope");
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 5_000), 1,
+    "the retry must not consume the budget twice");
+  assert.equal(store.countInWindow("actor:github:owner/repo#7:alice", WINDOW, 5_000), 1);
+  // A fresh store over the same file (the restart) counts the ONE charge.
+  const restarted = makeStore({ filePath });
+  assert.equal(restarted.countInWindow("pr:github:owner/repo#7", WINDOW, 5_000), 1);
+  assert.equal(restarted.countInWindow("actor:github:owner/repo#7:alice", WINDOW, 5_000), 1);
+});
+
+test("two distinct requests in the same millisecond are two charges", () => {
+  const { filePath } = scratch("distinct-same-ms");
+  const store = makeStore({ filePath });
+  const plan = scopes(2);
+  assert.equal(store.consumeScopesAtomically(plan, 1_000, "req-1"), true);
+  // A DIFFERENT question in the SAME millisecond is a real second question:
+  // the identity — not the instant — decides what a replay is.
+  assert.equal(store.consumeScopesAtomically(plan, 1_000, "req-2"), true);
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 1_000), 2,
+    "two real questions in one millisecond are never collapsed into one");
+  assert.equal(store.countInWindow("actor:github:owner/repo#7:alice", WINDOW, 1_000), 2);
+  const ledger = persistedScopes(filePath);
+  for (const key of ["pr:github:owner/repo#7", "actor:github:owner/repo#7:alice"]) {
+    const events = ledger.get(key) ?? [];
+    assert.equal(events.length, 2, `${key} must hold both charges`);
+    assert.deepEqual(events.map((event) => event.at), [1_000, 1_000]);
+    assert.deepEqual(
+      events.map((event) => event.id).slice().sort(),
+      [digest("req-1"), digest("req-2")].slice().sort(),
+      `${key} must hold one charge per distinct identity`,
+    );
+  }
+});
+
+test("a partially charged identity denies and writes nothing (inconsistent state)", () => {
+  const { filePath } = scratch("inconsistent");
+  const identity = "req-1";
+  // The identity is charged on the PR scope but NOT on the actor scope — a
+  // state the one-rename commit cannot produce, so it is INCONSISTENT.
+  const content = JSON.stringify({
+    version: 2,
+    scopes: [
+      { key: "pr:github:owner/repo#7", events: [{ at: 1_000, id: digest(identity) }] },
+      { key: "actor:github:owner/repo#7:alice", events: [{ at: 1_000 }] },
+    ],
+  });
+  writeFileSync(filePath, content);
+  const store = makeStore({ filePath });
+  assert.equal(store.consumeScopesAtomically(scopes(2), 2_000, identity), false);
+  assert.match(String(store.degradedReason), /inconsistent/);
+  assert.equal(readFileSync(filePath, "utf8"), content,
+    "an inconsistent state must never be rewritten — not even to charge the missing scope");
+});
+
+test("the stored request identity is a sha-256 digest, never the raw value", () => {
+  const { filePath } = scratch("digest-only");
+  const store = makeStore({ filePath });
+  const identity = "req-1";
+  assert.equal(store.consumeScopesAtomically(scopes(2), 1_000, identity), true);
+  const bytes = readFileSync(filePath, "utf8");
+  assert.ok(!bytes.includes(identity),
+    "the raw request identity must never be persisted in the ledger");
+  const ledger = persistedScopes(filePath);
+  for (const key of ["pr:github:owner/repo#7", "actor:github:owner/repo#7:alice"]) {
+    const events = ledger.get(key) ?? [];
+    assert.equal(events.length, 1);
+    assert.match(String(events[0]!.id), /^[0-9a-f]{64}$/,
+      "the persisted identity must be a 64-char lowercase hex digest");
+    assert.equal(events[0]!.id, digest(identity));
+  }
+});
+
+test("a version-1 ledger is migrated on load and rewritten as version 2 on the next commit", () => {
+  const { filePath } = scratch("migrate-v1");
+  writeFileSync(filePath, JSON.stringify({
+    version: 1,
+    scopes: [{ key: "pr:github:owner/repo#7", events: [1000] }],
+  }));
+  const store = makeStore({ filePath });
+  // The legacy bare instant is migrated into an identity-less charge, so it
+  // still counts — the migration never loses budget.
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 2_000), 1);
+  assert.equal(store.degradedReason, null, "a version-1 ledger is supported, not corrupt");
+  // The next commit rewrites the ledger in the current format.
+  assert.equal(store.consumeScopesAtomically(scopes(2), 2_000), true);
+  assert.equal(store.degradedReason, null);
+  const body = JSON.parse(readFileSync(filePath, "utf8")) as {
+    version: number;
+    scopes: { key: string; events: PersistedCharge[] }[];
+  };
+  assert.equal(body.version, 2);
+  const ledger = persistedScopes(filePath);
+  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [{ at: 1_000 }, { at: 2_000 }]);
+  assert.deepEqual(ledger.get("actor:github:owner/repo#7:alice"), [{ at: 2_000 }]);
+});
+
+// ── advisory directory fsync ─────────────────────────────────────────────
+
+test("a directory-fsync failure after the rename is advisory: the committed charge stands", () => {
+  const { filePath } = scratch("fsync-fail");
+  const store = makeStore({
+    filePath,
+    directoryFsync: () => { throw new Error("EIO"); },
+  });
+  // The charge is COMMITTED before the directory fsync runs, so the failure
+  // is a durability hint — never a failed commit.
+  assert.equal(store.consumeScopesAtomically(scopes(2), 1_000), true);
+  const ledger = persistedScopes(filePath);
+  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [{ at: 1_000 }],
+    "the committed charge must be on disk");
+  assert.deepEqual(ledger.get("actor:github:owner/repo#7:alice"), [{ at: 1_000 }]);
+  assert.match(String(store.durabilityAdvisory), /directory fsync/,
+    "the advisory directory-fsync failure must stay visible in lastAdvisory");
+  // The advisory is NOT a refusal: the degraded reason (which explains
+  // refusals) stays clean, and the advisory survives the next healthy read.
+  assert.equal(store.degradedReason, null);
+  // The store is NOT latched: a following count answers the real count, not
+  // the deny sentinel.
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 1_000), 1);
+  assert.match(String(store.durabilityAdvisory), /directory fsync/,
+    "a later healthy read must not erase the advisory");
+});
+
+// ── exclusive, unpredictable commit temp file ────────────────────────────
+
+test("the commit's temp file is exclusive: a planted symlink at the legacy predictable path is never written through", () => {
+  const { dir, filePath } = scratch("tmp-symlink");
+  const decoy = path.join(dir, "decoy.json");
+  writeFileSync(decoy, "decoy\n");
+  // The legacy PREDICTABLE temp name (pid only): a commit that used it could
+  // be redirected through this planted link.
+  const legacy = `${filePath}.tmp.${process.pid}`;
+  symlinkSync(decoy, legacy);
+  const store = makeStore({ filePath });
+  assert.equal(store.consumeScopesAtomically(scopes(2), 1_000), true);
+  assert.equal(readFileSync(decoy, "utf8"), "decoy\n",
+    "a planted symlink must never be written through");
+  assert.equal(lstatSync(legacy).isSymbolicLink(), true,
+    "the planted link must survive the commit");
+  // The ledger committed correctly.
+  const ledger = persistedScopes(filePath);
+  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [{ at: 1_000 }]);
+  assert.deepEqual(ledger.get("actor:github:owner/repo#7:alice"), [{ at: 1_000 }]);
+  // The commit left no temp file of its OWN behind.
+  assert.deepEqual(readdirSync(dir).filter((name) => name.includes(".tmp.")), [path.basename(legacy)],
+    "the commit must leave no temp file of its own behind");
+});
+
+test("the commit's temp file is exclusive: a planted file at the legacy predictable path is neither overwritten nor deleted", () => {
+  const { dir, filePath } = scratch("tmp-planted");
+  const legacy = `${filePath}.tmp.${process.pid}`;
+  writeFileSync(legacy, "planted\n");
+  const store = makeStore({ filePath });
+  assert.equal(store.consumeScopesAtomically(scopes(2), 1_000), true);
+  assert.equal(readFileSync(legacy, "utf8"), "planted\n",
+    "a planted name must never be overwritten");
+  assert.equal(existsSync(legacy), true,
+    "a planted name must never be deleted by the commit's cleanup");
+  const ledger = persistedScopes(filePath);
+  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [{ at: 1_000 }]);
+  assert.deepEqual(readdirSync(dir).filter((name) => name.includes(".tmp.")), [path.basename(legacy)],
+    "the commit must leave no temp file of its own behind");
+});
+
+test("a successful commit leaves no temp file behind", () => {
+  const { dir, filePath } = scratch("tmp-clean");
+  const store = makeStore({ filePath });
+  assert.equal(store.consumeScopesAtomically(scopes(2), 1_000), true);
+  assert.deepEqual(readdirSync(dir), ["rate-limit.json"]);
+});
+
+// ── the EXCLUSIVE-create fence, fed the hostile token itself ───────────
+// The repo's adversarial-boundary rule: the fence must be exercised with the
+// hostile artifact AT the path the commit actually uses — a proxy path (the
+// legacy predictable name) proves nothing about the fence.
+
+test("a symlink AT the commit's own temp path is never written through: the commit fails closed", () => {
+  const { dir, filePath } = scratch("tmp-symlink-fence");
+  const decoy = path.join(dir, "decoy.json");
+  writeFileSync(decoy, "decoy\n");
+  // The temp path this commit will use, INJECTED so the hostile artifact sits
+  // exactly where the fence has to reject it.
+  const tmp = path.join(dir, "injected.tmp");
+  symlinkSync(decoy, tmp);
+  const store = makeStore({ filePath, tempName: () => tmp });
+  // The EXCLUSIVE create (`wx`) refuses the existing path: the commit fails
+  // closed (never writes through the link, never truncates the decoy).
+  assert.throws(
+    () => store.consumeScopesAtomically(scopes(2), 1_000),
+    (err: NodeJS.ErrnoException) => err.code === "EEXIST",
+  );
+  assert.equal(readFileSync(decoy, "utf8"), "decoy\n",
+    "a planted symlink must never be written through");
+  assert.equal(lstatSync(tmp).isSymbolicLink(), true,
+    "the planted link must survive the refused commit");
+  assert.ok(!existsSync(filePath), "a refused commit writes no ledger");
+  // The planted link is NOT removed by the cleanup: the commit never created
+  // it, so it never owns it.
+  assert.equal(existsSync(tmp), true);
+});
+
+test("a regular file AT the commit's own temp path is neither overwritten nor deleted", () => {
+  const { dir, filePath } = scratch("tmp-file-fence");
+  const tmp = path.join(dir, "injected.tmp");
+  writeFileSync(tmp, "planted\n");
+  const store = makeStore({ filePath, tempName: () => tmp });
+  assert.throws(
+    () => store.consumeScopesAtomically(scopes(2), 1_000),
+    (err: NodeJS.ErrnoException) => err.code === "EEXIST",
+  );
+  assert.equal(readFileSync(tmp, "utf8"), "planted\n",
+    "a planted file must never be overwritten");
+  assert.equal(existsSync(tmp), true,
+    "a planted file must never be deleted by the commit's cleanup");
+});
+
+// ── the seam re-admits a redelivery of an already-charged request ───────
+
+test("a redelivery through the SEAM is re-admitted even when its scope is at the limit, and charges nothing", () => {
+  const { filePath } = scratch("seam-redelivery");
+  const store = makeStore({ filePath });
+  const plan = scopes(1);
+  assert.equal(consumeFollowUpBudget(store, plan, 1_000, "req-1").allowed, true);
+  // The scope is now AT its limit: a DIFFERENT request is refused...
+  assert.equal(consumeFollowUpBudget(store, plan, 2_000, "req-2").allowed, false);
+  // ...but the REDELIVERY of the already-charged request is re-admitted (the
+  // work was already admitted and charged) and charges NOTHING.
+  assert.equal(consumeFollowUpBudget(store, plan, 5_000, "req-1").allowed, true);
+  const ledger = persistedScopes(filePath);
+  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [{ at: 1_000, id: digest("req-1") }],
+    "the redelivery must not add a second charge");
+  assert.deepEqual(ledger.get("actor:github:owner/repo#7:alice"), [{ at: 1_000, id: digest("req-1") }]);
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 5_000), 1);
+});
+
+test("an atomic consume without a request identity raises an advisory (a redelivery is not idempotent)", () => {
+  const { filePath } = scratch("identity-advisory");
+  const store = makeStore({ filePath });
+  assert.equal(store.consumeScopesAtomically(scopes(2), 1_000), true);
+  assert.match(String(store.identityAdvisory), /without a request identity/);
+  // It is an ADVISORY, not a refusal: the degraded reason stays clean.
+  assert.equal(store.degradedReason, null);
+});
+
+// ── corrupt v2 states ───────────────────────────────────────────────────
+
+test("a malformed request identity in the ledger denies (shape class only)", () => {
+  const { filePath } = scratch("corrupt-id");
+  const marker = "SECRET-MARKER-7f3a";
+  writeFileSync(filePath, JSON.stringify({
+    version: 2,
+    scopes: [{ key: "pr:a", events: [{ at: 1_000, id: `not-a-digest-${marker}` }] }],
+  }));
+  const store = makeStore({ filePath });
+  assert.equal(store.countInWindow("pr:a", WINDOW, 2_000), Number.MAX_SAFE_INTEGER);
+  const reason = String(store.degradedReason);
+  assert.ok(!reason.includes(marker), `diagnostic echoed persisted content: ${reason}`);
+  assert.match(reason, /malformed event identity/);
+});
+
+test("a non-canonical charge order denies (a foreign state is never normalized)", () => {
+  const { filePath } = scratch("corrupt-order");
+  // Two charges at the same instant whose identities are NOT in the canonical
+  // order (the identity-less charge sorts first): a state this store never
+  // writes. Accepting it would let a later commit write a duplicate pair.
+  writeFileSync(filePath, JSON.stringify({
+    version: 2,
+    scopes: [{ key: "pr:a", events: [{ at: 1_000, id: digest("bb") }, { at: 1_000 }] }],
+  }));
+  const store = makeStore({ filePath });
+  assert.equal(store.countInWindow("pr:a", WINDOW, 2_000), Number.MAX_SAFE_INTEGER);
+  assert.match(String(store.degradedReason), /ascending and unique/);
+});
+
+// ── cross-process: concurrent redeliveries of ONE request ──────────────
+
+test("concurrent PROCESSES redelivering the SAME request charge it once", async () => {
+  const { filePath } = scratch("xproc-identity");
+  const modulePath = require.resolve("../src/followup/durable-rate-limit.js");
+  const childScript = `
+    const { DurableRateLimitStore } = require(process.argv[1]);
+    const store = new DurableRateLimitStore({ filePath: process.argv[2], lockRetryDelayMs: 5 });
+    const scopes = [
+      { key: "pr:github:owner/repo#7", rule: { limit: 6, windowMs: 60000 } },
+      { key: "actor:github:owner/repo#7:alice", rule: { limit: 6, windowMs: 60000 } },
+    ];
+    const allowed = store.consumeScopesAtomically(scopes, 10_000, "shared-req");
+    if (!allowed) {
+      process.stderr.write("denied");
+      process.exit(1);
+    }
+  `;
+  const launches: Promise<void>[] = [];
+  for (let index = 0; index < 6; index += 1) {
+    launches.push(new Promise<void>((resolve, reject) => {
+      const child = spawn(
+        process.execPath,
+        ["-e", childScript, modulePath, filePath],
+        { stdio: ["ignore", "ignore", "pipe"] },
+      );
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      child.on("error", reject);
+      child.on("exit", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`child ${index} exited ${code}: ${stderr}`));
+      });
+    }));
+  }
+  await Promise.all(launches);
+  const store = makeStore({ filePath });
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 20_000), 1,
+    "six concurrent redeliveries of ONE request must charge it ONCE");
+  assert.equal(store.countInWindow("actor:github:owner/repo#7:alice", WINDOW, 20_000), 1);
+  const ledger = persistedScopes(filePath);
+  assert.deepEqual(ledger.get("pr:github:owner/repo#7"), [{ at: 10_000, id: digest("shared-req") }]);
 });

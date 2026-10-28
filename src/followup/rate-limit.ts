@@ -24,6 +24,15 @@
  * a crash between scopes cannot persist one scope's charge alone. Stores
  * WITHOUT the capability are consumed through the same per-scope
  * check-then-record loop as before, byte-identically.
+ *
+ * Optional request identity: a caller MAY pass the STABLE identity of the
+ * logical request (the same value on every redelivery of it). Only a store
+ * with the atomic capability consumes it — and only to make a RETRY
+ * idempotent (a durable store recognizes the retry and charges it once, never
+ * again at a later instant) and to RE-ADMIT it (a request that was already
+ * admitted and charged is not turned into a rate-limited refusal by the
+ * budget pre-check). Stores without the capability ignore it completely, so
+ * the in-memory and forge-backed stores are unaffected.
  */
 
 /** A single-window budget: at most `limit` events per `windowMs` for one key. */
@@ -112,8 +121,28 @@ export interface AtomicMultiScopeRateLimitStore extends RateLimitStore {
    * when every scope is under its limit, commit one event per scope as ONE
    * all-or-nothing transaction: a crash strictly before the commit persists
    * nothing (a retry is a fresh attempt, never a double-charge of the
-   * interrupted attempt) and a denial writes nothing. */
-  consumeScopesAtomically(scopes: readonly RateLimitScope[], nowMs: number): boolean;
+   * interrupted attempt) and a denial writes nothing.
+   *
+   * `requestId` is the OPTIONAL stable identity of the logical request — the
+   * SAME value on every redelivery of it. A store that persists it uses it to
+   * recognize a RETRY of an already-charged request and charge it NOTHING
+   * (never again at a later instant), while two DISTINCT requests stay
+   * distinct charges even in the same millisecond. A store without durable
+   * state may ignore it. */
+  consumeScopesAtomically(
+    scopes: readonly RateLimitScope[],
+    nowMs: number,
+    requestId?: string,
+  ): boolean;
+
+  /** OPTIONAL read-only probe: is this request identity ALREADY charged on
+   * EVERY one of `scopes`? A redelivery of an already-charged request was
+   * already admitted and charged, so it is re-admitted (never charged again)
+   * even when its scopes have no headroom left — the budget pre-check must
+   * not turn a paid-for request into a rate-limited refusal. Absent (the
+   * default) means the store cannot prove that, and the pre-check decides
+   * as it always did. Never throws: an unprovable answer is `false`. */
+  isRequestCharged?(scopes: readonly RateLimitScope[], requestId: string): boolean;
 }
 
 /** The optional atomic-multi-scope capability of `store`, or null when the
@@ -128,12 +157,35 @@ function asAtomicMultiScopeStore(store: RateLimitStore): AtomicMultiScopeRateLim
 /** Decide a multi-scope follow-up budget in one atomic pass: allowed only when
  * EVERY scope is under its limit; then record the event for every scope. A
  * denied decision records nothing. Returns whether it was allowed (the caller
- * maps a denial to the `rate-limited` ignore reason). */
+ * maps a denial to the `rate-limited` ignore reason).
+ *
+ * `requestId` is the OPTIONAL stable identity of the logical request (the
+ * same value on every redelivery of it). It is forwarded ONLY to a store with
+ * the atomic capability, which uses it to make a retry idempotent; stores
+ * without the capability take the byte-identical per-scope loop and ignore
+ * it. */
 export function consumeFollowUpBudget(
   store: RateLimitStore,
   scopes: readonly RateLimitScope[],
   nowMs: number,
+  requestId?: string,
 ): { allowed: boolean } {
+  const atomic = asAtomicMultiScopeStore(store);
+  // A REDELIVERY of an already-charged request: the request was already
+  // admitted and charged, so it is RE-ADMITTED (never charged again) even
+  // when its scopes have no headroom left — the budget pre-check must not
+  // turn a paid-for request into a rate-limited refusal. The store's own
+  // lock-held check stays authoritative for the charge: the probe is
+  // read-only, and the transaction re-proves the charge under the lock.
+  if (
+    atomic !== null &&
+    requestId !== undefined &&
+    requestId !== "" &&
+    atomic.isRequestCharged !== undefined &&
+    atomic.isRequestCharged(scopes, requestId)
+  ) {
+    return { allowed: atomic.consumeScopesAtomically(scopes, nowMs, requestId) };
+  }
   for (const scope of scopes) {
     const limit = Math.floor(scope.rule.limit);
     // A non-positive limit OR a non-positive window proves nothing usable; a
@@ -150,8 +202,9 @@ export function consumeFollowUpBudget(
   // persist one scope's charge alone. The per-scope checks above stay first:
   // they are the shared deterministic policy (and their denials — including
   // fail-closed unprovable state — write nothing and never reach the commit).
-  const atomic = asAtomicMultiScopeStore(store);
-  if (atomic !== null) return { allowed: atomic.consumeScopesAtomically(scopes, nowMs) };
+  if (atomic !== null) {
+    return { allowed: atomic.consumeScopesAtomically(scopes, nowMs, requestId) };
+  }
   for (const scope of scopes) store.record(scope.key, nowMs);
   return { allowed: true };
 }

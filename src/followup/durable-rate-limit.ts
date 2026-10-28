@@ -39,6 +39,28 @@
  *   concurrent controllers' charges both land (no lost update) and neither is
  *   applied twice.
  *
+ * RETRY IDEMPOTENCY (the stable request identity):
+ * - the atomic transaction takes an OPTIONAL request identity — the stable id
+ *   of the logical request (the canonical follow-up comment id, qualified by
+ *   the PR it belongs to), the SAME value on every redelivery of that
+ *   request. It is persisted as a sha-256 DIGEST, never the raw identity, so
+ *   stored state carries no untrusted content;
+ * - a retry that carries an ALREADY-CHARGED identity is a NO-OP: the request
+ *   was already admitted and charged, so the retry is ALLOWED (it is not
+ *   denied as rate-limited — the work was already admitted) and charges
+ *   NOTHING. A commit that landed while its acknowledgement was lost can
+ *   therefore never be double-charged by the redelivery it triggers, at ANY
+ *   later instant. `isRequestCharged` is the read-only probe the seam uses to
+ *   re-admit such a redelivery BEFORE the budget pre-check; the charge
+ *   itself is re-proved under the lock by the transaction;
+ * - two DISTINCT requests are never conflated: distinct identities are
+ *   distinct charges even in the SAME millisecond, so the identity — not the
+ *   instant — decides what a replay is, and two real questions in one
+ *   millisecond are still two charges;
+ * - a state that carries the identity on only SOME of the transaction's scopes
+ *   is INCONSISTENT (the one-rename commit cannot produce it) and DENIES
+ *   without writing — never a half-charge, never a double-charge.
+ *
  * Fail-closed posture (`countInWindow` never throws — it returns a count no
  * sane limit can reach, so the planner denies the question):
  * - corrupt, unversioned, structurally unexpected, or over-cap state, and any
@@ -68,25 +90,40 @@
  *   (sanitized: shape class and path only, never file content). `record`
  *   otherwise THROWS only on programmer-contract violations (malformed key),
  *   which `countInWindow` already denies.
+ * - two ADVISORIES carry what a refusal reason cannot: the
+ *   {@link DurableRateLimitStore.durabilityAdvisory} (the post-rename
+ *   directory fsync of an already-committed charge failed — the charge
+ *   stands, its rename may not survive a power loss) and the
+ *   {@link DurableRateLimitStore.identityAdvisory} (an atomic consume ran
+ *   without a request identity, so it cannot recognize a redelivery). Both
+ *   survive a later healthy read, unlike the refusal reason.
  *
  * Instances sharing one ledger file MUST be configured with the SAME
  * `retentionMs`/`maxKeys`: a narrower config than the stored state cannot
  * prove the wider window or validate the over-cap scope count, so the store
  * denies until the file is repaired or removed (fail closed, never
- * under-count into an allow). Residual, stated honestly: two DISTINCT
- * concurrent requests charged by different processes in the SAME millisecond
- * for the same scope dedupe to one charge (the price of interface-level
- * replay idempotency), and a process crashing mid-`saveLedger` may leave a
- * `<file>.tmp.<pid>` remnant — a temp file is never read as state, and
- *   removal is safe. Lock release is token- AND inode-verified, and every
- *   durable write re-verifies lock ownership by inode identity immediately
- *   before the rename, so a stolen holder's stale snapshot cannot land over a
- *   thief's commit; the residual is the POSIX-level gap between the final
- *   verification syscall and the rename/unlink itself — a holder that
- *   overruns `lockStaleMs` (violating the documented staleness invariant)
- *   losing that microsecond race is the honest floor without a kernel lock
- *   primitive, and the failure direction is a latched, aborted commit —
- *   never a silently accepted stale write.
+ * under-count into an allow). Residual, stated honestly: the identity-less
+ * single-scope `record` primitive still dedupes by `(key, instant)`, so two
+ * DISTINCT identity-less charges in the SAME millisecond for the same scope
+ * collapse to one (the price of interface-level replay idempotency for a seam
+ * that carries no request identity); the atomic path — the one the planner
+ * uses — never collapses distinct requests, because the identity decides.
+ * A process crashing mid-`saveLedger` may leave a `<file>.tmp.<pid>.<uuid>`
+ * remnant — a temp file is never read as state, and removal is safe. The
+ * commit's temp file is created EXCLUSIVELY under an unpredictable name, so
+ * a planted symlink can never redirect a write and a planted name can never
+ * be overwritten or deleted. A directory fsync AFTER the rename is ADVISORY:
+ * the charge is already committed, so a failure there is recorded as a
+ * durability advisory (never reported as a failed commit — a thrown commit
+ * would deny work that was paid for) and never latches the store. Lock release is
+ * token- AND inode-verified, and every durable write re-verifies lock
+ * ownership by inode identity immediately before the rename, so a stolen
+ * holder's stale snapshot cannot land over a thief's commit; the residual is
+ * the POSIX-level gap between the final verification syscall and the
+ * rename/unlink itself — a holder that overruns `lockStaleMs` (violating the
+ * documented staleness invariant) losing that microsecond race is the honest
+ * floor without a kernel lock primitive, and the failure direction is a
+ * latched, aborted commit — never a silently accepted stale write.
  */
 
 import {
@@ -100,7 +137,7 @@ import {
   statSync,
   writeSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { dirname } from "node:path";
 import { MAX_RATE_LIMIT_KEYS, type RateLimitScope, type RateLimitStore } from "./rate-limit.js";
 
@@ -175,6 +212,33 @@ function readLockToken(lockPath: string): string | null {
   }
 }
 
+/** The default directory-durability step: fsync the ledger's directory so
+ * the rename itself survives a crash. The explicit 0600 mode is required even
+ * though this open never CREATES anything (the mode applies only at
+ * creation, so it is inert for the read-only directory fd): the CWE-377
+ * insecure-temporary-file rule flags ANY `fs.open`/`writeFile*` on a path
+ * tainted by the OS temp dir — an `os.tmpdir()` call or a "/tmp/..."
+ * literal, e.g. the ingress-host test's "/tmp/unused.json" ledger path —
+ * unless the call carries a restrictive mode ("Insecure creation of file in
+ * the os temp dir", CodeQL alert 278). The mode makes the never-world-
+ * accessible intent explicit and is what the rule requires; the temp-file and
+ * lock opens pass 0600 because they CREATE files that must stay private. */
+function fsyncDirectory(dir: string): void {
+  const dirFd = openSync(dir, "r", 0o600);
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
+}
+
+/** The default temp file name of a commit: UNPREDICTABLE (the pid alone is
+ * guessable, so the random component matters) and always beside the ledger
+ * (the rename must stay inside one filesystem). */
+function defaultTempName(ledgerPath: string): string {
+  return `${ledgerPath}.tmp.${process.pid}.${randomUUID()}`;
+}
+
 /** Configuration for {@link DurableRateLimitStore}. */
 export interface DurableRateLimitStoreOptions {
   /** Path of the durable ledger file. The constructor performs NO I/O. */
@@ -200,12 +264,53 @@ export interface DurableRateLimitStoreOptions {
   /** Epoch-ms clock used ONLY for lock staleness. The budget's own instants
    * are caller-supplied and never read from it. Default `Date.now`. */
   clock?: () => number;
+  /** The directory-durability step of a commit (fsync the ledger's directory
+   * after the rename). Injectable so the failure handling is pinnable in a
+   * test; defaults to the real fsync. A failure here is ADVISORY — the
+   * charge is already committed — so it is recorded as a durability advisory
+   * and never reported as a failed commit. */
+  directoryFsync?: (dir: string) => void;
+  /** The temp file name a commit uses (beside the ledger path). Injectable
+   * so the EXCLUSIVE-create fence can be exercised against a KNOWN path in a
+   * test (the repo's adversarial-boundary rule: the hostile token itself
+   * must be fed to the fence). Defaults to an unpredictable
+   * `<ledger>.tmp.<pid>.<uuid>` name. */
+  tempName?: (ledgerPath: string) => string;
 }
 
-/** One scope's recorded instants, ascending and duplicate-free — the shape
- * this store both loads and writes (a foreign state in another shape is
- * corrupt, never silently normalized). */
-type Ledger = Map<string, number[]>;
+/** One scope's recorded charges, ascending by instant — the shape this store
+ * both loads and writes (a foreign state in another shape is corrupt, never
+ * silently normalized). */
+type Ledger = Map<string, LedgerEvent[]>;
+
+/** One recorded charge: the instant it was committed and, when the request
+ * carried a stable identity, the DIGEST of that identity (never the identity
+ * itself — stored state carries no untrusted content). An identity-less event
+ * (the `record` primitive) carries no `id`. */
+interface LedgerEvent {
+  /** The committed instant (epoch ms). */
+  at: number;
+  /** sha-256 digest (64 lowercase hex chars) of the request identity, or
+   * undefined for an identity-less charge. */
+  id?: string;
+}
+
+/** The persisted snapshot version this store writes. */
+const LEDGER_VERSION = 2;
+
+/** The oldest persisted snapshot version this store still reads: its events
+ * are bare instants and are MIGRATED on load into identity-less events. */
+const LEDGER_VERSION_LEGACY = 1;
+
+/** The digest shape of a persisted request identity. */
+const ID_PATTERN = /^[0-9a-f]{64}$/;
+
+/** The persisted form of a request identity: a sha-256 digest, so the ledger
+ * carries a fixed-shape identifier and NEVER the caller's raw identity (no
+ * untrusted content in stored state, and no length growth per request). */
+function requestDigest(requestId: string): string {
+  return createHash("sha256").update(requestId, "utf8").digest("hex");
+}
 
 /** The outcome of the lock-held phase of an atomic multi-scope consume:
  * `denied` covers BOTH an input-validation refusal (its shape-class reason is
@@ -220,12 +325,16 @@ type AtomicOutcome = { kind: "committed" } | { kind: "denied" };
 class LedgerError extends Error {}
 
 /** Parse and validate the persisted snapshot. Strict fail-closed validation:
- * exactly the known envelope keys, `version === 1`, scopes an array of
+ * exactly the known envelope keys, a supported `version`, scopes an array of
  * exactly-`{key,events}` entries, keys matching the identifier grammar and
- * unique, events a non-empty strictly-ascending array of safe non-negative
- * integers, and no more scopes than `maxKeys`. Anything else throws
- * {@link LedgerError}. A missing file is NOT handled here (the caller maps it
- * to the empty ledger). */
+ * unique, events a non-empty ascending array of well-formed charges, and no
+ * more scopes than `maxKeys`. Anything else throws {@link LedgerError}. A
+ * missing file is NOT handled here (the caller maps it to the empty ledger).
+ *
+ * Version 1 (the shape this store wrote before the request-identity field
+ * existed) is MIGRATED on load: its bare instants become identity-less
+ * charges. Any other version or shape is corrupt — never silently
+ * normalized. */
 function parseLedger(raw: string, maxKeys: number): Ledger {
   let parsed: unknown;
   try {
@@ -244,8 +353,9 @@ function parseLedger(raw: string, maxKeys: number): Ledger {
       throw new LedgerError("rate-limit ledger: unknown top-level key present");
     }
   }
-  if (parsed["version"] !== 1) {
-    throw new LedgerError("rate-limit ledger: version must be 1");
+  const version = parsed["version"];
+  if (version !== LEDGER_VERSION && version !== LEDGER_VERSION_LEGACY) {
+    throw new LedgerError("rate-limit ledger: unsupported version");
   }
   const scopes = parsed["scopes"];
   if (!Array.isArray(scopes)) {
@@ -277,60 +387,109 @@ function parseLedger(raw: string, maxKeys: number): Ledger {
     if (!Array.isArray(events) || events.length === 0) {
       throw new LedgerError("rate-limit ledger: events must be a non-empty array");
     }
-    const instants: number[] = [];
-    for (const instant of events) {
-      if (
-        typeof instant !== "number" ||
-        !Number.isSafeInteger(instant) ||
-        instant < 0
-      ) {
-        throw new LedgerError("rate-limit ledger: malformed event instant");
+    const charges: LedgerEvent[] = [];
+    for (const rawEvent of events) {
+      const event = parseEvent(rawEvent, version);
+      if (charges.length > 0) {
+        // The charges of one scope are in CANONICAL order (ascending by
+        // instant, then by identity) and strictly increasing — a repeat of
+        // the same (instant, identity) is a duplicate the state a replayed
+        // commit would never produce. A non-canonical order is a FOREIGN
+        // state: corrupt, never silently normalized.
+        if (compareCharges(charges[charges.length - 1]!, event) >= 0) {
+          throw new LedgerError("rate-limit ledger: events must be ascending and unique");
+        }
       }
-      if (instants.length > 0 && instant <= instants[instants.length - 1]!) {
-        throw new LedgerError(
-          "rate-limit ledger: events must be strictly ascending",
-        );
-      }
-      instants.push(instant);
+      charges.push(event);
     }
-    ledger.set(key, instants);
+    ledger.set(key, charges);
   }
   return ledger;
 }
 
-/** Serialize the ledger to canonical JSON: scopes sorted by key, keys in a
- * fixed order, so equal ledgers are byte-identical across commits. */
-function serializeLedger(ledger: Ledger): string {
-  const scopes = [...ledger.entries()]
-    .filter(([, instants]) => instants.length > 0)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, events]) => ({ key, events }));
-  return JSON.stringify({ version: 1, scopes }, null, 2) + "\n";
+/** Parse ONE persisted charge. Version 1 carries a bare instant; version 2
+ * carries `{at, id?}` with the identity's digest. */
+function parseEvent(raw: unknown, version: number): LedgerEvent {
+  if (version === LEDGER_VERSION_LEGACY) {
+    if (
+      typeof raw !== "number" ||
+      !Number.isSafeInteger(raw) ||
+      raw < 0
+    ) {
+      throw new LedgerError("rate-limit ledger: malformed event instant");
+    }
+    return { at: raw };
+  }
+  if (!isPlainObject(raw)) {
+    throw new LedgerError("rate-limit ledger: malformed event");
+  }
+  const eventKeys = Object.keys(raw);
+  if (eventKeys.some((k) => k !== "at" && k !== "id")) {
+    throw new LedgerError("rate-limit ledger: malformed event");
+  }
+  const at = raw["at"];
+  if (typeof at !== "number" || !Number.isSafeInteger(at) || at < 0) {
+    throw new LedgerError("rate-limit ledger: malformed event instant");
+  }
+  const id = raw["id"];
+  if (id === undefined) return { at };
+  if (typeof id !== "string" || !ID_PATTERN.test(id)) {
+    throw new LedgerError("rate-limit ledger: malformed event identity");
+  }
+  return { at, id };
 }
 
-/** Drop events at or before `nowMs - retentionMs` (the window is
+/** Serialize the ledger to canonical JSON: scopes sorted by key, charges in
+ * their canonical order, keys in a fixed order, so equal ledgers are
+ * byte-identical across commits. */
+function serializeLedger(ledger: Ledger): string {
+  const scopes = [...ledger.entries()]
+    .filter(([, charges]) => charges.length > 0)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, charges]) => ({
+      key,
+      events: charges.map((charge) =>
+        charge.id === undefined ? { at: charge.at } : { at: charge.at, id: charge.id },
+      ),
+    }));
+  return JSON.stringify({ version: LEDGER_VERSION, scopes }, null, 2) + "\n";
+}
+
+/** Drop charges at or before `nowMs - retentionMs` (the window is
  * `(t0, now]`-bounded, so nothing older can ever count again) and any scope
  * thereby emptied. Mutates and returns the same ledger. */
 function pruneLedger(ledger: Ledger, nowMs: number, retentionMs: number): void {
   const horizon = nowMs - retentionMs;
-  for (const [key, instants] of ledger) {
+  for (const [key, charges] of ledger) {
     let drop = 0;
-    while (drop < instants.length && instants[drop]! <= horizon) drop += 1;
-    if (drop >= instants.length) ledger.delete(key);
-    else if (drop > 0) ledger.set(key, instants.slice(drop));
+    while (drop < charges.length && charges[drop]!.at <= horizon) drop += 1;
+    if (drop >= charges.length) ledger.delete(key);
+    else if (drop > 0) ledger.set(key, charges.slice(drop));
   }
 }
 
-/** Insert `nowMs` into `key`'s ascending list. Returns false (no mutation)
- * when the exact instant is already recorded — the idempotency that makes a
- * replayed commit never double-charge. */
-function insertInstant(instants: number[], nowMs: number): boolean {
-  // First position whose instant is >= nowMs; a list element equal to
-  // nowMs there is the already-committed replay.
-  let index = instants.length;
-  while (index > 0 && instants[index - 1]! >= nowMs) index -= 1;
-  if (index < instants.length && instants[index] === nowMs) return false;
-  instants.splice(index, 0, nowMs);
+/** The canonical order of charges: ascending by instant, and for equal
+ * instants by identity (an identity-less charge sorts first). */
+function compareCharges(a: LedgerEvent, b: LedgerEvent): number {
+  if (a.at !== b.at) return a.at - b.at;
+  const left = a.id ?? "";
+  const right = b.id ?? "";
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** Insert one charge into `charges` (kept in canonical order). Returns false
+ * (no mutation) when the exact charge — same instant AND same identity — is
+ * already recorded: the idempotency that makes a replayed commit never
+ * double-charge, while two DISTINCT requests (distinct identities) at the
+ * same instant stay two charges. */
+function insertCharge(charges: LedgerEvent[], charge: LedgerEvent): boolean {
+  let index = 0;
+  while (index < charges.length && compareCharges(charges[index]!, charge) <= 0) index += 1;
+  if (index > 0) {
+    const previous = charges[index - 1]!;
+    if (compareCharges(previous, charge) === 0) return false;
+  }
+  charges.splice(index, 0, charge);
   return true;
 }
 
@@ -347,8 +506,8 @@ function evictToCap(
   const ordered = [...ledger.entries()]
     .filter(([key]) => !protectedKeys.has(key))
     .sort(([ka, a], [kb, b]) => {
-      const lastA = a[a.length - 1]!;
-      const lastB = b[b.length - 1]!;
+      const lastA = a[a.length - 1]!.at;
+      const lastB = b[b.length - 1]!.at;
       if (lastA !== lastB) return lastA - lastB;
       return ka < kb ? -1 : ka > kb ? 1 : 0;
     });
@@ -370,7 +529,17 @@ export class DurableRateLimitStore implements RateLimitStore {
   private readonly lockAttempts: number;
   private readonly lockRetryDelayMs: number;
   private readonly clock: () => number;
+  private readonly directoryFsync: (dir: string) => void;
+  private readonly tempName: (ledgerPath: string) => string;
   private degraded: string | null = null;
+  /** The last ADVISORY durability note of a commit (a directory fsync that
+   * failed AFTER the rename already committed the charge). Kept apart from
+   * {@link degradedReason} so a later healthy read cannot erase the only
+   * evidence that the last commit's durability step failed. */
+  private durability: string | null = null;
+  /** The last ADVISORY identity note: an atomic consume ran WITHOUT a
+   * request identity, so it cannot recognize a redelivery of that request. */
+  private identityNote: string | null = null;
   /** A failed COMMIT latches the store: while set, `countInWindow` denies —
    * a budget whose writes are not landing must not keep allowing model work —
    * until a lock probe proves the lock path creatable again. */
@@ -410,6 +579,16 @@ export class DurableRateLimitStore implements RateLimitStore {
       throw new RangeError("DurableRateLimitStore: clock must be a function");
     }
     this.clock = clock;
+    const directoryFsync = options.directoryFsync ?? fsyncDirectory;
+    if (typeof directoryFsync !== "function") {
+      throw new RangeError("DurableRateLimitStore: directoryFsync must be a function");
+    }
+    this.directoryFsync = directoryFsync;
+    const tempName = options.tempName ?? defaultTempName;
+    if (typeof tempName !== "function") {
+      throw new RangeError("DurableRateLimitStore: tempName must be a function");
+    }
+    this.tempName = tempName;
     this.filePath = options.filePath;
     this.lockPath = `${options.filePath}.lock`;
   }
@@ -422,6 +601,49 @@ export class DurableRateLimitStore implements RateLimitStore {
    * into a forge-visible surface. */
   get degradedReason(): string | null {
     return this.degraded;
+  }
+
+  /** The last ADVISORY durability note about this store's own commits — a
+   * directory fsync that failed AFTER the rename already committed the
+   * charge, so the charge stands but its rename may not survive a power
+   * loss. Kept apart from {@link DurableRateLimitStore.degradedReason}
+   * (which explains REFUSALS and is cleared by the next healthy read) so
+   * the evidence survives it. `null` when the last commit's durability step
+   * succeeded. */
+  get durabilityAdvisory(): string | null {
+    return this.durability;
+  }
+
+  /** The last ADVISORY identity note: an atomic consume ran WITHOUT a
+   * request identity, so it deduplicates by instant alone and cannot
+   * recognize a redelivery of that request. An advisory, never a refusal. */
+  get identityAdvisory(): string | null {
+    return this.identityNote;
+  }
+
+  /** Is this request identity ALREADY charged on EVERY one of `scopes`?
+   * A read-only probe (never throws; an unprovable answer is `false`): the
+   * seam uses it to RE-ADMIT a redelivery of an already-charged request
+   * instead of refusing it as rate-limited. The charge itself is re-proved
+   * under the lock by the transaction. */
+  isRequestCharged(scopes: readonly RateLimitScope[], requestId: string): boolean {
+    if (typeof requestId !== "string" || requestId === "") return false;
+    if (!Array.isArray(scopes) || scopes.length === 0) return false;
+    const digest = requestDigest(requestId);
+    let ledger: Ledger | null;
+    try {
+      ledger = this.loadLedgerUnlocked();
+    } catch {
+      // Unprovable state: the seam's pre-check denies it (fail closed).
+      return false;
+    }
+    if (ledger === null) return false;
+    for (const scope of scopes) {
+      if (!isPlainObject(scope) || typeof scope["key"] !== "string") return false;
+      const charges = ledger.get(scope["key"]) ?? [];
+      if (!charges.some((charge) => charge.id === digest)) return false;
+    }
+    return true;
   }
 
   /** Count `key`'s events in `(nowMs - windowMs, nowMs]`, exactly the
@@ -482,12 +704,12 @@ export class DurableRateLimitStore implements RateLimitStore {
     if (ledger === null) return 0;
     const windowStart = nowMs - windowMs;
     let count = 0;
-    for (const instant of ledger.get(key) ?? []) {
+    for (const charge of ledger.get(key) ?? []) {
       // The window is `(nowMs - windowMs, nowMs]` — the SAME closed-upper
       // bound the forge-backed store counts: a future-dated instant (clock
       // skew, a forged event) is not inside the window and must not consume
       // budget the present has not reached yet.
-      if (instant > windowStart && instant <= nowMs) count += 1;
+      if (charge.at > windowStart && charge.at <= nowMs) count += 1;
     }
     return count;
   }
@@ -526,20 +748,23 @@ export class DurableRateLimitStore implements RateLimitStore {
         // Re-read INSIDE the lock: concurrent commits serialize here, so no
         // charge is lost and none is applied twice.
         const ledger = this.loadLedgerUnlocked();
+        // A healthy load clears a stale reason. The commit's own advisory
+        // note (a failed directory fsync) is set later and stays visible.
+        this.degraded = null;
         if (ledger === null) {
           // A missing file inside the lock is the well-defined empty state —
           // but a corrupted one must not be silently replaced either.
-          const fresh: Ledger = new Map();
-          fresh.set(key, [nowMs]);
+            const fresh: Ledger = new Map();
+            fresh.set(key, [{ at: nowMs }]);
           assertHolder();
           this.saveLedger(fresh, lockFd);
           return;
         }
         const existing = ledger.get(key);
         if (existing === undefined) {
-          ledger.set(key, [nowMs]);
+          ledger.set(key, [{ at: nowMs }]);
           evictToCap(ledger, this.maxKeys, new Set([key]));
-        } else if (!insertInstant(existing, nowMs)) {
+        } else if (!insertCharge(existing, { at: nowMs })) {
           // Exact replay of an already-committed (key, instant): charge once.
           return;
         }
@@ -547,7 +772,6 @@ export class DurableRateLimitStore implements RateLimitStore {
         assertHolder();
         this.saveLedger(ledger, lockFd);
       });
-      this.degraded = null;
       this.commitUnreliable = false;
     } catch (err) {
       this.degraded = err instanceof Error ? err.message : String(err);
@@ -571,6 +795,18 @@ export class DurableRateLimitStore implements RateLimitStore {
    * exactly once (never a half-charge, never a double-charge of the
    * interrupted attempt).
    *
+   * `requestId` is the OPTIONAL stable identity of the logical request (the
+   * SAME value on every redelivery of it). It is persisted as a sha-256
+   * digest — never the raw identity — and it decides what a replay is:
+   * - a retry of an ALREADY-CHARGED request is ALLOWED and charges NOTHING
+   *   (the request was already admitted, so it is not denied as rate-limited
+   *   either): a commit whose acknowledgement was lost can never be
+   *   double-charged by the redelivery it triggers, at any later instant;
+   * - two DISTINCT requests stay distinct charges even in the SAME
+   *   millisecond, so no real question is ever collapsed into another;
+   * - a state that carries the identity on only SOME of the transaction's
+   *   scopes is INCONSISTENT and DENIES without writing.
+   *
    * Failure posture, mirroring `record` exactly:
    * - input-validation refusals (malformed `nowMs`, a structurally broken
    *   scope list, a key outside the identifier grammar, a window over the
@@ -585,7 +821,11 @@ export class DurableRateLimitStore implements RateLimitStore {
    * - an ordinary denial (a scope at or over its limit, including a floored
    *   limit <= 0 as defense in depth) returns `false` having written nothing.
    */
-  consumeScopesAtomically(scopes: readonly RateLimitScope[], nowMs: number): boolean {
+  consumeScopesAtomically(
+    scopes: readonly RateLimitScope[],
+    nowMs: number,
+    requestId?: string,
+  ): boolean {
     // Input validation FIRST, before the lock is even acquired: a shape-class
     // refusal writes nothing, latches nothing, and throws nothing (the same
     // reasons/messages `countInWindow` denies with) — a malformed request
@@ -636,6 +876,14 @@ export class DurableRateLimitStore implements RateLimitStore {
       }
       validated.push({ key: scope["key"], windowMs, limit: flooredLimit });
     }
+    // The request's stable identity, in its persisted form: a digest, so the
+    // ledger carries a fixed-shape identifier and never the caller's value.
+    // An absent or non-string identity means an IDENTITY-LESS charge (the
+    // seam's `record` primitive), which dedupes by instant as before.
+    const digest =
+      typeof requestId === "string" && requestId !== ""
+        ? requestDigest(requestId)
+        : undefined;
     try {
       const outcome = this.withLock((assertHolder, lockFd) => {
         // Re-read INSIDE the lock: the check and the commit see the SAME
@@ -645,30 +893,78 @@ export class DurableRateLimitStore implements RateLimitStore {
         const loaded = this.loadLedgerUnlocked();
         const ledger: Ledger = loaded ?? new Map();
         this.degraded = null;
+        // RETRY IDEMPOTENCY: an identity that is already charged on EVERY
+        // scope of this transaction means the request was already admitted
+        // and charged. The retry is ALLOWED (not rate-limited — the work was
+        // already admitted) and charges NOTHING: the redelivery of a commit
+        // whose acknowledgement was lost can never double-charge.
+        if (digest !== undefined) {
+          let chargedScopes = 0;
+          let presentButMissing = false;
+          let absentScope = false;
+          for (const scope of validated) {
+            const charges = ledger.get(scope.key);
+            if (charges === undefined) {
+              // The scope is ABSENT from the ledger: it never had a charge,
+              // or the cap eviction dropped it.
+              absentScope = true;
+              continue;
+            }
+            if (charges.some((charge) => charge.id === digest)) chargedScopes += 1;
+            else presentButMissing = true;
+          }
+          if (chargedScopes === validated.length) {
+            // Already charged: the durable state already IS the committed
+            // outcome — save nothing.
+            return { kind: "committed" } as AtomicOutcome;
+          }
+          if (chargedScopes > 0) {
+            // INCONSISTENT: the one-rename commit charges every scope or
+            // none, so a partial charge is a state this store cannot produce.
+            // Fail closed: charge neither the missing scope nor the present
+            // one again. The reason names the likely cause: a scope the cap
+            // eviction dropped (absent from the ledger) or a state edited
+            // under the store's feet (the scope is present, but without the
+            // charge).
+            this.degraded = presentButMissing
+              ? "rate-limit ledger: inconsistent request charge"
+              : "rate-limit ledger: request charge partially evicted";
+            return { kind: "denied" } as AtomicOutcome;
+          }
+        } else {
+          // An IDENTITY-LESS consume cannot recognize a redelivery: the
+          // charge is deduplicated by instant alone. Say so — the trap is
+          // invisible otherwise. It is an ADVISORY, not a refusal: the
+          // consume itself is correct.
+          this.identityNote =
+            "rate-limit ledger: consume without a request identity; a redelivery is not idempotent";
+        }
         // Count every scope against the SAME snapshot. A denial consumes
         // nothing anywhere.
         for (const scope of validated) {
           const windowStart = nowMs - scope.windowMs;
           let count = 0;
-          for (const instant of ledger.get(scope.key) ?? []) {
+          for (const charge of ledger.get(scope.key) ?? []) {
             // The window is `(nowMs - windowMs, nowMs]` — the SAME closed
             // bounds `countInWindow` counts: a future-dated instant never
             // consumes budget the present has not reached yet.
-            if (instant > windowStart && instant <= nowMs) count += 1;
+            if (charge.at > windowStart && charge.at <= nowMs) count += 1;
           }
           if (count >= scope.limit) return { kind: "denied" } as AtomicOutcome;
         }
-        // Every scope allowed: insert one instant per scope. An exact-replay
-        // insert (the same (key, instant) already committed) is a no-op.
+        // Every scope allowed: insert one charge per scope. An exact-replay
+        // insert (the same (instant, identity) already committed) is a no-op.
         let changed = false;
         const transactionKeys = new Set<string>();
         for (const scope of validated) {
           transactionKeys.add(scope.key);
+          const charge: LedgerEvent =
+            digest === undefined ? { at: nowMs } : { at: nowMs, id: digest };
           const existing = ledger.get(scope.key);
           if (existing === undefined) {
-            ledger.set(scope.key, [nowMs]);
+            ledger.set(scope.key, [charge]);
             changed = true;
-          } else if (insertInstant(existing, nowMs)) {
+          } else if (insertCharge(existing, charge)) {
             changed = true;
           }
         }
@@ -690,7 +986,10 @@ export class DurableRateLimitStore implements RateLimitStore {
         return { kind: "committed" } as AtomicOutcome;
       });
       if (outcome.kind === "denied") return false;
-      this.degraded = null;
+      // The degraded reason is NOT cleared here: a healthy load already
+      // cleared any stale one inside the lock, and a commit's own advisory
+      // note (a failed directory fsync on an already-committed charge) must
+      // stay visible.
       this.commitUnreliable = false;
       return true;
     } catch (err) {
@@ -728,9 +1027,19 @@ export class DurableRateLimitStore implements RateLimitStore {
   private saveLedger(ledger: Ledger, lockFd: number): void {
     const body = serializeLedger(ledger);
     const dir = dirname(this.filePath);
-    const tmp = `${this.filePath}.tmp.${process.pid}`;
+    // An UNPREDICTABLE temp name: the pid alone is guessable, so a planted
+    // path could be aimed at this process. The random component makes the
+    // name unguessable, and the EXCLUSIVE create below (`wx` = O_CREAT |
+    // O_EXCL | O_WRONLY) makes the write safe even if a name IS guessed:
+    // O_EXCL fails on ANY existing path — including a symlink — so the write
+    // can never be redirected through a planted link, and a planted file is
+    // never overwritten (nor deleted: only a temp file this commit created
+    // is ever removed).
+    const tmp = this.tempName(this.filePath);
+    let created = false;
     try {
-      const fd = openSync(tmp, "w", 0o600);
+      const fd = openSync(tmp, "wx", 0o600);
+      created = true;
       try {
         writeAll(fd, body);
         fsyncSync(fd);
@@ -750,37 +1059,31 @@ export class DurableRateLimitStore implements RateLimitStore {
         );
       }
       renameSync(tmp, this.filePath);
+      created = false;
+      // The charge is COMMITTED from here on. The directory fsync only makes
+      // the RENAME itself survive a power loss, so a failure here is a
+      // durability hint — NEVER a commit failure: reporting it as one would
+      // abort a request that was already paid for and invite the redelivery
+      // that (with the request identity) is idempotent anyway. It is
+      // recorded as an ADVISORY and the commit stands. Residual, stated
+      // honestly: a power loss right here can lose the rename, so that one
+      // charge may not survive — the same narrow residual the queue store
+      // accepts, and the reason it is never reported as a failure.
       try {
-        // The explicit 0600 mode is required even though this open never
-        // CREATES anything (the mode applies only at creation, so it is inert
-        // for the read-only directory fd): the CWE-377 insecure-temporary-file
-        // rule flags ANY `fs.open`/`writeFile*` on a path tainted by the OS
-        // temp dir — an `os.tmpdir()` call or a "/tmp/..." literal, e.g. the
-        // ingress-host test's "/tmp/unused.json" ledger path — unless the
-        // call carries a restrictive mode ("Insecure creation of file in the
-        // os temp dir", CodeQL alert 278). The mode makes the never-world-
-        // accessible intent explicit and is what the rule requires; the
-        // temp-file and lock opens above pass 0600 because they CREATE files
-        // that must stay private.
-        const dirFd = openSync(dir, "r", 0o600);
-        try {
-          fsyncSync(dirFd);
-        } finally {
-          closeSync(dirFd);
-        }
-      } catch (err) {
-        // Best effort: the rename already committed; some platforms refuse
-        // directory fsync (EPERM/EINVAL). A lost final directory commit is
-        // tolerated exactly like the queue store's.
-        if (!isNodeError(err) || (err.code !== "EPERM" && err.code !== "EINVAL")) {
-          throw err;
-        }
+        this.directoryFsync(dir);
+        this.durability = null;
+      } catch {
+        this.durability = "rate-limit ledger: committed, but the directory fsync failed";
       }
     } catch (err) {
-      try {
-        rmSync(tmp, { force: true });
-      } catch {
-        // best effort: cleanup must not mask the original failure
+      if (created) {
+        // Only a temp file THIS commit created is removed — a planted name
+        // (or another writer's temp file) is never touched.
+        try {
+          rmSync(tmp, { force: true });
+        } catch {
+          // best effort: cleanup must not mask the original failure
+        }
       }
       throw err;
     }

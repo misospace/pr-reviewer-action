@@ -275,8 +275,12 @@ than silently truncating the ledger. The operator lane injects its own store;
 the durable cross-process store of #1295 shipped as
 `DurableRateLimitStore` (`src/followup/durable-rate-limit.ts`): the same
 atomic JSON-snapshot substrate (temp file + fsync + rename) plus a sidecar
-exclusive lock, cross-RESTART per-PR/per-actor budgets, idempotent replays,
-and fail-closed counts on unreadable or corrupt state.
+exclusive lock, cross-RESTART per-PR/per-actor budgets, idempotent replays
+(the multi-scope transaction carries the request's STABLE identity — the
+canonical follow-up comment id, PR-qualified — so a redelivery of an
+already-charged question is re-admitted and charged NOTHING, at any later
+instant, while two distinct questions stay distinct charges even in the same
+millisecond), and fail-closed counts on unreadable or corrupt state.
 
 ## Out of scope
 
