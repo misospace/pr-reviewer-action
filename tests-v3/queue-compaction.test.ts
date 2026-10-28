@@ -1,7 +1,9 @@
 /** Terminal-record compaction (#736): retention drop, cap drop
- * (oldest first), the protection rules (never drop a terminal sibling
- * of an active generation; never drop the newest terminal record per
- * prKey), fail-closed options, and input immutability. */
+ * (oldest first), the protection rule (never drop a terminal record
+ * whose prKey still has an active generation), fail-closed options,
+ * and input immutability. Aged-out terminal history for a SETTLED
+ * prKey drops entirely — the durable last-good result lives in the
+ * run/publication layer, not the queue snapshot. */
 
 import test from "node:test";
 import assert from "node:assert/strict";

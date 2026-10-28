@@ -56,8 +56,11 @@ import {
   validateIdempotencyKey,
   validateInstallation,
   validatePublication,
+  validatePublicationHistoryEntry,
   validateRun,
+  validateRunPatch,
   validateUsage,
+  validateLeaseOwner,
   type AdoptedRepositoryRecord,
   type IdempotencyKeyRecord,
   type InstallationRecord,
@@ -405,7 +408,16 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
         if (!canTransition(from, to)) {
           throw new RangeError(`transition-run: illegal transition ${from} -> ${to}`);
         }
-        const patch = mutation.patch ?? {};
+        // The SAME patch validation the in-memory backend applies: a
+        // patch the reader would reject fails the batch here, never
+        // after it became a durable row.
+        const patch = validateRunPatch(mutation.patch);
+        if (patch === null) {
+          throw new Error("transition-run: malformed patch field");
+        }
+        // A terminal transition clears the lease (the #731 scheduler
+        // does the same): a finished run holds no worker.
+        const terminal = to === "completed" || to === "failed" || to === "cancelled" || to === "superseded";
         const updated = await client.query(
           `UPDATE cp_runs SET
              state = $3,
@@ -414,6 +426,8 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
              superseded_by_job_id = COALESCE($6, superseded_by_job_id),
              started_at_ms = CASE WHEN $3 = 'running' AND started_at_ms = 0 THEN $2 ELSE started_at_ms END,
              finished_at_ms = CASE WHEN $3 IN ${TERMINAL_STATES_SQL} THEN $2 ELSE finished_at_ms END,
+             lease_owner = CASE WHEN $8 THEN '' ELSE lease_owner END,
+             lease_expires_at_ms = CASE WHEN $8 THEN 0 ELSE lease_expires_at_ms END,
              updated_at_ms = $2
            WHERE run_id = $1 AND state = $7
            RETURNING run_id`,
@@ -425,6 +439,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
             patch.failureReason ?? null,
             patch.supersededByJobId ?? null,
             from,
+            terminal,
           ],
         );
         if ((updated.rowCount ?? 0) === 0) {
@@ -459,16 +474,36 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
             `claim-idempotency: expiresAtMs must be a finite non-negative number, got ${String(expiresAtMs)}`,
           );
         }
+        // The SAME claim-shape validation the in-memory backend
+        // applies (a key/binding the store could never re-read fails
+        // the claim here, never after it became durable state).
+        if (validateIdempotencyKey({ key, binding, createdAtMs: nowMs, expiresAtMs }) === null) {
+          throw new Error("claim-idempotency: malformed key or binding");
+        }
         const existing = await client.query(
           "SELECT binding, expires_at_ms FROM cp_idempotency_keys WHERE key = $1 FOR UPDATE",
           [key],
         );
         if ((existing.rowCount ?? 0) === 0) {
-          await client.query(
-            "INSERT INTO cp_idempotency_keys (key, binding, created_at_ms, expires_at_ms) VALUES ($1, $2, $3, $4)",
+          // Race-safe first claim: two concurrent claims of a NEW key
+          // both see nothing under READ COMMITTED; only one INSERT
+          // lands, the loser falls through to the re-read below.
+          const inserted = await client.query(
+            `INSERT INTO cp_idempotency_keys (key, binding, created_at_ms, expires_at_ms)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (key) DO NOTHING`,
             [key, binding, nowMs, expiresAtMs],
           );
-          return;
+          if ((inserted.rowCount ?? 0) === 1) return;
+          const raced = await client.query(
+            "SELECT binding, expires_at_ms FROM cp_idempotency_keys WHERE key = $1 FOR UPDATE",
+            [key],
+          );
+          if ((raced.rowCount ?? 0) === 0) {
+            throw new StateConflictError("claim-idempotency: key vanished mid-claim");
+          }
+          existing.rows = raced.rows;
+          existing.rowCount = raced.rowCount;
         }
         const storedBinding = String(existing.rows[0]!["binding"]);
         const storedExpiry = Number(existing.rows[0]!["expires_at_ms"]);
@@ -543,10 +578,28 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
           );
         }
         const record = mapPublication(existing.rows[0]!);
-        const entry = { atMs, outcome, detail };
+        // The writer validates its own entry (bounded, single-line
+        // detail) and routes the WHOLE next record through the
+        // validator: a record the reader would reject is never stored.
+        const entry = validatePublicationHistoryEntry({ atMs, outcome, detail });
+        if (entry === null) {
+          throw new Error("record-publication-attempt: malformed history entry");
+        }
         const history = [...record.history, entry];
         while (history.length > PUBLICATION_HISTORY_CAP) {
           history.shift();
+        }
+        const next = validatePublication({
+          ...record,
+          attempt: record.attempt + 1,
+          publicationState:
+            outcome === "published" ? "published" : outcome === "failed" ? "failed" : record.publicationState,
+          lastError: outcome === "failed" ? detail : record.lastError,
+          history,
+          updatedAtMs: atMs,
+        });
+        if (next === null) {
+          throw new Error("record-publication-attempt: next record failed validation");
         }
         await client.query(
           `UPDATE cp_publications SET
@@ -558,10 +611,10 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
            WHERE job_id = $1`,
           [
             jobId,
-            record.attempt + 1,
-            outcome === "published" ? "published" : outcome === "failed" ? "failed" : record.publicationState,
-            outcome === "failed" ? detail : record.lastError,
-            JSON.stringify(history),
+            next.attempt,
+            next.publicationState,
+            next.lastError,
+            JSON.stringify(next.history),
             atMs,
           ],
         );
@@ -626,6 +679,12 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
         `claimRun: ttlMs must be a finite positive number, got ${String(ttlMs)}`,
       );
     }
+    // Fail closed on an unleaseable owner ("" would "succeed" while
+    // leaving the run unleased; an over-long owner would write a row
+    // the validator rejects).
+    if (validateLeaseOwner(owner) === null) {
+      throw new RangeError("claimRun: owner must be a non-empty lease-owner token (<= 64 chars)");
+    }
     const updated = await this.pool.query(
       `UPDATE cp_runs SET lease_owner = $2, lease_expires_at_ms = $4, updated_at_ms = $3
        WHERE run_id = $1
@@ -652,9 +711,14 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
         `heartbeatRun: ttlMs must be a finite positive number, got ${String(ttlMs)}`,
       );
     }
+    if (validateLeaseOwner(owner) === null) {
+      throw new RangeError("heartbeatRun: owner must be a non-empty lease-owner token (<= 64 chars)");
+    }
+    // A terminal run holds no worker: nothing to heartbeat.
     const updated = await this.pool.query(
       `UPDATE cp_runs SET lease_expires_at_ms = $4, updated_at_ms = $3
-       WHERE run_id = $1 AND lease_owner = $2 AND lease_expires_at_ms > $3`,
+       WHERE run_id = $1 AND lease_owner = $2 AND lease_expires_at_ms > $3
+         AND state NOT IN ${TERMINAL_STATES_SQL}`,
       [runId, owner, nowMs, nowMs + ttlMs],
     );
     return (updated.rowCount ?? 0) === 1;
@@ -740,7 +804,9 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
       };
       const provenance = row["mixed_provenance"]
         ? ("mixed" as const)
-        : (String(row["first_provenance"]) as "provider-reported" | "configured-estimate" | "unknown");
+        : row["first_provenance"] === null
+          ? ("unknown" as const)
+          : (String(row["first_provenance"]) as "provider-reported" | "configured-estimate" | "unknown");
       if (row["route"] === null) {
         totals = { ...bucket, costProvenance: provenance };
       } else {
@@ -758,7 +824,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
         costProvenance: "unknown",
       };
     }
-    return { rows, totals };
+    return Object.freeze({ rows: Object.freeze(rows), totals: Object.freeze(totals) });
   }
 
   async exportState(): Promise<StateExport> {
@@ -807,8 +873,14 @@ function usageContentEqual(a: UsageRecord, b: UsageRecord): boolean {
 
 /** PostgreSQL-backed queue snapshot store: the #731 whole-snapshot
  * contract over ONE JSONB row. The row lock (`FOR UPDATE` inside the
- * save transaction) serializes concurrent savers; the snapshot itself
- * is validated by the SAME parser the file backend uses on load. */
+ * save transaction) serializes concurrent savers — last committed
+ * wins, the SAME guarantee class as the atomic-file backend's
+ * whole-snapshot replace. The `revision` column is deliberately NOT a
+ * compare-and-swap guard: the deployment contract is a SINGLE active
+ * controller (the #731 recovery reconciliation assumes it), so a
+ * multi-controller split-brain must be prevented above this seam, not
+ * papered over here. The snapshot itself is validated by the SAME
+ * parser the file backend uses on load. */
 export class PostgresQueueSnapshotStore implements QueueSnapshotStore {
   private readonly pool: Pool;
 

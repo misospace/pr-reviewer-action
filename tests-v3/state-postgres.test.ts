@@ -306,6 +306,141 @@ async function runConformanceBattery(
     );
   });
 
+  await testFn("conformance: transition-run validates patch fields fail closed", async () => {
+    await hooks.beforeEach?.();
+    const store = await makeStore();
+    await store.apply([{ kind: "create-run", record: makeRun("run-1", "job-1") }]);
+    await assert.rejects(
+      () =>
+        store.apply([
+          {
+            kind: "transition-run",
+            runId: "run-1",
+            from: "queued",
+            to: "starting",
+            patch: { resultHeadSha: "NOT-A-SHA" },
+            nowMs: T0 + 1,
+          },
+        ]),
+      /malformed/,
+    );
+    await assert.rejects(
+      () =>
+        store.apply([
+          {
+            kind: "transition-run",
+            runId: "run-1",
+            from: "queued",
+            to: "starting",
+            patch: { failureReason: "bad\ndetail" },
+            nowMs: T0 + 1,
+          },
+        ]),
+      /malformed/,
+    );
+    assert.equal((await store.getRun("run-1"))!.state, "queued");
+  });
+
+  await testFn("conformance: a terminal transition clears the lease and stops heartbeats", async () => {
+    await hooks.beforeEach?.();
+    const store = await makeStore();
+    await store.apply([{ kind: "create-run", record: makeRun("run-1", "job-1") }]);
+    assert.equal(await store.claimRun("run-1", "worker-a", T0, 100_000), true);
+    await store.apply([
+      { kind: "transition-run", runId: "run-1", from: "queued", to: "failed", nowMs: T0 + 1 },
+    ]);
+    const run = (await store.getRun("run-1"))!;
+    assert.equal(run.leaseOwner, "");
+    assert.equal(run.leaseExpiresAtMs, 0);
+    // A stale worker can never heartbeat a finished run.
+    assert.equal(await store.heartbeatRun("run-1", "worker-a", T0 + 2, 1000), false);
+  });
+
+  await testFn("conformance: claim/heartbeat refuse an unleaseable owner", async () => {
+    await hooks.beforeEach?.();
+    const store = await makeStore();
+    await store.apply([{ kind: "create-run", record: makeRun("run-1", "job-1") }]);
+    // "" would "succeed" while leaving the run unleased — refused.
+    await assert.rejects(() => store.claimRun("run-1", "", T0, 1000), RangeError);
+    // An over-long owner would write a row the validator rejects — refused.
+    const longOwner = "w".repeat(65);
+    await assert.rejects(() => store.claimRun("run-1", longOwner, T0, 1000), RangeError);
+    await assert.rejects(() => store.heartbeatRun("run-1", longOwner, T0, 1000), RangeError);
+    assert.equal((await store.getRun("run-1"))!.leaseOwner, "");
+  });
+
+  await testFn("conformance: claim-idempotency and record-publication-attempt validate their write paths", async () => {
+    await hooks.beforeEach?.();
+    const store = await makeStore();
+    await store.apply([{ kind: "put-publication", record: makePublication("job-1") }]);
+    // A control character in a key would make the export un-restartable.
+    await assert.rejects(
+      () =>
+        store.apply([
+          { kind: "claim-idempotency", key: "bad\nkey", binding: "b", nowMs: T0, expiresAtMs: 0 },
+        ]),
+      /malformed/,
+    );
+    // An unbounded detail would make the publication record unreadable.
+    await assert.rejects(
+      () =>
+        store.apply([
+          {
+            kind: "record-publication-attempt",
+            jobId: "job-1",
+            atMs: T0 + 1,
+            outcome: "failed",
+            detail: "x".repeat(2001),
+          },
+        ]),
+      /malformed/,
+    );
+    // A multi-line detail violates the single-line rule.
+    await assert.rejects(
+      () =>
+        store.apply([
+          {
+            kind: "record-publication-attempt",
+            jobId: "job-1",
+            atMs: T0 + 2,
+            outcome: "failed",
+            detail: "line one\nline two",
+          },
+        ]),
+      /malformed/,
+    );
+  });
+
+  await testFn("conformance: empty usage table aggregates to a zero/unknown total", async () => {
+    await hooks.beforeEach?.();
+    const store = await makeStore();
+    const aggregate = await store.aggregateUsage();
+    assert.equal(aggregate.rows.length, 0);
+    assert.equal(aggregate.totals.requestCount, 0);
+    assert.equal(aggregate.totals.costMicros, 0);
+    assert.equal(aggregate.totals.costProvenance, "unknown");
+  });
+
+  await testFn("conformance: malformed records are refused by every mutation kind", async () => {
+    await hooks.beforeEach?.();
+    const store = await makeStore();
+    await assert.rejects(
+      () => store.apply([{ kind: "create-run", record: { bogus: true } as unknown as RunRecord }]),
+      /malformed/,
+    );
+    await assert.rejects(
+      () =>
+        store.apply([
+          { kind: "put-publication", record: { bogus: true } as unknown as PublicationRecord },
+        ]),
+      /malformed/,
+    );
+    await assert.rejects(
+      () => store.apply([{ kind: "record-usage", entry: { bogus: true } as unknown as UsageRecord }]),
+      /malformed/,
+    );
+  });
+
   await testFn("conformance: export round-trips through the in-memory seeder", async () => {
     await hooks.beforeEach?.();
     const store = await makeStore();
@@ -324,10 +459,13 @@ async function runConformanceBattery(
 pgTest("pg: migrations forward from empty and current", async () => {
   const pool = new Pool({ connectionString: DSN });
   try {
-    await truncateAll(pool);
+    // The DSN points at a DISPOSABLE database: on a fresh one the cp_
+    // tables do not exist yet, so the FIRST boot migrates BEFORE any
+    // truncate; every later boot migrates (no-op) then truncates.
     const first = await runControlPlaneMigrations(pool);
-    assert.deepEqual(first, [1]);
-    // Already current: the second boot applies nothing.
+    assert.ok(first.length >= 1);
+    await truncateAll(pool);
+    // Already current: the next boot applies nothing.
     const second = await runControlPlaneMigrations(pool);
     assert.deepEqual(second, []);
   } finally {
@@ -338,6 +476,7 @@ pgTest("pg: migrations forward from empty and current", async () => {
 pgTest("pg: conformance battery (same scenarios as the in-memory backend)", async () => {
   const pool = new Pool({ connectionString: DSN });
   try {
+    await runControlPlaneMigrations(pool);
     await truncateAll(pool);
     const store = new PostgresControlPlaneStore(pool);
     await runConformanceBattery(test, async () => store);
@@ -349,8 +488,8 @@ pgTest("pg: conformance battery (same scenarios as the in-memory backend)", asyn
 pgTest("pg: queue snapshot store round-trips and replaces atomically", async () => {
   const pool = new Pool({ connectionString: DSN });
   try {
-    await truncateAll(pool);
     await runControlPlaneMigrations(pool);
+    await truncateAll(pool);
     const store = new PostgresQueueSnapshotStore(pool);
     // Missing backing state => the empty snapshot (the one fresh start).
     assert.deepEqual(await store.load(), emptyQueueSnapshot());
@@ -378,8 +517,8 @@ pgTest("pg: queue snapshot store round-trips and replaces atomically", async () 
 pgTest("pg: queue recovery reconcile runs over the loaded snapshot", async () => {
   const pool = new Pool({ connectionString: DSN });
   try {
-    await truncateAll(pool);
     await runControlPlaneMigrations(pool);
+    await truncateAll(pool);
     const store = new PostgresQueueSnapshotStore(pool);
     const job = newJobRecord(makeJob("job-1"), T0, 0);
     const running = Object.freeze({

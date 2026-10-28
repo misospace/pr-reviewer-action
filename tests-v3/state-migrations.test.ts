@@ -36,9 +36,11 @@ test("pendingMigrations from current is empty", () => {
   assert.deepEqual(pendingMigrations(all), []);
 });
 
-test("pendingMigrations from a partial prefix applies only the tail", () => {
+test("pendingMigrations from a partial prefix applies only the tail", (t) => {
   if (CONTROL_PLANE_MIGRATIONS.length < 2) {
-    return; // meaningful only once the list has more than one migration
+    // Meaningful only once the list has more than one migration.
+    t.skip("migration list has a single entry: no partial prefix exists yet");
+    return;
   }
   assert.deepEqual(
     pendingMigrations(new Set([1])).map((m) => m.version),
@@ -54,33 +56,77 @@ test("pendingMigrations refuses a database ahead of this build", () => {
   );
 });
 
-test("pendingMigrations refuses a non-prefix applied set", () => {
-  // A hole below an applied version means broken schema history. With
-  // only migration 1 in the list there IS no hole below anything, so
-  // the case only exists once the list grows.
-  if (CONTROL_PLANE_MIGRATIONS.length < 2) {
+test("pendingMigrations refuses a non-prefix applied set", (t) => {
+  // A hole below an applied version means broken schema history. The
+  // example needs at least THREE versions: with fewer, {1, 3} is
+  // "ahead of this build" instead of a hole at 2.
+  if (CONTROL_PLANE_MIGRATIONS.length < 3) {
+    t.skip("migration list shorter than three: no hole example exists yet");
     return;
   }
   assert.throws(() => pendingMigrations(new Set([1, 3])), /not a prefix/);
 });
 
+const COLUMN_FORBIDDEN_PATTERN = /^(.*(secret|password|credential|bearer|authorization|api_?key|auth_?token).*|token|access_token|refresh_token)$/i;
+const COLUMN_CONSTRAINT_KEYWORDS = new Set([
+  "primary", "unique", "check", "foreign", "constraint", "exclude",
+]);
+
+/** Extract column names from one CREATE TABLE statement: any line
+ * whose first token is followed by a type token. Constraint lines
+ * (PRIMARY KEY / CHECK / ...) are skipped by keyword. Deliberately
+ * type-agnostic (any column definition shape counts) so a new column
+ * type cannot silently drop a column out of the scan. */
+function columnNamesOf(statement: string): string[] {
+  const names: string[] = [];
+  for (const line of statement.split("\n")) {
+    const match = /^\s+([a-z_0-9]+)\s+(\w+)/.exec(line);
+    if (match === null) continue;
+    if (COLUMN_CONSTRAINT_KEYWORDS.has(match[2]!.toLowerCase())) continue;
+    names.push(match[1]!);
+  }
+  return names;
+}
+
 test("schema columns carry no secret-bearing names", () => {
   // The #736 "do not persist" rule enforced against the DDL itself:
   // no column in any migration is a credential/secret-shaped name, so
   // the schema cannot even hold the material the contract forbids.
-  const forbidden = /^(.*(secret|password|credential|bearer|authorization|api_?key|auth_?token).*|token|access_token|refresh_token)$/i;
   for (const migration of CONTROL_PLANE_MIGRATIONS) {
     for (const statement of migration.statements) {
       if (!statement.includes("CREATE TABLE")) continue;
-      for (const line of statement.split("\n")) {
-        const column = /^\s{2}([a-z_0-9]+)\s+(text|bigint|boolean|jsonb|integer)[\s,]*$/.exec(line);
-        if (column === null) continue;
+      for (const name of columnNamesOf(statement)) {
         assert.equal(
-          forbidden.test(column[1]!),
+          COLUMN_FORBIDDEN_PATTERN.test(name),
           false,
-          `forbidden secret-shaped column in schema: ${column[1]}`,
+          `forbidden secret-shaped column in schema: ${name}`,
         );
       }
     }
   }
+});
+
+test("the column scan flags a secret-shaped column when one appears", () => {
+  // Adversarial-boundary rule: the scan is fed the boundary token
+  // itself. A synthetic migration statement carrying api_key/token
+  // columns MUST be flagged — a scan that passes hostile input would
+  // be a scan that passes nothing.
+  const hostile = `CREATE TABLE cp_hostile (
+  ok_column text NOT NULL,
+  api_key text NOT NULL,
+  model_token bigint NOT NULL,
+  PRIMARY KEY (ok_column),
+  CHECK (length(api_key) = 0)
+)`;
+  const names = columnNamesOf(hostile);
+  assert.ok(names.includes("api_key"));
+  assert.ok(names.includes("model_token"));
+  assert.ok(names.includes("ok_column"));
+  // Constraint lines (PRIMARY KEY / CHECK) introduce no column names:
+  // neither the leading keyword nor the referenced identifier inside
+  // the parens reads as a column.
+  assert.ok(!names.includes("primary"));
+  assert.ok(!names.includes("check"));
+  assert.ok(!names.includes("length"));
+  assert.equal(names.some((name) => COLUMN_FORBIDDEN_PATTERN.test(name)), true);
 });

@@ -217,7 +217,7 @@ test("transition-run validates patches fail closed", async () => {
           nowMs: T0 + 1,
         },
       ]),
-    /malformed resultHeadSha/,
+    /malformed patch/,
   );
   await assert.rejects(
     async () =>
@@ -231,7 +231,7 @@ test("transition-run validates patches fail closed", async () => {
           nowMs: T0 + 1,
         },
       ]),
-    /malformed failureReason/,
+    /malformed patch/,
   );
 });
 

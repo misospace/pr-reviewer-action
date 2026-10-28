@@ -73,7 +73,11 @@ unchanged:
 - **Leases/heartbeats** on runs: a live lease held by another owner
   cannot be stolen; an expired lease is claimable (how a restarted
   controller identifies abandoned workers); a lost lease can never be
-  heartbeated back by its previous owner.
+  heartbeated back by its previous owner; a TERMINAL transition clears
+  the lease and terminal runs accept no heartbeat (a finished run
+  holds no worker). Owners are validated with the same rule the
+  `leaseOwner` field enforces — an unleaseable owner fails the claim
+  instead of half-leasing the run.
 
 The in-memory backend implements this honestly: mutations are staged
 against a copy-on-write clone of the tables and committed only when
@@ -90,7 +94,11 @@ so the PostgreSQL queue backend lives behind the async
 row, serializes concurrent savers on the row lock, and loads through
 the SAME fail-closed parser (`parseQueueSnapshot`) — a controller
 restart never loses queue/run truth, and a snapshot it cannot validate
-throws instead of being adopted.
+throws instead of being adopted. Saves are last-committed-wins under
+the row lock (the same guarantee class as the atomic-file backend's
+whole-snapshot replace); the deployment contract is a single active
+controller, so multi-controller split-brain is prevented above this
+seam, not papered over in it.
 
 Terminal records used to accumulate in the snapshot until "compaction
 lands with #736" — `compactQueueSnapshot` (`src/queue/compaction.ts`)
@@ -100,7 +108,13 @@ first), protecting only the terminal records whose `prKey` still has a
 non-terminal (active) generation — the supersession gate reads only
 non-terminal siblings, so dropping settled terminal history cannot
 change a publish decision. The durable last-good result lives in the
-run/publication layer, not in the queue snapshot.
+run/publication layer, not in the queue snapshot. **Coupling to keep
+honest:** the queue's jobId coalescing only holds while a generation's
+record exists — a compacted-away terminal record means a redelivery of
+the same head+config can enqueue as a NEW generation. The controller's
+durable dedupe for redeliveries is the control plane's idempotency-key
+layer, so a deployment's compaction retention must never be shorter
+than its idempotency-key horizon.
 
 ## Migrations
 

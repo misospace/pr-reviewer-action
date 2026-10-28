@@ -175,6 +175,67 @@ function optionalIdentifier(value: unknown, max: number): string | null {
   return identifier(value, max);
 }
 
+// ── shared field validators (the ONE definition, reused by every
+// backend's write path so a store can never persist a value its own
+// readers would reject) ────────────────────────────────────────────────
+
+/** The `RunRecord.leaseOwner` rule: non-empty, ≤ 64 chars, trimmed,
+ * control-char-free. Used by every claim/heartbeat path — an owner the
+ * validator rejects must fail the claim, never half-lease the run. */
+export function validateLeaseOwner(value: unknown): string | null {
+  return identifier(value, 64);
+}
+
+/** The patch fields a run transition may carry, rebuilt to ONLY the
+ * present keys (a `null`/`undefined` field means "carry over").
+ * Returns null when any PRESENT field violates its record rule — the
+ * same rule `validateRun` enforces on the stored record, so a patch
+ * accepted here can never produce a row the reader rejects. */
+export interface RunPatchFields {
+  readonly resultHeadSha?: string;
+  readonly failureReason?: string;
+  readonly supersededByJobId?: string;
+}
+
+export function validateRunPatch(patch: RunPatchFields | undefined): RunPatchFields | null {
+  if (patch === undefined) return {};
+  const rebuilt: { resultHeadSha?: string; failureReason?: string; supersededByJobId?: string } = {};
+  if (patch.resultHeadSha !== undefined) {
+    const value = shaOrEmpty(patch.resultHeadSha);
+    if (value === null) return null;
+    rebuilt.resultHeadSha = value;
+  }
+  if (patch.failureReason !== undefined) {
+    const value = optionalIdentifier(patch.failureReason, REASON_MAX_CHARS);
+    if (value === null) return null;
+    rebuilt.failureReason = value;
+  }
+  if (patch.supersededByJobId !== undefined) {
+    const value = optionalIdentifier(patch.supersededByJobId, 256);
+    if (value === null) return null;
+    rebuilt.supersededByJobId = value;
+  }
+  return rebuilt;
+}
+
+/** A publication history entry rule check for WRITE paths: returns the
+ * rebuilt frozen entry or null when malformed. The writer must bound
+ * its own detail BEFORE appending — the reader rejects a record whose
+ * history the validator cannot rebuild. */
+export function validatePublicationHistoryEntry(value: unknown): PublicationHistoryEntry | null {
+  if (!isPlainObject(value)) return null;
+  const atMs = value["atMs"];
+  if (!isFiniteNonNegativeNumber(atMs)) return null;
+  const outcome = value["outcome"];
+  if (outcome !== "attempt" && outcome !== "published" && outcome !== "failed") {
+    return null;
+  }
+  const detail = optionalIdentifier(value["detail"], DETAIL_MAX_CHARS);
+  if (detail === null) return null;
+  const entry: PublicationHistoryEntry = Object.freeze({ atMs, outcome, detail });
+  return entry;
+}
+
 /** A persisted SHA-or-sentinel: `""` or 7–64 lowercase hex. */
 function shaOrEmpty(value: unknown): string | null {
   if (value === "") return "";
@@ -500,20 +561,6 @@ export interface PublicationHistoryEntry {
   readonly outcome: "attempt" | "published" | "failed";
   /** Single-line detail (error text, destination note); "" = none. */
   readonly detail: string;
-}
-
-function validatePublicationHistoryEntry(value: unknown): PublicationHistoryEntry | null {
-  if (!isPlainObject(value)) return null;
-  const atMs = value["atMs"];
-  if (!isFiniteNonNegativeNumber(atMs)) return null;
-  const outcome = value["outcome"];
-  if (outcome !== "attempt" && outcome !== "published" && outcome !== "failed") {
-    return null;
-  }
-  const detail = optionalIdentifier(value["detail"], DETAIL_MAX_CHARS);
-  if (detail === null) return null;
-  const entry: PublicationHistoryEntry = Object.freeze({ atMs, outcome, detail });
-  return entry;
 }
 
 /** One publication: the durable forge-write state that lets a

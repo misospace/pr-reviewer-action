@@ -44,8 +44,11 @@ import {
   validateIdempotencyKey,
   validateInstallation,
   validatePublication,
+  validatePublicationHistoryEntry,
   validateRun,
+  validateRunPatch,
   validateUsage,
+  validateLeaseOwner,
   type AdoptedRepositoryRecord,
   type IdempotencyKeyRecord,
   type InstallationRecord,
@@ -501,36 +504,25 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
             `transition-run: run is ${current.state}, expected ${from}`,
           );
         }
-        if (mutation.patch?.resultHeadSha !== undefined) {
-          if (validateRun({ ...current, resultHeadSha: mutation.patch.resultHeadSha }) === null) {
-            throw new Error("transition-run: malformed resultHeadSha patch");
-          }
+        const patch = validateRunPatch(mutation.patch);
+        if (patch === null) {
+          throw new Error("transition-run: malformed patch field");
         }
-        if (mutation.patch?.failureReason !== undefined) {
-          if (validateRun({ ...current, failureReason: mutation.patch.failureReason }) === null) {
-            throw new Error("transition-run: malformed failureReason patch");
-          }
-        }
-        if (mutation.patch?.supersededByJobId !== undefined) {
-          if (
-            validateRun({
-              ...current,
-              supersededByJobId: mutation.patch.supersededByJobId,
-            }) === null
-          ) {
-            throw new Error("transition-run: malformed supersededByJobId patch");
-          }
-        }
+        // A terminal transition clears the lease (the #731 scheduler
+        // does the same): a finished run holds no worker, and a stale
+        // worker must never be able to heartbeat a finished run.
+        const terminal = isTerminalState(to);
         const next: RunRecord = Object.freeze({
           ...current,
           state: to,
-          resultHeadSha: mutation.patch?.resultHeadSha ?? current.resultHeadSha,
-          failureReason: mutation.patch?.failureReason ?? current.failureReason,
-          supersededByJobId:
-            mutation.patch?.supersededByJobId ?? current.supersededByJobId,
+          resultHeadSha: patch.resultHeadSha ?? current.resultHeadSha,
+          failureReason: patch.failureReason ?? current.failureReason,
+          supersededByJobId: patch.supersededByJobId ?? current.supersededByJobId,
+          leaseOwner: terminal ? "" : current.leaseOwner,
+          leaseExpiresAtMs: terminal ? 0 : current.leaseExpiresAtMs,
           startedAtMs:
             to === "running" && current.startedAtMs === 0 ? nowMs : current.startedAtMs,
-          finishedAtMs: isTerminalState(to) ? nowMs : current.finishedAtMs,
+          finishedAtMs: terminal ? nowMs : current.finishedAtMs,
           updatedAtMs: nowMs,
         });
         tables.runs.set(runId, next);
@@ -549,6 +541,12 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
           throw new RangeError(
             `claim-idempotency: expiresAtMs must be a finite non-negative number, got ${String(expiresAtMs)}`,
           );
+        }
+        // Validate the claim shape through the ONE validator: a key or
+        // binding the store could never re-read fails the claim here,
+        // never after it became durable state.
+        if (validateIdempotencyKey({ key, binding, createdAtMs: nowMs, expiresAtMs }) === null) {
+          throw new Error("claim-idempotency: malformed key or binding");
         }
         const existing = tables.idempotencyKeys.get(key);
         if (existing === undefined || (existing.expiresAtMs !== 0 && existing.expiresAtMs <= nowMs)) {
@@ -584,14 +582,20 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
         if (current === undefined) {
           throw new StateConflictError("record-publication-attempt: publication not found");
         }
-        const entry: PublicationHistoryEntry = { atMs, outcome, detail };
+        // The writer validates its own entry (bounded, single-line
+        // detail) and routes the WHOLE next record through the
+        // validator: a record the reader would reject is never stored.
+        const entry = validatePublicationHistoryEntry({ atMs, outcome, detail });
+        if (entry === null) {
+          throw new Error("record-publication-attempt: malformed history entry");
+        }
         const history = [...current.history, entry];
         // Bounded history: oldest entries drop first once the cap is
         // exceeded (the writer, not the reader, enforces the cap).
         while (history.length > PUBLICATION_HISTORY_CAP) {
           history.shift();
         }
-        const next: PublicationRecord = Object.freeze({
+        const next = validatePublication({
           ...current,
           attempt: current.attempt + 1,
           publicationState:
@@ -600,6 +604,9 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
           history,
           updatedAtMs: atMs,
         });
+        if (next === null) {
+          throw new Error("record-publication-attempt: next record failed validation");
+        }
         tables.publications.set(jobId, next);
         return;
       }
@@ -638,6 +645,12 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
     if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs) || ttlMs <= 0) {
       throw new RangeError(`claimRun: ttlMs must be a finite positive number, got ${String(ttlMs)}`);
     }
+    // Fail closed on an unleaseable owner: "" would "succeed" while
+    // leaving the run unleased, and an over-long owner would write a
+    // row the validator rejects.
+    if (validateLeaseOwner(owner) === null) {
+      throw new RangeError("claimRun: owner must be a non-empty lease-owner token (<= 64 chars)");
+    }
     const current = this.tables.runs.get(runId);
     if (current === undefined || isTerminalState(current.state)) return false;
     // A LIVE lease held by a DIFFERENT owner cannot be stolen; the same
@@ -675,8 +688,13 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
         `heartbeatRun: ttlMs must be a finite positive number, got ${String(ttlMs)}`,
       );
     }
+    if (validateLeaseOwner(owner) === null) {
+      throw new RangeError("heartbeatRun: owner must be a non-empty lease-owner token (<= 64 chars)");
+    }
     const current = this.tables.runs.get(runId);
-    if (current === undefined || !runLeaseIsLive(current, owner, nowMs)) return false;
+    // A terminal run holds no worker: nothing to heartbeat.
+    if (current === undefined || isTerminalState(current.state)) return false;
+    if (!runLeaseIsLive(current, owner, nowMs)) return false;
     const renewed: RunRecord = Object.freeze({
       ...current,
       leaseExpiresAtMs: nowMs + ttlMs,
