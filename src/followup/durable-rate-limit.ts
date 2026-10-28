@@ -49,8 +49,14 @@
  *   was already admitted and charged, so the retry is ALLOWED (it is not
  *   denied as rate-limited — the work was already admitted) and charges
  *   NOTHING. A commit that landed while its acknowledgement was lost can
- *   therefore never be double-charged by the redelivery it triggers, at ANY
- *   later instant. `isRequestCharged` is the read-only probe the seam uses to
+ *   therefore never be double-charged by the redelivery it triggers. The
+ *   guarantee holds for as long as the identity RECORD survives in the
+ *   ledger — the IDEMPOTENCY horizon (`idempotencyRetentionMs`, default
+ *   7 days), deliberately INDEPENDENT of the budget horizon (`retentionMs`):
+ *   the budget stops counting a charge once it leaves every window, but the
+ *   identity that proves "this request was already charged" must OUTLIVE it,
+ *   or a redelivery arriving after the budget horizon would be charged a
+ *   second time. `isRequestCharged` is the read-only probe the seam uses to
  *   re-admit such a redelivery BEFORE the budget pre-check; the charge
  *   itself is re-proved under the lock by the transaction;
  * - two DISTINCT requests are never conflated: distinct identities are
@@ -99,15 +105,20 @@
  *   survive a later healthy read, unlike the refusal reason.
  *
  * Instances sharing one ledger file MUST be configured with the SAME
- * `retentionMs`/`maxKeys`: a narrower config than the stored state cannot
- * prove the wider window or validate the over-cap scope count, so the store
- * denies until the file is repaired or removed (fail closed, never
- * under-count into an allow). Residual, stated honestly: the identity-less
- * single-scope `record` primitive still dedupes by `(key, instant)`, so two
- * DISTINCT identity-less charges in the SAME millisecond for the same scope
- * collapse to one (the price of interface-level replay idempotency for a seam
- * that carries no request identity); the atomic path — the one the planner
- * uses — never collapses distinct requests, because the identity decides.
+ * `retentionMs`/`maxKeys`/`idempotencyRetentionMs`: a narrower config than the
+ * stored state cannot prove the wider window or validate the over-cap scope
+ * count, so the store denies until the file is repaired or removed (fail
+ * closed, never under-count into an allow). Residual, stated honestly: the
+ * identity-less single-scope `record` primitive still dedupes by `(key,
+ * instant)`, so two DISTINCT identity-less charges in the SAME millisecond
+ * for the same scope collapse to one (the price of interface-level replay
+ * idempotency for a seam that carries no request identity); the atomic path —
+ * the one the planner uses — never collapses distinct requests, because the
+ * identity decides. The retry guarantee is bounded by the IDEMPOTENCY horizon:
+ * a redelivery arriving AFTER the identity record was pruned is no longer
+ * recognized and is charged again (the budget treats it as a fresh request) —
+ * the horizon is a bound, not eternity, and it is configurable so an
+ * operator can widen it.
  * A process crashing mid-`saveLedger` may leave a `<file>.tmp.<pid>.<uuid>`
  * remnant — a temp file is never read as state, and removal is safe. The
  * commit's temp file is created EXCLUSIVELY under an unpredictable name, so
@@ -151,6 +162,16 @@ const DENY = Number.MAX_SAFE_INTEGER;
  * longer be counted. Far above the default 15-minute Q&A window; a scope whose
  * window exceeds the retention denies (the ledger cannot prove its coverage). */
 export const DEFAULT_RATE_LIMIT_RETENTION_MS = 24 * 60 * 60_000;
+
+/** Default IDEMPOTENCY horizon: how long a charge's request-identity RECORD
+ * survives in the ledger. Deliberately far longer than the budget retention:
+ * the budget stops counting a charge once it leaves every window, but the
+ * identity that proves "this request was already charged" must outlive it —
+ * otherwise a redelivery arriving after the budget horizon would be charged a
+ * second time. The horizon is a BOUND (a ledger cannot keep every identity
+ * forever); it is configurable, and it is never shorter than the budget
+ * retention. */
+export const DEFAULT_RATE_LIMIT_IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60_000;
 
 /** Default exclusive-lock staleness horizon: a lock file whose mtime is older
  * than this belongs to a dead holder and is stolen. */
@@ -247,6 +268,15 @@ export interface DurableRateLimitStoreOptions {
    * are pruned; a scope whose window EXCEEDS the retention denies, because a
    * pruned ledger cannot prove the window's count. */
   retentionMs?: number;
+  /** IDEMPOTENCY horizon in ms: how long a charge's request-identity RECORD
+   * survives (default 7 days, never shorter than `retentionMs`). The budget
+   * horizon prunes what can no longer be COUNTED; this one prunes what can no
+   * longer be RECOGNIZED as an already-charged request — the two horizons are
+   * deliberately independent, so a redelivery that arrives after the budget
+   * horizon is still recognized and charged nothing. A value SHORTER than
+   * `retentionMs` is refused at construction: an identity that died with the
+   * budget window would let a redelivery be charged twice. */
+  idempotencyRetentionMs?: number;
   /** Cap on distinct tracked scopes (default `MAX_RATE_LIMIT_KEYS`). An
    * over-cap insert evicts the scope with the OLDEST last activity (ties by
    * key), bounding the ledger deterministically. */
@@ -455,16 +485,39 @@ function serializeLedger(ledger: Ledger): string {
   return JSON.stringify({ version: LEDGER_VERSION, scopes }, null, 2) + "\n";
 }
 
-/** Drop charges at or before `nowMs - retentionMs` (the window is
- * `(t0, now]`-bounded, so nothing older can ever count again) and any scope
- * thereby emptied. Mutates and returns the same ledger. */
-function pruneLedger(ledger: Ledger, nowMs: number, retentionMs: number): void {
-  const horizon = nowMs - retentionMs;
+/** Drop the charges that can no longer matter, and any scope thereby emptied.
+ * TWO horizons, deliberately different:
+ * - an IDENTITY-LESS charge (the `record` primitive) is dropped once it
+ *   leaves the BUDGET horizon (`retentionMs`): every count window is bounded
+ *   by the retention, so nothing can count it again;
+ * - an IDENTITY-BEARING charge is dropped once it leaves the IDEMPOTENCY
+ *   horizon (`idempotencyRetentionMs`), which is never shorter than the
+ *   budget horizon: the identity is what proves "this request was already
+ *   charged", so it must outlive the budget counting — otherwise a redelivery
+ *   arriving after the budget horizon would be charged a second time.
+ *
+ * Retaining an aged-out identity charge NEVER changes a count: a charge at or
+ * before the budget horizon is outside every provable window (all windows are
+ * bounded by the retention), so it is counted by nobody and only its identity
+ * digest is still meaningful.
+ *
+ * Mutates and returns the same ledger. */
+function pruneLedger(
+  ledger: Ledger,
+  nowMs: number,
+  retentionMs: number,
+  idempotencyRetentionMs: number,
+): void {
+  const budgetHorizon = nowMs - retentionMs;
+  const idempotencyHorizon = nowMs - idempotencyRetentionMs;
   for (const [key, charges] of ledger) {
-    let drop = 0;
-    while (drop < charges.length && charges[drop]!.at <= horizon) drop += 1;
-    if (drop >= charges.length) ledger.delete(key);
-    else if (drop > 0) ledger.set(key, charges.slice(drop));
+    const kept = charges.filter((charge) =>
+      charge.id === undefined
+        ? charge.at > budgetHorizon
+        : charge.at > idempotencyHorizon,
+    );
+    if (kept.length === 0) ledger.delete(key);
+    else if (kept.length !== charges.length) ledger.set(key, kept);
   }
 }
 
@@ -524,6 +577,9 @@ export class DurableRateLimitStore implements RateLimitStore {
   private readonly filePath: string;
   private readonly lockPath: string;
   private readonly retentionMs: number;
+  /** How long a request-identity record survives in the ledger (never
+   * shorter than the budget retention). */
+  private readonly idempotencyRetentionMs: number;
   private readonly maxKeys: number;
   private readonly lockStaleMs: number;
   private readonly lockAttempts: number;
@@ -561,6 +617,22 @@ export class DurableRateLimitStore implements RateLimitStore {
       "retentionMs",
       options.retentionMs ?? DEFAULT_RATE_LIMIT_RETENTION_MS,
     );
+    // The IDEMPOTENCY horizon — how long a request-identity record survives —
+    // is never shorter than the budget retention: an identity that died with
+    // the budget window would let a redelivery be charged a second time, the
+    // exact failure the stable identity exists to prevent. The default widens
+    // with the retention (an operator asking for a wider window gets a wider
+    // idempotency horizon); an explicit shorter value is REFUSED.
+    this.idempotencyRetentionMs = positive(
+      "idempotencyRetentionMs",
+      options.idempotencyRetentionMs ??
+        Math.max(this.retentionMs, DEFAULT_RATE_LIMIT_IDEMPOTENCY_RETENTION_MS),
+    );
+    if (this.idempotencyRetentionMs < this.retentionMs) {
+      throw new RangeError(
+        "DurableRateLimitStore: idempotencyRetentionMs must not be shorter than retentionMs",
+      );
+    }
     this.maxKeys = positive("maxKeys", options.maxKeys ?? MAX_RATE_LIMIT_KEYS);
     this.lockStaleMs = positive(
       "lockStaleMs",
@@ -768,7 +840,7 @@ export class DurableRateLimitStore implements RateLimitStore {
           // Exact replay of an already-committed (key, instant): charge once.
           return;
         }
-        pruneLedger(ledger, nowMs, this.retentionMs);
+        pruneLedger(ledger, nowMs, this.retentionMs, this.idempotencyRetentionMs);
         assertHolder();
         this.saveLedger(ledger, lockFd);
       });
@@ -801,7 +873,10 @@ export class DurableRateLimitStore implements RateLimitStore {
    * - a retry of an ALREADY-CHARGED request is ALLOWED and charges NOTHING
    *   (the request was already admitted, so it is not denied as rate-limited
    *   either): a commit whose acknowledgement was lost can never be
-   *   double-charged by the redelivery it triggers, at any later instant;
+   *   double-charged by the redelivery it triggers, for as long as the
+   *   identity record survives (the store's IDEMPOTENCY horizon — never
+   *   shorter than its budget horizon, so the record outlives the budget
+   *   window it no longer counts in);
    * - two DISTINCT requests stay distinct charges even in the SAME
    *   millisecond, so no real question is ever collapsed into another;
    * - a state that carries the identity on only SOME of the transaction's
@@ -980,7 +1055,7 @@ export class DurableRateLimitStore implements RateLimitStore {
         // rejected by every later load — deny instead of self-bricking.
         evictToCap(ledger, this.maxKeys, transactionKeys);
         if (ledger.size > this.maxKeys) return { kind: "denied" } as AtomicOutcome;
-        pruneLedger(ledger, nowMs, this.retentionMs);
+        pruneLedger(ledger, nowMs, this.retentionMs, this.idempotencyRetentionMs);
         assertHolder();
         this.saveLedger(ledger, lockFd);
         return { kind: "committed" } as AtomicOutcome;

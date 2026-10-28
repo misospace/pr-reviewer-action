@@ -13,7 +13,10 @@
  * double-charge on retry), pure-replay no-save, and fail-closed input
  * validation — plus the STABLE REQUEST IDENTITY (a retry charges nothing,
  * distinct requests in one millisecond stay distinct charges, a partial
- * charge denies), the ledger format version 2 (a digest, never the raw
+ * charge denies), the IDEMPOTENCY HORIZON (the identity record outlives the
+ * budget horizon — a redelivery after the budget window still charges
+ * nothing — and is dropped only past its own, longer horizon), the ledger
+ * format version 2 (a digest, never the raw
  * identity; a version-1 ledger is migrated), the ADVISORY directory fsync,
  * and the EXCLUSIVE, unpredictable commit temp file. */
 
@@ -828,6 +831,132 @@ test("a partially charged identity denies and writes nothing (inconsistent state
     "an inconsistent state must never be rewritten — not even to charge the missing scope");
 });
 
+// ── the identity outlives the budget horizon (retry idempotency) ──────────
+
+/** The two scopes of a budget whose window is `windowMs` (the narrow window
+ * lets a test place the budget horizon INSIDE the idempotency horizon). */
+const narrowScopes = (limit: number, windowMs: number): RateLimitScope[] => [
+  { key: "pr:github:owner/repo#7", rule: rule(limit, windowMs) },
+  { key: "actor:github:owner/repo#7:alice", rule: rule(limit, windowMs) },
+];
+
+test("a redelivery AFTER the budget horizon is still recognized and charges nothing", () => {
+  const { filePath } = scratch("retry-after-budget-horizon");
+  // The budget horizon is short (the window it can prove is short too); the
+  // idempotency horizon is long: the identity record must OUTLIVE the budget
+  // window, or a redelivery arriving after it would be charged a SECOND time.
+  const store = makeStore({
+    filePath,
+    retentionMs: 1_000,
+    idempotencyRetentionMs: 1_000_000,
+  });
+  const plan = narrowScopes(5, 1_000);
+  assert.equal(store.consumeScopesAtomically(plan, 1_000, "req-1"), true);
+  // A LATER request commits and prunes the ledger: the first charge leaves
+  // every budget window (the budget horizon passed), but its IDENTITY record
+  // must survive.
+  assert.equal(store.consumeScopesAtomically(plan, 5_000, "req-2"), true);
+  const ledger = persistedScopes(filePath);
+  for (const key of ["pr:github:owner/repo#7", "actor:github:owner/repo#7:alice"]) {
+    assert.ok(
+      (ledger.get(key) ?? []).some((event) => event.id === digest("req-1")),
+      `${key} must still carry the request identity after the budget horizon pruned the charge`,
+    );
+  }
+  // The aged-out charge is still NOT counted (every window is bounded by the
+  // budget retention): the identity outlives the counting, it does not extend
+  // the window.
+  assert.equal(store.countInWindow("pr:github:owner/repo#7", 1_000, 5_000), 1,
+    "only the still-countable charge may occupy the window");
+  // The REDELIVERY is recognized and charges NOTHING.
+  assert.equal(store.isRequestCharged(plan, "req-1"), true);
+  assert.equal(store.consumeScopesAtomically(plan, 6_000, "req-1"), true);
+  const after = persistedScopes(filePath);
+  assert.equal((after.get("pr:github:owner/repo#7") ?? []).length, 2,
+    "a redelivery must never add a second charge to a scope");
+  assert.equal((after.get("actor:github:owner/repo#7:alice") ?? []).length, 2);
+  // A restart over the same ledger keeps the guarantee.
+  const restarted = makeStore({
+    filePath,
+    retentionMs: 1_000,
+    idempotencyRetentionMs: 1_000_000,
+  });
+  assert.equal(restarted.isRequestCharged(plan, "req-1"), true);
+  assert.equal(restarted.consumeScopesAtomically(plan, 7_000, "req-1"), true);
+  assert.equal((persistedScopes(filePath).get("pr:github:owner/repo#7") ?? []).length, 2);
+});
+
+test("the budget horizon still prunes IDENTITY-LESS charges; only the identity record outlives it", () => {
+  const { filePath } = scratch("identity-vs-budget-prune");
+  const store = makeStore({
+    filePath,
+    retentionMs: 1_000,
+    idempotencyRetentionMs: 1_000_000,
+  });
+  const plan = narrowScopes(5, 1_000);
+  assert.equal(store.consumeScopesAtomically(plan, 1_000, "req-1"), true);
+  store.record("pr:a", 0);
+  // The commit at 5_000 prunes the identity-LESS charge (past the budget
+  // horizon) and keeps the identity-bearing one (past the budget horizon,
+  // inside the idempotency horizon).
+  assert.equal(store.consumeScopesAtomically(plan, 5_000, "req-2"), true);
+  const ledger = persistedScopes(filePath);
+  assert.equal(ledger.get("pr:a"), undefined,
+    "an identity-less charge past the budget horizon must still be pruned");
+  const identityCharges = (ledger.get("pr:github:owner/repo#7") ?? []).filter(
+    (event) => event.id === digest("req-1"),
+  );
+  assert.equal(identityCharges.length, 1,
+    "the identity record must outlive the budget horizon");
+});
+
+test("the identity record is dropped once it ages past the IDEMPOTENCY horizon (the bound is explicit)", () => {
+  const { filePath } = scratch("idempotency-horizon");
+  const store = makeStore({
+    filePath,
+    retentionMs: 1_000,
+    idempotencyRetentionMs: 10_000,
+  });
+  const plan = narrowScopes(5, 1_000);
+  assert.equal(store.consumeScopesAtomically(plan, 1_000, "req-1"), true);
+  // A commit far past the idempotency horizon prunes the identity record:
+  // the retry guarantee is bounded, and the bound is the documented one.
+  assert.equal(store.consumeScopesAtomically(plan, 50_000, "req-2"), true);
+  const ledger = persistedScopes(filePath);
+  for (const key of ["pr:github:owner/repo#7", "actor:github:owner/repo#7:alice"]) {
+    assert.ok(
+      !(ledger.get(key) ?? []).some((event) => event.id === digest("req-1")),
+      `${key} must drop the identity record past the idempotency horizon`,
+    );
+  }
+});
+
+test("the DEFAULT idempotency horizon outlives the DEFAULT budget horizon", () => {
+  const { filePath } = scratch("default-horizons");
+  const store = makeStore({ filePath });
+  const plan = narrowScopes(5, 1_000);
+  assert.equal(store.consumeScopesAtomically(plan, 1_000, "req-1"), true);
+  // Two days later the charge left the DEFAULT budget horizon (24h) — but
+  // the identity record is still there (the DEFAULT idempotency horizon is
+  // 7 days), so the redelivery is recognized and charges nothing.
+  const twoDays = 2 * 24 * 60 * 60_000;
+  assert.equal(store.consumeScopesAtomically(plan, 1_000 + twoDays, "req-2"), true);
+  assert.equal(store.isRequestCharged(plan, "req-1"), true);
+  assert.equal(store.consumeScopesAtomically(plan, 1_000 + twoDays + 1, "req-1"), true);
+  const charges = persistedScopes(filePath).get("pr:github:owner/repo#7") ?? [];
+  assert.equal(charges.length, 2, "the redelivery must not add a charge");
+  assert.equal(charges.filter((event) => event.id === digest("req-1")).length, 1);
+});
+
+test("an idempotency horizon shorter than the budget retention is refused at construction", () => {
+  const { filePath } = scratch("idempotency-shorter");
+  assert.throws(
+    () => makeStore({ filePath, retentionMs: 10_000, idempotencyRetentionMs: 1_000 }),
+    RangeError,
+    "an identity that died with the budget window would let a redelivery be charged twice",
+  );
+});
+
 test("the stored request identity is a sha-256 digest, never the raw value", () => {
   const { filePath } = scratch("digest-only");
   const store = makeStore({ filePath });
@@ -1007,6 +1136,25 @@ test("a redelivery through the SEAM is re-admitted even when its scope is at the
     "the redelivery must not add a second charge");
   assert.deepEqual(ledger.get("actor:github:owner/repo#7:alice"), [{ at: 1_000, id: digest("req-1") }]);
   assert.equal(store.countInWindow("pr:github:owner/repo#7", WINDOW, 5_000), 1);
+});
+
+test("a redelivery AFTER the budget horizon is re-admitted through the SEAM and charges nothing", () => {
+  const { filePath } = scratch("seam-redelivery-after-horizon");
+  const store = makeStore({
+    filePath,
+    retentionMs: 1_000,
+    idempotencyRetentionMs: 1_000_000,
+  });
+  const plan = narrowScopes(1, 1_000);
+  assert.equal(consumeFollowUpBudget(store, plan, 1_000, "req-1").allowed, true);
+  // A DIFFERENT request commits and prunes the first charge out of every
+  // budget window...
+  assert.equal(consumeFollowUpBudget(store, plan, 5_000, "req-2").allowed, true);
+  // ...and the REDELIVERY of the first request is still re-admitted (it was
+  // already admitted and charged) and charges NOTHING.
+  assert.equal(consumeFollowUpBudget(store, plan, 6_000, "req-1").allowed, true);
+  const charges = persistedScopes(filePath).get("pr:github:owner/repo#7") ?? [];
+  assert.equal(charges.length, 2, "the redelivery must not add a charge");
 });
 
 test("an atomic consume without a request identity raises an advisory (a redelivery is not idempotent)", () => {

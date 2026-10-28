@@ -29,10 +29,11 @@
  * logical request (the same value on every redelivery of it). Only a store
  * with the atomic capability consumes it — and only to make a RETRY
  * idempotent (a durable store recognizes the retry and charges it once, never
- * again at a later instant) and to RE-ADMIT it (a request that was already
- * admitted and charged is not turned into a rate-limited refusal by the
- * budget pre-check). Stores without the capability ignore it completely, so
- * the in-memory and forge-backed stores are unaffected.
+ * again while its identity record survives — the store's own idempotency
+ * horizon) and to RE-ADMIT it (a request that was already admitted and
+ * charged is not turned into a rate-limited refusal by the budget pre-check).
+ * Stores without the capability ignore it completely, so the in-memory and
+ * forge-backed stores are unaffected.
  */
 
 /** A single-window budget: at most `limit` events per `windowMs` for one key. */
@@ -126,9 +127,9 @@ export interface AtomicMultiScopeRateLimitStore extends RateLimitStore {
    * `requestId` is the OPTIONAL stable identity of the logical request — the
    * SAME value on every redelivery of it. A store that persists it uses it to
    * recognize a RETRY of an already-charged request and charge it NOTHING
-   * (never again at a later instant), while two DISTINCT requests stay
-   * distinct charges even in the same millisecond. A store without durable
-   * state may ignore it. */
+   * (never again, for as long as the store's identity record survives), while
+   * two DISTINCT requests stay distinct charges even in the same millisecond.
+   * A store without durable state may ignore it. */
   consumeScopesAtomically(
     scopes: readonly RateLimitScope[],
     nowMs: number,

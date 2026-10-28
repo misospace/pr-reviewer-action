@@ -278,9 +278,21 @@ atomic JSON-snapshot substrate (temp file + fsync + rename) plus a sidecar
 exclusive lock, cross-RESTART per-PR/per-actor budgets, idempotent replays
 (the multi-scope transaction carries the request's STABLE identity — the
 canonical follow-up comment id, PR-qualified — so a redelivery of an
-already-charged question is re-admitted and charged NOTHING, at any later
-instant, while two distinct questions stay distinct charges even in the same
-millisecond), and fail-closed counts on unreadable or corrupt state.
+already-charged question is re-admitted and charged NOTHING, while two
+distinct questions stay distinct charges even in the same millisecond), and
+fail-closed counts on unreadable or corrupt state.
+
+Two horizons keep that retry guarantee honest. The BUDGET horizon
+(`retentionMs`) prunes what can no longer be COUNTED — every count window is
+bounded by it, so an aged-out charge stops occupying a budget. The IDEMPOTENCY
+horizon (`idempotencyRetentionMs`, default 7 days, never shorter than the
+budget horizon) prunes what can no longer be RECOGNIZED as an
+already-charged request. The identity record deliberately OUTLIVES the budget
+window it no longer counts in: pruning both together would let a redelivery
+arriving after the budget horizon be charged a SECOND time. The horizons are
+a bound, not eternity — a redelivery arriving after the idempotency horizon
+is no longer recognized — and they are the store's own configuration, so an
+operator can widen them.
 
 The operator lane's PRODUCTION binding owns that backend: `createOperatorHost`
 (`src/ingress/operator-host.ts`) takes the operator's durable state LOCATION

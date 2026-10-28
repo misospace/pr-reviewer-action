@@ -208,7 +208,7 @@ export async function planFollowUp(
   // event cannot split or share one PR's actor budget by casing. Recorded only
   // when BOTH scopes still allow. The request's stable identity travels with
   // the call so a durable store can make a redelivery idempotent (charged
-  // once, never again).
+  // once, never again while the store's identity record survives).
   const now = deps.clock();
   const repo = event.repoFullName.toLowerCase();
   const scopes: RateLimitScope[] = [
@@ -222,7 +222,9 @@ export async function planFollowUp(
   // retry and charge it ONCE — the "never double-charge on a retry" half of
   // #1295's acceptance criterion. The identity is opaque to the seam: only a
   // store with the atomic capability consumes it, and it persists a digest of
-  // it, never the value itself.
+  // it, never the value itself. How long the store RETAINS that record (so a
+  // redelivery is still recognized after the budget window has passed) is the
+  // store's own idempotency horizon, not the planner's concern.
   const requestIdentity =
     event.eventReference === ""
       ? undefined
