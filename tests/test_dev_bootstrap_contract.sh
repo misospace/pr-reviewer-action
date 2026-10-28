@@ -28,14 +28,23 @@ if bash -n "$BOOTSTRAP"; then SYNTAX_OK=yes; else SYNTAX_OK=no; fi
 check "bootstrap.sh parses" "$SYNTAX_OK" "yes"
 
 echo ""
-echo "=== node pin matches the shipped runtime and CI ==="
+echo "=== node pin, CI, and the @types/node major move together ==="
+# The mise pin and CI run the same Node major, and the @types/node major
+# describes exactly that interpreter. The shipped action runtime
+# (runs.using in action.yml) may deliberately LAG the pin — the Actions
+# runner only understands the node24 selector today (no node26 exists), so
+# the newest declarable runtime is behind the toolchain — but it must never
+# LEAD it, or the typings would green-light APIs the development host lacks.
 PIN="$(sed -n 's/^[[:space:]]*node[[:space:]]*=[[:space:]]*"\([0-9.]*\)".*/\1/p' "$CONFIG" | head -n 1 || true)"
 PIN_SHAPE="$(printf '%s' "$PIN" | grep -cE '^[0-9]+\.[0-9]+\.[0-9]+$' || true)"
 check "config pins a full version" "$PIN_SHAPE" "1"
 ACTION_MAJOR="$(sed -n 's/^[[:space:]]*using:[[:space:]]*node\([0-9]*\).*/\1/p' "$ROOT_DIR/action.yml" | head -n 1 || true)"
 CI_MAJOR="$(sed -n "s/^[[:space:]]*node-version:[[:space:]]*'\([0-9]*\)'.*/\1/p" "$ROOT_DIR/.github/workflows/ci.yaml" | head -n 1 || true)"
-check "pin major matches action.yml runs.using: node$ACTION_MAJOR" "${PIN%%.*}" "$ACTION_MAJOR"
+TYPES_MAJOR="$(sed -n 's/.*"@types\/node": "\([0-9]*\)\.[0-9]*\.[0-9]*".*/\1/p' "$ROOT_DIR/package.json" | head -n 1 || true)"
 check "pin major matches CI node-version '$CI_MAJOR'" "${PIN%%.*}" "$CI_MAJOR"
+check "pin major matches the @types/node major" "${PIN%%.*}" "$TYPES_MAJOR"
+RUNTIME_LAGS_OK="$([ -n "$ACTION_MAJOR" ] && [ "${PIN%%.*}" -ge "$ACTION_MAJOR" ] && echo yes || echo no)"
+check "declared action runtime node$ACTION_MAJOR does not lead the pin" "$RUNTIME_LAGS_OK" "yes"
 # Block-scoped rather than positional: a regenerated lock may reorder keys or
 # carry comments without the configured version changing.
 LOCK_VERSION="$(awk '/^\[\[tools\.node\]\]/{f=1;next} /^\[/{f=0} f&&/^version/{print}' "$LOCK" | head -n 1 | sed 's/^[^=]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/' || true)"

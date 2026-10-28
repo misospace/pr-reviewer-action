@@ -148,15 +148,16 @@ jobs:
           client-id: ${{ secrets.BOT_CLIENT_ID }}
           private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
 
-      - name: Set up Node 24
-        # Only to build the bundle below; the action itself runs on the
-        # runner's own node24 (`runs.using: node24`). Runs for pull_request
+      - name: Set up Node 26
+        # Only to build the bundle below on the repo's Node pin; the action
+        # itself runs on the runner's own node24 (`runs.using: node24`).
+        # Runs for pull_request
         # and issue_comment re-reviews; skipped for workflow_dispatch and for
         # draft comment runs (a draft PR is never reviewed).
         if: github.event_name != 'workflow_dispatch' && steps.pr-gate.outputs.is_draft != 'true' && (github.event_name != 'issue_comment' || steps.pr-gate.outputs.may_trigger == 'true')
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 26
 
       - name: Build the action bundle
         # The action ships dist/ only on release tags (#787); this dogfood job
