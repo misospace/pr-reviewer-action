@@ -388,7 +388,7 @@ def test_build_sha_stamps_the_checked_out_ref() -> None:
 def test_pipeline_steps_skip_dispatch_and_draft_comment_runs() -> None:
     """Manual dispatch and draft-PR comment runs never reach the review pipeline."""
     text = WORKFLOW.read_text(encoding="utf-8")
-    for step in ("Set up Node 24", "Build the action bundle", REVIEW_STEP):
+    for step in ("Set up Node 26", "Build the action bundle", REVIEW_STEP):
         expr = _extract_if(step, text)
         assert "workflow_dispatch" in expr, f"{step}: dispatch runs must be skipped: {expr!r}"
         assert "pr-gate.outputs.is_draft" in expr, f"{step}: draft comment runs must be skipped: {expr!r}"
@@ -492,7 +492,7 @@ def test_pipeline_steps_gate_on_comment_prefilter() -> None:
     for step in (
         "Checkout repository",
         "Generate bot token",
-        "Set up Node 24",
+        "Set up Node 26",
         "Build the action bundle",
         REVIEW_STEP,
     ):
@@ -505,7 +505,7 @@ def test_pipeline_steps_gate_on_comment_prefilter() -> None:
         assert "github.event_name != 'issue_comment' ||" in expr, (
             f"{step}: pre-filter gate must keep the non-comment escape hatch: {expr!r}"
         )
-    for step in ("Set up Node 24", "Build the action bundle", REVIEW_STEP):
+    for step in ("Set up Node 26", "Build the action bundle", REVIEW_STEP):
         expr = _extract_if(step, text)
         assert "workflow_dispatch" in expr and "is_draft" in expr, (
             f"{step}: must keep its existing dispatch/draft gates: {expr!r}"

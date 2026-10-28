@@ -183,9 +183,9 @@ test("a message carrying an API key is masked with redactText's marker before re
     { severity: "blocker", file: "f.ts", line: 1, message: `leak: api_key=${key} in env dump` },
   ]);
   assert.equal(lines.length, 1);
-  assert.ok(!lines[0]!.includes(key), lines[0]);
+  assert.ok(!lines[0]!.includes(key), lines[0]!);
   // The `redactText` heuristic marker (src/context/redact.ts: `REDACTED`).
-  assert.ok(lines[0]!.includes("[REDACTED]"), lines[0]);
+  assert.ok(lines[0]!.includes("[REDACTED]"), lines[0]!);
 });
 
 test("an annotation message caps at 300 code points with an ellipsis", () => {

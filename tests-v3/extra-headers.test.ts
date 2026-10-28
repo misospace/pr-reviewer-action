@@ -496,7 +496,7 @@ test("#1037 REPRO: a 200 body echoing a configured header VALUE reaches no artif
   // The artifact still parses and still explains the failure.
   const persisted = JSON.parse(run.response) as { error?: string; diagnostics?: Record<string, unknown> };
   assert.match(String(persisted.error), /error/i);
-  assert.equal(String(persisted.error).includes(CANARY), false, persisted.error);
+  assert.equal(String(persisted.error).includes(CANARY), false, String(persisted.error));
   assert.ok(persisted.diagnostics !== undefined, "diagnostics record persisted beside the error");
 
   const surfaces = [run.artifacts, run.summary, ...run.errorLog].join("\n");

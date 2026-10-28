@@ -6,14 +6,20 @@
 # There is deliberately no `postinstall`/`lefthook` hook here either:
 # installing git hooks is out of scope for bootstrap.
 #
-# The Node pin below is the single source of truth. It tracks the shipped
-# action runtime (`runs.using: node24` in action.yml) and CI
-# (`node-version: '24'` in .github/workflows/ci.yaml);
-# tests/test_dev_bootstrap_contract.sh fails when the three drift apart.
+# The Node pin below is the single source of truth for the development and CI
+# toolchain. It tracks CI (`node-version: '26'` in .github/workflows/ci.yaml)
+# and the `@types/node` major in package.json, so the type definitions
+# describe the interpreter every suite actually runs on. The shipped action
+# still declares `runs.using: node24` (action.yml): the Actions runner has no
+# node26 selector yet (actions/runner only understands node20/node24), so the
+# declared runtime deliberately lags this pin until runner support lands; the
+# Node-24 runtime floor is verified by CI's validate-runtime-floor job.
+# tests/test_dev_bootstrap_contract.sh fails when the pin, CI, and the
+# @types/node major drift apart or the pin falls below the declared runtime.
 min_version = "2026.10.13"
 
 [tools]
-node = "24.22.1"
+node = "26.12.1"
 
 [tasks.bootstrap]
 description = "Idempotent setup: verify the locked toolchain, then install dependencies (runs no tests, formatters, or generators)"

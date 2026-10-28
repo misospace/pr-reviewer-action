@@ -11,7 +11,7 @@ function runFixture(cases: Array<{ name: string; coverage: unknown; ledger: unkn
     const path = join(dir, "coverage.json");
     writeFileSync(path, JSON.stringify({ contract: "requirement-coverage/v1", cases }));
     const result = runRequirementCoverageFixture(path);
-    assert.equal(result.ok, true, result.stderr);
+    assert.equal(result.ok, true, String(result.stderr));
     return Object.fromEntries(
       Object.entries(result.values ?? {}).map(([name, value]) => [name, JSON.parse(value) as Record<string, unknown>]),
     );

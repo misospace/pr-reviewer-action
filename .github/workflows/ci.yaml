@@ -20,6 +20,7 @@ jobs:
       - validate-python
       - validate-static
       - validate-bash
+      - validate-runtime-floor
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -34,7 +35,8 @@ jobs:
             "validate-typescript ${{ needs.validate-typescript.result }}" \
             "validate-python ${{ needs.validate-python.result }}" \
             "validate-static ${{ needs.validate-static.result }}" \
-            "validate-bash ${{ needs.validate-bash.result }}"; do
+            "validate-bash ${{ needs.validate-bash.result }}" \
+            "validate-runtime-floor ${{ needs.validate-runtime-floor.result }}"; do
             job="${job_result%% *}"
             result="${job_result#* }"
             echo "$job: $result"
@@ -54,7 +56,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '24'
+          node-version: '26'
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -91,7 +93,7 @@ jobs:
         # and runs node --test; retained runtime integration tests also use Node.
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '24'
+          node-version: '26'
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -232,3 +234,27 @@ jobs:
             echo "::endgroup::"
           done
           exit "$failed"
+
+  # Typecheck and the toolchain run on the repo's Node 26 pin, and @types/node
+  # tracks that pin — so the typings alone could green-light an API the
+  # shipped runtime lacks. The action declares runs.using: node24 (the newest
+  # selector the Actions runner supports; there is no node26 runtime yet), so
+  # this job keeps the declared runtime honest: the full suite must also pass
+  # on Node 24.
+  validate-runtime-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Run full suite on the declared action runtime
+        run: |
+          npm ci
+          npm test
