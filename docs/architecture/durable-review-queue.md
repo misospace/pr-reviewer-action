@@ -272,8 +272,65 @@ platform seams cap the snapshot at the latest comments
 (`CONVERSATION_COMMENTS_SNAPSHOT_CAP`), the host reports snapshot
 completeness, and a failed Forgejo comment page fails the whole read rather
 than silently truncating the ledger. The operator lane injects its own store;
-the durable cross-process store of #1295 remains that lane's target
-(cross-RESTART durability, not a scope this store under-delivers).
+the durable cross-process store of #1295 shipped as
+`DurableRateLimitStore` (`src/followup/durable-rate-limit.ts`): the same
+atomic JSON-snapshot substrate (temp file + fsync + rename) plus a sidecar
+exclusive lock, cross-RESTART per-PR/per-actor budgets, idempotent replays
+(the multi-scope transaction carries the request's STABLE identity — the
+canonical follow-up comment id, PR-qualified — so a redelivery of an
+already-charged question is re-admitted and charged NOTHING, while two
+distinct questions stay distinct charges even in the same millisecond), and
+fail-closed counts on unreadable or corrupt state.
+
+Two horizons keep that retry guarantee honest. The BUDGET horizon
+(`retentionMs`) prunes what can no longer be COUNTED — every count window is
+bounded by it, so an aged-out charge stops occupying a budget. The IDEMPOTENCY
+horizon (`idempotencyRetentionMs`, default 7 days, never shorter than the
+budget horizon) prunes what can no longer be RECOGNIZED as an
+already-charged request. The identity record deliberately OUTLIVES the budget
+window it no longer counts in: pruning both together would let a redelivery
+arriving after the budget horizon be charged a SECOND time. The horizons are
+a bound, not eternity, and there are TWO of them: a redelivery arriving after
+the idempotency horizon is no longer recognized, and so is one whose scopes
+were EVICTED by the ledger's scope cap (an evicted scope takes its identity
+record with it; eviction drops the scopes that carry no identity record
+first, so a live identity is the last thing the bounded ledger gives up).
+Both misses are conservative OVER-charges of the budget, never under-counts.
+
+The identity records also make the ledger's FOOTPRINT scale with the
+idempotency horizon (a digest per charged scope, and every commit rewrites
+the whole file), so the horizon and the scope cap are the operator's levers
+on that cost.
+
+The operator lane's PRODUCTION binding owns that backend: `createOperatorHost`
+(`src/ingress/operator-host.ts`) takes the operator's durable state LOCATION
+(`durableStateDir`) and CONSTRUCTS the `DurableRateLimitStore` over the ledger
+file (`OPERATOR_RATE_LIMIT_LEDGER_FILENAME`) inside it, injecting that store
+into the follow-up consumer. The follow-up configuration therefore carries no
+budget backend at all, and a composition that smuggles one in is REFUSED at
+construction — the shipped operator path cannot run on a per-process budget,
+and the budget survives a daemon restart because its state lives in the
+operator's durable state location, not in a process. The location is PREPARED
+at construction (created private when missing, then probed for writability),
+so a location that cannot take a write fails the CONSTRUCTION — fail closed at
+startup rather than as a silent denial wave once the first question arrives.
+The ledger retention is sized to the widest configured budget window (never
+shorter than the store's default), so a window the retention could not cover
+does not refuse every question. The operator also owns the budget's
+IDEMPOTENCY horizon (`rateLimitIdempotencyRetentionMs`, optional; absent →
+the store's default), so the retry guarantee is the operator's configuration
+and not a hidden constant — a value shorter than the budget retention is
+REFUSED at construction. The host exposes the store it built
+(`OperatorHost.rateLimitStore`), because the webhook handler answers with
+fixed bodies: `degradedReason`, `durabilityAdvisory` and `identityAdvisory`
+are the operator's only window into WHY a question was refused. The ROUTER
+seam below the host (`createOperatorEventRouter`) stays injection-shaped: a
+router composed directly enforces exactly the backend its caller injects —
+the durable one is the HOST's. Pinned at that production boundary by
+`tests-v3/ingress-operator-host.test.ts` (the spent budget survives a restart;
+a configuration that brings its own backend is refused; an unusable durable
+state location fails the construction; an idempotency horizon shorter than
+the budget retention is refused).
 
 ## Out of scope
 

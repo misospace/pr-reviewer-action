@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { planFollowUp, type FollowUpPlanConfig, type FollowUpPlanDeps } from "../src/followup/plan.js";
-import { InMemoryRateLimitStore } from "../src/followup/rate-limit.js";
+import { InMemoryRateLimitStore, type RateLimitScope, type RateLimitStore } from "../src/followup/rate-limit.js";
 import { normalizeForgejoEvent, normalizeGitHubEvent, type CanonicalForgeEvent } from "../src/events/index.js";
 import type { AuthorityReading } from "../src/precheck/comment-authority.js";
 
@@ -368,4 +368,67 @@ test("#1298: the gate runs only for questions — never before authority, never 
   );
   assert.deepEqual(rereview, { action: "rereview" });
   assert.equal(stateReads, 0, "only a planned question reaches the PR-state gate");
+});
+
+// #1295: the planner hands the STABLE request identity to the rate-limit
+// store — the canonical follow-up comment id, PR-qualified — so a durable
+// store can recognize the redelivery of a question it already charged.
+
+/** A store that records what the planner's atomic consume forwarded. */
+function capturingStore(): {
+  store: RateLimitStore;
+  captured: { scopes: readonly RateLimitScope[]; nowMs: number; requestId: string | undefined }[];
+} {
+  const captured: { scopes: readonly RateLimitScope[]; nowMs: number; requestId: string | undefined }[] = [];
+  const store = {
+    countInWindow: (): number => 0,
+    record: (): void => undefined,
+    consumeScopesAtomically: (
+      scopes: readonly RateLimitScope[],
+      nowMs: number,
+      requestId?: string,
+    ): boolean => {
+      captured.push({ scopes, nowMs, requestId });
+      return true;
+    },
+  };
+  return { store, captured };
+}
+
+test("#1295: the planner passes the PR-qualified follow-up comment id as the request identity", async () => {
+  const { store, captured } = capturingStore();
+  const plan = await planFollowUp(
+    {
+      event: canonicalFollowUp({ repoFullName: "Owner/Repo", eventReference: "4242" }),
+      body: "@reviewer-bot what about the null check?",
+    },
+    deps({ rateLimitStore: store }),
+    CONFIG,
+  );
+  assert.equal(plan.action, "answer");
+  assert.equal(captured.length, 1);
+  // The identity is the canonical comment id qualified by the (lowercased)
+  // repository and the PR number — two repositories' identical comment ids
+  // never collide in a shared ledger.
+  assert.equal(captured[0]!.requestId, "github:owner/repo#7:4242");
+  assert.equal(captured[0]!.nowMs, 1_000_000);
+  // The scopes travel with it, lowercase (the same budget the planner has
+  // always enforced).
+  assert.deepEqual(
+    captured[0]!.scopes.map((scope) => scope.key),
+    ["pr:github:owner/repo#7", "actor:github:owner/repo#7:alice"],
+  );
+});
+
+test("#1295: an event with no canonical comment reference passes no request identity", async () => {
+  const { store, captured } = capturingStore();
+  const plan = await planFollowUp(
+    { event: canonicalFollowUp({ eventReference: "" }), body: "@reviewer-bot ping" },
+    deps({ rateLimitStore: store }),
+    CONFIG,
+  );
+  assert.equal(plan.action, "answer");
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0]!.requestId, undefined,
+    "without a canonical comment id there is no stable identity to replay against");
 });

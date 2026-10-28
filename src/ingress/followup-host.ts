@@ -54,6 +54,7 @@ import {
   type FollowUpPlanDeps,
   type FollowUpRateLimits,
 } from "../followup/plan.js";
+import { DurableRateLimitStore } from "../followup/durable-rate-limit.js";
 import type { RateLimitStore } from "../followup/rate-limit.js";
 import type { AuthorityReading } from "../precheck/comment-authority.js";
 import type { PrStateReading } from "../platform/pr.js";
@@ -116,9 +117,17 @@ export interface FollowUpConsumerOptions {
   botLogin: () => Promise<string | null>;
   /** Deterministic clock (epoch ms) for the follow-up rate budget. */
   clock: () => number;
-  /** The follow-up rate budget store, shared per process; the durable store
-   * lands in #1295. */
-  rateLimitStore: RateLimitStore;
+  /** The follow-up rate budget store, shared per process. EITHER this OR
+   * `rateLimitLedgerPath` must be provided (never both): an explicit store is
+   * used as-is, while a ledger path makes this construction build and inject
+   * the durable cross-restart backend (`DurableRateLimitStore`, #1295) —
+   * that construction IS the production wiring of the durable budget. */
+  rateLimitStore?: RateLimitStore;
+  /** Path of the durable Q&A-budget ledger file; when set (and
+   * `rateLimitStore` is absent) the operator composition constructs
+   * `DurableRateLimitStore` over it, so the budget survives daemon restarts
+   * and is shared across controller processes (#1295). */
+  rateLimitLedgerPath?: string;
   /** Explicit re-review command (e.g. `/ai-review`); "" disables it. */
   rereviewCommand: string;
   /** Handles a question must address to reach the reviewer. */
@@ -142,15 +151,29 @@ export interface FollowUpConsumerOptions {
 }
 
 /** One operator-mode follow-up consumer; call `handleEvent` per canonical
- * event. Total: it never throws. */
+ * event. Total over its effects; a store contract violation out of the
+ * planner (a `record` that refuses an unpersistable charge) rejects, and the
+ * webhook handler's boundary catch degrades it. */
 export interface FollowUpConsumer {
   handleEvent(event: CanonicalForgeEvent, body?: string): Promise<FollowUpRunOutcome>;
 }
 
 /** Create the operator-mode follow-up consumer. See the module header for the
- * parity and fail-closed guarantees. */
+ * parity and fail-closed guarantees. Exactly one budget backend must be
+ * configured: an explicit `rateLimitStore`, or a `rateLimitLedgerPath` whose
+ * construction of the durable store is the production wiring. */
 export function createFollowUpConsumer(options: FollowUpConsumerOptions): FollowUpConsumer {
   const { adapter } = options;
+  // Resolve the budget backend ONCE, at construction — never per event.
+  if (options.rateLimitStore !== undefined && options.rateLimitLedgerPath !== undefined) {
+    throw new TypeError("FollowUpConsumerOptions: provide either rateLimitStore or rateLimitLedgerPath, not both");
+  }
+  if (options.rateLimitStore === undefined && options.rateLimitLedgerPath === undefined) {
+    throw new TypeError("FollowUpConsumerOptions: one of rateLimitStore or rateLimitLedgerPath is required");
+  }
+  const rateLimitStore =
+    options.rateLimitStore ??
+    new DurableRateLimitStore({ filePath: options.rateLimitLedgerPath! });
   return {
     async handleEvent(event, body) {
       const repoFullName = event.repoFullName;
@@ -172,7 +195,7 @@ export function createFollowUpConsumer(options: FollowUpConsumerOptions): Follow
         // Forwarded as-is: the planner catches a throwing probe and fails
         // closed (null reading).
         readPermission: (login) => adapter.readPermission(repoFullName, login),
-        rateLimitStore: options.rateLimitStore,
+        rateLimitStore,
         // Forwarded as-is: the planner catches a throwing thread read and
         // degrades to a smaller prompt.
         fetchThreadComments: () => adapter.fetchThreadComments(repoFullName, prNumber),

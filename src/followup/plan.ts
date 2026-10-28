@@ -206,14 +206,30 @@ export async function planFollowUp(
   // repo-wide allowance. `repoFullName` is canonical-lowercase at the event
   // boundary; it is lowercased again here — for both scopes — so a hand-built
   // event cannot split or share one PR's actor budget by casing. Recorded only
-  // when BOTH scopes still allow.
+  // when BOTH scopes still allow. The request's stable identity travels with
+  // the call so a durable store can make a redelivery idempotent (charged
+  // once, never again while the store's identity record survives).
   const now = deps.clock();
   const repo = event.repoFullName.toLowerCase();
   const scopes: RateLimitScope[] = [
     { key: `pr:${event.platform}:${repo}#${event.prNumber}`, rule: config.rateLimit.perPr },
     { key: `actor:${event.platform}:${repo}#${event.prNumber}:${event.actor.toLowerCase()}`, rule: config.rateLimit.perActor },
   ];
-  if (!consumeFollowUpBudget(deps.rateLimitStore, scopes, now).allowed) {
+  // The STABLE identity of THIS request: the canonical follow-up comment id,
+  // qualified by the PR it belongs to (so two repositories' identical comment
+  // ids never collide in a shared ledger). Every redelivery of the same
+  // question carries the same identity, so a durable store can recognize the
+  // retry and charge it ONCE — the "never double-charge on a retry" half of
+  // #1295's acceptance criterion. The identity is opaque to the seam: only a
+  // store with the atomic capability consumes it, and it persists a digest of
+  // it, never the value itself. How long the store RETAINS that record (so a
+  // redelivery is still recognized after the budget window has passed) is the
+  // store's own idempotency horizon, not the planner's concern.
+  const requestIdentity =
+    event.eventReference === ""
+      ? undefined
+      : `${event.platform}:${repo}#${event.prNumber}:${event.eventReference}`;
+  if (!consumeFollowUpBudget(deps.rateLimitStore, scopes, now, requestIdentity).allowed) {
     return ignore("rate-limited");
   }
 

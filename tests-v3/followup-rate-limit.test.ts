@@ -4,6 +4,7 @@ import {
   InMemoryRateLimitStore,
   consumeFollowUpBudget,
   type RateLimitRule,
+  type RateLimitScope,
 } from "../src/followup/rate-limit.js";
 
 // #763: the deterministic follow-up rate limiter. Clock-injected, so every
@@ -83,4 +84,57 @@ test("the store bounds distinct keys by evicting the oldest on overflow", () => 
   store.record("k4", 100); // evicts k1
   assert.equal(store.countInWindow("k1", WINDOW, 150), 0);
   assert.equal(store.countInWindow("k4", WINDOW, 150), 1);
+});
+
+// #1295: the OPTIONAL stable request identity. Only a store with the atomic
+// multi-scope capability consumes it (it uses it to make a redelivery
+// idempotent); a store WITHOUT the capability takes the byte-identical
+// per-scope loop and ignores the extra argument entirely.
+
+test("the stable request identity is forwarded to a store with the atomic capability", () => {
+  const captured: { scopes: readonly RateLimitScope[]; nowMs: number; requestId: string | undefined }[] = [];
+  const store = {
+    countInWindow: (): number => 0,
+    record: (): void => {
+      throw new Error("the atomic path must own the commit, never the per-scope record");
+    },
+    consumeScopesAtomically: (
+      scopes: readonly RateLimitScope[],
+      nowMs: number,
+      requestId?: string,
+    ): boolean => {
+      captured.push({ scopes, nowMs, requestId });
+      return true;
+    },
+  };
+  const scopes: RateLimitScope[] = [{ key: "pr", rule: rule(2) }, { key: "actor", rule: rule(1) }];
+  assert.equal(consumeFollowUpBudget(store, scopes, 1_000, "req-1").allowed, true);
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0]!.nowMs, 1_000);
+  assert.equal(captured[0]!.requestId, "req-1");
+  assert.deepEqual(captured[0]!.scopes, scopes);
+});
+
+test("a store without the atomic capability ignores the request identity and keeps the per-scope loop", () => {
+  const calls: string[] = [];
+  const store = {
+    countInWindow: (key: string, _windowMs: number, nowMs: number): number => {
+      calls.push(`count:${key}:${nowMs}`);
+      return 0;
+    },
+    record: (key: string, nowMs: number): void => {
+      calls.push(`record:${key}:${nowMs}`);
+    },
+  };
+  const scopes: RateLimitScope[] = [{ key: "pr", rule: rule(2) }, { key: "actor", rule: rule(1) }];
+  // The identity-less call first: it is the baseline the seam behaved like
+  // before the identity existed.
+  assert.equal(consumeFollowUpBudget(store, scopes, 1_000).allowed, true);
+  const baseline = calls.slice();
+  calls.length = 0;
+  // The same call WITH the identity: byte-identical behaviour.
+  assert.equal(consumeFollowUpBudget(store, scopes, 1_000, "req-1").allowed, true);
+  assert.deepEqual(calls, baseline,
+    "the extra argument must not change a store without the atomic capability");
+  assert.deepEqual(calls, ["count:pr:1000", "count:actor:1000", "record:pr:1000", "record:actor:1000"]);
 });

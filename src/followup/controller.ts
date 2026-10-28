@@ -22,8 +22,13 @@
  *   second reviewer;
  * - `ignore` performs no write and no model call, ever.
  *
- * The consumer is total: an injected effect that throws degrades to a failed
- * outcome, it never rethrows and never retries.
+ * The consumer is total over its EFFECTS: an injected effect that throws
+ * degrades to a failed outcome, it never rethrows and never retries. A store
+ * whose `record` contract includes throwing on an unpersistable charge (the
+ * durable store does) rejects OUT of the planner — the model work must not
+ * run on an unpersisted budget charge — and the host boundary owns that
+ * rejection (the operator webhook handler's fixed 500, the Action's error
+ * exit); it is never swallowed into a published reply.
  */
 
 import type { CanonicalForgeEvent } from "../events/types.js";
@@ -101,7 +106,9 @@ function truncateToBytes(text: string, maxBytes: number): string {
 
 /** Consume ONE canonical follow-up event: plan it once, then execute exactly
  * the plan's action through the injected effects. See the module header for
- * the invariants. Never throws. */
+ * the invariants. Never throws over its effects; a store contract violation
+ * in the planner (a `record` that throws on an unpersistable charge)
+ * propagates to the host boundary, whose catch degrades it. */
 export async function runFollowUpEvent(
   request: FollowUpPlanRequest,
   deps: FollowUpPlanDeps,

@@ -14,9 +14,10 @@
  *
  * Routing policy (the whole of it — the router adds no decisions of its own):
  * - a `follow_up` event goes to the follow-up consumer, and nowhere else. The
- *   consumer is TOTAL (it never throws): an ignored comment, an answered
- *   question and a re-review hand-back all settle as a
- *   {@link FollowUpRunOutcome}. This branch therefore NEVER rejects.
+ *   consumer settles its EFFECTS as a {@link FollowUpRunOutcome}; a store
+ *   contract violation out of the planner (a `record` that refuses an
+ *   unpersistable charge) REJECTS, and the webhook handler's boundary catch
+ *   degrades it to the fixed 500 the forge redelivers.
  * - every other canonical event goes to the injected `dispatch` seam — the
  *   daemon's review-generation scheduler, the same consumer of review
  *   generations the operator has always had. With no `dispatch` configured the
@@ -36,6 +37,14 @@
  * happens inside the consumer through the injected forge capability
  * (`FollowUpForgeAdapter`), so this module stays forge-agnostic by
  * construction.
+ *
+ * Budget ownership: the router is the CONSUMER seam — it carries whatever
+ * budget backend its caller injects, and a router composed directly (tests,
+ * a daemon that wants its own store) enforces exactly that backend and
+ * nothing more. The OPERATOR PRODUCTION composition owns the cross-restart
+ * budget: `createOperatorHost` (`./operator-host.ts`) constructs the durable
+ * store over the operator's durable state location and injects it here, so
+ * the shipped operator path always enforces a durable budget (#1295).
  */
 
 import type { CanonicalForgeEvent } from "../events/types.js";
@@ -85,9 +94,10 @@ export function createOperatorEventRouter(options: OperatorEventRouterOptions): 
   return {
     async handleEvent(event: CanonicalForgeEvent): Promise<OperatorEventOutcome> {
       if (event.kind === "follow_up") {
-        // The consumer is total, so this branch never rejects: a follow-up
-        // delivery is always settled here (ignored, answered, or handed back
-        // for a re-review) and never falls through to the review scheduler.
+        // The consumer settles its effects here; a store contract violation
+        // out of the planner rejects (the webhook handler's catch owns the
+        // fixed 500) — a follow-up delivery never falls through to the
+        // review scheduler.
         const outcome = await consumer.handleEvent(event);
         return { kind: "follow-up", outcome };
       }

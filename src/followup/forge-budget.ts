@@ -42,9 +42,9 @@
  *   person cannot dominate a PR").
  * Both scopes the store covers are therefore exactly PR-scoped, so the thread
  * is the COMPLETE state for both keys it serves — nothing the planner asks
- * about under them lives outside this PR. #1295 remains the durable
- * cross-RESTART store target for the operator lane, which can hold state
- * beyond a single PR thread; it is not a gap in this store.
+ * about under them lives outside this PR. The durable cross-RESTART store
+ * for the operator lane shipped in #1295 (`./durable-rate-limit.ts`); it is
+ * not a gap in this store.
  *
  * Snapshot coverage (fail closed): the platform seam's thread read is
  * bounded to the LATEST comments (both platforms cap the snapshot), so a
