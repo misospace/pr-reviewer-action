@@ -374,8 +374,12 @@ function parseSnapshotRecords(raw: readonly unknown[]): JobRecord[] {
 /** Validate a snapshot-shaped value and return a normalized, fully
  * frozen snapshot (every record rebuilt with exactly the `JobRecord`
  * fields, extras dropped, and the nested job rebuilt from the
- * validator). */
-function parseQueueSnapshot(value: unknown): QueueSnapshot {
+ * validator).
+ *
+ * Exported so the #736 compaction pass validates a snapshot with the
+ * SAME parser before dropping anything from it (one definition, no
+ * drift). */
+export function parseQueueSnapshot(value: unknown): QueueSnapshot {
   const raw = checkSnapshotEnvelope(value);
   const records = parseSnapshotRecords(raw);
   const snapshot: QueueSnapshot = {

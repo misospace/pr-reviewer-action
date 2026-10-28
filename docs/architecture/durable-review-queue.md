@@ -80,7 +80,10 @@ verdict never appears in the state machine.
 `QueueStore` is the persistence seam: `load()` / `save()` over a whole
 `QueueSnapshot` (`version: 1` + records). Two backends ship —
 `InMemoryQueueStore` (tests/dev) and `JsonFileQueueStore` (durable JSON);
-the #736 PostgreSQL backend will slot in behind the same interface.
+the #736 PostgreSQL backend ships behind the ASYNC `QueueSnapshotStore`
+seam (`src/state/queue-snapshot.ts`) — a network database cannot be
+synchronous — and the daemon wires it to this contract through an
+adapter (see `docs/architecture/durable-control-plane-state.md`).
 
 - **Atomic save.** The file backend writes a temp file in the same
   directory, fsyncs it, renames it over the target, and then
@@ -114,8 +117,10 @@ the #736 PostgreSQL backend will slot in behind the same interface.
   result is never requeued or failed: it stays `publishing` with its
   stale lease cleared so the restarted controller retries the publish.
   Records with a live lease, `queued`, and terminal records pass through
-  untouched. Terminal records accumulate in the snapshot until
-  compaction lands with #736.
+  untouched. Terminal records accumulate in the snapshot;
+  `compactQueueSnapshot` (`src/queue/compaction.ts`, landed with #736)
+  is the pure pass that reclaims them once their `prKey` has no active
+  generation.
 - **Leases & heartbeats.** Dispatch takes a lease (`leaseOwner` token +
   `leaseExpiresAtMs = now + leaseTtlMs`); `heartbeat(jobId, owner)` renews
   only while the lease belongs to that owner and is still live, and
@@ -334,5 +339,8 @@ the budget retention is refused).
 
 ## Out of scope
 
-HTTP ingress (#730), executor implementations (#733), and the PostgreSQL
-backend with migrations/usage accounting (#736).
+HTTP ingress (#730), executor implementations (#733), and the
+control-plane state layer — PostgreSQL backend, migrations, usage
+accounting, terminal-record compaction — which landed as
+`src/state/` with #736
+(`docs/architecture/durable-control-plane-state.md`).

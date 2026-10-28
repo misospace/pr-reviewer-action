@@ -37,3 +37,6 @@ export type {
   EnqueueResult,
 } from "./scheduler.js";
 export { ReviewQueueController } from "./scheduler.js";
+
+export type { CompactionOptions } from "./compaction.js";
+export { compactQueueSnapshot } from "./compaction.js";
