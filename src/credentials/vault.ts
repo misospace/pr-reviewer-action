@@ -178,6 +178,13 @@ export class InMemorySecretVault implements CredentialBroker {
     } catch {
       fresh = null;
     }
+    // Revocation wins the race: `revoke()` can run while the refresh is in
+    // flight. Re-checking here ensures the in-flight resolution never stores
+    // or hands back live material for a reference revoked during the await
+    // (#735 revoked-token behavior is fail-closed, not eventually-consistent).
+    if (record.revoked) {
+      return refusal("revoked", "credential reference has been revoked");
+    }
     if (
       fresh === null ||
       !isValidSecretMaterial(fresh) ||

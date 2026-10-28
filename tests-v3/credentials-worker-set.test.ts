@@ -341,7 +341,7 @@ test("worker-set: cross-repo model credential cannot be resolved into another re
 });
 
 test("worker-set: no secrets in durable payload — plan and executor request stay reference-only", async () => {
-  const { vault, secrets } = vaultWithSecrets();
+  const { secrets } = vaultWithSecrets();
   const plan = buildWorkerCredentialPlan(input());
   // The plan is what would be embedded into durable state / the execution
   // request envelope: references and names only.

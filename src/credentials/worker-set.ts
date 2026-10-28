@@ -40,7 +40,7 @@ import {
   type SecretPurpose,
   type WorkerCredentialPlan,
 } from "./types.js";
-import { createResultChannelAuth, type MintedResultChannelToken, type ResultChannelAuth } from "./result-channel.js";
+import { type MintedResultChannelToken, type ResultChannelAuth } from "./result-channel.js";
 import { createSecretRedactor, type SecretRedactor } from "./redact.js";
 
 /** How the worker obtains its model access. `direct_worker` is the shipped

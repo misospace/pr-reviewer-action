@@ -283,6 +283,39 @@ test("vault: revoked references refuse and revoke is idempotent", async () => {
   assert.equal(broker.revoke("never-existed"), false);
 });
 
+test("vault: revocation wins the race against an in-flight refresh", async () => {
+  let releaseRefresh: ((material: { value: string; expiresAtMs: number }) => void) | undefined;
+  let signalInFlight: (() => void) | undefined;
+  const refreshInFlight = new Promise<void>((resolve) => {
+    signalInFlight = resolve;
+  });
+  let now = 3_000;
+  const broker = vault(
+    [entry({ material: { value: "ghs_secretvalue000000000001", expiresAtMs: 2_000 } })],
+    {
+      now: () => now,
+      refresh: () =>
+        new Promise((resolve) => {
+          releaseRefresh = resolve;
+          signalInFlight!();
+        }),
+    },
+  );
+  const pending = broker.resolve("forge-installation-token", request());
+  await refreshInFlight;
+  // The reference is revoked while the refresh is still in flight.
+  assert.equal(broker.revoke("forge-installation-token"), true);
+  releaseRefresh!({ value: "ghs_refreshedvalue0000000001", expiresAtMs: now + HOUR_MS });
+  const result = await pending;
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.code, "revoked");
+  // The in-flight resolution never stored or returned the refreshed
+  // material, and later resolutions keep refusing revoked.
+  const after = await broker.resolve("forge-installation-token", request());
+  assert.equal(after.ok, false);
+  if (!after.ok) assert.equal(after.code, "revoked");
+});
+
 test("vault: describe returns reference names only, never material", async () => {
   const broker = vault([
     entry(),
