@@ -674,11 +674,11 @@ inputs:
     v2_id: tool_loop_wall_clock_sec
     required: false
     default: "600"
-    description: "Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange (all model round-trips plus tool execution). Ignored for other modes."
+    description: "Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange (all model round-trips plus tool execution). Clamped to 10..900 seconds — an explicit value above 900 is capped at the hard ceiling, and one below 10 is raised to the floor. Ignored for other modes."
   - id: smart-tool-loop-wall-clock-sec
     required: false
     default: ""
-    description: "Wall-clock ceiling in seconds for the smart tier's tool-mode=native_loop exchange (the post-review escalation rerun) only. Empty (the default) inherits tool-loop-wall-clock-sec. An explicit value outranks tool-loop-wall-clock-sec on the smart tier and leaves the primary tier untouched. Ignored for other modes."
+    description: "Wall-clock ceiling in seconds for the smart tier's tool-mode=native_loop exchange (the post-review escalation rerun) only. Empty (the default) inherits tool-loop-wall-clock-sec. An explicit value outranks tool-loop-wall-clock-sec on the smart tier and leaves the primary tier untouched. Clamped to 10..900 seconds like tool-loop-wall-clock-sec. Ignored for other modes."
   - id: tool-loop-summarize
     v2_id: tool_loop_summarize
     required: false
@@ -753,7 +753,7 @@ inputs:
     v2_id: tool_max_search_results
     required: false
     default: "5"
-    description: "Maximum results returned per web_search call"
+    description: "Maximum results returned per web_search call; bounded to 1..15"
   - id: tool-failure-enforcement
     v2_id: tool_failure_enforcement
     required: false
@@ -999,15 +999,15 @@ removed:
   - kind: inputs
     v2_id: tool_planning_timeout_sec
     status: removed
-    reason: "Removed in v3; use tool_turn_timeout_sec."
+    reason: "Removed in v3; use tool_turn_timeout_sec. Since #1255 the runtime no longer honors the legacy TOOL_PLANNING_TIMEOUT_SEC env name either."
   - kind: inputs
     v2_id: tool_planning_max_context_bytes
     status: removed
-    reason: "Removed in v3; use tool_corpus_max_bytes."
+    reason: "Removed in v3; use tool_corpus_max_bytes. Since #1255 the runtime no longer honors the legacy TOOL_PLANNING_MAX_CONTEXT_BYTES env name either."
   - kind: inputs
     v2_id: tool_planning_max_tokens
     status: removed
-    reason: "Removed in v3; use tool_max_tokens_per_turn."
+    reason: "Removed in v3; use tool_max_tokens_per_turn. Since #1255 the runtime no longer honors the legacy TOOL_PLANNING_MAX_TOKENS env name either."
   - kind: inputs
     v2_id: review_scope
     status: removed

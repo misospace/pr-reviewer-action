@@ -1239,6 +1239,77 @@ test("#922: explicit byte inputs override the window-derived limits", () => {
   assert.equal(limits.maxConversationTokens, 250000);
 });
 
+test("#1255: the removed TOOL_PLANNING_* env aliases are inert — the live names win alone", () => {
+  const baseline = loopContextLimits({}, "primary");
+  assert.deepEqual(loopContextLimits({ TOOL_PLANNING_MAX_CONTEXT_BYTES: "999999" }, "primary"), baseline);
+  assert.deepEqual(loopContextLimits({ TOOL_PLANNING_MAX_CONTEXT_BYTES: "999999", TOOL_PLANNING_MAX_TOKENS: "1" }, "primary"), baseline);
+  const live = loopContextLimits({ TOOL_CORPUS_MAX_BYTES: "70000" }, "primary");
+  assert.equal(live.corpusMaxBytes, 70000);
+  assert.notEqual(live.corpusMaxBytes, baseline.corpusMaxBytes);
+  // The token alias was live pre-#1255 on the declared-window path (it sizes
+  // the per-turn reservation); a stale value must neither shift the budget
+  // nor throw.
+  const w = { PRIMARY_MODEL_CONTEXT_TOKENS: "12000" };
+  assert.deepEqual(loopContextLimits({ ...w, TOOL_PLANNING_MAX_TOKENS: "1" }, "primary"), loopContextLimits(w, "primary"));
+  assert.doesNotThrow(() => loopContextLimits({ ...w, TOOL_PLANNING_MAX_TOKENS: "999999" }, "primary"));
+});
+
+test("#1255: TOOL_PLANNING_TIMEOUT_SEC no longer sets the turn timeout", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const timeouts: number[] = [];
+  let calls = 0;
+  await runToolHarness(deps({
+    env: { TOOL_PLANNING_TIMEOUT_SEC: "7" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout!);
+      return openAiCall(`c${calls++}`, "read_file", '{"path":"a"}');
+    },
+  }));
+  assert.ok(timeouts.length > 0 && timeouts.every((t) => t === 60), `the removed alias must not set the turn timeout: ${timeouts.join(",")}`);
+});
+
+test("#1255: TOOL_PLANNING_MAX_TOKENS no longer sets the per-turn max_tokens", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const tokens: unknown[] = [];
+  let calls = 0;
+  await runToolHarness(deps({
+    env: { TOOL_PLANNING_MAX_TOKENS: "1234" },
+    transport: async (_baseUrl, _apiFormat, payload, _apiKey) => {
+      tokens.push((payload as { max_tokens?: unknown }).max_tokens);
+      return openAiCall(`c${calls++}`, "read_file", '{"path":"a"}');
+    },
+  }));
+  assert.ok(tokens.length > 0 && tokens.every((t) => t !== 1234), `the removed alias must not set per-turn max_tokens: ${tokens.join(",")}`);
+  assert.equal(tokens[0], 400);
+});
+
+test("#1255: web_search result count is clamped to 1..15 on the real path", async () => {
+  async function searchCount(maxResults: string): Promise<number> {
+    const { root, deps } = workspace();
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    const results = Array.from({ length: 40 }, (_, i) => ({ title: `t${i}`, url: `http://search.test/${i}`, content: "c" }));
+    const realFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = async () => new Response(JSON.stringify({ results }), { status: 200, headers: { "content-type": "application/json" } });
+    let calls = 0;
+    try {
+      const { result } = await runToolHarness(deps({
+        env: { SEARCH_URL: "http://search.test/search", ALLOWED_SOURCE_HOSTS: "search.test", TOOL_MAX_SEARCH_RESULTS: maxResults },
+        transport: async () => (calls++ === 0 ? openAiCall("c1", "web_search", '{"query":"x"}') : openAiText("done")),
+      }));
+      const toolResults = (result.tool_results ?? []) as Array<{ tool: string; result: unknown }>;
+      const search = toolResults.find((r) => r.tool === "web_search");
+      return JSON.parse((search!.result as { results: string }).results).length;
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = realFetch;
+    }
+  }
+  assert.equal(await searchCount("500"), 15);
+  assert.equal(await searchCount("0"), 1);
+  assert.equal(await searchCount("5"), 5);
+});
+
 test("#922: loop telemetry carries the conversation budget and peak only when the loop reported them", () => {
   const base: HarnessResult = {
     tool_budget_tier: "primary",
