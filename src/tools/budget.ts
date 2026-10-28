@@ -180,17 +180,19 @@ function clampedPositive(raw: string | undefined): number | null {
 /**
  * Classify a harness run's budget tier. Mirrors tool_budget_route:
  *   primary   — the ordinary primary-tier harness run;
- *   smart     — a harness run on the smart profile
- *               (REVIEW_CONTEXT_PROFILE=smart, i.e. the smart tier);
+ *   smart     — a harness run on the smart tier (TOOL_HARNESS_TIER=smart);
  *   escalated — the smart-tier harness run under post-review escalation
  *               (run_review.sh exports TOOL_ESCALATION=true around it).
+ *
+ * #1253: the tier argument is the only route signal. The historical
+ * REVIEW_CONTEXT_PROFILE=smart ambient override is gone — the stage env is
+ * a constructed record that never carries that key (src/run/env.ts), and the
+ * engine forced it to "primary" before any consumer ran, so the override
+ * branch was unreachable and has been removed.
  */
 export function toolBudgetRoute(tier: string, env: EnvLike): ToolBudgetTier {
   if (tier === "smart") {
     return flagTrue(env.TOOL_ESCALATION) ? "escalated" : "smart";
-  }
-  if ((env.REVIEW_CONTEXT_PROFILE ?? "").trim().toLowerCase() === "smart") {
-    return "smart";
   }
   return "primary";
 }

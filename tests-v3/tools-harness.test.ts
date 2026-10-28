@@ -931,11 +931,9 @@ test("#910: a cache-less stream keeps the v2 usage shape", () => {
   assert.deepEqual(plain.usage, { promptTokens: 3, completionTokens: 1, totalTokens: 4 });
 });
 
-test("loopLimitsProfile: first-pass defaults to primary; smart profile and escalation use smart", () => {
-  assert.equal(loopLimitsProfile({}, "primary"), "primary");
-  assert.equal(loopLimitsProfile({ REVIEW_CONTEXT_PROFILE: "primary" }, "primary"), "primary");
-  assert.equal(loopLimitsProfile({ REVIEW_CONTEXT_PROFILE: "smart" }, "primary"), "smart");
-  assert.equal(loopLimitsProfile({ REVIEW_CONTEXT_PROFILE: "primary" }, "smart"), "smart");
+test("loopLimitsProfile: first-pass defaults primary; the escalation smart tier uses smart (#1253: no env override)", () => {
+  assert.equal(loopLimitsProfile("primary"), "primary");
+  assert.equal(loopLimitsProfile("smart"), "smart");
 });
 
 test("resolveLoopLimits: defaults are 4 rounds / 600s; smart overrides; bounds clamp", () => {

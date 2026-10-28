@@ -973,7 +973,6 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       AI_REASONING_EFFORT: profiles.primary.reasoningEffort,
     });
   }
-  env.REVIEW_CONTEXT_PROFILE = "primary";
   log(`Review route: ${route} (${reason}) → ${env.AI_MODEL}`);
 
   promptState = applySystemPromptFragments(promptState, {
