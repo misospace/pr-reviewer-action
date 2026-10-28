@@ -20,21 +20,27 @@
 export {
   CREDENTIAL_NAME_RE,
   CREDENTIAL_REF_RE,
+  PROFILE_NAME_RE,
   RUN_ID_RE,
   WORKER_CREDENTIAL_NAMES,
   WORKER_CREDENTIAL_PURPOSES,
   CredentialPlanError,
   isPlatformName,
+  isScopeDimension,
   isSecretPurpose,
+  isSecretShapedValue,
   isValidCredentialRef,
+  isValidProfileName,
   validateCredentialPlan,
 } from "./types.js";
 export type {
   CredentialRef,
   CredentialBroker,
+  ForkEvidencePolicy,
   ResolutionRefusalCode,
   ResolutionRequest,
   ResolveResult,
+  ScopeDimension,
   SecretMaterial,
   SecretPurpose,
   SecretScope,
@@ -55,8 +61,17 @@ export type {
   WorkerSecretSet,
 } from "./worker-set.js";
 
-export { RESULT_CHANNEL_TOKEN_RE, createResultChannelAuth } from "./result-channel.js";
-export type { ResultChannelAuth, ResultChannelAuthOptions } from "./result-channel.js";
+export {
+  RESULT_CHANNEL_DEFAULT_TTL_MS,
+  RESULT_CHANNEL_TOKEN_RE,
+  createResultChannelAuth,
+} from "./result-channel.js";
+export type {
+  MintedResultChannelToken,
+  ResultChannelAuth,
+  ResultChannelAuthOptions,
+  ResultChannelIdentity,
+} from "./result-channel.js";
 
 export { createSecretRedactor } from "./redact.js";
 export type { SecretRedactor } from "./redact.js";
