@@ -286,14 +286,14 @@ const LOOP_MIN_CONVERSATION_TOKENS = 4000;
  * and a minimal conversation is refused, like a too-small corpus window. */
 export function loopContextLimits(env: EnvLike, tier: string): LoopContextLimits {
   const window = declaredWindowTokens(env, tier);
-  const explicitCorpus = env.TOOL_CORPUS_MAX_BYTES || env.TOOL_PLANNING_MAX_CONTEXT_BYTES || "";
+  const explicitCorpus = env.TOOL_CORPUS_MAX_BYTES || "";
   const explicitResponse = env.TOOL_MAX_RESPONSE_BYTES || "";
   const corpus = (derived: number): number => (explicitCorpus !== "" ? pyInt(explicitCorpus, "TOOL_CORPUS_MAX_BYTES") : derived);
   const response = (derived: number): number => (explicitResponse !== "" ? pyInt(explicitResponse, "TOOL_MAX_RESPONSE_BYTES") : derived);
   if (window === null) {
     return { maxConversationTokens: 24000, corpusMaxBytes: corpus(50000), maxResponseBytes: response(12000) };
   }
-  const perTurn = pyInt(env.TOOL_MAX_TOKENS_PER_TURN || env.TOOL_PLANNING_MAX_TOKENS || "400", "TOOL_MAX_TOKENS_PER_TURN");
+  const perTurn = pyInt(env.TOOL_MAX_TOKENS_PER_TURN || "400", "TOOL_MAX_TOKENS_PER_TURN");
   const available = window - perTurn - LOOP_FRAMING_TOKENS;
   if (available < LOOP_MIN_CONVERSATION_TOKENS) {
     throw new LoopContextError(
@@ -3161,10 +3161,12 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   if (tier !== "primary" && tier !== "smart") {
     throw new Error("invalid tool harness tier");
   }
-  // #540: the legacy tool_planning_* names are a fallback; the new name wins.
+  // #1255: the legacy TOOL_PLANNING_* env aliases (kept as a #540 fallback)
+  // are gone — the v3 contract declares those inputs removed, so the runtime
+  // no longer honors them behind the contract's back.
   // #922: corpus and per-result bytes follow the declared window when set.
   const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, loopLimitsProfile(tier));
-  const turnTimeoutRaw = env.TOOL_TURN_TIMEOUT_SEC || env.TOOL_PLANNING_TIMEOUT_SEC || "60";
+  const turnTimeoutRaw = env.TOOL_TURN_TIMEOUT_SEC || "60";
   const turnTimeout = pyInt(turnTimeoutRaw, "TOOL_TURN_TIMEOUT_SEC");
   // #810: the default budget scales with the PR (changed files/lines +
   // specialist leads), floored at the tier default; explicit overrides in
@@ -3261,7 +3263,7 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     requestTimeout,
     maxRequests: maxRequests.budget,
     turnTimeout,
-    maxTokensPerTurn: pyInt(env.TOOL_MAX_TOKENS_PER_TURN || env.TOOL_PLANNING_MAX_TOKENS || "400", "TOOL_MAX_TOKENS_PER_TURN"),
+    maxTokensPerTurn: pyInt(env.TOOL_MAX_TOKENS_PER_TURN || "400", "TOOL_MAX_TOKENS_PER_TURN"),
     result,
     tier,
     deps,

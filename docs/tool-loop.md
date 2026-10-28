@@ -52,7 +52,7 @@ retried once non-streamed before the loop gives up on that turn.
 | `gh_api` | Structured JSON from a read-only API endpoint (`repos/`, `issues/`, `search/`, `releases/`, `git/` prefixes only; GitHub-REST-shaped paths), for an allowlisted repo. Calls are served through the run's configured forge capability — the same `PlatformAdapter.ghApi` seam every platform read uses — so GitHub runs honor `github-api-url` and non-GitHub forges serve their translated endpoints, refusing unmapped ones in-band. Blob content (`git/blobs`) is refused: this channel has no file path, so it cannot apply the path-aware source masking blob bytes need, and base64-encoded bytes hide credential shapes from the redactor. | `tool-allowed-gh-api-repos`; endpoint allowlist; deny-listed paths (`/actions/secrets`, `/actions/variables`, `/dependabot/secrets`, `/environments/`, `/dispatches`, `/git/blobs/`) |
 | `repo_contents` | Source files or directory listings from an explicitly allowlisted related GitHub repository (file reads go through the blob API and are masked with the path-aware source-safe policy, so a credential in a file never reaches the model in the clear; directories return sorted name/type rows capped at `max_entries`, default 200, max 500). Unsupported on Forgejo. | same allowlist as `gh_api` |
 | `web_fetch` | A URL on an allowlisted host; output capped at ~10 KB of decoded text. Redirects are followed up to 10 hops, each re-validated against the host allowlist. | `allowed-source-hosts` |
-| `web_search` | A ranked `{title, url, snippet}` list from the configured search endpoint — advertised only when `search-url` is set. The model supplies only the query; the host is fixed by the input. | `search-url` |
+| `web_search` | A ranked `{title, url, snippet}` list from the configured search endpoint — advertised only when `search-url` is set. The model supplies only the query; the host is fixed by the input, and the result count is bounded to 1..15 (`tool-max-search-results`). | `search-url` |
 
 `tool-allowed-gh-api-repos` is a comma-separated `owner/repo` list (`*` allows
 any repo the path allowlist still permits); empty means the current repo
@@ -136,11 +136,11 @@ count and opts only that tier out of the scaling, under the same rule: up to
 
 ### Wall clock and per-turn timeouts
 
-- `tool-loop-wall-clock-sec` (default 600) bounds the whole exchange — every
-  model round-trip plus tool execution.
+- `tool-loop-wall-clock-sec` (default 600, clamped to 10..900) bounds the whole
+  exchange — every model round-trip plus tool execution.
 - `smart-tool-loop-wall-clock-sec` (default empty, inheriting
-  `tool-loop-wall-clock-sec`) bounds the smart tier's exchange, and therefore
-  the deadline its per-turn timeouts are clamped to.
+  `tool-loop-wall-clock-sec`, same 10..900 clamp) bounds the smart tier's
+  exchange, and therefore the deadline its per-turn timeouts are clamped to.
 - `tool-turn-timeout-sec` (default 180) bounds each individual model turn. On
   the smart/escalated tier this is also clamped to whatever remains of the
   wall-clock deadline, so a slow turn can't single-handedly blow past it.

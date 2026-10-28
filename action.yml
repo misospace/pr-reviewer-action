@@ -518,11 +518,11 @@ inputs:
     required: false
     default: "native_loop"
   tool-loop-wall-clock-sec:
-    description: Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange (all model round-trips plus tool execution). Ignored for other modes.
+    description: Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange (all model round-trips plus tool execution). Clamped to 10..900 seconds — an explicit value above 900 is capped at the hard ceiling, and one below 10 is raised to the floor. Ignored for other modes.
     required: false
     default: "600"
   smart-tool-loop-wall-clock-sec:
-    description: Wall-clock ceiling in seconds for the smart tier's tool-mode=native_loop exchange (the post-review escalation rerun) only. Empty (the default) inherits tool-loop-wall-clock-sec. An explicit value outranks tool-loop-wall-clock-sec on the smart tier and leaves the primary tier untouched. Ignored for other modes.
+    description: Wall-clock ceiling in seconds for the smart tier's tool-mode=native_loop exchange (the post-review escalation rerun) only. Empty (the default) inherits tool-loop-wall-clock-sec. An explicit value outranks tool-loop-wall-clock-sec on the smart tier and leaves the primary tier untouched. Clamped to 10..900 seconds like tool-loop-wall-clock-sec. Ignored for other modes.
     required: false
     default: ""
   tool-loop-summarize:
@@ -582,7 +582,7 @@ inputs:
     required: false
     default: ""
   tool-max-search-results:
-    description: Maximum results returned per web_search call
+    description: Maximum results returned per web_search call; bounded to 1..15
     required: false
     default: "5"
   tool-failure-enforcement:
