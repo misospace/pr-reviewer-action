@@ -901,13 +901,13 @@ export class DurableRateLimitStore implements RateLimitStore {
         if (digest !== undefined) {
           let chargedScopes = 0;
           let presentButMissing = false;
-          let absentScope = false;
           for (const scope of validated) {
             const charges = ledger.get(scope.key);
             if (charges === undefined) {
               // The scope is ABSENT from the ledger: it never had a charge,
-              // or the cap eviction dropped it.
-              absentScope = true;
+              // or the cap eviction dropped it. (An absent scope counts as
+              // neither a charge nor a present-but-missing one, so the
+              // refusal reason below names the eviction.)
               continue;
             }
             if (charges.some((charge) => charge.id === digest)) chargedScopes += 1;
