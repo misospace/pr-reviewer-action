@@ -1189,6 +1189,25 @@ const TEMPLATE_LITERAL_EXTENSIONS = new Set([
   "js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts", "json", "json5",
 ]);
 
+/** File types whose quoted strings NEVER execute shell command substitution
+ * while being evaluated: in these languages `$(...)` inside a quoted span is
+ * inert data (#1331 review: Python `message = "$(readlink $1)"` must not
+ * fire). The languages that DO evaluate `$(...)` at string-evaluation time —
+ * the shell family and PowerShell — are not listed; nor are YAML, Makefile
+ * and Dockerfile, whose string content is routinely handed to a shell, and
+ * an unknown or extensionless type recovers too — mistaking a shell
+ * substitution for inert string data would hide a real operation, which is
+ * the wrong direction to fail in. A string that a non-listed language passes
+ * to a shell is still recovered by the exec-argument rule, which is
+ * language-agnostic. */
+const COMMAND_SUBSTITUTION_INERT_EXTENSIONS = new Set([
+  ...TEMPLATE_LITERAL_EXTENSIONS,
+  "py", "pyi", "pyw", "rb", "rake", "pl", "pm", "php", "go", "rs",
+  "java", "kt", "kts", "scala", "swift", "cs", "c", "h", "cc", "cpp",
+  "cxx", "hpp", "hh", "hxx", "m", "mm", "lua", "dart", "ex", "exs",
+  "erl", "hrl", "hs", "jl", "r", "sql", "tcl", "vb", "toml", "ini", "cfg",
+]);
+
 /** Bounds on the #1331 recovery work, because the scanned text is
  * attacker-controlled diff content. A line longer than the first bound scans
  * as the pre-#1331 view (detection kept, recovery not paid for); at most this
@@ -1218,21 +1237,50 @@ function quotedSpanEnd(text: string, start: number): number | null {
   return null;
 }
 
-/** The text of every quoted span of `text`, as RAW slices (escapes left as
- * written, an unterminated quote yields the remainder). Rawness is what keeps
- * the containment guarantee of `symlinkCodeView` honest: a word that only
- * exists once escapes are unwrapped (`"sym\link"`) is not a signal. */
-function quotedSpanTexts(text: string): string[] {
-  const spans: string[] = [];
+/** The quoted spans of `text` as RAW slices (escapes left as written, an
+ * unterminated quote yields the remainder) with their open index and close
+ * index (null when the span never closes), so a caller can judge the
+ * position a span occupies. Rawness is what keeps the containment guarantee
+ * of `symlinkCodeView` honest: a word that only exists once escapes are
+ * unwrapped (`"sym\link"`) is not a signal. */
+function quotedSpans(text: string): { text: string; open: number; close: number | null }[] {
+  const spans: { text: string; open: number; close: number | null }[] = [];
   for (let i = 0; i < text.length; i++) {
     const quote = text[i];
     if (quote !== "'" && quote !== '"' && quote !== "`") continue;
     const close = quotedSpanEnd(text, i);
-    spans.push(text.slice(i + 1, close ?? text.length));
+    spans.push({ text: text.slice(i + 1, close ?? text.length), open: i, close });
     if (close === null) break;
     i = close;
   }
   return spans;
+}
+
+/** Whether the whitespace-free quoted span opening at `open` (closing at
+ * `close`, null when unterminated) sits where an argv/path TOKEN lives
+ * (#1331 review: whitespace-free alone does not make quoted prose a token —
+ * `raise RuntimeError("symlink")` is a diagnostic value). It does when it is
+ * path-shaped (contains a path separator: `"/usr/bin/readlink"`) or in
+ * list-element position — preceded by `[` or `,`, or followed by `,`
+ * (`["readlink", user_path]` at any nesting or line break,
+ * `exec.Command("readlink", p)`). The sole argument of a call, even carried
+ * to its own line by the formatter, is a value, not an argv element, and
+ * stays inert; an argument that is NOT the sole one (`log("symlink",
+ * level)`) keeps the token, the toward-detection direction. Only `/` counts
+ * as path-shaped: a raw `\` in the span is exactly the escape ambiguity the
+ * rawness rule exists for (`"sym\link"` must stay inert). Exec-head calls
+ * recover their whole argument lists independently, so dropping
+ * value-position tokens cannot hide an exec shape. */
+function isArgvPathTokenPosition(line: string, open: number, close: number | null): boolean {
+  const span = line.slice(open + 1, close ?? line.length);
+  if (span.includes("/")) return true;
+  let j = open - 1;
+  while (j >= 0 && (line[j] === " " || line[j] === "\t")) j -= 1;
+  const prev = line[j];
+  if (prev === "[" || prev === ",") return true;
+  let k = (close ?? line.length - 1) + 1;
+  while (k < line.length && (line[k] === " " || line[k] === "\t")) k += 1;
+  return line[k] === ",";
 }
 
 /** Quote-aware paren walk: the index of the `)` that brings `depth` to zero
@@ -1290,12 +1338,20 @@ function openCallArgumentText(
  * scrutiny — while the executable shapes that merely LOOK quoted are recovered
  * explicitly, which is what the issue requires instead of a blanket
  * `stripQuotedSpans`:
- *   - a whitespace-free quoted span is an argv/path TOKEN, never prose:
- *     `["readlink", user_path]` at any nesting or line break,
- *     `exec.Command("readlink", p)`, `"/usr/bin/readlink"`;
- *   - a command substitution executes its contents, quoted or not:
- *     `target="$(readlink "$1")"`, and outside the JavaScript family the
- *     backtick spelling too;
+ *   - a whitespace-free quoted span in ARGV/PATH-TOKEN position is a token,
+ *     never prose: path-shaped (`"/usr/bin/readlink"`) or in list-element
+ *     position — `["readlink", user_path]` at any nesting or line break,
+ *     `exec.Command("readlink", p)`; a whitespace-free span in VALUE
+ *     position — the sole argument of a call, `raise
+ *     RuntimeError("symlink")` — is diagnostic data and stays inert
+ *     (#1331 review);
+ *   - a command substitution executes its contents, quoted or not, in the
+ *     file kinds whose language evaluates it: `target="$(readlink "$1")"`
+ *     in shell (and PowerShell), gated by
+ *     `COMMAND_SUBSTITUTION_INERT_EXTENSIONS` (#1331 review: a Python string
+ *     such as `message = "$(readlink $1)"` is inert data); outside the
+ *     JavaScript family the backtick spelling too (shell, Ruby, Perl,
+ *     extensionless scripts);
  *   - the WHOLE argument list of a call that executes text is command content,
  *     not just its first element: `subprocess.run(["bash", "-c",
  *     "readlink -f " + p])`, `os.system("readlink -f '%s'" % p)`, including an
@@ -1312,8 +1368,12 @@ function openCallArgumentText(
  * (`runner.run("readlink -f " + p)`, pinned in the tests) — the same rule
  * covers PowerShell `Invoke-Expression "readlink -f $p"` and an argv list
  * staged in a variable before `subprocess.run(args)`, and a shell command
- * staged the same way and invoked later as `$cmd`, since linking those
- * statements is the taint tracking this model refuses to be; the tail of an
+ * staged the same way — bare or whitespace-containing — and invoked later as
+ * `$cmd`, since linking those statements is the taint tracking this model
+ * refuses to be (`cmd = "readlink"` no longer fires: a value-position token
+ * is prose, so a staged command reads like one); a whitespace-free span that
+ * is the sole argument of a non-exec call, on the line or carried to its own
+ * line by the formatter (`runner.run("readlink")`); the tail of an
  * open exec call longer than `MAX_CONSTRUCTION_CONTINUATION_LINES` or
  * `MAX_SYMLINK_RECOVERED_CHARS`; the `(MAX_EXEC_HEADS_PER_LINE + 1)`-th exec
  * call of one line, which cannot contribute once its predecessors consumed
@@ -1321,7 +1381,12 @@ function openCallArgumentText(
  * `MAX_SYMLINK_SCAN_LINE_CHARS`, which keeps the pre-#1331 view without the
  * recovery; and a word that only exists after escapes are unwrapped. Comments
  * are handled upstream: `blankCommentSpans` is the sole comment authority. */
-function symlinkCodeView(lines: string[], index: number, backtickIsCommand: boolean): string {
+function symlinkCodeView(
+  lines: string[],
+  index: number,
+  backtickIsCommand: boolean,
+  substitutionIsCommand: boolean,
+): string {
   const line = lines[index] ?? "";
   // A minified, generated or hostile over-long line keeps the pre-#1331 view:
   // scanning it as-is can only fire, and the per-head walks below stay bounded.
@@ -1334,7 +1399,7 @@ function symlinkCodeView(lines: string[], index: number, backtickIsCommand: bool
     budget -= Math.min(text.length, budget);
   };
   for (let i = 0; i < line.length && budget > 0; i++) {
-    if (line[i] === "$" && line[i + 1] === "(") {
+    if (substitutionIsCommand && line[i] === "$" && line[i + 1] === "(") {
       const { close } = scanCallDepth(line, 1, i + 2);
       keep(line.slice(i + 2, close ?? line.length));
       if (close === null) break;
@@ -1360,9 +1425,11 @@ function symlinkCodeView(lines: string[], index: number, backtickIsCommand: bool
         : line.slice(argsStart, close),
     );
   }
-  for (const span of quotedSpanTexts(line)) {
+  for (const { text: span, open, close } of quotedSpans(line)) {
     const token = span.trim();
-    if (token !== "" && !/\s/.test(token)) keep(token);
+    if (token !== "" && !/\s/.test(token) && isArgvPathTokenPosition(line, open, close)) {
+      keep(token);
+    }
   }
   const code = stripQuotedSpans(line);
   return recovered.length === 0 ? code : `${code}\n${recovered.join("\n")}`;
@@ -1568,11 +1635,15 @@ export function evaluatePathHandlingSignals(
         : filenames.length > 0 && filenames.every((name) => isDocumentationPath(name));
 
     // #1331: a backtick opens a command substitution except in the JavaScript
-    // family; a chunk with no file type of its own recovers, because unknown
-    // state must fail toward detection rather than read a substitution as a
-    // template literal.
+    // family; `$(...)` executes only where the language evaluates it at
+    // string-evaluation time (shell family, PowerShell — see
+    // COMMAND_SUBSTITUTION_INERT_EXTENSIONS). A chunk with no file type of
+    // its own recovers for both, because unknown state must fail toward
+    // detection rather than read a substitution as a template literal.
     const backtickIsCommand =
       chunkPath === null || !TEMPLATE_LITERAL_EXTENSIONS.has(fileKindToken(chunkPath));
+    const substitutionIsCommand =
+      chunkPath === null || !COMMAND_SUBSTITUTION_INERT_EXTENSIONS.has(fileKindToken(chunkPath));
 
     for (const [className, patterns] of PATH_HANDLING_CONTENT_CLASSES) {
       const codeOnly = LEXICAL_CODE_ONLY_CLASSES.has(className);
@@ -1590,7 +1661,7 @@ export function evaluatePathHandlingSignals(
         const scanLine = codeOnly
           ? stripQuotedSpans(base)
           : symlinkClass
-            ? symlinkCodeView(neutralized, index, backtickIsCommand)
+            ? symlinkCodeView(neutralized, index, backtickIsCommand, substitutionIsCommand)
             : base;
         if (matchesAny(scanLine, patterns)) {
           if (!fired) {

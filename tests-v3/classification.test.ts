@@ -1670,7 +1670,10 @@ test("#1034: real symlink surfaces and near-miss self-location shapes keep firin
     ["second readlink on the line, python", "tools/tool.py", ["+x = os.readlink(__file__) or os.readlink(p)"]],
     ["anchor changed from $0 to $1, loop in context", "scripts/run.sh", modifiedLoopAnchor("$0", "$1")],
     ["anchor changed from $1 to $0, loop in context", "scripts/run.sh", modifiedLoopAnchor("$1", "$0")],
-    ["shell loop in a .js file", "src/run.js", SH_SELF_LOCATION_LOOP],
+    // The .js spelling moved to the #1331 no-fire table below: in a
+    // JavaScript file `"$(readlink ...)"` is a plain string literal, inert
+    // data under the quoted-data/executable-use boundary — the shell
+    // family (.sh, .zsh) and extensionless scripts still recover it.
     ["shell loop in a .zsh file", "scripts/run.zsh", SH_SELF_LOCATION_LOOP],
     ["os.lstat", "src/app.py", ["+os.lstat(path)"]],
     // Declared limits: false positives that exist today and stay.
@@ -1738,14 +1741,30 @@ test("#1331: quoted symlink diagnostics stop firing while executable command for
     ["ruby backtick command", "tool.rb", ['+out = `readlink -f #{path}`'], true],
     ["command substitution in an echo", "tool.sh", ['+echo "$(readlink "$1")"'], true],
     ["quoted absolute command path", "tool.py", ['+bin_path = "/usr/bin/readlink"'], true],
+    // The review correction (#1334): a whitespace-free span in VALUE position
+    // is prose, not an argv token, and `$(...)` only recovers where the
+    // language itself evaluates it.
+    ["python one-word diagnostic message", "tool.py", ['+raise RuntimeError("symlink")'], false],
+    ["python diagnostic as a formatter-split sole argument", "tool.py", ['+raise RuntimeError(', '+\t"symlink"', '+)'], false],
+    ["python inert dollar-paren string", "tool.py", ['+message = "$(readlink $1)"'], false],
+    ["workflow run-block substitution recovers", ".github/workflows/ci.yml", ['+run: target="$(readlink "$1")"'], true],
+    ["staged bare command token", "tool.py", ['+cmd = "readlink"'], false],
+    // A JavaScript file's quoted `$(...)` is inert string data — the same
+    // boundary the backtick gate draws for the JS family. The .zsh and
+    // extensionless spellings of the same loop keep firing (pinned in the
+    // #1034 table above).
+    ["shell loop in a .js file is string data", "src/run.js", SH_SELF_LOCATION_LOOP, false],
     // Declared limits, all toward concealment: whitespace-containing quoted
-    // text behind a call the exec-head pattern does not recognize. Treating
-    // any `.run(` as an exec call would donate arbitrary prose, and tying a
-    // deferred command variable to its later `$cmd` invocation needs the taint
-    // tracking the issue rules out. A whitespace-free quoted token is still
-    // read as argv, so the same helper with `("readlink")` would fire.
+    // text behind a call the exec-head pattern does not recognize, and —
+    // the same rule, since a value-position token is prose (#1334 review) —
+    // a whitespace-free span that is the sole argument of a non-exec call,
+    // on the line or carried to its own line by the formatter. Treating any
+    // `.run(` as an exec call would donate arbitrary prose, and tying a
+    // deferred command variable to its later `$cmd` invocation needs the
+    // taint tracking the issue rules out.
     ["spaced command behind an unknown helper", "tool.py", ['+runner.run("readlink -f " + p)'], false],
     ["helper named run is not an exec head", "tool.py", ['+runner.run("note the symlink word")'], false],
+    ["unknown helper with a bare command token", "tool.py", ['+runner.run("readlink")'], false],
     ["deferred shell command variable", "tool.sh", ['+cmd="readlink -f"', '+$cmd "$f"'], false],
     ["argv carried past the continuation bound", "tool.py", [
       '+subprocess.run(',
