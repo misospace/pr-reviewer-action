@@ -578,6 +578,10 @@ These v2 fields have no v3 ID or compatibility alias:
 
 The `tool_planning_*` inputs are currently deprecated fallback inputs in v2
 and are removed in v3. They are intentionally not copied into the v3 contract.
+Since #1255 the v3 runtime no longer honors the legacy `TOOL_PLANNING_*` env
+names either: set the replacement inputs (`tool_turn_timeout_sec`,
+`tool_corpus_max_bytes`, `tool_max_tokens_per_turn`) instead — a stale env
+variable is silently ignored.
 
 The `escalate_on_*` inputs above are also currently deprecated in v2
 (accepted for backward compatibility since #721 but already inert — they no

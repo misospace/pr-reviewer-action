@@ -20,6 +20,7 @@ import {
   computeDiffFingerprint,
   CREDENTIAL_AI_KEYS,
   EMPTY_DIFF_FINGERPRINT,
+  EXACT_CONFIG_KEYS,
   parseMarkerFingerprints,
 } from "../src/precheck/fingerprint.js";
 import { buildMetadataMarker, parseMetadata, pythonJsonStringify } from "../src/precheck/metadata.js";
@@ -301,6 +302,25 @@ test("#1152: every api-key contract input is registered in the credential digest
   for (const name of CREDENTIAL_AI_KEYS) {
     assert.ok(contractCredentialEnvNames.includes(name), `${name} is not a contract credential; drop it from the set`);
   }
+});
+
+test("#1255: the fingerprint key allowlist carries no removed TOOL_PLANNING_* entries", () => {
+  // The v3 contract declares the tool_planning_* inputs removed and the
+  // runtime no longer honors their env names (#1255), so they must not stay
+  // in the exact config-key allowlist: a stale env var there would keep
+  // invalidating cached reviews for config that no longer affects the review.
+  // The live replacement names stay registered.
+  for (const removed of ["TOOL_PLANNING_TIMEOUT_SEC", "TOOL_PLANNING_MAX_CONTEXT_BYTES", "TOOL_PLANNING_MAX_TOKENS"]) {
+    assert.equal(EXACT_CONFIG_KEYS.includes(removed), false, `${removed} is a removed alias; drop it from EXACT_CONFIG_KEYS`);
+  }
+  for (const live of ["TOOL_TURN_TIMEOUT_SEC", "TOOL_CORPUS_MAX_BYTES", "TOOL_MAX_TOKENS_PER_TURN"]) {
+    assert.ok(EXACT_CONFIG_KEYS.includes(live), `${live} is the live replacement and must stay registered`);
+  }
+  // The behavioral property behind the list change: a stale alias env var
+  // contributes no config-hash line at all, so it can no longer force a
+  // fresh review for config that does not affect the review.
+  const lines = collectConfigLines({ AI_MODEL: "m", TOOL_PLANNING_TIMEOUT_SEC: "30", TOOL_PLANNING_MAX_CONTEXT_BYTES: "1", TOOL_PLANNING_MAX_TOKENS: "2" });
+  assert.equal(lines.some((line) => line.includes("TOOL_PLANNING")), false, lines.join("|"));
 });
 
 test("#1005/#1003: triage and its routing mode enter the config fingerprint only when effective", () => {
