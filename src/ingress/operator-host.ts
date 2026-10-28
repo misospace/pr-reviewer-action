@@ -50,6 +50,10 @@
  * caller that smuggles one in is refused at construction. The budget survives
  * a daemon restart and is shared across controller processes, because the
  * state lives in the operator's durable state location and not in a process.
+ * The operator also owns the budget's IDEMPOTENCY horizon
+ * (`rateLimitIdempotencyRetentionMs`): how long a request-identity record
+ * survives, i.e. how long a redelivery of an already-charged question is
+ * recognized and charged NOTHING.
  */
 
 import { randomUUID } from "node:crypto";
@@ -134,12 +138,25 @@ function effectiveRetentionMs(rateLimit: FollowUpRateLimits | undefined): number
 function createDurableRateLimitStore(
   durableStateDir: string,
   retentionMs: number,
+  idempotencyRetentionMs: number | undefined,
 ): DurableRateLimitStore {
   if (typeof durableStateDir !== "string" || durableStateDir.trim() === "") {
     throw new TypeError("OperatorHostOptions: durableStateDir must be a non-empty path");
   }
   if (durableStateDir.includes("\u0000")) {
     throw new TypeError("OperatorHostOptions: durableStateDir must not contain a null byte");
+  }
+  // The idempotency horizon must never be shorter than the budget retention
+  // (an identity that died with the budget window would let a redelivery be
+  // charged twice). The store enforces the same invariant; checking it here
+  // names the OPERATOR's option in the error.
+  if (
+    idempotencyRetentionMs !== undefined &&
+    idempotencyRetentionMs < retentionMs
+  ) {
+    throw new RangeError(
+      "OperatorHostOptions: rateLimitIdempotencyRetentionMs must not be shorter than the budget retention",
+    );
   }
   try {
     mkdirSync(durableStateDir, { recursive: true, mode: 0o700 });
@@ -154,6 +171,7 @@ function createDurableRateLimitStore(
   return new DurableRateLimitStore({
     filePath: join(durableStateDir, OPERATOR_RATE_LIMIT_LEDGER_FILENAME),
     retentionMs,
+    ...(idempotencyRetentionMs !== undefined ? { idempotencyRetentionMs } : {}),
   });
 }
 
@@ -175,6 +193,14 @@ export interface OperatorHostOptions {
    * always enforces a cross-RESTART budget (#1295) — it cannot be composed
    * without a durable budget. */
   readonly durableStateDir: string;
+  /** How long the budget's REQUEST-IDENTITY records survive in the ledger —
+   * the horizon within which a redelivery of an already-charged question is
+   * recognized and charged NOTHING (the store's own idempotency horizon).
+   * Absent → the store's default (7 days, widened by the configured budget
+   * window's retention). It is never shorter than the ledger retention: an
+   * identity that died with the budget window would let a redelivery be
+   * charged twice, so a shorter value is REFUSED at construction. */
+  readonly rateLimitIdempotencyRetentionMs?: number;
   /** The operator follow-up host configuration; the router builds the
    * follow-up consumer from it. UNCONDITIONAL — this construction is the
    * production binding.
@@ -231,6 +257,7 @@ export function createOperatorHost(options: OperatorHostOptions): OperatorHost {
   const rateLimitStore = createDurableRateLimitStore(
     options.durableStateDir,
     effectiveRetentionMs(followUp.rateLimit),
+    options.rateLimitIdempotencyRetentionMs,
   );
   // Constructed ONCE, here, UNCONDITIONALLY: this construction is the
   // in-repo production caller of the router (and through it of the

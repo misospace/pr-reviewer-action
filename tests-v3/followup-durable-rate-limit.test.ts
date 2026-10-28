@@ -368,6 +368,28 @@ test("an over-cap insert evicts the least-recently-active scope, deterministical
   assert.equal(fresh.countInWindow("pr:c", WINDOW, 1_000), 1);
 });
 
+test("a cap eviction drops the IDENTITY-FREE scope first: a live identity record is the last thing evicted", () => {
+  const { filePath } = scratch("evict-identity");
+  const store = makeStore({ filePath, maxKeys: 2 });
+  // One scope carries a request-identity record (charged through the atomic
+  // path), one does not (the identity-less `record` primitive).
+  assert.equal(
+    store.consumeScopesAtomically([{ key: "pr:withid", rule: rule(5) }], 1_000, "req-1"),
+    true,
+  );
+  store.record("pr:noid", 2_000);
+  // A THIRD scope exceeds the cap: the eviction must take the identity-free
+  // scope (its last activity is the more recent one, so the plain
+  // oldest-first order would have taken the identity-bearing scope).
+  store.record("pr:new", 3_000);
+  const fresh = makeStore({ filePath, maxKeys: 2 });
+  assert.equal(fresh.countInWindow("pr:withid", WINDOW, 3_000), 1,
+    "the scope that still holds a live identity record must survive the eviction");
+  assert.equal(fresh.countInWindow("pr:noid", WINDOW, 3_000), 0,
+    "the identity-free scope is evicted first");
+  assert.equal(fresh.countInWindow("pr:new", WINDOW, 3_000), 1);
+});
+
 // ── sidecar lock ────────────────────────────────────────────────────────
 
 test("concurrent PROCESSES commit every charge exactly once (no lost update)", async () => {

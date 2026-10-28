@@ -587,3 +587,34 @@ test("the operator host refuses to be composed without a usable durable state lo
     /followUp is required/,
   );
 });
+
+test("the operator owns the budget's idempotency horizon: a shorter one than the budget retention is refused", (t) => {
+  const durableStateDir = makeDurableStateDir(t);
+  const { adapter } = makeAdapter(QUESTION);
+  const followUp = makeFollowUpOptions(adapter, {
+    rateLimit: { perPr: { limit: 1, windowMs: 15 * 60_000 }, perActor: { limit: 1, windowMs: 15 * 60_000 } },
+  });
+  // An idempotency horizon SHORTER than the budget retention would let a
+  // redelivery be charged twice (the identity record would die with the
+  // budget window), so the host refuses the configuration at construction.
+  assert.throws(
+    () =>
+      createOperatorHost({
+        secret: SECRET,
+        durableStateDir,
+        followUp,
+        rateLimitIdempotencyRetentionMs: 1_000,
+      }),
+    /rateLimitIdempotencyRetentionMs must not be shorter than the budget retention/,
+  );
+  // A horizon at or above the retention is accepted: the operator's ledger
+  // keeps the request-identity records for as long as it says.
+  const host = createOperatorHost({
+    secret: SECRET,
+    durableStateDir,
+    followUp,
+    rateLimitIdempotencyRetentionMs: 30 * 24 * 60 * 60_000,
+  });
+  assert.ok(host.rateLimitStore instanceof DurableRateLimitStore);
+  assert.equal(host.rateLimitStore.degradedReason, null);
+});

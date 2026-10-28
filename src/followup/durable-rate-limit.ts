@@ -105,20 +105,31 @@
  *   survive a later healthy read, unlike the refusal reason.
  *
  * Instances sharing one ledger file MUST be configured with the SAME
- * `retentionMs`/`maxKeys`/`idempotencyRetentionMs`: a narrower config than the
- * stored state cannot prove the wider window or validate the over-cap scope
- * count, so the store denies until the file is repaired or removed (fail
- * closed, never under-count into an allow). Residual, stated honestly: the
+ * `retentionMs`/`maxKeys`: a narrower config than the stored state cannot
+ * prove the wider window or validate the over-cap scope count, so the store
+ * denies until the file is repaired or removed (fail closed, never
+ * under-count into an allow). The `idempotencyRetentionMs` must match too,
+ * but a mismatch there is NOT a denial — the ledger carries no fingerprint of
+ * the horizons it was written under: a controller that prunes the identity
+ * records EARLIER than its peer simply loses the retry guarantee for the
+ * records it pruned (a conservative OVER-charge, never an under-count).
+ * Residual, stated honestly: the
  * identity-less single-scope `record` primitive still dedupes by `(key,
  * instant)`, so two DISTINCT identity-less charges in the SAME millisecond
  * for the same scope collapse to one (the price of interface-level replay
  * idempotency for a seam that carries no request identity); the atomic path —
  * the one the planner uses — never collapses distinct requests, because the
- * identity decides. The retry guarantee is bounded by the IDEMPOTENCY horizon:
- * a redelivery arriving AFTER the identity record was pruned is no longer
- * recognized and is charged again (the budget treats it as a fresh request) —
- * the horizon is a bound, not eternity, and it is configurable so an
- * operator can widen it.
+ * identity decides. The retry guarantee is bounded by TWO bounds, both
+ * stated: the IDEMPOTENCY horizon (a redelivery arriving after the identity
+ * record was pruned is no longer recognized and is charged again) and the
+ * ledger's SCOPE CAP (an evicted scope takes its identity record with it, so
+ * a redelivery of a request whose scopes were evicted is charged again —
+ * again a conservative over-charge, never an under-count; eviction drops the
+ * scopes that carry no identity record first, so a live identity is the last
+ * thing the bounded ledger gives up). The identity records also make the
+ * ledger's FOOTPRINT scale with the idempotency horizon (a retained record
+ * is a digest per charged scope, and every commit rewrites the whole file) —
+ * the horizon and the scope cap are the operator's levers on that.
  * A process crashing mid-`saveLedger` may leave a `<file>.tmp.<pid>.<uuid>`
  * remnant — a temp file is never read as state, and removal is safe. The
  * commit's temp file is created EXCLUSIVELY under an unpredictable name, so
@@ -279,7 +290,9 @@ export interface DurableRateLimitStoreOptions {
   idempotencyRetentionMs?: number;
   /** Cap on distinct tracked scopes (default `MAX_RATE_LIMIT_KEYS`). An
    * over-cap insert evicts the scope with the OLDEST last activity (ties by
-   * key), bounding the ledger deterministically. */
+   * key) — after every scope that carries no request-identity record, so a
+   * live identity is the last thing evicted — bounding the ledger
+   * deterministically. */
   maxKeys?: number;
   /** A lock file older than this (mtime vs the injected clock — the clock and
    * the state directory's filesystem must agree within this margin) is
@@ -549,7 +562,13 @@ function insertCharge(charges: LedgerEvent[], charge: LedgerEvent): boolean {
 /** Evict scopes (oldest last activity first, ties by key) until the ledger
  * fits `maxKeys`. The keys in `protectedKeys` are never evicted — a
  * multi-scope commit protects ALL of its transaction's keys, so evicting for
- * one scope can never evict another scope of the same transaction. */
+ * one scope can never evict another scope of the same transaction.
+ *
+ * A scope that still carries an IDENTITY-BEARING charge (a request-identity
+ * record, retained for the idempotency horizon) is evicted AFTER every scope
+ * without one: a live identity record is the last thing this bounded ledger
+ * gives up, so a cap eviction drops it only when there is nothing else to
+ * drop. */
 function evictToCap(
   ledger: Ledger,
   maxKeys: number,
@@ -558,13 +577,19 @@ function evictToCap(
   if (ledger.size <= maxKeys) return;
   const ordered = [...ledger.entries()]
     .filter(([key]) => !protectedKeys.has(key))
-    .sort(([ka, a], [kb, b]) => {
-      const lastA = a[a.length - 1]!.at;
-      const lastB = b[b.length - 1]!.at;
-      if (lastA !== lastB) return lastA - lastB;
-      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    .map(([key, charges]) => ({
+      key,
+      // A scope holding an identity record holds a live "this request was
+      // already charged" proof — the last thing to evict.
+      hasIdentity: charges.some((charge) => charge.id !== undefined),
+      lastAt: charges[charges.length - 1]!.at,
+    }))
+    .sort((a, b) => {
+      if (a.hasIdentity !== b.hasIdentity) return a.hasIdentity ? 1 : -1;
+      if (a.lastAt !== b.lastAt) return a.lastAt - b.lastAt;
+      return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
     });
-  for (const [key] of ordered) {
+  for (const { key } of ordered) {
     if (ledger.size <= maxKeys) break;
     ledger.delete(key);
   }
@@ -697,7 +722,13 @@ export class DurableRateLimitStore implements RateLimitStore {
    * A read-only probe (never throws; an unprovable answer is `false`): the
    * seam uses it to RE-ADMIT a redelivery of an already-charged request
    * instead of refusing it as rate-limited. The charge itself is re-proved
-   * under the lock by the transaction. */
+   * under the lock by the transaction.
+   *
+   * The probe answers from the CURRENT durable state, so it is bounded by
+   * the state as of the last COMMIT: an identity record that has aged past
+   * the idempotency horizon is still reported as charged until the next
+   * commit prunes it. That direction is the safe one (a redelivery is
+   * re-admitted and charged nothing; it is never charged twice). */
   isRequestCharged(scopes: readonly RateLimitScope[], requestId: string): boolean {
     if (typeof requestId !== "string" || requestId === "") return false;
     if (!Array.isArray(scopes) || scopes.length === 0) return false;
