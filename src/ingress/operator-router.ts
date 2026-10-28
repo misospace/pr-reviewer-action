@@ -37,6 +37,14 @@
  * happens inside the consumer through the injected forge capability
  * (`FollowUpForgeAdapter`), so this module stays forge-agnostic by
  * construction.
+ *
+ * Budget ownership: the router is the CONSUMER seam — it carries whatever
+ * budget backend its caller injects, and a router composed directly (tests,
+ * a daemon that wants its own store) enforces exactly that backend and
+ * nothing more. The OPERATOR PRODUCTION composition owns the cross-restart
+ * budget: `createOperatorHost` (`./operator-host.ts`) constructs the durable
+ * store over the operator's durable state location and injects it here, so
+ * the shipped operator path always enforces a durable budget (#1295).
  */
 
 import type { CanonicalForgeEvent } from "../events/types.js";

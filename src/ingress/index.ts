@@ -99,4 +99,7 @@ export type {
 export { createOperatorEventRouter } from "./operator-router.js";
 
 export type { OperatorHost, OperatorHostOptions } from "./operator-host.js";
-export { createOperatorHost } from "./operator-host.js";
+export {
+  createOperatorHost,
+  OPERATOR_RATE_LIMIT_LEDGER_FILENAME,
+} from "./operator-host.js";

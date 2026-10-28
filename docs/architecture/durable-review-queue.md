@@ -282,6 +282,31 @@ already-charged question is re-admitted and charged NOTHING, at any later
 instant, while two distinct questions stay distinct charges even in the same
 millisecond), and fail-closed counts on unreadable or corrupt state.
 
+The operator lane's PRODUCTION binding owns that backend: `createOperatorHost`
+(`src/ingress/operator-host.ts`) takes the operator's durable state LOCATION
+(`durableStateDir`) and CONSTRUCTS the `DurableRateLimitStore` over the ledger
+file (`OPERATOR_RATE_LIMIT_LEDGER_FILENAME`) inside it, injecting that store
+into the follow-up consumer. The follow-up configuration therefore carries no
+budget backend at all, and a composition that smuggles one in is REFUSED at
+construction — the shipped operator path cannot run on a per-process budget,
+and the budget survives a daemon restart because its state lives in the
+operator's durable state location, not in a process. The location is PREPARED
+at construction (created private when missing, then probed for writability),
+so a location that cannot take a write fails the CONSTRUCTION — fail closed at
+startup rather than as a silent denial wave once the first question arrives.
+The ledger retention is sized to the widest configured budget window (never
+shorter than the store's default), so a window the retention could not cover
+does not refuse every question. The host exposes the store it built
+(`OperatorHost.rateLimitStore`), because the webhook handler answers with
+fixed bodies: `degradedReason`, `durabilityAdvisory` and `identityAdvisory`
+are the operator's only window into WHY a question was refused. The ROUTER
+seam below the host (`createOperatorEventRouter`) stays injection-shaped: a
+router composed directly enforces exactly the backend its caller injects —
+the durable one is the HOST's. Pinned at that production boundary by
+`tests-v3/ingress-operator-host.test.ts` (the spent budget survives a restart;
+a configuration that brings its own backend is refused; an unusable durable
+state location fails the construction).
+
 ## Out of scope
 
 HTTP ingress (#730), executor implementations (#733), and the PostgreSQL

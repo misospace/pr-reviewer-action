@@ -13,6 +13,11 @@ and own their own HTTP server, queue, and worker lifecycle;
 `operator-host.ts` (`createOperatorHost`) is the pre-bound handler — it
 constructs the operator event router (follow-up consumer included) and hands
 it to the webhook handler, so the daemon only supplies the listening socket.
+It also owns the Q&A budget's durable state (#1295): the daemon supplies its
+durable state location (`durableStateDir`, required) and the host builds the
+durable budget store over the ledger inside it, so the follow-up budget
+survives a daemon restart and the shipped operator path cannot run on a
+per-process budget.
 
 ## Module map
 
@@ -29,7 +34,7 @@ it to the webhook handler, so the daemon only supplies the listening socket.
 | `reconcile.ts` | Missed-webhook reconciliation poll across configured repositories |
 | `followup-host.ts` | Operator-mode follow-up consumer (#1294): one canonical `follow_up` event through the shared planner; all forge I/O through the injected `FollowUpForgeAdapter` |
 | `operator-router.ts` | Operator-mode canonical event router: `follow_up` → the follow-up consumer, every other kind → the daemon's dispatch seam (rejection propagates) |
-| `operator-host.ts` | Production host: constructs the router UNCONDITIONALLY and binds it into `webhook-handler.ts` — the in-repo production caller, so follow-up consumption is never an opt-in the wiring can forget |
+| `operator-host.ts` | Production host: constructs the router UNCONDITIONALLY and binds it into `webhook-handler.ts` — the in-repo production caller, so follow-up consumption is never an opt-in the wiring can forget — and owns the Q&A budget's durable backend (#1295): it builds the `DurableRateLimitStore` over the ledger inside the operator's durable state location (`durableStateDir`, required) and refuses a follow-up configuration that brings its own budget backend |
 
 ## Trust boundaries (webhook ingress)
 
