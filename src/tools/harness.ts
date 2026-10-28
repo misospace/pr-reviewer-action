@@ -241,12 +241,13 @@ function envIntIsSet(env: EnvLike, name: string): boolean {
 }
 
 /** The model profile whose loop limits a harness run uses. The tier names the
- * artifact slot; a run on the smart profile (REVIEW_CONTEXT_PROFILE=smart —
- * the escalation smart tier) follows that profile's window and loop limits,
- * as toolBudgetRoute already does for the request budget. */
-export function loopLimitsProfile(env: EnvLike, tier: string): "primary" | "smart" {
-  if (tier === "smart") return "smart";
-  return (env.REVIEW_CONTEXT_PROFILE ?? "").trim().toLowerCase() === "smart" ? "smart" : "primary";
+ * artifact slot; a run on the smart tier (TOOL_HARNESS_TIER=smart — the
+ * escalation smart tier) follows that tier's window and loop limits, as
+ * toolBudgetRoute already does for the request budget. #1253: the tier is the
+ * only signal — the unreachable REVIEW_CONTEXT_PROFILE=smart ambient override
+ * has been removed. */
+export function loopLimitsProfile(tier: string): "primary" | "smart" {
+  return tier === "smart" ? "smart" : "primary";
 }
 
 /** #922: the tier's declared context window in tokens (the tier input, which
@@ -989,7 +990,7 @@ const STANDARDS_PATH_RE =
 
 const CORPUS_TITLES = new Set([
   "Changed Manifest Context", "PR Metadata", "PR Classification",
-  "Related Code Context", "Repository Map", "Linked Issue Context", "Unresolved Review Threads",
+  "Related Code Context", "Syntax-Aware Context", "Repository Map", "Linked Issue Context", "Unresolved Review Threads",
   "Outstanding Human Change Requests",
   "PR Files", "Version Hints from Diff", "PR Diff",
   "Tool Harness Findings", "Evidence Providers", "CI Check Results",
@@ -2001,7 +2002,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   const toolSchemas = [...TOOL_SCHEMAS].filter(schema => schema.name !== "read_skill" || ((env.REPOSITORY_SKILLS_PATHS ?? "[]") !== "[]" && (env.REPOSITORY_SKILLS ?? "false") === "true"));
   if (searchUrl) toolSchemas.push(WEB_SEARCH_SCHEMA);
 
-  const limitsProfile = loopLimitsProfile(env, input.tier);
+  const limitsProfile = loopLimitsProfile(input.tier);
   const [maxRounds, wallClock, roundsExplicit] = resolveLoopLimits(env, limitsProfile);
   const budgets = {
     ...adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock, roundsExplicit),
@@ -2533,9 +2534,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         let verdictCorpus = deps.readText(corpusName) ?? "";
         if (!verdictCorpus) return null;
         // #965: the initial pass is always the primary profile; the smart
-        // profile belongs to the escalation tier.
-        const profile = input.tier === "smart" ? "smart" : (env.REVIEW_CONTEXT_PROFILE ?? "primary");
-        const shape = (profile === "smart" ? env.SMART_REQUEST_SHAPE : env.PRIMARY_REQUEST_SHAPE) ?? "default";
+        // profile belongs to the escalation tier. #1253: the tier decides —
+        // the unreachable REVIEW_CONTEXT_PROFILE=smart override is gone.
+        const shape = (input.tier === "smart" ? env.SMART_REQUEST_SHAPE : env.PRIMARY_REQUEST_SHAPE) ?? "default";
         if (isRefresh) {
           // #1145: the REFRESH turn carries no corpus. The conversation
           // already holds the corpus verbatim from the FIRST verdict turn
@@ -3162,7 +3163,7 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   }
   // #540: the legacy tool_planning_* names are a fallback; the new name wins.
   // #922: corpus and per-result bytes follow the declared window when set.
-  const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, loopLimitsProfile(env, tier));
+  const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, loopLimitsProfile(tier));
   const turnTimeoutRaw = env.TOOL_TURN_TIMEOUT_SEC || env.TOOL_PLANNING_TIMEOUT_SEC || "60";
   const turnTimeout = pyInt(turnTimeoutRaw, "TOOL_TURN_TIMEOUT_SEC");
   // #810: the default budget scales with the PR (changed files/lines +

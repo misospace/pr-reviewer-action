@@ -12,6 +12,14 @@ import { engineMain } from "./engine/cli.js";
 import { publishMain } from "./run/entrypoints.js";
 import { actionMain } from "./run/action.js";
 
+// The syntax-provider worker entry (#764). The shipped runtime is a
+// single-file bundle, so the provider's worker thread loads THIS file and
+// calls the exported worker. Requiring the bundle inside a worker does not
+// run the action: the entry at the bottom of this file is guarded by
+// `require.main === module`, and `require.main` is undefined in a worker
+// thread.
+export { syntaxProviderWorker } from "./context/syntax/provider-main.js";
+
 export function main(): void {
   assertSupportedNode(process.versions.node);
   const contract = validateContract(V3_CONTRACT);

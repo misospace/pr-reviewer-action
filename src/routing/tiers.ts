@@ -515,8 +515,9 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
 
 export function tierRequestShape(profile: "primary" | "smart" | "fallback", env: EnvLike): "default" | "trailing_task" {
   if (profile === "fallback") return "default";
-  const key = profile === "smart" || (env.REVIEW_CONTEXT_PROFILE ?? "").trim() === "smart"
-    ? "SMART_REQUEST_SHAPE" : "PRIMARY_REQUEST_SHAPE";
+  // #1253: the profile argument decides — the unreachable
+  // REVIEW_CONTEXT_PROFILE=smart env override has been removed.
+  const key = profile === "smart" ? "SMART_REQUEST_SHAPE" : "PRIMARY_REQUEST_SHAPE";
   const shape = env[key];
   return shape === "trailing_task" ? "trailing_task" : "default";
 }

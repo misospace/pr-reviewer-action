@@ -933,14 +933,24 @@ const COMMENT_PREFIXES: Record<string, readonly string[]> = {
   go: ["//", "/*", "*"],
 };
 
-function declarationAt(line: string, language: string): [string, string] | null {
-  let patterns: [RegExp, string][];
-  if (language === "python") patterns = [[PY_DEF_RE, "high"], [PY_CLASS_RE, "high"]];
-  else if (language === "go") patterns = [[GO_FUNC_RE, "high"], [GO_TYPE_RE, "high"]];
-  else patterns = [[JS_FUNC_RE, "high"], [JS_CLASS_RE, "high"], [JS_ARROW_RE, "medium"], [JS_METHOD_RE, "high"]];
-  for (const [pattern, confidence] of patterns) {
+/** The syntactic kind of a declaration, as the per-language declaration
+ * grammar above recognises it. Exported alongside `declarationAt` so the
+ * syntax-aware context stage (#764) reuses THIS grammar as the single source
+ * of truth for what a declaration is, instead of restating its patterns. */
+export type DeclarationAtKind = "function" | "method" | "class" | "type" | "variable";
+
+/** The declaration a line opens, with the confidence of the matched pattern
+ * and the syntactic kind of the declaration. The kind is the THIRD tuple
+ * element, so the existing readers of indices 0 and 1 keep working
+ * unchanged. */
+export function declarationAt(line: string, language: string): [string, string, DeclarationAtKind] | null {
+  let patterns: [RegExp, string, DeclarationAtKind][];
+  if (language === "python") patterns = [[PY_DEF_RE, "high", "function"], [PY_CLASS_RE, "high", "class"]];
+  else if (language === "go") patterns = [[GO_FUNC_RE, "high", "function"], [GO_TYPE_RE, "high", "type"]];
+  else patterns = [[JS_FUNC_RE, "high", "function"], [JS_CLASS_RE, "high", "class"], [JS_ARROW_RE, "medium", "variable"], [JS_METHOD_RE, "high", "method"]];
+  for (const [pattern, confidence, kind] of patterns) {
     const m = pattern.exec(line);
-    if (m) return [m[1] as string, confidence];
+    if (m) return [m[1] as string, confidence, kind];
   }
   return null;
 }
@@ -1364,7 +1374,10 @@ function counterparts(
   budget: number,
 ): [CounterpartEntry[], boolean] {
   const changed = new Map<string, [string, number]>();
-  const candidates: [number, [string, string] | null][] = [];
+  // The tuple widened when `declarationAt` grew its KIND element; the
+  // two-element spelling below is the anchor's own enclosing-symbol entry,
+  // which carries no kind.
+  const candidates: [number, [string, string] | [string, string, DeclarationAtKind] | null][] = [];
   for (const [lineNo] of sortedLines(state.addedLines)) {
     if (lineNo <= headLines.length) candidates.push([lineNo, declarationAt(headLines[lineNo - 1] as string, language)]);
   }

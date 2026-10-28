@@ -98,6 +98,7 @@ import {
   buildPrThreadSection,
   buildRelatedCodeSection,
   buildReviewThreadsSection,
+  buildSyntaxContextSection,
   ciChecksBytes,
   deriveFork,
   extractEnrichmentArtifacts,
@@ -844,6 +845,18 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // see the correctness specialist wiring below.
   buildEquivalentPathsSection(ws, env, workspace, relatedInputs === null ? null : relatedInputs.anchors);
 
+  // #764: the optional syntax-aware context stage, from the same anchors.
+  // Off by default; it complements the lexical related-code context above
+  // (never replaces it) and emits evidence only — no findings, no severity,
+  // no obligations, no verdict.
+  await buildSyntaxContextSection(
+    ws,
+    env,
+    workspace,
+    relatedInputs === null ? null : relatedInputs.anchors,
+    context.headSha !== "" ? context.headSha : String(pr.headRefOid ?? ""),
+  );
+
   // PR-metadata-derived context (context.sh): linked issues + Linear, the
   // requirement ledger, review threads and human reviews. Built here and
   // again after the CI wait (#812), so edits made while CI runs are seen.
@@ -960,7 +973,6 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       AI_REASONING_EFFORT: profiles.primary.reasoningEffort,
     });
   }
-  env.REVIEW_CONTEXT_PROFILE = "primary";
   log(`Review route: ${route} (${reason}) → ${env.AI_MODEL}`);
 
   promptState = applySystemPromptFragments(promptState, {

@@ -75,4 +75,13 @@ export class DeadlineBudget {
   exceeded(): boolean {
     return this.deadline !== null && this.monotonic() >= this.deadline;
   }
+
+  /** The seconds left before the deadline, or `Infinity` when the budget is
+   * disabled. A caller that hands the remaining time to a SUBPROCESS
+   * timeout keeps that subprocess inside the same bound the caller
+   * enforces for itself. */
+  remainingSeconds(): number {
+    if (this.deadline === null) return Number.POSITIVE_INFINITY;
+    return Math.max(0, this.deadline - this.monotonic());
+  }
 }

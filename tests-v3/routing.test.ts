@@ -125,7 +125,9 @@ test("tier profiles bind model defaults, retry/stream settings, and request shap
   assert.equal(configured.fallback.retries, 2);
   assert.equal(configured.smart.retries, 2);
   assert.equal(tierRequestShape("primary", { PRIMARY_REQUEST_SHAPE: "trailing_task" }), "trailing_task");
-  assert.equal(tierRequestShape("primary", { PRIMARY_REQUEST_SHAPE: "trailing_task", SMART_REQUEST_SHAPE: "default", REVIEW_CONTEXT_PROFILE: "smart" }), "default");
+  // #1253: the profile argument decides; a stray REVIEW_CONTEXT_PROFILE env
+  // value never flips the request shape.
+  assert.equal(tierRequestShape("primary", { PRIMARY_REQUEST_SHAPE: "trailing_task", SMART_REQUEST_SHAPE: "default", REVIEW_CONTEXT_PROFILE: "smart" }), "trailing_task");
   assert.equal(tierRequestShape("smart", { SMART_REQUEST_SHAPE: "trailing_task" }), "trailing_task");
   assert.equal(tierRequestShape("fallback", { SMART_REQUEST_SHAPE: "trailing_task" }), "default");
   assert.equal(tierRequestShape("smart", { SMART_REQUEST_SHAPE: "unknown" }), "default");

@@ -254,13 +254,15 @@ jobs:
           # credentials in play.
           allowed-source-hosts: ""
 
-          # related-code and repo-map scan the local git worktree. The
-          # worktree here is the trusted BASE checkout, not the fork head,
-          # so those sections would describe the wrong tree. Disabled rather
-          # than checking out the fork into the privileged job (see the v3
-          # follow-up note in docs/fork-review.md).
+          # related-code, repo-map and the syntax-aware context scan the
+          # local git worktree. The worktree here is the trusted BASE
+          # checkout, not the fork head, so those sections would describe
+          # the wrong tree. Disabled rather than checking out the fork into
+          # the privileged job (see the v3 follow-up note in
+          # docs/fork-review.md).
           related-code-context: "false"
           repo-map-context: "false"
+          syntax-context: "false"
 
           # CI already completed — that completion is what triggered this
           # run. Do not spend wall-clock re-polling the Checks API.

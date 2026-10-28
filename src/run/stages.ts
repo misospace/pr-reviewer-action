@@ -37,6 +37,15 @@ import {
 } from "../context/index.js";
 import { BudgetTracker } from "../context/budget.js";
 import { buildImageProvenanceFromNetwork } from "../context/image-transport.js";
+import {
+  MAX_SYNTAX_BYTES,
+  buildSyntaxContext,
+  clipSyntaxContextMarkdown,
+  renderSyntaxContextJson,
+  renderSyntaxContextMarkdown,
+  resolveSyntaxProvider,
+  syntaxContextToArtifact,
+} from "../context/syntax/index.js";
 import { enforcementView as threadEnforcementView, prepareThreads, renderReviewThreads } from "../context/review-threads.js";
 import { enforcementView as humanEnforcementView, prepareReviews, renderOutstanding } from "../context/human-reviews.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
@@ -397,6 +406,106 @@ export function buildEquivalentPathsSection(
   }
 }
 
+const SYNTAX_CONTEXT_ARTIFACTS = ["syntax-context.json", "syntax-context.md", "syntax-context.truncated.md"] as const;
+
+/** Builds the #764 syntax-aware context artifacts from the anchors the
+ * related-code stage already extracted.
+ *
+ * OFF BY DEFAULT (`SYNTAX_CONTEXT`): the issue's acceptance criterion is
+ * measured quality/token benefit, and the measurement is not in yet. The
+ * stage is EVIDENCE, never authority — it emits context, never findings,
+ * severity, obligations or a verdict.
+ *
+ * A no-op (empty artifacts) when the stage is disabled, when the upstream
+ * anchors are unavailable, when the PR is a FORK, or when the build fails:
+ * the review then falls back to the existing lexical related-code context
+ * and never breaks. */
+export async function buildSyntaxContextSection(
+  ws: RunWorkspace,
+  env: StageEnv,
+  workspace: string,
+  anchors: ChangeAnchorsArtifact | null,
+  headRevision: string | null,
+): Promise<void> {
+  for (const name of SYNTAX_CONTEXT_ARTIFACTS) ws.write(name, "");
+  // The fork boundary is enforced IN CODE, not by the workflow pin.
+  //
+  // Why the pin alone is not enough: the contract default of
+  // `syntax-context` is "false" — the same value the fork workflow pins —
+  // and `isOperatorExplicit` (src/config/repository-config.ts) treats an
+  // operator value EQUAL to the contract default as "not explicitly set".
+  // A repository's base-ref `.github/pr-reviewer.yml` could therefore set
+  // `syntax-context: "true"` and the pin would not stop it. (`related-code-context`
+  // has no such hole: its default is "true", so the fork's "false" IS
+  // explicit.)
+  //
+  // Why the stage must not run on a fork at all: the privileged fork job
+  // holds the TRUSTED BASE checkout, not the fork head, so a
+  // worktree-scanning section would describe the wrong tree.
+  //
+  // The comparison is the repository's own: `IS_FORK_PR` is resolved
+  // upstream by `deriveFork`, which fails closed to "true" when the PR
+  // object cannot be parsed.
+  //
+  // The check FAILS CLOSED: the stage runs only for an EXPLICIT
+  // non-fork ("false"). Any other value — "TRUE", "1", a non-canonical
+  // spelling an operator's request JSON carried, or a missing flag — is
+  // UNCERTAIN fork state, and uncertain metadata must refuse rather than
+  // proceed (see AGENTS.md, "Fail closed where required"). Every shipped
+  // lane resolves the flag to exactly "true" or "false" before this point.
+  if (env.IS_FORK_PR !== "false") return;
+  if ((env.SYNTAX_CONTEXT ?? "false").toLowerCase() !== "true") return;
+  if (anchors === null) return;
+  const reset = (): void => {
+    for (const name of SYNTAX_CONTEXT_ARTIFACTS) ws.write(name, "");
+  };
+  try {
+    // The registry resolves the provider and reports what it got: an
+    // unknown id degrades to the default provider with a recorded reason
+    // (never an exception). The provider itself runs in an isolated worker
+    // thread, so a provider that blocks cannot hold the review past the
+    // stage's wall-clock bound.
+    const resolution = resolveSyntaxProvider(env.SYNTAX_CONTEXT_PROVIDER);
+    const context = await buildSyntaxContext({
+      workspace,
+      anchors,
+      providerRegistration: resolution.registration,
+      providerFallback: resolution.fallback,
+      providerFallbackReason: resolution.reason,
+      headRevision,
+      // The artifact budget is the module's own hard cap; the operator's
+      // `syntax-context-max-bytes` bounds the section that enters the
+      // corpus (same shape as RELATED_CODE_MAX_BYTES).
+      maxBytes: MAX_SYNTAX_BYTES,
+    });
+    const artifact = syntaxContextToArtifact(context);
+    // A degraded build (a provider that failed, a malformed anchor
+    // artifact) carries no trustworthy context: the section is dropped
+    // whole, exactly like the lexical stage drops a degraded related-code
+    // artifact, and the review falls back to the lexical context. The
+    // failure never reaches the corpus.
+    //
+    // A per-file SKIP (an unreadable changed file, a binary changed file)
+    // is NOT a degradation of this kind: it is recorded as a note and the
+    // rest of the section is kept — one oversized file must not silence
+    // the evidence the other changed files carry.
+    const errors = (artifact as { errors?: unknown }).errors;
+    if (Array.isArray(errors) && errors.length > 0) {
+      reset();
+      return;
+    }
+    ws.write("syntax-context.json", renderSyntaxContextJson(artifact));
+    const markdown = renderSyntaxContextMarkdown(artifact);
+    ws.write("syntax-context.md", markdown);
+    ws.write(
+      "syntax-context.truncated.md",
+      clipSyntaxContextMarkdown(Buffer.from(markdown, "utf8"), Number(env.SYNTAX_CONTEXT_MAX_BYTES ?? "8000") || 8000) ?? new Uint8Array(0),
+    );
+  } catch {
+    reset();
+  }
+}
+
 export async function buildPrThreadSection(ws: RunWorkspace, adapter: PlatformReadAdapter, env: StageEnv, supersededCutoff: string | null): Promise<void> {
   ws.write("pr-thread.json", "");
   ws.write("pr-thread.md", "");
@@ -473,6 +582,7 @@ export function assembleCorpus(
       prJson: ws.read("pr.json"),
       classificationJson: ws.read("classification.json"),
       relatedCodeTruncatedMd: ws.read("related-code.truncated.md"),
+      syntaxContextTruncatedMd: ws.read("syntax-context.truncated.md"),
       repoMapMd: ws.read("repo-map.md"),
       prThreadMd: ws.read("pr-thread.md"),
       reviewThreadsMd: ws.read("review-threads.md"),
