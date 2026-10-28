@@ -1688,7 +1688,6 @@ test("#1034: real symlink surfaces and near-miss self-location shapes keep firin
         "+done",
       ],
     ],
-    ["symlink word in a string literal", "scripts/run.sh", ['+echo "too many symlink levels" >&2']],
     ["comment in an extensionless file", "bin/tool", ["+# follow readlink until the real file", ...SH_SELF_LOCATION_LOOP]],
     ["single-line compound", "scripts/run.sh", ['+[ -L "$0" ] && readlink "$0"']],
     ["braced ${0}", "scripts/run.sh", ['+readlink "${0}"']],
@@ -1701,6 +1700,115 @@ test("#1034: real symlink surfaces and near-miss self-location shapes keep firin
     const result = classifyPr({ prFiles: files(file), diffText: selfLocationDiff(file, lines), linkedIssues: [] });
     assert.ok(firesSymlinkSensitive(result), `${label}: expected a symlink_sensitive signal`);
   }
+});
+
+// ── #1331: quoted symlink diagnostics vs executable symlink forms ──────────
+
+test("#1331: quoted symlink diagnostics stop firing while executable command forms keep firing", () => {
+  const cases: [string, string, string[], boolean][] = [
+    // The issue's acceptance table.
+    ["python exception message", "tool.py", ['+raise SystemExit("too many symlink levels")'], false],
+    ["shell diagnostic echo (the limit #1034 declared, retired here)", "tool.sh", ['+echo "too many symlink levels" >&2'], false],
+    ["python argv command token", "tool.py", ['+subprocess.check_output(["readlink", user_path])'], true],
+    ["shell command substitution", "tool.sh", ['+target="$(readlink "$1")"'], true],
+    ["python direct call", "tool.py", ["+os.readlink(user_path)"], true],
+    ["ordinary string", "tool.py", ['+print("hello world")'], false],
+    // Quoted prose is inert data in the neighbouring shapes too.
+    ["quoted word in a JS log call", "src/run.js", ['+log("follow_symlinks is disabled")'], false],
+    ["quoted word in a template literal", "src/run.js", ["+console.log(`symlink loop detected`)"], false],
+    ["quoted word in a ruby message", "tool.rb", ['+puts "follow_symlinks is disabled"'], false],
+    ["escaped word inside a string", "tool.py", ['+w = "sym\\link"'], false],
+    // Executable forms the quoted-span rule must never hide: argv the
+    // formatter moved to its own line, an exec head the pattern does not
+    // name, a command string that is not the first argument, an argument
+    // list carried across the line break, and both shell spellings of a
+    // command substitution.
+    ["python argv one element per line", "tool.py", ['+subprocess.check_output([', '+\t"readlink",', '+\tuser_path,', '+])'], true],
+    ["go exec.Command argv", "main.go", ['+exec.Command("readlink", userPath).Run()'], true],
+    ["go exec.Command sh -c tail argument", "main.go", ['+exec.Command("sh", "-c", "readlink -f " + p).Run()'], true],
+    ["java Runtime exec", "App.java", ['+Runtime.getRuntime().exec("readlink -f " + p);'], true],
+    ["bash -c argv tail argument", "tool.py", ['+subprocess.run(["bash", "-c", "readlink -f " + p])'], true],
+    ["exec call argv of a recognized exec is command content", "tool.py", ['+subprocess.check_output(["echo", "too many symlink levels"])'], true],
+    ["execa command string", "src/run.js", ['+execa.command("readlink -f " + p)'], true],
+    ["shell-string exec call", "tool.py", ['+os.system("readlink "$f"")'], true],
+    ["shell-string exec call across lines", "tool.py", ['+subprocess.run(', '+\t"readlink -f %s" % p,', '+\tshell=True,', '+)'], true],
+    ["quoted close paren cannot close the call early", "tool.py", ['+subprocess.check_output(["bash", "-c", "echo )", "readlink -f x"])'], true],
+    ["second exec call on the line", "tool.py", ['+system("hello world"); subprocess.run("readlink -f x")'], true],
+    ["shell backtick substitution", "tool.sh", ['+target="`readlink "$1"`"'], true],
+    ["ruby backtick command", "tool.rb", ['+out = `readlink -f #{path}`'], true],
+    ["command substitution in an echo", "tool.sh", ['+echo "$(readlink "$1")"'], true],
+    ["quoted absolute command path", "tool.py", ['+bin_path = "/usr/bin/readlink"'], true],
+    // Declared limits, all toward concealment: whitespace-containing quoted
+    // text behind a call the exec-head pattern does not recognize. Treating
+    // any `.run(` as an exec call would donate arbitrary prose, and tying a
+    // deferred command variable to its later `$cmd` invocation needs the taint
+    // tracking the issue rules out. A whitespace-free quoted token is still
+    // read as argv, so the same helper with `("readlink")` would fire.
+    ["spaced command behind an unknown helper", "tool.py", ['+runner.run("readlink -f " + p)'], false],
+    ["helper named run is not an exec head", "tool.py", ['+runner.run("note the symlink word")'], false],
+    ["deferred shell command variable", "tool.sh", ['+cmd="readlink -f"', '+$cmd "$f"'], false],
+    ["argv carried past the continuation bound", "tool.py", [
+      '+subprocess.run(',
+      ...Array.from({ length: 8 }, (_unused, i) => `+\targ${i},`),
+      '+\t"readlink -f x",',
+      '+)',
+    ], false],
+    // Backtick recovery is a language rule, not a whitespace rule: an
+    // extensionless script recovers, the JavaScript family does not.
+    ["backtick command in an extensionless script", "bin/tool", ['+target="`readlink "$1"`"'], true],
+    // The bounded-work limits, pinned so retuning a bound is a deliberate
+    // act: only the first MAX_EXEC_HEADS_PER_LINE exec calls of a line
+    // contribute, and an argument list carried across lines stops once
+    // MAX_SYMLINK_RECOVERED_CHARS is spent.
+    ["more exec calls than the per-line head budget", "tool.py", [
+      `+${'exec("a") + '.repeat(9)}subprocess.run("readlink -f x")`,
+    ], false],
+    ["carried argv past the recovered-character budget", "tool.py", [
+      '+subprocess.run(',
+      ...Array.from({ length: 6 }, (_unused, i) => `+\targ${i} = "${"x".repeat(700)}",`),
+      '+\t"readlink -f x",',
+      '+)',
+    ], false],
+  ];
+  for (const [label, file, lines, expected] of cases) {
+    const result = classifyPr({
+      prFiles: files(file),
+      diffText: selfLocationDiff(file, lines),
+      linkedIssues: [],
+    });
+    assert.equal(firesSymlinkSensitive(result), expected, `${label}: symlink_sensitive`);
+  }
+
+  // A mention that survives only inside a comment stays discounted, never
+  // fired: #960's comment authority is untouched by the quoted-span rule.
+  const comment = classifyPr({
+    prFiles: files("tool.py"),
+    diffText: selfLocationDiff("tool.py", ["+# too many symlink levels"]),
+    linkedIssues: [],
+  });
+  assert.ok(!firesSymlinkSensitive(comment), "comment mention must not fire");
+  assert.ok(comment.pathHandlingProvenance.discounted.some(
+    (s) => s.signal === "symlink_sensitive" && s.source === "diff_comment",
+  ), "comment mention must be discounted");
+});
+
+test("#1331: the symlink recovery stays bounded on a hostile line", () => {
+  // Repeated unclosed exec calls are the worst case for the argument-carry
+  // walk: an over-long line takes the pre-#1331 view, a just-under-one takes
+  // the per-line head cap, and neither may turn into work quadratic in the
+  // number of calls.
+  const cases = [`+${"exec(".repeat(20000)}readlink`, `+${"exec(".repeat(700)}readlink`];
+  const started = process.hrtime.bigint();
+  for (const hostile of cases) {
+    const result = classifyPr({
+      prFiles: files("tool.py"),
+      diffText: selfLocationDiff("tool.py", [hostile]),
+      linkedIssues: [],
+    });
+    assert.ok(firesSymlinkSensitive(result), "over-long input keeps detection");
+  }
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(ms < 2000, `hostile lines took ${ms.toFixed(0)}ms, expected well under 2000ms`);
 });
 
 // ── Specialist role selection (#633 port) ─────────────────────────────────

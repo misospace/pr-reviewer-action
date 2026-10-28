@@ -932,6 +932,10 @@ function isDocumentationPath(path: string): boolean {
   return DOCUMENTATION_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
+/** The symlink-operation class name, shared with `symlinkCodeView`, which
+ * decides what counts as executable text for it (#1331). */
+const SYMLINK_SENSITIVE_CLASS = "symlink_sensitive";
+
 const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp[]])[] = [
   // Explicit traversal literals (outside specifiers/anchor calls).
   ["traversal_literal", [PATH_TRAVERSAL_PATTERN]],
@@ -957,8 +961,11 @@ const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp
     /\bunzip\s*\(/i,
   ]],
   // Symlink-sensitive filesystem operations. A recognised self-location
-  // `readlink` (#1034) is blanked before this scan runs.
-  ["symlink_sensitive", [
+  // `readlink` (#1034) is blanked before this scan runs. Quoted text is inert
+  // data for this class too (#1331), but through `symlinkCodeView`, which
+  // recovers the executable command forms that live inside quote-shaped
+  // syntax rather than dropping the whole span.
+  [SYMLINK_SENSITIVE_CLASS, [
     /symlink|readlink|lstat|follow_symlinks|O_NOFOLLOW/i,
   ]],
   // Identifier-shaped path references (`filepath`) — variables and
@@ -1135,7 +1142,10 @@ function pathSample(line: string): string {
  * interpolation included, are data, not code identifiers). Comments are NOT
  * handled here: the comment-free lines from `blankCommentSpans` are the sole
  * comment authority, so this runs only on text that has already been through
- * them. */
+ * them. Keeping the quote characters is what makes removal non-adjacent, so
+ * stripping can never spell a token that was not already there; that guarantee
+ * is what the #1331 containment argument below relies on, and the span rule is
+ * shared with `quotedSpanEnd`. */
 function stripQuotedSpans(line: string): string {
   const out: string[] = [];
   let i = 0;
@@ -1143,24 +1153,219 @@ function stripQuotedSpans(line: string): string {
   while (i < n) {
     const ch = line[i] ?? "";
     if (ch === "'" || ch === '"' || ch === "`") {
-      let j = i + 1;
-      while (j < n) {
-        const c = line[j] ?? "";
-        if (c === "\\" && j + 1 < n) {
-          j += 2;
-          continue;
-        }
-        if (c === ch) break;
-        j += 1;
-      }
+      const close = quotedSpanEnd(line, i);
       out.push(ch + ch);
-      i = j < n ? j + 1 : n;
+      i = close === null ? n : close + 1;
       continue;
     }
     out.push(ch);
     i += 1;
   }
   return out.join("");
+}
+
+/** #1331 exec-call heads: a call that EXECUTES text, so its argument list is
+ * command content rather than inert data even where it contains prose-shaped
+ * whitespace. Two branches: an unambiguous command verb in ANY position
+ * (`exec`, Go `exec.Command`, Java `Runtime.getRuntime().exec`, `system`,
+ * `spawn…`, Ruby `Open3.capture2`), and a generic verb (`run`, `call`,
+ * `check_output`, `Popen`) only behind a known exec module — recognizing any
+ * `run(` would donate arbitrary prose. Global: every exec call on a line
+ * contributes its own arguments. */
+const EXEC_ARGV_HEAD_PATTERN = new RegExp(
+  String.raw`(?:`
+    + String.raw`(?:^|[^\w$])(?:exec|execl|execle|execlp|execv|execve|execvp|execvpe|execSync|execFile(?:Sync)?|system|spawn\w*|command(?:Sync)?|capture\w*)`
+    + String.raw`|\b(?:subprocess|child_process|execa|os|open3|syscall)\s*\.\s*(?:run|call|check_call|check_output|getoutput|getstatusoutput|Popen|exec\w*|spawn\w*|command(?:Sync)?|capture\w*)`
+    + String.raw`)\s*\(`,
+  "gi",
+);
+
+/** File types for which a backtick opens a STRING rather than a command: the
+ * JavaScript family. Everywhere else this classifier reaches a backtick is
+ * command substitution (shell, Ruby, Perl), and an unknown or extensionless
+ * type recovers too — mistaking a shell substitution for a template literal
+ * would hide a real operation, which is the wrong direction to fail in. */
+const TEMPLATE_LITERAL_EXTENSIONS = new Set([
+  "js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts", "json", "json5",
+]);
+
+/** Bounds on the #1331 recovery work, because the scanned text is
+ * attacker-controlled diff content. A line longer than the first bound scans
+ * as the pre-#1331 view (detection kept, recovery not paid for); at most this
+ * many characters are recovered per line, shared with an argument list carried
+ * across lines; and at most this many exec calls per line contribute. Without
+ * them, a single minified or hostile line of repeated unclosed `exec(` turns
+ * the per-head walk into O(calls × line length) per line. */
+const MAX_SYMLINK_SCAN_LINE_CHARS = 4000;
+const MAX_SYMLINK_RECOVERED_CHARS = 4000;
+const MAX_EXEC_HEADS_PER_LINE = 8;
+
+/** Index of the quote that closes the span opening at `start`, or null when
+ * it never closes. THE shared span rule: `stripQuotedSpans`, the argv-token
+ * scan and the quote-aware paren walk must agree on where a string ends. */
+function quotedSpanEnd(text: string, start: number): number | null {
+  const quote = text[start] ?? "";
+  let j = start + 1;
+  while (j < text.length) {
+    const ch = text[j] ?? "";
+    if (ch === "\\" && j + 1 < text.length) {
+      j += 2;
+      continue;
+    }
+    if (ch === quote) return j;
+    j += 1;
+  }
+  return null;
+}
+
+/** The text of every quoted span of `text`, as RAW slices (escapes left as
+ * written, an unterminated quote yields the remainder). Rawness is what keeps
+ * the containment guarantee of `symlinkCodeView` honest: a word that only
+ * exists once escapes are unwrapped (`"sym\link"`) is not a signal. */
+function quotedSpanTexts(text: string): string[] {
+  const spans: string[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const quote = text[i];
+    if (quote !== "'" && quote !== '"' && quote !== "`") continue;
+    const close = quotedSpanEnd(text, i);
+    spans.push(text.slice(i + 1, close ?? text.length));
+    if (close === null) break;
+    i = close;
+  }
+  return spans;
+}
+
+/** Quote-aware paren walk: the index of the `)` that brings `depth` to zero
+ * (null when the text ends with the call still open) plus the depth the text
+ * leaves behind, so a caller can continue on the next line. A paren inside a
+ * quoted span is command text rather than call structure, so
+ * `["bash", "-c", "echo )", "readlink -f x"]` never closes the call early. */
+function scanCallDepth(text: string, depth: number, start = 0): { close: number | null; depth: number } {
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const close = quotedSpanEnd(text, i);
+      i = close === null ? text.length : close;
+      continue;
+    }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth <= 0) return { close: i, depth };
+    }
+  }
+  return { close: null, depth };
+}
+
+/** The argument-list text of an exec call whose `(` is still open at the end
+ * of `index`: the opening line's remainder plus the following lines up to the
+ * balanced closer, within `MAX_CONSTRUCTION_CONTINUATION_LINES` — the same
+ * bound `constructionOperandSpans` gives an open construction call — and
+ * within `maxChars`, so the walk stays bounded even when the closer never
+ * comes. Auto-formatted argv is therefore still read as the call's content. */
+function openCallArgumentText(
+  lines: string[],
+  index: number,
+  argsStart: number,
+  maxChars: number,
+): string {
+  let depth = 1;
+  let size = 0;
+  const parts: string[] = [];
+  const limit = Math.min(lines.length, index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES);
+  for (let i = index; i < limit; i++) {
+    const text = (lines[i] ?? "").slice(i === index ? argsStart : 0);
+    const scanned = scanCallDepth(text, depth);
+    depth = scanned.depth;
+    parts.push(scanned.close === null ? text : text.slice(0, scanned.close));
+    size += text.length;
+    if (scanned.close !== null || size >= maxChars) break;
+  }
+  return parts.join("\n");
+}
+
+/** #1331 code view for the symlink class: quoted text is inert DATA, so a
+ * diagnostic string (`raise SystemExit("too many symlink levels")`,
+ * `echo "too many symlink levels" >&2`) stops creating path-handling
+ * scrutiny — while the executable shapes that merely LOOK quoted are recovered
+ * explicitly, which is what the issue requires instead of a blanket
+ * `stripQuotedSpans`:
+ *   - a whitespace-free quoted span is an argv/path TOKEN, never prose:
+ *     `["readlink", user_path]` at any nesting or line break,
+ *     `exec.Command("readlink", p)`, `"/usr/bin/readlink"`;
+ *   - a command substitution executes its contents, quoted or not:
+ *     `target="$(readlink "$1")"`, and outside the JavaScript family the
+ *     backtick spelling too;
+ *   - the WHOLE argument list of a call that executes text is command content,
+ *     not just its first element: `subprocess.run(["bash", "-c",
+ *     "readlink -f " + p])`, `os.system("readlink -f '%s'" % p)`, including an
+ *     argument list the formatter carried to the following lines.
+ * CONTAINMENT: every scanned run is a raw slice of this line or of this call's
+ * own argument list, and runs are never concatenated adjacently
+ * (`stripQuotedSpans` keeps the quote characters, recovered runs are joined
+ * with newlines), so the class's match set stays a SUBSET of the pre-#1331
+ * chunk scan — a carried argument list is text of a following line that scan
+ * already read unquoted. The precision correction can drop signals but cannot
+ * invent one.
+ * DECLARED LIMITS, all in the concealment direction: whitespace-containing
+ * quoted text behind a call `EXEC_ARGV_HEAD_PATTERN` does not recognize
+ * (`runner.run("readlink -f " + p)`, pinned in the tests) — the same rule
+ * covers PowerShell `Invoke-Expression "readlink -f $p"` and an argv list
+ * staged in a variable before `subprocess.run(args)`, and a shell command
+ * staged the same way and invoked later as `$cmd`, since linking those
+ * statements is the taint tracking this model refuses to be; the tail of an
+ * open exec call longer than `MAX_CONSTRUCTION_CONTINUATION_LINES` or
+ * `MAX_SYMLINK_RECOVERED_CHARS`; the `(MAX_EXEC_HEADS_PER_LINE + 1)`-th exec
+ * call of one line, which cannot contribute once its predecessors consumed
+ * the head budget; a line longer than
+ * `MAX_SYMLINK_SCAN_LINE_CHARS`, which keeps the pre-#1331 view without the
+ * recovery; and a word that only exists after escapes are unwrapped. Comments
+ * are handled upstream: `blankCommentSpans` is the sole comment authority. */
+function symlinkCodeView(lines: string[], index: number, backtickIsCommand: boolean): string {
+  const line = lines[index] ?? "";
+  // A minified, generated or hostile over-long line keeps the pre-#1331 view:
+  // scanning it as-is can only fire, and the per-head walks below stay bounded.
+  if (line.length > MAX_SYMLINK_SCAN_LINE_CHARS) return line;
+  const recovered: string[] = [];
+  let budget = MAX_SYMLINK_RECOVERED_CHARS;
+  const keep = (text: string): void => {
+    if (text === "" || budget <= 0) return;
+    recovered.push(text.length <= budget ? text : text.slice(0, budget));
+    budget -= Math.min(text.length, budget);
+  };
+  for (let i = 0; i < line.length && budget > 0; i++) {
+    if (line[i] === "$" && line[i + 1] === "(") {
+      const { close } = scanCallDepth(line, 1, i + 2);
+      keep(line.slice(i + 2, close ?? line.length));
+      if (close === null) break;
+      i = close;
+      continue;
+    }
+    if (backtickIsCommand && line[i] === "`") {
+      const close = quotedSpanEnd(line, i);
+      keep(line.slice(i + 1, close ?? line.length));
+      if (close === null) break;
+      i = close;
+    }
+  }
+  let heads = 0;
+  for (const head of line.matchAll(EXEC_ARGV_HEAD_PATTERN)) {
+    if (heads >= MAX_EXEC_HEADS_PER_LINE || budget <= 0) break;
+    heads += 1;
+    const argsStart = head.index + head[0].length;
+    const { close } = scanCallDepth(line, 1, argsStart);
+    keep(
+      close === null
+        ? openCallArgumentText(lines, index, argsStart, budget)
+        : line.slice(argsStart, close),
+    );
+  }
+  for (const span of quotedSpanTexts(line)) {
+    const token = span.trim();
+    if (token !== "" && !/\s/.test(token)) keep(token);
+  }
+  const code = stripQuotedSpans(line);
+  return recovered.length === 0 ? code : `${code}\n${recovered.join("\n")}`;
 }
 
 /** Index of the `)` that closes a construction call opened `depth` paren
@@ -1362,16 +1567,31 @@ export function evaluatePathHandlingSignals(
         ? isDocumentationPath(chunkFile)
         : filenames.length > 0 && filenames.every((name) => isDocumentationPath(name));
 
+    // #1331: a backtick opens a command substitution except in the JavaScript
+    // family; a chunk with no file type of its own recovers, because unknown
+    // state must fail toward detection rather than read a substitution as a
+    // template literal.
+    const backtickIsCommand =
+      chunkPath === null || !TEMPLATE_LITERAL_EXTENSIONS.has(fileKindToken(chunkPath));
+
     for (const [className, patterns] of PATH_HANDLING_CONTENT_CLASSES) {
       const codeOnly = LEXICAL_CODE_ONLY_CLASSES.has(className);
       if (codeOnly && isDocumentation) continue;
+      // Each class gets its own view of the same comment-free text: the
+      // lexical classes drop every quoted span, the symlink class drops them
+      // only where they are inert data (#1331), the rest scan as-is.
+      const symlinkClass = className === SYMLINK_SENSITIVE_CLASS;
       let fired = false;
       for (let index = 0; index < neutralized.length; index++) {
         const raw = lines[index] ?? "";
-        // commentFree is the sole comment authority; the lexical view only
-        // additionally strips quoted spans.
+        // commentFree is the sole comment authority; the code views only
+        // additionally handle quoted spans.
         const base = neutralized[index] ?? "";
-        const scanLine = codeOnly ? stripQuotedSpans(base) : base;
+        const scanLine = codeOnly
+          ? stripQuotedSpans(base)
+          : symlinkClass
+            ? symlinkCodeView(neutralized, index, backtickIsCommand)
+            : base;
         if (matchesAny(scanLine, patterns)) {
           if (!fired) {
             recordSignal(buckets, className, source, chunkFile, pathSample(raw));
