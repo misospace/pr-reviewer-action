@@ -94,7 +94,6 @@ function probeWritable(dir: string): void {
       closeSync(fd);
     }
     rmSync(probe, { force: true });
-    created = false;
   } catch (err) {
     if (created) {
       try {
