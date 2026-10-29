@@ -2532,15 +2532,32 @@ function isRenovateImageUpdate(
  * Chart.yaml `version:`/`appVersion:`. Case-sensitive — these are the exact
  * YAML keys Renovate's helm-release and Chart.yaml managers bump; a
  * case-insensitive match would swallow unrelated version-shaped keys. The
- * anchor excludes prefixed keys like `apiVersion:`. */
-const CHART_VERSION_LINE_RE = /^\s*(?:chart|version|appVersion)\s*:\s*["']?([A-Za-z0-9][A-Za-z0-9._-]*)["']?\s*$/;
+ * anchor excludes prefixed keys like `apiVersion:`.
+ *
+ * The line shape is captured in groups — indentation, key, separator, quoting
+ * — so the comparison can hold every byte around the version value fixed: a
+ * pure chart refresh changes the VALUE only (#1336 pure-diff requirement). */
+const CHART_VERSION_LINE_RE = /^(\s*)((?:chart|version|appVersion))(\s*:\s*)(["']?)([A-Za-z0-9][A-Za-z0-9._-]*)(["']?)(\s*)$/;
 
-function parseChartVersionLine(content: string): { key: string; value: string; normalized: string } | null {
+/** One parsed chart-version line: the key, the version value, and the line
+ * with the value blanked out (`normalized`) — indentation, key, separator and
+ * quoting. A pair may only differ in the value, so the normalized shape must
+ * be identical on both sides. */
+interface ChartVersionLine {
+  key: string;
+  value: string;
+  normalized: string;
+}
+
+function parseChartVersionLine(content: string): ChartVersionLine | null {
   const match = CHART_VERSION_LINE_RE.exec(content);
   if (match === null) return null;
-  const key = (match[0].match(/^\s*(?:chart|version|appVersion)/) ?? [""])[0].trim();
-  const value = match[1] ?? "";
-  return { key, value, normalized: `${key}:` };
+  const [, indent = "", key = "", separator = "", openQuote = "", value = "", closeQuote = "", trailing = ""] = match;
+  // A quoted value must be quoted consistently: a mismatched or stray quote
+  // is not a well-formed version line, so the line does not parse at all and
+  // the block fails closed rather than accepting a half-quoted shape.
+  if (openQuote !== closeQuote) return null;
+  return { key, value, normalized: `${indent}${key}${separator}${openQuote}${closeQuote}${trailing}` };
 }
 
 /** Chart/appVersion refresh: pairs keep the same key and change the value; a
@@ -2548,10 +2565,16 @@ function parseChartVersionLine(content: string): { key: string; value: string; n
  * strictly positional with equal run lengths — an unpaired `chart:` line
  * (a dependency added or removed alongside the bump) invalidates the block,
  * exactly like the image rule (#1336 review): the pairing must be able to SEE
- * every chart-line change. At least one true value change must exist. */
+ * every chart-line change. At least one true value change must exist.
+ *
+ * Only the version VALUE may change: the normalized shape (indentation, key,
+ * separator, quoting) must match on both sides, so a re-indent or a quote-style
+ * change travelling with the bump disqualifies the kind instead of reaching
+ * the zero-specialist gate (#1336 review: "every changed line is a version
+ * bump"). */
 function evaluateChartVersionBlock(
-  removed: readonly { key: string; value: string; normalized: string }[],
-  added: readonly { key: string; value: string; normalized: string }[],
+  removed: readonly ChartVersionLine[],
+  added: readonly ChartVersionLine[],
 ): boolean | null {
   if (removed.length === 0 || removed.length !== added.length) return null;
   let valueChanged = false;
@@ -2559,6 +2582,7 @@ function evaluateChartVersionBlock(
     const before = removed[index]!;
     const after = added[index]!;
     if (before.key !== after.key) return null;
+    if (before.normalized !== after.normalized) return null;
     if (before.key === "chart" && before.value !== after.value) return null;
     if (before.value !== after.value) valueChanged = true;
   }
@@ -2573,6 +2597,55 @@ function evaluateChartVersionBlock(
 const CHART_FILE_RE = /(?:helmrelease|chart)\.ya?ml$/i;
 const CHART_PR_MARKER_RE = /^\s*(?:kind\s*:\s*["']?HelmRelease["']?\s*|apiVersion\s*:\s*["']?helm\.toolkit\.fluxcd\.io)/m;
 
+/** The diff region that belongs to each changed file: the text between this
+ * file's `+++ b/…` header and the next file header. A diff with no file
+ * header at all (a bare hunk) belongs to the single changed file — with more
+ * than one changed file the region cannot be attributed, so no file may claim
+ * a marker it does not own (fail closed).
+ *
+ * The marker must be attributed per file: a `kind: HelmRelease` marker in one
+ * file's region says nothing about another file, so a chart-shaped file can
+ * no longer bless an unrelated YAML `version:` change in a sibling file
+ * (#1336 review). */
+function diffFileRegions(fullDiffText: string, files: readonly ChangedFile[]): Map<string, string> {
+  const regions = new Map<string, string>();
+  let current: string | null = null;
+  let buffer: string[] = [];
+  const flush = (): void => {
+    if (current === null) return;
+    const existing = regions.get(current);
+    regions.set(current, existing === undefined ? buffer.join("\n") : `${existing}\n${buffer.join("\n")}`);
+    buffer = [];
+  };
+  for (const line of fullDiffText.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      // A new file section: close the previous one and drop its pending
+      // header lines, so a region never carries another file's header.
+      flush();
+      current = null;
+      buffer = [];
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      flush();
+      current = line.slice(4).replace(/^b\//, "").trim();
+      buffer = [line];
+      continue;
+    }
+    if (line.startsWith("--- ")) {
+      // The old-path header precedes the new-path header of the same file.
+      flush();
+      current = line.slice(4).replace(/^a\//, "").trim();
+      buffer = [line];
+      continue;
+    }
+    buffer.push(line);
+  }
+  flush();
+  if (regions.size === 0 && files.length === 1) regions.set(files[0]!.filename, fullDiffText);
+  return regions;
+}
+
 /** Every changed file is a modified YAML manifest (HelmRelease/Chart.yaml
  * shapes); the diff changes only chart/version values. */
 function isRenovateChartUpdate(
@@ -2585,8 +2658,18 @@ function isRenovateChartUpdate(
   if (!metadata.renovateAuthored) return false;
   if (files.length === 0) return false;
   if (!files.every((file) => file.status === "modified" && /\.ya?ml$/i.test(file.filename))) return false;
-  const filenames = files.map((file) => file.filename);
-  if (!filenames.every((name) => CHART_FILE_RE.test(name)) && !CHART_PR_MARKER_RE.test(fullDiffText)) return false;
+  // Every changed file must be chart-bearing ON ITS OWN: chart-shaped by name,
+  // or carrying the HelmRelease marker in its own diff region. A marker in a
+  // sibling file's region blesses nothing, so one chart file can no longer
+  // carry an unrelated YAML `version:` change into the zero-selection gate
+  // (#1336 review).
+  const regions = diffFileRegions(fullDiffText, files);
+  const chartBearing = files.every((file) => {
+    if (CHART_FILE_RE.test(file.filename)) return true;
+    const region = regions.get(file.filename) ?? "";
+    return CHART_PR_MARKER_RE.test(region);
+  });
+  if (!chartBearing) return false;
   const walk = walkImageRefBlocks(fullDiffText, parseChartVersionLine, evaluateChartVersionBlock, { lenient: false });
   if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
   return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);

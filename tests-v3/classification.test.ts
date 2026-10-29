@@ -2313,6 +2313,84 @@ test("#1336: chart updates require a chart-shaped manifest or HelmRelease marker
   assert.equal(marker.prKind, "renovate_chart_update");
 });
 
+test("#1336: a chart refresh changes the version VALUE only — formatting alongside it disqualifies the kind", () => {
+  // The pure-diff requirement: every changed line is a version bump. A
+  // re-indent or a quote-style change travelling with the bump is a
+  // formatting change, so the diff is not a pure chart refresh and must not
+  // reach the zero-specialist gate.
+  const shapes = [
+    // indentation moved
+    "-   version: 62.7.0\n+     version: 62.8.0\n",
+    // quote style changed
+    '-   version: "62.7.0"\n+   version: \'62.8.0\'\n',
+    // quoting added around the value
+    "-   version: 62.7.0\n+   version: \"62.8.0\"\n",
+    // separator spacing changed
+    "-   version:62.7.0\n+   version: 62.8.0\n",
+  ];
+  for (const diffText of shapes) {
+    const result = classifyPr({
+      prFiles: [digestFile("apps/app/helmrelease.yaml", 1, 1)],
+      authoritativeChangedFiles: 1,
+      diffText,
+      prAuthor: "renovate[bot]",
+    });
+    assert.notEqual(result.prKind, "renovate_chart_update", diffText);
+    // The kind is gone, so the benign zero-selection gate is gone with it.
+    const selection = selectSpecialistRoles(result);
+    assert.ok(selection.selectedRoles.length > 0, diffText);
+  }
+  // The same shape with only the value changed still classifies.
+  const pure = classifyPr({
+    prFiles: [digestFile("apps/app/helmrelease.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: "-   version: 62.7.0\n+   version: 62.8.0\n",
+    prAuthor: "renovate[bot]",
+  });
+  assert.equal(pure.prKind, "renovate_chart_update");
+});
+
+test("#1336: a HelmRelease marker blesses only its own file", () => {
+  // One chart-shaped file must not carry an unrelated YAML `version:` change
+  // in a sibling file into the chart zero-selection gate: the marker has to
+  // belong to the file whose chart version changed.
+  const markerOnly = classifyPr({
+    prFiles: [digestFile("apps/app/helm.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      " diff --git a/apps/app/helm.yaml b/apps/app/helm.yaml\n" +
+      "--- a/apps/app/helm.yaml\n" +
+      "+++ b/apps/app/helm.yaml\n" +
+      "@@ -10,2 +10,2 @@\n" +
+      " kind: HelmRelease\n" +
+      "-  version: 62.7.0\n" +
+      "+  version: 62.8.0\n",
+    prAuthor: "renovate[bot]",
+  });
+  assert.equal(markerOnly.prKind, "renovate_chart_update");
+
+  const sibling = classifyPr({
+    prFiles: [digestFile("apps/app/helm.yaml", 1, 1), digestFile("ci/version-stamp.yaml", 1, 1)],
+    authoritativeChangedFiles: 2,
+    diffText:
+      "diff --git a/apps/app/helm.yaml b/apps/app/helm.yaml\n" +
+      "--- a/apps/app/helm.yaml\n" +
+      "+++ b/apps/app/helm.yaml\n" +
+      "@@ -10,2 +10,2 @@\n" +
+      " kind: HelmRelease\n" +
+      "-  version: 62.7.0\n" +
+      "+  version: 62.8.0\n" +
+      "diff --git a/ci/version-stamp.yaml b/ci/version-stamp.yaml\n" +
+      "--- a/ci/version-stamp.yaml\n" +
+      "+++ b/ci/version-stamp.yaml\n" +
+      "@@ -1,1 +1,1 @@\n" +
+      "-version: 1.0.0\n" +
+      "+version: 2.0.0\n",
+    prAuthor: "renovate[bot]",
+  });
+  assert.notEqual(sibling.prKind, "renovate_chart_update");
+});
+
 test("#1336: near-miss sensitive tokens never fire", () => {
   // updateContext is established (Renovate author) so the sensitive trigger
   // actually evaluates — only the near-miss tokens keep it silent.
