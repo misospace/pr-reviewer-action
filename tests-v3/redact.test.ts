@@ -7,6 +7,7 @@ import {
   KNOWN_SECRET_REDACTED,
   REDACTED_SOURCE,
   containsKnownSecret,
+  containsSecretShapedContent,
   maskAndTruncateSource,
   maskDiagnostic,
   maskKnownSecrets,
@@ -866,6 +867,47 @@ test("#1149: redactTextDeep inherits maskKnownSecretsDeep's depth cutoff (fails 
   assert.equal(protoEntry.keep, 1);
   assert.equal(out.safe, "value");
   assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, "leak"), false, "no pollution escaped");
+});
+
+test("#1333: containsSecretShapedContent detects credential shapes a durable payload must not carry", () => {
+  const shaped: readonly string[] = [
+    "token ghp_AbcdEfghIjklMnOpqrStuvwx012345",
+    "Bearer abcdefghijklmnopqrstuvwx",
+    "AKIAIOSFODNN7EXAMPLE",
+    "sk-abcdef0123456789abcdef",
+    '{"note":"api_key=supersecretvalue1"}',
+    '{"note":"password: hunter2hunter2"}',
+    // Quoted assignment quoted inside a JSON prose leaf — the line core on
+    // the leaf; a JSON document is the durable payload contract, so this is
+    // the shape the boundary sees
+    '{"note":"leaked: \\"password\\": \\"hunter2hunter2\\""}',
+    "export DB_PASSWORD=hunter2hunter2",
+  ];
+  for (const text of shaped) assert.equal(containsSecretShapedContent(text), true, text);
+  // Non-JSON text with no credential shape, non-credential JSON, and shapes
+  // the producer's own sanitizer deliberately leaves alone all pass.
+  assert.equal(containsSecretShapedContent("plain review prose, no credentials"), false);
+  assert.equal(containsSecretShapedContent('{"verdict":"approved"}'), false);
+  assert.equal(containsSecretShapedContent(""), false);
+  // The verdict-content key-name rule is OFF at this boundary (mirrors the
+  // producer): a credential-named KEY is the render layer's schema
+  // contract, and legitimate category keys must never be refused.
+  assert.equal(containsSecretShapedContent('{"api_key":"supersecretvalue1"}'), false);
+  assert.equal(containsSecretShapedContent('{"secret_handling_changes":"none found"}'), false);
+  // The flat pass never runs on serialized JSON: its value run would spill
+  // across structural boundaries.
+  assert.equal(containsSecretShapedContent('{"a":["token=",12345678901234]}'), false);
+  // Idempotency (#252): content the redactors already sanitized — including
+  // each marker form — is secret-free by construction and must NOT read as
+  // a detection (a durable boundary that refused its own sanitizer's
+  // output could never persist a redacted payload).
+  const clean: readonly string[] = [
+    '{"config":{"password":"[REDACTED]"}}',
+    "the env file showed ⟦redacted:credential⟧",
+    "bearer header was ⟦•⟧ in the log",
+    '{"config":{"password":"${DB_PASSWORD}"}}',
+  ];
+  for (const text of clean) assert.equal(containsSecretShapedContent(text), false, text);
 });
 
 test("#1094: containsKnownSecret detects raw, URL-encoded, and base64 variants — the same set maskKnownSecrets replaces", () => {

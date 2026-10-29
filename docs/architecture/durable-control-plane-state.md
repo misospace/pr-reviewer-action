@@ -13,7 +13,11 @@ The initial production backend is **PostgreSQL**
 SAME conformance battery, so a PostgreSQL-only regression cannot hide
 behind a missing DSN and an in-memory drift cannot hide behind a skip.
 Production scheduling correctness never depends on process memory:
-the in-memory backend is for tests/dev only.
+the in-memory backend is for tests/dev only. Driver compatibility:
+node-postgres documents support for every PostgreSQL version from 8.x
+to the most recent — current `pg` 8.23.1 against the PostgreSQL 18
+service container CI provisions (and runs the full conformance battery
+against) covers the deployed matrix.
 
 ## What is persisted (and what is not)
 
@@ -37,7 +41,18 @@ columns, and the rebuilt-frozen validators drop any smuggled extra
 field): provider/API secrets; complete prompts/corpora; repository
 files; model responses beyond the normalized result; worker filesystem
 paths that are meaningless after restart. Credentials exist only behind
-the #735 broker's opaque references.
+the #735 broker's opaque references. The `resultPayload` boundary makes
+the same invariant hold for CONTENT: it must parse as a JSON object (the
+canonical encoding the publisher replays), and `validatePublication`
+refuses — never normalizes — a payload that is not a fixed point of the
+producer's own verdict-content sanitizer (the shared redactor applied
+exactly as the completion projection applies it: per-leaf value shapes,
+key names left alone). Already-sanitized payloads and reference-shaped
+values (`${VAR}`) pass unchanged, so the upstream sanitizer's own output
+stays publishable; a credential-named JSON KEY is the render layer's
+schema contract, not this boundary's. Documented bounds: JSON nesting
+deeper than the redactor's depth cap is refused even when benign, and
+encoded (base64/hex) secret echoes are out of shape-detection scope.
 
 ## Cost provenance is never fabricated
 

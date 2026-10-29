@@ -30,6 +30,7 @@
  */
 
 import { INSTALLATION_ID_PATTERN } from "../events/normalize.js";
+import { containsSecretShapedContent } from "../context/redact.js";
 import type { JobLifecycleState } from "../queue/types.js";
 
 /** The two platforms the controller knows (mirrors `ReviewJob`). */
@@ -628,6 +629,32 @@ export function validatePublication(value: unknown): PublicationRecord | null {
   if (resultHeadSha === null) return null;
   const resultPayload = identifier(value["resultPayload"], PUBLICATION_PAYLOAD_MAX_CHARS);
   if (resultPayload === null) return null;
+  // The payload is the CANONICAL JSON encoding of the normalized review
+  // result — parseability is part of the contract, not an optimization, and
+  // it is what makes the secret-shape check below total: a hostile payload
+  // cannot escape it by not being JSON. (It also pins what "arbitrary text
+  // is accepted" used to leave open: a payload that is not the encoding the
+  // publisher replays is malformed, whatever it contains.)
+  let parsedPayload: unknown;
+  try {
+    parsedPayload = JSON.parse(resultPayload);
+  } catch {
+    return null;
+  }
+  if (!isPlainObject(parsedPayload)) return null;
+  // Secret-free durable boundary: the payload is the content the publisher
+  // replays verbatim to the forge, so a credential shape here would be both
+  // persisted and re-published. The upstream render pipeline redacts before
+  // a payload ever reaches a writer; this check refuses (never normalizes)
+  // when that invariant was not upheld. The detector is the producer's own
+  // sanitizer re-applied (fixed-point test), so an already-sanitized payload
+  // — including redaction markers and reference-shaped values — passes
+  // unchanged, and legitimate verdict-content keys (e.g. the
+  // `secret_handling_changes` category) are never refused. Documented
+  // bounds: JSON nesting deeper than the redactor's depth cap is refused
+  // even when benign, and encoded (base64/hex) secret echoes are out of
+  // shape-detection scope.
+  if (containsSecretShapedContent(resultPayload)) return null;
   const rawHistory = value["history"];
   if (!Array.isArray(rawHistory)) return null;
   const history: PublicationHistoryEntry[] = [];

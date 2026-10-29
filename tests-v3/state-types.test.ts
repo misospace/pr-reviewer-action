@@ -316,12 +316,85 @@ test("publication payload is required, bounded, and control-char-free", () => {
     validatePublication({ ...validPublication(), resultPayload: "```forge\u0000```" }),
     null,
   );
+  const capPayload = JSON.stringify({ note: "x".repeat(PUBLICATION_PAYLOAD_MAX_CHARS - 11) });
   const atCap = validatePublication({
     ...validPublication(),
-    resultPayload: "x".repeat(PUBLICATION_PAYLOAD_MAX_CHARS),
+    resultPayload: capPayload,
   });
   assert.ok(atCap !== null);
   assert.equal(atCap!.resultPayload.length, PUBLICATION_PAYLOAD_MAX_CHARS);
+});
+
+test("publication payload boundary refuses secret-shaped content (fail closed)", () => {
+  // The payload is replayed verbatim to the forge on restart, so a
+  // credential shape in it would be both PERSISTED and PUBLISHED. The
+  // upstream render pipeline redacts first; the validator refuses (never
+  // normalizes) when content that is not secret-free reaches the durable
+  // boundary — each case below is a shape the shared redactor masks.
+  const secretPayloads: readonly string[] = [
+    // GitHub token shapes (flat masker inside a string leaf)
+    '{"verdict":"approved","note":"token ghp_AbcdEfghIjklMnOpqrStuvwx012345"}',
+    '{"verdict":"approved","note":"Bearer abcdefghijklmnopqrstuvwx"}',
+    '{"verdict":"approved","note":"AKIAIOSFODNN7EXAMPLE"}',
+    '{"verdict":"approved","note":"sk-abcdef0123456789abcdef"}',
+    // Generic key=value assignment inside a string leaf
+    '{"note":"export DB_PASSWORD=hunter2hunter2"}',
+    '{"note":"password: hunter2hunter2"}',
+    '{"note":"api_key=supersecretvalue1"}',
+    // Quoted assignment quoted inside a prose leaf (line core on the leaf;
+    // the flat pass is structurally blind to it — the quote blocks the
+    // separator)
+    '{"note":"leaked: \\"password\\": \\"hunter2hunter2\\""}',
+  ];
+  for (const payload of secretPayloads) {
+    assert.equal(
+      validatePublication({ ...validPublication(), resultPayload: payload }),
+      null,
+      `expected refusal for ${payload}`,
+    );
+  }
+});
+
+test("publication payload must be the canonical JSON object the publisher replays", () => {
+  // "Canonical JSON encoding of the normalized review result" is a
+  // structural contract, not prose: a payload that is not a JSON object is
+  // malformed whatever it contains, and parseability is what makes the
+  // secret-shape check total (a non-JSON payload cannot route around it).
+  assert.equal(validatePublication({ ...validPublication(), resultPayload: "not json at all" }), null);
+  assert.equal(validatePublication({ ...validPublication(), resultPayload: "12345" }), null);
+  assert.equal(validatePublication({ ...validPublication(), resultPayload: '"just a string"' }), null);
+  assert.equal(validatePublication({ ...validPublication(), resultPayload: '["an","array"]' }), null);
+  assert.equal(validatePublication({ ...validPublication(), resultPayload: '{"verdict":"approved"' }), null);
+});
+
+test("publication payload boundary accepts already-redacted and reference content", () => {
+  // Idempotency (#252) at the boundary: a payload the upstream redactor
+  // already sanitized — including the redaction markers THEMSELVES — is
+  // secret-free by construction and must stay publishable; a reference
+  // value is a pointer to a secret, not the secret. The detector mirrors
+  // the producer's verdict-content sanitizer (key-name rule off), so
+  // legitimate verdict-content keys — including the
+  // `secret_handling_changes` classification category — and credential-
+  // named JSON keys (a render-layer schema concern) are never refused
+  // here, and the flat pass never runs across serialized-JSON structural
+  // boundaries.
+  const cleanPayloads: readonly string[] = [
+    '{"verdict":"approved"}',
+    '{"verdict":"approved","secret_handling_changes":"none found"}',
+    '{"secret_handling_changes":{"label":"clear","count":2}}',
+    '{"a":["token=",12345678901234]}',
+    '{"api_key":"supersecretvalue1"}',
+    '{"config":{"password":"[REDACTED]"}}',
+    '{"note":"the env file showed ⟦redacted:credential⟧"}',
+    '{"note":"bearer header was ⟦•⟧ in the log"}',
+    '{"config":{"password":"${DB_PASSWORD}"}}',
+    '{"config":{"api_key":"op://vault/item/field"}}',
+  ];
+  for (const payload of cleanPayloads) {
+    const record = validatePublication({ ...validPublication(), resultPayload: payload });
+    assert.ok(record !== null, `expected acceptance for ${payload}`);
+    assert.equal(record!.resultPayload, payload);
+  }
 });
 
 test("numeric fields fail closed beyond the safe integer range", () => {

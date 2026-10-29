@@ -919,6 +919,39 @@ export function containsKnownSecret(text: string, secrets: readonly (string | nu
   return false;
 }
 
+/** Secret-shape DETECTION for a candidate durable payload: true when the
+ * text carries any credential shape this module masks. Detection, not
+ * masking — the caller owns the policy (the durable-state validators refuse
+ * rather than normalize).
+ *
+ * The boundary contract is "the payload is a FIXED POINT of the sanitizer
+ * its producer was required to run": a JSON document is judged by re-applying
+ * exactly the verdict-content surface (`redactPrTextDeep` with
+ * `keyNames=false` — the same treatment the completion projection applies to
+ * verdict content, harness.ts) and comparing; anything the producer's
+ * sanitizer would have masked but did not is a detection. That keeps the
+ * detector marker-aware and idempotent (#252) — an already-sanitized payload
+ * compares equal and is NOT flagged — and keeps it from being STRICTER than
+ * the producer in ways that refuse legitimate schema content (e.g. the
+ * `secret_handling_changes` classification category is a verdict-content KEY;
+ * the values-only `keyNames=false` rule deliberately leaves keys alone). A
+ * credential-named JSON KEY is therefore the render layer's schema contract,
+ * not this boundary's. Non-JSON text gets the flat pass only (`redactText`);
+ * the flat pass is NEVER run on serialized JSON — its value run can spill
+ * across structural boundaries (`{"a":["token=",1234…]}`), the exact class
+ * the line-core docs call out below. Encoded (base64/hex) echoes of a
+ * secret are out of shape-detection scope: `containsKnownSecret` covers
+ * configured secrets where the secret list exists, not here. */
+export function containsSecretShapedContent(text: string): boolean {
+  if (text === "") return false;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return JSON.stringify(redactPrTextDeep(parsed, 0, false, false)) !== JSON.stringify(parsed);
+  } catch {
+    return redactText(text) !== text;
+  }
+}
+
 /** Structural counterpart to `redactText`, for a JSON-shaped PR-authored
  * body on its way into a persisted artifact (#1154). `redactText` applied to
  * serialized JSON misses the quoted-key form (`"api_key": "…"` — the quote

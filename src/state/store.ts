@@ -605,6 +605,11 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
           history,
           updatedAtMs: atMs,
         });
+        // Re-validation includes the stored payload under the CURRENT
+        // redactor rules: an attempt recorded against a payload a newer
+        // boundary would refuse fails closed here (the write is rejected,
+        // the stored record stays intact) rather than carrying a payload
+        // the publisher must not replay.
         if (next === null) {
           throw new Error("record-publication-attempt: next record failed validation");
         }
