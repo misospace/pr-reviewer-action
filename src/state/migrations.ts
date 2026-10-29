@@ -37,7 +37,10 @@ export interface ControlPlaneMigration {
  * shared operator database, and JSONB only for genuinely nested
  * bounded structures (publication history). No column anywhere holds
  * secret material: credentials live behind the #735 broker's opaque
- * references and never enter this schema.
+ * references and never enter this schema. The one content-bearing
+ * column, `cp_publications.result_payload`, is the durable review
+ * result the publisher replays (secret-redacted render output, bounded
+ * by the validator) — data to be written, never a credential.
  */
 const MIGRATION_1_STATEMENTS: readonly string[] = [
   `CREATE TABLE cp_installations (
@@ -97,6 +100,7 @@ const MIGRATION_1_STATEMENTS: readonly string[] = [
   attempt bigint NOT NULL,
   last_error text NOT NULL,
   result_head_sha text NOT NULL,
+  result_payload text NOT NULL,
   history jsonb NOT NULL,
   created_at_ms bigint NOT NULL,
   updated_at_ms bigint NOT NULL

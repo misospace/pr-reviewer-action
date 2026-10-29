@@ -1,12 +1,14 @@
 /** PostgreSQL backend conformance (#736).
  *
  * The SAME scenario battery the in-memory backend passes, run against
- * the production backend when a disposable database is available:
+ * the production backend whenever a disposable database is available:
  * set `PR_REVIEWER_TEST_PG_DSN` (e.g.
  * `postgres://user:pass@localhost:5432/pr_reviewer_test`) to enable.
- * Without it the battery SKIPS — that skip is the documented CI state,
- * not a pass: the PostgreSQL path needs a real server for its
- * transaction/concurrency semantics.
+ * CI provisions a disposable PostgreSQL service container for the
+ * `validate-typescript` job and sets the DSN, so the transaction and
+ * race semantics run in CI. Without a DSN the battery SKIPS — that
+ * skip is the LOCAL state, not a pass: the PostgreSQL path needs a
+ * real server for its transaction/concurrency semantics.
  *
  * The suite TRUNCATES every `cp_` table before the battery: the DSN
  * must point at a disposable database, never at operator state.
@@ -77,6 +79,7 @@ function makePublication(jobId: string, overrides: Partial<PublicationRecord> = 
     attempt: 0,
     lastError: "",
     resultHeadSha: "",
+    resultPayload: '{"verdict":"approved"}',
     history: [],
     createdAtMs: T0,
     updatedAtMs: T0,
@@ -142,6 +145,32 @@ async function runConformanceBattery(
     await hooks.beforeEach?.();
     const store = await makeStore();
     await store.apply([
+      {
+        kind: "put-installation",
+        record: {
+          installationId: "123",
+          platform: "github",
+          profileName: "default",
+          accountLogin: "octo-org",
+          configRef: "instance-config:rev-7",
+          createdAtMs: T0,
+          updatedAtMs: T0,
+        },
+      },
+      {
+        kind: "put-adopted-repository",
+        record: {
+          platform: "github",
+          installationId: "123",
+          repoFullName: "octo-org/repo",
+          adoptionEpoch: "epoch-1",
+          configFingerprint: "abcdef1234567890",
+          headFingerprint: "",
+          enabled: true,
+          adoptedAtMs: T0,
+          updatedAtMs: T0,
+        },
+      },
       { kind: "put-publication", record: makePublication("job-1") },
       { kind: "create-run", record: makeRun("run-1", "job-1") },
       { kind: "transition-run", runId: "run-1", from: "queued", to: "starting", nowMs: T0 + 10 },
@@ -152,6 +181,14 @@ async function runConformanceBattery(
     assert.equal((await store.getIdempotencyKey("evt-1"))!.binding, "job-1");
     assert.equal((await store.getPublication("job-1"))!.jobId, "job-1");
     assert.equal((await store.aggregateUsage()).totals.requestCount, 1);
+    // The text-column identity fields must read back EXACTLY on every
+    // backend (a numeric-looking id like "123" must not cross any
+    // number conversion on the way out of the database).
+    assert.equal((await store.getInstallation("123"))!.accountLogin, "octo-org");
+    assert.equal(
+      (await store.getAdoptedRepository("github", "123", "octo-org/repo"))!.repoFullName,
+      "octo-org/repo",
+    );
   });
 
   await testFn("conformance: batch atomicity rejects the whole batch on conflict", async () => {
@@ -479,7 +516,17 @@ pgTest("pg: conformance battery (same scenarios as the in-memory backend)", asyn
     await runControlPlaneMigrations(pool);
     await truncateAll(pool);
     const store = new PostgresControlPlaneStore(pool);
-    await runConformanceBattery(test, async () => store);
+    // Every scenario reuses the SAME ids (run-1, evt-1, job-1): the
+    // in-memory backend gets a fresh store per scenario, so the PG
+    // backend must get a fresh table state per scenario — otherwise
+    // scenario N inherits scenario N-1's rows and the battery measures
+    // nothing. (This hook existing but never being wired is exactly
+    // what made an unrun battery look green.)
+    await runConformanceBattery(test, async () => store, {
+      beforeEach: async () => {
+        await truncateAll(pool);
+      },
+    });
   } finally {
     await pool.end();
   }

@@ -49,6 +49,25 @@ jobs:
 
   validate-typescript:
     runs-on: ubuntu-latest
+    # Disposable PostgreSQL for the #736 control-plane conformance battery
+    # (tests-v3/state-postgres.test.ts): its transaction/CAS/race semantics
+    # are only exercised against a real server, so CI provides one instead
+    # of leaving the battery skipped. The battery TRUNCATES every cp_ table
+    # — this database is ephemeral to the job and holds nothing.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: pr_reviewer
+          POSTGRES_PASSWORD: pr_reviewer
+          POSTGRES_DB: pr_reviewer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pr_reviewer -d pr_reviewer_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,6 +80,8 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Validate v3 TypeScript runtime
+        env:
+          PR_REVIEWER_TEST_PG_DSN: postgres://pr_reviewer:pr_reviewer@localhost:5432/pr_reviewer_test
         run: |
           npm ci
           npm run typecheck

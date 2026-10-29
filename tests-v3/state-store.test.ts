@@ -47,6 +47,7 @@ function makePublication(jobId: string, overrides: Partial<PublicationRecord> = 
     attempt: 0,
     lastError: "",
     resultHeadSha: "",
+    resultPayload: '{"verdict":"approved"}',
     history: [],
     createdAtMs: T0,
     updatedAtMs: T0,
@@ -427,6 +428,9 @@ test("failed publication attempt records the error and state", async () => {
   assert.equal(publication.publicationState, "failed");
   assert.equal(publication.lastError, "forge 502");
   assert.equal(publication.attempt, 1);
+  // Retrying must never cost the durable payload: without it a retry
+  // could only mean rerunning the model.
+  assert.equal(publication.resultPayload, '{"verdict":"approved"}');
 });
 
 test("restart through export: full state survives identically", async () => {
@@ -473,6 +477,7 @@ test("restart through export: full state survives identically", async () => {
   assert.equal((await restarted.getRun("run-1"))!.state, "running");
   assert.equal((await restarted.getRun("run-1"))!.leaseOwner, "worker-a");
   assert.equal((await restarted.getIdempotencyKey("evt-1"))!.binding, "job-1");
+  assert.equal((await restarted.getPublication("job-1"))!.resultPayload, '{"verdict":"approved"}');
   assert.ok((await restarted.getAdoptedRepository("github", "123", "octo-org/repo")) !== null);
   assert.ok((await restarted.getInstallation("123")) !== null);
   assert.equal((await restarted.aggregateUsage()).totals.requestCount, 1);

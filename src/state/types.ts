@@ -76,6 +76,12 @@ const DETAIL_MAX_CHARS = 2000;
  * older entries are dropped first. */
 export const PUBLICATION_HISTORY_CAP = 32;
 
+/** Maximum length of a publication record's durable result payload.
+ * Bounded by the forge write it replays (a GitHub issue comment body is
+ * capped at 65536 characters), so a payload the publisher could never
+ * send is never persisted. */
+export const PUBLICATION_PAYLOAD_MAX_CHARS = 65536;
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null) return false;
   const proto = Object.getPrototypeOf(value);
@@ -94,17 +100,14 @@ function isBoolean(value: unknown): value is boolean {
   return typeof value === "boolean";
 }
 
-function isFiniteNonNegativeNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
-
-function isFiniteNonNegativeInteger(value: unknown): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isFinite(value) &&
-    Number.isInteger(value) &&
-    value >= 0
-  );
+/** Every persisted numeric field (epoch ms, counters, attempts) must
+ * be a safe integer ≥ 0. Every numeric column is BIGINT and the `pg`
+ * driver returns bigint/numeric as strings converted through `Number()`
+ * — a value beyond `Number.MAX_SAFE_INTEGER` rounds SILENTLY there, so
+ * the validator refuses it (and any non-integer) instead of persisting
+ * or adopting a value that cannot round-trip exactly. */
+function isSafeNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isPlatform(value: unknown): value is ControlPlanePlatform {
@@ -217,7 +220,7 @@ export function validateRunPatch(patch: RunPatchFields | undefined): RunPatchFie
 export function validatePublicationHistoryEntry(value: unknown): PublicationHistoryEntry | null {
   if (!isPlainObject(value)) return null;
   const atMs = value["atMs"];
-  if (!isFiniteNonNegativeNumber(atMs)) return null;
+  if (!isSafeNonNegativeInteger(atMs)) return null;
   const outcome = value["outcome"];
   if (outcome !== "attempt" && outcome !== "published" && outcome !== "failed") {
     return null;
@@ -282,9 +285,9 @@ export function validateInstallation(value: unknown): InstallationRecord | null 
   const configRef = optionalIdentifier(value["configRef"], 256);
   if (configRef === null) return null;
   const createdAtMs = value["createdAtMs"];
-  if (!isFiniteNonNegativeNumber(createdAtMs)) return null;
+  if (!isSafeNonNegativeInteger(createdAtMs)) return null;
   const updatedAtMs = value["updatedAtMs"];
-  if (!isFiniteNonNegativeNumber(updatedAtMs)) return null;
+  if (!isSafeNonNegativeInteger(updatedAtMs)) return null;
   const record: InstallationRecord = Object.freeze({
     installationId,
     platform,
@@ -342,9 +345,9 @@ export function validateAdoptedRepository(value: unknown): AdoptedRepositoryReco
   const enabled = value["enabled"];
   if (!isBoolean(enabled)) return null;
   const adoptedAtMs = value["adoptedAtMs"];
-  if (!isFiniteNonNegativeNumber(adoptedAtMs)) return null;
+  if (!isSafeNonNegativeInteger(adoptedAtMs)) return null;
   const updatedAtMs = value["updatedAtMs"];
-  if (!isFiniteNonNegativeNumber(updatedAtMs)) return null;
+  if (!isSafeNonNegativeInteger(updatedAtMs)) return null;
   const record: AdoptedRepositoryRecord = Object.freeze({
     platform,
     installationId,
@@ -420,7 +423,7 @@ export function validateRun(value: unknown): RunRecord | null {
   const executorIdentity = identifier(value["executorIdentity"], 128);
   if (executorIdentity === null) return null;
   const attempt = value["attempt"];
-  if (!isFiniteNonNegativeInteger(attempt)) return null;
+  if (!isSafeNonNegativeInteger(attempt)) return null;
   const headSha = shaOrEmpty(value["headSha"]);
   if (headSha === null) return null;
   const configFingerprint = fingerprintOrEmpty(value["configFingerprint"]);
@@ -428,7 +431,7 @@ export function validateRun(value: unknown): RunRecord | null {
   const leaseOwner = optionalIdentifier(value["leaseOwner"], 64);
   if (leaseOwner === null) return null;
   const leaseExpiresAtMs = value["leaseExpiresAtMs"];
-  if (!isFiniteNonNegativeNumber(leaseExpiresAtMs)) return null;
+  if (!isSafeNonNegativeInteger(leaseExpiresAtMs)) return null;
   const resultHeadSha = shaOrEmpty(value["resultHeadSha"]);
   if (resultHeadSha === null) return null;
   const failureReason = optionalIdentifier(value["failureReason"], REASON_MAX_CHARS);
@@ -436,13 +439,13 @@ export function validateRun(value: unknown): RunRecord | null {
   const supersededByJobId = optionalIdentifier(value["supersededByJobId"], 256);
   if (supersededByJobId === null) return null;
   const createdAtMs = value["createdAtMs"];
-  if (!isFiniteNonNegativeNumber(createdAtMs)) return null;
+  if (!isSafeNonNegativeInteger(createdAtMs)) return null;
   const updatedAtMs = value["updatedAtMs"];
-  if (!isFiniteNonNegativeNumber(updatedAtMs)) return null;
+  if (!isSafeNonNegativeInteger(updatedAtMs)) return null;
   const startedAtMs = value["startedAtMs"];
-  if (!isFiniteNonNegativeNumber(startedAtMs)) return null;
+  if (!isSafeNonNegativeInteger(startedAtMs)) return null;
   const finishedAtMs = value["finishedAtMs"];
-  if (!isFiniteNonNegativeNumber(finishedAtMs)) return null;
+  if (!isSafeNonNegativeInteger(finishedAtMs)) return null;
   const record: RunRecord = Object.freeze({
     runId,
     jobId,
@@ -533,9 +536,9 @@ export function validateIdempotencyKey(value: unknown): IdempotencyKeyRecord | n
   const binding = identifier(value["binding"], 256);
   if (binding === null) return null;
   const createdAtMs = value["createdAtMs"];
-  if (!isFiniteNonNegativeNumber(createdAtMs)) return null;
+  if (!isSafeNonNegativeInteger(createdAtMs)) return null;
   const expiresAtMs = value["expiresAtMs"];
-  if (!isFiniteNonNegativeNumber(expiresAtMs)) return null;
+  if (!isSafeNonNegativeInteger(expiresAtMs)) return null;
   const record: IdempotencyKeyRecord = Object.freeze({
     key,
     binding,
@@ -557,10 +560,11 @@ export interface PublicationHistoryEntry {
 
 /** One publication: the durable forge-write state that lets a
  * restarted controller RETRY the forge write without rerunning the
- * model. The record carries the forge destination reference and the
- * publication id once confirmed; the review result itself lives beside
- * it (the run's durable `resultHeadSha` and the executor's structured
- * result artifact). */
+ * model. The record carries the forge destination reference, the
+ * DURABLE result content itself (`resultPayload` — the publisher's
+ * canonical JSON encoding of the normalized review result; required,
+ * because metadata alone cannot be republished), and the publication
+ * id once confirmed. */
 export interface PublicationRecord {
   readonly jobId: string;
   readonly publicationState: "pending" | "published" | "failed";
@@ -575,6 +579,12 @@ export interface PublicationRecord {
   readonly lastError: string;
   /** The head the durable result belongs to (staleness anchor). */
   readonly resultHeadSha: string;
+  /** The durable content to write — canonical `JSON.stringify` of the
+   * normalized review result, so it is single-line and control-char
+   * free. Required non-empty: a publication record exists precisely to
+   * make the write resumable, and one without its payload could only
+   * be retried by rerunning the model. */
+  readonly resultPayload: string;
   /** Bounded retry history (oldest dropped first beyond the cap). */
   readonly history: readonly PublicationHistoryEntry[];
   readonly createdAtMs: number;
@@ -595,11 +605,13 @@ export function validatePublication(value: unknown): PublicationRecord | null {
   const publicationId = optionalIdentifier(value["publicationId"], 256);
   if (publicationId === null) return null;
   const attempt = value["attempt"];
-  if (!isFiniteNonNegativeInteger(attempt)) return null;
+  if (!isSafeNonNegativeInteger(attempt)) return null;
   const lastError = optionalIdentifier(value["lastError"], DETAIL_MAX_CHARS);
   if (lastError === null) return null;
   const resultHeadSha = shaOrEmpty(value["resultHeadSha"]);
   if (resultHeadSha === null) return null;
+  const resultPayload = identifier(value["resultPayload"], PUBLICATION_PAYLOAD_MAX_CHARS);
+  if (resultPayload === null) return null;
   const rawHistory = value["history"];
   if (!Array.isArray(rawHistory)) return null;
   const history: PublicationHistoryEntry[] = [];
@@ -609,9 +621,9 @@ export function validatePublication(value: unknown): PublicationRecord | null {
     history.push(entry);
   }
   const createdAtMs = value["createdAtMs"];
-  if (!isFiniteNonNegativeNumber(createdAtMs)) return null;
+  if (!isSafeNonNegativeInteger(createdAtMs)) return null;
   const updatedAtMs = value["updatedAtMs"];
-  if (!isFiniteNonNegativeNumber(updatedAtMs)) return null;
+  if (!isSafeNonNegativeInteger(updatedAtMs)) return null;
   // The cap is enforced by the validator too: a persisted record beyond
   // the cap is malformed (the writer, not the reader, drops oldest).
   if (history.length > PUBLICATION_HISTORY_CAP) return null;
@@ -623,6 +635,7 @@ export function validatePublication(value: unknown): PublicationRecord | null {
     attempt,
     lastError,
     resultHeadSha,
+    resultPayload,
     history: Object.freeze(history),
     createdAtMs,
     updatedAtMs,
@@ -674,22 +687,22 @@ export function validateUsage(value: unknown): UsageRecord | null {
   const role = value["role"];
   if (!isUsageRole(role)) return null;
   const requestCount = value["requestCount"];
-  if (!isFiniteNonNegativeInteger(requestCount) || requestCount < 1) return null;
+  if (!isSafeNonNegativeInteger(requestCount) || requestCount < 1) return null;
   const inputTokens = value["inputTokens"];
-  if (!isFiniteNonNegativeInteger(inputTokens)) return null;
+  if (!isSafeNonNegativeInteger(inputTokens)) return null;
   const cacheReadTokens = value["cacheReadTokens"];
-  if (!isFiniteNonNegativeInteger(cacheReadTokens)) return null;
+  if (!isSafeNonNegativeInteger(cacheReadTokens)) return null;
   const cacheWriteTokens = value["cacheWriteTokens"];
-  if (!isFiniteNonNegativeInteger(cacheWriteTokens)) return null;
+  if (!isSafeNonNegativeInteger(cacheWriteTokens)) return null;
   const outputTokens = value["outputTokens"];
-  if (!isFiniteNonNegativeInteger(outputTokens)) return null;
+  if (!isSafeNonNegativeInteger(outputTokens)) return null;
   const costMicros = value["costMicros"];
-  if (!isFiniteNonNegativeInteger(costMicros)) return null;
+  if (!isSafeNonNegativeInteger(costMicros)) return null;
   const costProvenance = value["costProvenance"];
   if (!isCostProvenance(costProvenance)) return null;
   if (costProvenance === "unknown" && costMicros !== 0) return null;
   const recordedAtMs = value["recordedAtMs"];
-  if (!isFiniteNonNegativeNumber(recordedAtMs)) return null;
+  if (!isSafeNonNegativeInteger(recordedAtMs)) return null;
   const record: UsageRecord = Object.freeze({
     usageId,
     runId,

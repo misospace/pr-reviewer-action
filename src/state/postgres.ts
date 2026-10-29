@@ -140,15 +140,20 @@ type QueryResultRow = Record<string, unknown>;
 
 function num(value: unknown): unknown {
   // `pg` hands bigint/numeric back as strings; convert for the
-  // validators, which refuse non-safe-integers (precision loss fails
-  // closed, never silently truncates).
-  if (typeof value === "string") return Number(value);
-  return value;
+  // validators. Only an EXACT round-trip is trusted: a bigint string
+  // outside Number's safe range would round into a DIFFERENT (safe)
+  // integer that the validators would then accept — silent corruption.
+  // Anything that does not round-trip exactly becomes NaN, which every
+  // validator refuses (precision loss fails closed, never silently).
+  if (typeof value !== "string") return value;
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && String(parsed) === value) return parsed;
+  return Number.NaN;
 }
 
 function mapInstallation(row: QueryResultRow): InstallationRecord {
   const record = validateInstallation({
-    installationId: num(row["installation_id"]),
+    installationId: row["installation_id"],
     platform: row["platform"],
     profileName: row["profile_name"],
     accountLogin: row["account_login"],
@@ -165,7 +170,7 @@ function mapInstallation(row: QueryResultRow): InstallationRecord {
 function mapAdoptedRepository(row: QueryResultRow): AdoptedRepositoryRecord {
   const record = validateAdoptedRepository({
     platform: row["platform"],
-    installationId: num(row["installation_id"]),
+    installationId: row["installation_id"],
     repoFullName: row["repo_full_name"],
     adoptionEpoch: row["adoption_epoch"],
     configFingerprint: row["config_fingerprint"],
@@ -228,6 +233,7 @@ function mapPublication(row: QueryResultRow): PublicationRecord {
     attempt: num(row["attempt"]),
     lastError: row["last_error"],
     resultHeadSha: row["result_head_sha"],
+    resultPayload: row["result_payload"],
     history: row["history"],
     createdAtMs: num(row["created_at_ms"]),
     updatedAtMs: num(row["updated_at_ms"]),
@@ -530,8 +536,8 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
         }
         await client.query(
           `INSERT INTO cp_publications
-             (job_id, publication_state, destination, publication_id, attempt, last_error, result_head_sha, history, created_at_ms, updated_at_ms)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+             (job_id, publication_state, destination, publication_id, attempt, last_error, result_head_sha, result_payload, history, created_at_ms, updated_at_ms)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
            ON CONFLICT (job_id) DO UPDATE SET
              publication_state = EXCLUDED.publication_state,
              destination = EXCLUDED.destination,
@@ -539,6 +545,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
              attempt = EXCLUDED.attempt,
              last_error = EXCLUDED.last_error,
              result_head_sha = EXCLUDED.result_head_sha,
+             result_payload = EXCLUDED.result_payload,
              history = EXCLUDED.history,
              updated_at_ms = EXCLUDED.updated_at_ms`,
           [
@@ -549,6 +556,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
             record.attempt,
             record.lastError,
             record.resultHeadSha,
+            record.resultPayload,
             JSON.stringify(record.history),
             record.createdAtMs,
             record.updatedAtMs,

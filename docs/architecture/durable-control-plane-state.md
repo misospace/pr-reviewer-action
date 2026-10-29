@@ -28,7 +28,7 @@ validators are the one definition of a valid record for EVERY backend.
 | `AdoptedRepositoryRecord` | adopted repositories (#727): identity triple, adoption epoch, config fingerprint, head fingerprint, enabled |
 | `RunRecord` | run state mirroring the #731 lifecycle (same 8 states, same transition table via `canTransition`), executor identity, worker lease/heartbeat, head/config fingerprints, result head SHA, lifecycle timestamps |
 | `IdempotencyKeyRecord` | webhook/poll/manual convergence and redelivery protection (binding + expiry) |
-| `PublicationRecord` | forge-write state: destination reference, publication id, retry attempt + bounded 32-entry history — publication retries WITHOUT rerunning the model |
+| `PublicationRecord` | forge-write state: destination reference, publication id, the REQUIRED durable `resultPayload` (canonical JSON of the normalized review result, bounded at the forge comment cap) so a retry replays the write WITHOUT rerunning the model, retry attempt + bounded 32-entry history |
 | `UsageRecord` | normalized usage per (route, role): request counts, input/cache-read/cache-write/output tokens, cost in micros + provenance |
 
 **Never persisted** (normative, enforced structurally — a test scans
@@ -130,9 +130,11 @@ planner and fails closed: an applied version unknown to this build
 history) both refuse to run.
 
 The PostgreSQL backend stores epoch-ms integers end to end and
-converts the driver's string-typed bigints through the validators, so
-precision loss fails closed instead of corrupting state. Publication
-history is the only nested structure (JSONB, bounded by the validator).
+converts the driver's string-typed bigints through the validators —
+every numeric validator requires a safe integer, so a value beyond
+`Number.MAX_SAFE_INTEGER` (which `Number()` would round silently)
+fails closed instead of corrupting state. Publication history is the
+only nested structure (JSONB, bounded by the validator).
 
 ## Lifecycle recovery (with #731)
 
@@ -154,11 +156,12 @@ counting.
   always (in-memory backend + pure layers + migration planner +
   schema/DDL secret scan).
 - `tests-v3/state-postgres.test.ts` runs the same conformance battery
-  against PostgreSQL ONLY when `PR_REVIEWER_TEST_PG_DSN` is set (it
-  must point at a disposable database — the suite truncates the `cp_`
-  tables); otherwise those tests SKIP, which is a documented pending
-  verification, not a pass. Wiring a disposable PostgreSQL service into
-  CI is the follow-up that turns the skip into coverage.
+  against PostgreSQL whenever `PR_REVIEWER_TEST_PG_DSN` is set (it must
+  point at a disposable database — the suite truncates the `cp_`
+  tables). The CI `validate-typescript` job provisions a disposable
+  PostgreSQL service container and sets the DSN, so the transaction,
+  CAS, and race semantics run in CI; without a DSN (plain local runs)
+  those tests SKIP — a local convenience, never a pass.
 
 ## Out of scope
 

@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 
 import {
   PUBLICATION_HISTORY_CAP,
+  PUBLICATION_PAYLOAD_MAX_CHARS,
   newRunRecord,
   validateAdoptedRepository,
   validateIdempotencyKey,
@@ -81,6 +82,7 @@ function validPublication(): Record<string, unknown> {
     attempt: 0,
     lastError: "",
     resultHeadSha: "",
+    resultPayload: '{"verdict":"approved"}',
     history: [],
     createdAtMs: 1000,
     updatedAtMs: 1000,
@@ -294,6 +296,56 @@ test("publication validator rejects malformed fields", () => {
     }),
     null,
   );
+});
+
+test("publication payload is required, bounded, and control-char-free", () => {
+  // The payload is what makes a restart-resume possible WITHOUT
+  // rerunning the model — an empty or smuggled delimiter payload is a
+  // record that cannot be honestly retried.
+  assert.equal(validatePublication({ ...validPublication(), resultPayload: "" }), null);
+  assert.equal(validatePublication({ ...validPublication(), resultPayload: undefined }), null);
+  assert.equal(
+    validatePublication({ ...validPublication(), resultPayload: "x".repeat(PUBLICATION_PAYLOAD_MAX_CHARS + 1) }),
+    null,
+  );
+  assert.equal(
+    validatePublication({ ...validPublication(), resultPayload: "line1\nline2" }),
+    null,
+  );
+  assert.equal(
+    validatePublication({ ...validPublication(), resultPayload: "```forge\u0000```" }),
+    null,
+  );
+  const atCap = validatePublication({
+    ...validPublication(),
+    resultPayload: "x".repeat(PUBLICATION_PAYLOAD_MAX_CHARS),
+  });
+  assert.ok(atCap !== null);
+  assert.equal(atCap!.resultPayload.length, PUBLICATION_PAYLOAD_MAX_CHARS);
+});
+
+test("numeric fields fail closed beyond the safe integer range", () => {
+  // Every numeric column is BIGINT and the pg driver crosses bigint
+  // strings through Number(): anything outside the safe integer domain
+  // would round SILENTLY, so the validator must refuse it instead.
+  const unsafe = Number.MAX_SAFE_INTEGER + 2;
+  assert.equal(validatePublication({ ...validPublication(), attempt: unsafe }), null);
+  assert.equal(validatePublication({ ...validPublication(), attempt: 1e30 }), null);
+  assert.equal(validatePublication({ ...validPublication(), createdAtMs: unsafe }), null);
+  assert.equal(validatePublication({ ...validPublication(), updatedAtMs: 1500.5 }), null);
+  assert.equal(validateUsage({ ...validUsage(), inputTokens: unsafe }), null);
+  assert.equal(validateUsage({ ...validUsage(), costMicros: 1e30 }), null);
+  assert.equal(validateUsage({ ...validUsage(), recordedAtMs: unsafe }), null);
+  assert.equal(validateIdempotencyKey({ ...validIdempotencyKey(), expiresAtMs: unsafe }), null);
+  assert.equal(validateInstallation({ ...validInstallation(), createdAtMs: unsafe }), null);
+  assert.equal(
+    validateAdoptedRepository({ ...validAdoptedRepository(), adoptedAtMs: 1000.25 }),
+    null,
+  );
+  assert.equal(validateRun({ ...validRun(), attempt: unsafe }), null);
+  assert.equal(validateRun({ ...validRun(), leaseExpiresAtMs: unsafe }), null);
+  const maxSafe = validateUsage({ ...validUsage(), inputTokens: Number.MAX_SAFE_INTEGER });
+  assert.ok(maxSafe !== null, "the safe-integer boundary itself stays valid");
 });
 
 test("usage validator accepts and rebuilds", () => {

@@ -25,6 +25,7 @@ export type {
 } from "./types.js";
 export {
   PUBLICATION_HISTORY_CAP,
+  PUBLICATION_PAYLOAD_MAX_CHARS,
   newRunRecord,
   validateAdoptedRepository,
   validateIdempotencyKey,
