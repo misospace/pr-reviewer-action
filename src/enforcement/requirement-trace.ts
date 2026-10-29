@@ -29,7 +29,12 @@
  * AND test-path-classified test citation, and a predicate involving one of
  * the requirement's derived key terms at (or near) the enforcement
  * location — see `extractRequirementTerms`/`enforcementPredicateFound`
- * below for the exact heuristic and its documented limits. `not_applicable`,
+ * below for the exact heuristic and its documented limits. #1343: the
+ * lexical half is dropped where the subject is established by declaration
+ * instead — a citation into a base-ref-trusted declared owner of the
+ * requirement (repository config) needs only a real predicate, on the cited
+ * line itself, and every distributed seam citation is owner-anchored by
+ * construction. `not_applicable`,
  * `unmet`, and an explicit `unverifiable` each require a non-empty, bounded
  * `reason`; a missing one downgrades to `unverifiable`. Any downgrade or
  * missing trace marks the requirement `unverifiable`, and a well-formed
@@ -246,6 +251,18 @@ function anyTestLocationValid(locations: readonly TraceLocation[], cache: FileTe
 // coincidentally near unrelated comparison syntax could pass. It is
 // deliberately permissive when the requirement text yields no usable terms
 // at all (documented below) rather than fail every odd phrasing closed.
+//
+// #1343: for prose standards the derived terms are generic words the
+// enforcing code never spells, so the lexical half alone made the gate
+// unsatisfiable-by-construction for a reviewer citing the real enforcement.
+// Where the subject is established by declaration — a citation into a
+// base-ref-trusted declared owner of the requirement (repository config,
+// `enforcementPredicateSatisfied`), or any distributed seam citation, whose
+// group owner globs come from the same trusted config — the predicate
+// requirement is kept and only the lexical co-occurrence is dropped. The
+// owner-anchored predicate must sit ON the cited line (the lexical half was
+// what bounded which line could qualify there); every other citation still
+// needs the term and the predicate on the same line.
 // ---------------------------------------------------------------------------
 
 const PREDICATE_WINDOW_RADIUS = 3;
@@ -342,6 +359,22 @@ function predicateSignalFound(locations: readonly TraceLocation[], cache: FileTe
   return false;
 }
 
+/** #1343: true when a predicate-shaped line occurs ON the cited line itself
+ * — not merely within a window around it. The owner-anchored exception drops
+ * the lexical subject check, so the predicate is the whole anti-copy core
+ * there: a copy-only cited line standing next to an unrelated comparison
+ * must not pass, which is exactly the case the issue's acceptance
+ * criterion ("a real predicate on the cited line") rules out. */
+function citedLinePredicateFound(locations: readonly TraceLocation[], cache: FileTextCache): boolean {
+  for (const loc of locations) {
+    const lines = cache.lines(loc.file);
+    if (lines === null || loc.line < 1 || loc.line > lines.length) continue;
+    const line = lines[loc.line - 1];
+    if (line !== undefined && linePredicateSignal(line)) return true;
+  }
+  return false;
+}
+
 /**
  * True when at least one of the given (already location-valid) enforcement
  * locations has a term from `terms` and a predicate signal on the SAME
@@ -373,6 +406,46 @@ export function enforcementPredicateFound(
     }
   }
   return false;
+}
+
+/** #1343: the declared owner globs for one requirement — the top-level
+ * `owners` of every rule whose `match` tokens all appear in its text. The
+ * rules come from the base-ref-trusted repository config (never the PR
+ * head), so "this file owns that requirement" is maintainer-declared, not
+ * inferred from the model's citation. Deduplicated; bounded by the config's
+ * own rule/owner caps. */
+function declaredOwnerGlobsFor(text: string, ownership: readonly RequirementOwnership[] | undefined): string[] {
+  const globs: string[] = [];
+  for (const rule of ownership ?? []) {
+    if (!rule || !ruleMatchesRequirement(rule, text) || !Array.isArray(rule.owners)) continue;
+    for (const pattern of rule.owners) {
+      if (typeof pattern === "string" && pattern !== "" && !globs.includes(pattern)) globs.push(pattern);
+    }
+  }
+  return globs;
+}
+
+/** #1343: the `met` predicate gate for a narrow requirement's enforcement
+ * citations. A location-valid citation into a declared owner of this
+ * requirement proves the subject by declaration, so the lexical term
+ * co-occurrence is dropped there while the predicate requirement is kept:
+ * the CITED LINE itself must be predicate-shaped (a copy-only cited line
+ * beside an unrelated predicate does not pass — the predicate is the whole
+ * anti-copy core once the lexical half is gone). A citation that is neither a
+ * declared owner nor carries the requirement's vocabulary still fails, so
+ * the boundary does not become fail-open; the lexical check is unchanged for
+ * every other shape (including the documented empty-terms skip). */
+function enforcementPredicateSatisfied(
+  validLocations: readonly TraceLocation[],
+  terms: readonly string[],
+  ownerGlobs: readonly string[],
+  cache: FileTextCache,
+): boolean {
+  if (ownerGlobs.length > 0) {
+    const ownerCitations = validLocations.filter((loc) => citationMatchesPatterns(loc, ownerGlobs));
+    if (ownerCitations.length > 0 && citedLinePredicateFound(ownerCitations, cache)) return true;
+  }
+  return enforcementPredicateFound(validLocations, terms, cache);
 }
 
 // ---------------------------------------------------------------------------
@@ -1891,12 +1964,15 @@ export function validateRequirementTrace(
           if (uncoveredEnforcement.length > 0 || distributedGroups.some((group) => !testMatches.has(group.name)) || validTests.length === 0) {
             disposition = "unverifiable";
           } else {
-            const terms = extractRequirementTerms(entry.text);
+            // #1343: every matched citation is already anchored to a trusted
+            // declared seam surface (the group owner globs from base-ref
+            // config), so the subject is established by declaration and the
+            // lexical term co-occurrence is dropped — the predicate alone
+            // carries anti-copy. A seam matched only by value-copying lines
+            // still fails (predicate required), and citations outside every
+            // declared seam never count toward coverage at all.
             const matchedLocations = [...enforcementMatches.values()];
-            const predicateFound = terms.length === 0
-              ? predicateSignalFound(matchedLocations, cache)
-              : enforcementPredicateFound(matchedLocations, terms, cache);
-            if (!predicateFound) {
+            if (!predicateSignalFound(matchedLocations, cache)) {
               disposition = "unverifiable";
               notes.push("enforcement-location-copies-without-comparing");
             }
@@ -1937,7 +2013,8 @@ export function validateRequirementTrace(
             if (disposition === "met") {
               const terms = extractRequirementTerms(entry.text, symbol);
               const validEnforcementLocations = enforcement.filter((loc) => locationValid(loc, cache));
-              if (!enforcementPredicateFound(validEnforcementLocations, terms, cache)) {
+              const ownerGlobs = declaredOwnerGlobsFor(entry.text, context.ownership);
+              if (!enforcementPredicateSatisfied(validEnforcementLocations, terms, ownerGlobs, cache)) {
                 disposition = "unverifiable";
                 notes.push("enforcement-location-copies-without-comparing");
               }

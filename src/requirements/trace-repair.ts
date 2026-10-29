@@ -80,9 +80,13 @@ export const TRACE_REPAIR_SYSTEM_PROMPT =
   + '"symbol":"optional identifier the enforcing code uses"}. `enforcement`/`test` are `{file, line}` '
   + "locations in the pull request head; `test` must point at an actual test or fixture file, never "
   + "production code. `met` requires BOTH a valid enforcement location and a valid test location, and the "
-  + "enforcement line must contain a real predicate — a comparison, guard, throw/assert, or match call — "
-  + "not just an assignment or object-literal property that copies the value (naming the field is not "
-  + "enforcing it). `not_applicable`, `unmet`, and `unverifiable` all require a `reason`. A `met` claim for a requirement listed as distributed must cite one enforcement location and one matching test in each named seam. Return strict "
+  + "enforcement must be a real predicate — a comparison, guard, throw/assert, or match call — not just an "
+  + "assignment or object-literal property that copies the value (naming the field is not enforcing it). "
+  + "The predicate's line must also carry a word from the requirement's own wording (or the `symbol`) — "
+  + "unless the cited file is a declared owner of the requirement in the repository's "
+  + "`.github/pr-reviewer-owners.yml`, in which case the predicate must sit on the cited line itself and "
+  + "the requirement's wording is not needed. "
+  + "`not_applicable`, `unmet`, and `unverifiable` all require a `reason`. A `met` claim for a requirement listed as distributed must cite one enforcement location and one matching test in each named seam; a real predicate in a cited seam is enough there — no word from the requirement's wording is needed. Return strict "
   + 'JSON only — no prose, no markdown, no code fences: {"requirement_coverage":[ ... ]}.';
 
 function fitUtf8(text: string, maxBytes: number): [string, boolean] {

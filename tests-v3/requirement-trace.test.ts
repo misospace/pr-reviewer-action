@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
@@ -41,7 +41,7 @@ PENDING_DISPOSITION,
   type RequirementOwnership,
   type RequirementTraceArtifact,
 } from "../src/enforcement/requirement-trace.js";
-import { buildTraceRepairUserMessage, normalizeTraceRepairPayload, runRequirementTraceRepairPass, traceRepairOutcomeSummary, type TraceRepairPassResult } from "../src/requirements/trace-repair.js";
+import { buildTraceRepairUserMessage, normalizeTraceRepairPayload, runRequirementTraceRepairPass, traceRepairOutcomeSummary, TRACE_REPAIR_SYSTEM_PROMPT, type TraceRepairPassResult } from "../src/requirements/trace-repair.js";
 import { workspacePathHasSymlinkComponent } from "../src/context/workspace-path.js";
 
 function artifact(overrides: Record<string, unknown> = {}): ReviewArtifact {
@@ -232,6 +232,209 @@ test("#854 reproduction: met citing a line that exists and copies the value with
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
+});
+
+test("#1343: a met citation into a declared owner with a real predicate needs no lexical term match", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The requirement's derived terms ("quux", "bandwidth", "stay", "below",
+    // "negotiated", "ceiling", …) appear NOWHERE in the enforcing file, so
+    // only the base-ref-trusted ownership declaration can anchor the
+    // citation. The predicate requirement is kept: the CITED line (line 2)
+    // is itself a real comparison guard.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export function applyGate(state) {",
+      "  if (state.requested > state.current) {",
+      "    throw new Error('rejected');",
+      "  }",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" }]);
+    const claim = metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: 2 }], [VALID_TEST_LOCATION]);
+    const ownership: RequirementOwnership[] = [{ match: ["quux", "bandwidth"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace([claim], ledger, workspace, undefined, { ownership });
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.deepEqual(trace.rows[0]?.notes, []);
+    assert.equal(trace.incomplete, false);
+
+    // Control: the identical claim without the ownership declaration is
+    // still downgraded — the declaration, not the predicate alone, did the
+    // work, so the gate did not become fail-open.
+    const withoutDeclaration = validateRequirementTrace([claim], ledger, workspace);
+    assertUnverifiableWithNotes(withoutDeclaration, "req-quux", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: a declared-owner citation still needs a real predicate on the cited line", () => {
+  const workspace = makeWorkspace();
+  try {
+    // Owner-anchored, but the cited line (and its whole window) only copies
+    // a value — no predicate shape at all — so the row is downgraded even
+    // though the lexical half would match ("ceiling" is on the line). The
+    // declaration replaces the subject check, never the predicate check.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export const applied = { ceiling: state.requested, };",
+    ]);
+    const ledger = ledgerWith([{ id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" }]);
+    const ownership: RequirementOwnership[] = [{ match: ["quux", "bandwidth"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: 1 }], [VALID_TEST_LOCATION])],
+      ledger,
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assertUnverifiableWithNotes(trace, "req-quux", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: an owner-anchored citation does not borrow a neighbouring line's predicate", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The cited line copies a value; the predicate lives on a neighbouring
+    // line of the same (declared owner) file. Owner-anchored rows drop the
+    // lexical subject half, so the predicate is the whole anti-copy core
+    // there and must sit ON the cited line — the issue's acceptance
+    // criterion ("a real predicate on the cited line") and the disclosed
+    // rule both say so. A window around the citation would let a copy-only
+    // cited line pass by borrowing an unrelated comparison; the legacy
+    // lexical half cannot rescue it either, because no line in the window
+    // carries both a requirement term and the predicate.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export const applied = { ceiling: state.requested, };",
+      "export function applyGate(state) {",
+      "  if (state.requested > state.current) {",
+      "    throw new Error('rejected');",
+      "  }",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" }]);
+    const ownership: RequirementOwnership[] = [{ match: ["quux", "bandwidth"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: 1 }], [VALID_TEST_LOCATION])],
+      ledger,
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assertUnverifiableWithNotes(trace, "req-quux", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: an owner rule whose match tokens do not appear in the requirement text does not anchor", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The glob points at the same predicate-bearing file as the accepted
+    // case, but this rule's tokens are absent from the requirement text, so
+    // it declares ownership of some OTHER requirement — reusing it here must
+    // not anchor the citation.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export function applyGate(state) {",
+      "  if (state.requested > state.current) {",
+      "    throw new Error('rejected');",
+      "  }",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" }]);
+    const ownership: RequirementOwnership[] = [{ match: ["unrelated", "boundary"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: 2 }], [VALID_TEST_LOCATION])],
+      ledger,
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assertUnverifiableWithNotes(trace, "req-quux", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: a rule's token association is shared — every requirement carrying all its tokens is anchored", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The slug-token association is deliberately shared (#958 scope, #962
+    // topology, and now this gate all use it): one rule anchors EVERY
+    // requirement whose text contains all of its tokens. Here a second
+    // requirement shares both tokens with the rule and shares no vocabulary
+    // with the enforcing file, so the declaration alone anchors it — pinned
+    // so the semantics are explicit and the config-authoring consequence
+    // (choose distinctive tokens) is on the record.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export function applyGate(state) {",
+      "  if (state.requested > state.current) {",
+      "    throw new Error('rejected');",
+      "  }",
+      "}",
+    ]);
+    const ledger = ledgerWith([
+      { id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" },
+      { id: "req-quux-metering", text: "Quux bandwidth metering must never be disabled in production.", kind: "normative" },
+    ]);
+    const ownership: RequirementOwnership[] = [{ match: ["quux", "bandwidth"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-quux-metering", [{ file: "src/boundary/gate.ts", line: 2 }], [VALID_TEST_LOCATION])],
+      ledger,
+      workspace,
+      undefined,
+      { ownership },
+    );
+    const row = trace.rows.find((candidate) => candidate.requirement_id === "req-quux-metering");
+    assert.equal(row?.disposition, "met");
+    assert.deepEqual(row?.notes, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: an all-stopword requirement keeps the documented empty-terms skip, declaration or not", () => {
+  const workspace = makeWorkspace();
+  try {
+    // Term extraction yields nothing usable, so the pre-existing documented
+    // skip stands: location validity alone passes. The declaration is
+    // irrelevant here — this pins that #1343 did not silently remove the
+    // skip (nor make it stricter) on either side of the owner split.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export function applyGate(state) {",
+      "  return state.value;",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-stop", text: "The IT must the on.", kind: "normative" }]);
+    const ownership: RequirementOwnership[] = [{ match: ["must"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-stop", [{ file: "src/boundary/gate.ts", line: 1 }], [VALID_TEST_LOCATION])],
+      ledger,
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.deepEqual(trace.rows[0]?.notes, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: the citation rule is disclosed where the reviewer is asked for claims", () => {
+  // The validator's rule is only satisfiable-by-construction if the reviewer
+  // can see it: both claim-asking surfaces must state the lexical half, the
+  // declared-owner exception, AND the cited-line predicate the owner-anchored
+  // path enforces (the disclosed rule and the enforced rule must agree).
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /carry a word from the requirement's own wording/);
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /declared owner/);
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /pr-reviewer-owners\.yml/);
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /the predicate must sit on the cited line itself/);
+  const fragment = readFileSync("scripts/prompt_fragments/requirement_trace.txt", "utf8");
+  assert.match(fragment, /carrying a word from the requirement's own wording/);
+  assert.match(fragment, /declared owner/);
+  assert.match(fragment, /pr-reviewer-owners\.yml/);
+  assert.match(fragment, /the cited line itself must carry the predicate/);
 });
 
 /**
@@ -1882,9 +2085,21 @@ test("#962.6: an off-seam predicate cannot launder value copies across covered s
   }
 });
 
-test("#962.7: a model-supplied symbol cannot make copied seam values predicate evidence", () => {
+test("#962.7/#1343: a model-supplied symbol is irrelevant to a distributed row — the declared seam's own predicate decides", () => {
   const workspace = makeWorkspace();
   try {
+    // Pre-#1343 this fixture asserted `unverifiable`: the cited line 2 only
+    // copies a value, and the lexical half of the predicate gate demanded a
+    // requirement-derived term (or the symbol) next to the predicate line —
+    // vocabulary a prose standard's enforcing code never spells. #1343 drops
+    // the lexical co-occurrence for seam-anchored citations (every matched
+    // citation already points into a trusted declared seam), so the
+    // predicate alone decides. The predicate line deliberately does NOT
+    // carry the supplied symbol, so the pre-#1343 gate would still fail
+    // here: this test discriminates the two contracts, pinning that the
+    // symbol can change a distributed row's outcome neither way. The
+    // downgrade direction stays pinned by #962.6 (off-seam predicate) and
+    // #962.18 (no predicate inside the seams).
     const copyFiles = [
       "src/context/redact.ts",
       "src/render/fence-safe.ts",
@@ -1894,7 +2109,7 @@ test("#962.7: a model-supplied symbol cannot make copied seam values predicate e
       writeFile(workspace, file, [
         "export const record = {",
         "  opaqueValue: input.opaqueValue,",
-        "  if (opaqueValue !== expectedValue) throw new Error('mismatch');",
+        "  if (expectedValue !== guardValue) throw new Error('mismatch');",
       ]);
     }
     writeUntrustedTestFixtures(workspace);
@@ -1910,7 +2125,10 @@ test("#962.7: a model-supplied symbol cannot make copied seam values predicate e
       undefined,
       { ownership: UNTRUSTED_DISTRIBUTED_OWNERSHIP },
     );
-    assertUnverifiableWithNotes(trace, "req-untrusted", ["enforcement-location-copies-without-comparing"]);
+    const row = trace.rows.find((candidate) => candidate.requirement_id === "req-untrusted");
+    assert.equal(row?.disposition, "met");
+    assert.deepEqual(row?.notes, []);
+    assert.equal(trace.incomplete, false);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
