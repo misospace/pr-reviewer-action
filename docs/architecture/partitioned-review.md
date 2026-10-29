@@ -186,5 +186,5 @@ may close #1026 without enabling the mode.
 ## Clean-room implementation
 
 The behavior was specified and implemented independently under the MIT
-license. No code, prompts, fixtures, or assets were copied from
-Kritika/Konflate.
+license. No external AGPL code, prompts, fixtures, or assets were copied
+into this project.
