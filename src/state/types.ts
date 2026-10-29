@@ -181,6 +181,22 @@ export function validateLeaseOwner(value: unknown): string | null {
   return identifier(value, 64);
 }
 
+/** The claim/heartbeat clock rule: `nowMs` and `ttlMs` must be safe
+ * integers (`ttlMs` positive) whose SUM stays a safe integer. A
+ * finite-but-unsafe pair would write a lease/expiry the record
+ * validator refuses on EVERY later read — a poisoned, permanently
+ * unreadable run — so the write boundary refuses it instead. */
+export function validateLeaseWindow(
+  nowMs: unknown,
+  ttlMs: unknown,
+): { readonly nowMs: number; readonly leaseExpiresAtMs: number } | null {
+  if (!isSafeNonNegativeInteger(nowMs)) return null;
+  if (!isSafeNonNegativeInteger(ttlMs) || ttlMs <= 0) return null;
+  const leaseExpiresAtMs = nowMs + ttlMs;
+  if (!Number.isSafeInteger(leaseExpiresAtMs)) return null;
+  return { nowMs, leaseExpiresAtMs };
+}
+
 /** The patch fields a run transition may carry, rebuilt to ONLY the
  * present keys (a `null`/`undefined` field means "carry over").
  * Returns null when any PRESENT field violates its record rule — the

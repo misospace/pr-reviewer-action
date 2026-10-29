@@ -49,6 +49,7 @@ import {
   validateRunPatch,
   validateUsage,
   validateLeaseOwner,
+  validateLeaseWindow,
   type AdoptedRepositoryRecord,
   type IdempotencyKeyRecord,
   type InstallationRecord,
@@ -639,11 +640,11 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
 
   /** Synchronous core of `claimRun` (single-record, trivially atomic). */
   private claimRunSync(runId: string, owner: string, nowMs: number, ttlMs: number): boolean {
-    if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) {
-      throw new RangeError(`claimRun: nowMs must be finite, got ${String(nowMs)}`);
-    }
-    if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs) || ttlMs <= 0) {
-      throw new RangeError(`claimRun: ttlMs must be a finite positive number, got ${String(ttlMs)}`);
+    const window = validateLeaseWindow(nowMs, ttlMs);
+    if (window === null) {
+      throw new RangeError(
+        `claimRun: nowMs/ttlMs must be safe integers with a positive safe-integer sum, got nowMs=${String(nowMs)} ttlMs=${String(ttlMs)}`,
+      );
     }
     // Fail closed on an unleaseable owner: "" would "succeed" while
     // leaving the run unleased, and an over-long owner would write a
@@ -666,8 +667,8 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
     const claimed: RunRecord = Object.freeze({
       ...current,
       leaseOwner: owner,
-      leaseExpiresAtMs: nowMs + ttlMs,
-      updatedAtMs: nowMs,
+      leaseExpiresAtMs: window.leaseExpiresAtMs,
+      updatedAtMs: window.nowMs,
     });
     this.tables.runs.set(runId, claimed);
     return true;
@@ -680,12 +681,10 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
   /** Synchronous core of `heartbeatRun` (single-record, trivially
    * atomic). */
   private heartbeatRunSync(runId: string, owner: string, nowMs: number, ttlMs: number): boolean {
-    if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) {
-      throw new RangeError(`heartbeatRun: nowMs must be finite, got ${String(nowMs)}`);
-    }
-    if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+    const window = validateLeaseWindow(nowMs, ttlMs);
+    if (window === null) {
       throw new RangeError(
-        `heartbeatRun: ttlMs must be a finite positive number, got ${String(ttlMs)}`,
+        `heartbeatRun: nowMs/ttlMs must be safe integers with a positive safe-integer sum, got nowMs=${String(nowMs)} ttlMs=${String(ttlMs)}`,
       );
     }
     if (validateLeaseOwner(owner) === null) {
@@ -697,8 +696,8 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
     if (!runLeaseIsLive(current, owner, nowMs)) return false;
     const renewed: RunRecord = Object.freeze({
       ...current,
-      leaseExpiresAtMs: nowMs + ttlMs,
-      updatedAtMs: nowMs,
+      leaseExpiresAtMs: window.leaseExpiresAtMs,
+      updatedAtMs: window.nowMs,
     });
     this.tables.runs.set(runId, renewed);
     return true;

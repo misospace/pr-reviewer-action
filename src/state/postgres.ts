@@ -61,6 +61,7 @@ import {
   validateRunPatch,
   validateUsage,
   validateLeaseOwner,
+  validateLeaseWindow,
   type AdoptedRepositoryRecord,
   type IdempotencyKeyRecord,
   type InstallationRecord,
@@ -149,6 +150,18 @@ function num(value: unknown): unknown {
   const parsed = Number(value);
   if (Number.isFinite(parsed) && String(parsed) === value) return parsed;
   return Number.NaN;
+}
+
+/** A numeric read that must be a safe integer even though it feeds a
+ * computation directly (expiry decisions, aggregates) instead of a
+ * validated record: the exact-round-trip conversion followed by a
+ * safe-integer refusal, so no read path rounds silently. */
+function safeCount(value: unknown): number {
+  const parsed = num(value);
+  if (typeof parsed !== "number" || !Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error("postgres backend: bigint value outside the safe integer range");
+  }
+  return parsed;
 }
 
 function mapInstallation(row: QueryResultRow): InstallationRecord {
@@ -512,7 +525,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
           existing.rowCount = raced.rowCount;
         }
         const storedBinding = String(existing.rows[0]!["binding"]);
-        const storedExpiry = Number(existing.rows[0]!["expires_at_ms"]);
+        const storedExpiry = safeCount(existing.rows[0]!["expires_at_ms"]);
         if (storedExpiry !== 0 && storedExpiry <= nowMs) {
           // Expired: replace the binding (an expired key may be
           // re-claimed by different work).
@@ -679,12 +692,10 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
     nowMs: number,
     ttlMs: number,
   ): Promise<boolean> {
-    if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) {
-      throw new RangeError(`claimRun: nowMs must be finite, got ${String(nowMs)}`);
-    }
-    if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+    const window = validateLeaseWindow(nowMs, ttlMs);
+    if (window === null) {
       throw new RangeError(
-        `claimRun: ttlMs must be a finite positive number, got ${String(ttlMs)}`,
+        `claimRun: nowMs/ttlMs must be safe integers with a positive safe-integer sum, got nowMs=${String(nowMs)} ttlMs=${String(ttlMs)}`,
       );
     }
     // Fail closed on an unleaseable owner ("" would "succeed" while
@@ -698,7 +709,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
        WHERE run_id = $1
          AND state NOT IN ${TERMINAL_STATES_SQL}
          AND (lease_owner = '' OR lease_owner = $2 OR lease_expires_at_ms <= $3)`,
-      [runId, owner, nowMs, nowMs + ttlMs],
+      [runId, owner, window.nowMs, window.leaseExpiresAtMs],
     );
     return (updated.rowCount ?? 0) === 1;
   }
@@ -709,14 +720,10 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
     nowMs: number,
     ttlMs: number,
   ): Promise<boolean> {
-    if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) {
+    const window = validateLeaseWindow(nowMs, ttlMs);
+    if (window === null) {
       throw new RangeError(
-        `heartbeatRun: nowMs must be finite, got ${String(nowMs)}`,
-      );
-    }
-    if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs) || ttlMs <= 0) {
-      throw new RangeError(
-        `heartbeatRun: ttlMs must be a finite positive number, got ${String(ttlMs)}`,
+        `heartbeatRun: nowMs/ttlMs must be safe integers with a positive safe-integer sum, got nowMs=${String(nowMs)} ttlMs=${String(ttlMs)}`,
       );
     }
     if (validateLeaseOwner(owner) === null) {
@@ -727,7 +734,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
       `UPDATE cp_runs SET lease_expires_at_ms = $4, updated_at_ms = $3
        WHERE run_id = $1 AND lease_owner = $2 AND lease_expires_at_ms > $3
          AND state NOT IN ${TERMINAL_STATES_SQL}`,
-      [runId, owner, nowMs, nowMs + ttlMs],
+      [runId, owner, window.nowMs, window.leaseExpiresAtMs],
     );
     return (updated.rowCount ?? 0) === 1;
   }
@@ -802,13 +809,17 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
     let totals: UsageAggregate["totals"] | null = null;
     for (const raw of result.rows) {
       const row = raw as QueryResultRow;
+      // sum() over an EMPTY group is NULL (the zero-row total row of
+      // GROUPING SETS); every present value must still be a safe
+      // integer.
+      const count = (value: unknown): number => (value === null ? 0 : safeCount(value));
       const bucket = {
-        requestCount: Number(row["request_count"]),
-        inputTokens: Number(row["input_tokens"]),
-        cacheReadTokens: Number(row["cache_read_tokens"]),
-        cacheWriteTokens: Number(row["cache_write_tokens"]),
-        outputTokens: Number(row["output_tokens"]),
-        costMicros: Number(row["cost_micros"]),
+        requestCount: count(row["request_count"]),
+        inputTokens: count(row["input_tokens"]),
+        cacheReadTokens: count(row["cache_read_tokens"]),
+        cacheWriteTokens: count(row["cache_write_tokens"]),
+        outputTokens: count(row["output_tokens"]),
+        costMicros: count(row["cost_micros"]),
       };
       const provenance = row["mixed_provenance"]
         ? ("mixed" as const)

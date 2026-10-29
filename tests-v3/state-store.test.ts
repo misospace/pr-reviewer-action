@@ -297,6 +297,15 @@ test("lease/heartbeat helpers fail closed on bad arguments", async () => {
   await assert.rejects(() => store.claimRun("run-1", "w", T0, -5), RangeError);
   await assert.rejects(() => store.heartbeatRun("run-1", "w", Number.NaN, 1000), RangeError);
   await assert.rejects(() => store.heartbeatRun("run-1", "w", T0, -1), RangeError);
+  // Finite-but-unsafe clocks are refused at the WRITE boundary too: a
+  // non-integer or beyond-safe-integer expiry would be a record every
+  // later read rejects — a permanently unreadable run.
+  await assert.rejects(() => store.claimRun("run-1", "w", T0, 1.5), RangeError);
+  await assert.rejects(
+    () => store.claimRun("run-1", "w", Number.MAX_SAFE_INTEGER, 10),
+    RangeError,
+  );
+  await assert.rejects(() => store.heartbeatRun("run-1", "w", T0 + 100.25, 1000), RangeError);
 });
 
 test("idempotency: same binding replays, different binding conflicts, expiry re-claims", async () => {
