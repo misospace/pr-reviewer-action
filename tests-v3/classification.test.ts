@@ -2371,12 +2371,12 @@ test("#1336: the sensitive-component vocabulary is closed — `certs` fires, `au
   assert.ok(!author.riskFlags.includes("dependency_security_sensitive"));
 });
 
-test("#1336: hostile PR metadata stays bounded data, never an instruction channel", () => {
+test("#1336: hostile PR metadata stays data, never an instruction channel", () => {
   // The forge-reported title is author-influenced text: untrusted data. A
-  // title that forges a heading, closes a fence, smuggles an ANSI escape and
-  // runs far past any sane length must change nothing — the classifier
-  // bounds and control-strips it, matches only closed vocabularies, and
-  // never renders it into the artifact it persists.
+  // title that forges a heading, closes a fence and smuggles an ANSI escape
+  // must change nothing — the classifier reads it only through closed
+  // vocabularies, keeps no untrusted text, and never renders it into the
+  // artifact it persists.
   const base = {
     prFiles: [digestFile("apps/app/deployment.yaml", 1, 1)],
     authoritativeChangedFiles: 1,
@@ -2396,14 +2396,19 @@ test("#1336: hostile PR metadata stays bounded data, never an instruction channe
   assert.deepEqual(result.riskFlags, []);
   const artifact = JSON.stringify(classificationToArtifact(result));
   assert.ok(!artifact.includes("Instructions"));
-  assert.ok(!artifact.includes("\u001b"));
   assert.ok(!artifact.includes("previous instructions"));
+  // `JSON.stringify` escapes ESC as the six-character text `\u001b`, so the
+  // raw byte never appears — assert on the escaped form.
+  assert.ok(!artifact.includes("\\u001b"));
 
-  // Bounded: the matcher never reads past the projection's cap, so an
-  // advisory identifier beyond it is not seen (real forge titles are far
-  // shorter than the cap). The same identifier inside the cap does fire.
-  const beyondCap = classifyPr({ ...base, prTitle: `${"x".repeat(600)} (CVE-2026-12345)` });
-  assert.deepEqual(beyondCap.riskFlags, []);
-  const withinCap = classifyPr({ ...base, prTitle: `(CVE-2026-12345) ${"x".repeat(600)}` });
-  assert.deepEqual(withinCap.riskFlags, ["dependency_security_sensitive"]);
+  // The advisory signal is never traded for a smaller working set: an
+  // identifier at the END of a long title is still seen, so an author cannot
+  // pad the title to suppress the escalation.
+  const padded = classifyPr({ ...base, prTitle: `${"x".repeat(600)} (CVE-2026-12345)` });
+  assert.deepEqual(padded.riskFlags, ["dependency_security_sensitive"]);
+
+  // The identity strings are not normalized: a padded login is still not
+  // Renovate-authored, exactly as before the metadata boundary existed.
+  const paddedAuthor = classifyPr({ ...base, prAuthor: " renovate[bot]", headBranch: "" });
+  assert.notEqual(paddedAuthor.prKind, "renovate_image_update");
 });

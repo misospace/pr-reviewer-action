@@ -2389,12 +2389,13 @@ function isDependencyUpgrade(files: readonly ChangedFile[], _diffText: string): 
 
 /** Forge-reported PR metadata the update rules may rely on. Author and branch
  * are forge identity facts (never PR-body content); the title is forge-reported
- * text used only by the bounded risk trigger below. All three are untrusted
- * data and reach the rules only through the bounded projection in
- * {@link boundUntrustedMetadata}. */
+ * text. All three are untrusted data: this boundary keeps only the booleans
+ * the rules need, so no untrusted string is retained. */
 interface PrMetadata {
   renovateAuthored: boolean;
-  prTitle: string;
+  /** Whether the forge-reported title carries a security-fix/advisory
+   * identifier (`CVE-…`, `GHSA-…`, "security"). */
+  titleReportsAdvisory: boolean;
 }
 
 /** Renovate authorship from forge-reported metadata only: the bot account —
@@ -2410,37 +2411,30 @@ interface PrMetadata {
 const RENOVATE_AUTHOR_RE = /^renovate($|\[|-|_)/i;
 const RENOVATE_BRANCH_RE = /^renovate\//i;
 
-/** Untrusted forge-reported metadata is DATA, never instructions: the PR title
- * is author-influenced text, and the author login and head branch are
- * author-chosen strings. Every value is length-bounded and control-stripped
- * before a rule sees it, so untrusted text can neither inflate the matcher
- * nor carry a line break, an ANSI escape, or a fence/heading sequence into
- * the evaluation. The rules match closed vocabularies only, and none of the
- * metadata is rendered into an artifact, a log line, or the prompt.
+/** Security-fix/advisory vocabulary in the forge-reported PR title — a known
+ * fact from the update metadata (Renovate titles carry the dependency and,
+ * for vulnerability-alert branches, the fix context), never a guess about the
+ * image contents. */
+const SECURITY_TITLE_RE = /\b(?:CVE-\d{4}-\d+|GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}|security)\b/i;
+
+/** Untrusted data, never instructions. The forge-reported metadata is read
+ * here and reduced to two booleans: the title against the closed advisory
+ * vocabulary, the author login and head branch against the closed
+ * Renovate-authorship prefixes. Nothing derived from the untrusted text is
+ * retained, rendered, or promoted into a kind — the classifier emits closed
+ * values only, so hostile content can neither close a fence nor carry itself
+ * into an artifact, a log line, or the prompt through this path.
  *
- * Hostile content must not be able to forge a rule outcome, close a fence, or
- * promote itself into instructions. */
-const MAX_UNTRUSTED_METADATA_CHARS = 512;
-const UNTRUSTED_CONTROL_RE = /[\x00-\x1f\x7f]/g;
-
-/** One bounded projection of one untrusted metadata value: control characters
- * (including newlines) become spaces, the value is trimmed, and it is capped
- * at {@link MAX_UNTRUSTED_METADATA_CHARS} — the matcher never sees past it. */
-function boundUntrustedMetadata(value: string): string {
-  const untrusted = value.replace(UNTRUSTED_CONTROL_RE, " ").trim();
-  if (untrusted.length > MAX_UNTRUSTED_METADATA_CHARS) {
-    return untrusted.slice(0, MAX_UNTRUSTED_METADATA_CHARS);
-  }
-  return untrusted;
-}
-
+ * The title is read in FULL against the advisory vocabulary: a bounded
+ * projection would let an author pad the title past the bound and suppress
+ * the advisory signal, so the signal is never traded away for a smaller
+ * working set. The authorship prefixes themselves stay author-chosen strings
+ * (the documented #1336 residual risk) — the pure-diff requirement is the
+ * load-bearing guard for the kinds they gate. */
 function classifyPrMetadata(prAuthor: string, headBranch: string, prTitle: string): PrMetadata {
-  const author = boundUntrustedMetadata(prAuthor);
-  const branch = boundUntrustedMetadata(headBranch);
-  return {
-    renovateAuthored: RENOVATE_AUTHOR_RE.test(author) || RENOVATE_BRANCH_RE.test(branch),
-    prTitle: boundUntrustedMetadata(prTitle),
-  };
+  const renovateAuthored = RENOVATE_AUTHOR_RE.test(prAuthor) || RENOVATE_BRANCH_RE.test(headBranch); // untrusted identity: closed prefixes only
+  const titleReportsAdvisory = SECURITY_TITLE_RE.test(prTitle); // untrusted content: closed advisory vocabulary only
+  return { renovateAuthored, titleReportsAdvisory };
 }
 
 /** An allowed image-reference line form — the #909 digest-line grammar
@@ -2614,20 +2608,15 @@ const DEPENDENCY_UPDATE_KINDS: ReadonlySet<string> = new Set([
   "dependency_upgrade",
 ]);
 
-/** Security-fix/advisory vocabulary in the forge-reported PR title — a known
- * fact from the update metadata (Renovate titles carry the dependency and,
- * for vulnerability-alert branches, the fix context), never a guess about the
- * image contents. */
-const SECURITY_TITLE_RE = /\b(?:CVE-\d{4}-\d+|GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}|security)\b/i;
-
 /** Bounded component vocabulary for the sensitive-component trigger:
- * proxy/auth/network/secret-handling infrastructure. Exact-token matching on
- * `/`/`-`/`_`/`.`-separated tokens (`oauth2-proxy` → `oauth2`, `proxy`), so a
- * token that is NOT on this closed list (`author`) never fires; a closed
- * compound-name list covers the well-known components whose token isn't a
- * bare stem (`certs`, `certbot`, `certificate`, `certmanager`, `oauth2proxy`
- * — certificate material is exactly the secret-handling class this trigger
- * exists for). Only ever evaluated inside the dependency-update context. */
+ * proxy/auth/network/secret-handling infrastructure. Exact-token matching —
+ * any non-alphanumeric character separates tokens (`oauth2-proxy` → `oauth2`,
+ * `proxy`) — so a token that is NOT on this closed list (`author`) never
+ * fires; a closed compound-name list covers the well-known components whose
+ * token isn't a bare stem (`certs`, `certbot`, `certificate`, `certmanager`,
+ * `oauth2proxy` — certificate material is exactly the secret-handling class
+ * this trigger exists for). Only ever evaluated inside the
+ * dependency-update context. */
 const SENSITIVE_COMPONENT_TOKENS: readonly string[] = [
   "auth", "oauth", "oidc", "saml", "sso", "proxy", "gateway", "ingress",
   "traefik", "nginx", "caddy", "haproxy", "envoy", "vpn", "wireguard",
@@ -2809,7 +2798,7 @@ function detectRiskFlags(
   for (const name of filenames) {
     if (mentionsSensitiveComponent(name) && !sensitiveFiles.includes(name)) sensitiveFiles.push(name);
   }
-  if (imageScan.repoChanged || (updateContext && (SECURITY_TITLE_RE.test(metadata.prTitle) || sensitiveFiles.length > 0))) {
+  if (imageScan.repoChanged || (updateContext && (metadata.titleReportsAdvisory || sensitiveFiles.length > 0))) {
     const attribution = [...imageScan.repoChangeFiles, ...sensitiveFiles].filter(
       (name, index, list) => list.indexOf(name) === index,
     );
@@ -3025,8 +3014,8 @@ export interface ClassifyInput {
   /** #1336: forge-reported PR metadata for the Renovate-update rules — the
    * author login (never PR-body content), the forge-reported title, and the
    * head branch name. All optional; absent/empty means no metadata signal.
-   * Untrusted data: the classifier bounds and control-strips every value
-   * before a rule sees it (see `boundUntrustedMetadata`). */
+   * Untrusted data: the classifier reduces these to booleans at the metadata
+   * boundary and retains no untrusted text (see `classifyPrMetadata`). */
   prAuthor?: string | undefined;
   prTitle?: string | undefined;
   headBranch?: string | undefined;
