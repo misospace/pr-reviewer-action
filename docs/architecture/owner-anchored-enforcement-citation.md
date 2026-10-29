@@ -153,11 +153,26 @@ The load-bearing boundary for these rows remains the maintainer-declared glob
 plus the cited-line predicate.
 
 The tightening was measured against false downgrades, not only against the
-artifacts: over this repository's own 96.9k TypeScript lines it took accepted
-shapes from 20.6k to 14.7k, added none, and every removed line is an arrow,
-optional chain, nullish coalesce, comment/doc text, string literal, optional
-property declaration or pattern-definition assignment — none of them a
-comparison, guard, throw/assert or match call. That corpus is TypeScript, so it
+artifacts. The measurement is retained as a reproducible artifact (#1347
+review follow-up): `node scripts/measure_predicate_signal.mjs` re-runs the
+pre-#1347 baseline shape (embedded verbatim from base revision
+`8b91cf01bbadcf8c1f280c98227418089cd000fc`) against the shipped production
+`linePredicateSignal` over the git-tracked TypeScript files (an optional
+positional arg narrows the corpus to a path prefix), and prints the counts
+plus file:line samples of both change directions; the production logic is
+imported from source, never re-implemented, so the measurement cannot drift
+from the runtime. At the measured head (486 tracked `.ts` files, 216.4k
+lines) the tightening took accepted shapes from 54.2k to 37.6k: the sampled
+removed lines are arrows, optional chains, nullish coalescing, comment/doc
+text, string literals and optional-property declarations — none of them a
+comparison, guard, throw/assert or match call. The baseline comparison is
+not a pure subset: 68 lines became newly accepted, and every sampled one is
+a prefixed assertion-name call (`rejectUnknown(…)`, `expectFailed(…)`,
+`rejectCancelled(…)`) — call-shaped enforcement the tightened call-shape
+rule deliberately accepts and the old bare-word regex (`\breject\b`) could
+not match, not a loosened copy. A `src`-only scope reproduces the scale of
+the earlier unretained one-off run (297 files, 20.7k → 14.8k). That corpus
+is TypeScript, so it
 measures this product's own risk, not every language a reviewed repository might
 use. The same measurement caught one over-tightening: erasing a literal span
 collapses a real ternary such as `clip(symbol ? "x" : path)` into `? :`, so the

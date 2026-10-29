@@ -463,7 +463,11 @@ function blankNonPredicateOperators(code: string): string {
   * read as a comparison: it is indistinguishable from an unspaced `a<b` without
   * a parser, and refusing both would reject real enforcement.
  */
-function linePredicateSignal(rawLine: string): boolean {
+/** Exported for the retained corpus measurement (#1347):
+ * `scripts/measure_predicate_signal.mjs` re-runs this production shape over
+ * the repository's own sources so the false-downgrade measurement cannot
+ * drift from the shipped logic. Not part of any action contract. */
+export function linePredicateSignal(rawLine: string): boolean {
   const line = predicateCodeView(blankNonPredicateOperators(rawLine));
   return COMPARISON_RE.test(line)
     || GUARD_RE.test(line)
