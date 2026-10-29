@@ -13,8 +13,12 @@
   },
   "devDependencies": {
     "@types/node": "26.6.6",
+    "@types/pg": "^8.23.1",
     "esbuild": "0.28.2",
     "typescript": "7.0.2",
     "yaml": "2.9.1"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
   }
 }
