@@ -2210,10 +2210,6 @@ interface ImageBlockWalk {
   anyTrue: boolean;
   totalAdded: number;
   totalRemoved: number;
-  /** Lenient mode only: false when any impurity was seen (the walk kept
-   * going so cleanly paired blocks still report; consumers decide whether
-   * partial evidence is usable). Always true in strict mode when ok. */
-  clean: boolean;
   /** Lenient mode only: the `+++ b/` file most recently seen, for
    * attribution callbacks. */
   currentFile: string;
@@ -2227,8 +2223,10 @@ interface ImageBlockWalk {
  * `anyTrue`. Strict mode (the kind rules) aborts on the first impurity —
  * the fail-closed shape `isImageDigestOnly` established (#909). Lenient mode
  * (the #1336 risk scan) flushes the current block on an impurity and keeps
- * walking, so cleanly paired blocks elsewhere in the diff still report.
- * `onLine`/`onPair` observe parsed lines and accepted pairs for attribution. */
+ * walking, so cleanly paired blocks elsewhere in the diff still report —
+ * only their evaluation result is visible (`anyTrue` counts validated blocks
+ * only). `onLine`/`onPair` observe parsed lines and accepted pairs for
+ * attribution. */
 function walkImageRefBlocks<T>(
   fullDiffText: string,
   parseLine: (content: string) => T | null,
@@ -2241,7 +2239,6 @@ function walkImageRefBlocks<T>(
   let anyTrue = false;
   let totalRemoved = 0;
   let totalAdded = 0;
-  let clean = true;
   let currentFile = "";
 
   const flush = (): boolean => {
@@ -2249,7 +2246,6 @@ function walkImageRefBlocks<T>(
     const changed = evaluateBlock(removed, added);
     if (changed === null) {
       if (!opts.lenient) return false;
-      clean = false;
     } else {
       sawBlock = true;
       anyTrue = anyTrue || changed;
@@ -2259,30 +2255,27 @@ function walkImageRefBlocks<T>(
     added = [];
     return true;
   };
-  const impurity = (): boolean => {
-    if (!opts.lenient) return false;
-    if (!flush()) return false;
-    clean = false;
-    return true;
-  };
 
   for (const line of fullDiffText.split("\n")) {
     // Rename/copy/mode metadata is a structural change, never a digest
     // refresh — fail closed even if the file status looks like a plain edit.
     if (STRUCTURAL_DIFF_LINE_RE.test(line)) {
-      if (!impurity()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, clean, currentFile };
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
       continue;
     }
     // A truncation marker means changed lines are missing: not complete
     // evidence, so never claim digest-only.
     if (DIFF_TRUNCATION_MARKER_RE.test(line)) {
-      if (!impurity()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, clean, currentFile };
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
       continue;
     }
     // A binary diff has no `+`/`-` lines, so it would otherwise vanish from
     // the line reconciliation below.
     if (BINARY_DIFF_LINE_RE.test(line)) {
-      if (!impurity()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, clean, currentFile };
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
       continue;
     }
     const isRemoved = line.startsWith("-") && !line.startsWith("---");
@@ -2292,19 +2285,21 @@ function walkImageRefBlocks<T>(
       // the current change block is complete. File headers carry the
       // attribution target for lenient-mode callbacks.
       if (line.startsWith("+++ ")) currentFile = line.slice(4).replace(/^b\//, "");
-      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, clean, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
       continue;
     }
     const parsed = parseLine(line.slice(1));
     if (parsed === null) {
-      if (!impurity()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, clean, currentFile };
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
       continue;
     }
     if (isRemoved) {
       // Git emits a block's removals before its additions; a removal after an
       // addition means the block boundary was mis-detected, so fail closed.
       if (added.length > 0) {
-        if (!impurity()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, clean, currentFile };
+        if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+        if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
         continue;
       }
       removed.push(parsed);
@@ -2315,8 +2310,8 @@ function walkImageRefBlocks<T>(
     }
     opts.onLine?.(parsed, currentFile);
   }
-  if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, clean, currentFile };
-  return { ok: true, sawBlock, anyTrue, totalAdded, totalRemoved, clean, currentFile };
+  if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+  return { ok: true, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
 }
 
 /** Renovate image-digest-only refresh: every changed line is a single image
@@ -2440,18 +2435,21 @@ function parseImageRefLine(content: string): { normalized: string; repo: string;
   const match = IMAGE_REF_LINE_RE.exec(content);
   if (match === null) return null;
   const [, prefix = "", ref = "", digestToken = "", quote = "", tail = ""] = match;
-  // A bare token with no `image:`/`tag:` key and no `FROM` is not attributable
-  // to an image reference — ordinary single-token diffs (`- build/` /
-  // `+ dist/` in .gitignore) must never feed the provenance/sensitivity scan.
-  if (prefix.trim() === "") return null;
+  // A line that is not keyed (`image:`/`tag:`) and not a Dockerfile FROM is
+  // not attributable to an image reference — ordinary single-token or quoted
+  // value diffs (`- build/` / `+ "prod"` in .gitignore or YAML) must never
+  // feed the provenance/sensitivity scan. The opening quote sits inside the
+  // prefix capture, so a bare-prefix check would pass it: require the key.
+  if (!/^\s*(?:FROM\b|(?:image|tag)\s*:)/i.test(prefix)) return null;
   const digest = digestToken === "" ? null : digestToken.slice(1).toLowerCase();
-  // A bare `tag:` YAML value is a tag, never a repository (`tag: v1.2.3` in a
-  // values file): it carries no provenance to compare. Only a full-reference
-  // `tag:` value (a `/` path or an `@sha256:` digest) names a repository.
+  // A `tag:` YAML value is a tag, never a repository (`tag: v1.2.3` in a
+  // values file, `tag: latest@sha256:…` in a HelmRelease): it carries no
+  // provenance to compare. Only a full-reference `tag:` value (a `/` path)
+  // names a repository.
   const isTagKey = /^\s*tag\s*:/i.test(prefix);
   let repo = "";
   let tag: string | null = null;
-  if (isTagKey && digest === null && !ref.includes("/")) {
+  if (isTagKey && !ref.includes("/")) {
     tag = ref;
   } else {
     repo = ref;
@@ -2605,6 +2603,8 @@ const SENSITIVE_COMPONENT_TOKENS: readonly string[] = [
   "traefik", "nginx", "caddy", "haproxy", "envoy", "vpn", "wireguard",
   "tailscale", "cloudflared", "vault", "sops", "cert", "secret", "secrets",
   "keycloak", "authelia", "authentik", "auth0", "oauth2", "vaultwarden",
+  // Compound/camelCase spellings whose tokens are not a bare stem:
+  "certs", "certbot", "certificate", "certmanager", "oauth2proxy",
 ];
 
 function mentionsSensitiveComponent(text: string): boolean {

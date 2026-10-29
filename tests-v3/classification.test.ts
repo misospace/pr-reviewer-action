@@ -2262,8 +2262,10 @@ test("#1336: registry ports, quoted refs, and FROM stages parse without mis-spli
 });
 
 test("#1336: an unpaired chart line invalidates the block (pairing must see every chart change)", () => {
+  // Line counts match the diff exactly, so evidenceIsComplete passes and the
+  // block-pairing rule itself is what rejects the unpaired chart line.
   const result = classifyPr({
-    prFiles: [digestFile("apps/app/helmrelease.yaml", 1, 2)],
+    prFiles: [digestFile("apps/app/helmrelease.yaml", 2, 1)],
     authoritativeChangedFiles: 1,
     diffText: "-   version: 1.2.3\n+   version: 1.2.4\n+   chart: evil\n",
     prAuthor: "renovate[bot]",
@@ -2312,10 +2314,37 @@ test("#1336: chart updates require a chart-shaped manifest or HelmRelease marker
 });
 
 test("#1336: near-miss sensitive tokens never fire", () => {
+  // updateContext is established (Renovate author) so the sensitive trigger
+  // actually evaluates — only the near-miss tokens keep it silent.
   const result = classifyPr({
-    prFiles: files("src/author.py", "k8s/certs/readme.md"),
+    prFiles: files("src/author.py", "docs/authors.md"),
     diffText: "+placeholder\n",
     prTitle: "update dependencies",
+    prAuthor: "renovate[bot]",
   });
   assert.ok(!result.riskFlags.includes("dependency_security_sensitive"));
+});
+
+test("#1336: quoted bare values and digest-bearing tag values carry no repository", () => {
+  // A quoted YAML value without an image/tag key is not an image reference.
+  const quoted = classifyPr({
+    prFiles: files("deploy/env.yaml"),
+    diffText: '- stage: "prod"\n+ stage: "staging"\n',
+    prAuthor: "renovate[bot]",
+  });
+  assert.ok(!quoted.riskFlags.includes("dependency_security_sensitive"));
+  // `tag: <ref>@sha256:…` keeps its tag/digest comparison but names no
+  // repository, so a tag+digest bump is never a provenance swap.
+  const digestA = "a".repeat(64);
+  const digestB = "b".repeat(64);
+  const tagDigest = classifyPr({
+    prFiles: [digestFile("k8s/lemonade.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `- tag: v1@sha256:${digestA}\n+ tag: v2@sha256:${digestB}\n`,
+    prAuthor: "renovate[bot]",
+  });
+  // A tag change (not digest-only) is the image-update kind — with no
+  // repository named, the provenance trigger stays silent.
+  assert.equal(tagDigest.prKind, "renovate_image_update");
+  assert.deepEqual(tagDigest.riskFlags, []);
 });
