@@ -9,7 +9,6 @@ import assert from "node:assert/strict";
 import {
   InMemoryQueueStore,
   ReviewQueueController,
-  newJobRecord,
   type ExecutionOutcome,
   type JobExecutor,
   type JobPublisher,

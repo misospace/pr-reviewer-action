@@ -33,7 +33,6 @@
  * durable record — the worker's artifact file is consulted exactly once.
  */
 
-import { join } from "node:path";
 import type { ReviewJob } from "../jobs/types.js";
 import { gateJobPublication } from "../ingress/dispatch.js";
 import type { JobPublisher } from "../queue/scheduler.js";

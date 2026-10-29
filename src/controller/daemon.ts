@@ -432,37 +432,6 @@ async function trackRunStart(
   }
 }
 
-async function trackRunOutcome(
-  runtime: DaemonRuntime,
-  record: JobRecord,
-  outcome: ExecutionOutcome,
-): Promise<void> {
-  const to =
-    outcome.status === "completed"
-      ? "publishing"
-      : outcome.status === "failed"
-        ? "failed"
-        : "cancelled";
-  try {
-    await runtime.store.apply([
-      {
-        kind: "transition-run",
-        runId: `${record.job.jobId}-a${record.attempt}`,
-        from: "running",
-        to,
-        patch: {
-          ...(outcome.status === "completed" ? { resultHeadSha: outcome.resultHeadSha } : {}),
-          ...(outcome.status === "failed" ? { failureReason: outcome.failureCategory } : {}),
-        },
-        nowMs: runtime.now(),
-      },
-    ]);
-  } catch (err) {
-    if (err instanceof StateConflictError) return;
-    throw err;
-  }
-}
-
 function executorIdentityOf(runtime: DaemonRuntime, profileName: string): string {
   const configured = runtime.instanceConfig.executorProfiles.find(
     (entry) => entry.name === profileName,

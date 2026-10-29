@@ -53,10 +53,6 @@ function makeJob(jobId: string, overrides: Partial<ReviewJob> = {}): ReviewJob {
   });
 }
 
-function BASE(): string {
-  return "dd44ee55ff66aa77bb88cc99001122334455667788";
-}
-
 /** A record in the exact state the scheduler hands the publisher:
  * `publishing` with a durable result head, attempt already counted. */
 function makePublishingRecord(jobId: string, resultHeadSha = HEAD): JobRecord {

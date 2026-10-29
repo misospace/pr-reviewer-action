@@ -40,7 +40,6 @@ import type { InstanceConfig } from "../config/instance-config.js";
 import { isSecretShapedValue } from "../credentials/types.js";
 import type { CredentialRef } from "../credentials/types.js";
 import {
-  KubernetesExecutor,
   LocalExecutor,
   EXECUTION_ID_RE,
   validateExecutionRequest,
