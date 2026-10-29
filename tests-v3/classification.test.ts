@@ -1731,12 +1731,36 @@ test("#1331: quoted symlink diagnostics stop firing while executable command for
     ["go exec.Command sh -c tail argument", "main.go", ['+exec.Command("sh", "-c", "readlink -f " + p).Run()'], true],
     ["java Runtime exec", "App.java", ['+Runtime.getRuntime().exec("readlink -f " + p);'], true],
     ["bash -c argv tail argument", "tool.py", ['+subprocess.run(["bash", "-c", "readlink -f " + p])'], true],
-    ["exec call argv of a recognized exec is command content", "tool.py", ['+subprocess.check_output(["echo", "too many symlink levels"])'], true],
+    ["interpreter behind wrapper argv elements", "tool.py", ['+subprocess.run(["timeout", "5", "bash", "-c", "readlink -f " + p])'], true],
+    ["interpreter behind a sudo wrapper", "tool.py", ['+subprocess.check_output(["sudo", "bash", "-c", "readlink -f x"])'], true],
+    // #1334 review round 2: an argv operand passed to a program that is not a
+    // symlink operation and not a shell interpreter is inert data — only what
+    // the call executes as command text is recovered.
+    ["argv operand prose of a recognized exec stays inert", "tool.py", ['+subprocess.check_output(["echo", "too many symlink levels"])'], false],
+    ["carried argv operand prose stays inert", "tool.py", ['+subprocess.check_output([', '+\t"echo",', '+\t"too many symlink levels",', '+])'], false],
+    ["quoted prose after an interpreter flag stays data", "tool.py", ['+subprocess.check_output(["bash", "-c", "echo \'too many symlink levels\'"])'], false],
     ["execa command string", "src/run.js", ['+execa.command("readlink -f " + p)'], true],
     ["shell-string exec call", "tool.py", ['+os.system("readlink "$f"")'], true],
     ["shell-string exec call across lines", "tool.py", ['+subprocess.run(', '+\t"readlink -f %s" % p,', '+\tshell=True,', '+)'], true],
+    ["shell-string command word behind a format string", "tool.py", ["+os.system(\"readlink -f '%s'\" % p)"], true],
+    ["shell-string getoutput", "tool.py", ['+subprocess.getoutput("readlink -f " + p)'], true],
+    ["shell marker on a string command", "tool.py", ['+subprocess.run("readlink -f " + p, shell=True)'], true],
     ["quoted close paren cannot close the call early", "tool.py", ['+subprocess.check_output(["bash", "-c", "echo )", "readlink -f x"])'], true],
-    ["second exec call on the line", "tool.py", ['+system("hello world"); subprocess.run("readlink -f x")'], true],
+    ["second exec call on the line (marker string form)", "tool.py", ['+system("hello world"); subprocess.run("readlink -f x", shell=True)'], true],
+    ["interpreter command nested in a shell string", "tool.py", ["+os.system(\"sh -c 'readlink -f x'\")"], true],
+    // Within an executed command line the quote is the data marker one level
+    // down: quoted prose stays inert, unquoted prose is code — the same rule
+    // the shell-level echo row above follows.
+    ["quoted prose inside an executed command string", "tool.py", ["+os.system(\"echo 'too many symlink levels'\")"], false],
+    ["unquoted prose inside an executed command string", "tool.py", ['+os.system("echo too many symlink levels")'], true],
+    ["unquoted -c command prose is executed text", "tool.py", ['+subprocess.check_output(["bash", "-c", "echo too many symlink levels"])'], true],
+    ["non-interpreter flag operand stays data", "tool.py", ["+os.system(\"grep -c 'too many symlink levels' access.log\")"], false],
+    ["non-interpreter flag operand behind an interpreter", "tool.py", ['+subprocess.check_output(["bash", "-c", "grep -c \'too many symlink levels\' f"])'], false],
+    // Escaped inner quotes mispair the lexical spans at the second nesting
+    // level — pairing is lexical, and unescaping escapes to repair it would
+    // let a word that only exists after unescaping (`"sym\link"`) count as a
+    // signal. Declared limit, same family as the escape-rawness rule.
+    ["escaped nested quotes keep the prose visible", "tool.py", ['+os.system("sh -c \'echo \\"too many symlink levels\\"\'")'], true],
     ["shell backtick substitution", "tool.sh", ['+target="`readlink "$1"`"'], true],
     ["ruby backtick command", "tool.rb", ['+out = `readlink -f #{path}`'], true],
     ["command substitution in an echo", "tool.sh", ['+echo "$(readlink "$1")"'], true],
@@ -1769,6 +1793,11 @@ test("#1331: quoted symlink diagnostics stop firing while executable command for
     ["spaced command behind an unknown helper", "tool.py", ['+runner.run("readlink -f " + p)'], false],
     ["helper named run is not an exec head", "tool.py", ['+runner.run("note the symlink word")'], false],
     ["unknown helper with a bare command token", "tool.py", ['+runner.run("readlink")'], false],
+    ["string command without a shell marker", "tool.py", ['+subprocess.run("readlink -f x")'], false],
+    // A whitespace-free single word in argv-element position is a token, not
+    // prose — argv tokens are position-modeled, not program-modeled, so this
+    // stays in the same declared-limit family as `sudo "readlink" "$1"`.
+    ["whitespace-free operand word of a non-symlink program", "tool.py", ['+subprocess.check_output(["echo", "readlink"])'], true],
     ["deferred shell command variable", "tool.sh", ['+cmd="readlink -f"', '+$cmd "$f"'], false],
     ["argv carried past the continuation bound", "tool.py", [
       '+subprocess.run(',
