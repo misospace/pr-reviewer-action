@@ -14,6 +14,10 @@ import { reassembleSse } from "../src/transport/sse.js";
 import { normalizedToOpenAiChat } from "../src/run/stages.js";
 import { prioritizeDiff } from "../src/corpus/diff-priority.js";
 import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../src/corpus/assemble.js";
+import { markerReviewResult, renderPartialCoverageNotice } from "../src/publish/publish.js";
+import { publishInputFromEnv } from "../src/run/entrypoints.js";
+import { resolvePartialCoverage, toolBudgetTelemetryOf } from "../src/engine/review.js";
+import type { PartialCoverage } from "../src/tools/coverage.js";
 import { linesInsideCodeFences } from "./helpers.js";
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
@@ -785,6 +789,212 @@ test("#1338: a wall-clock stop after the evidence was gathered leaves no gap rec
   const markdown = fs.readFileSync(path.join(root, "tool-harness.md"), "utf8");
   assert.match(markdown, /Investigation interrupted/);
   assert.ok(!markdown.includes("Outstanding evidence"));
+  // The other half of the issue's acceptance: a timeout AFTER all the
+  // required evidence was collected stays clean-eligible — no blanket
+  // timeout block. The publish boundary must read it as a complete review.
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  assert.equal(artifact.partial_coverage, undefined);
+  fs.writeFileSync(
+    path.join(root, "review-coverage.json"),
+    JSON.stringify({
+      version: 1,
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
+      route: "primary",
+      partial_coverage: null,
+      required_checks: "complete",
+    }),
+  );
+  const input = publishInputFromEnv(
+    { PR_REVIEWER_RUN_DIR: root, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv,
+    "github",
+  );
+  assert.equal(input.partialCoverage, undefined);
+  assert.equal(input.coverageUnknown, undefined);
+  assert.equal(input.incompleteReason, "none");
+  for (const verdictPolicy of ["strict", undefined]) {
+    assert.equal(
+      markerReviewResult({
+        ...(verdictPolicy !== undefined ? { verdictPolicy } : {}),
+        verdict: "approve",
+        findings: [],
+        requiredChecks: input.requiredChecks,
+        partialCoverage: input.partialCoverage,
+      }),
+      "clean",
+      `verdict_policy=${verdictPolicy ?? "default"}`,
+    );
+  }
+});
+
+// #1338 (issue acceptance): the #11591 regression fixture — the reported
+// failure SHAPE, not a two-round stand-in: 23 executed rounds, the
+// wall-clock budget expiring mid-exchange, the verdict turn dying in the
+// transport seam, and the security evidence the investigation never
+// gathered. The run must not be able to publish a clean review over it.
+test("#1338: a 23-round deadline exhaustion with missing security evidence can never publish clean", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  // 23 changed files the loop reads, one it never reads: the security
+  // evidence the issue is about (`src/security/auth.ts`).
+  const readFiles = Array.from({ length: 23 }, (_, index) => `src/mod-${String(index + 1).padStart(2, "0")}.ts`);
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  for (const file of readFiles) fs.writeFileSync(path.join(root, file), "export const x = 1;\n");
+  const missing = "src/security/auth.ts";
+  fs.writeFileSync(
+    path.join(root, "pr-files.json"),
+    JSON.stringify({
+      files: [
+        ...readFiles.map((filename) => ({ filename, status: "modified" })),
+        { filename: missing, status: "modified" },
+      ],
+    }),
+  );
+  // The security specialist's lead names the file the loop never read, so
+  // the required evidence is missing on both surfaces: the file itself and
+  // the lead that pointed at it.
+  fs.writeFileSync(
+    path.join(root, "specialist-security.json"),
+    JSON.stringify({ leads: [{ file: missing, message: "token verification can be bypassed" }] }),
+  );
+  // The scripted clock advances 6s per read. The harness reads it at the
+  // deadline anchor, at the loop start, once per between-rounds check, once
+  // per postFn remaining check, and twice per executed tool call — four
+  // reads per round. With TOOL_LOOP_WALL_CLOCK_SEC=576 the deadline (576)
+  // lands just AFTER round 24's remaining-budget check (570), so round 24's
+  // request is actually IN FLIGHT when the budget runs out — #11591's shape
+  // ("round 24 took ~110s"), where the deadline surfaces through the
+  // transport seam as a thrown request error. Rounds 1..23 each execute one
+  // tool call; round 24's request is aborted mid-flight.
+  let clock = -6;
+  const timeFn = () => {
+    clock += 6;
+    return clock;
+  };
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "576" },
+    timeFn,
+    transport: async () => {
+      transportCalls++;
+      if (transportCalls === 24) {
+        // The request was in flight when the wall-clock budget expired: the
+        // transport aborts it and the loop records the request error.
+        clock += 12;
+        throw new Error("request aborted: tool-loop wall-clock budget exhausted");
+      }
+      const file = readFiles[transportCalls - 1];
+      if (file === undefined) throw new Error("the loop opened a transport call past the deadline");
+      return openAiCall(`c${transportCalls}`, "read_file", JSON.stringify({ path: file }));
+    },
+  }));
+  // The reported shape: 23 executed tool calls in 23 rounds, then a 24th
+  // turn that dies at the deadline — never a two-round stand-in.
+  assert.equal(transportCalls, 24, "23 rounds executed a tool call; the 24th request was in flight");
+  assert.equal(result.rounds, 23);
+  assert.equal(result.executed_request_count, 23);
+  assert.equal(result.stop_reason, "wall-clock-exceeded");
+  assert.equal(result.loop_error, "request aborted: tool-loop wall-clock budget exhausted");
+  assert.equal(result.native_loop_verdict_produced, undefined);
+  assert.equal(result.native_loop_verdict_status, "fallback");
+  // The verdict turn died in the deadline check itself — #11591's exact log
+  // line ("verdict turn failed (tool-loop wall-clock budget exhausted) — the
+  // standard review call will synthesize the verdict").
+  assert.equal(result.native_loop_verdict_reason, "error");
+  assert.equal(result.native_loop_verdict_error, "tool-loop wall-clock budget exhausted");
+  // The deterministic gap record rides the deadline stop reason and names
+  // the missing security evidence.
+  const coverage = result.partial_coverage as unknown as Record<string, unknown>;
+  assert.ok(coverage, "the interrupted investigation must carry a coverage record");
+  assert.equal(coverage.stop_reason, "wall-clock-exceeded");
+  assert.equal(coverage.changed_files_total, 24);
+  assert.deepEqual(coverage.unread_files, [missing]);
+  assert.equal(coverage.leads_total, 1);
+  const leads = coverage.unresolved_leads as unknown as Array<Record<string, unknown>>;
+  assert.equal(leads.length, 1);
+  assert.equal(leads[0]!.role, "security");
+  assert.equal(leads[0]!.file, missing);
+  // Every completed receipt survives the synthesis fallback.
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  assert.equal(artifact.stop_reason, "wall-clock-exceeded");
+  assert.equal(artifact.rounds, 23);
+  assert.equal((artifact.tool_results as unknown[]).length, 23);
+  assert.ok(artifact.partial_coverage);
+  // The published marker's `tool_stop_reason` is lifted from the harness
+  // artifact's own stop reason — the acceptance item "correct
+  // tool_stop_reason ... survive synthesis fallback".
+  assert.equal(toolBudgetTelemetryOf(artifact as Record<string, unknown>).stopReason, "wall-clock-exceeded");
+  // The record `review.ts` derives from this harness artifact.
+  const recorded = resolvePartialCoverage(artifact as Record<string, unknown>, true, true);
+  assert.ok(recorded, "the engine's own derivation must find the recorded gap");
+  assert.equal(recorded.stop_reason, "wall-clock-exceeded");
+  const markdown = fs.readFileSync(path.join(root, "tool-harness.md"), "utf8");
+  assert.match(markdown, /Investigation interrupted/);
+  assert.match(markdown, /Outstanding evidence/);
+  assert.match(markdown, /src\/security\/auth\.ts/);
+  assert.match(markdown, /security/);
+  // The published notice names the stop reason and the unread file, so the
+  // gap cannot read as a complete review.
+  const notice = renderPartialCoverageNotice(recorded as PartialCoverage);
+  assert.match(notice, /Partial Coverage Notice/);
+  assert.match(notice, /wall-clock-exceeded/);
+  assert.match(notice, /src\/security\/auth\.ts/);
+
+  // The publish boundary: the artifact `review.ts` writes as
+  // `review-coverage.json`, and the marker state the publisher derives from
+  // it. A 23-round deadline exhaustion with missing security evidence must
+  // read as `partial` — never `clean`.
+  fs.writeFileSync(
+    path.join(root, "review-coverage.json"),
+    JSON.stringify({
+      version: 1,
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
+      route: "primary",
+      partial_coverage: recorded,
+      required_checks: "complete",
+      incomplete_reason: "execution",
+    }),
+  );
+  const input = publishInputFromEnv(
+    { PR_REVIEWER_RUN_DIR: root, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv,
+    "github",
+  );
+  assert.ok(input.partialCoverage, "the publish input must carry the coverage gap");
+  assert.equal(input.partialCoverage.stop_reason, "wall-clock-exceeded");
+  assert.equal(input.incompleteReason, "execution");
+  assert.equal(input.requiredChecks, "complete");
+  // The same artifact without the recorded reason still resolves to
+  // `execution`: the gap alone is enough, so a run that never wrote the
+  // reason field cannot read as a complete review either.
+  fs.writeFileSync(
+    path.join(root, "review-coverage.json"),
+    JSON.stringify({
+      version: 1,
+      tool_loop_ran: true,
+      enforcement_harness: "tool-harness.json",
+      route: "primary",
+      partial_coverage: recorded,
+      required_checks: "complete",
+    }),
+  );
+  const derived = publishInputFromEnv(
+    { PR_REVIEWER_RUN_DIR: root, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv,
+    "github",
+  );
+  assert.equal(derived.incompleteReason, "execution");
+  assert.equal(derived.requiredChecks, "complete");
+  for (const verdictPolicy of ["strict", undefined]) {
+    const reviewResult = markerReviewResult({
+      ...(verdictPolicy !== undefined ? { verdictPolicy } : {}),
+      verdict: "approve",
+      findings: [],
+      requiredChecks: input.requiredChecks,
+      partialCoverage: input.partialCoverage,
+    });
+    assert.equal(reviewResult, "partial", `verdict_policy=${verdictPolicy ?? "default"}`);
+    assert.notEqual(reviewResult, "clean", `verdict_policy=${verdictPolicy ?? "default"}`);
+  }
 });
 
 test("#1198 smart: a near-deadline verdict turn is clamped to the remaining budget and still accepted", async () => {
