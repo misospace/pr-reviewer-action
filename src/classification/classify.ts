@@ -1168,13 +1168,17 @@ function stripQuotedSpans(line: string): string {
  * command text is recovered from its argument list even where it contains
  * prose-shaped whitespace. Two branches: an unambiguous command verb in ANY
  * position (`exec`, Go `exec.Command`, Java `Runtime.getRuntime().exec`,
- * `system`, `spawn…`, Ruby `Open3.capture2`), and a generic verb (`run`,
+ * `system`, `spawn…`, Ruby `Open3.capture*`), and a generic verb (`run`,
  * `call`, `check_output`, `Popen`) only behind a known exec module —
- * recognizing any `run(` would donate arbitrary prose. Global: every exec
- * call on a line contributes the command text it executes. */
+ * recognizing any `run(` would donate arbitrary prose. #1334 review round 4
+ * names `popen` and `shell_exec` explicitly so a shell-string executor's
+ * command string is recovered wherever it is spelled (the `Popen` branch
+ * already covered `os.popen` case-insensitively; the bare spellings of both
+ * heads did not match at all). Global: every exec call on a line contributes
+ * the command text it executes. */
 const EXEC_ARGV_HEAD_PATTERN = new RegExp(
   String.raw`(?:`
-    + String.raw`(?:^|[^\w$])(?:exec|execl|execle|execlp|execv|execve|execvp|execvpe|execSync|execFile(?:Sync)?|system|spawn\w*|command(?:Sync)?|capture\w*)`
+    + String.raw`(?:^|[^\w$])(?:exec|execl|execle|execlp|execv|execve|execvp|execvpe|execSync|execFile(?:Sync)?|system|popen|shell_exec|spawn\w*|command(?:Sync)?|capture\w*)`
     + String.raw`|\b(?:subprocess|child_process|execa|os|open3|syscall)\s*\.\s*(?:run|call|check_call|check_output|getoutput|getstatusoutput|Popen|exec\w*|spawn\w*|command(?:Sync)?|capture\w*)`
     + String.raw`)\s*\(`,
   "gi",
@@ -1262,20 +1266,21 @@ function quotedSpans(text: string): { text: string; open: number; close: number 
  * `close`, null when unterminated) sits where an argv/path TOKEN lives
  * (#1331 review: whitespace-free alone does not make quoted prose a token —
  * `raise RuntimeError("symlink")` is a diagnostic value). It does when it is
- * path-shaped (contains a path separator: `"/usr/bin/readlink"`) or in
- * list-element position — preceded by `[` or `,`, or followed by `,`
+ * in list-element position — preceded by `[` or `,`, or followed by `,`
  * (`["readlink", user_path]` at any nesting or line break,
  * `exec.Command("readlink", p)`). The sole argument of a call, even carried
  * to its own line by the formatter, is a value, not an argv element, and
  * stays inert; an argument that is NOT the sole one (`log("symlink",
- * level)`) keeps the token, the toward-detection direction. Only `/` counts
- * as path-shaped: a raw `\` in the span is exactly the escape ambiguity the
- * rawness rule exists for (`"sym\link"` must stay inert). Exec calls recover
- * their command text independently, so dropping value-position tokens cannot
- * hide a shell-string executor or an interpreter operand. */
+ * level)`) keeps the token, the toward-detection direction. #1334 review
+ * round 4 retired the earlier path-shaped rule (any span containing `/`): a
+ * quoted constant path in non-argv position (`bin_path = "/usr/bin/readlink"`)
+ * is trusted constant-path scaffolding — no execution, no untrusted source —
+ * and the normative rule requires a real untrusted-path surface, so being
+ * path-shaped adds nothing that list-element position does not already cover.
+ * Exec calls recover their command text independently, so dropping
+ * value-position tokens cannot hide a shell-string executor or an
+ * interpreter operand. */
 function isArgvPathTokenPosition(line: string, open: number, close: number | null): boolean {
-  const span = line.slice(open + 1, close ?? line.length);
-  if (span.includes("/")) return true;
   let j = open - 1;
   while (j >= 0 && (line[j] === " " || line[j] === "\t")) j -= 1;
   const prev = line[j];
@@ -1447,12 +1452,15 @@ function commandTextView(text: string, depth: number, keep: (part: string) => vo
  * explicitly, which is what the issue requires instead of a blanket
  * `stripQuotedSpans`:
  *   - a whitespace-free quoted span in ARGV/PATH-TOKEN position is a token,
- *     never prose: path-shaped (`"/usr/bin/readlink"`) or in list-element
- *     position — `["readlink", user_path]` at any nesting or line break,
- *     `exec.Command("readlink", p)`; a whitespace-free span in VALUE
+ *     never prose: in list-element position — preceded by `[`/`,` or
+ *     followed by `,` (`["readlink", user_path]` at any nesting or line
+ *     break, `exec.Command("readlink", p)`); a whitespace-free span in VALUE
  *     position — the sole argument of a call, `raise
  *     RuntimeError("symlink")` — is diagnostic data and stays inert
- *     (#1331 review);
+ *     (#1331 review); a quoted constant path in non-argv position
+ *     (`bin_path = "/usr/bin/readlink"`) is trusted constant-path
+ *     scaffolding and stays inert too (#1334 review round 4 retired the
+ *     path-shaped rule — an untrusted-path surface is required);
  *   - a command substitution executes its contents, quoted or not, in the
  *     file kinds whose language evaluates it: `target="$(readlink "$1")"`
  *     in shell (and PowerShell), gated by

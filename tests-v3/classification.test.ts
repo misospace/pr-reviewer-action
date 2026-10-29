@@ -1764,7 +1764,22 @@ test("#1331: quoted symlink diagnostics stop firing while executable command for
     ["shell backtick substitution", "tool.sh", ['+target="`readlink "$1"`"'], true],
     ["ruby backtick command", "tool.rb", ['+out = `readlink -f #{path}`'], true],
     ["command substitution in an echo", "tool.sh", ['+echo "$(readlink "$1")"'], true],
-    ["quoted absolute command path", "tool.py", ['+bin_path = "/usr/bin/readlink"'], true],
+    ["quoted absolute command path in argv keeps firing", "tool.py", ['+subprocess.check_output(["ln", "-s", target, "/var/run/symlink"])'], true],
+    // #1334 review round 4: a quoted constant path in non-argv position is
+    // trusted constant-path scaffolding — no execution, no untrusted source —
+    // so it stops firing; recovery is position-based, not content-based.
+    ["quoted absolute command path as a plain value", "tool.py", ['+bin_path = "/usr/bin/readlink"'], false],
+    ["quoted absolute command path behind a pathlib constant", "tool.py", ['+Path("/usr/bin/readlink")'], false],
+    // Round 4: shell-string executors are named wherever they are spelled —
+    // the bare `popen`/`shell_exec` heads used to miss the head pattern
+    // entirely (review round 4), so their command strings were concealed.
+    ["shell_exec command string", "tool.php", ['+shell_exec("readlink -f " + p)'], true],
+    ["os.popen command string", "tool.py", ['+os.popen("readlink -f " + p)'], true],
+    ["bare popen command string", "tool.c", ['+popen("readlink -f " + p, "r")'], true],
+    // Pins the round-4 requirement trace: command substitution inside an
+    // already-recovered command string is evaluated — the receiver is a
+    // shell, regardless of the host file kind.
+    ["command substitution inside an executed command string", "tool.py", ['+os.system("echo $(readlink -f $p)")'], true],
     // Token-position boundary: the carried list's last element has no comma,
     // so the token rule sees none — the exec-argument walk is what keeps it
     // firing.
