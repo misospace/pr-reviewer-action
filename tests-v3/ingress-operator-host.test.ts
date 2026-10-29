@@ -24,6 +24,7 @@ import {
   type OperatorHostOptions,
 } from "../src/ingress/index.js";
 import { computeForgejoWebhookSignature } from "../src/ingress/signature.js";
+import { computeGitHubWebhookSignature } from "../src/ingress/github-app-signature.js";
 import { MemoryGenerationLedger } from "../src/ingress/dispatch.js";
 import type {
   FollowUpConsumerOptions,
@@ -617,4 +618,96 @@ test("the operator owns the budget's idempotency horizon: a shorter one than the
   });
   assert.ok(host.rateLimitStore instanceof DurableRateLimitStore);
   assert.equal(host.rateLimitStore.degradedReason, null);
+});
+
+// ── 6. the host's intake is PLATFORM-AWARE ─────────────────────────────────
+//
+// One daemon instance serves ONE forge platform, so the host binds exactly
+// one intake: the GitHub App intake (`X-GitHub-Event` +
+// `X-Hub-Signature-256`) or the native Forgejo intake (`X-Gitea-Event` +
+// `X-Gitea-Signature`). The two seams accept exactly what the other
+// refuses — a Forgejo-style delivery must NEVER be accepted by the GitHub
+// intake.
+
+/** A REAL GitHub `pull_request` delivery: the event NAME lives in the
+ *  `X-GitHub-Event` header, never in the body. */
+function makeGitHubSyncPayload(): Record<string, unknown> {
+  return {
+    action: "synchronize",
+    number: 7,
+    pull_request: {
+      number: 7,
+      id: 4242,
+      head: { sha: HEAD_SHA, repo: { full_name: "org/repo" } },
+      base: { sha: BASE_SHA, repo: { full_name: "org/repo" } },
+    },
+    repository: { full_name: "org/repo" },
+    sender: { login: "octo" },
+  };
+}
+
+test("the platform-aware host binds the GITHUB intake: it requires X-Hub-Signature-256 and refuses a Forgejo delivery", async (t) => {
+  const { adapter } = makeAdapter(QUESTION);
+  const dispatched: CanonicalForgeEvent[] = [];
+  const host = createOperatorHost({
+    platform: "github",
+    secret: SECRET,
+    durableStateDir: makeDurableStateDir(t),
+    followUp: makeFollowUpOptions(adapter),
+    dispatch: (event) => {
+      dispatched.push(event);
+    },
+  });
+  const h = await startTestHandler(host.handler);
+  t.after(() => h.close());
+
+  // A FORGEJO-style delivery (X-Gitea-Event + X-Gitea-Signature) is NOT
+  // accepted by the GitHub intake: there is no X-GitHub-Event header, so
+  // the delivery is refused before any signature work.
+  const forgejoBody = JSON.stringify(makeForgejoSyncPayload());
+  const forgejoRes = await fetch(h.url, {
+    method: "POST",
+    headers: {
+      "x-gitea-event": "pull_request",
+      "x-gitea-signature": computeForgejoWebhookSignature(SECRET, forgejoBody),
+    },
+    body: forgejoBody,
+  });
+  assert.equal(forgejoRes.status, 400);
+  assert.deepEqual(JSON.parse(await forgejoRes.text()), { status: "invalid event header" });
+  assert.equal(dispatched.length, 0, "a Forgejo delivery never reaches the dispatch seam");
+
+  // The GitHub event header alone is not enough: the GitHub intake
+  // requires the GitHub signature header, so a Forgejo signature is
+  // refused with the fixed 401.
+  const signedBody = JSON.stringify(makeGitHubSyncPayload());
+  const wrongSignatureRes = await fetch(h.url, {
+    method: "POST",
+    headers: {
+      "x-github-event": "pull_request",
+      "x-gitea-signature": computeForgejoWebhookSignature(SECRET, signedBody),
+    },
+    body: signedBody,
+  });
+  assert.equal(wrongSignatureRes.status, 401);
+  assert.deepEqual(JSON.parse(await wrongSignatureRes.text()), { status: "invalid signature" });
+  assert.equal(dispatched.length, 0);
+
+  // A REAL GitHub delivery (X-GitHub-Event + X-Hub-Signature-256) IS
+  // accepted and reaches the dispatch seam as a GitHub canonical event.
+  const res = await fetch(h.url, {
+    method: "POST",
+    headers: {
+      "x-github-event": "pull_request",
+      "x-hub-signature-256": computeGitHubWebhookSignature(SECRET, signedBody),
+    },
+    body: signedBody,
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(await res.text()), { status: "accepted", kind: "synchronize" });
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0]!.platform, "github");
+  assert.equal(dispatched[0]!.kind, "synchronize");
+  assert.equal(dispatched[0]!.repoFullName, "org/repo");
+  assert.equal(dispatched[0]!.prNumber, 7);
 });

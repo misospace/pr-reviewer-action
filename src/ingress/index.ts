@@ -9,6 +9,9 @@
 //   github-app-client.ts - GitHub App read+write capability client over the typed transport
 //   forgejo-events.ts    - native Gitea/Forgejo event projection onto the #728 envelope
 //   webhook-handler.ts   - Node http webhook ingress (verify before parse, fixed bodies)
+//   github-webhook-handler.ts - Node http GitHub App webhook ingress
+//                           (X-Hub-Signature-256 over the RAW body; the event-name
+//                           projection from the unauthenticated X-GitHub-Event header)
 //   endpoints.ts         - REST/web endpoint resolution from a configured platform base URL
 //   api-client.ts        - read-only authenticated Forgejo REST client
 //   clone-credentials.ts - git clone credentials as a Basic Authorization header only
@@ -27,6 +30,11 @@ export {
   DEFAULT_MAX_WEBHOOK_BODY_BYTES,
   createForgejoWebhookHandler,
 } from "./webhook-handler.js";
+export type { GitHubWebhookHandlerOptions } from "./github-webhook-handler.js";
+export {
+  createGitHubWebhookHandler,
+  projectGitHubWebhookPayload,
+} from "./github-webhook-handler.js";
 export { computeForgejoWebhookSignature, verifyForgejoWebhookSignature } from "./signature.js";
 export {
   computeGitHubWebhookSignature,
@@ -82,7 +90,7 @@ export type { GenerationLedger, DispatchOutcome, PublishGate } from "./dispatch.
 export { MemoryGenerationLedger, dispatchCanonicalEvent, gateJobPublication } from "./dispatch.js";
 
 export type { ReconcileReport, ReconcileOptions } from "./reconcile.js";
-export { reconcileForgejoRepositories } from "./reconcile.js";
+export { reconcileRepositories } from "./reconcile.js";
 
 export type {
   FollowUpConsumer,

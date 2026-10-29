@@ -22,10 +22,14 @@
  *   redeliveries, the #727 adoption policy decides whether the repository
  *   is reviewed at all, `dispatchCanonicalEvent` mints the deterministic
  *   #728 generation, and the #731 queue gets it. A failed enqueue releases
- *   the ledger reservation (the dispatch contract). The Forgejo webhook
+ *   the ledger reservation (the dispatch contract). The forge webhook
  *   ingress binds through `createOperatorHost` (which unconditionally
  *   wires the follow-up consumer); missed-webhook reconciliation runs on
- *   a bounded schedule through the injected reconcile pass.
+ *   a bounded schedule through the injected reconcile pass. The intake is
+ *   PLATFORM-AWARE: one daemon instance serves ONE forge platform, and
+ *   `webhook.platform` selects the intake it binds — the GitHub App intake
+ *   (`X-Hub-Signature-256`, bound here) or the native Forgejo intake
+ *   (`X-Gitea-Signature`).
  * - **Scheduling and execution** — the daemon drives `tick()` on its own
  *   timer, renews worker leases while the executor reports liveness,
  *   prepares exact-head workspaces through #732, resolves ONLY the
@@ -202,13 +206,21 @@ export interface ControllerDaemonOptions {
   readonly reconcile?: {
     readonly intervalMs: number;
     /** One reconciliation pass (the operator binds
-     * `reconcileForgejoRepositories` with this daemon's ledger). */
+     * `reconcileRepositories` with this daemon's ledger). */
     run(): Promise<void>;
   };
-  /** The Forgejo webhook ingress binding. When present, the daemon
-   * constructs the operator host (which unconditionally binds the
-   * follow-up consumer) and serves it on `port`. */
+  /** The forge webhook ingress binding. The intake is PLATFORM-AWARE: the
+   * daemon serves exactly ONE forge platform per instance (its forge
+   * capability is a single per-platform capability), and `platform` selects
+   * the intake the daemon binds — `github` the GitHub App intake
+   * (`X-Hub-Signature-256`) or `forgejo` the native Forgejo intake
+   * (`X-Gitea-Signature`). When present, the daemon constructs the operator
+   * host (which unconditionally binds the follow-up consumer) and serves it
+   * on `port`. */
   readonly webhook?: {
+    /** The forge platform this daemon instance serves: `github` (the GitHub
+     * App intake) or `forgejo` (the native Forgejo intake). */
+    readonly platform: "github" | "forgejo";
     readonly port: number;
     readonly secret: string;
     /** The follow-up consumer configuration; the daemon injects its own
@@ -937,6 +949,10 @@ export async function startControllerDaemon(
   let operatorHost: OperatorHost | undefined;
   if (options.webhook !== undefined) {
     operatorHost = createOperatorHost({
+      // The intake the platform selects: the GitHub App intake
+      // (`X-Hub-Signature-256`) or the native Forgejo intake
+      // (`X-Gitea-Signature`). ONE platform per daemon instance.
+      platform: options.webhook.platform,
       secret: options.webhook.secret,
       durableStateDir,
       ...(options.webhook.maxBodyBytes !== undefined

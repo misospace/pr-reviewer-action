@@ -33,13 +33,25 @@
  * delivery always settles with the handler's `202` acceptance, never the 500.
  *
  * Trust boundary: inherited unchanged from the two modules it binds — the
- * `X-Gitea-Signature` HMAC-SHA256 over the RAW body is verified BEFORE any
- * parse (fail closed), the `X-Gitea-Event`/`X-Gitea-Event-Type` headers stay
- * unauthenticated shape-guarded hints, and this module sees only CANONICAL
- * events: no forge payload-shape parsing, no forge CLI, no untrusted-content
- * inspection. Every forge read/write the follow-up path performs happens
- * inside the consumer through the injected forge capability
+ * `X-Gitea-Signature` HMAC-SHA256 over the RAW body (the Forgejo intake) or
+ * the `X-Hub-Signature-256` HMAC-SHA256 over the RAW body (the GitHub App
+ * intake) is verified BEFORE any parse (fail closed), the event headers
+ * stay unauthenticated shape-guarded hints, and this module sees only
+ * CANONICAL events: no forge payload-shape parsing, no forge CLI, no
+ * untrusted-content inspection. Every forge read/write the follow-up path
+ * performs happens inside the consumer through the injected forge capability
  * (`FollowUpForgeAdapter`).
+ *
+ * PLATFORM-AWARE INTAKE: the host serves exactly ONE forge platform per
+ * instance — the operator's forge capability is a single per-platform
+ * capability, so a host that served both platforms would accept a delivery
+ * for a platform the instance cannot act on. `platform` selects the intake
+ * the host binds: `github` the GitHub App intake (`X-Hub-Signature-256`,
+ * `X-GitHub-Event`) or `forgejo` the native Forgejo intake
+ * (`X-Gitea-Signature`, `X-Gitea-Event`); absent → `forgejo`. The
+ * SELECTION is the only thing that changes: the router, the follow-up
+ * consumer and the ONE durable rate-limit store are unchanged, so there is
+ * still exactly one of each per host.
  *
  * The Q&A budget's durable backend is OWNED HERE (#1295): the operator's
  * durable state location (`durableStateDir`) is the host's configuration, and
@@ -71,6 +83,10 @@ import {
   createOperatorEventRouter,
   type OperatorEventRouter,
 } from "./operator-router.js";
+import {
+  createGitHubWebhookHandler,
+  type GitHubWebhookHandlerOptions,
+} from "./github-webhook-handler.js";
 import {
   createForgejoWebhookHandler,
   type ForgejoWebhookHandlerOptions,
@@ -177,6 +193,13 @@ function createDurableRateLimitStore(
 
 /** Configuration for {@link createOperatorHost}. */
 export interface OperatorHostOptions {
+  /** The forge platform this host's INTAKE serves: `github` binds the GitHub
+   * App intake (`X-Hub-Signature-256`), `forgejo` the native Forgejo intake
+   * (`X-Gitea-Signature`). One platform per host: the operator's forge
+   * capability is a single per-platform capability, so an intake that served
+   * both would accept deliveries for a platform the instance cannot act on.
+   * Absent → `forgejo`. */
+  readonly platform?: "github" | "forgejo" | undefined;
   /** The webhook HMAC-SHA256 secret; the signature is verified over the raw
    * body before anything else (the handler's fail-closed boundary). */
   readonly secret: string;
@@ -223,7 +246,9 @@ export interface OperatorHost {
    * through — constructed here, unconditionally. */
   readonly router: OperatorEventRouter;
   /** The webhook handler (HMAC-verified, fixed response bodies) ready to be
-   * installed on a Node http server. */
+   * installed on a Node http server. It is the intake of the ONE platform
+   * this host serves: the GitHub App intake (`X-Hub-Signature-256`) or the
+   * native Forgejo intake (`X-Gitea-Signature`). */
   readonly handler: (req: IncomingMessage, res: ServerResponse) => void;
   /** The durable Q&A-budget store this host constructed — the operator's
    * window into WHY a question was refused: `degradedReason` (a refusal:
@@ -267,10 +292,16 @@ export function createOperatorHost(options: OperatorHostOptions): OperatorHost {
     followUp: { ...followUp, rateLimitStore },
     dispatch: options.dispatch,
   });
-  const handlerOptions: ForgejoWebhookHandlerOptions = {
+  // The intake this host serves: ONE platform per instance (the operator's
+  // forge capability is a single per-platform capability). Only the HANDLER
+  // differs — the router, the follow-up consumer and the durable budget are
+  // the same objects either way, so the single-router and single-budget
+  // invariants are untouched by the platform choice.
+  const platform = options.platform ?? "forgejo";
+  const handlerOptions: ForgejoWebhookHandlerOptions & GitHubWebhookHandlerOptions = {
     secret: options.secret,
-    ...(options.maxBodyBytes !== undefined ? { maxBodyBytes: options.maxBodyBytes } : {}),
-    ...(options.rereviewLabel !== undefined ? { rereviewLabel: options.rereviewLabel } : {}),
+    maxBodyBytes: options.maxBodyBytes,
+    rereviewLabel: options.rereviewLabel,
     // The handler's follow-up lane: a canonical `follow_up` delivery is
     // handed to this router and never to onEvent — the operator lane
     // CONSUMES it (plan, answer, publish) instead of forwarding it.
@@ -286,7 +317,10 @@ export function createOperatorHost(options: OperatorHostOptions): OperatorHost {
   };
   return {
     router,
-    handler: createForgejoWebhookHandler(handlerOptions),
+    handler:
+      platform === "github"
+        ? createGitHubWebhookHandler(handlerOptions)
+        : createForgejoWebhookHandler(handlerOptions),
     rateLimitStore,
   };
 }

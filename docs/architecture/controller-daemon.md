@@ -14,6 +14,7 @@ a forge-specific CLI.
 | module | owns |
 |---|---|
 | `daemon.ts` | startup composition: options validation (fail closed), the #736 migration hook (work is accepted only after durable state is proven), queue-store binding, `recover()`, recovered-worker reconciliation, intake (`ingest`), tick loop, lease renewal, superseded-recovered-worker cancellation, graceful stop |
+| `run-lifecycle.ts` | the control-plane run mirror: the `RunRecord` lifecycle (`queued` → `starting` → `running` → `publishing` → `completed`/`failed`/`cancelled`/`superseded`) over the queue's own transition table, and the attempt bookkeeping (create + lease under the daemon's instance id) |
 | `snapshot-adapter.ts` | the sync-over-async bridge the #736 doc named: `QueueStore` (sync, #731) over `QueueSnapshotStore` (async, PostgreSQL). Cache == durable truth: a failed persist rolls the cache back to the last snapshot the backend accepted; failures latch and are reported (`persistenceError`/`flush`) until the next successful save clears them |
 | `execution.ts` | the host-side `QueueRequestBuilder` (#733's division of labor): deterministic per-attempt run-dir layout (`<runsRoot>/<jobId>/<attempt>/request.json` + `result.json` — the layout the publisher re-derives, so it is a contract), workspace extraction (#732), operator-approved profile names, opaque credential references (#735); plus the profile→`Executor` selector (local + #734 Kubernetes; `oci` refuses until an implementation ships) |
 | `publication.ts` | the durable `JobPublisher`: persists the normalized result + usage to the control plane BEFORE any forge side effect, enforces the exact-head gate, retries the write from the durable `PublicationRecord` (never the model), usage ids are replay-idempotent; stale/expired results settle terminally instead of retrying forever |
@@ -26,10 +27,28 @@ a forge-specific CLI.
   mints adoption records from webhook deliveries (a hostile repository
   must not be able to drive adoption state). Discovery and epoch
   management belong to the reconciler and the operator API (#737).
+- **One forge platform per daemon instance.** The daemon's forge
+  capability is a single per-platform capability, so the intake it binds
+  is platform-aware: `webhook.platform` selects the GitHub App intake
+  (`X-Hub-Signature-256`, `X-GitHub-Event`) or the native Forgejo intake
+  (`X-Gitea-Signature`, `X-Gitea-Event`). Both are served by the same
+  operator host — one router, one follow-up consumer, one durable Q&A
+  budget — so only the handler differs.
 - **The durable generation dedupe lives in the idempotency-key layer**
   (#736), with an in-process fast path. The claim horizon (default 7
   days) must never be shorter than the deployment's compaction retention
   (#736's coupled-pair rule).
+- **The generation claim is an acquire/release contract, not a flag.**
+  Every reservation carries an owner token (the durable binding is
+  `review-generation#<token>`), so the store answers the only question
+  that matters across a restart: *does somebody else own this
+  generation?* `addIfAbsent` claims under a fresh token (a generation
+  already reserved by this process before a restart, or by another
+  controller, is a duplicate — never a second mint), and `remove`
+  RELEASES the durable claim, so a failed enqueue re-mints on the next
+  delivery instead of staying suppressed until the horizon expires. Only
+  the owner may release: a claim bound to a different token is refused by
+  the store.
 - **Lease renewal is liveness-based.** The per-dispatch renewal loop
   renews the queue lease and the run lease only while the executor
   reports a non-terminal phase; a hung worker's lease still lapses into
@@ -42,15 +61,22 @@ a forge-specific CLI.
   publish path without a new dispatch (no duplicate model spend); a
   recovered worker whose generation was superseded is cancelled by
   identity and settled `cancelled`.
-- **Run bookkeeping** mirrors each attempt into a #736 `RunRecord`
-  (created before launch, terminal outcome mirrored after settle,
-  claimed under the daemon's instance id); late bookkeeping for an
-  abandoned attempt is a no-op, never a crash.
-- **No GitHub App webhook handler is bound yet.** The GitHub App client
-  capabilities (#729) are available to the operator's forge binding, but
-  the shipped HTTP intake this composition binds is the Forgejo operator
-  host (`createOperatorHost`, which unconditionally wires the follow-up
-  consumer); a GitHub App webhook server remains #729 follow-on work.
+- **Run bookkeeping mirrors the attempt, not the generation.** The
+  control-plane `RunRecord` is created before the worker launches and
+  moves through the queue's own state machine (`starting` when the
+  worker is launched, `running` when it executes, `publishing` when its
+  result is durable, and a terminal state once the publication path
+  settles it). Every move is a CAS against the run's current state, so
+  late bookkeeping for an abandoned attempt is a no-op, never a crash —
+  and a run whose intermediate step was lost still reaches its terminal
+  state through the legal hops instead of being stranded.
+- **Reconciliation is platform-agnostic.** `reconcileRepositories`
+  (`src/ingress/reconcile.ts`) polls through the same
+  `listOpenPullRequests` lister the GitHub App client and the Forgejo
+  client expose; the caller declares the platform it polls, because the
+  platform is part of the generation identity (a poll mislabelled as the
+  other forge would mint a different generation than the webhook of the
+  same head, and the two would never converge).
 
 ## Testing posture
 
@@ -65,7 +91,9 @@ a forge-specific CLI.
 - `tests-v3/controller-daemon.test.ts` — the end-to-end composition:
   intake → adoption → queue → execution → durable result → publication;
   restart recovery without rerun; superseded recovered worker cancelled
-  by identity; graceful shutdown; fail-closed startup.
+  by identity; graceful shutdown; fail-closed startup; the DURABLE
+  generation claim (restart dedupe, failed-enqueue release) and the
+  mirrored run lifecycle; the platform-aware GitHub App intake.
 
 ## Out of scope (per #1348)
 

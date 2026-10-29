@@ -9,6 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -27,6 +28,8 @@ import type {
   Executor,
 } from "../src/executor/index.js";
 import type { ReviewJob } from "../src/jobs/types.js";
+import { computeGitHubWebhookSignature } from "../src/ingress/github-app-signature.js";
+import type { FollowUpForgeAdapter } from "../src/ingress/followup-host.js";
 import {
   startControllerDaemon,
   type ControllerDaemon,
@@ -35,6 +38,7 @@ import {
 
 const HEAD = "aa11bb22cc33dd44ee55ff667788990001122334";
 const BASE = "dd44ee55ff66aa77bb88cc99001122334455667788";
+const GITHUB_WEBHOOK_SECRET = "github-app-webhook-secret";
 
 function instanceConfig(): InstanceConfig {
   return {
@@ -597,4 +601,115 @@ test("a failed attempt is mirrored as a failed run", async (t) => {
   assert.notEqual(failed, undefined);
   assert.equal(failed!.failureReason, "worker_error");
   assert.equal(failed!.finishedAtMs > 0, true);
+});
+
+// ── the platform-aware intake: the daemon serves ONE forge platform ────────
+//
+// The daemon's forge capability is a single per-platform capability, so one
+// daemon instance serves one forge platform, and the intake it binds is
+// selected by `webhook.platform`: the GitHub App intake
+// (`X-GitHub-Event` + `X-Hub-Signature-256`) or the native Forgejo intake
+// (`X-Gitea-Event` + `X-Gitea-Signature`).
+
+/** A free TCP port on the loopback interface (the daemon binds it). */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createNetServer();
+    probe.on("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const addr = probe.address() as AddressInfo;
+      probe.close(() => resolve(addr.port));
+    });
+  });
+}
+
+/** The follow-up adapter fake the daemon binds into its operator host. The
+ *  question path is never driven by this test — the configuration only has
+ *  to be complete enough for the host to construct the consumer. */
+function followUpAdapter(): FollowUpForgeAdapter {
+  return {
+    async readPermission() {
+      return null;
+    },
+    async readComment() {
+      return "";
+    },
+    async fetchThreadComments() {
+      return [];
+    },
+    async readPrState() {
+      return { state: "open", draft: "not-draft" };
+    },
+    async postComment() {
+      return true;
+    },
+    async resolveHeadSha() {
+      return HEAD;
+    },
+  };
+}
+
+test("the daemon serves the platform's intake: a signed GitHub delivery reaches the daemon's intake", async (t) => {
+  const port = await freePort();
+  const h = await start({
+    options: {
+      // An in-memory queue store: this test is about the INTAKE, and a
+      // durable snapshot file would couple it to the queue store's own
+      // persistence timing.
+      queueStore: { load: () => emptyQueueSnapshot(), save: () => undefined },
+      webhook: {
+        platform: "github",
+        port,
+        secret: GITHUB_WEBHOOK_SECRET,
+        followUp: {
+          adapter: followUpAdapter(),
+          botLogin: async () => "reviewer-bot",
+          clock: () => 1_000_000,
+          rereviewCommand: "/ai-review",
+          mentionHandles: ["reviewer-bot"],
+          answer: async () => "an answer",
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    // The daemon is stopped BEFORE the durable state is removed: an
+    // in-flight tick still persists the queue snapshot, and a snapshot write
+    // into a removed directory would surface as an unhandled rejection.
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+
+  // A REAL GitHub `pull_request`/synchronize delivery, signed over the raw
+  // body: GitHub carries the event NAME in the header, never in the body.
+  const body = JSON.stringify({
+    action: "synchronize",
+    number: 7,
+    pull_request: {
+      number: 7,
+      id: 4242,
+      head: { sha: HEAD, repo: { full_name: "owner/repo" } },
+      base: { sha: BASE, repo: { full_name: "owner/repo" } },
+    },
+    repository: { full_name: "owner/repo" },
+    sender: { login: "contributor" },
+  });
+  const res = await fetch(`http://127.0.0.1:${port}/`, {
+    method: "POST",
+    headers: {
+      "x-github-event": "pull_request",
+      "x-hub-signature-256": computeGitHubWebhookSignature(GITHUB_WEBHOOK_SECRET, body),
+    },
+    body,
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(JSON.parse(await res.text()), { status: "accepted", kind: "synchronize" });
+
+  // The delivery reached the daemon's INTAKE: it scheduled one exact-head
+  // generation, the worker ran for that head, and the run published.
+  await waitFor(() => h.fake.started.length === 1);
+  assert.equal(h.fake.started.length, 1, "exactly one generation was scheduled");
+  assert.equal(h.fake.started[0]!.headSha, HEAD);
+  await waitFor(() => h.forgePublishes.length > 0);
+  assert.equal(h.forgePublishes.length, 1, "the scheduled review published exactly once");
 });
