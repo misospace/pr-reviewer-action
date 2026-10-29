@@ -28,7 +28,10 @@ export const SPECIALIST_ROLES_ORDER: readonly string[] = ["correctness", "securi
 export const SUMMARY_FILE_CAP = 50;
 
 /** Security lane: pr_kind values AND risk-flag names that select the
- * `security` specialist. */
+ * `security` specialist. `dependency_security_sensitive` is the #1336
+ * bounded dependency-update escalation — it fires only on known-fact
+ * triggers (provenance change, reported advisory, sensitive component), so
+ * benign Renovate bumps stay out of the lane. */
 const SECURITY_SIGNALS: readonly string[] = [
   "auth_changes",
   "public_route_changes",
@@ -37,6 +40,7 @@ const SECURITY_SIGNALS: readonly string[] = [
   "secret_handling_changes",
   "linked_security_issue",
   "linked_audit_issue",
+  "dependency_security_sensitive",
 ];
 
 /** Tests lane: pr_kind values (no risk flag name collides — kind-only lane). */
@@ -269,6 +273,24 @@ function trivialZeroReason(kind: string, flags: readonly string[], files: readon
   if (kind === "image_digest_only") {
     return (
       "trivial class: image-digest-only change with no risk " +
+      "signals — no role has a meaningful lane (documented " +
+      "zero-selection gate)"
+    );
+  }
+  // #1336: a benign Renovate image tag/digest or chart/appVersion refresh is
+  // a dependency update with no risk signal — zero specialists, like the
+  // digest-only gates. Any risk flag (notably dependency_security_sensitive)
+  // defeats this gate and the lanes evaluate normally.
+  if (kind === "renovate_image_update") {
+    return (
+      "trivial class: benign Renovate image tag/digest refresh with no risk " +
+      "signals — no role has a meaningful lane (documented " +
+      "zero-selection gate)"
+    );
+  }
+  if (kind === "renovate_chart_update") {
+    return (
+      "trivial class: benign Renovate chart/appVersion refresh with no risk " +
       "signals — no role has a meaningful lane (documented " +
       "zero-selection gate)"
     );

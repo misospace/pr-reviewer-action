@@ -10,27 +10,31 @@ In `auto`, role selection is a pure lookup over classification data the pipeline
 
 `pr_kind` is a single value from a fixed, precedence-ordered rule table (first match wins), falling back to `app_code` when nothing else matches:
 
-`renovate_digest_only`, `image_digest_only`, `dependency_upgrade`, `k8s_manifest`, `secret_handling_changes`, `db_or_migration_changes`, `auth_changes`, `public_route_changes`, `file_serving_changes`, `path_handling_changes`, `app_code` (default).
+`renovate_digest_only`, `image_digest_only`, `renovate_image_update`, `renovate_chart_update`, `dependency_upgrade`, `k8s_manifest`, `secret_handling_changes`, `db_or_migration_changes`, `auth_changes`, `public_route_changes`, `file_serving_changes`, `path_handling_changes`, `app_code` (default).
 
-`risk_flags` is a set of zero or more additional signals: `linked_security_issue`, `linked_audit_issue`, `linked_priority_p0`, `linked_priority_p1` (from linked-issue labels, or Linear priority 1/2), plus `file_serving_changes`, `path_handling_changes`, `auth_changes`, `secret_handling_changes` when those patterns match the diff content as well as (or instead of) the filename.
+`renovate_image_update` (#1336) is a Renovate-authored refresh of image tags/digests in YAML/Dockerfile manifests; `renovate_chart_update` is a Renovate-authored Helm chart/`appVersion` version bump (in a `helmrelease.yaml`/`Chart.yaml`-shaped file, or YAML whose diff carries a `kind: HelmRelease`/`helm.toolkit.fluxcd.io` marker). Both require forge-reported Renovate authorship — a login starting with `renovate` (`renovate[bot]`, `renovate-bot`, …) or a `renovate/` head branch — and a pure diff: every changed line is an image reference or chart-version key whose repository/name is unchanged, with the classifier's evidence reconciliation proving no changed line went unseen. A human edit, a mixed diff, or a renamed chart keeps the pre-existing kinds. Documented residual risk (#1336 review): both authorship signals are author-chosen strings — a human PR from a `renovate/` branch with a pure image-tag refresh reaches the benign zero-selection gate. That is accepted on purpose: the pure-diff requirement is the load-bearing guard (any other change in the diff disqualifies the kind), so the gate can only ever bless an update whose every changed line is a version bump.
+
+`risk_flags` is a set of zero or more additional signals: `linked_security_issue`, `linked_audit_issue`, `linked_priority_p0`, `linked_priority_p1` (from linked-issue labels, or Linear priority 1/2), plus `file_serving_changes`, `path_handling_changes`, `auth_changes`, `secret_handling_changes` when those patterns match the diff content as well as (or instead of) the filename, plus `dependency_security_sensitive` (#1336) — a bounded dependency-update escalation that fires only on known-fact triggers: a paired image reference whose registry/repository changed (unknown upstream provenance, any authorship — the scan pairs what parses cleanly and is never aborted by unrelated diff content), or — inside a dependency-update PR (Renovate-authored or an update kind) — a forge-reported title carrying `CVE-…`/`GHSA-…`/"security", or a security-infrastructure component in a changed image repository or changed path. The component vocabulary is a closed exact-token list (`auth`, `oauth`, `oidc`, `saml`, `sso`, `proxy`, `gateway`, `ingress`, `traefik`, `nginx`, `caddy`, `haproxy`, `envoy`, `vpn`, `wireguard`, `tailscale`, `cloudflared`, `vault`, `sops`, `cert`, `secret`/`secrets`, `keycloak`, plus named compounds `authelia`, `authentik`, `auth0`, `oauth2`, `vaultwarden`) — near-miss tokens like `author` or `certs` never fire. It never infers vulnerabilities from image contents.
 
 ### Selection table
 
 | Role | Selected when `pr_kind` is... | ...or `risk_flags` includes |
 | --- | --- | --- |
 | `correctness` | `app_code`, `k8s_manifest` | `linked_priority_p0`, `linked_priority_p1` |
-| `security` | `auth_changes`, `public_route_changes`, `file_serving_changes`, `path_handling_changes`, `secret_handling_changes` | `linked_security_issue`, `linked_audit_issue`, `auth_changes`, `file_serving_changes`, `path_handling_changes`, `secret_handling_changes` |
+| `security` | `auth_changes`, `public_route_changes`, `file_serving_changes`, `path_handling_changes`, `secret_handling_changes` | `linked_security_issue`, `linked_audit_issue`, `auth_changes`, `file_serving_changes`, `path_handling_changes`, `secret_handling_changes`, `dependency_security_sensitive` |
 | `tests` | `dependency_upgrade`, `db_or_migration_changes` | — |
 
 A PR can match several lanes and select several roles. There's one additional, independent force-on: if the PR's non-test source footprint is substantial (a new non-test source module, or over 200 non-test source lines changed — `SUBSTANTIAL_SOURCE_LINE_THRESHOLD` in `classify.ts`), `correctness` runs regardless of which lane matched. This closes a gap where a real, sizable change classified only on a content-only `file_serving_changes`/`path_handling_changes` match (too weak to route on by itself) could otherwise skip correctness entirely (#871).
 
 ### Zero-selection gates
 
-Zero selection only ever happens through one of three explicit, documented trivial gates — all require `risk_flags` to be empty:
+Zero selection only ever happens through one of five explicit, documented trivial gates — all require `risk_flags` to be empty:
 
 1. **`renovate_digest_only` with no risk flags** — a lockfile digest bump with no version change and no risk signal.
 2. **`image_digest_only` with no risk flags** — an image-reference-only change (YAML `image:`/`tag:`, compose, Dockerfile `FROM`) where every changed line keeps its repository and tag and only the `@sha256:` digest differs.
-3. **`app_code` with no risk flags, where every changed file is in the enumerated trivial class** — `docs/`, prose extensions (`.md`, `.rst`, `.txt`, ...), license/contributor/bot-config files, and a specific inert subset of `.github/` (issue templates, `CODEOWNERS`, `dependabot.yml`, `FUNDING.yml`). This gate only applies when the changed-file list is under the classifier's 50-file summary cap — a capped (truncated) list can't prove every file is trivial, so it doesn't fire. Unknown `.github/**` content (workflows, actions, anything not explicitly enumerated) is treated as non-trivial on purpose.
+3. **`renovate_image_update` with no risk flags** (#1336) — a Renovate-authored image tag/digest refresh whose diff is pure (every changed line is an image reference; repository unchanged).
+4. **`renovate_chart_update` with no risk flags** (#1336) — a Renovate-authored chart/`appVersion` value bump whose diff is pure.
+5. **`app_code` with no risk flags, where every changed file is in the enumerated trivial class** — `docs/`, prose extensions (`.md`, `.rst`, `.txt`, ...), license/contributor/bot-config files, and a specific inert subset of `.github/` (issue templates, `CODEOWNERS`, `dependabot.yml`, `FUNDING.yml`). This gate only applies when the changed-file list is under the classifier's 50-file summary cap — a capped (truncated) list can't prove every file is trivial, so it doesn't fire. Unknown `.github/**` content (workflows, actions, anything not explicitly enumerated) is treated as non-trivial on purpose.
 
 ### Unknown kinds and conservative fallback
 
@@ -48,6 +52,9 @@ Any time the classifier gives no deterministic basis to skip a role, auto fails 
 | Edit to `src/auth/login.ts` | `auth_changes` | `auth_changes` | `security` selected; `correctness`/`tests` skipped unless the diff is also substantial (#871) |
 | Renovate PR bumping only `package-lock.json` hashes | `renovate_digest_only` | none | **Zero selection** — digest-only trivial gate |
 | Renovate PR refreshing only an image `@sha256:` digest in a HelmRelease | `image_digest_only` | none | **Zero selection** — image-digest-only trivial gate |
+| Renovate PR bumping an image tag (`litellm-database:v1.106.5` → `v1.106.6`) in a manifest (#11591) | `renovate_image_update` | none | **Zero selection** — benign image-refresh trivial gate |
+| Renovate PR bumping a security-infrastructure image (e.g. `authelia`) or changing an image's repository, or whose title reports a CVE | `renovate_image_update` | `dependency_security_sensitive` | `security` selected; correctness per the fall-through kind |
+| Renovate PR bumping a HelmRelease `chart` version | `renovate_chart_update` | none | **Zero selection** — benign chart-refresh trivial gate |
 | New 300-line non-test module, e.g. `src/platform/foo.ts` | `app_code` | none | `correctness` selected (direct `app_code` match, reinforced by the #871 substantial-change force-on); `security`/`tests` skipped |
 
 ## Where to see the decision
