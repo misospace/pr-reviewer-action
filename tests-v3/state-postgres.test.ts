@@ -289,6 +289,55 @@ async function runConformanceBattery(
     assert.equal((await store.getIdempotencyKey("evt-exp"))!.binding, "new");
   });
 
+  await testFn("conformance: release-idempotency frees only the caller's own claim", async () => {
+    await hooks.beforeEach?.();
+    const store = await makeStore();
+    await store.apply([
+      { kind: "claim-idempotency", key: "evt-1", binding: "job-1", nowMs: T0, expiresAtMs: 0 },
+    ]);
+    // A caller that does not own the claim can never release it.
+    await assert.rejects(
+      () =>
+        store.apply([
+          { kind: "release-idempotency", key: "evt-1", binding: "job-2", nowMs: T0 + 1 },
+        ]),
+      StateConflictError,
+    );
+    assert.notEqual(await store.getIdempotencyKey("evt-1"), null);
+    // The owner releases it: the key is GONE (durable, not a memory
+    // detail), so a redelivery re-mints the work.
+    await store.apply([
+      { kind: "release-idempotency", key: "evt-1", binding: "job-1", nowMs: T0 + 2 },
+    ]);
+    assert.equal(await store.getIdempotencyKey("evt-1"), null);
+    // Releasing an absent key is a successful no-op.
+    await store.apply([
+      { kind: "release-idempotency", key: "evt-1", binding: "job-1", nowMs: T0 + 3 },
+    ]);
+    // An EXPIRED key owns nothing: anyone may release it.
+    await store.apply([
+      {
+        kind: "claim-idempotency",
+        key: "evt-exp",
+        binding: "old",
+        nowMs: T0,
+        expiresAtMs: T0 + 100,
+      },
+    ]);
+    await store.apply([
+      { kind: "release-idempotency", key: "evt-exp", binding: "other", nowMs: T0 + 101 },
+    ]);
+    assert.equal(await store.getIdempotencyKey("evt-exp"), null);
+    // A malformed release fails closed.
+    await assert.rejects(
+      () =>
+        store.apply([
+          { kind: "release-idempotency", key: "evt-2", binding: "job-1", nowMs: Number.NaN },
+        ]),
+      RangeError,
+    );
+  });
+
   await testFn("conformance: publication retry grows capped history from the stored record", async () => {
     await hooks.beforeEach?.();
     const store = await makeStore();

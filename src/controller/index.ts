@@ -24,6 +24,12 @@ export {
   type ForgeWriteCapability,
 } from "./publication.js";
 export {
+  mirrorRunTransition,
+  runFailureReason,
+  startRunRecord,
+  type RunAttemptIdentity,
+} from "./run-lifecycle.js";
+export {
   createAdoptionIdentityResolver,
   startControllerDaemon,
   type ControllerDaemon,

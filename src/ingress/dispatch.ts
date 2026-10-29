@@ -21,7 +21,18 @@ import { isExpired, resultMatchesJob } from "../jobs/staleness.js";
 import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
 import type { CanonicalForgeEvent } from "../events/types.js";
 
-/** Store of already-minted generation ids (the dedupe key). */
+/** Store of already-minted generation ids (the dedupe key).
+ *
+ * A DURABLE implementation (the daemon's control-plane ledger) must
+ * satisfy two contracts across a restart:
+ *
+ * - `addIfAbsent` is ATOMIC and reports whether THIS caller took the
+ *   reservation: a generation already reserved (by this process before a
+ *   restart, or by another controller) must be a duplicate, never a
+ *   second mint;
+ * - `remove` releases the DURABLE reservation, not just the caller's
+ *   in-process memory: a claim left behind suppresses the redelivery
+ *   until its horizon expires, which loses the review. */
 export interface GenerationLedger {
   has(jobId: string): boolean | Promise<boolean>;
   add(jobId: string): void | Promise<void>;

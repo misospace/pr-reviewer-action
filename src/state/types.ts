@@ -487,7 +487,11 @@ export function validateRun(value: unknown): RunRecord | null {
 
 /** Build a fresh `RunRecord` with sentinels everywhere and `createdAtMs
  * = updatedAtMs = nowMs`. Throws RangeError on a non-finite nowMs
- * (fail closed). */
+ * (fail closed).
+ *
+ * `attempt` mirrors the queue's attempt counter for the run (the attempt
+ * that is about to start); it defaults to 0 when the caller does not
+ * know it yet. */
 export function newRunRecord(
   input: {
     readonly runId: string;
@@ -496,11 +500,16 @@ export function newRunRecord(
     readonly executorIdentity: string;
     readonly headSha: string;
     readonly configFingerprint: string;
+    readonly attempt?: number;
   },
   nowMs: number,
 ): RunRecord {
   if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) {
     throw new RangeError(`nowMs must be a finite number, got ${String(nowMs)}`);
+  }
+  const attempt = input.attempt ?? 0;
+  if (!isSafeNonNegativeInteger(attempt)) {
+    throw new RangeError(`attempt must be a safe non-negative integer, got ${String(attempt)}`);
   }
   const seeded = validateRun({
     runId: input.runId,
@@ -508,7 +517,7 @@ export function newRunRecord(
     kind: input.kind,
     state: "queued",
     executorIdentity: input.executorIdentity,
-    attempt: 0,
+    attempt,
     headSha: input.headSha,
     configFingerprint: input.configFingerprint,
     leaseOwner: "",

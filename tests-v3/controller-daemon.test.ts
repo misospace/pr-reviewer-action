@@ -16,6 +16,7 @@ import {
   InMemoryControlPlaneStore,
   type ControlPlaneStore,
 } from "../src/state/index.js";
+import { emptyQueueSnapshot, type QueueStore } from "../src/queue/index.js";
 import type { CanonicalForgeEvent } from "../src/events/types.js";
 import type { InstanceConfig } from "../src/config/instance-config.js";
 import type { MirrorCache, WorkspaceHandle } from "../src/acquisition/index.js";
@@ -471,4 +472,129 @@ test("an adoption policy the repository did not satisfy never schedules", async 
   });
   assert.equal(await h.daemon.ingest(event()), "ignored");
   assert.equal(h.fake.started.length, 0);
+});
+
+/** Poll until an ASYNC predicate holds (bounded): the control-plane
+ * state is read through an async seam. */
+async function waitForAsync(
+  predicate: () => Promise<boolean>,
+  budgetMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  while (!(await predicate())) {
+    if (Date.now() > deadline) {
+      assert.fail("waitFor: condition not reached within budget");
+    }
+    await settleFor(20);
+  }
+}
+
+/** The durable generation claim of one job (the control plane's
+ * idempotency-key layer owns the dispatch dedupe). */
+async function generationClaim(
+  controlPlane: ControlPlaneStore,
+): Promise<{ readonly key: string; readonly jobId: string }> {
+  const keys = (await controlPlane.exportState()).idempotencyKeys;
+  const claim = keys.find((entry) => entry.key.startsWith("generation:"));
+  assert.notEqual(claim, undefined, "a durable generation claim exists");
+  return { key: claim!.key, jobId: claim!.key.slice("generation:".length) };
+}
+
+test("a redelivery after a restart dedupes on the DURABLE generation claim", async (t) => {
+  const h = await start();
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  const claim = await generationClaim(h.controlPlane);
+  // The daemon goes down (a crash image), and a fresh daemon comes up
+  // over the SAME durable state.
+  await h.daemon.stop();
+  const h2 = await start({
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: new FakeExecution(false),
+  });
+  t.after(() => {
+    void h2.daemon.stop().catch(() => undefined);
+  });
+  // The claim is DURABLE: the redelivery is a duplicate, not a second
+  // mint of the same generation.
+  assert.equal(await h2.daemon.ingest(event()), "duplicate");
+  assert.notEqual(await h.controlPlane.getIdempotencyKey(claim.key), null);
+});
+
+test("a failed enqueue releases the DURABLE generation claim", async (t) => {
+  // The queue store refuses every durable commit FROM NOW ON: the
+  // enqueue handoff fails, which is exactly the case the dispatch
+  // contract releases.
+  let failSaves = false;
+  const failingStore: QueueStore = {
+    load: () => emptyQueueSnapshot(),
+    save: () => {
+      if (failSaves) throw new Error("queue store unavailable");
+    },
+  };
+  const h = await start({ options: { queueStore: failingStore } });
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  failSaves = true;
+  await assert.rejects(() => h.daemon.ingest(event()), /queue store unavailable/);
+  // The durable claim was RELEASED, not merely forgotten in process
+  // memory: a redelivery re-mints the generation instead of being
+  // suppressed until the claim's horizon expires.
+  const keys = (await h.controlPlane.exportState()).idempotencyKeys;
+  assert.equal(
+    keys.filter((entry) => entry.key.startsWith("generation:")).length,
+    0,
+    "no durable generation claim survives a failed enqueue",
+  );
+});
+
+test("the control-plane run mirrors the attempt lifecycle to a terminal state", async (t) => {
+  const h = await start();
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  await waitFor(() => h.forgePublishes.length > 0);
+  const runs = (await h.controlPlane.exportState()).runs;
+  assert.equal(runs.length, 1);
+  const run = runs[0]!;
+  // The attempt is accounted for end to end: it started, it produced a
+  // result, and it reached a terminal state.
+  assert.equal(run.state, "completed");
+  assert.equal(run.resultHeadSha, HEAD);
+  assert.equal(run.startedAtMs > 0, true, "the run recorded its start");
+  assert.equal(run.finishedAtMs > 0, true, "the run recorded its finish");
+  assert.equal(run.attempt, 1);
+  assert.equal(run.leaseOwner, "", "a terminal run holds no worker lease");
+});
+
+test("a failed attempt is mirrored as a failed run", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  h.fake.finish({
+    status: "failed",
+    resultHeadSha: "",
+    failureCategory: "worker_error",
+    failureMessage: "worker failed",
+    resultArtifactPath: "",
+  });
+  await waitForAsync(async () =>
+    (await h.controlPlane.exportState()).runs.some((run) => run.state === "failed"),
+  );
+  const failed = (await h.controlPlane.exportState()).runs.find(
+    (run) => run.state === "failed",
+  );
+  assert.notEqual(failed, undefined);
+  assert.equal(failed!.failureReason, "worker_error");
+  assert.equal(failed!.finishedAtMs > 0, true);
 });

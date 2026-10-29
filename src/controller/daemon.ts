@@ -62,10 +62,9 @@ import { decideAdoption } from "../config/adoption.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import {
   StateConflictError,
-  newRunRecord,
   type ControlPlaneStore,
   type QueueSnapshotStore,
-  type RunRecord,
+  type StateMutation,
 } from "../state/index.js";
 import {
   JsonFileQueueStore,
@@ -84,6 +83,7 @@ import {
   validateExecutionResult,
   type ExecutionProfiles,
   type ExecutionRequest,
+  type ExecutionResult,
   type Executor,
 } from "../executor/index.js";
 import type { CredentialRef } from "../credentials/types.js";
@@ -97,6 +97,11 @@ import {
   type ExecutorSelector,
 } from "./execution.js";
 import { createDurablePublisher } from "./publication.js";
+import {
+  mirrorRunTransition,
+  runFailureReason,
+  startRunRecord,
+} from "./run-lifecycle.js";
 import {
   createSnapshotBackedQueueStore,
   type SnapshotBackedQueueStore,
@@ -262,17 +267,35 @@ const FIRST_ADOPTION_EPOCH = "1";
 
 /** The durable generation ledger (#1348): the dispatch dedupe key lives
  * in the control plane's idempotency-key layer — the #736 doc names that
- * layer as "the controller's durable dedupe for redeliveries" — with an
- * in-process fast path so a hot webhook does not round-trip the database
- * for a generation this process already minted. `remove` releases the
- * in-process reservation (the dispatch contract for a failed enqueue);
- * the durable claim expires on its own horizon, which is what bounds how
- * long a redelivery stays suppressed across a restart. */
+ * layer as "the controller's durable dedupe for redeliveries".
+ *
+ * ACQUIRE/RELEASE CONTRACT. Every reservation carries an OWNER TOKEN: the
+ * durable binding is `review-generation#<token>`, so the store's
+ * idempotency-key layer answers the only question that matters across a
+ * restart — "does somebody else own this generation?".
+ *
+ * - `addIfAbsent` claims the key under a FRESH token. The store rejects a
+ *   claim whose binding differs from the stored one, so a generation that
+ *   is already reserved (by this process before a restart, or by another
+ *   controller) is a DUPLICATE, never a second mint. A lost
+ *   acknowledgement (the write landed, the answer did not) is resolved by
+ *   reading the key back: the reservation is ours only when the stored
+ *   binding IS our token.
+ * - `remove` RELEASES the durable claim (the dispatch contract for a
+ *   failed enqueue) instead of only forgetting it in process memory, so a
+ *   redelivery re-mints the generation immediately instead of being
+ *   suppressed until the claim's horizon expires. Only the owner may
+ *   release: a key bound to a different token is refused by the store.
+ *
+ * The in-process fast path (`memory`) answers a hot redelivery without a
+ * database round-trip; it is a cache of the durable truth, never the
+ * truth itself. */
 class ControlPlaneGenerationLedger implements GenerationLedger {
   private readonly store: ControlPlaneStore;
   private readonly now: () => number;
   private readonly ttlMs: number;
-  private readonly memory = new Set<string>();
+  /** This process's OWN reservations: jobId → owner token. */
+  private readonly claims = new Map<string, string>();
 
   constructor(store: ControlPlaneStore, now: () => number, ttlMs: number) {
     this.store = store;
@@ -280,49 +303,93 @@ class ControlPlaneGenerationLedger implements GenerationLedger {
     this.ttlMs = ttlMs;
   }
 
-  has(jobId: string): boolean | Promise<boolean> {
-    if (this.memory.has(jobId)) return true;
-    return this.store
-      .getIdempotencyKey(`${GENERATION_CLAIM_PREFIX}${jobId}`)
-      .then((key) => key !== null);
+  private claimKey(jobId: string): string {
+    return `${GENERATION_CLAIM_PREFIX}${jobId}`;
   }
 
-  add(jobId: string): void {
-    this.memory.add(jobId);
-    const claim = {
-      kind: "claim-idempotency" as const,
-      key: `${GENERATION_CLAIM_PREFIX}${jobId}`,
-      binding: GENERATION_CLAIM_BINDING,
-      nowMs: this.now(),
-      expiresAtMs: this.now() + this.ttlMs,
+  private bindingOf(token: string): string {
+    return `${GENERATION_CLAIM_BINDING}#${token}`;
+  }
+
+  private claimMutation(jobId: string, token: string): StateMutation {
+    const nowMs = this.now();
+    return {
+      kind: "claim-idempotency",
+      key: this.claimKey(jobId),
+      binding: this.bindingOf(token),
+      nowMs,
+      expiresAtMs: nowMs + this.ttlMs,
     };
-    void this.store.apply([claim]).catch(() => undefined);
+  }
+
+  async has(jobId: string): Promise<boolean> {
+    if (this.claims.has(jobId)) return true;
+    const key = await this.store.getIdempotencyKey(this.claimKey(jobId));
+    if (key === null) return false;
+    // An EXPIRED claim owns nothing: the key is free to be re-claimed.
+    return key.expiresAtMs === 0 || key.expiresAtMs > this.now();
+  }
+
+  async add(jobId: string): Promise<void> {
+    const token = this.claims.get(jobId) ?? randomUUID();
+    try {
+      await this.store.apply([this.claimMutation(jobId, token)]);
+    } catch (err) {
+      // Already bound (by another owner): the id IS recorded, which is
+      // all `add` promises. A transport failure is not swallowed — the
+      // caller owns the retry.
+      if (err instanceof StateConflictError) return;
+      throw err;
+    }
+    this.claims.set(jobId, token);
   }
 
   async addIfAbsent(jobId: string): Promise<boolean> {
-    if (this.memory.has(jobId)) return false;
+    if (this.claims.has(jobId)) return false;
+    const token = randomUUID();
     try {
-      await this.store.apply([
-        {
-          kind: "claim-idempotency",
-          key: `${GENERATION_CLAIM_PREFIX}${jobId}`,
-          binding: GENERATION_CLAIM_BINDING,
-          nowMs: this.now(),
-          expiresAtMs: this.now() + this.ttlMs,
-        },
-      ]);
+      await this.store.apply([this.claimMutation(jobId, token)]);
     } catch (err) {
-      // A conflicting claim means the key is already bound — the
-      // generation was already minted (dedupe), whatever the binding.
-      if (err instanceof StateConflictError) return false;
-      throw err;
+      if (err instanceof StateConflictError) {
+        // Somebody else owns the generation: a duplicate delivery, never
+        // a second mint.
+        return false;
+      }
+      // The write may have landed even though the answer was lost. Prove
+      // it before deciding: the reservation is OURS only when the stored
+      // binding is our token.
+      const stored = await this.store
+        .getIdempotencyKey(this.claimKey(jobId))
+        .catch(() => null);
+      if (stored === null) throw err;
+      if (stored.binding !== this.bindingOf(token)) return false;
+      this.claims.set(jobId, token);
+      return true;
     }
-    this.memory.add(jobId);
+    this.claims.set(jobId, token);
     return true;
   }
 
-  remove(jobId: string): void {
-    this.memory.delete(jobId);
+  async remove(jobId: string): Promise<void> {
+    const token = this.claims.get(jobId);
+    this.claims.delete(jobId);
+    // A reservation this process does not own is never released: it may
+    // belong to another controller instance.
+    if (token === undefined) return;
+    try {
+      await this.store.apply([
+        {
+          kind: "release-idempotency",
+          key: this.claimKey(jobId),
+          binding: this.bindingOf(token),
+          nowMs: this.now(),
+        },
+      ]);
+    } catch (err) {
+      // Somebody else owns the claim now: releasing it is not ours to do.
+      if (err instanceof StateConflictError) return;
+      throw err;
+    }
   }
 }
 
@@ -409,7 +476,8 @@ async function trackRunStart(
   record: JobRecord,
   request: ExecutionRequest,
 ): Promise<void> {
-  const created: RunRecord = newRunRecord(
+  await startRunRecord(
+    runtime.store,
     {
       runId: request.runId,
       jobId: record.job.jobId,
@@ -417,19 +485,14 @@ async function trackRunStart(
       executorIdentity: executorIdentityOf(runtime, request.profiles.executor),
       headSha: record.job.headSha,
       configFingerprint: record.job.configFingerprint,
+      attempt: record.attempt,
     },
-    runtime.now(),
+    {
+      nowMs: runtime.now(),
+      leaseOwner: runtime.instanceId,
+      leaseTtlMs: runtime.leaseTtlMs,
+    },
   );
-  try {
-    await runtime.store.apply([{ kind: "create-run", record: created }]);
-    // The daemon claims the run's worker lease under its own instance id:
-    // a restarted controller identifies abandoned workers by an expired
-    // lease (#736), and a lost lease can never be heartbeated back.
-    await runtime.store.claimRun(request.runId, runtime.instanceId, runtime.now(), runtime.leaseTtlMs);
-  } catch (err) {
-    if (err instanceof StateConflictError) return; // already created/claimed
-    throw err;
-  }
 }
 
 function executorIdentityOf(runtime: DaemonRuntime, profileName: string): string {
@@ -442,6 +505,68 @@ function executorIdentityOf(runtime: DaemonRuntime, profileName: string): string
     : configured.kind;
 }
 
+/** The message of a thrown value ("" when it carries none). */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : "";
+}
+
+/** Mirror the run's terminal state for one attempt outcome.
+ *
+ * The attribution follows the queue's OWN settle rules, so the durable
+ * run and the queue record never disagree about why an attempt ended:
+ *
+ * - `completed` does NOT settle the run: the work is done and its
+ *   result is durable, so the run is `publishing` until the durable
+ *   publication path settles it (published → `completed`, refused →
+ *   `failed`);
+ * - a failure of a SUPERSEDED generation is retired as `superseded`,
+ *   not as a plain failure;
+ * - a cancellation is `cancelled`, with the queue's own reason. */
+async function settleRunForOutcome(
+  runtime: DaemonRuntime,
+  record: JobRecord,
+  request: ExecutionRequest,
+  outcome: {
+    readonly status: "completed" | "failed" | "cancelled";
+    readonly resultHeadSha: string;
+    readonly failureCategory: string;
+  },
+): Promise<void> {
+  const nowMs = runtime.now();
+  const current = runtime.controller.recordFor(record.job.jobId);
+  const supersededByJobId =
+    current !== null && current.cancelRequested ? current.supersededByJobId : "";
+  if (outcome.status === "completed") {
+    await mirrorRunTransition(runtime.store, request.runId, "publishing", { nowMs });
+    return;
+  }
+  if (outcome.status === "failed") {
+    if (supersededByJobId !== "") {
+      await mirrorRunTransition(runtime.store, request.runId, "superseded", {
+        nowMs,
+        patch: {
+          supersededByJobId,
+          failureReason: "superseded-by-newer-head",
+        },
+      });
+      return;
+    }
+    await mirrorRunTransition(runtime.store, request.runId, "failed", {
+      nowMs,
+      patch: { failureReason: runFailureReason(outcome.failureCategory, "execution-failed") },
+    });
+    return;
+  }
+  await mirrorRunTransition(runtime.store, request.runId, "cancelled", {
+    nowMs,
+    patch: {
+      failureReason:
+        current !== null && current.cancelRequested
+          ? "cancelled-by-supersession"
+          : "cancelled-shutdown",
+    },
+  });
+}
 /** The daemon's `JobExecutor`: request building, control-plane run
  * bookkeeping, executor selection by approved profile name, lease
  * renewal while the worker is provably alive, and the workspace-release
@@ -467,8 +592,27 @@ function createDaemonJobExecutor(
         }
         // 2. Persist the run record BEFORE the worker launches.
         await trackRunStart(runtime, record, request);
+        // 2b. Mirror the run lifecycle: the attempt leaves `queued` — the
+        //     worker is about to launch.
+        await mirrorRunTransition(runtime.store, request.runId, "starting", {
+          nowMs: runtime.now(),
+        });
         // 3. Select the operator-approved executor and launch.
-        const handle = await selector.forProfile(request.profiles.executor).start(request, signal);
+        let handle: Awaited<ReturnType<Executor["start"]>>;
+        try {
+          handle = await selector.forProfile(request.profiles.executor).start(request, signal);
+        } catch (err) {
+          // The launch itself failed: the run never started working.
+          await mirrorRunTransition(runtime.store, request.runId, "failed", {
+            nowMs: runtime.now(),
+            patch: { failureReason: runFailureReason(errorMessage(err), "executor-launch-failed") },
+          });
+          return failedOutcome(err);
+        }
+        // 3b. The worker exists and is executing: the run is `running`.
+        await mirrorRunTransition(runtime.store, request.runId, "running", {
+          nowMs: runtime.now(),
+        });
         // 4. Renew leases while the worker is provably alive: the queue
         //    lease (the scheduler's own expiry requeues anything the
         //    daemon stopped renewing) and the control-plane run lease.
@@ -506,20 +650,55 @@ function createDaemonJobExecutor(
           // `toQueueJobExecutor` enforces): re-validate the shape, then
           // prove the correlation identity against the request the
           // daemon itself built.
-          const validated = validateExecutionResult(collected);
+          let validated: ExecutionResult;
+          try {
+            validated = validateExecutionResult(collected);
+          } catch (err) {
+            // An unusable result is a FAILED attempt: the run says so
+            // instead of staying `running` for a worker that is already
+            // gone.
+            const category = runFailureReason(errorMessage(err), "invalid-result");
+            await settleRunForOutcome(runtime, record, request, {
+              status: "failed",
+              resultHeadSha: "",
+              failureCategory: category,
+            });
+            return Object.freeze({
+              status: "failed" as const,
+              resultHeadSha: "",
+              failureCategory: category,
+            });
+          }
           if (validated.runId !== request.runId || validated.jobId !== request.jobId) {
+            await settleRunForOutcome(runtime, record, request, {
+              status: "failed",
+              resultHeadSha: "",
+              failureCategory: "stale_result",
+            });
             return Object.freeze({
               status: "failed" as const,
               resultHeadSha: "",
               failureCategory: "stale_result",
             });
           }
-          return Object.freeze({
+          const outcome = Object.freeze({
             status: validated.status,
             resultHeadSha: validated.status === "completed" ? validated.resultHeadSha : "",
             failureCategory:
               validated.failureCategory === "" ? "executor-error" : validated.failureCategory,
           });
+          await settleRunForOutcome(runtime, record, request, outcome);
+          return outcome;
+        } catch (err) {
+          // The worker channel failed outright: the attempt is over, and
+          // the run is accounted for before the failure propagates to the
+          // queue's own settle path.
+          await settleRunForOutcome(runtime, record, request, {
+            status: "failed",
+            resultHeadSha: "",
+            failureCategory: runFailureReason(errorMessage(err), "executor-error"),
+          });
+          throw err;
         } finally {
           renewing = false;
           clearInterval(renewTimer);
@@ -801,9 +980,12 @@ export async function startControllerDaemon(
       try {
         controller.enqueue(job);
       } catch (err) {
-        // Release the reservation so a later delivery can re-mint (the
-        // dispatch contract); the caller above the daemon owns redelivery.
-        ledger.remove(job.jobId);
+        // Release the DURABLE reservation so a later delivery can re-mint
+        // (the dispatch contract): the release is awaited, because a
+        // claim left behind suppresses the redelivery until its horizon
+        // expires. The enqueue failure is the error the caller owns; a
+        // failed release never masks it.
+        await ledger.remove(job.jobId).catch(() => undefined);
         throw err;
       }
       return "scheduled";

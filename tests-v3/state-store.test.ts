@@ -348,6 +348,32 @@ test("idempotency: same binding replays, different binding conflicts, expiry re-
   assert.equal((await store.getIdempotencyKey("evt-exp"))!.binding, "new");
 });
 
+test("release-idempotency frees only the caller's own claim", async () => {
+  const store = new InMemoryControlPlaneStore();
+  await store.apply([
+    { kind: "claim-idempotency", key: "evt-1", binding: "job-1", nowMs: T0, expiresAtMs: 0 },
+  ]);
+  // A caller that does not own the claim can never release it.
+  await assert.rejects(
+    async () =>
+      await store.apply([
+        { kind: "release-idempotency", key: "evt-1", binding: "job-2", nowMs: T0 + 1 },
+      ]),
+    StateConflictError,
+  );
+  assert.notEqual(await store.getIdempotencyKey("evt-1"), null);
+  // The owner releases it: the key is GONE, so a redelivery re-mints the
+  // work instead of being suppressed.
+  await store.apply([
+    { kind: "release-idempotency", key: "evt-1", binding: "job-1", nowMs: T0 + 2 },
+  ]);
+  assert.equal(await store.getIdempotencyKey("evt-1"), null);
+  // Releasing an absent key is a successful no-op.
+  await store.apply([
+    { kind: "release-idempotency", key: "evt-1", binding: "job-1", nowMs: T0 + 3 },
+  ]);
+});
+
 test("claim-idempotency fails closed on bad arguments", async () => {
   const store = new InMemoryControlPlaneStore();
   await assert.rejects(

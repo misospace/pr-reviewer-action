@@ -52,6 +52,7 @@ import {
   executionRunId,
   executionRunDir,
 } from "./execution.js";
+import { mirrorRunTransition } from "./run-lifecycle.js";
 
 /** The forge write seam the daemon binds from the platform capability.
  * The payload is the durable canonical JSON the record persisted; the
@@ -345,6 +346,16 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
           nowMs,
         });
         if (gate.status === "published") {
+          // The run's own account closes here: the result is on the forge.
+          await mirrorRunTransition(
+            deps.store,
+            executionRunId(jobId, record.attempt),
+            "completed",
+            {
+              nowMs: deps.now(),
+              patch: { resultHeadSha: record.resultHeadSha },
+            },
+          );
           return true;
         }
         // Stale/expired: terminal refusals. The queue record settles
@@ -361,6 +372,14 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
             detail,
           },
         ]);
+        // The run's account closes as failed: the work produced a result
+        // that was provably refused, and nothing was published.
+        await mirrorRunTransition(
+          deps.store,
+          executionRunId(jobId, record.attempt),
+          "failed",
+          { nowMs: deps.now(), patch: { failureReason: detail } },
+        );
         return true;
       } catch (err) {
         // A forge-write rejection PROPAGATES through the gate by contract
