@@ -465,6 +465,10 @@ export interface RunMarkerContext {
   confidenceStatus?: string;
   /** #1073: the scorer's integer 0..5, only when status is "scored". */
   confidenceScore?: number;
+  /** #1337: dependency-upgrade coverage rollup ("complete" | "partial" |
+   * "unavailable"), only when the model emitted a `dependency_coverage`
+   * answer; omitted otherwise so pre-#1337 marker bytes are preserved. */
+  dependencyCoverage?: string;
 }
 
 /**
@@ -534,6 +538,12 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     // runs serialize byte-identically to the pre-#1073 marker.
 confidence_status: confidenceStatus,
 confidence_score: confidenceScore,
+    // #1337: the coverage rollup, appended last under the additive-key
+    // discipline — a run without a `dependency_coverage` answer
+    // serializes byte-identically to the pre-#1337 marker.
+    ...(context.dependencyCoverage === "complete" || context.dependencyCoverage === "partial" || context.dependencyCoverage === "unavailable"
+      ? { dependency_coverage: context.dependencyCoverage }
+      : {}),
   });
 }
 

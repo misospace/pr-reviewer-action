@@ -34,6 +34,8 @@ import { buildStageEnv, validateStageEnv, type RunContext, type StageEnv } from 
 import { RunWorkspace } from "../run/workspace.js";
 import { trustFramingOverhead } from "../context/repo-map.js";
 import { generateRepoMap, renderRepoMapJson, renderRepoMapMarkdown } from "../context/repo-map.js";
+import { buildDependencyCoverageContext } from "../context/dependency-coverage.js";
+import { renderDependencyCoverageBlock } from "../model/dependency-coverage.js";
 import {
   buildLinkedIssueContext,
   buildManifestContext,
@@ -966,6 +968,20 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // up being.
   env.SUBSTANTIAL_CODE_CHANGE = classification.substantialCodeChange ? "true" : "false";
 
+  // ── Dependency-upgrade coverage accounting (#1337) ────────────────────
+  // Deterministic corpus section: what the harness established per
+  // coverage aspect vs what is explicitly not checked. Bounded, empty
+  // unless the classification is dependency-shaped and the diff carries
+  // dependency changes — other PRs keep today's corpus byte-for-byte.
+  ws.write(
+    "dependency-coverage.md",
+    buildDependencyCoverageContext({
+      prKind: String(classificationArtifact.pr_kind ?? "unknown"),
+      diffText,
+      prBody: typeof pr.body === "string" ? pr.body : null,
+    }),
+  );
+
   const { route, reason } = resolveReviewRoute({ routingMode: env.REVIEW_ROUTING_MODE ?? "off" });
   env.REVIEW_ROUTE = route;
   env.ROUTE_REASON = reason;
@@ -1786,6 +1802,22 @@ secrets: [profiles.primary.apiKey],
     reviewRecord.review_markdown = String(reviewRecord.review_markdown ?? "")
       + `\n\n_${blockerVerification.demoted} finding(s) making source-backed claims that deterministic verification positively contradicted or could not substantiate are listed above as non-blocking. Deterministic enforcement gates are unaffected._`;
   }
+  // #1337: the reviewer-reported coverage-accounting block is appended
+  // after every enforcement/reconcile pass (nothing re-scans it), the same
+  // post-reconcile append position the blocker-verification note uses.
+  // Gated on BOTH the deterministic detection having fired (the section is
+  // non-empty — a stray answer on a non-dependency PR never publishes) and
+  // the model having emitted a real `dependency_coverage` answer; the
+  // publish boundary still sanitizes the whole markdown afterwards.
+  const dependencyCoverageFired = (ws.read("dependency-coverage.md")?.length ?? 0) > 0;
+  const dependencyCoverageBlock = dependencyCoverageFired
+    ? renderDependencyCoverageBlock(
+      (reviewRecord as { dependency_coverage?: unknown }).dependency_coverage as never,
+    )
+    : "";
+  if (dependencyCoverageBlock !== "") {
+    reviewRecord.review_markdown = String(reviewRecord.review_markdown ?? "") + "\n\n" + dependencyCoverageBlock;
+  }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 
   // Requirement coverage fold (#624) — advisory, never alters a verdict.
@@ -2160,12 +2192,17 @@ secrets: [profiles.primary.apiKey],
     reviewTriageReason: triageReason,
     reviewTriageRouting: routingOutput,
     // #1073: all five empty when the scorer is disabled — never a spurious 0.
-    confidenceStatus: confidenceOutputs.status,
-    confidenceScore: confidenceOutputs.score,
-    confidenceRisk: confidenceOutputs.risk,
-    confidenceReason: confidenceOutputs.reason,
-    confidenceModel: confidenceOutputs.model,
-    reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
+confidenceStatus: confidenceOutputs.status,
+confidenceScore: confidenceOutputs.score,
+confidenceRisk: confidenceOutputs.risk,
+confidenceReason: confidenceOutputs.reason,
+confidenceModel: confidenceOutputs.model,
+      // #1337: "" when the model never emitted a real `dependency_coverage`
+      // answer (artifact key absent) OR the deterministic detection never
+      // fired — a run without an answer gains no summary row and no marker
+      // key.
+      dependencyCoverageStatus: dependencyCoverageFired && typeof reviewRecord.dependency_coverage_status === "string" ? reviewRecord.dependency_coverage_status : "",
+reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     findings: pyJsonDumps(Array.isArray(reviewRecord.findings) ? reviewRecord.findings : []),
     toolCalls,
     cacheHitRatio,
@@ -2226,8 +2263,13 @@ secrets: [profiles.primary.apiKey],
     ...(ciState !== undefined ? { ciState } : {}),
     // #1073: the scorer's marker keys, only when the scorer ran — disabled
     // and never-attempted runs keep the pre-#1073 marker bytes exactly.
-    ...(outputs.confidenceStatus !== "" ? { confidenceStatus: outputs.confidenceStatus } : {}),
-    ...(outputs.confidenceScore !== "" ? { confidenceScore: Number(outputs.confidenceScore) } : {}),
+...(outputs.confidenceStatus !== "" ? { confidenceStatus: outputs.confidenceStatus } : {}),
+...(outputs.confidenceScore !== "" ? { confidenceScore: Number(outputs.confidenceScore) } : {}),
+// #1337: the coverage rollup, only when the model emitted a
+// `dependency_coverage` answer — other runs keep pre-#1337 marker bytes.
+...(outputs.dependencyCoverageStatus === "complete" || outputs.dependencyCoverageStatus === "partial" || outputs.dependencyCoverageStatus === "unavailable"
+  ? { dependencyCoverage: outputs.dependencyCoverageStatus }
+  : {}),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCalls: toolBudgetTelemetry.calls } : {}),

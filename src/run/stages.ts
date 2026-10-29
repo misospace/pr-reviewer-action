@@ -595,6 +595,7 @@ export function assembleCorpus(
       toolHarnessSmartMd: ws.read("tool-harness.smart.md"),
       evidenceProvidersMd: ws.read("evidence-providers.md"),
       imageDigestContextMd: ws.read("image-digest-context.md"),
+      dependencyCoverageMd: ws.read("dependency-coverage.md"),
       linkedSourcesMd: ws.read("linked-sources.md"),
       repoImpactTruncatedMd: ws.read("repo-impact.truncated.md"),
       repoHistoryTruncatedMd: ws.read("repo-history.truncated.md"),
