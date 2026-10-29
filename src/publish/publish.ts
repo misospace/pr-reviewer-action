@@ -20,6 +20,7 @@ import {
   prescriptionKeyDigest, recoverPublishedSuggestion, MAX_CARRYOVER_KEYS_PER_RUN, SEVERITY_LABELS,
 } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
+import { escapeCodeSpan } from "../context/fence.js";
 import { stripRevealedCapNoteTails } from "../confidence/result.js";
 import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, parseMetadata, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
 import { FINDING_OUTCOMES_SCHEMA, isProvenHeadSha, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, serializeOutcomeLedger, type OutcomeEvent, type OutcomeLedger } from "../outcomes/schema.js";
@@ -520,19 +521,6 @@ export function renderIndependentConfidenceBlock(
 }
 
 /**
- * Fence-safe single-line code span for untrusted-derived text (changed-file
- * paths, specialist lead excerpts): backticks cannot be escaped inside a
- * code span, so they (and control characters) are replaced, and the length
- * is capped. Deterministic; biases toward rendering less rather than
- * letting hostile content break the section out.
- */
-function escapeCodeSpan(text: string, maxChars: number): string {
-  const singleLine = text.replace(/\s+/g, " ").replace(/[`]/g, "'");
-  const stripped = [...singleLine].filter((ch) => ch.charCodeAt(0) >= 0x20).join("").trim();
-  return stripped.length > maxChars ? stripped.slice(0, maxChars) + "…" : stripped;
-}
-
-/**
  * #588: the platform's native-review degradation reason, flattened to one
  * bounded line. It is rendered inside a blockquote notice and inside a step
  * message, so a reason carrying a newline (or an unbounded length) could
@@ -548,15 +536,16 @@ function flattenSurfaceReason(reason: string | undefined): string {
 /**
  * Render the #810 partial-coverage notice: a short, deterministic section
  * stating which changed files and specialist leads the tool loop never read
- * or resolved before a budget stopped it. Full presentation is #811's; this
- * only makes the gap impossible to miss (and impossible for a
- * partial-coverage review to pass as a plain clean approve).
+ * or resolved before it stopped short (a budget or a provider request error,
+ * #1338). Full presentation is #811's; this only makes the gap impossible to
+ * miss (and impossible for a partial-coverage review to pass as a plain
+ * clean approve).
  */
 export function renderPartialCoverageNotice(coverage: PartialCoverage): string {
   const lines = [
     "## Partial Coverage Notice",
     "",
-    `> **This review is incomplete.** The evidence-gathering tool loop stopped on its budget ` +
+    `> **This review is incomplete.** The evidence-gathering tool loop stopped early ` +
       `(\`${escapeCodeSpan(coverage.stop_reason, 80)}\`) before finishing.`,
   ];
   if (coverage.unread_files.length > 0) {

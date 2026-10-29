@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import { applyRequirementTraceFragment, workspaceAt } from "../src/prompt/index.js";
 import { traceChangedText } from "../src/run/review.js";
@@ -70,6 +70,9 @@ function writeFile(workspace: string, relPath: string, lines: readonly string[])
 
 const SOURCE_SHA_REQUIREMENT = "Context resolution MUST compare the source SHA against the resolved pull.";
 const VALID_TEST_LOCATION = { file: "tests/real.test.ts", line: 1 };
+/** This repository's own checkout — the standards source and the shared
+ * escaping seam are read from it, exactly as a review reads them at head. */
+const REPO_ROOT = resolve(__dirname, "..", "..");
 
 test("validateRequirementTrace: empty ledger scope is a no-op", () => {
   const workspace = makeWorkspace();
@@ -228,6 +231,78 @@ test("#854 reproduction: met citing a line that exists and copies the value with
     assert.equal(outcome.reviewResult, "partial");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+/**
+ * #1340: the repository's own untrusted-content standard must stay traceable
+ * to the shared escaping seam.
+ *
+ * The deterministic trace (#874/#854) accepts a `met` claim only when the
+ * cited enforcement line carries a term from the requirement text NEXT TO a
+ * predicate. The seam's flattened intermediate was named `singleLine`, so no
+ * line inside `escapeCodeSpan` carried the standard's vocabulary: every
+ * citation into the function was downgraded to `unverifiable`
+ * (`enforcement-location-copies-without-comparing`), and three consecutive
+ * reviews of #1340 published `partial` coverage even though the enforcement
+ * and its #252 regression test both existed. The seam now names the trust
+ * level of the value it neutralizes; this test pins the property that EVERY
+ * citation into the implementation is accepted, so a later rename cannot
+ * silently make the standard untraceable again.
+ *
+ * The trust level must be named in CODE, not only in prose: a comment
+ * containing "must" is predicate-shaped to the validator, so a prose-only
+ * edit would satisfy the trace without naming anything.
+ */
+test("#1340: the untrusted-content standard traces to the shared escaping seam", () => {
+  const standards = readFileSync(join(REPO_ROOT, "AGENTS.md"), "utf8");
+  assert.ok(
+    standards.includes(STANDARDS_UNTRUSTED),
+    "AGENTS.md must still carry the untrusted-content standards row this seam enforces",
+  );
+
+  const seam = readFileSync(join(REPO_ROOT, "src/context/fence.ts"), "utf8").split("\n");
+  const start = seam.findIndex((line) => line.startsWith("export function escapeCodeSpan"));
+  assert.ok(start >= 0, "the shared escaping seam must exist");
+  // The function's own closing brace is the only one at column 0, so a
+  // nested block inside the body cannot truncate the checked span.
+  const implementation: number[] = [];
+  for (let index = start; index < seam.length; index += 1) {
+    implementation.push(index + 1);
+    if (seam[index] === "}") break;
+  }
+  assert.ok(implementation.length >= 3, "the seam must have an implementation to cite");
+  const namedInCode = implementation.some((line) => {
+    const text = (seam[line - 1] ?? "").trim();
+    if (text.startsWith("*") || text.startsWith("//")) return false;
+    return /\bconst\s+untrusted\b/.test(text);
+  });
+  assert.ok(namedInCode, "the seam must name the untrusted value in code, not only in prose");
+
+  const fenceTest = readFileSync(join(REPO_ROOT, "tests-v3/fence.test.ts"), "utf8").split("\n");
+  const boundaryTestLine = fenceTest.findIndex((line) => line.includes("escapeCodeSpan strips the boundary tokens"));
+  assert.ok(boundaryTestLine >= 0, "the #252 boundary test must exist");
+
+  for (const line of implementation) {
+    const claims = [
+      metTraceClaim(
+        "req-untrusted",
+        [{ file: "src/context/fence.ts", line }],
+        [{ file: "tests-v3/fence.test.ts", line: boundaryTestLine + 1 }],
+      ),
+    ];
+    const result = validateRequirementTrace(
+      claims,
+      traceLedger("req-untrusted", STANDARDS_UNTRUSTED),
+      REPO_ROOT,
+    );
+    const row = result.rows.find((candidate) => candidate.requirement_id === "req-untrusted");
+    const noteText = row === undefined ? "no row" : row.notes.join(", ");
+    assert.equal(
+      row?.disposition,
+      "met",
+      `a citation at src/context/fence.ts:${line} must validate (${noteText})`,
+    );
   }
 });
 
