@@ -31,6 +31,8 @@ const PLACEHOLDERS = [
   "RELATED_CODE_GUIDANCE", "PR_THREAD_GUIDANCE", "REVIEW_THREADS_GUIDANCE", "HUMAN_REVIEWS_GUIDANCE",
   "VERSION_BUMP_GUIDANCE", "REQUIREMENT_LEDGER_GUIDANCE", "SPECIALIST_LEADS_GUIDANCE",
   "IMAGE_DIGEST_GUIDANCE", "RELEASE_NOTES_GUIDANCE", "VERBOSITY_GUIDANCE",
+  // #1337: dependency-upgrade coverage accounting guidance.
+  "COVERAGE_ACCOUNTING_GUIDANCE",
 ];
 
 function withWorkspace(files: Record<string, string>, body: (dir: string) => void): void {

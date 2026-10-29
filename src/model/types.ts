@@ -260,6 +260,16 @@ export interface ParsedReviewVerdict {
    * reviewer request is made.
    */
   reviewTriageTargets: string[];
+  /**
+   * #1337: structured dependency-upgrade coverage accounting answer,
+   * normalized fail-closed (unknown status word → `invalid`, which the
+   * rollup counts as not-checked). Tri-state with
+   * `dependencyCoverageEmitted`, same shape as the required-check
+   * dispositions: only true key absence may read "not reported".
+   */
+  dependencyCoverage: import("./dependency-coverage.js").NormalizedDependencyCoverageAspect[] | null;
+  /** True iff the model emitted the `dependency_coverage` key at all. */
+  dependencyCoverageEmitted: boolean;
   extra: Record<string, unknown>;
 }
 

@@ -97,6 +97,10 @@ export interface MetadataOptions {
   confidence_status?: string | null;
   /** #1073: the scorer's integer 0..5, only when status is "scored". */
   confidence_score?: number | null;
+  /** #1337: dependency-upgrade coverage rollup ("complete" | "partial" |
+   * "unavailable"), only when the model emitted a `dependency_coverage`
+   * answer; omitted otherwise so pre-#1337 marker bytes are preserved. */
+  dependency_coverage?: string | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -180,10 +184,16 @@ export function buildMetadataMarker(options: MetadataOptions = {}): string {
   if (options.confidence_status !== null && options.confidence_status !== undefined && options.confidence_status !== "") {
     data.confidence_status = options.confidence_status;
   }
-  if (options.confidence_score !== null && options.confidence_score !== undefined) {
-    data.confidence_score = options.confidence_score;
-  }
-  return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
+if (options.confidence_score !== null && options.confidence_score !== undefined) {
+data.confidence_score = options.confidence_score;
+}
+// #1337 additive key: appended last, same discipline as every key above —
+// a run without a dependency-coverage answer serializes byte-identically
+// to the pre-#1337 marker, and older parsers ignore keys they do not know.
+if (options.dependency_coverage !== null && options.dependency_coverage !== undefined && options.dependency_coverage !== "") {
+data.dependency_coverage = options.dependency_coverage;
+}
+return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }
 
 /** Compact JSON with `,`/`:` separators and INSERTION key order — the exact

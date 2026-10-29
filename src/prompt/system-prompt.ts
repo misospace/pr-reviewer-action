@@ -28,6 +28,10 @@ export const PROMPT_PRESENCE_FILES = {
   requirementLedger: "requirement-ledger-present.txt",
   specialistLeads: "specialist-leads-present.txt",
   classification: "classification.json",
+  /** #1337: the deterministic coverage-accounting section (empty unless the
+   * classification is dependency-shaped AND dependency changes were
+   * detected — the same presence the corpus gates on). */
+  dependencyCoverage: "dependency-coverage.md",
 } as const;
 
 /** The sentence v2 appends to every assembled default prompt. */
@@ -140,12 +144,18 @@ export function applySystemPromptFragments(
     sub("VERSION_BUMP_GUIDANCE", infra ? guidance(assets, "version_bump") : "");
     sub("IMAGE_DIGEST_GUIDANCE", digest ? guidance(assets, "image_digest") : "");
     sub("RELEASE_NOTES_GUIDANCE", infra || digest ? guidance(assets, "release_notes") : "");
+    // #1337: dependency-upgrade coverage accounting. Gated on the
+    // deterministic section being present (kind-shaped AND dependency
+    // changes detected), so the instructions never reference a section the
+    // corpus does not carry.
+    sub("COVERAGE_ACCOUNTING_GUIDANCE", workspace.isNonEmpty(PROMPT_PRESENCE_FILES.dependencyCoverage) ? guidance(assets, "coverage_accounting") : "");
   } else {
     // Also runs on a replace-mode operator prompt: v2 strips these three
     // placeholders (first occurrence) from any prompt text.
     sub("VERSION_BUMP_GUIDANCE", "");
     sub("IMAGE_DIGEST_GUIDANCE", "");
     sub("RELEASE_NOTES_GUIDANCE", "");
+    sub("COVERAGE_ACCOUNTING_GUIDANCE", "");
   }
   if (state.addendum !== "") prompt = `${prompt}\n\n${state.addendum}`;
   return { ...state, systemPrompt: prompt };

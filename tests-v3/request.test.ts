@@ -373,17 +373,18 @@ test("the strict verdict schema matches the frozen v2 bash literal plus only the
   // #1003 adds exactly two properties (the human-review triage answer) and
   // two `required` entries on top of the frozen v2 literal. #1005 adds the
   // `review_triage_targets` logical-id selection alongside the #1003 pair.
-  // Strip every `review_triage_*` property and required entry and the pin is
-  // byte-for-byte the v2 snapshot again, so a future drift in anything else
-  // still fails here.
+  // #1337 adds the `dependency_coverage` accounting array alongside them.
+  // Strip every `review_triage_*` property and required entry and the
+  // #1337 array, and the pin is byte-for-byte the v2 snapshot again, so a
+  // future drift in anything else still fails here.
   const live = structuredClone(OPENAI_VERDICT_JSON_SCHEMA) as {
     json_schema: { schema: { properties: Record<string, unknown>; required: string[] } };
   };
   const schema = live.json_schema.schema;
   for (const key of Object.keys(schema.properties)) {
-    if (key.startsWith("review_triage_")) delete schema.properties[key];
+    if (key.startsWith("review_triage_") || key === "dependency_coverage") delete schema.properties[key];
   }
-  schema.required = schema.required.filter((name) => !name.startsWith("review_triage_"));
+  schema.required = schema.required.filter((name) => !name.startsWith("review_triage_") && name !== "dependency_coverage");
   assert.deepEqual(live, JSON.parse(V2_RF_JSON_SCHEMA_LITERAL));
 });
 
@@ -391,7 +392,10 @@ test("the strict verdict schema requires every property (OpenAI strict mode)", (
   const schema = (OPENAI_VERDICT_JSON_SCHEMA.json_schema as unknown as Record<string, unknown>).schema as unknown as Record<string, unknown>;
   assert.deepEqual(
     schema.required,
-    ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions"],
+    // #1337: `dependency_coverage` joins the strict required list (null
+    // permitted, so non-dependency PRs answer null) after
+    // `required_check_dispositions`.
+    ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions", "dependency_coverage"],
   );
   const properties = schema.properties as unknown as Record<string, { type: unknown; enum?: string[] }>;
   assert.deepEqual(properties.smart_review_requested!.type, "boolean");

@@ -137,6 +137,14 @@ export {
   imageTransportAllows,
   type ImageTransportOptions,
 } from "./image-transport.js";
+export {
+  MAX_DEPENDENCY_CHANGES,
+  buildDependencyCoverageContext,
+  dependencyCoverageKindEnabled,
+  parseTagChanges,
+  type BuildDependencyCoverageInput,
+  type DependencyChange,
+} from "./dependency-coverage.js";
 export { redactText } from "./redact.js";
 export {
   ARTIFACT_VERSION as CHANGE_ANCHORS_ARTIFACT_VERSION,
