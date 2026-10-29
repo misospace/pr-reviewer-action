@@ -673,7 +673,7 @@ test("#810: partial coverage renders the notice near the top and records it in t
   // Near the top: after the engine line, before any model-produced text.
   assert.ok(noticeAt > body.indexOf("_Analysis engine: test-engine_"));
   assert.ok(noticeAt < body.indexOf("Safe."));
-  assert.match(body, /stopped on its budget \(`tool-call-budget-exhausted`\) before finishing/);
+  assert.match(body, /stopped early \(`tool-call-budget-exhausted`\) before finishing/);
   assert.match(body, /Changed files never read \(2 of 3\): `src\/b\.ts`, `src\/c\.ts`/);
   assert.match(body, /Specialist leads never resolved \(2 of 2\): `security` \(`src\/c\.ts`\): unvalidated input; `tests` \(no file path\): new flag untested/);
   assert.match(body, /Absence of findings in the unread paths is not evidence they are safe\./);

@@ -2,9 +2,9 @@
  * Deterministic partial-coverage accounting for the native tool loop (#810).
  *
  * When the loop stops on ANY budget — request ceiling, rounds, or wall clock
- * — the published review must not read as if the investigation were
- * complete. This module computes, from the loop's own call log and the
- * workspace artifacts the harness can already see (the changed-file manifest
+ * — or on a provider request error (#1338), the published review must not
+ * read as if the investigation were complete. This module computes, from the
+ * loop's own call log and the workspace artifacts the harness can already see (the changed-file manifest
  * and the per-role specialist lead artifacts), which changed files were
  * never read and which specialist leads were never resolved. The model is
  * never asked about its own coverage: the computation is a pure fold over
@@ -47,11 +47,23 @@
 
 import { SPECIALIST_ROLES_ORDER } from "../specialists/types.js";
 import { splitChunks } from "../corpus/diff-priority.js";
-import { STOP_BUDGET, STOP_MAX_ROUNDS, STOP_WALL_CLOCK, type LoopOutcome } from "./loop.js";
+import { STOP_BUDGET, STOP_MAX_ROUNDS, STOP_REQUEST_ERROR, STOP_WALL_CLOCK, type LoopOutcome } from "./loop.js";
 
 /** The loop stopped on one of its budgets rather than by choice or failure. */
 export function isBudgetStopReason(stopReason: string): boolean {
   return stopReason === STOP_BUDGET || stopReason === STOP_MAX_ROUNDS || stopReason === STOP_WALL_CLOCK;
+}
+
+/**
+ * The loop ended without the model choosing to stop: one of the budgets, or a
+ * provider request error (#1338) — including a wall-clock deadline surfacing
+ * through the transport seam as a request error before the harness
+ * reclassifies it. Coverage honesty applies to every such stop; the fold below
+ * still leaves a stop whose every gap is resolved as complete coverage, so a
+ * timeout after all required evidence was collected stays clean-eligible.
+ */
+export function isIncompleteInvestigationStopReason(stopReason: string): boolean {
+  return isBudgetStopReason(stopReason) || stopReason === STOP_REQUEST_ERROR;
 }
 
 /** One specialist lead, identified by role plus its own fields. */
@@ -300,7 +312,7 @@ export function computePartialCoverage(
     corpusDiffCoveredFiles?: ReadonlySet<string>;
   },
 ): PartialCoverage | null {
-  if (!isBudgetStopReason(outcome.stopReason)) return null;
+  if (!isIncompleteInvestigationStopReason(outcome.stopReason)) return null;
   const touched = pathsTouchedByLoop(outcome);
   const corpus = inputs.corpusDiffCoveredFiles ?? new Set<string>();
   const unreadFiles = inputs.changedFiles.filter((path) => !touched.has(path) && !corpus.has(path));

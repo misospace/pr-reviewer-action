@@ -4,6 +4,7 @@ import {
   computePartialCoverage,
   corpusDiffCoveredFiles,
   isBudgetStopReason,
+  isIncompleteInvestigationStopReason,
   loadChangedFilePaths,
   loadRemovedFilePaths,
   loadSpecialistLeadRefs,
@@ -50,6 +51,36 @@ test("only the budget stop reasons count as budget stops", () => {
   assert.ok(!isBudgetStopReason(STOP_MODEL_DONE));
   assert.ok(!isBudgetStopReason(STOP_NO_TOOL_CALLS));
   assert.ok(!isBudgetStopReason(STOP_REQUEST_ERROR));
+});
+
+test("#1338: budget stops and request errors count as incomplete investigations; model-chosen stops do not", () => {
+  assert.ok(isIncompleteInvestigationStopReason(STOP_BUDGET));
+  assert.ok(isIncompleteInvestigationStopReason(STOP_MAX_ROUNDS));
+  assert.ok(isIncompleteInvestigationStopReason(STOP_WALL_CLOCK));
+  assert.ok(isIncompleteInvestigationStopReason(STOP_REQUEST_ERROR));
+  assert.ok(!isIncompleteInvestigationStopReason(STOP_MODEL_DONE));
+  assert.ok(!isIncompleteInvestigationStopReason(STOP_NO_TOOL_CALLS));
+});
+
+test("#1338: a request-error stop produces coverage too; one with nothing left unread stays complete", () => {
+  const executed = [okCall("read_file", { path: "src/a.ts" })];
+  const coverage = computePartialCoverage(outcome({ stopReason: STOP_REQUEST_ERROR, executed }), {
+    changedFiles: ["src/a.ts", "src/b.ts"],
+    leads: leads([["security", "src/b.ts", "x"]]),
+  });
+  assert.ok(coverage);
+  assert.equal(coverage.stop_reason, STOP_REQUEST_ERROR);
+  assert.deepEqual(coverage.unread_files, ["src/b.ts"]);
+  assert.deepEqual(coverage.unresolved_leads, [{ role: "security", file: "src/b.ts", excerpt: "x" }]);
+  // A request error AFTER all required evidence was gathered is complete
+  // coverage: no gap record, so a synthesized clean verdict stays possible.
+  assert.equal(
+    computePartialCoverage(outcome({ stopReason: STOP_REQUEST_ERROR, executed: [okCall("read_file", { path: "src/a.ts" })] }), {
+      changedFiles: ["src/a.ts"],
+      leads: leads([["security", "src/a.ts", "checked"]]),
+    }),
+    null,
+  );
 });
 
 test("unread files are exactly the manifest paths no successful call read", () => {

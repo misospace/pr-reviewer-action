@@ -63,6 +63,8 @@ import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import {
   STOP_BUDGET,
+  STOP_REQUEST_ERROR,
+  STOP_WALL_CLOCK,
   adaptiveLoopBudgets,
   driveToolLoop,
   extractToolCalls,
@@ -72,9 +74,10 @@ import {
 } from "./loop.js";
 import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
 import {
+  COVERAGE_NOTICE_MAX_ITEMS,
   computePartialCoverage,
   corpusDiffCoveredFiles,
-  isBudgetStopReason,
+  isIncompleteInvestigationStopReason,
   loadChangedFilePaths,
   loadRemovedFilePaths,
   loadSpecialistLeadRefs,
@@ -1396,6 +1399,17 @@ export function verdictHarnessFindingsBody(outcome: LoopOutcome): string {
     );
     lines.push("");
   }
+  if (outcome.stopReason === STOP_WALL_CLOCK || outcome.stopReason === STOP_REQUEST_ERROR) {
+    // #1338: a deadline- or transport-interrupted loop must not read as a
+    // completed investigation either — same honesty rule as #701.
+    lines.push(
+      `The tool loop stopped on \`${outcome.stopReason}\` before the ` +
+        "investigation finished. Treat paths you could not verify as " +
+        "unverified — never as safe — and decide the verdict from the " +
+        "evidence you actually have.",
+    );
+    lines.push("");
+  }
   for (let index = 0; index < outcome.executed.length; index++) {
     const executed = outcome.executed[index]!;
     const status = (executed.result.status as string) ?? "error";
@@ -1497,8 +1511,9 @@ export type HarnessResult = Record<string, unknown> & {
    * when every component was zero). */
   tool_budget_size?: { changed_files: number; changed_lines: number; specialist_leads: number };
   /** #810: deterministic partial-coverage record, present only when the
-   * loop stopped on a budget with changed files / specialist leads left
-   * unread (snake_case: persisted verbatim in the harness artifact). */
+   * loop stopped on a budget or on a provider request error (#1338) with
+   * changed files / specialist leads left unread (snake_case: persisted
+   * verbatim in the harness artifact). */
   partial_coverage?: PartialCoverage;
   /** #921/#930 audit: changed files credited as covered by the corpus-diff
    * rule (complete untruncated diff in the assembler-certified payload)
@@ -2376,6 +2391,17 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     },
   );
 
+  // #1338: a request-error stop AT the run's wall-clock deadline is the deadline
+  // stopping the loop through the transport seam (the postFn wrapper throws
+  // "tool-loop wall-clock budget exhausted" when no budget remains) — record
+  // the true cause the smart tier already records, so tool_stop_reason, the
+  // coverage accounting, and the synthesized-fallback metadata all reflect the
+  // deadline rather than a generic provider error. The underlying error text
+  // stays on `loop_error`.
+  if (outcome.stopReason === STOP_REQUEST_ERROR && timeFn() >= deadline) {
+    outcome.stopReason = STOP_WALL_CLOCK;
+  }
+
   // One always-printed outcome line.
   log(
     `  native_loop: ${outcome.executed.length} tool call(s) executed in ` +
@@ -2401,22 +2427,23 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // loop further down, so the artifact sees every native-loop model turn.
     repair_round_telemetry: repairRoundTelemetry,
   };
-  // #810: on any budget stop, account from the loop's own call log which
-  // changed files and specialist leads were never read/resolved. A degraded
-  // run issued no calls at all and is reported through its own degraded
-  // path, not as a partial tool investigation.
+  // #810/#1338: on any budget stop or provider request error, account from
+  // the loop's own call log which changed files and specialist leads were
+  // never read/resolved. A degraded run issued no calls at all and is
+  // reported through its own degraded path, not as a partial tool
+  // investigation.
   // #1145: the coverage inputs — the changed-file manifest, the specialist
   // leads, and the corpus-diff credit set — are computed ONCE here so the
   // original record is built from exactly one manifest snapshot (re-reading
   // them could observe a different workspace state).
-  // Null when the original loop did not stop on a budget: there is no
+  // Null when the original loop stopped by the model's own choice: there is no
   // coverage record to recompute then.
   let coverageInputs: {
     changedFiles: string[];
     leads: CoverageLeadRef[];
     corpusDiffCoveredFiles: ReadonlySet<string>;
   } | null = null;
-  if (!outcome.degraded && isBudgetStopReason(outcome.stopReason)) {
+  if (!outcome.degraded && isIncompleteInvestigationStopReason(outcome.stopReason)) {
     // #921/#930: coverage credits files whose complete diff is in the corpus
     // via the assembler-certified diff-section payload (slot-keyed, written
     // beside the corpus the verdict turn reads) — never by re-parsing the
@@ -2504,7 +2531,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
 
   // Fold the outcome into `result` and build tool-harness.md now, before the
   // verdict turn — the verdict re-sends a corpus built before this harness ran.
-  const harnessMarkdown = summarizeLoopOutcome(input.result, outcome, harnessSecrets);
+  const harnessMarkdown = summarizeLoopOutcome(input.result, outcome, harnessSecrets, input.result.partial_coverage);
   if (input.tier === "smart" && outcome.executed.some((c) => c.result.status !== "ok")) {
     input.result.native_loop_verdict_status = "fallback";
     input.result.native_loop_verdict_reason = "tool-error";
@@ -3010,7 +3037,11 @@ function traceGapIdLabel(id: string): string {
 /**
  * Fold the loop outcome into `result` and return the harness markdown (port
  * of `_summarize_loop_outcome`). Runs BEFORE the verdict turn so the verdict
- * corpus can be corrected with real findings.
+ * corpus can be corrected with real findings. `coverage` is the run's own
+ * deterministic partial-coverage record (#810/#1338) — when present, the
+ * outstanding-evidence list is rendered so the synthesis fallback (and the
+ * verdict corpus's harness findings section) sees exactly what the loop
+ * never read or resolved.
  */
 /** The harness surfaces' masking list: the configured known secrets at or
  * above `MIN_KNOWN_SECRET_CONTENT_LEN`, the same floor the #1094 content gate
@@ -3026,6 +3057,7 @@ export function summarizeLoopOutcome(
   result: HarnessResult,
   outcome: LoopOutcome,
   knownSecrets: readonly (string | null | undefined)[] = [],
+  coverage?: PartialCoverage | null,
 ): string {
   result.mode = "native_loop";
   result.rounds = outcome.rounds;
@@ -3085,6 +3117,15 @@ export function summarizeLoopOutcome(
         "as unverified — it is not proof that a path is safe.",
     );
   }
+  if (outcome.stopReason === STOP_WALL_CLOCK || outcome.stopReason === STOP_REQUEST_ERROR) {
+    // #1338: the interrupted-investigation line for stops that are not the
+    // request-budget ceiling — same honesty rule as #701's budget note.
+    mdLines.push(
+      `**Investigation interrupted:** the tool loop ended on \`${outcome.stopReason}\` ` +
+        "before the reviewer chose to stop. Treat missing evidence as " +
+        "unverified — it is not proof that a path is safe.",
+    );
+  }
   mdLines.push("");
 
   let executedCount = Number(result.executed_request_count ?? 0);
@@ -3102,6 +3143,46 @@ export function summarizeLoopOutcome(
     mdLines.push("## Evidence summary (from the tool loop, untrusted)");
     mdLines.push("");
     mdLines.push(maskAndTruncate(maskKnownSecrets(outcome.finalText, knownSecrets), 4000).text);
+    mdLines.push("");
+  }
+
+  if (coverage) {
+    // #1338: the explicit outstanding-evidence list — a deterministic fold
+    // over the loop's own call log (never model output) — so the synthesis
+    // fallback corpus carries exactly what the loop never read or resolved.
+    mdLines.push("## Outstanding evidence (deterministic accounting)");
+    mdLines.push("");
+    mdLines.push(
+      "The loop stopped before the investigation finished. This list is a " +
+        "deterministic fold over the loop's own call log — not model output — " +
+        "of what the loop never read or resolved:",
+      "",
+    );
+    if (coverage.unread_files.length > 0) {
+      const listed = coverage.unread_files.slice(0, COVERAGE_NOTICE_MAX_ITEMS);
+      const more = coverage.unread_files.length - listed.length;
+      mdLines.push(
+        `- Changed files never read (${coverage.unread_files.length} of ` +
+          `${coverage.changed_files_total}): ` +
+          listed.map((p) => `\`${p}\``).join(", ") +
+          (more > 0 ? `, … and ${more} more` : ""),
+      );
+    }
+    if (coverage.unresolved_leads.length > 0) {
+      const listed = coverage.unresolved_leads.slice(0, COVERAGE_NOTICE_MAX_ITEMS);
+      const more = coverage.unresolved_leads.length - listed.length;
+      const items = listed.map((lead) =>
+        `\`${lead.role}\`` +
+        (lead.file ? ` (\`${lead.file}\`)` : " (no file path)") +
+        (lead.excerpt ? `: ${lead.excerpt}` : ""),
+      );
+      mdLines.push(
+        `- Specialist leads never resolved (${coverage.unresolved_leads.length} of ` +
+          `${coverage.leads_total}): ` +
+          items.join("; ") +
+          (more > 0 ? `; … and ${more} more` : ""),
+      );
+    }
     mdLines.push("");
   }
 

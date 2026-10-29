@@ -548,15 +548,16 @@ function flattenSurfaceReason(reason: string | undefined): string {
 /**
  * Render the #810 partial-coverage notice: a short, deterministic section
  * stating which changed files and specialist leads the tool loop never read
- * or resolved before a budget stopped it. Full presentation is #811's; this
- * only makes the gap impossible to miss (and impossible for a
- * partial-coverage review to pass as a plain clean approve).
+ * or resolved before it stopped short (a budget or a provider request error,
+ * #1338). Full presentation is #811's; this only makes the gap impossible to
+ * miss (and impossible for a partial-coverage review to pass as a plain
+ * clean approve).
  */
 export function renderPartialCoverageNotice(coverage: PartialCoverage): string {
   const lines = [
     "## Partial Coverage Notice",
     "",
-    `> **This review is incomplete.** The evidence-gathering tool loop stopped on its budget ` +
+    `> **This review is incomplete.** The evidence-gathering tool loop stopped early ` +
       `(\`${escapeCodeSpan(coverage.stop_reason, 80)}\`) before finishing.`,
   ];
   if (coverage.unread_files.length > 0) {

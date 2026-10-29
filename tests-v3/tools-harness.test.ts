@@ -571,6 +571,142 @@ test("#1198 primary: a verdict turn landing past the exchange deadline is fallba
   assert.equal(result.native_loop_verdict_reason, "deadline");
 });
 
+// #1338: a loop that ended without the model choosing to stop (a wall-clock
+// deadline surfacing through the transport seam, or a provider request error)
+// must get the same deterministic coverage accounting as a budget stop, and
+// its synthesis fallback must carry the interrupted-investigation note and the
+// outstanding-evidence list. Clock maps below follow the #1198 tests: the
+// budget `timeFn` is read at the deadline anchor, the loop start, each
+// between-rounds check, each postFn remaining check, and twice per executed
+// tool call (the executor's own deadline checks).
+
+test("#1338: a request error at the exchange deadline records wall-clock-exceeded and the coverage gap", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(
+    path.join(root, "pr-files.json"),
+    JSON.stringify({ files: [{ filename: "src.ts", status: "modified" }, { filename: "unread.ts", status: "modified" }] }),
+  );
+  // Deadline = 0 + 400. The first round completes (reads 80/120/160/200 all
+  // inside); the second round's transport call burns the rest of the budget
+  // and then fails with the seam's deadline error. Every timeFn read after
+  // that is past the deadline, so the harness reclassifies the loop's
+  // request-error stop to wall-clock-exceeded, and the verdict turn's
+  // remaining-budget check throws the same error before any request.
+  let clock = -40;
+  const timeFn = () => {
+    clock += 40;
+    return clock;
+  };
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "400" },
+    timeFn,
+    transport: async () => {
+      transportCalls++;
+      if (transportCalls === 1) return openAiCall("c1", "read_file", '{"path":"src.ts"}');
+      clock += 200;
+      throw new Error("tool-loop wall-clock budget exhausted");
+    },
+  }));
+  assert.equal(transportCalls, 2, "the verdict turn must not open a request past the deadline");
+  assert.equal(result.stop_reason, "wall-clock-exceeded");
+  assert.equal(result.loop_error, "tool-loop wall-clock budget exhausted");
+  assert.equal(result.native_loop_verdict_produced, undefined);
+  assert.equal(result.native_loop_verdict_status, "fallback");
+  assert.equal(result.native_loop_verdict_reason, "error");
+  // The deterministic gap record rides the same stop reason and survives the
+  // fallback with the completed receipts.
+  const coverage = result.partial_coverage as unknown as Record<string, unknown>;
+  assert.ok(coverage, "the interrupted investigation must carry a coverage record");
+  assert.equal(coverage.stop_reason, "wall-clock-exceeded");
+  assert.deepEqual(coverage.unread_files, ["unread.ts"]);
+  assert.equal((result.tool_results as unknown[]).length, 1, "completed tool receipts are preserved");
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  assert.equal(artifact.stop_reason, "wall-clock-exceeded");
+  assert.ok(artifact.partial_coverage);
+  assert.equal((artifact.tool_results as unknown[]).length, 1);
+  const markdown = fs.readFileSync(path.join(root, "tool-harness.md"), "utf8");
+  assert.match(markdown, /Investigation interrupted/);
+  assert.match(markdown, /Outstanding evidence/);
+  assert.match(markdown, /`unread\.ts`/);
+});
+
+test("#1338: a request error with time left keeps the request-error stop and still accounts coverage", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(
+    path.join(root, "pr-files.json"),
+    JSON.stringify({ files: [{ filename: "src.ts", status: "modified" }, { filename: "unread.ts", status: "modified" }] }),
+  );
+  // Deadline = 0 + 600, far away: the second round's provider 503 is a genuine
+  // request error, not a deadline. The verdict turn's transport also fails.
+  let clock = -10;
+  const timeFn = () => {
+    clock += 10;
+    return clock;
+  };
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "600" },
+    timeFn,
+    transport: async () => {
+      transportCalls++;
+      if (transportCalls === 1) return openAiCall("c1", "read_file", '{"path":"src.ts"}');
+      throw new Error("provider 503");
+    },
+  }));
+  assert.equal(result.stop_reason, "request-error");
+  assert.equal(result.loop_error, "provider 503");
+  assert.equal(result.native_loop_verdict_status, "fallback");
+  const coverage = result.partial_coverage as unknown as Record<string, unknown>;
+  assert.ok(coverage);
+  assert.equal(coverage.stop_reason, "request-error");
+  assert.deepEqual(coverage.unread_files, ["unread.ts"]);
+  const markdown = fs.readFileSync(path.join(root, "tool-harness.md"), "utf8");
+  assert.match(markdown, /Investigation interrupted/);
+  assert.match(markdown, /`request-error`/);
+  assert.match(markdown, /Outstanding evidence/);
+});
+
+test("#1338: a wall-clock stop after the evidence was gathered leaves no gap record", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(
+    path.join(root, "pr-files.json"),
+    JSON.stringify({ files: [{ filename: "src.ts", status: "modified" }] }),
+  );
+  // Deadline = 20 + 110 = 130. Round 1 completes its read (executor checks at
+  // 100/120 stay inside); the SECOND between-rounds check (140) is the first
+  // read past the deadline, so the loop stops on its own wall-clock check —
+  // no transport error involved. The only changed file was read, so the fold
+  // leaves nothing unread: no gap record, and the synthesized review stays
+  // clean-eligible (no blanket timeout block).
+  let clock = 0;
+  const timeFn = () => {
+    clock += 20;
+    return clock;
+  };
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "110" },
+    timeFn,
+    transport: async () => {
+      transportCalls++;
+      return openAiCall("c1", "read_file", '{"path":"src.ts"}');
+    },
+  }));
+  assert.equal(result.stop_reason, "wall-clock-exceeded");
+  assert.equal(result.partial_coverage, undefined);
+  assert.equal(result.native_loop_verdict_status, "fallback");
+  const markdown = fs.readFileSync(path.join(root, "tool-harness.md"), "utf8");
+  assert.match(markdown, /Investigation interrupted/);
+  assert.ok(!markdown.includes("Outstanding evidence"));
+});
+
 test("#1198 smart: a near-deadline verdict turn is clamped to the remaining budget and still accepted", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
