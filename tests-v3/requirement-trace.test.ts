@@ -442,15 +442,17 @@ test("#1343: the citation rule is disclosed where the reviewer is asked for clai
  *
  * Once the lexical subject half is dropped for an owner-anchored citation
  * (#1343), `linePredicateSignal` is the entire anti-copy core — and applied to
- * raw text it accepted a line that merely *looks* predicate-shaped: an arrow
- * function read as `>`, an optional chain or nullish coalesce read as `?`, an
- * assertion-shaped word read inside an identifier, a comment or a string
- * literal. Each excluded artifact below carries the requirement's own word
- * `ceiling` on the cited line, so it is the SHAPE that rejects the citation,
- * not term extraction. The helper is shared by the legacy and distributed
- * paths, so both are pinned here too: the tightening must not silently differ
- * per consumer.
- */
+  * raw text it accepted a line that merely *looks* predicate-shaped: an arrow
+  * function (`=>` or `->`) read as `>`, an optional chain, nullish coalesce or
+  * optional property marker read as `?`, an assertion-shaped word read inside
+  * an identifier, a comment or a string literal. Every excluded artifact below
+  * but the camelCase-identifier one carries the requirement's own word
+  * `ceiling` on the cited line, so it is the SHAPE that rejects the citation,
+  * not term extraction. The owner-anchored and legacy paths are both exercised
+  * here; the distributed path calls this same single helper
+  * (`predicateSignalFound`) and its own #962 seam fixtures cover the wiring, so
+  * the tightening cannot silently differ per consumer.
+  */
 function quuxLedger(): unknown {
   return ledgerWith([{ id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" }]);
 }
@@ -479,6 +481,7 @@ function dispositionOfQuuxCitation(line: string, ownerAnchored: boolean): string
 test("#1347: copy-only citations that merely look predicate-shaped are excluded", () => {
   const artifacts: Array<[string, string]> = [
     ["an arrow function", "export const readCeiling = (state) => state.ceiling;"],
+    ["a ->-spelled arrow", "const read = -> { ceiling };"],
     ["optional chaining", "export const ceiling = state?.requested;"],
     ["nullish coalescing", "export const ceiling = state.requested ?? fallback.requested;"],
     ["an assertion word in a comment", "export const ceiling = state.requested; // must never be exceeded"],
@@ -486,10 +489,12 @@ test("#1347: copy-only citations that merely look predicate-shaped are excluded"
     ["an assertion word inside an identifier", "export const mustNotExceedTheCeiling = state.requested;"],
     ["an optional property declaration", "readonly ceiling?: number;"],
   ];
-  // Each artifact carries the requirement's own word `ceiling` somewhere on
-  // the line, so the legacy path's lexical half is satisfied and only the
-  // shape can refuse it.
-  const lexicalCarried = [true, true, true, true, true, false, true];
+  // Every artifact but the camelCase-identifier one carries the requirement's
+  // own word `ceiling` as a whole word on the line, so the legacy path's
+  // lexical half is satisfied there and only the shape can refuse it; the
+  // identifier case is pinned on the owner-anchored path alone, where no term
+  // is needed at all.
+  const lexicalCarried = [true, true, true, true, true, true, false, true];
   for (const [index, [label, line]] of artifacts.entries()) {
     assert.equal(
       dispositionOfQuuxCitation(line, true),
@@ -514,6 +519,9 @@ test("#1347: real predicates on the cited line are still accepted", () => {
     ["a comparison", "export const allowed = state.requested <= ceiling;"],
     ["a guard", "if (state.requested > ceiling) {"],
     ["a ternary", "const applied = state.requested > ceiling ? ceiling : state.requested;"],
+    // A `?` before a digit-starting operand is a ternary, never an
+    // optional-member marker; blanking it would erase real enforcement.
+    ["a ternary with a leading-dot operand", "const ratio = flag ? .5 : 1.0;"],
     // Both found by measuring the tightened shape against this repository's
     // own sources: removing a literal span collapses a real ternary's `? … :`
     // into `? :`, which must not then be erased as an optional-member marker.
@@ -549,6 +557,7 @@ test("#1347: the comment and string scrubber is fed its own delimiters", () => {
     ["a comparison after a block comment that holds a quote", "/* \"must not exceed */ if (state.requested > ceiling) {", "met"],
     ["a quote escaped inside a string", "const ceiling = state.requested; const note = \"a \\\" must not exceed\";", "unverifiable"],
     ["an unterminated string", "const ceiling = state.requested; const note = 'must not exceed", "unverifiable"],
+    ["a lone block-comment terminator", "*/ const ceiling = state.requested;", "unverifiable"],
   ];
   for (const [label, line, expected] of cases) {
     assert.equal(
@@ -557,6 +566,31 @@ test("#1347: the comment and string scrubber is fed its own delimiters", () => {
       `${label} must be ${expected} to the shape check: ${line}`,
     );
   }
+});
+
+test("#1347: the two named line-scan residuals are pinned rather than silently wrong", () => {
+  // `predicateCodeView` is a line-local scan, not a tokenizer, and these are
+  // the two boundaries where that shows. Both are documented in the helper and
+  // in docs/architecture/owner-anchored-enforcement-citation.md; the tests
+  // exist so a later change cannot move either one unnoticed.
+  //
+  // Permissive: a `#` glued directly to code is NOT treated as a comment,
+  // because `this.#ceiling > requested` is a private field and cutting at the
+  // `#` would erase a real comparison. The cost is that an inline
+  // script-language comment written without its space still reads as code.
+  assert.equal(
+    dispositionOfQuuxCitation("const max_items = 10#if state.requested > ceiling { raise }", true),
+    "met",
+    "a `#` glued to code must stay code so the private-field comparison survives",
+  );
+  // Strict: a quote character inside a regex literal opens a span that
+  // consumes the rest of the line, so a real comparison written after it is
+  // lost. Distinguishing that quote from a string opening needs a parser.
+  assert.equal(
+    dispositionOfQuuxCitation("const quoteRe = /\"/; if (state.requested > ceiling) {", true),
+    "unverifiable",
+    "a quote inside a regex literal is read as a string opening (documented limit)",
+  );
 });
 
 /**

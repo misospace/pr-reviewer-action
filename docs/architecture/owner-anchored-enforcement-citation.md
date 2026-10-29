@@ -87,32 +87,46 @@ downgrades far more often than true rejections (PR #1340 published
 Dropping it inside declared surfaces moves the load to the declaration.
 Be honest about what remains: `linePredicateSignal` is still a shape heuristic
 over source text, not a parser. **#1347 closed the artifacts that made it fire
-on text which is not a predicate at all** — an arrow function (`=>`) read as a
-`>` comparison, an optional chain (`?.`) or nullish coalesce (`??`) read as a
-ternary, an optional property declaration (`x?: T`) read as a ternary, and an
-assertion-shaped word (`throw`, `reject`, `assert…`, `expect`, `invariant`,
-`must…`) read inside an identifier, a comment or a string literal. Those are
-excluded in the shared helper, so the legacy, owner-anchored and distributed
-paths all accept the same shape. On owner-anchored rows this is what makes the
-disclosed rule real: a copy-only citation such as
-`const readCeiling = (state) => state.ceiling;`, `const ceiling =
-state?.requested;` or `const note = 'must not exceed the ceiling';` no longer
-passes as `met`.
+on text which is not a predicate at all** — an arrow function (`=>`, and the
+`->` spelling Ruby/PHP/C++ use) read as a `>` comparison, an optional chain
+(`?.`), nullish coalesce (`??`) or optional property marker (`x?: T`) read as a
+ternary, and an assertion-shaped word (`throw`, `reject`, `assert…`, `expect`,
+`invariant`, `must…`) read inside an identifier, a comment or a string literal.
+Those are excluded in the shared helper, so the legacy, owner-anchored and
+distributed paths all accept the same shape. On owner-anchored rows this is what
+makes the disclosed rule real: a copy-only citation such as
+`const readCeiling = (state) => state.ceiling;`,
+`const ceiling = state?.requested;` or
+`const note = 'must not exceed the ceiling';` no longer passes as `met`.
 
 What the coarse copy-detector still cannot tell you, named rather than silently
 wrong:
 
-- A generic argument list (`Map<string, Ceiling>`) still reads as a
-  comparison. It is indistinguishable from an unspaced `a<b` without a parser,
-  and refusing both would reject real enforcement.
+- A generic argument list (`Map<string, Ceiling>`) still reads as a comparison.
+  It is indistinguishable from an unspaced `a<b` without a parser, and refusing
+  both would reject real enforcement.
 - A regex literal (`const GT = />/;`) is still an accepted shape, and a `//`
   inside an unquoted URL is treated as a comment opening.
-- Only `'…'`, `"…"`, `` `…` ``, `//`, `/* … */`, a `#` comment at line start or
-  after whitespace, and a doc-comment continuation line are stripped. An inline
-  `#` glued directly to code is not, which costs a false downgrade rather than
-  granting a false `met`.
+- Only single-quoted, double-quoted and backtick spans, `//`, `/* … */`, a `#`
+  comment at line start or after whitespace, and a doc-comment continuation line
+  are stripped. Permissive residuals: a `#` glued directly to code is not a
+  comment, because `this.#ceiling > requested` is a private field and cutting
+  there would erase a real comparison — so an inline script comment written
+  without its own leading space still reads as code; and the interior of a
+  multi-line template literal (or of a block comment whose lines do not begin
+  with `*`) is not tracked across lines. Strict residual: a quote character
+  inside a regex literal (`if (/[="']/.test(key))`) opens a span that swallows
+  the rest of the line, so a real comparison after it is lost.
+- The assertion shapes are the spellings the corpus speaks. A parenless or
+  underscore-joined idiom such as Ruby's `assert_equal ceiling, actual` was only
+  ever matched by accident and is now refused; a language/style the regexes do
+  not recognize is the pre-existing limit of this heuristic.
 - A line that genuinely is predicate-shaped can still be the wrong line of the
   right file.
+
+Each of these boundaries has a test, so a later change cannot move one silently
+— including the two line-scan residuals above, which are pinned at their actual
+(permissive and strict) outcome rather than at an idealized one.
 
 The load-bearing boundary for these rows remains the maintainer-declared glob
 plus the cited-line predicate.
@@ -122,10 +136,11 @@ artifacts: over this repository's own 96.9k TypeScript lines it took accepted
 shapes from 20.6k to 14.7k, added none, and every removed line is an arrow,
 optional chain, nullish coalesce, comment/doc text, string literal, optional
 property declaration or pattern-definition assignment — none of them a
-comparison, guard, throw/assert or match call. That measurement also caught one
-over-tightening, now pinned by a test: erasing a literal span collapses a real
-ternary such as `clip(symbol ? \`x\` : path)` into `? :`, so the operator
-blanking runs *before* span removal.
+comparison, guard, throw/assert or match call. That corpus is TypeScript, so it
+measures this product's own risk, not every language a reviewed repository might
+use. The same measurement caught one over-tightening: erasing a literal span
+collapses a real ternary such as `clip(symbol ? "x" : path)` into `? :`, so the
+operator blanking runs *before* span removal.
 
 The cited-line requirement is itself a deliberate tightening over the first
 draft of this gate, which searched a ±3-line window around the owner

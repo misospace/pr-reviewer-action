@@ -377,12 +377,17 @@ function skipQuotedSpan(line: string, start: number): number {
  * continuation line whose first non-space character is `*`.
  *
  * Not a tokenizer, and the unmodeled cases are named rather than silently
- * wrong: a regex literal (`const gt = />/;`) and a `//` inside an unquoted URL
- * pass through, both in the permissive direction; an inline `#` comment glued
- * directly to code is not stripped, which can only ever cost a false
- * downgrade, never grant a false `met`. Block comments are handled per line,
- * not by tracking block state across lines, so an interior line of a block
- * comment that does not begin with `*` still reads as code.
+ * wrong. Permissive (a shape survives that is not one): a regex literal
+ * (`const gt = />/;`) and a `//` inside an unquoted URL pass through; a `#`
+ * that is glued directly to code is NOT treated as a comment, because
+ * `this.#ceiling > requested` is a private field and stripping from the `#`
+ * would erase the real comparison — so an inline script-language comment
+ * written without its space (`x = 1#if a > b`) still counts; and the interior
+ * of a block comment is only stripped when its line begins with `*`, while a
+ * multi-line template literal drops its whole span, so prose inside either can
+ * carry a shape in either direction.
+ * Strict (a real predicate is lost): a quote character inside a regex literal
+ * (`if (/[="']/.test(key))`) opens a span that consumes the rest of the line.
  */
 function predicateCodeView(line: string): string {
   if (line.trimStart().startsWith("*")) return "";
@@ -409,19 +414,25 @@ function predicateCodeView(line: string): string {
 
 /**
  * Operator spellings that read as a predicate shape but enforce nothing
- * (#1347): an arrow function (`=>`), an optional chain (`?.`), a nullish
- * coalesce (`??`), and an optional property/parameter marker (`?:`).
+ * (#1347): an arrow function (`=>`, and the `->` spelling Ruby/PHP/C++ use),
+ * an optional chain (`?.`), a nullish coalesce (`??`), and an optional
+ * property/parameter marker (`?:`). None of them is a comparison in any
+ * language this gate reads, so removing them cannot lose an enforcement shape.
+ *
+ * A `?` followed by a digit-starting token is left alone: that is a ternary
+ * with a leading-dot operand (`flag ? .5 : 1`), which no optional-member
+ * spelling produces.
  *
  * Applied BEFORE span removal, which is what keeps a genuine ternary whose
  * branch is a literal — `clip(symbol ? TEMPLATE : path)` — intact: in the raw
  * text its `?` is followed by the opening quote, not by `:`, so it survives,
  * while the collapsed `? :` left behind by removing the span would otherwise
- * read as an optional-member marker and be erased. Blanking only
- * ever removes operator characters, so it cannot fabricate a quote or a comment
- * for the scan that follows.
+ * read as an optional-member marker and be erased. Blanking only ever removes
+ * operator characters, so it cannot fabricate a quote or a comment for the scan
+ * that follows.
  */
 function blankNonPredicateOperators(code: string): string {
-  return code.replace(/=>/g, " ").replace(/\?\s*[.?:]/g, " ");
+  return code.replace(/=>|->/g, " ").replace(/\?\s*(?:[?:]|\.(?![0-9]))/g, " ");
 }
 
 /**
@@ -496,6 +507,13 @@ function citedLinePredicateFound(locations: readonly TraceLocation[], cache: Fil
  * location validity alone stands: a documented limitation, not a silent
  * pass-everything default, since this only fires when term extraction
  * itself found nothing to check.
+ *
+ * Note the asymmetry the two halves read: the shape test sees the scrubbed
+ * code view (#1347) while the term test still matches the raw line, so a
+ * genuine predicate followed by `// ceiling` on the same line counts. Pre-#1347
+ * behavior on the term half, kept deliberately: a requirement word a reviewer
+ * quotes in a comment beside the real comparison is evidence of the citation,
+ * not the copy, this gate exists to refuse.
  */
 export function enforcementPredicateFound(
   locations: readonly TraceLocation[],
