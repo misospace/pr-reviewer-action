@@ -199,6 +199,15 @@ Set `rereview-command` to an empty string to disable comment-triggered re-review
 
 `skip-if-diff-unchanged` (default `true`) skips the LLM review entirely when the current PR patch plus config fingerprint matches the last managed review, and carries the prior verdict forward (`verdict-source: carry_forward`) — zero model calls spent on a PR nobody touched. Any new push, force-push, rebase, or config change busts the fingerprint and triggers a fresh full review; there is no incremental/delta mode, every review is a full review of the current PR.
 
+## Dependency-upgrade coverage accounting (#1337)
+
+Dependency-upgrade PRs (classification kinds `dependency_upgrade`, `k8s_manifest`, `renovate_chart_update`, `renovate_image_update`) whose diff carries detected dependency changes (image digest changes or plain tag/version bumps) get two bounded, deterministic surfaces — coverage **accounting**, never a vulnerability-scan verdict:
+
+- A deterministic corpus section, `# Dependency Upgrade Coverage Accounting`, states per aspect what the harness itself established versus what is explicitly not checked. A missing advisory lookup is `not_checked`, never "no known vulnerabilities"; signature verification is never grounded in a successful image pull or a cosign example in release notes (especially one naming a different image than the one deployed).
+- The reviewer answers with a structured `dependency_coverage` array — one object per aspect (`source_mapping`, `release_notes`, `advisories`, `signature_verification`, `relevance`), each with a closed-vocabulary `status` (`checked_no_match`, `finding_present`, `unavailable`, `not_checked`, `skipped`) and an optional bounded note. Normalization is fail-closed: an unknown status word is preserved as `invalid` and the rollup counts it as not checked; an aspect the answer never mentions renders as `not_checked`, so silence can never read as a completed negative check.
+
+A deterministic rollup (`complete` / `partial` / `unavailable`) over the five aspects is written to the review artifact as `dependency_coverage_status`, carried in the published metadata marker (`dependency_coverage`, present only when the answer was emitted), the step-summary table, and an appended "Dependency Upgrade Coverage Accounting" section in the published review body. The accounting is purely informational: an evidence gap never creates a finding, never changes the verdict, and provenance or signature claims are never fabricated from unrelated release metadata.
+
 ## On model failure
 
 `on-model-failure` controls what happens when both the primary and fallback models fail to return a usable review:

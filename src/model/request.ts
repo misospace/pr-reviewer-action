@@ -119,8 +119,25 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
             additionalProperties: false,
           },
         },
+        // #1337: dependency-upgrade coverage accounting, one entry per
+        // closed aspect; unknown status words are parsed fail-closed to
+        // `invalid` (counted not-checked), so the wire enum mirrors the
+        // parser's accepted set.
+        dependency_coverage: {
+          type: ["array", "null"],
+          items: {
+            type: "object",
+            properties: {
+              aspect: { type: "string", enum: ["source_mapping", "release_notes", "advisories", "signature_verification", "relevance"] },
+              status: { type: "string", enum: ["checked_no_match", "finding_present", "unavailable", "not_checked", "skipped"] },
+              note: { type: ["string", "null"] },
+            },
+            required: ["aspect", "status", "note"],
+            additionalProperties: false,
+          },
+        },
       },
-      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions"],
+      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions", "dependency_coverage"],
       additionalProperties: false,
     },
   },

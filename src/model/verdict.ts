@@ -1,5 +1,6 @@
 import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, ReviewTriageDecision, VerdictValue } from "./types.js";
 import { resolveReviewTriageDecision } from "./triage.js";
+import { normalizeDependencyCoverage } from "./dependency-coverage.js";
 import { VerdictParseFailure } from "./types.js";
 import { containsKnownSecret, maskDiagnostic } from "../context/redact.js";
 import { stripRevealedCapNoteTails } from "../confidence/result.js";
@@ -791,6 +792,10 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
       && key !== "required_check_dispositions"
       && key !== "thread_dispositions"
       && key !== "human_review_dispositions"
+      // #1337: known structured field, not a model extra — the coverage
+      // answer is read by the parser (fail-closed), never passed through
+      // unparsed.
+      && key !== "dependency_coverage"
     ) {
       extra[key] = value;
     }
@@ -809,6 +814,11 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     parsed.human_review_dispositions,
     "human_review_dispositions" in parsed,
   );
+  // #1337: structured dependency-upgrade coverage accounting (fail-closed).
+  const dependencyCoverage = normalizeDependencyCoverage(
+    parsed.dependency_coverage,
+    "dependency_coverage" in parsed,
+  );
   return {
     verdict,
     reviewMarkdown: markdown,
@@ -825,6 +835,8 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     reviewTriageDecision: triage.decision,
     reviewTriageReason: triage.reason,
     reviewTriageTargets: normalizeReviewTriageTargets(parsed),
+    dependencyCoverage: dependencyCoverage.aspects,
+    dependencyCoverageEmitted: dependencyCoverage.present,
     extra,
   };
 }
