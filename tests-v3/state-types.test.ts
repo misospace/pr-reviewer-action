@@ -367,6 +367,40 @@ test("publication payload must be the canonical JSON object the publisher replay
   assert.equal(validatePublication({ ...validPublication(), resultPayload: '{"verdict":"approved"' }), null);
 });
 
+test("publication payload encoding must be canonical, so a lossy parse cannot hide a credential", () => {
+  // `JSON.parse` keeps the LAST occurrence of a duplicate key, so a payload
+  // whose EARLIER value carries a credential parses to a value with no
+  // credential shape — while the credential stays in the bytes the record
+  // persists and the publisher replays verbatim. The durable bytes must
+  // therefore be exactly the canonical encoding of the value they carry.
+  const lossyPayloads: readonly string[] = [
+    '{"x":"token ghp_AbcdEfghIjklMnOpqrStuvwx012345","x":"ok"}',
+    '{"note":"api_key=supersecretvalue1","note":"ok"}',
+    '{"outer":{"b":"AKIAIOSFODNN7EXAMPLE"},"outer":{"b":"ok"}}',
+  ];
+  for (const payload of lossyPayloads) {
+    assert.equal(
+      validatePublication({ ...validPublication(), resultPayload: payload }),
+      null,
+      `expected refusal for ${payload}`,
+    );
+  }
+  // A non-canonical encoding of benign content is refused too: the payload
+  // contract IS the canonical encoding the publisher replays.
+  assert.equal(validatePublication({ ...validPublication(), resultPayload: '{"verdict": "approved"}' }), null);
+  // A credential used as a property NAME is a credential in the durable bytes.
+  assert.equal(
+    validatePublication({
+      ...validPublication(),
+      resultPayload: '{"ghp_AbcdEfghIjklMnOpqrStuvwx012345":"ok"}',
+    }),
+    null,
+  );
+  // The canonical encoding of the same benign content is accepted — the
+  // refusal above is about the encoding, not about the verdict content.
+  assert.ok(validatePublication({ ...validPublication(), resultPayload: '{"x":"ok"}' }) !== null);
+});
+
 test("publication payload boundary accepts already-redacted and reference content", () => {
   // Idempotency (#252) at the boundary: a payload the upstream redactor
   // already sanitized — including the redaction markers THEMSELVES — is

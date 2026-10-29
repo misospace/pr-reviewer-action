@@ -910,6 +910,50 @@ test("#1333: containsSecretShapedContent detects credential shapes a durable pay
   for (const text of clean) assert.equal(containsSecretShapedContent(text), false, text);
 });
 
+test("#1333: containsSecretShapedContent refuses a lossy JSON encoding and a credential-shaped key", () => {
+  // DUPLICATE KEYS: `JSON.parse` keeps the LAST occurrence, so a
+  // secret-shaped EARLIER value survives in the raw bytes while the parsed
+  // comparison passes. The boundary must judge the BYTES, not only the value
+  // they parse to.
+  assert.equal(
+    containsSecretShapedContent('{"x":"token ghp_AbcdEfghIjklMnOpqrStuvwx012345","x":"ok"}'),
+    true,
+    "duplicate key hiding a credential",
+  );
+  assert.equal(
+    containsSecretShapedContent('{"note":"api_key=supersecretvalue1","note":"ok"}'),
+    true,
+    "duplicate key hiding an assignment",
+  );
+  assert.equal(
+    containsSecretShapedContent('{"a":{"b":"AKIAIOSFODNN7EXAMPLE"},"a":{"b":"ok"}}'),
+    true,
+    "duplicate key hiding a credential in a nested object",
+  );
+  // A NON-CANONICAL encoding is refused as well: the bytes are not the
+  // canonical encoding of the value they carry, so the parse cannot be
+  // trusted to describe them (the durable payload's contract IS the
+  // canonical encoding the publisher replays).
+  assert.equal(containsSecretShapedContent('{"verdict": "approved"}'), true, "whitespace");
+  assert.equal(containsSecretShapedContent('{"verdict":"approved"}'), false, "canonical");
+  // A CREDENTIAL-SHAPED property name is a credential in the durable bytes:
+  // the verdict-content sanitizer leaves key names alone, so the fixed-point
+  // comparison cannot see it.
+  assert.equal(
+    containsSecretShapedContent('{"ghp_AbcdEfghIjklMnOpqrStuvwx012345":"ok"}'),
+    true,
+    "credential used as a property name",
+  );
+  assert.equal(
+    containsSecretShapedContent('{"outer":{"AKIAIOSFODNN7EXAMPLE":"ok"}}'),
+    true,
+    "credential-shaped name nested one level down",
+  );
+  // A credential-NAMED key stays exempt: that is the render layer's schema
+  // contract, not this boundary's.
+  assert.equal(containsSecretShapedContent('{"api_key":"supersecretvalue1"}'), false, "named key");
+});
+
 test("#1094: containsKnownSecret detects raw, URL-encoded, and base64 variants — the same set maskKnownSecrets replaces", () => {
   const secret = "gw-8f2a1c9d3b7e4a10";
   const secrets = [secret];

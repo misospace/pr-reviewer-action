@@ -919,10 +919,25 @@ export function containsKnownSecret(text: string, secrets: readonly (string | nu
   return false;
 }
 
+/** The canonical-encoding rule for a JSON document: its bytes are canonical
+ * when they are EXACTLY `JSON.stringify` of the value they parse to. ONE
+ * definition, two callers — the durable-payload contract (src/state/types.ts)
+ * and the secret-shape detector below — so the two cannot drift apart (the
+ * repo's "one definition" rule for every rule a second writer must obey).
+ *
+ * A JSON parse is LOSSY — duplicate keys keep only the LAST occurrence — so a
+ * document whose bytes are not canonical can carry content its parsed value
+ * does not describe. `parsed` must be the value `text` parses to; both callers
+ * pass their own parse of those same bytes. */
+export function isCanonicalJsonEncoding(text: string, parsed: unknown): boolean {
+  return JSON.stringify(parsed) === text;
+}
+
 /** Secret-shape DETECTION for a candidate durable payload: true when the
- * text carries any credential shape this module masks. Detection, not
- * masking — the caller owns the policy (the durable-state validators refuse
- * rather than normalize).
+ * text carries any credential shape this module masks, or when its bytes
+ * cannot be trusted to carry what they parse to. Detection, not masking —
+ * the caller owns the policy (the durable-state validators refuse rather
+ * than normalize).
  *
  * The boundary contract is "the payload is a FIXED POINT of the sanitizer
  * its producer was required to run": a JSON document is judged by re-applying
@@ -935,21 +950,82 @@ export function containsKnownSecret(text: string, secrets: readonly (string | nu
  * the producer in ways that refuse legitimate schema content (e.g. the
  * `secret_handling_changes` classification category is a verdict-content KEY;
  * the values-only `keyNames=false` rule deliberately leaves keys alone). A
- * credential-named JSON KEY is therefore the render layer's schema contract,
+ * credential-NAMED JSON KEY is therefore the render layer's schema contract,
  * not this boundary's. Non-JSON text gets the flat pass only (`redactText`);
  * the flat pass is NEVER run on serialized JSON — its value run can spill
  * across structural boundaries (`{"a":["token=",1234…]}`), the exact class
  * the line-core docs call out below. Encoded (base64/hex) echoes of a
  * secret are out of shape-detection scope: `containsKnownSecret` covers
- * configured secrets where the secret list exists, not here. */
+ * configured secrets where the secret list exists, not here.
+ *
+ * The comparison above judges the PARSED value, so it is only as total as the
+ * parse. `JSON.parse` is LOSSY for duplicate keys — it keeps the LAST
+ * occurrence — so `{"x":"ghp_…","x":"ok"}` parses to a value with no
+ * credential shape while the credential stays in the raw string the durable
+ * store persists and the publisher replays. Two clauses close that class:
+ *
+ * 1. CANONICAL-SERIALIZATION EQUALITY — the bytes must be exactly the
+ *    canonical encoding (`JSON.stringify`) of the value they parse to
+ *    (`isCanonicalJsonEncoding`, the one definition shared with the payload
+ *    contract). Two grounds, both fail-closed: a LOSSY parse (a discarded
+ *    duplicate key) means the raw bytes can carry content the parsed value
+ *    does not describe, so the comparison below cannot judge them; and a
+ *    non-canonical encoding of benign content is malformed anyway — the
+ *    durable payload's contract IS the canonical encoding the publisher
+ *    replays. Refused, never normalized.
+ * 2. CREDENTIAL-SHAPED PROPERTY NAMES — the verdict-content sanitizer
+ *    deliberately leaves key names alone, so a credential used as a property
+ *    NAME (`{"ghp_…":"ok"}`) is invisible to the fixed-point comparison while
+ *    sitting in the persisted bytes. A credential-SHAPED name (the shape
+ *    itself, e.g. `ghp_…`/`AKIA…`/`sk-…`/`Bearer …`/`key=value`) is refused;
+ *    a credential-NAMED key (`api_key`) stays in scope-exempt above.
+ *
+ * Both clauses are STRICTER than the producer's sanitizer, and deliberately
+ * so: the producer is required to produce canonical, already-sanitized
+ * content, so neither clause can refuse legitimate schema content — only
+ * bytes that carry a credential or bytes whose parse cannot be trusted to
+ * describe them. */
 export function containsSecretShapedContent(text: string): boolean {
   if (text === "") return false;
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(text);
-    return JSON.stringify(redactPrTextDeep(parsed, 0, false, false)) !== JSON.stringify(parsed);
+    parsed = JSON.parse(text);
   } catch {
+    // Non-JSON text: the flat pass only (`redactText`). It is NEVER run on
+    // serialized JSON — its value run can spill across structural boundaries
+    // (`{"a":["token=",1234…]}`), the exact class the line-core docs call out
+    // below.
     return redactText(text) !== text;
   }
+  // Canonical-serialization equality (clause 1): a lossy parse would let a
+  // credential hide in the bytes the comparison below never sees.
+  if (!isCanonicalJsonEncoding(text, parsed)) return true;
+  // Fixed point of the producer's own verdict-content sanitizer.
+  if (JSON.stringify(redactPrTextDeep(parsed, 0, false, false)) !== JSON.stringify(parsed)) return true;
+  // Credential-shaped property names (clause 2).
+  return hasCredentialShapedKey(parsed);
+}
+
+/** True when any property NAME in `value` carries a credential SHAPE (the
+ * credential itself used as a key), at any depth below the redactor's own
+ * depth cap. Names are judged with the same leaf sanitizer the producer
+ * applies to string leaves (`redactPrTextLines`), so a credential-NAMED key
+ * (`api_key`, `password`) passes unchanged — only a key carrying a credential
+ * shape is flagged. Depth mirrors `MAX_MASK_DEPTH`: a subtree past the cap is
+ * already refused by the fixed-point comparison (the redactor replaces it
+ * wholesale), so this walk stops there too. */
+function hasCredentialShapedKey(value: unknown, depth = 0): boolean {
+  if (depth >= MAX_MASK_DEPTH) return false;
+  if (Array.isArray(value)) return value.some((item) => hasCredentialShapedKey(item, depth + 1));
+  if (typeof value !== "object" || value === null) return false;
+  // `Object.entries` reads own enumerable properties only; an own `__proto__`
+  // key from `JSON.parse` is a plain data property, so it is read, never
+  // written — no prototype setter is invoked on this path.
+  for (const [key, item] of Object.entries(value)) {
+    if (redactPrTextLines(key) !== key) return true;
+    if (hasCredentialShapedKey(item, depth + 1)) return true;
+  }
+  return false;
 }
 
 /** Structural counterpart to `redactText`, for a JSON-shaped PR-authored

@@ -42,17 +42,25 @@ field): provider/API secrets; complete prompts/corpora; repository
 files; model responses beyond the normalized result; worker filesystem
 paths that are meaningless after restart. Credentials exist only behind
 the #735 broker's opaque references. The `resultPayload` boundary makes
-the same invariant hold for CONTENT: it must parse as a JSON object (the
-canonical encoding the publisher replays), and `validatePublication`
-refuses — never normalizes — a payload that is not a fixed point of the
-producer's own verdict-content sanitizer (the shared redactor applied
-exactly as the completion projection applies it: per-leaf value shapes,
-key names left alone). Already-sanitized payloads and reference-shaped
-values (`${VAR}`) pass unchanged, so the upstream sanitizer's own output
-stays publishable; a credential-named JSON KEY is the render layer's
-schema contract, not this boundary's. Documented bounds: JSON nesting
-deeper than the redactor's depth cap is refused even when benign, and
-encoded (base64/hex) secret echoes are out of shape-detection scope.
+the same invariant hold for CONTENT: it must parse as a JSON object whose
+bytes are EXACTLY the canonical encoding of that object (the encoding the
+publisher replays), and `validatePublication` refuses — never normalizes —
+a payload that is not a fixed point of the producer's own verdict-content
+sanitizer (the shared redactor applied exactly as the completion projection
+applies it: per-leaf value shapes, key names left alone). Already-sanitized
+payloads and reference-shaped values (`${VAR}`) pass unchanged, so the
+upstream sanitizer's own output stays publishable; a credential-NAMED JSON
+KEY is the render layer's schema contract, not this boundary's. The
+canonical-encoding requirement is what makes the content check total: a
+JSON parse is lossy for duplicate keys (it keeps the LAST occurrence), so
+without it a payload such as `{"x":"ghp_…","x":"ok"}` would parse to a
+value with no credential shape while the credential stayed in the persisted
+bytes. A credential-SHAPED property NAME (`ghp_…`/`AKIA…`/`sk-…` used as
+a key) is refused for the same reason — the verdict-content sanitizer
+leaves key names alone, so the fixed-point comparison cannot see it.
+Documented bounds: JSON nesting deeper than the redactor's depth cap is
+refused even when benign, and encoded (base64/hex) secret echoes are out
+of shape-detection scope.
 
 ## Cost provenance is never fabricated
 

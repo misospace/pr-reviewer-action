@@ -30,7 +30,7 @@
  */
 
 import { INSTALLATION_ID_PATTERN } from "../events/normalize.js";
-import { containsSecretShapedContent } from "../context/redact.js";
+import { containsSecretShapedContent, isCanonicalJsonEncoding } from "../context/redact.js";
 import type { JobLifecycleState } from "../queue/types.js";
 
 /** The two platforms the controller knows (mirrors `ReviewJob`). */
@@ -642,6 +642,16 @@ export function validatePublication(value: unknown): PublicationRecord | null {
     return null;
   }
   if (!isPlainObject(parsedPayload)) return null;
+  // Canonical-encoding requirement (structural): the durable bytes must be
+  // EXACTLY the canonical JSON encoding of the object parsed from them (the
+  // one definition shared with the secret-shape detector). The parse is lossy
+  // otherwise — duplicate keys keep only the LAST occurrence — so a payload
+  // like `{"x":"ghp_…","x":"ok"}` parses to a value with no credential shape
+  // while the credential stays in the bytes this record persists and the
+  // publisher replays. Refused, never normalized: the payload contract IS the
+  // canonical encoding, so bytes that are not canonical are malformed
+  // whatever they contain.
+  if (!isCanonicalJsonEncoding(resultPayload, parsedPayload)) return null;
   // Secret-free durable boundary: the payload is the content the publisher
   // replays verbatim to the forge, so a credential shape here would be both
   // persisted and re-published. The upstream render pipeline redacts before
