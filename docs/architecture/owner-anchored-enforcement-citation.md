@@ -161,7 +161,7 @@ pre-#1347 baseline shape (embedded verbatim from base revision
 positional arg narrows the corpus to a path prefix), and prints the counts
 plus file:line samples of both change directions; the production logic is
 imported from source, never re-implemented, so the measurement cannot drift
-from the runtime. At the measured head (486 tracked `.ts` files, 216.4k
+from the runtime. At the measured head (487 tracked `.ts` files, 216.6k
 lines) the tightening took accepted shapes from 54.2k to 37.6k: the sampled
 removed lines are arrows, optional chains, nullish coalescing, comment/doc
 text, string literals and optional-property declarations — none of them a
