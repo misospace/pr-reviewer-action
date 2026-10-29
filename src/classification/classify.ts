@@ -1513,7 +1513,11 @@ function commandTextView(text: string, depth: number, keep: (part: string) => vo
  * open exec call longer than `MAX_CONSTRUCTION_CONTINUATION_LINES` or
  * `MAX_SYMLINK_RECOVERED_CHARS`; the `(MAX_EXEC_HEADS_PER_LINE + 1)`-th exec
  * call of one line, which cannot contribute once its predecessors consumed
- * the head budget; command text nested deeper than
+ * the head budget — predecessors that, since round 4 names `popen` and
+ * `shell_exec` explicitly, include quoted prose that merely mentions a head
+ * spelling (eight `log("popen(x)")` calls starve a real exec call later on
+ * the line), a widening of this declared family the explicit spellings
+ * bought; command text nested deeper than
  * `MAX_COMMAND_RECOVERY_DEPTH`, kept only as their quoted-data-stripped
  * view; a line
  * longer than `MAX_SYMLINK_SCAN_LINE_CHARS`, which keeps the pre-#1331 view
