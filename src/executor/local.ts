@@ -225,28 +225,6 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-/** True while the live child can still execute work. On Linux a killed child
- * can remain as a zombie until its parent reaps it; `kill(pid, 0)` reports
- * that PID as present even though it cannot execute. Treat Z/X as terminated
- * for the in-memory proof, while retaining the ordinary liveness probe on
- * platforms without /proc. */
-async function processStillExecuting(
-  pid: number,
-  pidAlive: (pid: number) => boolean,
-): Promise<boolean> {
-  if (!pidAlive(pid)) return false;
-  if (process.platform !== "linux") return true;
-  try {
-    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
-    const close = stat.lastIndexOf(")");
-    if (close < 0) return pidAlive(pid);
-    const state = stat.slice(close + 1).trim().split(/\s+/, 1)[0] ?? "";
-    return state !== "Z" && state !== "X";
-  } catch {
-    return pidAlive(pid);
-  }
-}
-
 /** Terminate a worker's process tree and CONFIRM that the worker is gone.
  *
  * The confirmation is a bounded poll, not a single probe: the tree
@@ -291,6 +269,8 @@ interface LocalRun {
   /** One shared proof that live cancellation really removed the worker tree.
    * Classification awaits this instead of racing process reaping. */
   terminationProof: Promise<boolean> | null;
+  /** Authoritative in-memory leader-exit proof from the owned ChildProcess. */
+  leaderExited: Promise<void> | null;
   /** Resolves when `terminate` is known — after the spawn, or when the
    * launch never happened at all. A cancellation that lands inside the
    * launch window waits for it instead of reporting a worker as terminated
@@ -371,6 +351,7 @@ export class LocalExecutor implements Executor {
       result: null,
       terminate: null,
       terminationProof: null,
+      leaderExited: null,
       terminateReady,
       stateWriteChain: Promise.resolve(),
     };
@@ -443,6 +424,8 @@ export class LocalExecutor implements Executor {
           ? { timeoutMs: Math.max(1, validated.deadlineAtMs - this.deps.nowMs()) }
           : {}),
       });
+
+      run.leaderExited = processHandle.exited;
 
       // abort requests cleanup; the Executor contract requires PROOF that
       // the tree is gone. Share one bounded proof with classification so a
@@ -805,17 +788,17 @@ export class LocalExecutor implements Executor {
     });
   }
 
-  /** Confirm the runtime completed a full descendant sweep and the leader
-   * is actually gone (not merely a transient zombie awaiting reap). */
+  /** Confirm a live child cancellation using the two proofs the owner has:
+   * the runtime's complete descendant sweep and the ChildProcess `exit`
+   * event for the leader. PID liveness is intentionally NOT used here;
+   * a dead-but-unreaped zombie still answers `kill(pid, 0)`. Recovered
+   * workers, which have no ChildProcess handle, keep the stricter
+   * pid-identity + liveness path in `cancel(request)`. */
   private async confirmLiveTermination(run: LocalRun, outcome: ProcessResult): Promise<boolean> {
-    if (run.pid <= 0) return false;
     const report = outcome.termination;
     if (report === null || !report.swept || report.survived.length > 0) return false;
-    const deadline = Date.now() + DEATH_SETTLE_MS;
-    while (await processStillExecuting(run.pid, this.deps.pidAlive)) {
-      if (Date.now() >= deadline) return false;
-      await sleep(DEATH_POLL_MS);
-    }
+    if (run.leaderExited === null) return false;
+    await run.leaderExited;
     return true;
   }
 

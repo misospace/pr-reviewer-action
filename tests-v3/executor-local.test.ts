@@ -1016,6 +1016,7 @@ test("cancel: an in-memory cleanup that leaves an unconfirmed tree fails instead
     const fakeHandle: ProcessHandle = {
       pid: 4242,
       launched: Promise.resolve(),
+      exited: Promise.resolve(),
       launchRefusal: null,
       result,
       abort: async () => {
