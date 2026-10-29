@@ -85,24 +85,47 @@ terms are generic (`data`, `close`, `never`, `content`), so it produced false
 downgrades far more often than true rejections (PR #1340 published
 `review_result=partial` on three consecutive reviews for exactly this reason).
 Dropping it inside declared surfaces moves the load to the declaration.
-Be honest about what remains: `linePredicateSignal` is the module's
-deliberately permissive shape heuristic — any comparison or ternary/logical
-operator, an `if`/`unless` guard, an assertion-shaped call — applied to raw
-text, not to parsed code. A line that only *looks* predicate-shaped therefore
-counts: an arrow function (`=>`), optional chaining (`?.`) and nullish
-coalescing (`??`) read as a comparison, and an assertion-shaped word inside an
-identifier, a comment or a string literal reads as an assertion. For
-owner-anchored rows this is therefore a coarse copy-detector, not a proof of
-concept: the cited line must carry one of those shapes, and a line that does
-can still be the wrong line of the right file — including a copy-only
-assignment that happens to be arrow-shaped (`const readCeiling = (state) =>
-state.requested;`). The load-bearing boundary for these rows is the
-maintainer-declared glob plus the cited-line predicate. Tightening the
-*accepted shape* (which predicate shapes count) would strengthen this gate
-further; it is deliberately left as follow-up work ([#1347]), not smuggled into
-this change, because the shape heuristic is shared with the legacy and
-distributed paths and tightening it there risks false downgrades across every
-consumer.
+Be honest about what remains: `linePredicateSignal` is still a shape heuristic
+over source text, not a parser. **#1347 closed the artifacts that made it fire
+on text which is not a predicate at all** — an arrow function (`=>`) read as a
+`>` comparison, an optional chain (`?.`) or nullish coalesce (`??`) read as a
+ternary, an optional property declaration (`x?: T`) read as a ternary, and an
+assertion-shaped word (`throw`, `reject`, `assert…`, `expect`, `invariant`,
+`must…`) read inside an identifier, a comment or a string literal. Those are
+excluded in the shared helper, so the legacy, owner-anchored and distributed
+paths all accept the same shape. On owner-anchored rows this is what makes the
+disclosed rule real: a copy-only citation such as
+`const readCeiling = (state) => state.ceiling;`, `const ceiling =
+state?.requested;` or `const note = 'must not exceed the ceiling';` no longer
+passes as `met`.
+
+What the coarse copy-detector still cannot tell you, named rather than silently
+wrong:
+
+- A generic argument list (`Map<string, Ceiling>`) still reads as a
+  comparison. It is indistinguishable from an unspaced `a<b` without a parser,
+  and refusing both would reject real enforcement.
+- A regex literal (`const GT = />/;`) is still an accepted shape, and a `//`
+  inside an unquoted URL is treated as a comment opening.
+- Only `'…'`, `"…"`, `` `…` ``, `//`, `/* … */`, a `#` comment at line start or
+  after whitespace, and a doc-comment continuation line are stripped. An inline
+  `#` glued directly to code is not, which costs a false downgrade rather than
+  granting a false `met`.
+- A line that genuinely is predicate-shaped can still be the wrong line of the
+  right file.
+
+The load-bearing boundary for these rows remains the maintainer-declared glob
+plus the cited-line predicate.
+
+The tightening was measured against false downgrades, not only against the
+artifacts: over this repository's own 96.9k TypeScript lines it took accepted
+shapes from 20.6k to 14.7k, added none, and every removed line is an arrow,
+optional chain, nullish coalesce, comment/doc text, string literal, optional
+property declaration or pattern-definition assignment — none of them a
+comparison, guard, throw/assert or match call. That measurement also caught one
+over-tightening, now pinned by a test: erasing a literal span collapses a real
+ternary such as `clip(symbol ? \`x\` : path)` into `? :`, so the operator
+blanking runs *before* span removal.
 
 The cited-line requirement is itself a deliberate tightening over the first
 draft of this gate, which searched a ±3-line window around the owner
@@ -140,9 +163,9 @@ is follow-up work.
 - Consider surfacing declared owner paths (or per-requirement owner hints, as
   the distributed hints already do) in the prompt corpus, so the owners-file
   exception is fully actionable for the model.
-- Consider a stricter accepted predicate *shape* for owner-anchored citations
-  (which predicate shapes count), measured against false-downgrade rates —
-  tracked as [#1347](https://github.com/misospace/pr-reviewer-action/issues/1347).
+- Consider excluding generic argument lists from the accepted predicate shape
+  without also rejecting an unspaced `a<b` (a parser-grade shape check) — the
+  one artifact #1347 named but deliberately left in place.
 
 ## Rejected alternatives
 

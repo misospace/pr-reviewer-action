@@ -438,6 +438,128 @@ test("#1343: the citation rule is disclosed where the reviewer is asked for clai
 });
 
 /**
+ * #1347: the accepted predicate *shape*.
+ *
+ * Once the lexical subject half is dropped for an owner-anchored citation
+ * (#1343), `linePredicateSignal` is the entire anti-copy core — and applied to
+ * raw text it accepted a line that merely *looks* predicate-shaped: an arrow
+ * function read as `>`, an optional chain or nullish coalesce read as `?`, an
+ * assertion-shaped word read inside an identifier, a comment or a string
+ * literal. Each excluded artifact below carries the requirement's own word
+ * `ceiling` on the cited line, so it is the SHAPE that rejects the citation,
+ * not term extraction. The helper is shared by the legacy and distributed
+ * paths, so both are pinned here too: the tightening must not silently differ
+ * per consumer.
+ */
+function quuxLedger(): unknown {
+  return ledgerWith([{ id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" }]);
+}
+
+function quuxOwnership(): RequirementOwnership[] {
+  return [{ match: ["quux", "bandwidth"], owners: ["src/boundary/gate.ts"] }];
+}
+
+/** The disposition of a lone cited line, checked on the owner-anchored path
+ * (the declaration replaces the lexical half) or the legacy lexical path (term
+ * and predicate must share the line). */
+function dispositionOfQuuxCitation(line: string, ownerAnchored: boolean): string | undefined {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/boundary/gate.ts", [line]);
+    const claim = metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: 1 }], [VALID_TEST_LOCATION]);
+    const trace = ownerAnchored
+      ? validateRequirementTrace([claim], quuxLedger(), workspace, undefined, { ownership: quuxOwnership() })
+      : validateRequirementTrace([claim], quuxLedger(), workspace);
+    return trace.rows.find((row) => row.requirement_id === "req-quux")?.disposition;
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+}
+
+test("#1347: copy-only citations that merely look predicate-shaped are excluded", () => {
+  const artifacts: Array<[string, string]> = [
+    ["an arrow function", "export const readCeiling = (state) => state.ceiling;"],
+    ["optional chaining", "export const ceiling = state?.requested;"],
+    ["nullish coalescing", "export const ceiling = state.requested ?? fallback.requested;"],
+    ["an assertion word in a comment", "export const ceiling = state.requested; // must never be exceeded"],
+    ["an assertion word in a string literal", "export const note = 'must not exceed the ceiling';"],
+    ["an assertion word inside an identifier", "export const mustNotExceedTheCeiling = state.requested;"],
+    ["an optional property declaration", "readonly ceiling?: number;"],
+  ];
+  // Each artifact carries the requirement's own word `ceiling` somewhere on
+  // the line, so the legacy path's lexical half is satisfied and only the
+  // shape can refuse it.
+  const lexicalCarried = [true, true, true, true, true, false, true];
+  for (const [index, [label, line]] of artifacts.entries()) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "unverifiable",
+      `a copy-only owner-anchored citation shaped like ${label} must not pass as met: ${line}`,
+    );
+    if (lexicalCarried[index]) {
+      assert.equal(
+        dispositionOfQuuxCitation(line, false),
+        "unverifiable",
+        `the shared shape check must exclude ${label} on the legacy path too: ${line}`,
+      );
+    }
+  }
+});
+
+test("#1347: real predicates on the cited line are still accepted", () => {
+  // The false-downgrade direction: a stricter shape must not reject real
+  // enforcement, including where the excluded spellings sit NEXT TO a genuine
+  // predicate.
+  const real: Array<[string, string]> = [
+    ["a comparison", "export const allowed = state.requested <= ceiling;"],
+    ["a guard", "if (state.requested > ceiling) {"],
+    ["a ternary", "const applied = state.requested > ceiling ? ceiling : state.requested;"],
+    // Both found by measuring the tightened shape against this repository's
+    // own sources: removing a literal span collapses a real ternary's `? … :`
+    // into `? :`, which must not then be erased as an optional-member marker.
+    ["a ternary whose branch is a template literal", "scope: clip(symbol ? `${block.path}:${symbol}` : block.path, MAX_SCOPE_CHARS),"],
+    ["a ternary whose branch is a string literal", "const errorKind = outcome.timeout ? 'timeout' : 'transport';"],
+    ["a throw beside an arrow", "const reject = (state) => { if (state.requested > ceiling) throw new Error('over'); };"],
+    ["an assert call", "assertEquals(state.requested, ceiling);"],
+    ["an assert member call", "assert.ok(state.requested <= ceiling);"],
+    ["a must-prefixed call", "mustBeLessThanOrEqual(state.requested, ceiling);"],
+    ["a match call", "if (kind.startsWith('ceiling')) { return ceiling; }"],
+    ["a private-field comparison", "if (this.#ceiling > state.requested) {"],
+    ["a comparison after a quoted URL", "const docs = 'https://example.com/ceiling'; if (state.requested > ceiling) {"],
+    ["a comparison after a block comment holding a quote", "/* 'must not exceed */ const ok = state.requested <= ceiling;"],
+  ];
+  for (const [label, line] of real) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "met",
+      `a real predicate (${label}) on the cited line must stay met: ${line}`,
+    );
+  }
+});
+
+test("#1347: the comment and string scrubber is fed its own delimiters", () => {
+  // #252: a sanitizer gets tested against the delimiter itself, not only
+  // against benign text. A predicate that exists ONLY inside a comment or an
+  // unterminated literal is prose; a predicate the delimiters merely touch
+  // must survive.
+  const cases: Array<[string, string, "met" | "unverifiable"]> = [
+    ["a comparison inside a line comment", "const ceiling = state.requested; // if (state.requested > 999) {", "unverifiable"],
+    ["a comparison inside a block comment", "const ceiling = state.requested; /* if (state.requested > 999) */", "unverifiable"],
+    ["a comparison inside a script-language comment", "const ceiling = state.requested;  # if state.requested > 999:", "unverifiable"],
+    ["a comparison after a block comment that holds a quote", "/* \"must not exceed */ if (state.requested > ceiling) {", "met"],
+    ["a quote escaped inside a string", "const ceiling = state.requested; const note = \"a \\\" must not exceed\";", "unverifiable"],
+    ["an unterminated string", "const ceiling = state.requested; const note = 'must not exceed", "unverifiable"],
+  ];
+  for (const [label, line, expected] of cases) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      expected,
+      `${label} must be ${expected} to the shape check: ${line}`,
+    );
+  }
+});
+
+/**
  * #1340: the repository's own untrusted-content standard must stay traceable
  * to the shared escaping seam.
  *
@@ -453,9 +575,10 @@ test("#1343: the citation rule is disclosed where the reviewer is asked for clai
  * citation into the implementation is accepted, so a later rename cannot
  * silently make the standard untraceable again.
  *
- * The trust level must be named in CODE, not only in prose: a comment
- * containing "must" is predicate-shaped to the validator, so a prose-only
- * edit would satisfy the trace without naming anything.
+  * The trust level must be named in CODE, not only in prose: the trace needs
+  * the standard's vocabulary on a predicate-shaped line, and since #1347 a
+  * comment is stripped before any shape is read, so a prose-only edit names
+  * nothing at all.
  */
 test("#1340: the untrusted-content standard traces to the shared escaping seam", () => {
   const standards = readFileSync(join(REPO_ROOT, "AGENTS.md"), "utf8");

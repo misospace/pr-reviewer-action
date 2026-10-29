@@ -263,6 +263,14 @@ function anyTestLocationValid(locations: readonly TraceLocation[], cache: FileTe
 // owner-anchored predicate must sit ON the cited line (the lexical half was
 // what bounded which line could qualify there); every other citation still
 // needs the term and the predicate on the same line.
+//
+// #1347: with the lexical half gone the shape test alone was the anti-copy
+// core, and applied to raw text it accepted copy-only lines — an arrow
+// function, an optional chain, a nullish coalesce, or an assertion-shaped word
+// that survives only inside an identifier, a comment or a string literal. The
+// accepted shape is tightened in `linePredicateSignal`, which all three
+// consumers share, so the legacy and distributed paths move with it rather
+// than diverging.
 // ---------------------------------------------------------------------------
 
 const PREDICATE_WINDOW_RADIUS = 3;
@@ -329,16 +337,117 @@ export function extractRequirementTerms(text: string, symbol?: string): string[]
 const COMPARISON_RE = /(===|!==|==|!=|<=|>=|<|>)/;
 const GUARD_RE = /\b(if|unless)\b/i;
 const LOGICAL_OR_TERNARY_RE = /(\?|&&|\|\|)/;
-const ASSERTION_CALL_RE = /\b(throw|reject|assert\w*|expect|invariant|must\w*)\b/i;
+/** Bare assertion keywords, word-boundary anchored so `throwing`, `rejection`
+ * and `expectation` do not read as assertions. */
+const ASSERTION_WORD_RE = /\b(throw|reject|expect|invariant|assert)\b/i;
+/** #1347: an identifier that merely starts like an assertion
+ * (`mustNotExceed`, `assertionsEnabled`) is a NAME, not an assertion, so the
+ * `assert…`/`must…` prefixes count only in a call or member shape —
+ * `assertEquals(…)`, `assert.ok(…)`, `mustBePositive(…)`. */
+const ASSERTION_CALL_RE = /\b(?:assert|must)[A-Za-z0-9_]*\s*[.(]/i;
 const MATCH_CALL_RE = /\.(includes|startsWith|endsWith|equals|match|test)\s*\(/i;
 
-/** A line is predicate-shaped when it carries a comparison, a guard/logical
- * operator, an assertion-style call, or a string-match call — the shapes
- * that actually enforce something, as opposed to merely naming a value. */
-function linePredicateSignal(line: string): boolean {
+/** End of a quoted span opened at `start`, honoring `\` escapes. An
+ * unterminated quote consumes the rest of the line. */
+function skipQuotedSpan(line: string, start: number): number {
+  const quote = line[start] as string;
+  for (let index = start + 1; index < line.length; index += 1) {
+    const char = line[index] as string;
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === quote) return index + 1;
+  }
+  return line.length;
+}
+
+/**
+ * The line with its string literals and comments removed (#1347).
+ *
+ * An assertion-shaped word that survives only inside
+ * `const note = 'must not exceed the ceiling';` or `// must never be exceeded`
+ * is prose about the value, not enforcement of it, and a `>` inside a comment
+ * is not a comparison. The scan is deliberately line-local and
+ * language-agnostic: it drops `'…'`/`"…"`/`` `…` `` bodies (honoring `\`
+ * escapes; an unterminated quote takes the rest of the line), `//` line
+ * comments, `/* … *\/` blocks, a `#` comment at line start or after whitespace
+ * (script languages — a `#` glued to an identifier is a private field,
+ * `this.#ceiling > requested`, and must survive), and a doc-comment
+ * continuation line whose first non-space character is `*`.
+ *
+ * Not a tokenizer, and the unmodeled cases are named rather than silently
+ * wrong: a regex literal (`const gt = />/;`) and a `//` inside an unquoted URL
+ * pass through, both in the permissive direction; an inline `#` comment glued
+ * directly to code is not stripped, which can only ever cost a false
+ * downgrade, never grant a false `met`. Block comments are handled per line,
+ * not by tracking block state across lines, so an interior line of a block
+ * comment that does not begin with `*` still reads as code.
+ */
+function predicateCodeView(line: string): string {
+  if (line.trimStart().startsWith("*")) return "";
+  let out = "";
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index] as string;
+    if (char === "/" && line[index + 1] === "/") return out;
+    if (char === "/" && line[index + 1] === "*") {
+      const close = line.indexOf("*/", index + 2);
+      if (close < 0) return out;
+      index = close + 1;
+      continue;
+    }
+    if (char === "#" && (index === 0 || /\s/.test(line[index - 1] as string))) return out;
+    if (char === "'" || char === '"' || char === "`") {
+      index = skipQuotedSpan(line, index) - 1;
+      out += " ";
+      continue;
+    }
+    out += char;
+  }
+  return out;
+}
+
+/**
+ * Operator spellings that read as a predicate shape but enforce nothing
+ * (#1347): an arrow function (`=>`), an optional chain (`?.`), a nullish
+ * coalesce (`??`), and an optional property/parameter marker (`?:`).
+ *
+ * Applied BEFORE span removal, which is what keeps a genuine ternary whose
+ * branch is a literal — `clip(symbol ? TEMPLATE : path)` — intact: in the raw
+ * text its `?` is followed by the opening quote, not by `:`, so it survives,
+ * while the collapsed `? :` left behind by removing the span would otherwise
+ * read as an optional-member marker and be erased. Blanking only
+ * ever removes operator characters, so it cannot fabricate a quote or a comment
+ * for the scan that follows.
+ */
+function blankNonPredicateOperators(code: string): string {
+  return code.replace(/=>/g, " ").replace(/\?\s*[.?:]/g, " ");
+}
+
+/**
+ * A line is predicate-shaped when its CODE (comments and string literals
+ * removed) carries a comparison, a guard/logical operator, an assertion-style
+ * call, or a string-match call — the shapes that actually enforce something,
+ * as opposed to merely naming a value.
+ *
+ * #1347: applied to raw text the shape test fired on text that is not a
+ * predicate at all — `>`/`<` matched arrow functions and generics, `?` matched
+ * `?.` and `??`, and `throw|reject|assert…|expect|invariant|must…` matched
+ * inside identifiers, comments and string literals. The owner-anchored path
+ * (#1343) dropped the lexical subject half, so there the shape was the whole
+ * anti-copy core and a copy-only citation passed as `met`. The artifacts are
+ * excluded here, in the helper shared by every consumer (legacy,
+ * owner-anchored and distributed), so no path accepts a shape another rejects.
+ * A TypeScript generic argument list (`Map<string, Ceiling>`) is still read as
+ * a comparison: it is indistinguishable from an unspaced `a<b` without a
+ * parser, and refusing both would reject real enforcement.
+ */
+function linePredicateSignal(rawLine: string): boolean {
+  const line = predicateCodeView(blankNonPredicateOperators(rawLine));
   return COMPARISON_RE.test(line)
     || GUARD_RE.test(line)
     || LOGICAL_OR_TERNARY_RE.test(line)
+    || ASSERTION_WORD_RE.test(line)
     || ASSERTION_CALL_RE.test(line)
     || MATCH_CALL_RE.test(line);
 }
