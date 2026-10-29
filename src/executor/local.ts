@@ -43,24 +43,35 @@
  * runId/jobId/attempt does not match the request is foreign, and a foreign
  * execution is never collected.
  *
+ * Correlation-keyed cancellation (`Executor.cancel`): the same recovery
+ * record also identifies the worker of a run THIS process no longer holds a
+ * handle for, so a restarted controller can stop a superseded run by
+ * identity instead of by a live handle. The cancellation is confirmed, never
+ * assumed: a termination whose success cannot be proven is reported as a
+ * failure (`worker-not-terminated`), never as a terminated worker. The
+ * recovered path is also where untrusted DATA would become a SIGNAL, so the
+ * record carries the worker's PROCESS IDENTITY (its process start time)
+ * next to the pid: the pid is signalled only while that identity still
+ * matches the live process, and a pid that cannot be proven (or one that
+ * names init or the controller itself) is refused outright.
+ *
  * Operator-mode library (like `src/queue/` and `src/acquisition/`): NOT
  * wired into the Action runtime.
  */
 
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { mkdir, open, rename, rm } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { buildChildEnv, extendAllowlist } from "../runtime/env.js";
 import { runProcess } from "../runtime/subprocess.js";
 import type { ProcessHandle, ProcessResult, RunProcessOptions } from "../runtime/subprocess.js";
+import { terminateProcessTreeByPid } from "../runtime/process-tree.js";
 import type { LocalExecutorSpec } from "../config/instance-config.js";
 import {
-  MAX_EXECUTION_FAILURE_MESSAGE_CHARS,
-  MAX_EXECUTION_RESULT_FILE_BYTES,
   validateExecutionRequest,
-  validateExecutionResult,
   ExecutionRequestError,
+  type ExecutionCancelOutcome,
   type ExecutionHandle,
   type ExecutionReconcileOutcome,
   type ExecutionRequest,
@@ -68,7 +79,8 @@ import {
   type ExecutionStatusReport,
   type Executor,
 } from "./types.js";
-import { ensureContained, proveContained, readBoundedFileNoFollow, writeFileNoFollow } from "./paths.js";
+import { boundedFailureMessage, readWorkerResultFile } from "./result-file.js";
+import { ensureContained, writeFileNoFollow, readBoundedFileNoFollow } from "./paths.js";
 
 /** The executor's coordination variables — the ONLY non-generic keys the
  * child environment ever carries. */
@@ -95,20 +107,22 @@ const DIAGNOSTIC_TAIL_CHARS = 2_000;
  * bound. */
 const MAX_STATE_FILE_BYTES = 16_384;
 
-/** Failure messages are bounded by the result contract
- * (`MAX_EXECUTION_FAILURE_MESSAGE_CHARS`). The refusal message embeds
- * filesystem paths — which the request contract itself allows to be long
- * — so the message is truncated to the cap: an executor result must
- * always satisfy the contract it is validated against, or the queue
- * seam would reject the executor's OWN result. */
-function boundedFailureMessage(message: string): string {
-  if (message.length <= MAX_EXECUTION_FAILURE_MESSAGE_CHARS) return message;
-  return `${message.slice(0, MAX_EXECUTION_FAILURE_MESSAGE_CHARS - 1)}…`;
-}
+/** Failure messages are bounded by the result contract; the shared
+ * `boundedFailureMessage` helper lives in `result-file.ts` alongside the
+ * worker-result reader both executors use. */
 
 const FAILURE_CATEGORIES: readonly string[] = [
   "launch_refused", "deadline", "worker_crash", "worker_error", "no_result", "stale_result", "orphaned",
+  "terminate_failed",
 ];
+
+/** Shared frozen cancellation outcomes. The local backend hands the worker
+ * no credential material, so `material-not-removed` can never apply here. */
+const CANCEL_TERMINATED: ExecutionCancelOutcome = Object.freeze({ kind: "terminated" as const });
+const CANCEL_WORKER_NOT_TERMINATED: ExecutionCancelOutcome = Object.freeze({
+  kind: "failed" as const,
+  reason: "worker-not-terminated" as const,
+});
 
 /** Shared frozen tri-state sentinels for `reconcile` (settled outcomes are
  * built per call — they carry a result). */
@@ -139,6 +153,18 @@ export interface LocalExecutorDeps {
   /** Liveness probe for reconcile. Default: `process.kill(pid, 0)`
    * try/catch semantics (see `src/runtime/process-tree.ts`). */
   readonly pidAlive?: (pid: number) => boolean;
+  /** Terminate a worker's process tree by pid — the seam a RECOVERED
+   * cancellation uses (there is no in-memory handle to abort). Resolves
+   * `true` only when the worker is CONFIRMED gone. Default: the runtime's
+   * own tree termination. */
+  readonly terminate?: (pid: number) => Promise<boolean>;
+  /** The PROCESS IDENTITY of a pid: a token that names the process
+   * INSTANCE, not just the pid number. A pid alone is not an identity —
+   * the OS recycles pids, so a record written before a crash can name a
+   * process that started much later. Default: the platform's process
+   * start time (Linux `/proc/<pid>/stat` field 22); a platform that
+   * cannot prove one answers "" (unprovable). */
+  readonly pidIdentity?: (pid: number) => Promise<string>;
 }
 
 function defaultPidAlive(pid: number): boolean {
@@ -153,14 +179,73 @@ function defaultPidAlive(pid: number): boolean {
   }
 }
 
-/** What reading the worker's result file concluded. `stale` is distinct:
- * a parseable file from ANOTHER correlation identity is a different
- * failure than no file at all, and neither is ever believed. */
-type ResultFileOutcome =
-  | { readonly kind: "ok"; readonly result: ExecutionResult }
-  | { readonly kind: "missing" }
-  | { readonly kind: "invalid" }
-  | { readonly kind: "stale" };
+/** The process start time of a pid — the PROCESS IDENTITY.
+ *
+ * On Linux this is field 22 (`starttime`) of `/proc/<pid>/stat`, counted
+ * in clock ticks since boot: two different processes never share one, and
+ * one process instance keeps it for its whole life. The field is parsed
+ * AFTER the last `)` — the `comm` field (the second one) may contain
+ * spaces AND parentheses, so splitting the whole line would mis-count
+ * every field behind it.
+ *
+ * A platform without `/proc` cannot prove an identity: the token is ""
+ * (unprovable), and the recovered cancellation then fails closed instead
+ * of signalling an unproven pid. */
+async function readProcStartTime(pid: number): Promise<string> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return "";
+  let stat: string;
+  try {
+    stat = await readFile(`/proc/${pid}/stat`, "utf8");
+  } catch {
+    return "";
+  }
+  const close = stat.lastIndexOf(")");
+  if (close < 0) return "";
+  // The remainder starts at field 3 (`state`), so the start time (field
+  // 22) is its 20th element.
+  const fields = stat.slice(close + 1).trim().split(/\s+/);
+  const startTime = fields[19];
+  if (startTime === undefined || !/^\d+$/.test(startTime)) return "";
+  return startTime;
+}
+
+/** TERM→KILL grace for a recovered cancellation — the runtime's own
+ * tree-termination grace. */
+const TERMINATE_GRACE_MS = 2_000;
+/** Liveness poll interval and settle window for the confirmation that a
+ * terminated worker is really gone: a killed child stays a ZOMBIE until
+ * its parent reaps it, and a zombie still answers the liveness probe, so
+ * a single probe would call a dead worker alive. */
+const DEATH_POLL_MS = 50;
+const DEATH_SETTLE_MS = 1_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/** Terminate a worker's process tree and CONFIRM that the worker is gone.
+ *
+ * The confirmation is a bounded poll, not a single probe: the tree
+ * termination kills the leader, but the leader stays addressable (as a
+ * zombie) until its parent reaps it, and a zombie still answers the
+ * liveness probe. A survivor in the snapshot means the tree was not fully
+ * swept — the worker may still have live descendants, so the termination
+ * is not confirmed. */
+async function terminateWorkerTree(
+  pid: number,
+  pidAlive: (pid: number) => boolean,
+): Promise<boolean> {
+  const report = await terminateProcessTreeByPid(pid, { graceMs: TERMINATE_GRACE_MS });
+  if (report.survived.length > 0) return false;
+  const deadline = Date.now() + DEATH_SETTLE_MS;
+  while (pidAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await sleep(DEATH_POLL_MS);
+  }
+  return true;
+}
 
 interface LocalRun {
   readonly request: ExecutionRequest;
@@ -168,10 +253,29 @@ interface LocalRun {
   readonly signal: AbortSignal;
   /** The worker pid once assigned; 0 until then (never a process). */
   pid: number;
+  /** The worker's durable PROCESS IDENTITY — the platform's process start
+   * time, captured as soon as the pid is known. It resolves to "" when
+   * the platform cannot prove one, and an unprovable identity is exactly
+   * what makes a recovered cancellation refuse to signal. */
+  pidIdentity: Promise<string>;
   cancelRequested: boolean;
   phase: "starting" | "running";
   /** The FIRST terminal result; never replaced once set. */
   result: ExecutionResult | null;
+  /** The process handle's abort, set once the worker is spawned. The
+   * cancellation paths share it: `handle.cancel()` and `Executor.cancel()`
+   * terminate the SAME tree through the same call. */
+  terminate: (() => Promise<boolean>) | null;
+  /** One shared proof that live cancellation really removed the worker tree.
+   * Classification awaits this instead of racing process reaping. */
+  terminationProof: Promise<boolean> | null;
+  /** Authoritative in-memory leader-exit proof from the owned ChildProcess. */
+  leaderExited: Promise<void> | null;
+  /** Resolves when `terminate` is known — after the spawn, or when the
+   * launch never happened at all. A cancellation that lands inside the
+   * launch window waits for it instead of reporting a worker as terminated
+   * while it is still being spawned. */
+  terminateReady: Promise<void>;
   /** Serialized per-run state-file writes: every write appends to this
    * chain, so a terminal write can never be overtaken by an earlier
    * non-terminal one. */
@@ -183,6 +287,10 @@ interface ExecutionStateRecord {
   readonly jobId: string;
   readonly attempt: number;
   readonly pid: number;
+  /** The PROCESS IDENTITY of the recorded pid — the token that proves the
+   * pid still names the same process instance. Absent when the identity
+   * could not be proven (an older record, or a platform without one). */
+  readonly pidIdentity?: string;
   readonly startedAtMs: number;
   readonly state: "starting" | "running" | "completed" | "failed" | "cancelled";
   readonly failureCategory?: string;
@@ -199,10 +307,16 @@ export class LocalExecutor implements Executor {
 
   constructor(spec: LocalExecutorSpec, deps: LocalExecutorDeps = {}) {
     this.spec = spec;
+    const pidAlive = deps.pidAlive ?? defaultPidAlive;
     this.deps = {
       runProcess: deps.runProcess ?? ((options) => runProcess(options)),
       nowMs: deps.nowMs ?? (() => Date.now()),
-      pidAlive: deps.pidAlive ?? defaultPidAlive,
+      pidAlive,
+      // The default termination confirms the worker's death with the SAME
+      // liveness probe the executor uses, so an injected probe and the
+      // termination seam can never disagree about what is alive.
+      terminate: deps.terminate ?? (async (pid: number) => await terminateWorkerTree(pid, pidAlive)),
+      pidIdentity: deps.pidIdentity ?? ((pid: number) => readProcStartTime(pid)),
     };
   }
 
@@ -222,14 +336,23 @@ export class LocalExecutor implements Executor {
     // Synchronous in-flight reservation (before the first await): every
     // failure path below removes the entry, so two concurrent starts with
     // the same runId cannot both proceed.
+    let resolveTerminateReady!: () => void;
+    const terminateReady = new Promise<void>((resolve) => {
+      resolveTerminateReady = resolve;
+    });
     const run: LocalRun = {
       request: validated,
       startedAtMs: this.deps.nowMs(),
       signal,
       pid: 0,
+      pidIdentity: Promise.resolve(""),
       cancelRequested: false,
       phase: "starting",
       result: null,
+      terminate: null,
+      terminationProof: null,
+      leaderExited: null,
+      terminateReady,
       stateWriteChain: Promise.resolve(),
     };
     this.runs.set(validated.runId, run);
@@ -239,6 +362,7 @@ export class LocalExecutor implements Executor {
     // failed immediately — no envelope, no state file, no child process.
     if (validated.deadlineAtMs !== 0 && validated.deadlineAtMs - this.deps.nowMs() <= 0) {
       this.runs.delete(validated.runId);
+      resolveTerminateReady();
       return refusedHandle(this.refusedResult(
         validated,
         "deadline",
@@ -269,6 +393,7 @@ export class LocalExecutor implements Executor {
           : null;
       if (refusal !== null) {
         this.runs.delete(validated.runId);
+        resolveTerminateReady();
         return refusedHandle(this.refusedResult(
           validated,
           "launch_refused",
@@ -299,6 +424,44 @@ export class LocalExecutor implements Executor {
           ? { timeoutMs: Math.max(1, validated.deadlineAtMs - this.deps.nowMs()) }
           : {}),
       });
+
+      run.leaderExited = processHandle.exited;
+
+      // abort requests cleanup; the Executor contract requires PROOF that
+      // the tree is gone. Share one bounded proof with classification so a
+      // transient zombie/reaping window cannot turn a successful cancel into
+      // terminate_failed.
+      run.terminate = async (): Promise<boolean> => {
+        if (run.terminationProof === null) {
+          run.terminationProof = (async (): Promise<boolean> => {
+            await processHandle.abort();
+            const outcome = await processHandle.result;
+            if (processHandle.launchRefusal !== null) return true;
+            return await this.confirmLiveTermination(run, outcome);
+          })();
+        }
+        return await run.terminationProof;
+      };
+      resolveTerminateReady();
+
+      // The worker's PROCESS IDENTITY, captured as soon as the pid is
+      // known: the recovery record must be able to PROVE that the pid it
+      // names is still the very process this executor spawned (the OS
+      // recycles pids, so the pid alone proves nothing). It is a promise
+      // because the pid itself only exists once the launch resolved, and
+      // the terminal state write must not overtake it.
+      run.pidIdentity = (async (): Promise<string> => {
+        await processHandle.launched;
+        const pid = processHandle.pid ?? 0;
+        run.pid = pid;
+        if (pid <= 0) return "";
+        try {
+          return await this.deps.pidIdentity(pid);
+        } catch {
+          // An unreadable identity is an UNPROVABLE one: never a guess.
+          return "";
+        }
+      })();
 
       // Terminal classification happens exactly once, when the process
       // settles; the first built result is cached and never replaced.
@@ -341,7 +504,7 @@ export class LocalExecutor implements Executor {
         cancel: async (): Promise<void> => {
           if (run.result !== null) return;
           run.cancelRequested = true;
-          await processHandle.abort();
+          if (run.terminate !== null) await run.terminate();
         },
         collect: async (): Promise<ExecutionResult> => {
           // Always await the settled promise: it carries the terminal
@@ -354,6 +517,7 @@ export class LocalExecutor implements Executor {
       };
     } catch (err) {
       this.runs.delete(validated.runId);
+      resolveTerminateReady();
       throw err;
     }
   }
@@ -437,7 +601,7 @@ export class LocalExecutor implements Executor {
       });
     }
     if (state === "completed") {
-      const file = await this.readResultFile(validated);
+      const file = await readWorkerResultFile(validated);
       if (file.kind === "ok" && file.result.status === "completed") {
         return Object.freeze({
           kind: "settled" as const,
@@ -476,6 +640,140 @@ export class LocalExecutor implements Executor {
     });
   }
 
+  /** Correlation-keyed cancellation: terminate the worker for this
+   * request's run identity, whether or not THIS process started it.
+   *
+   * This is the RECOVERY path: after a controller restart the in-memory
+   * handle is gone, but the worker may still be running — and a superseded
+   * or cancelled run must be terminated by its EXACT run identity, not
+   * left to its deadline. The identity is the request's own
+   * runId/jobId/attempt: a foreign identity is NEVER touched.
+   *
+   * Two paths, one discipline:
+   *
+   * - a run THIS process started is cancelled through the in-memory
+   *   handle's own tree termination — the runtime's confirmed
+   *   termination, the very one `handle.cancel()` relies on;
+   * - a RECOVERED run is identified by the durable recovery record, which
+   *   is read exactly the way `reconcile` reads it (no-follow, byte-capped)
+   *   and correlation-checked against the request. The recorded pid is
+   *   then terminated through the runtime's tree termination — but only
+   *   after the record's PROCESS IDENTITY still matches the live process.
+   *
+   * The recovered path is the one place where DATA becomes a SIGNAL: the
+   * record lives in the worker-writable run directory, so its pid is
+   * untrusted. A pid is not an identity (the OS recycles pids), and the
+   * runtime terminates a process GROUP, so a planted `pid: 1` would reach
+   * every process the controller may signal. The record therefore carries
+   * the worker's process start time next to the pid, and the cancellation
+   * re-reads the live process's token before it signals anything: a pid of
+   * `<= 1` or the controller's own pid, a record without a token, an
+   * unreadable current token, or a mismatch all fail closed.
+   *
+   * Fail closed: a termination that cannot be CONFIRMED is reported
+   * `failed` (`worker-not-terminated`), never `terminated` — the caller
+   * must keep treating the execution as possibly alive. The local backend
+   * hands the worker no credential material, so `material-not-removed`
+   * never applies here. */
+  async cancel(request: ExecutionRequest): Promise<ExecutionCancelOutcome> {
+    const validated = validateExecutionRequest(request);
+    const run = this.runs.get(validated.runId);
+    if (
+      run !== undefined &&
+      run.request.jobId === validated.jobId &&
+      run.request.attempt === validated.attempt
+    ) {
+      // A run THIS process started: cancel it exactly like the handle's
+      // own cancellation does. The abort is the runtime's tree
+      // termination, so it is a CONFIRMED termination.
+      run.cancelRequested = true;
+      // A cancellation that lands inside the launch window waits for the
+      // spawn instead of reporting a worker as terminated while it is
+      // still being spawned.
+      await run.terminateReady;
+      if (run.terminate === null) return CANCEL_WORKER_NOT_TERMINATED;
+      return (await run.terminate()) ? CANCEL_TERMINATED : CANCEL_WORKER_NOT_TERMINATED;
+    }
+
+    // A RECOVERED run: this process holds no handle for it, so the
+    // recovery record is the only surviving identity. It is read the way
+    // `reconcile` reads it — no-follow and byte-capped, because the run
+    // directory is worker-writable space.
+    const statePath = join(validated.runDir, EXECUTION_STATE_FILE);
+    const read = await readBoundedFileNoFollow(statePath, MAX_STATE_FILE_BYTES);
+    if (read.kind !== "ok") return CANCEL_WORKER_NOT_TERMINATED;
+    let record: unknown;
+    try {
+      record = JSON.parse(read.text);
+    } catch {
+      return CANCEL_WORKER_NOT_TERMINATED;
+    }
+    if (typeof record !== "object" || record === null || Array.isArray(record)) {
+      return CANCEL_WORKER_NOT_TERMINATED;
+    }
+    const item = record as Record<string, unknown>;
+    if (
+      item["runId"] !== validated.runId ||
+      item["jobId"] !== validated.jobId ||
+      item["attempt"] !== validated.attempt
+    ) {
+      // A FOREIGN record proves only that this file cannot identify the
+      // requested run. It does NOT prove that the requested worker is gone:
+      // the record is worker-writable and may have been replaced/corrupted.
+      return CANCEL_WORKER_NOT_TERMINATED;
+    }
+    const state = item["state"];
+    if (state === "completed" || state === "failed" || state === "cancelled") {
+      // Already terminal: nothing is running for this run.
+      return CANCEL_TERMINATED;
+    }
+    const pid = typeof item["pid"] === "number" ? item["pid"] : 0;
+    if (pid <= 0) {
+      // pid 0 is the pre-spawn crash-window marker, not proof of absence:
+      // the controller can crash after spawn but before the running record
+      // (with its pid) is durably rewritten.
+      return CANCEL_WORKER_NOT_TERMINATED;
+    }
+    if (pid === 1 || pid === process.pid) {
+      // A pid that can never be this run's worker. pid 1 is init — and
+      // the runtime's tree termination signals the PROCESS GROUP, so
+      // `kill(-1, …)` would reach every process the controller may
+      // signal — and the controller's own pid is just as fatal. The
+      // recovery record lives in worker-writable space, so a planted pid
+      // must never become a signal: refuse, and let the caller keep
+      // treating the run as possibly alive.
+      return CANCEL_WORKER_NOT_TERMINATED;
+    }
+    if (!this.deps.pidAlive(pid)) {
+      // The recorded worker is already gone: there is nothing running to
+      // terminate.
+      return CANCEL_TERMINATED;
+    }
+    // The PROCESS IDENTITY: a pid is not an identity (the OS recycles
+    // pids), so the token the record carries is re-read from the LIVE
+    // process and compared. A record with no token (an older one, or a
+    // planted one), an unreadable current token, and a mismatch all mean
+    // the same thing: the worker cannot be PROVEN to be the recorded one,
+    // so nothing is signalled.
+    const recordedIdentity = typeof item["pidIdentity"] === "string" ? item["pidIdentity"] : "";
+    if (recordedIdentity === "") return CANCEL_WORKER_NOT_TERMINATED;
+    let currentIdentity: string;
+    try {
+      currentIdentity = await this.deps.pidIdentity(pid);
+    } catch {
+      return CANCEL_WORKER_NOT_TERMINATED;
+    }
+    if (currentIdentity === "" || currentIdentity !== recordedIdentity) {
+      return CANCEL_WORKER_NOT_TERMINATED;
+    }
+    const terminated = await this.deps.terminate(pid);
+    if (!terminated) return CANCEL_WORKER_NOT_TERMINATED;
+    // The termination seam reported success; the worker is only gone when
+    // the liveness probe agrees.
+    if (this.deps.pidAlive(pid)) return CANCEL_WORKER_NOT_TERMINATED;
+    return CANCEL_TERMINATED;
+  }
+
   /** Wrap a synthesized terminal result into the `settled` reconcile
    * outcome. */
   private settledOutcome(
@@ -488,6 +786,20 @@ export class LocalExecutor implements Executor {
       kind: "settled" as const,
       result: this.reconciledResult(request, partial),
     });
+  }
+
+  /** Confirm a live child cancellation using the two proofs the owner has:
+   * the runtime's complete descendant sweep and the ChildProcess `exit`
+   * event for the leader. PID liveness is intentionally NOT used here;
+   * a dead-but-unreaped zombie still answers `kill(pid, 0)`. Recovered
+   * workers, which have no ChildProcess handle, keep the stricter
+   * pid-identity + liveness path in `cancel(request)`. */
+  private async confirmLiveTermination(run: LocalRun, outcome: ProcessResult): Promise<boolean> {
+    const report = outcome.termination;
+    if (report === null || !report.swept || report.survived.length > 0) return false;
+    if (run.leaderExited === null) return false;
+    await run.leaderExited;
+    return true;
   }
 
   /** Map a settled `ProcessResult` (plus the result file) onto the
@@ -524,7 +836,21 @@ export class LocalExecutor implements Executor {
       resultArtifactPath: "",
     });
 
-    if (run.cancelRequested || run.signal.aborted) return cancelled();
+    if (run.cancelRequested || run.signal.aborted) {
+      const noWorkerLaunched = run.pid <= 0 && outcome.status === "spawn_error";
+      const treeConfirmedGone = noWorkerLaunched
+        ? true
+        : run.terminationProof !== null
+          ? await run.terminationProof
+          : await this.confirmLiveTermination(run, outcome);
+      if (!treeConfirmedGone) {
+        return failed(
+          "terminate_failed",
+          "the worker could not be confirmed terminated, so the cancellation could not be completed",
+        );
+      }
+      return cancelled();
+    }
     if (outcome.status === "timeout") {
       return failed("deadline", "the worker exceeded the execution deadline");
     }
@@ -542,7 +868,7 @@ export class LocalExecutor implements Executor {
     if (outcome.exitCode !== 0) {
       return failed("worker_error", `the worker exited with code ${outcome.exitCode}`);
     }
-    const file = await this.readResultFile(run.request);
+    const file = await readWorkerResultFile(run.request);
     if (file.kind === "ok") {
       if (file.result.status === "completed") {
         return Object.freeze({
@@ -572,42 +898,6 @@ export class LocalExecutor implements Executor {
         ? "the worker exited 0 without writing a result file"
         : "the worker exited 0 with a result file that violates the execution-result contract",
     );
-  }
-
-  /** Read, correlation-check, and validate the worker's structured result
-   * file. The file is proven contained (no symlink, canonical directory
-   * inside the run directory) and read with no-follow, bounded semantics
-   * before it is parsed at all — a planted symlink is never followed and
-   * an oversized file never reaches the parser. Correlation comes NEXT and
-   * stays first among the CONTENT checks: a parseable file from another
-   * generation is `stale`, never a validation target. */
-  private async readResultFile(request: ExecutionRequest): Promise<ResultFileOutcome> {
-    const proof = await proveContained(request.runDir, request.resultPath);
-    if (!proof.contained) {
-      return { kind: "invalid" };
-    }
-    const read = await readBoundedFileNoFollow(
-      request.resultPath,
-      MAX_EXECUTION_RESULT_FILE_BYTES,
-    );
-    if (read.kind === "missing") return { kind: "missing" };
-    if (read.kind === "invalid") return { kind: "invalid" };
-    let raw: unknown;
-    try {
-      raw = JSON.parse(read.text);
-    } catch {
-      return { kind: "invalid" };
-    }
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { kind: "invalid" };
-    const item = raw as Record<string, unknown>;
-    if (item["runId"] !== request.runId || item["jobId"] !== request.jobId) {
-      return { kind: "stale" };
-    }
-    try {
-      return { kind: "ok", result: validateExecutionResult(raw, { runDir: request.runDir }) };
-    } catch {
-      return { kind: "invalid" };
-    }
   }
 
   /** Build a frozen result synthesized by `reconcile` (no live process to
@@ -678,11 +968,17 @@ export class LocalExecutor implements Executor {
     state: ExecutionStateRecord["state"],
     result: ExecutionResult | null,
   ): Promise<void> {
+    // The process identity travels WITH the pid: a record that names a pid
+    // without the token that proves it is not enough to signal it. The
+    // await also settles the pid (the capture assigns it), so the two can
+    // never disagree.
+    const pidIdentity = await run.pidIdentity;
     const record: ExecutionStateRecord = {
       runId: run.request.runId,
       jobId: run.request.jobId,
       attempt: run.request.attempt,
       pid: run.pid,
+      ...(run.pid > 0 && pidIdentity !== "" ? { pidIdentity } : {}),
       startedAtMs: run.startedAtMs,
       state,
       ...(result !== null && result.status === "failed"

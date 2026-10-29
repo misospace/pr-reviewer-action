@@ -61,6 +61,11 @@ export interface ProcessHandle {
   launched: Promise<void>;
   /** Set when the launch was refused before spawn (sync or async preflight). */
   launchRefusal: string | null;
+  /** Resolves when the leader can no longer execute: the child emitted
+   * `exit`, or the launch was refused/failed before a live child existed.
+   * This is stronger than probing the pid: a dead child may remain as a
+   * zombie until reaped and still answer `kill(pid, 0)`. */
+  exited: Promise<void>;
   /** Terminate the whole tree now. Idempotent. */
   abort(): Promise<void>;
 }
@@ -239,6 +244,15 @@ export function runProcess(options: RunProcessOptions): ProcessHandle {
   const launchedPromise = new Promise<void>((resolve) => {
     resolveLaunched = resolve;
   });
+  let resolveExited!: () => void;
+  let exitedResolved = false;
+  const exitedPromise = new Promise<void>((resolve) => {
+    resolveExited = () => {
+      if (exitedResolved) return;
+      exitedResolved = true;
+      resolve();
+    };
+  });
 
   // The launch is async because the pgrep preflight is: every tree-owning
   // child refuses to start when descendant cleanup cannot be guaranteed.
@@ -297,6 +311,7 @@ export function runProcess(options: RunProcessOptions): ProcessHandle {
       state.pid = child.pid ?? null;
     } finally {
       resolveLaunched();
+      if (child === null) resolveExited();
     }
 
     child.stdout?.on("data", (chunk: Buffer) => {
@@ -307,6 +322,7 @@ export function runProcess(options: RunProcessOptions): ProcessHandle {
     });
 
     child.on("error", (error: Error) => {
+      resolveExited();
       settle(() => spawnErrorResult(`${options.file}: ${error.message}`));
     });
 
@@ -337,6 +353,7 @@ export function runProcess(options: RunProcessOptions): ProcessHandle {
     // detached descendant; cut the streams after a short drain instead of
     // hanging on `close`.
     child.on("exit", () => {
+      resolveExited();
       if (settled || terminateReason !== null) return;
       const drainTimer = setTimeout(() => {
         child?.stdout?.destroy();
@@ -353,6 +370,7 @@ export function runProcess(options: RunProcessOptions): ProcessHandle {
   };
 
   void launch().catch((error: unknown) => {
+    if (child === null) resolveExited();
     settle(() => spawnErrorResult(`${options.file}: ${error instanceof Error ? error.message : String(error)}`));
   });
 
@@ -361,6 +379,7 @@ export function runProcess(options: RunProcessOptions): ProcessHandle {
       return state.pid;
     },
     launched: launchedPromise,
+    exited: exitedPromise,
     get launchRefusal(): string | null {
       return state.launchRefusal;
     },
@@ -383,6 +402,7 @@ function refusedHandle(refusal: string, result: ProcessResult): ProcessHandle {
   return {
     pid: null,
     launched: Promise.resolve(),
+    exited: Promise.resolve(),
     launchRefusal: refusal,
     result: Promise.resolve(result),
     abort: () => Promise.resolve(),

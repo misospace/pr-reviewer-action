@@ -166,6 +166,7 @@ test("executor profiles are a closed set — an arbitrary image/PodSpec/host pat
       maxReviews: 4,
       local: null,
       oci: { image: "ghcr.io/acme/review-worker:1" },
+      kubernetes: null,
     },
   );
   // Specs are frozen at validation.
@@ -223,21 +224,173 @@ test("executor profiles carry exactly one kind-matching backend spec (#733)", ()
     { ...baseInstance(), "executor-profiles": [{ name: "default", kind: "oci", oci: { image: "ghcr.io/acme/worker:1" }, local: { command: "worker", args: [] } }] },
     "must be absent for kind 'oci'",
   );
-  // Kubernetes carries NO spec until #734 lands its versioned schema.
+  // Kubernetes carries its own versioned spec since #734 — deployment
+  // facts only, never raw pod infrastructure.
+  const kubernetesSpec = {
+    image: "ghcr.io/acme/pr-reviewer-worker:1.2.3",
+    args: ["--worker"],
+    namespace: "review-workers",
+    "service-account": "pr-reviewer-worker",
+    "ttl-seconds-after-finished": 3_600,
+    resources: {
+      requests: { cpu: "500m", memory: "512Mi" },
+      limits: { cpu: "2", memory: "2Gi" },
+    },
+    volumes: [{
+      claim: "pr-reviewer-data",
+      "controller-root": "/var/lib/pr-reviewer",
+    }],
+  };
   const kubernetesOk = validate({
     ...baseInstance(),
-    "executor-profiles": [{ name: "k8s", kind: "kubernetes" }],
+    "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: kubernetesSpec }],
   });
   assert.equal(kubernetesOk.executorProfiles[0]!.local, null);
   assert.equal(kubernetesOk.executorProfiles[0]!.oci, null);
+  assert.deepEqual({ ...kubernetesOk.executorProfiles[0]!.kubernetes! }, {
+    image: "ghcr.io/acme/pr-reviewer-worker:1.2.3",
+    args: ["--worker"],
+    namespace: "review-workers",
+    serviceAccount: "pr-reviewer-worker",
+    ttlSecondsAfterFinished: 3_600,
+    resources: {
+      requests: { cpu: "500m", memory: "512Mi" },
+      limits: { cpu: "2", memory: "2Gi" },
+    },
+    volumes: [{
+      claim: "pr-reviewer-data",
+      controllerRoot: "/var/lib/pr-reviewer",
+    }],
+  });
+  assert.ok(Object.isFrozen(kubernetesOk.executorProfiles[0]!.kubernetes));
+  assert.ok(Object.isFrozen(kubernetesOk.executorProfiles[0]!.kubernetes!.volumes));
+  // A kubernetes kind without its spec fails closed — the executor has
+  // nothing to build a Job from.
   expectError(
-    { ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", local: { command: "worker", args: [] } }] },
+    { ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes" }] },
+    "is required for kind 'kubernetes'",
+  );
+  expectError(
+    { ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: kubernetesSpec, local: { command: "worker", args: [] } }] },
     "must be absent for kind 'kubernetes'",
   );
   expectError(
-    { ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", oci: { image: "ghcr.io/acme/worker:1" } }] },
+    { ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: kubernetesSpec, oci: { image: "ghcr.io/acme/worker:1" } }] },
     "must be absent for kind 'kubernetes'",
   );
+  // The other kinds must not carry the kubernetes spec either.
+  expectError(
+    {
+      ...baseInstance(),
+      "executor-profiles": [{ name: "default", kind: "local", local: { command: "worker", args: [] }, kubernetes: kubernetesSpec }],
+    },
+    "must be absent for kind 'local'",
+  );
+  expectError(
+    {
+      ...baseInstance(),
+      "executor-profiles": [{ name: "default", kind: "oci", oci: { image: "ghcr.io/acme/worker:1" }, kubernetes: kubernetesSpec }],
+    },
+    "must be absent for kind 'oci'",
+  );
+});
+
+test("the kubernetes executor spec is a closed set — a PodSpec fragment has nowhere to land", () => {
+  const baseKubernetes = {
+    image: "ghcr.io/acme/pr-reviewer-worker:1",
+    namespace: "review-workers",
+    "service-account": "pr-reviewer-worker",
+    "ttl-seconds-after-finished": 3_600,
+    resources: {
+      requests: { cpu: "500m", memory: "512Mi" },
+      limits: { cpu: "2", memory: "2Gi" },
+    },
+    volumes: [{
+      claim: "pr-reviewer-data",
+      "controller-root": "/var/lib/pr-reviewer",
+    }],
+  };
+  for (const field of [
+    "podSpec", "nodeSelector", "hostPath", "command", "tolerations", "affinity",
+    "securityContext", "env", "volumeMounts", "containers", "imagePullPolicy",
+  ] as const) {
+    expectError(
+      {
+        ...baseInstance(),
+        "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: { ...baseKubernetes, [field]: "arbitrary" } }],
+      },
+      `unsupported field '${field}'`,
+    );
+  }
+});
+
+test("the kubernetes executor spec's fields are grammar-bounded (#734)", () => {
+  const baseKubernetes = () => ({
+    image: "ghcr.io/acme/pr-reviewer-worker:1",
+    namespace: "review-workers",
+    "service-account": "pr-reviewer-worker",
+    "ttl-seconds-after-finished": 3_600,
+    resources: {
+      requests: { cpu: "500m", memory: "512Mi" },
+      limits: { cpu: "2", memory: "2Gi" },
+    },
+    volumes: [{
+      claim: "pr-reviewer-data",
+      "controller-root": "/var/lib/pr-reviewer",
+    }],
+  });
+  const broken = (label: string, mutate: (spec: ReturnType<typeof baseKubernetes>) => unknown, why: string) => {
+    const spec = baseKubernetes();
+    const result = mutate(spec);
+    expectError(
+      { ...baseInstance(), "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: result }] },
+      why,
+    );
+  };
+  // image grammar (shared with oci).
+  broken("image", (spec) => ({ ...spec, image: "Not An Image Ref" }), "must be an image reference");
+  // namespace / service-account / claim: DNS-1123 labels.
+  broken("namespace", (spec) => ({ ...spec, namespace: "Review_Workers" }), "DNS-1123");
+  broken("namespace", (spec) => ({ ...spec, namespace: "-workers" }), "DNS-1123");
+  broken("service-account", (spec) => ({ ...spec, "service-account": "Default" }), "DNS-1123");
+  broken("volumes", (spec) => ({ ...spec, volumes: [{ ...spec.volumes[0], claim: "Bad_Claim" }] }), "DNS-1123");
+  // ttl: bounded positive integer.
+  broken("ttl", (spec) => ({ ...spec, "ttl-seconds-after-finished": 0 }), "must be between 1 and 604800");
+  broken("ttl", (spec) => ({ ...spec, "ttl-seconds-after-finished": 604_801 }), "must be between 1 and 604800");
+  // resources: required, quantity grammar.
+  broken("resources", (spec) => ({ ...spec, resources: undefined }), "must be a mapping");
+  broken("cpu", (spec) => ({
+    ...spec,
+    resources: { requests: { cpu: "fast", memory: "512Mi" }, limits: { cpu: "2", memory: "2Gi" } },
+  }), "must be a resource quantity");
+  broken("memory", (spec) => ({
+    ...spec,
+    resources: { requests: { cpu: "500m", memory: "lots" }, limits: { cpu: "2", memory: "2Gi" } },
+  }), "must be a resource quantity");
+  broken("limits", (spec) => ({
+    ...spec,
+    resources: { requests: { cpu: "500m", memory: "512Mi" } },
+  }), "must be a mapping");
+  // args: single argv elements only.
+  broken("args", (spec) => ({ ...spec, args: ["a | b"] }), "single argv element");
+  // volumes: 1..8, absolute non-root paths, no overlaps.
+  broken("volumes", (spec) => ({ ...spec, volumes: [] }), "must have at least 1 entry");
+  broken("volumes", (spec) => ({
+    ...spec,
+    volumes: [
+      ...spec.volumes,
+      { claim: "other", "controller-root": "/var/lib/pr-reviewer/runs" },
+    ],
+  }), "overlapping controller roots");
+  broken("root", (spec) => ({
+    ...spec,
+    volumes: [{ ...spec.volumes[0], "controller-root": "var/lib" }],
+  }), "must be an absolute path");
+  broken("root-slash", (spec) => ({
+    ...spec,
+    volumes: [{ ...spec.volumes[0], "controller-root": "/" }],
+  }), "must not be the filesystem root");
+  broken("volumes-none", (spec) => ({ ...spec, volumes: undefined }), "must be a list of volume mappings");
 });
 
 test("local executor specs are bounded single argv elements, not shell lines", () => {

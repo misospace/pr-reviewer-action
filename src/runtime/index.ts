@@ -15,6 +15,7 @@ export {
   pgrepAvailable,
   preflightTreeCleanup,
   terminateProcessTree,
+  terminateProcessTreeByPid,
   type TerminationReport,
 } from "./process-tree.js";
 export {

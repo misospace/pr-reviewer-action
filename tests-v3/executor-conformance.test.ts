@@ -17,11 +17,13 @@ import {
 } from "../src/executor/index.js";
 import { LocalExecutor } from "../src/executor/index.js";
 import type {
+  ExecutionCancelOutcome,
   ExecutionHandle,
   ExecutionReconcileOutcome,
   ExecutionRequest,
   ExecutionResult,
   Executor,
+  LocalExecutorDeps,
 } from "../src/executor/index.js";
 
 const WORKER = path.resolve(__dirname, "..", "..", "tests-v3", "fixtures", "executor-worker.mjs");
@@ -96,6 +98,7 @@ const WORKER_SCENARIO: Record<ConformanceScenario, string> = {
   "reconcile-unknown": "ok",
   "reconcile-running": "sleep-long",
   "reconcile-terminal": "ok",
+  "recovered-cancel": "sleep-long",
 };
 
 let activeRoots: string[] = [];
@@ -114,16 +117,26 @@ const localTests = executorConformanceTests(
       activeRoots.push(fixture.root);
       return fixture.request;
     },
-    executorFor: (scenario: ConformanceScenario) =>
-      new LocalExecutor(
+    executorFor: (scenario: ConformanceScenario) => {
+      const deps: LocalExecutorDeps = scenario === "reconcile-running"
+        // The reconcile-running scenario pins the live-pid branch
+        // deterministically: the probe always says alive.
+        ? { pidAlive: () => true }
+        : scenario === "recovered-cancel"
+          // The recovered cancellation proves the worker's PROCESS
+          // IDENTITY before it signals it; the suite must not depend on
+          // the host platform's ability to prove one, so the identity
+          // seam is a constant.
+          ? { pidIdentity: async () => "identity-token" }
+          : {};
+      return new LocalExecutor(
         {
           command: process.execPath,
           args: [WORKER, WORKER_SCENARIO[scenario]],
         },
-        // The reconcile-running scenario pins the live-pid branch
-        // deterministically: the probe always says alive.
-        scenario === "reconcile-running" ? { pidAlive: () => true } : {},
-      ),
+        deps,
+      );
+    },
   },
 );
 
@@ -155,7 +168,13 @@ const FAKE_OUTCOME: Record<ConformanceScenario, ScriptedOutcome> = {
   "reconcile-unknown": { kind: "completed" },
   "reconcile-running": { kind: "running" },
   "reconcile-terminal": { kind: "completed" },
+  "recovered-cancel": { kind: "running" },
 };
+
+/** The frozen cancellation outcome the fake reports: the recovery path
+ * terminates a worker by identity alone, and there is nothing to confirm
+ * in-process. */
+const CANCEL_TERMINATED: ExecutionCancelOutcome = Object.freeze({ kind: "terminated" as const });
 
 /** A fake whose handles are driven by the scenario the request was built
  * for: no processes, no filesystem. Cancellation is honored by the
@@ -163,7 +182,9 @@ const FAKE_OUTCOME: Record<ConformanceScenario, ScriptedOutcome> = {
  * the first collected result is cached (first-terminal-wins), and
  * `reconcile` reports only executions this instance actually started —
  * alive-but-unsettled as `running`, settled as `settled`, never started
- * as `none`. */
+ * as `none`. The correlation-keyed `cancel` is the RECOVERY path: it
+ * terminates the run by identity (a run this instance never started has
+ * nothing to terminate) and the run stops reading as alive. */
 class ScriptedExecutor implements Executor {
   private readonly outcomes = new Map<string, ScriptedOutcome>();
   private readonly started = new Set<string>();
@@ -215,19 +236,7 @@ class ScriptedExecutor implements Executor {
     let cached: ExecutionResult | null = null;
     const build = (): ExecutionResult => {
       if (cancelled || outcome.kind === "running") {
-        return Object.freeze({
-          status: "cancelled" as const,
-          runId: request.runId,
-          jobId: request.jobId,
-          resultHeadSha: "",
-          failureCategory: "" as const,
-          failureMessage: "",
-          resultArtifactPath: "",
-          diagnostics: "scripted cancellation",
-          artifactPaths: Object.freeze([]),
-          resourceMs: 0,
-          observedAtMs: 0,
-        });
+        return this.cancelledResult(request);
       }
       if (outcome.kind === "completed") {
         return Object.freeze({
@@ -288,6 +297,34 @@ class ScriptedExecutor implements Executor {
     return this.started.has(request.runId)
       ? Object.freeze({ kind: "running" as const })
       : Object.freeze({ kind: "none" as const });
+  }
+
+  /** The correlation-keyed cancellation: the recovery path a restarted
+   * controller takes, with no in-memory handle to cancel. The run is
+   * terminated by its identity alone, and a run this instance never
+   * started has nothing to terminate — it is terminated too. */
+  async cancel(request: ExecutionRequest): Promise<ExecutionCancelOutcome> {
+    if (this.started.has(request.runId)) {
+      this.settled.set(request.runId, this.cancelledResult(request));
+    }
+    return CANCEL_TERMINATED;
+  }
+
+  /** The terminal result a cancelled run settles with. */
+  private cancelledResult(request: ExecutionRequest): ExecutionResult {
+    return Object.freeze({
+      status: "cancelled" as const,
+      runId: request.runId,
+      jobId: request.jobId,
+      resultHeadSha: "",
+      failureCategory: "" as const,
+      failureMessage: "",
+      resultArtifactPath: "",
+      diagnostics: "scripted cancellation",
+      artifactPaths: Object.freeze([]),
+      resourceMs: 0,
+      observedAtMs: 0,
+    });
   }
 }
 

@@ -18,6 +18,11 @@
  *   (defaults to the single `factory` executor; needed when the
  *   implementation's worker behavior is scenario-specific, as the local
  *   executor's fixture worker is).
+ * - `restartedExecutorFor(scenario)` — the RESTARTED controller for that
+ *   scenario: an executor instance that holds NO in-memory handle for the
+ *   run, because the controller it replaces restarted (defaults to
+ *   `executorFor`). The recovered-cancellation scenario needs one: with the
+ *   handle gone, the cancellation can only work by correlation identity.
  *
  * Assertions use `node:assert/strict` INSIDE the definitions — a runtime
  * import of the assertion library, not a test framework. Every scenario
@@ -45,7 +50,8 @@ export type ConformanceScenario =
   | "stale-result"
   | "reconcile-unknown"
   | "reconcile-running"
-  | "reconcile-terminal";
+  | "reconcile-terminal"
+  | "recovered-cancel";
 
 /** One conformance scenario, as a pure async definition a test file
  * registers with its runner. */
@@ -54,7 +60,7 @@ export interface ConformanceTest {
   readonly run: () => Promise<void>;
 }
 
-/** Injection surface for the suite. Both hooks are optional; the defaults
+/** Injection surface for the suite. Every hook is optional; the defaults
  * suit executors that never touch the filesystem (pure fakes). */
 export interface ConformanceOptions {
   /** The scenario's execution request. Default:
@@ -69,6 +75,13 @@ export interface ConformanceOptions {
    * Supply this when worker behavior is scenario-specific (the local
    * executor picks its worker scenario per request). */
   readonly executorFor?: (scenario: ConformanceScenario) => Executor;
+  /** The RESTARTED controller for one scenario: an executor instance that
+   * holds NO in-memory handle for the run (the controller it replaces
+   * restarted, so its handle is gone). Default: the `executorFor` executor
+   * — a suite over an executor whose instances are already fresh per call
+   * needs nothing more, while an executor that keeps its handles in
+   * memory must hand over a fresh instance here. */
+  readonly restartedExecutorFor?: (scenario: ConformanceScenario) => Executor;
 }
 
 /** The default scenario request: a fully valid `ExecutionRequest` with
@@ -126,6 +139,8 @@ export function defaultConformanceRequest(scenario: ConformanceScenario): Execut
  * - reconcile for an unknown correlation → `{kind: "none"}`.
  * - reconcile while the worker is alive → `{kind: "running"}`.
  * - reconcile after terminal → `{kind: "settled"}` with the same result.
+ * - recovered cancellation: a run whose controller RESTARTED (the handle
+ *   is gone) is terminated by its correlation identity alone.
  */
 export function executorConformanceTests(
   factory: () => Executor,
@@ -133,6 +148,10 @@ export function executorConformanceTests(
 ): readonly ConformanceTest[] {
   const requestOf = options.requestOf ?? defaultConformanceRequest;
   const executorFor = options.executorFor ?? factory;
+  // The restarted controller falls back to the executor under test: an
+  // executor whose instances are already fresh per call needs no second
+  // hook, and a pure fake has no handle to lose.
+  const restartedExecutorFor = options.restartedExecutorFor ?? executorFor;
   const requestFor = async (scenario: ConformanceScenario): Promise<ExecutionRequest> =>
     validateExecutionRequest(await requestOf(scenario));
 
@@ -284,6 +303,31 @@ export function executorConformanceTests(
         assert.equal(reconciled.result.jobId, request.jobId);
         assert.equal(reconciled.result.resultHeadSha, collected.resultHeadSha);
         assert.equal(reconciled.result.resultArtifactPath, collected.resultArtifactPath);
+      },
+    },
+    {
+      name: "a recovered execution is cancelled by its correlation identity",
+      run: async () => {
+        const request = await requestFor("recovered-cancel");
+        const started = executorFor("recovered-cancel");
+        const handle = await started.start(request, new AbortController().signal);
+        // The controller restarts: the next executor holds NO handle for
+        // the run, so the cancellation can only work by correlation
+        // identity.
+        const restarted = restartedExecutorFor("recovered-cancel");
+        const outcome = await restarted.cancel(request);
+        assert.ok(outcome.kind === "terminated", `expected terminated, got '${outcome.kind}'`);
+        // The worker is gone: the restarted controller no longer sees it
+        // alive.
+        const reconciled = await restarted.reconcile(request);
+        assert.notEqual(reconciled.kind, "running", "the cancelled worker is not alive any more");
+        // The original run settles too (its worker was terminated). The
+        // exact terminal verdict differs per backend — a killed worker
+        // settles `failed`, a deleted Job settles `orphaned` — but a
+        // terminated run NEVER reports a completed result.
+        await handle.cancel();
+        const settled = await handle.collect();
+        assert.notEqual(settled.status, "completed", "a terminated run never reports a completed result");
       },
     },
   ]);
