@@ -225,6 +225,28 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+/** True while the live child can still execute work. On Linux a killed child
+ * can remain as a zombie until its parent reaps it; `kill(pid, 0)` reports
+ * that PID as present even though it cannot execute. Treat Z/X as terminated
+ * for the in-memory proof, while retaining the ordinary liveness probe on
+ * platforms without /proc. */
+async function processStillExecuting(
+  pid: number,
+  pidAlive: (pid: number) => boolean,
+): Promise<boolean> {
+  if (!pidAlive(pid)) return false;
+  if (process.platform !== "linux") return true;
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return pidAlive(pid);
+    const state = stat.slice(close + 1).trim().split(/\s+/, 1)[0] ?? "";
+    return state !== "Z" && state !== "X";
+  } catch {
+    return pidAlive(pid);
+  }
+}
+
 /** Terminate a worker's process tree and CONFIRM that the worker is gone.
  *
  * The confirmation is a bounded poll, not a single probe: the tree
@@ -790,7 +812,7 @@ export class LocalExecutor implements Executor {
     const report = outcome.termination;
     if (report === null || !report.swept || report.survived.length > 0) return false;
     const deadline = Date.now() + DEATH_SETTLE_MS;
-    while (this.deps.pidAlive(run.pid)) {
+    while (await processStillExecuting(run.pid, this.deps.pidAlive)) {
       if (Date.now() >= deadline) return false;
       await sleep(DEATH_POLL_MS);
     }
