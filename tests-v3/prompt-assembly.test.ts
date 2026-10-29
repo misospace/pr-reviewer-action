@@ -273,3 +273,22 @@ test("#812: the superseded-discussion rule appends once discussion sections exis
     assert.equal(state.systemPrompt, "Operator prompt.");
   });
 });
+
+test("#1336: the new Renovate kinds pick up version-bump/image-digest/release-notes guidance", () => {
+  const cases: { prKind: string; included: string[]; excluded: string[] }[] = [
+    { prKind: "renovate_image_update", included: ["image_digest", "version_bump", "release_notes"], excluded: [] },
+    { prKind: "renovate_chart_update", included: ["version_bump", "release_notes"], excluded: ["image_digest"] },
+  ];
+  for (const { prKind, included, excluded } of cases) {
+    withWorkspace({ "classification.json": `{"pr_kind":"${prKind}"}` }, (dir) => {
+      const ws = workspaceAt(dir);
+      const state = applySystemPromptFragments(resolveSystemPrompt({}, ws), { reviewVerbosity: "normal" }, ws);
+      for (const name of included) {
+        assert.equal(state.systemPrompt.includes(BUNDLED_PROMPT_ASSETS.fragments[name]!.trimEnd()), true, `${prKind} should include ${name}`);
+      }
+      for (const name of excluded) {
+        assert.equal(state.systemPrompt.includes(BUNDLED_PROMPT_ASSETS.fragments[name]!.trimEnd()), false, `${prKind} should exclude ${name}`);
+      }
+    });
+  }
+});

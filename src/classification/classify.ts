@@ -17,6 +17,8 @@ import type { ChangedFile, IssueLabel, LinkedIssue } from "../context/types.js";
 export const PR_KINDS: readonly string[] = [
   "renovate_digest_only",
   "image_digest_only",
+  "renovate_image_update",
+  "renovate_chart_update",
   "dependency_upgrade",
   "app_code",
   "k8s_manifest",
@@ -38,6 +40,7 @@ export const RISK_FLAGS: readonly string[] = [
   "path_handling_changes",
   "auth_changes",
   "secret_handling_changes",
+  "dependency_security_sensitive",
 ];
 
 // ---------------------------------------------------------------------------
@@ -2062,10 +2065,18 @@ type KindPredicate = (
   diffText: string,
   fullDiffText: string,
   authoritativeChangedFiles: number | undefined,
+  metadata: PrMetadata,
 ) => boolean;
 const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   { kind: "renovate_digest_only", matches: isRenovateDigestOnly },
   { kind: "image_digest_only", matches: isImageDigestOnly },
+  // #1336: Renovate-authored image tag/digest and Helm chart/appVersion
+  // refreshes are dependency updates, not ordinary app-code/manifest edits.
+  // They precede k8s_manifest (whose generic lane would swallow a Renovate
+  // image bump in a HelmRelease) and depend on forge-reported Renovate
+  // authorship metadata — a human tag bump keeps the pre-existing kinds.
+  { kind: "renovate_image_update", matches: isRenovateImageUpdate },
+  { kind: "renovate_chart_update", matches: isRenovateChartUpdate },
   { kind: "dependency_upgrade", matches: isDependencyUpgrade },
   { kind: "k8s_manifest", matches: filenameMatches(K8S_PATTERNS) },
   // secret handling before auth (more specific)
@@ -2189,6 +2200,120 @@ function evaluateDigestBlock(
   return digestChanged;
 }
 
+/** Result of walking a unified diff's contiguous change blocks. */
+interface ImageBlockWalk {
+  /** False when the diff carries structural metadata, a truncation marker, a
+   * binary-diff marker, or (strict mode only) a changed line the parser
+   * rejected — evidence too incomplete for an "only X changed" claim. */
+  ok: boolean;
+  sawBlock: boolean;
+  anyTrue: boolean;
+  totalAdded: number;
+  totalRemoved: number;
+  /** Lenient mode only: the `+++ b/` file most recently seen, for
+   * attribution callbacks. */
+  currentFile: string;
+}
+
+/** Shared unified-diff change-block walker for the image-reference rules:
+ * pairs each contiguous run of removed lines with the added lines that
+ * follow it (delimited by context, hunk headers, or file headers), and
+ * delegates line parsing and per-block evaluation to the caller. A block's
+ * evaluation returning `null` invalidates it; returning a boolean ORs into
+ * `anyTrue`. Strict mode (the kind rules) aborts on the first impurity —
+ * the fail-closed shape `isImageDigestOnly` established (#909). Lenient mode
+ * (the #1336 risk scan) flushes the current block on an impurity and keeps
+ * walking, so cleanly paired blocks elsewhere in the diff still report —
+ * only their evaluation result is visible (`anyTrue` counts validated blocks
+ * only). `onLine`/`onPair` observe parsed lines and accepted pairs for
+ * attribution. */
+function walkImageRefBlocks<T>(
+  fullDiffText: string,
+  parseLine: (content: string) => T | null,
+  evaluateBlock: (removed: readonly T[], added: readonly T[]) => boolean | null,
+  opts: { lenient: boolean; onLine?: (parsed: T, file: string) => void; onPair?: (removed: readonly T[], added: readonly T[], file: string) => void },
+): ImageBlockWalk {
+  let removed: T[] = [];
+  let added: T[] = [];
+  let sawBlock = false;
+  let anyTrue = false;
+  let totalRemoved = 0;
+  let totalAdded = 0;
+  let currentFile = "";
+
+  const flush = (): boolean => {
+    if (removed.length === 0 && added.length === 0) return true;
+    const changed = evaluateBlock(removed, added);
+    if (changed === null) {
+      if (!opts.lenient) return false;
+    } else {
+      sawBlock = true;
+      anyTrue = anyTrue || changed;
+      opts.onPair?.(removed, added, currentFile);
+    }
+    removed = [];
+    added = [];
+    return true;
+  };
+
+  for (const line of fullDiffText.split("\n")) {
+    // Rename/copy/mode metadata is a structural change, never a digest
+    // refresh — fail closed even if the file status looks like a plain edit.
+    if (STRUCTURAL_DIFF_LINE_RE.test(line)) {
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      continue;
+    }
+    // A truncation marker means changed lines are missing: not complete
+    // evidence, so never claim digest-only.
+    if (DIFF_TRUNCATION_MARKER_RE.test(line)) {
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      continue;
+    }
+    // A binary diff has no `+`/`-` lines, so it would otherwise vanish from
+    // the line reconciliation below.
+    if (BINARY_DIFF_LINE_RE.test(line)) {
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      continue;
+    }
+    const isRemoved = line.startsWith("-") && !line.startsWith("---");
+    const isAdded = line.startsWith("+") && !line.startsWith("+++");
+    if (!isRemoved && !isAdded) {
+      // Context line, hunk header (`@@`), file header, or any other line:
+      // the current change block is complete. File headers carry the
+      // attribution target for lenient-mode callbacks.
+      if (line.startsWith("+++ ")) currentFile = line.slice(4).replace(/^b\//, "");
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      continue;
+    }
+    const parsed = parseLine(line.slice(1));
+    if (parsed === null) {
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      continue;
+    }
+    if (isRemoved) {
+      // Git emits a block's removals before its additions; a removal after an
+      // addition means the block boundary was mis-detected, so fail closed.
+      if (added.length > 0) {
+        if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+        if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+        continue;
+      }
+      removed.push(parsed);
+      totalRemoved += 1;
+    } else {
+      added.push(parsed);
+      totalAdded += 1;
+    }
+    opts.onLine?.(parsed, currentFile);
+  }
+  if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+  return { ok: true, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+}
+
 /** Renovate image-digest-only refresh: every changed line is a single image
  * reference whose repository and tag are unchanged and only the `@sha256:`
  * digest differs (YAML `image:`/`tag:`, compose, Dockerfile `FROM`). A mixed
@@ -2212,58 +2337,9 @@ function isImageDigestOnly(
   authoritativeChangedFiles: number | undefined,
 ): boolean {
   if (!allFilesAreImageManifests(files)) return false;
-  let removed: { normalized: string; digest: string }[] = [];
-  let added: { normalized: string; digest: string }[] = [];
-  let sawBlock = false;
-  let anyDigestChanged = false;
-  let totalRemoved = 0;
-  let totalAdded = 0;
-
-  const flushBlock = (): boolean => {
-    if (removed.length === 0 && added.length === 0) return true;
-    const changed = evaluateDigestBlock(removed, added);
-    if (changed === null) return false;
-    sawBlock = true;
-    anyDigestChanged = anyDigestChanged || changed;
-    removed = [];
-    added = [];
-    return true;
-  };
-
-  for (const line of fullDiffText.split("\n")) {
-    // Rename/copy/mode metadata is a structural change, never a digest
-    // refresh — fail closed even if the file status looks like a plain edit.
-    if (STRUCTURAL_DIFF_LINE_RE.test(line)) return false;
-    // A truncation marker means changed lines are missing: not complete
-    // evidence, so never claim digest-only.
-    if (DIFF_TRUNCATION_MARKER_RE.test(line)) return false;
-    // A binary diff has no `+`/`-` lines, so it would otherwise vanish from
-    // the line reconciliation below.
-    if (BINARY_DIFF_LINE_RE.test(line)) return false;
-    const isRemoved = line.startsWith("-") && !line.startsWith("---");
-    const isAdded = line.startsWith("+") && !line.startsWith("+++");
-    if (!isRemoved && !isAdded) {
-      // Context line, hunk header (`@@`), file header, or any other line:
-      // the current change block is complete.
-      if (!flushBlock()) return false;
-      continue;
-    }
-    const parsed = parseImageDigestLine(line.slice(1));
-    if (parsed === null) return false;
-    if (isRemoved) {
-      // Git emits a block's removals before its additions; a removal after an
-      // addition means the block boundary was mis-detected, so fail closed.
-      if (added.length > 0) return false;
-      removed.push(parsed);
-      totalRemoved += 1;
-    } else {
-      added.push(parsed);
-      totalAdded += 1;
-    }
-  }
-  if (!flushBlock()) return false;
-  if (!sawBlock || !anyDigestChanged) return false;
-  return evidenceIsComplete(files, authoritativeChangedFiles, totalAdded, totalRemoved);
+  const walk = walkImageRefBlocks(fullDiffText, parseImageDigestLine, evaluateDigestBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
 }
 
 /** Prove the supplied file list and diff are complete before claiming every
@@ -2307,14 +2383,395 @@ function isDependencyUpgrade(files: readonly ChangedFile[], _diffText: string): 
   return !hasK8s;
 }
 
+// ---------------------------------------------------------------------------
+// Renovate image/chart updates (#1336)
+// ---------------------------------------------------------------------------
+
+/** Forge-reported PR metadata the update rules may rely on. Author and branch
+ * are forge identity facts (never PR-body content); the title is forge-reported
+ * text. All three are untrusted data: this boundary keeps only the booleans
+ * the rules need, so no untrusted string is retained. */
+interface PrMetadata {
+  renovateAuthored: boolean;
+  /** Whether the forge-reported title carries a security-fix/advisory
+   * identifier (`CVE-…`, `GHSA-…`, "security"). */
+  titleReportsAdvisory: boolean;
+}
+
+/** Renovate authorship from forge-reported metadata only: the bot account —
+ * a login that STARTS with `renovate` (`renovate[bot]`, `renovate-bot`,
+ * custom-configured `renovate-pro[bot]`) — or a `renovate/` head branch.
+ * Both are author-chosen strings (a fork PR's head branch is fully
+ * attacker-controlled), so the load-bearing guard for these kinds is the
+ * pure-diff requirement and the evidence reconciliation, not the name; the
+ * residual risk — a human PR from a `renovate/` branch reaching the benign
+ * zero-selection gate for a pure tag refresh — is a documented decision
+ * (docs/deep-review.md). The title never establishes authorship: it is
+ * attacker-influenced text and must not gate a zero-specialist path. */
+const RENOVATE_AUTHOR_RE = /^renovate($|\[|-|_)/i;
+const RENOVATE_BRANCH_RE = /^renovate\//i;
+
+/** Security-fix/advisory vocabulary in the forge-reported PR title — a known
+ * fact from the update metadata (Renovate titles carry the dependency and,
+ * for vulnerability-alert branches, the fix context), never a guess about the
+ * image contents. */
+const SECURITY_TITLE_RE = /\b(?:CVE-\d{4}-\d+|GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}|security)\b/i;
+
+/** Untrusted data, never instructions. The forge-reported metadata is read
+ * here and reduced to two booleans: the title against the closed advisory
+ * vocabulary, the author login and head branch against the closed
+ * Renovate-authorship prefixes. Nothing derived from the untrusted text is
+ * retained, rendered, or promoted into a kind — the classifier emits closed
+ * values only, so hostile content can neither close a fence nor carry itself
+ * into an artifact, a log line, or the prompt through this path.
+ *
+ * The title is read in FULL against the advisory vocabulary: a bounded
+ * projection would let an author pad the title past the bound and suppress
+ * the advisory signal, so the signal is never traded away for a smaller
+ * working set. The authorship prefixes themselves stay author-chosen strings
+ * (the documented #1336 residual risk) — the pure-diff requirement is the
+ * load-bearing guard for the kinds they gate. */
+function classifyPrMetadata(prAuthor: string, headBranch: string, prTitle: string): PrMetadata {
+  const renovateAuthored = RENOVATE_AUTHOR_RE.test(prAuthor) || RENOVATE_BRANCH_RE.test(headBranch); // untrusted identity: closed prefixes only
+  const titleReportsAdvisory = SECURITY_TITLE_RE.test(prTitle); // untrusted content: closed advisory vocabulary only
+  return { renovateAuthored, titleReportsAdvisory };
+}
+
+/** An allowed image-reference line form — the #909 digest-line grammar
+ * generalized to an optional `:tag`: optional YAML `image:`/`tag:` key or
+ * Dockerfile `FROM [--platform=...]` prefix, optional quotes, the reference
+ * (charset excludes `@`), an optional trailing `@sha256:<64hex>`, optional
+ * closing quote, and an optional trailing `AS <stage>`. */
+const IMAGE_REF_LINE_RE =
+  /^(\s*(?:FROM\s+(?:--platform=\S+\s+)?|(?:image|tag)\s*:\s*)?["']?)([A-Za-z0-9][A-Za-z0-9._:/-]*)(@sha256:[0-9a-fA-F]{64})?(["']?)((?:\s+AS\s+\S+)?)\s*$/i;
+
+/** A tag is the last `:`-segment of the reference with no `/` or `@` in it —
+ * so a registry port (`localhost:5000/repo`) is never mistaken for a tag. */
+const IMAGE_TAG_RE = /^[A-Za-z0-9._-]+$/;
+
+/** At most one digest token per line: the anchored regex admits a single
+ * `@sha256:`, but a second `sha256:<hex>` could hide in the `AS <stage>` tail;
+ * an ambiguous token would let a non-reference difference normalize away. */
+function parseImageRefLine(content: string): { normalized: string; repo: string; tag: string | null; digest: string | null } | null {
+  if ((content.match(/sha256:[0-9a-fA-F]{64}/g) ?? []).length > 1) return null;
+  const match = IMAGE_REF_LINE_RE.exec(content);
+  if (match === null) return null;
+  const [, prefix = "", ref = "", digestToken = "", quote = "", tail = ""] = match;
+  // A line that is not keyed (`image:`/`tag:`) and not a Dockerfile FROM is
+  // not attributable to an image reference — ordinary single-token or quoted
+  // value diffs (`- build/` / `+ "prod"` in .gitignore or YAML) must never
+  // feed the provenance/sensitivity scan. The opening quote sits inside the
+  // prefix capture, so a bare-prefix check would pass it: require the key.
+  if (!/^\s*(?:FROM\b|(?:image|tag)\s*:)/i.test(prefix)) return null;
+  const digest = digestToken === "" ? null : digestToken.slice(1).toLowerCase();
+  // A `tag:` YAML value is a tag, never a repository (`tag: v1.2.3` in a
+  // values file, `tag: latest@sha256:…` in a HelmRelease): it carries no
+  // provenance to compare. Only a full-reference `tag:` value (a `/` path)
+  // names a repository.
+  const isTagKey = /^\s*tag\s*:/i.test(prefix);
+  let repo = "";
+  let tag: string | null = null;
+  if (isTagKey && !ref.includes("/")) {
+    tag = ref;
+  } else {
+    repo = ref;
+    const colon = ref.lastIndexOf(":");
+    if (colon >= 0) {
+      const candidate = ref.slice(colon + 1);
+      if (candidate.length > 0 && IMAGE_TAG_RE.test(candidate)) {
+        tag = candidate;
+        repo = ref.slice(0, colon);
+      }
+    }
+  }
+  return {
+    // The paired-comparison form: key, indentation, repository, platform,
+    // stage and quotes preserved; tag and digest blanked.
+    normalized:
+      `${prefix}${repo !== "" ? repo : ""}${tag !== null ? (repo !== "" ? ":" : "") + "<TAG>" : ""}${digest !== null ? "@sha256:<DIGEST>" : ""}${quote}${tail}`,
+    repo,
+    tag,
+    digest,
+  };
+}
+
+/** Every paired line keeps its repository (and everything around the
+ * reference) and at least one pair changed a tag or digest. A repository
+ * change is a provenance change, not a version refresh — the kind rule
+ * rejects it (the #1336 risk scan flags it instead). */
+function evaluateImageRefBlock(
+  removed: readonly { normalized: string; repo: string; tag: string | null; digest: string | null }[],
+  added: readonly { normalized: string; repo: string; tag: string | null; digest: string | null }[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let refChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    if (before.normalized !== after.normalized) return null;
+    if (before.repo !== after.repo || before.tag !== after.tag || before.digest !== after.digest) refChanged = true;
+  }
+  return refChanged;
+}
+
+function isRenovateImageUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+  metadata: PrMetadata,
+): boolean {
+  if (!metadata.renovateAuthored) return false;
+  if (!allFilesAreImageManifests(files)) return false;
+  const walk = walkImageRefBlocks(fullDiffText, parseImageRefLine, evaluateImageRefBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+/** Helm chart version vocabulary: HelmRelease `chart:`/`version:`,
+ * Chart.yaml `version:`/`appVersion:`. Case-sensitive — these are the exact
+ * YAML keys Renovate's helm-release and Chart.yaml managers bump; a
+ * case-insensitive match would swallow unrelated version-shaped keys. The
+ * anchor excludes prefixed keys like `apiVersion:`.
+ *
+ * The line shape is captured in groups — indentation, key, separator, quoting
+ * — so the comparison can hold every byte around the version value fixed: a
+ * pure chart refresh changes the VALUE only (#1336 pure-diff requirement). */
+const CHART_VERSION_LINE_RE = /^(\s*)((?:chart|version|appVersion))(\s*:\s*)(["']?)([A-Za-z0-9][A-Za-z0-9._-]*)(["']?)(\s*)$/;
+
+/** One parsed chart-version line: the key, the version value, and the line
+ * with the value blanked out (`normalized`) — indentation, key, separator and
+ * quoting. A pair may only differ in the value, so the normalized shape must
+ * be identical on both sides. */
+interface ChartVersionLine {
+  key: string;
+  value: string;
+  normalized: string;
+}
+
+function parseChartVersionLine(content: string): ChartVersionLine | null {
+  const match = CHART_VERSION_LINE_RE.exec(content);
+  if (match === null) return null;
+  const [, indent = "", key = "", separator = "", openQuote = "", value = "", closeQuote = "", trailing = ""] = match;
+  // A quoted value must be quoted consistently: a mismatched or stray quote
+  // is not a well-formed version line, so the line does not parse at all and
+  // the block fails closed rather than accepting a half-quoted shape.
+  if (openQuote !== closeQuote) return null;
+  return { key, value, normalized: `${indent}${key}${separator}${openQuote}${closeQuote}${trailing}` };
+}
+
+/** Chart/appVersion refresh: pairs keep the same key and change the value; a
+ * changed `chart:` value is a renamed dependency, not an update. Pairing is
+ * strictly positional with equal run lengths — an unpaired `chart:` line
+ * (a dependency added or removed alongside the bump) invalidates the block,
+ * exactly like the image rule (#1336 review): the pairing must be able to SEE
+ * every chart-line change. At least one true value change must exist.
+ *
+ * Only the version VALUE may change: the normalized shape (indentation, key,
+ * separator, quoting) must match on both sides, so a re-indent or a quote-style
+ * change travelling with the bump disqualifies the kind instead of reaching
+ * the zero-specialist gate (#1336 review: "every changed line is a version
+ * bump"). */
+function evaluateChartVersionBlock(
+  removed: readonly ChartVersionLine[],
+  added: readonly ChartVersionLine[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let valueChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    if (before.key !== after.key) return null;
+    if (before.normalized !== after.normalized) return null;
+    if (before.key === "chart" && before.value !== after.value) return null;
+    if (before.value !== after.value) valueChanged = true;
+  }
+  return valueChanged;
+}
+
+/** Chart-bearing manifests: a HelmRelease/Chart.yaml filename, or any YAML in
+ * a diff that carries a HelmRelease marker (Renovate's helm-release manager
+ * bumps `version:` inside `kind: HelmRelease` documents whose filenames are
+ * unconstrained). Without this gate a Renovate `version:` bump in arbitrary
+ * YAML would drop the correctness lane the k8s_manifest kind used to give. */
+const CHART_FILE_RE = /(?:helmrelease|chart)\.ya?ml$/i;
+const CHART_PR_MARKER_RE = /^\s*(?:kind\s*:\s*["']?HelmRelease["']?\s*|apiVersion\s*:\s*["']?helm\.toolkit\.fluxcd\.io)/m;
+
+/** The diff region that belongs to each changed file: the text between this
+ * file's `+++ b/…` header and the next file header. A diff with no file
+ * header at all (a bare hunk) belongs to the single changed file — with more
+ * than one changed file the region cannot be attributed, so no file may claim
+ * a marker it does not own (fail closed).
+ *
+ * The marker must be attributed per file: a `kind: HelmRelease` marker in one
+ * file's region says nothing about another file, so a chart-shaped file can
+ * no longer bless an unrelated YAML `version:` change in a sibling file
+ * (#1336 review). */
+function diffFileRegions(fullDiffText: string, files: readonly ChangedFile[]): Map<string, string> {
+  const regions = new Map<string, string>();
+  let current: string | null = null;
+  let buffer: string[] = [];
+  const flush = (): void => {
+    if (current === null) return;
+    const existing = regions.get(current);
+    regions.set(current, existing === undefined ? buffer.join("\n") : `${existing}\n${buffer.join("\n")}`);
+    buffer = [];
+  };
+  for (const line of fullDiffText.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      // A new file section: close the previous one and drop its pending
+      // header lines, so a region never carries another file's header.
+      flush();
+      current = null;
+      buffer = [];
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      flush();
+      current = line.slice(4).replace(/^b\//, "").trim();
+      buffer = [line];
+      continue;
+    }
+    if (line.startsWith("--- ")) {
+      // The old-path header precedes the new-path header of the same file.
+      flush();
+      current = line.slice(4).replace(/^a\//, "").trim();
+      buffer = [line];
+      continue;
+    }
+    buffer.push(line);
+  }
+  flush();
+  if (regions.size === 0 && files.length === 1) regions.set(files[0]!.filename, fullDiffText);
+  return regions;
+}
+
+/** Every changed file is a modified YAML manifest (HelmRelease/Chart.yaml
+ * shapes); the diff changes only chart/version values. */
+function isRenovateChartUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+  metadata: PrMetadata,
+): boolean {
+  if (!metadata.renovateAuthored) return false;
+  if (files.length === 0) return false;
+  if (!files.every((file) => file.status === "modified" && /\.ya?ml$/i.test(file.filename))) return false;
+  // Every changed file must be chart-bearing ON ITS OWN: chart-shaped by name,
+  // or carrying the HelmRelease marker in its own diff region. A marker in a
+  // sibling file's region blesses nothing, so one chart file can no longer
+  // carry an unrelated YAML `version:` change into the zero-selection gate
+  // (#1336 review).
+  const regions = diffFileRegions(fullDiffText, files);
+  const chartBearing = files.every((file) => {
+    if (CHART_FILE_RE.test(file.filename)) return true;
+    const region = regions.get(file.filename) ?? "";
+    return CHART_PR_MARKER_RE.test(region);
+  });
+  if (!chartBearing) return false;
+  const walk = walkImageRefBlocks(fullDiffText, parseChartVersionLine, evaluateChartVersionBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+// ---------------------------------------------------------------------------
+// Dependency-update risk signals (#1336)
+// ---------------------------------------------------------------------------
+
+/** The update types the bounded #1336 risk triggers may escalate: Renovate's
+ * own kinds plus the generic dependency kind. Outside this context a title
+ * word like "security" must not invent a dependency risk signal for an
+ * ordinary code PR (its own lanes already cover that). */
+const DEPENDENCY_UPDATE_KINDS: ReadonlySet<string> = new Set([
+  "renovate_digest_only",
+  "image_digest_only",
+  "renovate_image_update",
+  "renovate_chart_update",
+  "dependency_upgrade",
+]);
+
+/** Bounded component vocabulary for the sensitive-component trigger:
+ * proxy/auth/network/secret-handling infrastructure. Exact-token matching —
+ * any non-alphanumeric character separates tokens (`oauth2-proxy` → `oauth2`,
+ * `proxy`) — so a token that is NOT on this closed list (`author`) never
+ * fires; a closed compound-name list covers the well-known components whose
+ * token isn't a bare stem (`certs`, `certbot`, `certificate`, `certmanager`,
+ * `oauth2proxy` — certificate material is exactly the secret-handling class
+ * this trigger exists for). Only ever evaluated inside the
+ * dependency-update context. */
+const SENSITIVE_COMPONENT_TOKENS: readonly string[] = [
+  "auth", "oauth", "oidc", "saml", "sso", "proxy", "gateway", "ingress",
+  "traefik", "nginx", "caddy", "haproxy", "envoy", "vpn", "wireguard",
+  "tailscale", "cloudflared", "vault", "sops", "cert", "secret", "secrets",
+  "keycloak", "authelia", "authentik", "auth0", "oauth2", "vaultwarden",
+  // Compound/camelCase spellings whose tokens are not a bare stem:
+  "certs", "certbot", "certificate", "certmanager", "oauth2proxy",
+];
+
+function mentionsSensitiveComponent(text: string): boolean {
+  const tokens = text.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token !== "");
+  return tokens.some((token) => SENSITIVE_COMPONENT_TOKENS.includes(token));
+}
+
+/** Lenient image-reference scan of the full diff: pairs what parses cleanly,
+ * reports provenance changes (a paired reference whose repository/registry
+ * differs — the "unknown upstream provenance" escalation fact) and the files
+ * carrying them, and collects sensitive-component repositories from every
+ * parsed reference line. Impure content never aborts the scan — cleanly
+ * paired blocks elsewhere in the diff still report, so a genuine repository
+ * swap is never erased by an unrelated line the parser rejects (the kind
+ * rules stay strict; this scan only ever ADDS scrutiny). */
+function scanImageRefDiff(fullDiffText: string): { repoChanged: boolean; repoChangeFiles: string[]; sensitiveFiles: string[] } {
+  const repoChangeFiles: string[] = [];
+  const sensitiveFiles: string[] = [];
+  const push = (list: string[], file: string): void => {
+    if (file === "" || list.includes(file)) return;
+    list.push(file);
+  };
+  /** Provenance comparison: a repository must be named on BOTH sides — a
+   * bare `tag:` value carries none — and differ. */
+  const repoSwap = (a: { repo: string }, b: { repo: string }): boolean =>
+    a.repo !== "" && b.repo !== "" && a.repo !== b.repo;
+  const walk = walkImageRefBlocks(
+    fullDiffText,
+    parseImageRefLine,
+    (removed, added) => {
+      if (removed.length !== added.length) return null;
+      for (let index = 0; index < removed.length; index += 1) {
+        if (repoSwap(removed[index]!, added[index]!)) return true;
+      }
+      return false;
+    },
+    {
+      lenient: true,
+      onLine: (parsed, file) => {
+        if (parsed.repo !== "" && mentionsSensitiveComponent(parsed.repo)) push(sensitiveFiles, file);
+      },
+      onPair: (removed, added, file) => {
+        for (let index = 0; index < Math.min(removed.length, added.length); index += 1) {
+          if (repoSwap(removed[index]!, added[index]!)) {
+            push(repoChangeFiles, file);
+            return;
+          }
+        }
+      },
+    },
+  );
+  // A provenance claim needs at least one cleanly paired block that changed
+  // the repository — `anyTrue` is exactly that.
+  return { repoChanged: walk.anyTrue, repoChangeFiles: walk.anyTrue ? repoChangeFiles : [], sensitiveFiles };
+}
+
 function classifyPrKind(
   files: readonly ChangedFile[],
   diffText: string,
   fullDiffText: string,
   authoritativeChangedFiles: number | undefined,
+  metadata: PrMetadata,
 ): string {
   for (const rule of KIND_RULES) {
-    if (rule.matches(files, diffText, fullDiffText, authoritativeChangedFiles)) return rule.kind;
+    if (rule.matches(files, diffText, fullDiffText, authoritativeChangedFiles, metadata)) return rule.kind;
   }
   return DEFAULT_PR_KIND;
 }
@@ -2352,7 +2809,10 @@ function issueLabels(issue: LinkedIssue): Set<string> {
 function detectRiskFlags(
   files: readonly ChangedFile[],
   diffText: string,
+  fullDiffText: string,
   linkedIssues: readonly LinkedIssue[],
+  prKind: string,
+  metadata: PrMetadata,
 ): { flags: string[]; flagsWithFiles: Record<string, string[]> } {
   const flags: string[] = [];
   const flagsWithFiles: Record<string, string[]> = {};
@@ -2408,6 +2868,27 @@ function detectRiskFlags(
     }
   }
 
+  // #1336: bounded dependency-update risk signals — every trigger is a known
+  // fact (a paired reference whose repository changed, a forge-reported title
+  // carrying an advisory identifier, a security-infrastructure component in a
+  // changed reference or path), never an inference about image contents.
+  const imageScan = scanImageRefDiff(fullDiffText);
+  const updateContext = metadata.renovateAuthored || DEPENDENCY_UPDATE_KINDS.has(prKind);
+  // Attribution merges two known-fact sources: files whose changed image
+  // references name a sensitive component (from the scan) and changed
+  // filenames whose own path segments do.
+  const sensitiveFiles = [...imageScan.sensitiveFiles];
+  for (const name of filenames) {
+    if (mentionsSensitiveComponent(name) && !sensitiveFiles.includes(name)) sensitiveFiles.push(name);
+  }
+  if (imageScan.repoChanged || (updateContext && (metadata.titleReportsAdvisory || sensitiveFiles.length > 0))) {
+    const attribution = [...imageScan.repoChangeFiles, ...sensitiveFiles].filter(
+      (name, index, list) => list.indexOf(name) === index,
+    );
+    if (!flags.includes("dependency_security_sensitive")) flags.push("dependency_security_sensitive");
+    flagsWithFiles["dependency_security_sensitive"] = attribution;
+  }
+
   return { flags, flagsWithFiles };
 }
 
@@ -2421,6 +2902,8 @@ function detectRiskFlags(
 const KIND_CHECKS: Readonly<Record<string, readonly string[]>> = {
   renovate_digest_only: ["verify no functional changes beyond lockfile hashes"],
   image_digest_only: ["verify only image digests changed; repository and tag unchanged"],
+  renovate_image_update: ["verify only image tags/digests changed; repository unchanged"],
+  renovate_chart_update: ["verify only chart/version values changed"],
   dependency_upgrade: [
     "check for breaking API changes in updated dependencies",
     "run full test suite after upgrade",
@@ -2458,6 +2941,9 @@ const FLAG_CHECKS: Readonly<Record<string, readonly string[]>> = {
   linked_audit_issue: ["verify audit findings are addressed"],
   linked_priority_p0: ["treat as critical — verify all changes thoroughly"],
   linked_priority_p1: ["treat as high priority — verify correctness carefully"],
+  dependency_security_sensitive: [
+    "verify the update provenance and any referenced security advisory",
+  ],
 };
 
 /** Kinds/flags whose RISK FLAG can still fire from diff CONTENT alone (with an
@@ -2608,6 +3094,14 @@ export interface ClassifyInput {
    * and fails closed when either is short (#909). */
   authoritativeChangedFiles?: number | undefined;
   linkedIssues?: readonly LinkedIssue[] | undefined;
+  /** #1336: forge-reported PR metadata for the Renovate-update rules — the
+   * author login (never PR-body content), the forge-reported title, and the
+   * head branch name. All optional; absent/empty means no metadata signal.
+   * Untrusted data: the classifier reduces these to booleans at the metadata
+   * boundary and retains no untrusted text (see `classifyPrMetadata`). */
+  prAuthor?: string | undefined;
+  prTitle?: string | undefined;
+  headBranch?: string | undefined;
   maxSummaryFiles?: number | undefined;
   metadataStatus?: unknown;
 }
@@ -2623,6 +3117,9 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     linkedIssues = [],
     maxSummaryFiles = 50,
     metadataStatus = null,
+    prAuthor = "",
+    prTitle = "",
+    headBranch = "",
   } = input;
 
   const uncertainty = linkedMetadataUncertainty(metadataStatus);
@@ -2639,8 +3136,9 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     discounted: pathEvaluation.discounted,
   };
 
-  const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText, authoritativeChangedFiles);
-  const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, linkedIssues);
+  const metadata = classifyPrMetadata(prAuthor, headBranch, prTitle);
+  const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText, authoritativeChangedFiles, metadata);
+  const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, fullDiffText ?? diffText, linkedIssues, prKind, metadata);
   const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles);
 
   // Build changed files summary (just filenames, truncated).

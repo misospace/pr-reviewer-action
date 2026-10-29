@@ -946,10 +946,19 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // normalized here, exactly like the classification fixture path.
     linkedIssues: normalizeLinkedIssues(linked.linkedIssues, repo),
     metadataStatus: safeJson(ws.read("linked-metadata-status.json")),
+    // #1336: forge-reported Renovate-update metadata — author login, title,
+    // and head branch feed the deterministic update-kind/risk rules. PR-body
+    // content is never consulted (untrusted data).
+    prAuthor: String((pr.author as { login?: unknown } | undefined)?.login ?? ""),
+    prTitle: String(pr.title ?? ""),
+    headBranch: String(pr.headRefName ?? ""),
   });
   const classificationArtifact = classificationToArtifact(classification) as Record<string, unknown>;
   ws.write("classification.json", `${pythonJsonStringify(classificationArtifact)}\n`);
-  log(`PR classification complete: ${String(classificationArtifact.pr_kind ?? "unknown")}`);
+  const classificationFlags = Array.isArray(classificationArtifact.risk_flags)
+    ? (classificationArtifact.risk_flags as string[]).join(",")
+    : "none";
+  log(`PR classification complete: ${String(classificationArtifact.pr_kind ?? "unknown")} (risk_flags=${classificationFlags})`);
   // #871: substantialCodeChange isn't part of the persisted classification
   // artifact (see PRClassification's field doc); thread it to the
   // specialists gate through env instead, so role selection can force the
