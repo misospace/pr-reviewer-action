@@ -7,11 +7,23 @@
 //   refuses an empty secret, a duplicate header, a missing `sha256=`
 //   prefix, and a non-lowercase-hex digest).
 // - The `X-GitHub-Event` header is an UNAUTHENTICATED HINT: the HMAC covers
-//   the BODY ONLY, so the header selects the event VOCABULARY and nothing
-//   else. It never rewrites the signed `action`, and the signed body shape
-//   stays authoritative: the normalizer's `mapKind` only maps a
-//   vocabulary/action pair the signed body authorizes, so a forged header can
-//   only DEGRADE a delivery to `unknown` — it can never schedule one.
+//   the BODY ONLY, so the header is not authenticated. It may only select
+//   the event VOCABULARY, and the SIGNED BODY must support that vocabulary
+//   (a `pull_request` header needs a `pull_request` object in the signed
+//   body, an `issue_comment` header needs a `comment` object, and so on) —
+//   a vocabulary the signed body cannot support is REFUSED. Within the
+//   vocabulary, the signed `action` and the signed payload shape stay
+//   authoritative: the normalizer's `mapKind` admits only the
+//   vocabulary/action pairs the signed body authorizes, and its own gates
+//   (a PR-scoped kind needs a resolvable PR; a check/status kind needs its
+//   shape) drop the rest.
+// - KNOWN LIMIT (stated, not hidden): GitHub signs the body only, so a
+//   captured signed delivery can be REPLAYED under a different header — the
+//   vocabulary may be re-aimed within the action map. The blast radius is
+//   bounded: the durable generation ledger dedupes the replayed generation
+//   (one review per head+config), the exact-head publication gate still
+//   refuses a stale head, and the review is of the PR head the signed body
+//   carries.
 // - Every response body is FIXED and short. The payload, the secret, the
 //   signature header, and any error text are NEVER echoed back to the
 //   caller.
@@ -38,6 +50,37 @@ import type { OperatorEventRouter } from "./operator-router.js";
 import { DEFAULT_MAX_WEBHOOK_BODY_BYTES } from "./webhook-handler.js";
 
 const EVENT_HEADER = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** The SIGNED-BODY shape each event vocabulary requires. The header is
+ * unauthenticated, so it may only select a vocabulary the signed body
+ * itself supports. A vocabulary without a shape anchor here (the
+ * installation/visibility families) never mints a review generation, so
+ * its shape is not load-bearing. */
+const VOCABULARY_ANCHORS: Readonly<Record<string, string>> = {
+  pull_request: "pull_request",
+  issue_comment: "comment",
+  check_run: "check_run",
+  check_suite: "check_suite",
+};
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/** True when the SIGNED body carries the shape the named vocabulary
+ * requires, and can therefore authorize it. A vocabulary without a shape
+ * anchor is accepted as it is: none of those kinds mints a review
+ * generation. */
+export function githubBodySupportsVocabulary(
+  eventHeader: string,
+  payload: Record<string, unknown>,
+): boolean {
+  const anchor = VOCABULARY_ANCHORS[eventHeader];
+  if (anchor === undefined) return true;
+  return isPlainObject(payload[anchor]);
+}
 
 export interface GitHubWebhookHandlerOptions {
   /** The webhook secret; the signature is verified over the raw body before
@@ -196,10 +239,18 @@ export function createGitHubWebhookHandler(
         return;
       }
 
-      if (eventHeader === "ping") {
-        settle(200, '{"status":"ignored"}');
-        return;
-      }
+    if (eventHeader === "ping") {
+      settle(200, '{"status":"ignored"}');
+      return;
+    }
+    // The header may only select a vocabulary the SIGNED body supports: a
+    // header that claims a PR (or comment) vocabulary the body does not
+    // carry is refused, so a captured delivery replayed under a forged
+    // header cannot be re-aimed at a vocabulary its body never carried.
+    if (!githubBodySupportsVocabulary(eventHeader, parsed as Record<string, unknown>)) {
+      settle(200, '{"status":"ignored"}');
+      return;
+    }
 
       // The header supplies the event NAME (GitHub's body carries none); the
       // signed `action` and the signed payload shape stay authoritative, so

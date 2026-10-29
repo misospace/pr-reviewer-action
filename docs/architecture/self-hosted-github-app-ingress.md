@@ -60,12 +60,23 @@ Two properties decide its trust boundary:
   reads the name from the envelope — so `projectGitHubWebhookPayload`
   copies the header onto `name` when the signed payload carries none of
   its own. It never rewrites the signed `action` and never mutates its
-  input. Because the HMAC covers the body only, a forged header can only
-  DEGRADE a delivery: the normalizer's kind map admits a vocabulary/action
-  pair only when the signed body authorizes it, so a captured delivery
-  replayed under another header lands on `unknown` (ignored), never on a
-  scheduleable kind. The same posture the Forgejo projection takes, for
-  the same reason.
+  input.
+
+  The header may only name a vocabulary the SIGNED BODY can authorize: a
+  `pull_request` header needs a `pull_request` object in the signed body,
+  an `issue_comment` header needs a `comment` object, and so on — a
+  header whose shape the body does not carry is REFUSED (the delivery is
+  ignored, never dispatched). Within a supported vocabulary the
+  normalizer's kind map admits only the vocabulary/action pairs the signed
+  body authorizes, and its own gates drop the rest.
+
+  **Known limit (stated, not hidden):** GitHub signs the body only, so a
+  captured signed delivery can be REPLAYED under a different header, and
+  the vocabulary may be re-aimed within the action map. The blast radius
+  is bounded: the durable generation ledger dedupes the replayed
+  generation (one review per head+config), the exact-head publication
+  gate still refuses a stale head, and the review is of the PR head the
+  signed body carries.
 
 The handler mirrors the Forgejo one response-for-response (405/400/413/401
 on the refusals, `200 {"status":"ignored"}` for an unroutable delivery,

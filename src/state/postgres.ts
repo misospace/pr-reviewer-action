@@ -571,7 +571,17 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
         if ((existing.rowCount ?? 0) === 0) return;
         const storedBinding = String(existing.rows[0]!["binding"]);
         const storedExpiry = safeCount(existing.rows[0]!["expires_at_ms"]);
-        if (storedBinding === binding) return; // released concurrently
+        if (storedBinding === binding) {
+          // The row's binding IS ours but the binding-scoped DELETE did not
+          // remove it (it was re-written concurrently): the release must
+          // still free the key, exactly as the in-memory backend does — a
+          // caller told the claim is released must find it GONE.
+          await client.query(
+            "DELETE FROM cp_idempotency_keys WHERE key = $1 AND binding = $2",
+            [key, binding],
+          );
+          return;
+        }
         // An EXPIRED key owns nothing: it may be released by anyone.
         if (storedExpiry !== 0 && storedExpiry <= nowMs) {
           await client.query(

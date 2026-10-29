@@ -440,3 +440,36 @@ test("the GitHub platform converges on the same generation a GitHub webhook woul
   assert.equal(again.jobs.length, 0);
   assert.equal(again.skipped, 1);
 });
+
+test("a refused queue handoff releases the durable reservation", async () => {
+  const lister = listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } });
+  const ledger = new MemoryGenerationLedger();
+  // The queue refuses the handoff: the reservation MUST be released, or
+  // the head stays suppressed until the claim's horizon expires.
+  const report = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger,
+    enqueueJob: () => false,
+  });
+  assert.equal(report.jobs.length, 0);
+  assert.equal(report.skipped, 1);
+  const pollEvent = reconciliationPollEvent("github", makeBarePr(7, 700, HEAD));
+  assert.notEqual(pollEvent, null);
+  const jobId = buildReviewJob(pollEvent!, {})!.jobId;
+  assert.equal(
+    await ledger.has(jobId),
+    false,
+    "no reservation survives a refused handoff",
+  );
+  // The next pass re-discovers the head: the reservation is free again.
+  const again = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger,
+    enqueueJob: () => true,
+  });
+  assert.equal(again.jobs.length, 1);
+});

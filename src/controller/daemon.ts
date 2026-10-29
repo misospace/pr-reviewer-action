@@ -68,6 +68,7 @@ import {
   StateConflictError,
   type ControlPlaneStore,
   type QueueSnapshotStore,
+  type RunTransitionPatch,
   type StateMutation,
 } from "../state/index.js";
 import {
@@ -97,6 +98,7 @@ import {
   createControllerRequestBuilder,
   createExecutorSelector,
   executionRequestPath,
+  executionRunId,
   type ControllerRequestBuilder,
   type ExecutorSelector,
 } from "./execution.js";
@@ -205,8 +207,15 @@ export interface ControllerDaemonOptions {
   /** Bounded missed-webhook reconciliation schedule. */
   readonly reconcile?: {
     readonly intervalMs: number;
+    /** The forge platform the poll observes. It is part of the generation
+     * identity, so a poll mislabelled as the other platform would mint a
+     * generation that never converges with its own webhook delivery. When
+     * the daemon serves an intake (`webhook.platform`), the two MUST
+     * agree — a mismatch fails construction (fail closed). */
+    readonly platform?: "github" | "forgejo";
     /** One reconciliation pass (the operator binds
-     * `reconcileRepositories` with this daemon's ledger). */
+     * `reconcileRepositories` with this daemon's ledger and the
+     * `enqueue` handoff this daemon exposes). */
     run(): Promise<void>;
   };
   /** The forge webhook ingress binding. The intake is PLATFORM-AWARE: the
@@ -240,6 +249,11 @@ export interface ControllerDaemonOptions {
 export interface ControllerDaemon {
   /** Feed one canonical event through adoption → dispatch → queue. */
   ingest(event: CanonicalForgeEvent): Promise<"scheduled" | "duplicate" | "ignored">;
+  /** Hand one minted generation to the queue — the reconciliation pass's
+   * handoff (the poll mints the generation; the daemon owns the queue).
+   * A failed handoff releases the durable reservation, so the head is
+   * re-discovered instead of staying suppressed. */
+  enqueue(job: ReviewJob): void;
   /** The generation ledger the operator's ingress/reconciliation binds. */
   readonly ledger: GenerationLedger;
   /** The operator host when `webhook` was configured. */
@@ -384,7 +398,6 @@ class ControlPlaneGenerationLedger implements GenerationLedger {
 
   async remove(jobId: string): Promise<void> {
     const token = this.claims.get(jobId);
-    this.claims.delete(jobId);
     // A reservation this process does not own is never released: it may
     // belong to another controller instance.
     if (token === undefined) return;
@@ -399,9 +412,18 @@ class ControlPlaneGenerationLedger implements GenerationLedger {
       ]);
     } catch (err) {
       // Somebody else owns the claim now: releasing it is not ours to do.
-      if (err instanceof StateConflictError) return;
+      if (err instanceof StateConflictError) {
+        this.claims.delete(jobId);
+        return;
+      }
+      // A transport failure keeps the OWNERSHIP TOKEN: the reservation is
+      // still ours, and a later release attempt must be able to retry it.
+      // Dropping the token here would make the release unretryable and
+      // leave the durable claim suppressing the redelivery.
       throw err;
     }
+    // The durable claim is gone: the token is spent.
+    this.claims.delete(jobId);
   }
 }
 
@@ -475,6 +497,79 @@ interface DaemonRuntime {
   /** Renewal timers of in-flight executions; cleared on stop/abandon so
    * no per-dispatch interval outlives the daemon. */
   readonly renewalTimers: Set<NodeJS.Timeout>;
+  /** The run ids already reconciled against the queue's records, so the
+   * reconciliation pass does not re-read a settled run on every tick. */
+  readonly settledRuns: Set<string>;
+}
+
+/** Mirror the control-plane runs whose attempt the queue has retired.
+ *
+ * The queue owns the ATTEMPT's lifecycle; the run record is the durable
+ * account of it. The two can diverge in ONE direction only: the queue
+ * retires an attempt the daemon's own bookkeeping never reached — a
+ * generation superseded before its publication, a recovered worker
+ * abandoned by a crash, an attempt whose lease expired and was requeued.
+ * Without this pass such a run would stay in a non-terminal state
+ * forever, and the control plane's answer to "what did this run do"
+ * would never settle.
+ *
+ * The mirror is a no-op for a run that is already terminal (the
+ * executor and the publisher settle their own attempts), so the pass
+ * never contradicts them: whoever wrote the terminal state first
+ * owns it. */
+async function reconcileRunRecords(runtime: DaemonRuntime): Promise<void> {
+  for (const record of runtime.controller.snapshot().records) {
+    // A record that never started an attempt has no run record.
+    if (record.attempt === 0) continue;
+    // Every attempt BEFORE the current one was retired by the queue: its
+    // worker lease died (the record was requeued for a new attempt) or it
+    // was superseded. Its run must be terminal — an abandoned attempt is
+    // an attempt that produced nothing.
+    for (let attempt = 1; attempt < record.attempt; attempt += 1) {
+      const abandoned = executionRunId(record.job.jobId, attempt);
+      if (runtime.settledRuns.has(abandoned)) continue;
+      await mirrorRunTransition(runtime.store, abandoned, "failed", {
+        nowMs: runtime.now(),
+        patch: { failureReason: "attempt-abandoned" },
+      });
+      runtime.settledRuns.add(abandoned);
+    }
+    // The CURRENT attempt: while the record is in flight its run is too;
+    // once the queue retires the record, the run must follow it.
+    const runId = executionRunId(record.job.jobId, record.attempt);
+    if (runtime.settledRuns.has(runId)) continue;
+    const target = retiredRunState(record.state);
+    if (target === null) continue; // still in flight
+    await mirrorRunTransition(runtime.store, runId, target.state, {
+      nowMs: runtime.now(),
+      patch: target.patch,
+    });
+    runtime.settledRuns.add(runId);
+  }
+}
+
+/** The terminal run state a retired queue record implies, or `null` when
+ * the record is still in flight. A requeued record (`queued` with an
+ * attempt already spent) means the attempt was abandoned: its worker
+ * lease died and the queue handed the generation to a new attempt. */
+function retiredRunState(state: JobRecord["state"]):
+  | {
+      readonly state: "completed" | "failed" | "cancelled" | "superseded";
+      readonly patch?: RunTransitionPatch;
+    }
+  | null {
+  if (state === "completed") return { state: "completed" };
+  if (state === "failed") return { state: "failed", patch: { failureReason: "attempt-failed" } };
+  if (state === "cancelled") return { state: "cancelled", patch: { failureReason: "attempt-cancelled" } };
+  if (state === "superseded") {
+    return { state: "superseded", patch: { failureReason: "superseded-by-newer-head" } };
+  }
+  if (state === "queued") {
+    // The attempt was abandoned (its lease died and the queue requeued
+    // the generation for a new attempt).
+    return { state: "failed", patch: { failureReason: "attempt-abandoned" } };
+  }
+  return null;
 }
 
 /** Control-plane run bookkeeping for one attempt: the run record is
@@ -761,6 +856,20 @@ export async function startControllerDaemon(
   }
   const drainMs = options.drainMs ?? DEFAULT_DRAIN_MS;
   const claimTtlMs = options.generationClaimTtlMs ?? DEFAULT_GENERATION_CLAIM_TTL_MS;
+  // The poll's platform must agree with the intake's platform: the
+  // platform is part of the generation identity, so a poll that names the
+  // other forge would mint generations that never converge with the
+  // webhook deliveries of the same head (a duplicate review). Fail
+  // closed at construction rather than at the first poll.
+  if (
+    options.reconcile?.platform !== undefined &&
+    options.webhook !== undefined &&
+    options.reconcile.platform !== options.webhook.platform
+  ) {
+    throw new TypeError(
+      "ControllerDaemonOptions.reconcile.platform must match the intake platform (webhook.platform)",
+    );
+  }
 
   // The durable directories the daemon owns are prepared (private mode)
   // BEFORE anything binds — a location that cannot hold state is a
@@ -816,6 +925,7 @@ export async function startControllerDaemon(
     instanceId,
     leaseTtlMs,
     renewalTimers,
+    settledRuns: new Set<string>(),
   };
   const inFlight = new Set<string>();
   const jobExecutor = createDaemonJobExecutor(runtime, selector, inFlight);
@@ -887,6 +997,19 @@ export async function startControllerDaemon(
 
   // 6. Intake: ledger, adoption resolver, dispatch → enqueue.
   const ledger = new ControlPlaneGenerationLedger(options.controlPlane, now, claimTtlMs);
+  /** Hand one minted generation to the queue. A failed handoff releases
+   * the DURABLE reservation (the dispatch contract): the release is
+   * awaited, because a claim left behind suppresses the redelivery until
+   * its horizon expires. The handoff failure is the error the caller
+   * owns; a failed release never masks it. */
+  const enqueueGeneration = (job: ReviewJob): void => {
+    try {
+      controller.enqueue(job);
+    } catch (err) {
+      void ledger.remove(job.jobId).catch(() => undefined);
+      throw err;
+    }
+  };
   const resolveEventIdentity =
     options.resolveEventIdentity ??
     createAdoptionIdentityResolver({
@@ -941,6 +1064,11 @@ export async function startControllerDaemon(
           // best-effort; retried on the next tick
         }
       }
+      // The control-plane runs follow the queue's own retirement of an
+      // attempt (supersession, an abandoned attempt, a recovered worker):
+      // a run the daemon's own bookkeeping never reached must not stay in
+      // a non-terminal state forever.
+      await reconcileRunRecords(runtime);
     } finally {
       ticking = false;
     }
@@ -991,20 +1119,25 @@ export async function startControllerDaemon(
         buildOptions,
       });
       if (dispatched.status === "ignored") return "ignored";
-      if (dispatched.status === "duplicate") return "duplicate";
-      const job = dispatched.job;
-      try {
-        controller.enqueue(job);
-      } catch (err) {
-        // Release the DURABLE reservation so a later delivery can re-mint
-        // (the dispatch contract): the release is awaited, because a
-        // claim left behind suppresses the redelivery until its horizon
-        // expires. The enqueue failure is the error the caller owns; a
-        // failed release never masks it.
-        await ledger.remove(job.jobId).catch(() => undefined);
-        throw err;
+      if (dispatched.status === "duplicate") {
+        // A duplicate whose generation the queue does NOT know: the durable
+        // reservation was taken but the job never reached the queue (the
+        // daemon died between the claim and the enqueue). The reservation
+        // still dedupes other deliveries, but the REVIEW must not be lost:
+        // the queue's own jobId dedupe makes this handoff idempotent, so
+        // the job is enqueued anyway and the generation runs.
+        if (controller.recordFor(dispatched.job.jobId) === null) {
+          enqueueGeneration(dispatched.job);
+          return "scheduled";
+        }
+        return "duplicate";
       }
+      const job = dispatched.job;
+      enqueueGeneration(job);
       return "scheduled";
+    },
+    enqueue(job) {
+      enqueueGeneration(job);
     },
     async stop() {
       if (stopped) return;

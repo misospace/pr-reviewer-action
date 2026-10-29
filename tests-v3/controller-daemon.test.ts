@@ -31,10 +31,12 @@ import type { ReviewJob } from "../src/jobs/types.js";
 import { computeGitHubWebhookSignature } from "../src/ingress/github-app-signature.js";
 import type { FollowUpForgeAdapter } from "../src/ingress/followup-host.js";
 import {
+  executionRunId,
   startControllerDaemon,
   type ControllerDaemon,
   type ControllerDaemonOptions,
 } from "../src/controller/index.js";
+import { buildReviewJob } from "../src/jobs/generation.js";
 
 const HEAD = "aa11bb22cc33dd44ee55ff667788990001122334";
 const BASE = "dd44ee55ff66aa77bb88cc99001122334455667788";
@@ -712,4 +714,137 @@ test("the daemon serves the platform's intake: a signed GitHub delivery reaches 
   assert.equal(h.fake.started[0]!.headSha, HEAD);
   await waitFor(() => h.forgePublishes.length > 0);
   assert.equal(h.forgePublishes.length, 1, "the scheduled review published exactly once");
+});
+
+// ── the fixes the review round demanded ───────────────────────────────────
+//
+// 1. A crash between the durable generation claim and the queue handoff
+//    must not LOSE the review: the reservation still dedupes other
+//    deliveries, but the generation is handed to the queue anyway.
+// 2. A run whose attempt the queue retires (supersession, an abandoned
+//    attempt, a recovered worker) must not stay non-terminal forever.
+// 3. The reconciliation pass's handoff must release the durable
+//    reservation when the queue refuses the job.
+// 4. The poll's platform must agree with the intake's platform.
+
+test("a durable claim whose job never reached the queue does not lose the review", async (t) => {
+  const h = await start();
+  t.after(async () => {
+    // The daemon is stopped BEFORE the durable state is removed: an
+    // in-flight tick still persists the queue snapshot, and a snapshot
+    // write into a removed directory would surface as an unhandled
+    // rejection.
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const job = buildReviewJob(event(), { adoptionEpoch: "1" });
+  assert.notEqual(job, null);
+  // The daemon died between the durable claim and the queue handoff: the
+  // reservation is durable, the queue never learned the job.
+  assert.equal(await h.daemon.ledger.addIfAbsent(job!.jobId), true);
+  assert.equal(h.fake.started.length, 0);
+  // The redelivery: the durable claim dedupes it, but the REVIEW must not
+  // be lost — the queue's own jobId dedupe makes the handoff idempotent.
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  assert.equal(h.fake.started.length, 1, "the orphaned reservation did not lose the review");
+  assert.equal(h.fake.started[0]!.jobId, job!.jobId);
+});
+
+test("a run whose attempt the queue retired settles terminally", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(async () => {
+    h.fake.dispose();
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const runId = executionRunId(h.fake.started[0]!.jobId, 1);
+  // The attempt is still in flight: the run is `running`, not terminal.
+  await waitForAsync(async () => {
+    const run = await h.controlPlane.getRun(runId);
+    return run !== null && run.state === "running";
+  });
+  // The daemon goes down and comes back: the recovered attempt is
+  // abandoned, and the run must not stay `running` forever.
+  h.fake.dispose();
+  h.daemon.abandon();
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: new FakeExecution(true),
+  });
+  t.after(async () => {
+    h2.fake.dispose();
+    await h2.daemon.stop().catch(() => undefined);
+  });
+  await waitForAsync(async () => {
+    const run = await h.controlPlane.getRun(runId);
+    return run !== null && run.state !== "running" && run.state !== "starting";
+  });
+  const run = await h.controlPlane.getRun(runId);
+  assert.notEqual(run, null);
+  assert.equal(
+    ["cancelled", "failed", "superseded", "completed"].includes(run!.state),
+    true,
+    `the run reached a terminal state (got ${run!.state})`,
+  );
+  assert.equal(run!.finishedAtMs > 0, true);
+});
+
+test("the daemon exposes the queue handoff the reconciliation pass needs", async (t) => {
+  const h = await start();
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  // A generation handed over by the poll path reaches the queue.
+  const job = buildReviewJob(event(), { adoptionEpoch: "1" });
+  assert.notEqual(job, null);
+  h.daemon.enqueue(job!);
+  await waitFor(() => h.fake.started.length === 1);
+  assert.equal(h.fake.started.length, 1);
+});
+
+test("a poll platform that disagrees with the intake platform fails closed", async () => {
+  const dirs = {
+    durableStateDir: mkdtempSync(join(tmpdir(), "prv-daemon-state-")),
+    runsRoot: mkdtempSync(join(tmpdir(), "prv-daemon-runs-")),
+    workspaceCacheRoot: mkdtempSync(join(tmpdir(), "prv-daemon-cache-")),
+  };
+  try {
+    await assert.rejects(
+      () =>
+        startControllerDaemon({
+          instance: instanceConfig(),
+          controlPlane: new InMemoryControlPlaneStore(),
+          durableStateDir: dirs.durableStateDir,
+          runsRoot: dirs.runsRoot,
+          workspaceCacheRoot: dirs.workspaceCacheRoot,
+          forge: {
+            mirrorFor: async () => ({}) as MirrorCache,
+            currentHeadSha: async () => HEAD,
+            publish: async () => ({ publicationId: "x" }),
+          },
+          resolveProfiles: async () => ({ executor: "default", model: "m", evidence: "e" }),
+          credentialRefs: async () => [],
+          webhook: {
+            platform: "github",
+            port: 0,
+            secret: "s",
+            followUp: {} as never,
+          },
+          reconcile: {
+            intervalMs: 1_000,
+            platform: "forgejo",
+            run: async () => undefined,
+          },
+        }),
+      /reconcile\.platform/,
+    );
+  } finally {
+    for (const dir of Object.values(dirs)) rmSync(dir, { recursive: true, force: true });
+  }
 });

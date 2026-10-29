@@ -59,6 +59,16 @@ export interface ReconcileOptions {
   readonly ledger: GenerationLedger;
   readonly buildOptions?: BuildJobOptions | undefined;
   readonly installationId?: string | undefined;
+  /** The queue handoff for the discovered generations (the same seam the
+   * follow-up host uses). When provided, each minted job is handed over
+   * here and a REFUSED handoff releases the durable reservation — the
+   * dispatch contract — so the head is re-discovered on the next pass
+   * instead of staying suppressed until the claim's horizon expires.
+   *
+   * Absent → the caller owns the handoff AND the release: a caller that
+   * enqueues the returned jobs itself MUST release the reservation when
+   * its handoff fails (`ledger.remove(job.jobId)`). */
+  readonly enqueueJob?: ((job: ReviewJob) => boolean | Promise<boolean>) | undefined;
 }
 
 /** Poll every configured repository and schedule the review generations the
@@ -122,6 +132,23 @@ export async function reconcileRepositories(
         if (!(await options.ledger.addIfAbsent(job.jobId))) {
           skipped += 1;
           continue;
+        }
+        // The reservation is taken; the job is handed over. A REFUSED
+        // handoff releases it (the dispatch contract), so the head is
+        // re-discovered on the next pass instead of staying suppressed
+        // until the claim's horizon expires.
+        if (options.enqueueJob !== undefined) {
+          let handedOver = false;
+          try {
+            handedOver = await options.enqueueJob(job);
+          } catch {
+            handedOver = false;
+          }
+          if (!handedOver) {
+            await Promise.resolve(options.ledger.remove(job.jobId)).catch(() => undefined);
+            skipped += 1;
+            continue;
+          }
         }
         jobs.push(job);
       }

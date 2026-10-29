@@ -430,11 +430,14 @@ test("without a router a follow_up delivery goes to onEvent", async (t) => {
 // ── 9. the header is an unauthenticated VOCABULARY hint ────────────────────
 //
 // The HMAC covers the body ONLY, so a captured delivery can be replayed
-// byte-for-byte with a CHANGED event header. The signed action and the
-// signed payload shape stay authoritative: a forged header can only
-// DEGRADE a delivery to `unknown`, never schedule one.
+// byte-for-byte with a CHANGED event header. The header may only select
+// the event VOCABULARY, and the SIGNED BODY must support that vocabulary:
+// a header whose shape the body does not carry is REFUSED (the delivery is
+// ignored, never dispatched), and within a supported vocabulary the signed
+// action and the signed payload shape stay authoritative — a forged header
+// can only DEGRADE a delivery, never schedule one.
 
-test("a forged header degrades a signed delivery to unknown, never to a scheduleable kind", async (t) => {
+test("a forged header never reaches a scheduleable kind", async (t) => {
   const h = await startTestHandler();
   t.after(() => h.close());
 
@@ -443,14 +446,13 @@ test("a forged header degrades a signed delivery to unknown, never to a schedule
   // A signed PR-sync body (a scheduleable delivery on its own).
   const sync = JSON.stringify(makePrPayload("synchronize"));
 
-  const forgeries: Array<{ header: string; body: string }> = [
+  // A header the signed body CAN support: the vocabulary is the body's,
+  // and the signed action decides the kind (an action the vocabulary does
+  // not recognize degrades to unknown).
+  const supported: Array<{ header: string; body: string }> = [
     { header: "pull_request", body: nonPrAction },
-    { header: "issue_comment", body: nonPrAction },
-    { header: "issue_comment", body: sync },
-    { header: "check_run", body: sync },
-    { header: "status", body: sync },
   ];
-  for (const forgery of forgeries) {
+  for (const forgery of supported) {
     const res = await post(h.url, {
       event: forgery.header,
       body: forgery.body,
@@ -463,7 +465,28 @@ test("a forged header degrades a signed delivery to unknown, never to a schedule
       `a forged "${forgery.header}" header must degrade to unknown`,
     );
   }
-  assert.equal(h.events.length, forgeries.length);
+  // A header the signed body CANNOT support: the delivery is refused
+  // outright — it never reaches the dispatcher.
+  const unsupported: Array<{ header: string; body: string }> = [
+    { header: "issue_comment", body: nonPrAction },
+    { header: "issue_comment", body: sync },
+    { header: "check_run", body: sync },
+    { header: "check_suite", body: sync },
+  ];
+  for (const forgery of unsupported) {
+    const res = await post(h.url, {
+      event: forgery.header,
+      body: forgery.body,
+      signature: sign(forgery.body),
+    });
+    assert.equal(res.status, 200, forgery.header);
+    assert.deepEqual(
+      JSON.parse(res.text),
+      { status: "ignored" },
+      `a forged "${forgery.header}" header over a body without that shape must be ignored`,
+    );
+  }
+  assert.equal(h.events.length, supported.length);
   for (const ev of h.events) {
     assert.equal(ev.kind, "unknown");
     assert.equal(
@@ -479,13 +502,13 @@ test("a forged header never turns a signed non-comment body into a follow_up", a
   const h = await startTestHandler({ router: fakeRouter(routed) }, routed);
   t.after(() => h.close());
   // The signed body is a PR-sync delivery; the header claims a comment.
+  // The signed body carries no comment, so the vocabulary is refused.
   const body = JSON.stringify(makePrPayload("synchronize"));
   const res = await post(h.url, { event: "issue_comment", body, signature: sign(body) });
-  assert.equal(res.status, 202);
-  assert.deepEqual(JSON.parse(res.text), { status: "accepted", kind: "unknown" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(JSON.parse(res.text), { status: "ignored" });
   assert.equal(h.routed.length, 0, "the follow-up branch is never entered");
-  assert.equal(h.events.length, 1);
-  assert.equal(h.events[0]!.kind, "unknown");
+  assert.equal(h.events.length, 0, "the refused delivery is never dispatched");
 });
 
 // ── 10. the projection itself ──────────────────────────────────────────────

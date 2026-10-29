@@ -33,6 +33,7 @@ export {
 export type { GitHubWebhookHandlerOptions } from "./github-webhook-handler.js";
 export {
   createGitHubWebhookHandler,
+  githubBodySupportsVocabulary,
   projectGitHubWebhookPayload,
 } from "./github-webhook-handler.js";
 export { computeForgejoWebhookSignature, verifyForgejoWebhookSignature } from "./signature.js";

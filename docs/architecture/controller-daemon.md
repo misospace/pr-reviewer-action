@@ -70,13 +70,26 @@ a forge-specific CLI.
   late bookkeeping for an abandoned attempt is a no-op, never a crash —
   and a run whose intermediate step was lost still reaches its terminal
   state through the legal hops instead of being stranded.
+- **The queue retires the attempt; the run follows.** The tick reconciles
+  the control-plane runs against the queue’s records: an attempt the
+  queue retired without the daemon’s own bookkeeping (superseded
+  before publication, a recovered worker abandoned by a crash, an attempt
+  whose lease died and was requeued) settles terminally instead of
+  staying in a non-terminal state forever. The reconciliation never
+  contradicts the executor or the publisher: a run that is already
+  terminal is left alone, so whoever settled it first owns it.
 - **Reconciliation is platform-agnostic.** `reconcileRepositories`
   (`src/ingress/reconcile.ts`) polls through the same
   `listOpenPullRequests` lister the GitHub App client and the Forgejo
   client expose; the caller declares the platform it polls, because the
   platform is part of the generation identity (a poll mislabelled as the
   other forge would mint a different generation than the webhook of the
-  same head, and the two would never converge).
+  same head, and the two would never converge). The daemon refuses to
+  start when the poll’s declared platform disagrees with the intake’s
+  (fail closed), and the poll’s queue handoff goes through the
+  daemon’s `enqueue`, which releases the durable reservation when the
+  queue refuses the job — so a refused handoff is re-discovered on the
+  next pass instead of staying suppressed.
 
 ## Testing posture
 
