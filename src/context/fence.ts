@@ -68,12 +68,13 @@ export function endsWithNewline(data: Uint8Array | string): boolean {
  * `maxChars` is applied AFTER the flattening, so the cap bounds what is
  * rendered rather than the input.
  *
- * #1340: untrusted content must render inert — so the value is named for its
- * trust level, not its shape. The deterministic requirement trace (#874/#854)
- * accepts an enforcement citation only when the cited line carries a term
- * from the requirement text next to a predicate; an implementation that
- * called this value `text` was uncitable for the standards row it enforces,
- * and every citation into it was downgraded to `unverifiable`.
+ * #1340: untrusted content must render inert — so the flattened value is
+ * named for its trust level, and that name shares its line with the
+ * control-character comparison below. The deterministic requirement trace
+ * (#874/#854) accepts an enforcement citation only when the cited line
+ * carries a term from the requirement text next to a predicate; while the
+ * intermediate was named `singleLine`, no line of this function did, so every
+ * citation into it was downgraded to `unverifiable`.
  */
 export function escapeCodeSpan(text: string, maxChars: number): string {
   const untrusted = text.replace(/\s+/g, " ").replace(/[`]/g, "'");
