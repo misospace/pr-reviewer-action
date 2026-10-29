@@ -5,7 +5,9 @@
  * (`./local.js`) built on the v3 runtime's typed process lifecycle, the
  * reusable conformance suite (`./conformance.js`), the portable OCI
  * worker-image contract (`./image.js`, what #734's container executor
- * builds on), and the queue-seam adapter (`./queue.js`) that rides the
+ * builds on), the #734 Kubernetes executor (`./kubernetes.js` — one
+ * ephemeral Job/Pod per execution over an injected API seam), and the
+ * queue-seam adapter (`./queue.js`) that rides the
  * rich `Executor` contract inside the queue's `JobExecutor` seam.
  * Operator-mode library (like `src/queue/` and `src/acquisition/`): the
  * future controller daemon (#736) imports it — NOT wired into the Action
@@ -31,6 +33,8 @@ export {
   validateExecutionResult,
 } from "./types.js";
 export type {
+  ExecutionCancelFailureReason,
+  ExecutionCancelOutcome,
   ExecutionCredentialRef,
   ExecutionFailureCategory,
   ExecutionHandle,
@@ -69,3 +73,29 @@ export type { ExecutionEnvelope, WorkerImageContract } from "./image.js";
 
 export { toQueueJobExecutor } from "./queue.js";
 export type { QueueRequestBuilder } from "./queue.js";
+
+export {
+  WORKER_CREDENTIAL_REFUSAL_CODES,
+  WORKER_NETWORK_POSTURE,
+  WORKER_RUN_AS_ID,
+  KubernetesExecutor,
+  buildReviewJobManifest,
+  kubernetesCredentialSecretName,
+  kubernetesJobName,
+} from "./kubernetes.js";
+export type {
+  BuiltReviewJob,
+  KubernetesApi,
+  KubernetesContainerEnv,
+  KubernetesCredentialSecret,
+  KubernetesCredentialSecretSummary,
+  KubernetesCredentialStore,
+  KubernetesExecutorDeps,
+  KubernetesJobManifest,
+  KubernetesJobStatus,
+  KubernetesJobSummary,
+  ProjectedWorkerCredential,
+  WorkerCredentialRefusalCode,
+  WorkerCredentialResolution,
+  WorkerCredentialResolver,
+} from "./kubernetes.js";

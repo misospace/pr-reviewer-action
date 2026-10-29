@@ -94,13 +94,23 @@ export interface ResolutionRequest {
  * deterministic and explainable from the stored binding — a hostile caller
  * cannot distinguish "secret does not exist" from "secret exists but is
  * bound elsewhere" beyond what these codes already reveal, and no refusal
- * ever carries material. */
-export type ResolutionRefusalCode =
-  | "unknown_reference"
-  | "expired"
-  | "revoked"
-  | "scope_mismatch"
-  | "invalid_request";
+ * ever carries material.
+ *
+ * The vocabulary lives in a RUNTIME array so a consumer that must echo a
+ * refusal code (#734's Kubernetes executor) can DERIVE its closed set from
+ * the broker instead of re-typing it: a hand-copied list is a list that
+ * drifts the first time a code is added here. */
+export const RESOLUTION_REFUSAL_CODES = Object.freeze([
+  "unknown_reference",
+  "expired",
+  "revoked",
+  "scope_mismatch",
+  "invalid_request",
+] as const);
+
+/** Why a resolution refused, as a closed union — derived from the
+ * runtime vocabulary above, so the type and the array cannot disagree. */
+export type ResolutionRefusalCode = (typeof RESOLUTION_REFUSAL_CODES)[number];
 
 /** The discriminated answer every resolution returns. A failure reason is
  * always a FIXED, bounded string — never a URL, a response body, or any

@@ -184,6 +184,17 @@ function signalGroupOrLeader(pid: number, signal: NodeJS.Signals, issues: string
   }
 }
 
+/** An empty report: nothing was terminated and nothing was observed. */
+function emptyTerminationReport(): TerminationReport {
+  return {
+    swept: false,
+    snapshot: [],
+    killedAfterGrace: [],
+    survived: [],
+    issues: [],
+  };
+}
+
 /**
  * Terminate and reap the tree rooted at `child`'s PID: snapshot, TERM group +
  * descendants, bounded grace, KILL group + survivors, verify. Idempotent per
@@ -193,15 +204,37 @@ export async function terminateProcessTree(
   child: ChildProcess,
   options: { graceMs: number },
 ): Promise<TerminationReport> {
-  const report: TerminationReport = {
-    swept: false,
-    snapshot: [],
-    killedAfterGrace: [],
-    survived: [],
-    issues: [],
-  };
   const pid = child.pid;
+  if (pid === undefined || pid === null) return emptyTerminationReport();
+  return terminateProcessTreeByPid(pid, options);
+}
+
+/**
+ * Terminate and reap the tree rooted at `pid` — the PID-based entry point a
+ * RECOVERED cancellation needs: after a controller restart the in-memory
+ * `ChildProcess` handle is gone, but the pid (recorded in the durable
+ * recovery record) still identifies the worker.
+ *
+ * The TERM → grace → KILL → verify discipline lives here exactly once; the
+ * handle-based entry point delegates to it, so a recovered cancellation and
+ * a live cancellation cannot drift apart.
+ *
+ * A pid that is not a process id is REFUSED, never signalled: `kill(0, sig)`
+ * reaches the caller's own process group and `kill(-pid, sig)` with a
+ * negative pid reaches init, so a corrupt (or hostile) pid must never reach
+ * a signal. The refusal is reported as an issue — the caller must treat the
+ * termination as unconfirmed.
+ */
+export async function terminateProcessTreeByPid(
+  pid: number | null | undefined,
+  options: { graceMs: number },
+): Promise<TerminationReport> {
+  const report: TerminationReport = emptyTerminationReport();
   if (pid === undefined || pid === null) return report;
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    report.issues.push(`refusing to terminate pid ${pid}: not a process id`);
+    return report;
+  }
   if (!isPosix()) {
     report.issues.push("non-POSIX platform: process-tree termination refused by policy");
     return report;

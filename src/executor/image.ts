@@ -12,7 +12,7 @@
  */
 
 import { hasControlCharacters } from "../config/instance-config.js";
-import type { OciImageSpec } from "../config/instance-config.js";
+import type { KubernetesExecutorSpec, OciImageSpec } from "../config/instance-config.js";
 import { EXECUTION_REQUEST_ENV_KEY, EXECUTION_RESULT_ENV_KEY } from "./local.js";
 import type { ExecutionRequest } from "./types.js";
 
@@ -196,24 +196,39 @@ export function parseWorkerImageContract(value: unknown): WorkerImageContract {
 
 /** Build the worker-image contract for an instance-config executor
  * profile: the contract for an `oci` profile (built from its validated
- * image reference and re-parsed fail-closed), `null` for every other
- * kind (local executors carry their own argv; kubernetes has no spec
- * until #734). An `oci` profile without its spec is a malformed profile —
- * fail closed rather than degrade. */
+ * image reference and re-parsed fail-closed), the contract for a
+ * `kubernetes` profile (#734 — built from its validated image reference
+ * and fixed argv, re-parsed fail-closed; a kubernetes profile without its
+ * spec is malformed), and `null` for every other kind (local executors
+ * carry their own argv). Fail closed rather than degrade. */
 export function validateImageContractForProfile(
-  profile: { kind: string; oci: OciImageSpec | null },
+  profile: { kind: string; oci: OciImageSpec | null; kubernetes?: KubernetesExecutorSpec | null },
 ): WorkerImageContract | null {
-  if (profile.kind !== "oci") return null;
-  if (profile.oci === null) {
-    throw new WorkerImageContractError("an 'oci' executor profile must carry an image reference");
+  if (profile.kind === "oci") {
+    if (profile.oci === null) {
+      throw new WorkerImageContractError("an 'oci' executor profile must carry an image reference");
+    }
+    return parseWorkerImageContract({
+      contractVersion: WORKER_IMAGE_CONTRACT_VERSION,
+      image: profile.oci.image,
+      args: [],
+      requestVar: EXECUTION_REQUEST_ENV_KEY,
+      resultVar: EXECUTION_RESULT_ENV_KEY,
+    });
   }
-  return parseWorkerImageContract({
-    contractVersion: WORKER_IMAGE_CONTRACT_VERSION,
-    image: profile.oci.image,
-    args: [],
-    requestVar: EXECUTION_REQUEST_ENV_KEY,
-    resultVar: EXECUTION_RESULT_ENV_KEY,
-  });
+  if (profile.kind === "kubernetes") {
+    if (profile.kubernetes === undefined || profile.kubernetes === null) {
+      throw new WorkerImageContractError("a 'kubernetes' executor profile must carry its spec");
+    }
+    return parseWorkerImageContract({
+      contractVersion: WORKER_IMAGE_CONTRACT_VERSION,
+      image: profile.kubernetes.image,
+      args: profile.kubernetes.args,
+      requestVar: EXECUTION_REQUEST_ENV_KEY,
+      resultVar: EXECUTION_RESULT_ENV_KEY,
+    });
+  }
+  return null;
 }
 
 /** The fixed argv prefix an OCI executor would launch: the image

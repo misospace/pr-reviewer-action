@@ -8,6 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -102,6 +103,54 @@ function executor(scenario: string, deps: LocalExecutorDeps = {}): LocalExecutor
 function writeStateFile(request: ExecutionRequest, record: Record<string, unknown>): void {
   mkdirSync(request.runDir, { recursive: true });
   writeFileSync(path.join(request.runDir, EXECUTION_STATE_FILE), JSON.stringify(record), "utf8");
+}
+
+/** Wait until the recovery record carries the worker's pid — the only
+ * identity a restarted controller has to work from. */
+async function waitForRecordedPid(request: ExecutionRequest, timeoutMs = 5_000): Promise<number> {
+  const statePath = path.join(request.runDir, EXECUTION_STATE_FILE);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const record = JSON.parse(readFileSync(statePath, "utf8")) as { pid?: unknown };
+      if (typeof record.pid === "number" && record.pid > 0) return record.pid;
+    } catch {
+      // not written yet
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return 0;
+}
+
+/** The real liveness probe: a pid that still answers `kill(pid, 0)` is
+ * still a process (a zombie counts — it is not reaped yet). */
+function pidAliveNow(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A detached sleeper that must survive a cancellation it is not part of. */
+function spawnSurvivor(): { pid: number; stop: () => void } {
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  const pid = child.pid ?? 0;
+  return {
+    pid,
+    stop: () => {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+      child.unref();
+    },
+  };
 }
 
 function cleanup(fixture: Fixture): void {
@@ -782,6 +831,395 @@ test("reconcile: a live pid reports running; a dead (or unassigned) pid without 
     assert.equal(probed, false, "pid 0 is never probed for liveness");
     assert.ok(outcomeZero.kind === "settled");
     assert.equal(outcomeZero.result.failureCategory, "orphaned");
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+// ── correlation-keyed cancellation ───────────────────────────────────────
+
+test("cancel: a live in-memory run is cancelled through the handle's own termination", async () => {
+  const fixture = makeRequest();
+  try {
+    const local = executor("sleep-long");
+    const handle = await local.start(fixture.request, new AbortController().signal);
+    const pid = await waitForRecordedPid(fixture.request);
+    assert.ok(pid > 0, "the recovery record carries the worker's pid");
+    const outcome = await local.cancel(fixture.request);
+    assert.deepEqual(outcome, { kind: "terminated" });
+    const result = await handle.collect();
+    assert.equal(result.status, "cancelled");
+    assert.equal(result.failureCategory, "");
+    assert.equal(pidAliveNow(pid), false, "the worker process is really gone");
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a recovered run is terminated by its correlation identity", async () => {
+  // The controller restarted: the in-memory handle is gone and only the
+  // durable recovery record survives. The cancellation still finds the
+  // worker — by identity, not by a handle.
+  const fixture = makeRequest();
+  try {
+    const handle = await executor("sleep-long").start(fixture.request, new AbortController().signal);
+    const pid = await waitForRecordedPid(fixture.request);
+    assert.ok(pid > 0, "the recovery record carries the worker's pid");
+
+    // A SECOND executor instance over the same run directory.
+    const outcome = await executor("sleep-long").cancel(fixture.request);
+    assert.deepEqual(outcome, { kind: "terminated" });
+    assert.equal(pidAliveNow(pid), false, "the worker process is really gone");
+
+    // The executor that still holds the handle settles the run it lost:
+    // the worker died to a signal it did not choose.
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "worker_crash");
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a foreign recovery record is never terminated", async () => {
+  // The record names another generation: it is not this run's worker, so
+  // the cancellation must not touch the process it points at.
+  const fixture = makeRequest();
+  const survivor = spawnSurvivor();
+  try {
+    writeStateFile(fixture.request, {
+      runId: "other-generation",
+      jobId: fixture.request.jobId,
+      attempt: 1,
+      pid: survivor.pid,
+      startedAtMs: 1,
+      state: "running",
+    });
+    const outcome = await executor("ok").cancel(fixture.request);
+    assert.deepEqual(outcome, { kind: "failed", reason: "worker-not-terminated" });
+    assert.equal(pidAliveNow(survivor.pid), true, "the foreign worker was never terminated");
+  } finally {
+    survivor.stop();
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a termination that cannot be confirmed fails closed", async () => {
+  // The termination seam reports failure: the worker may still be running,
+  // so the outcome must be `failed`, never a terminated worker.
+  const fixture = makeRequest();
+  const survivor = spawnSurvivor();
+  try {
+    writeStateFile(fixture.request, {
+      runId: fixture.request.runId,
+      jobId: fixture.request.jobId,
+      attempt: 1,
+      pid: survivor.pid,
+      pidIdentity: "identity-token",
+      startedAtMs: 1,
+      state: "running",
+    });
+    let attempts = 0;
+    const outcome = await executor("ok", {
+      pidAlive: () => true,
+      pidIdentity: async () => "identity-token",
+      terminate: async () => {
+        attempts += 1;
+        return false;
+      },
+    }).cancel(fixture.request);
+    assert.deepEqual(outcome, { kind: "failed", reason: "worker-not-terminated" });
+    assert.equal(attempts, 1, "the termination was attempted");
+    assert.equal(pidAliveNow(survivor.pid), true, "the worker may still be running");
+  } finally {
+    survivor.stop();
+    cleanup(fixture);
+  }
+});
+
+test("cancel: cancelling twice reports terminated both times and terminates once", async () => {
+  const fixture = makeRequest();
+  try {
+    let alive = true;
+    let terminations = 0;
+    const recovered = executor("ok", {
+      pidAlive: () => alive,
+      pidIdentity: async () => "identity-token",
+      terminate: async () => {
+        terminations += 1;
+        alive = false;
+        return true;
+      },
+    });
+    writeStateFile(fixture.request, {
+      runId: fixture.request.runId,
+      jobId: fixture.request.jobId,
+      attempt: 1,
+      pid: 4242,
+      pidIdentity: "identity-token",
+      startedAtMs: 1,
+      state: "running",
+    });
+    const first = await recovered.cancel(fixture.request);
+    const second = await recovered.cancel(fixture.request);
+    assert.deepEqual(first, { kind: "terminated" });
+    assert.deepEqual(second, { kind: "terminated" });
+    assert.equal(terminations, 1, "the second cancellation terminates nothing again");
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("cancel: missing, malformed, and pid-zero recovery evidence fails closed", async () => {
+  const fixture = makeRequest();
+  try {
+    const local = executor("ok");
+    assert.deepEqual(
+      await local.cancel(fixture.request),
+      { kind: "failed", reason: "worker-not-terminated" },
+      "a missing state record cannot prove the worker is absent",
+    );
+
+    mkdirSync(fixture.request.runDir, { recursive: true });
+    writeFileSync(path.join(fixture.request.runDir, EXECUTION_STATE_FILE), "{not-json", "utf8");
+    assert.deepEqual(
+      await local.cancel(fixture.request),
+      { kind: "failed", reason: "worker-not-terminated" },
+      "a malformed state record cannot prove the worker is absent",
+    );
+
+    writeStateFile(fixture.request, {
+      runId: fixture.request.runId,
+      jobId: fixture.request.jobId,
+      attempt: 1,
+      pid: 0,
+      startedAtMs: 1,
+      state: "starting",
+    });
+    assert.deepEqual(
+      await local.cancel(fixture.request),
+      { kind: "failed", reason: "worker-not-terminated" },
+      "pid 0 is a crash-window marker, not proof that spawn never happened",
+    );
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("cancel: an in-memory cleanup that leaves an unconfirmed tree fails instead of claiming cancelled", async () => {
+  const fixture = makeRequest();
+  try {
+    let resolveResult!: (value: Awaited<ProcessHandle["result"]>) => void;
+    const result = new Promise<Awaited<ProcessHandle["result"]>>((resolve) => {
+      resolveResult = resolve;
+    });
+    const fakeHandle: ProcessHandle = {
+      pid: 4242,
+      launched: Promise.resolve(),
+      launchRefusal: null,
+      result,
+      abort: async () => {
+        resolveResult({
+          status: "cancelled",
+          exitCode: null,
+          signal: "SIGTERM",
+          stdout: Buffer.alloc(0),
+          stderr: Buffer.alloc(0),
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          durationMs: 1,
+          termination: {
+            swept: true,
+            snapshot: [4243],
+            killedAfterGrace: [],
+            survived: [4243],
+            issues: [],
+          },
+        });
+      },
+    };
+    const local = executor("ok", {
+      runProcess: () => fakeHandle,
+      pidAlive: () => true,
+      pidIdentity: async () => "identity-token",
+    });
+    const handle = await local.start(fixture.request, new AbortController().signal);
+    const outcome = await local.cancel(fixture.request);
+    assert.deepEqual(outcome, { kind: "failed", reason: "worker-not-terminated" });
+
+    const collected = await handle.collect();
+    assert.equal(collected.status, "failed");
+    assert.equal(collected.failureCategory, "terminate_failed");
+    assert.match(collected.failureMessage, /could not be confirmed terminated/);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a structurally invalid request is refused before anything is touched", async () => {
+  const fixture = makeRequest();
+  try {
+    await assert.rejects(
+      () => executor("ok").cancel({ ...fixture.request, attempt: 0 } as ExecutionRequest),
+      /attempt must be an integer >= 1/,
+    );
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a pid that can never be this run's worker is refused, never signalled", async () => {
+  // The recovery record lives in worker-writable space: a planted pid
+  // must never become a signal. pid 1 is init — and the runtime's tree
+  // termination signals the PROCESS GROUP, so `kill(-1, …)` would reach
+  // every process the controller may signal — and the controller's own
+  // pid is just as fatal.
+  const fixture = makeRequest();
+  try {
+    let terminations = 0;
+    for (const pid of [1, process.pid]) {
+      writeStateFile(fixture.request, {
+        runId: fixture.request.runId,
+        jobId: fixture.request.jobId,
+        attempt: 1,
+        pid,
+        pidIdentity: "identity-token",
+        startedAtMs: 1,
+        state: "running",
+      });
+      const outcome = await executor("ok", {
+        pidIdentity: async () => "identity-token",
+        terminate: async () => {
+          terminations += 1;
+          return true;
+        },
+      }).cancel(fixture.request);
+      assert.deepEqual(
+        outcome,
+        { kind: "failed", reason: "worker-not-terminated" },
+        `pid ${pid} must be refused`,
+      );
+    }
+    assert.equal(terminations, 0, "an unproven pid is never signalled");
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a recorded pid whose process identity no longer matches is refused", async () => {
+  // The pid may have been RECYCLED: the recorded token is the process
+  // instance's start time, so a different token means the live process is
+  // NOT the recorded worker — signalling it would kill an unrelated
+  // process.
+  const fixture = makeRequest();
+  const survivor = spawnSurvivor();
+  try {
+    writeStateFile(fixture.request, {
+      runId: fixture.request.runId,
+      jobId: fixture.request.jobId,
+      attempt: 1,
+      pid: survivor.pid,
+      pidIdentity: "recorded-token",
+      startedAtMs: 1,
+      state: "running",
+    });
+    let terminations = 0;
+    const outcome = await executor("ok", {
+      pidIdentity: async () => "other-token",
+      terminate: async () => {
+        terminations += 1;
+        return true;
+      },
+    }).cancel(fixture.request);
+    assert.deepEqual(outcome, { kind: "failed", reason: "worker-not-terminated" });
+    assert.equal(terminations, 0, "an unproven pid is never signalled");
+    assert.equal(pidAliveNow(survivor.pid), true, "the unrelated process was never signalled");
+  } finally {
+    survivor.stop();
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a record without a process identity is refused, never signalled", async () => {
+  // An older record (or a planted one) carries no identity at all: the
+  // pid alone proves nothing, so the recovered cancellation fails closed.
+  const fixture = makeRequest();
+  const survivor = spawnSurvivor();
+  try {
+    writeStateFile(fixture.request, {
+      runId: fixture.request.runId,
+      jobId: fixture.request.jobId,
+      attempt: 1,
+      pid: survivor.pid,
+      startedAtMs: 1,
+      state: "running",
+    });
+    let terminations = 0;
+    const outcome = await executor("ok", {
+      pidIdentity: async () => "identity-token",
+      terminate: async () => {
+        terminations += 1;
+        return true;
+      },
+    }).cancel(fixture.request);
+    assert.deepEqual(outcome, { kind: "failed", reason: "worker-not-terminated" });
+    assert.equal(terminations, 0, "an unproven pid is never signalled");
+    assert.equal(pidAliveNow(survivor.pid), true, "the unrelated process was never signalled");
+  } finally {
+    survivor.stop();
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a recorded pid whose process identity still matches is terminated", async () => {
+  // The proof succeeded: the live process IS the recorded worker, so the
+  // termination may happen.
+  const fixture = makeRequest();
+  const survivor = spawnSurvivor();
+  try {
+    writeStateFile(fixture.request, {
+      runId: fixture.request.runId,
+      jobId: fixture.request.jobId,
+      attempt: 1,
+      pid: survivor.pid,
+      pidIdentity: "identity-token",
+      startedAtMs: 1,
+      state: "running",
+    });
+    let alive = true;
+    let terminatedPid = 0;
+    const outcome = await executor("ok", {
+      pidAlive: () => alive,
+      pidIdentity: async () => "identity-token",
+      terminate: async (pid) => {
+        terminatedPid = pid;
+        alive = false;
+        return true;
+      },
+    }).cancel(fixture.request);
+    assert.deepEqual(outcome, { kind: "terminated" });
+    assert.equal(terminatedPid, survivor.pid, "the proven worker was the one terminated");
+  } finally {
+    survivor.stop();
+    cleanup(fixture);
+  }
+});
+
+test("the recovery record carries the worker's process identity next to its pid", async () => {
+  // The identity is what makes a recovered cancellation provable, so it
+  // must survive into the record the terminal write leaves behind.
+  const fixture = makeRequest();
+  try {
+    const handle = await executor("sleep-long").start(fixture.request, new AbortController().signal);
+    const pid = await waitForRecordedPid(fixture.request);
+    assert.ok(pid > 0, "the recovery record carries the worker's pid");
+    const running = JSON.parse(readFileSync(path.join(fixture.request.runDir, EXECUTION_STATE_FILE), "utf8"));
+    assert.equal(typeof running.pidIdentity, "string");
+    assert.notEqual(running.pidIdentity, "", "the identity is proven, not empty");
+    await handle.cancel();
+    await handle.collect();
+    const terminal = JSON.parse(readFileSync(path.join(fixture.request.runDir, EXECUTION_STATE_FILE), "utf8"));
+    assert.equal(terminal.pidIdentity, running.pidIdentity, "the identity survives the terminal write");
   } finally {
     cleanup(fixture);
   }

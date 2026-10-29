@@ -156,7 +156,11 @@ export interface ExecutionStatusReport {
  * - `stale_result` — a result file exists but belongs to another
  *   correlation identity; collecting it would mix generations.
  * - `orphaned` — the recorded worker is gone with no terminal state (found
- *   by post-restart reconciliation). */
+ *   by post-restart reconciliation).
+ * - `terminate_failed` — the executor could NOT confirm that the worker
+ *   was terminated (a cancellation whose deletion never succeeded): the
+ *   worker may still be running, so the run must never be reported as
+ *   `cancelled`. */
 export type ExecutionFailureCategory =
   | "launch_refused"
   | "deadline"
@@ -164,7 +168,8 @@ export type ExecutionFailureCategory =
   | "worker_error"
   | "no_result"
   | "stale_result"
-  | "orphaned";
+  | "orphaned"
+  | "terminate_failed";
 
 /** The terminal outcome of one execution. Frozen at construction; the
  * FIRST terminal result for a correlation identity wins — a duplicate
@@ -195,7 +200,10 @@ export interface ExecutionResult {
 
 /** Live view of one started execution.
  *
- * - `cancel` is idempotent and tree-terminates the worker.
+ * - `cancel` is idempotent and tree-terminates the worker. When the
+ *   termination cannot be CONFIRMED, the collected result says so
+ *   (`failed` `terminate_failed`) instead of claiming a `cancelled`
+ *   verdict for a worker that may still be running.
  * - `collect` after terminal is idempotent: the FIRST terminal result wins
  *   and every later call returns that identical frozen object — a duplicate
  *   result (or a late re-classification) must never replace it. */
@@ -214,6 +222,28 @@ export type ExecutionReconcileOutcome =
   | { readonly kind: "running" }
   | { readonly kind: "settled"; readonly result: ExecutionResult };
 
+/** Why a correlation-keyed cancellation could not be completed. A closed
+ * vocabulary: the reason is a machine-readable fact about the cluster (or
+ * the worker host), never free text and never a secret. */
+export type ExecutionCancelFailureReason =
+  /** The worker could not be confirmed terminated: it may still be
+   * running. */
+  | "worker-not-terminated"
+  /** The worker's credential material could not be removed: it may still
+   * be live. */
+  | "material-not-removed";
+
+/** The outcome of a correlation-keyed cancellation (`Executor.cancel`).
+ *
+ * The distinction IS the contract: `terminated` PROVES that the worker
+ * for this correlation identity is gone (terminated now, or there was
+ * nothing running to terminate), while `failed` says it could not be
+ * proven — the worker may still be running and the caller must treat the
+ * execution as possibly alive (retry later, never assume). */
+export type ExecutionCancelOutcome =
+  | { readonly kind: "terminated" }
+  | { readonly kind: "failed"; readonly reason: ExecutionCancelFailureReason };
+
 /** The executor seam (#733). Implementations own launching, observing,
  * cancelling, and reconciling executions for the correlation identities the
  * controller hands them. `reconcile` is the crash-recovery path: after a
@@ -221,10 +251,19 @@ export type ExecutionReconcileOutcome =
  * request's correlation identity already exists — `none` means none was
  * found (the caller may start fresh), `running` means it is still alive
  * (the caller retries later), and `settled` carries the terminal result,
- * which MUST NOT be rerun. */
+ * which MUST NOT be rerun.
+ *
+ * `cancel` is the RECOVERY-side cancellation: it terminates the worker for
+ * a correlation identity WITHOUT an in-memory handle, so a controller that
+ * restarted (or one that adopted a worker another controller started) can
+ * still stop a superseded or cancelled run. It is keyed by the request's
+ * correlation identity, never by a live handle: a foreign identity is
+ * never touched, and a termination that cannot be CONFIRMED is reported
+ * as `failed`, never as `terminated`. */
 export interface Executor {
   start(request: ExecutionRequest, signal: AbortSignal): Promise<ExecutionHandle>;
   reconcile(request: ExecutionRequest): Promise<ExecutionReconcileOutcome>;
+  cancel(request: ExecutionRequest): Promise<ExecutionCancelOutcome>;
 }
 
 /** Fail-closed rejection for a structurally invalid execution request. */
@@ -464,6 +503,7 @@ const RESULT_KEYS = [
 
 const RESULT_FAILURE_CATEGORIES: readonly string[] = [
   "launch_refused", "deadline", "worker_crash", "worker_error", "no_result", "stale_result", "orphaned",
+  "terminate_failed",
 ];
 
 /** Fail-closed validation of an execution result — the ONE definition of
