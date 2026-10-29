@@ -2,7 +2,9 @@
 
 Status: **pinned proof contract (v2)** — implemented by `src/enforcement/requirement-trace.ts`,
 `src/config/requirement-owners.ts`, `src/requirements/trace-repair.ts` and the
-`requirement_trace` prompt fragment.
+`requirement_trace` prompt fragment. Amended by #1343: the distributed predicate
+clause is predicate-only (see
+[owner-anchored-enforcement-citation.md](owner-anchored-enforcement-citation.md)).
 
 ## Problem
 
@@ -144,14 +146,20 @@ a standard whose prose drifts from its slug tokens falls back to the **narrow** 
 proof. This is the same lexical fragility #958 accepted for scope, now on the
 proof-strength axis; it fails toward narrow, never toward "easier than declared", and is
 never reachable by the model. Choose slug tokens from the standard's canonical phrasing.
+#1343 amended the narrow proof's subject axis for owner-anchored citations (see
+[owner-anchored-enforcement-citation.md](owner-anchored-enforcement-citation.md)); the
+fallback direction and its reachability are unchanged.
 
 ## Validation algorithm
 
-`met` on a **narrow** requirement is unchanged, byte for byte:
+`met` on a **narrow** requirement keeps the #854 shape, with the #1343 owner-anchored
+exception on the lexical half:
 
 > ≥1 location-valid enforcement citation **and** ≥1 test-path-valid test citation
-> **and** a predicate involving one of the requirement's derived terms found over the
-> valid enforcement locations.
+> **and** a predicate over the valid enforcement locations — involving one of the
+> requirement's derived terms, EXCEPT that a citation into a base-ref-trusted declared
+> owner of the requirement needs only a predicate-shaped line **on the cited line**
+> ([owner-anchored-enforcement-citation.md](owner-anchored-enforcement-citation.md)).
 
 Distributed validation **replaces** the narrow `met` path entirely for a distributed row:
 the narrow downgrade notes (`downgraded-no-valid-enforcement-location`,
@@ -172,14 +180,13 @@ requirement requires all three of:
    globs can never be assigned one. A miss downgrades with
    `distributed-test-group-uncovered:<name>`. A row with no test-path-valid citation at
    all additionally carries `distributed-test-location-uncovered`.
-3. **Predicate (anti-copy, #854).** `enforcementPredicateFound` must hold over the set of
-   **matched group-covering** enforcement citations. The term set is the requirement's
-   derived terms **only** — the model-supplied `symbol` is **excluded** for distributed
-   rows, because the model chooses both the cited line and the symbol and could otherwise
-   satisfy the check with a term it invented. When the requirement text yields **no usable
-   terms at all**, the distributed path does **not** fall through to the narrow path's
-   documented empty-terms skip: it requires at least one predicate-shaped line among the
-   matched group-covering citations, or downgrades. A miss downgrades with the existing
+3. **Predicate (anti-copy, #854; predicate-only since #1343).** A predicate-shaped
+   line must occur among the **matched group-covering** enforcement citations
+   (`predicateSignalFound`). The lexical term co-occurrence was dropped (#1343):
+   every matched citation already points into a trusted declared seam surface, so
+   the subject is established by declaration and the model-supplied `symbol` is
+   **irrelevant** — the seam's own predicate decides. A seam matched only by
+   value-copying lines still downgrades with the existing
    `enforcement-location-copies-without-comparing` note.
 
 All three must pass for `met`. A distributed requirement's `unmet` / `not_applicable` /
@@ -273,7 +280,7 @@ same distributed rule.
 | Effective topology exceeds `MAX_GROUPS_PER_RULE` | `unverifiable`, incomplete, warn | never validate a truncated proof |
 | Model payload carries a `groups` field | ignored entirely | model never declares topology |
 | Model supplies a `symbol` on a distributed row | ignored for the predicate term set | model cannot invent the term it must match |
-| Narrow requirement, no distributed rule | existing behavior unchanged | do not make everything distributed |
+| Narrow requirement, no distributed rule | existing behavior, plus the #1343 owner-anchored predicate exception | do not make everything distributed |
 | Base config `groups` block malformed (<2 valid groups) | drop groups, keep rule as plain ownership, warn | **fail-soft on trusted base config** — see below |
 | Declared groups exceed the parse safety bound | drop excess + warn; validator still fails closed | bound parser work without changing the outcome |
 | Base config unreadable / unresolvable ref | no ownership rules, warn (existing) | consistent with #958 |
@@ -300,11 +307,14 @@ proof, so they fail closed; only structurally malformed config degrades.
    so a generic or unrelated test file cannot satisfy a distributed requirement.
 5. **No truncated proof.** Topology overflow fails closed rather than validating the
    representable subset.
-6. **No predicate laundering by invention.** The distributed predicate term set excludes
-   the model-supplied `symbol`. Cross-seam propping (a value-copying seam A propped up by a
-   predicate-shaped seam B) remains possible in principle, but only *within
-   maintainer-declared files*, and unlike narrow mode every citation must at least land
-   inside a declared seam.
+6. **No predicate laundering by invention.** The model-supplied `symbol` is never
+   consulted (#1343), so it cannot invent its way past the gate, and citations that
+   match no declared group glob contribute nothing to coverage — an off-seam
+   predicate cannot prop up a value-copying seam (#962.6). Cross-seam propping (a
+   value-copying seam A propped up by a predicate-shaped seam B) remains possible in
+   principle, but only *within maintainer-declared seams* — since #1343 the predicate
+   gate is predicate-only, so the seam declaration, not the lexical half, is what
+   bounds it.
 7. **Bounded.** Groups ≤ 4 representable (16 parse safety bound), names ≤ 60 chars,
    citations ≤ 5/list, notes bounded by the group cap, rendered seam names capped and
    stripped, prompt hints ≤ 20 requirements.
@@ -353,7 +363,10 @@ Negative (must stay `unverifiable`):
    with one predicate-shaped citation that matches **no** group glob ⇒ predicate check
    fails ⇒ `unverifiable`.
 7. **Symbol injection** — every group matched by a value-copying line, `symbol` chosen to
-   appear on one of them ⇒ predicate still fails (symbol excluded for distributed).
+   appear on one of them ⇒ the symbol is irrelevant (#1343); the row's outcome follows the
+   seams' own predicate. With a real predicate inside the seam windows the row is `met`
+   (the pre-#1343 `unverifiable` expectation pinned the lexical co-occurrence that was
+   dropped); with only value-copying lines it stays `unverifiable` (#962.18).
 8. **Injective coverage** — two groups with overlapping globs and a single matching
    citation ⇒ second group uncovered.
 9. **Test-seam miss** — enforcement fully covered, but a group's declared `tests` glob is
