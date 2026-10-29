@@ -11,7 +11,12 @@
  *
  * The scan is over bytes (ASCII 0x60): UTF-8 continuation bytes never collide
  * with the backtick byte, so a byte scan of raw content agrees with a string
- * scan of its decoded form even when the raw bytes are not valid UTF-8. */
+ * scan of its decoded form even when the raw bytes are not valid UTF-8.
+ *
+ * `escapeCodeSpan` is the same boundary's INLINE half: one implementation of
+ * the "untrusted text renders as inert, single-line, length-capped content"
+ * rule, shared by every surface that renders PR-derived text into markdown
+ * (the published coverage notice and the corpus-borne harness findings). */
 
 const BACKTICK = 0x60;
 
@@ -44,4 +49,27 @@ export function fenceDelimiterFor(data: Uint8Array | string): string {
 export function endsWithNewline(data: Uint8Array | string): boolean {
   if (typeof data === "string") return data.length === 0 || data.endsWith("\n");
   return data.length === 0 || data[data.length - 1] === 0x0a;
+}
+
+/**
+ * Fence-safe single-line code span for untrusted-derived text (changed-file
+ * paths, specialist lead excerpts): backticks cannot be escaped inside a
+ * code span, so they (and control characters) are replaced, and the length
+ * is capped. Deterministic; biases toward rendering less rather than
+ * letting hostile content break the section out.
+ *
+ * The three properties a hostile value must not have:
+ * - a NEWLINE — it would start a new line and could forge a heading (or a
+ *   fence opener) in a surface that renders untrusted text as markdown;
+ * - a BACKTICK — it would close the surrounding code span, or (three in a
+ *   row) open a fence that swallows every section after it;
+ * - more than `maxChars` — it would flood the surface it renders into.
+ *
+ * `maxChars` is applied AFTER the flattening, so the cap bounds what is
+ * rendered rather than the input.
+ */
+export function escapeCodeSpan(text: string, maxChars: number): string {
+  const singleLine = text.replace(/\s+/g, " ").replace(/[`]/g, "'");
+  const stripped = [...singleLine].filter((ch) => ch.charCodeAt(0) >= 0x20).join("").trim();
+  return stripped.length > maxChars ? stripped.slice(0, maxChars) + "…" : stripped;
 }

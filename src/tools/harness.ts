@@ -34,7 +34,7 @@ import {
   pyDumpsAscii,
 } from "../model/conversation.js";
 import { redactPrTextDeep, redactPrTextLines, redactText } from "../context/redact.js";
-import { fenceDelimiterFor } from "../context/fence.js";
+import { fenceDelimiterFor, escapeCodeSpan } from "../context/fence.js";
 import { fenceSafeLength } from "../context/related-context.js";
 import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, MIN_KNOWN_SECRET_CONTENT_LEN } from "../context/redact.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
@@ -3150,6 +3150,14 @@ export function summarizeLoopOutcome(
     // #1338: the explicit outstanding-evidence list — a deterministic fold
     // over the loop's own call log (never model output) — so the synthesis
     // fallback corpus carries exactly what the loop never read or resolved.
+    // #1340: every value interpolated here is PR-derived (forge-provided
+    // paths, specialist-lead excerpts), and this markdown rides the corpus
+    // UNFENCED — so a hostile value carrying a newline could forge a
+    // heading, and a backtick run could open a fence that swallows every
+    // section after it. Each value takes the shared fence-safe code span
+    // (`escapeCodeSpan`), exactly like the published Partial Coverage Notice;
+    // the excerpt is additionally rendered as a code span because this
+    // surface is model-facing, where bare prose would read as instruction.
     mdLines.push("## Outstanding evidence (deterministic accounting)");
     mdLines.push("");
     mdLines.push(
@@ -3164,7 +3172,7 @@ export function summarizeLoopOutcome(
       mdLines.push(
         `- Changed files never read (${coverage.unread_files.length} of ` +
           `${coverage.changed_files_total}): ` +
-          listed.map((p) => `\`${p}\``).join(", ") +
+          listed.map((p) => `\`${escapeCodeSpan(p, 200)}\``).join(", ") +
           (more > 0 ? `, … and ${more} more` : ""),
       );
     }
@@ -3172,9 +3180,9 @@ export function summarizeLoopOutcome(
       const listed = coverage.unresolved_leads.slice(0, COVERAGE_NOTICE_MAX_ITEMS);
       const more = coverage.unresolved_leads.length - listed.length;
       const items = listed.map((lead) =>
-        `\`${lead.role}\`` +
-        (lead.file ? ` (\`${lead.file}\`)` : " (no file path)") +
-        (lead.excerpt ? `: ${lead.excerpt}` : ""),
+        `\`${escapeCodeSpan(lead.role, 60)}\`` +
+        (lead.file ? ` (\`${escapeCodeSpan(lead.file, 200)}\`)` : " (no file path)") +
+        (lead.excerpt ? `: \`${escapeCodeSpan(lead.excerpt, 120)}\`` : ""),
       );
       mdLines.push(
         `- Specialist leads never resolved (${coverage.unresolved_leads.length} of ` +

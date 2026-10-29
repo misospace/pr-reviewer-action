@@ -20,6 +20,7 @@ import {
   prescriptionKeyDigest, recoverPublishedSuggestion, MAX_CARRYOVER_KEYS_PER_RUN, SEVERITY_LABELS,
 } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
+import { escapeCodeSpan } from "../context/fence.js";
 import { stripRevealedCapNoteTails } from "../confidence/result.js";
 import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, parseMetadata, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
 import { FINDING_OUTCOMES_SCHEMA, isProvenHeadSha, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, serializeOutcomeLedger, type OutcomeEvent, type OutcomeLedger } from "../outcomes/schema.js";
@@ -517,19 +518,6 @@ export function renderIndependentConfidenceBlock(
   }
   lines.push(">", "_Advisory only: this independent confidence grade is telemetry from a second model call — it does not change the review's verdict, findings, or approval, and its concerns are not findings._");
   return lines.join("\n");
-}
-
-/**
- * Fence-safe single-line code span for untrusted-derived text (changed-file
- * paths, specialist lead excerpts): backticks cannot be escaped inside a
- * code span, so they (and control characters) are replaced, and the length
- * is capped. Deterministic; biases toward rendering less rather than
- * letting hostile content break the section out.
- */
-function escapeCodeSpan(text: string, maxChars: number): string {
-  const singleLine = text.replace(/\s+/g, " ").replace(/[`]/g, "'");
-  const stripped = [...singleLine].filter((ch) => ch.charCodeAt(0) >= 0x20).join("").trim();
-  return stripped.length > maxChars ? stripped.slice(0, maxChars) + "…" : stripped;
 }
 
 /**
