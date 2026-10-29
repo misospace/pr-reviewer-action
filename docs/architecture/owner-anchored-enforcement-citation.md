@@ -90,14 +90,22 @@ over source text, not a parser. **#1347 closed the artifacts that made it fire
 on text which is not a predicate at all** — an arrow function (`=>`, and the
 `->` spelling Ruby/PHP/C++ use) read as a `>` comparison, an optional chain
 (`?.`), nullish coalesce (`??`) or optional property marker (`x?: T`) read as a
-ternary, and an assertion-shaped word (`throw`, `reject`, `assert…`, `expect`,
-`invariant`, `must…`) read inside an identifier, a comment or a string literal.
-Those are excluded in the shared helper, so the legacy, owner-anchored and
-distributed paths all accept the same shape. On owner-anchored rows this is what
-makes the disclosed rule real: a copy-only citation such as
+ternary, and an assertion-shaped word read inside an identifier, a comment or a
+string literal. Only `throw` — a keyword wherever it exists — keeps bare-word
+semantics; `reject`, `expect`, `invariant`, `assert` and `must…` are
+library/identifier names, so they count only in a call or member shape
+(`expect(…)`, `Assert.ok(…)`, `invariant(…)`), which is what separates
+enforcement from `const expect = state.requested;`. The `?`-marker blanking is
+adjacency-only (`?.`, `??`, `?:` are spelled without a space), so a ternary
+whose branch starts with a dot — `flag ? .5 : 1`, or the Swift-style
+contextual case `wide ? .large : .small` — keeps its `?`. Those rules live in
+the shared helper, so the legacy, owner-anchored and distributed paths all
+accept the same shape. On owner-anchored rows this is what makes the disclosed
+rule real: a copy-only citation such as
 `const readCeiling = (state) => state.ceiling;`,
-`const ceiling = state?.requested;` or
-`const note = 'must not exceed the ceiling';` no longer passes as `met`.
+`const ceiling = state?.requested;`,
+`const note = 'must not exceed the ceiling';` or
+`const expect = state.requested;` no longer passes as `met`.
 
 What the coarse copy-detector still cannot tell you, named rather than silently
 wrong:
@@ -117,9 +125,22 @@ wrong:
   with `*`) is not tracked across lines. Strict residual: a quote character
   inside a regex literal (`if (/[="']/.test(key))`) opens a span that swallows
   the rest of the line, so a real comparison after it is lost.
+- The adjacency-only `?` blanker resolves the spaced-`?` ambiguity toward the
+  ternary: the legal-but-never-formatted optional chain `obj ? .value` survives
+  as a `?` shape, because the alternative would erase the `?` of a real
+  leading-dot branch (`wide ? .large : .small`).
+- A member read on a bare assertion name (`expect.value`, `must.not`) still
+  matches, because the accepted member shape is what makes `assert.ok(…)` work;
+  suffixed spellings are refused their member shape (`expected.ceiling`,
+  `rejected.length` are English identifiers, not assertions), so only the bare
+  names keep this permissive edge.
 - The assertion shapes are the spellings the corpus speaks. A parenless or
   underscore-joined idiom such as Ruby's `assert_equal ceiling, actual` was only
-  ever matched by accident and is now refused; a language/style the regexes do
+  ever matched by accident and is now refused; a keyword-assert statement whose
+  operand is a bare name — Python's `assert ceiling_ok` — is refused too, since
+  #1347's review follow-up requires a call/member shape for every
+  non-keyword assertion name (an operand carrying a real comparison,
+  `assert x <= ceiling`, still passes); and a language/style the regexes do
   not recognize is the pre-existing limit of this heuristic.
 - A line that genuinely is predicate-shaped can still be the wrong line of the
   right file.
@@ -140,7 +161,11 @@ comparison, guard, throw/assert or match call. That corpus is TypeScript, so it
 measures this product's own risk, not every language a reviewed repository might
 use. The same measurement caught one over-tightening: erasing a literal span
 collapses a real ternary such as `clip(symbol ? "x" : path)` into `? :`, so the
-operator blanking runs *before* span removal.
+operator blanking runs *before* span removal. A review of the first fix caught
+a second one: a blanker that matched a **spaced** `? .` erased the `?` of a
+genuine ternary whose branch begins with a dot (`wide ? .large : .small`,
+valid Swift), so the blanker is adjacency-only — the non-predicate `?` markers
+never contain a space, and a ternary `?` always does.
 
 The cited-line requirement is itself a deliberate tightening over the first
 draft of this gate, which searched a ±3-line window around the owner

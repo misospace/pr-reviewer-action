@@ -337,14 +337,19 @@ export function extractRequirementTerms(text: string, symbol?: string): string[]
 const COMPARISON_RE = /(===|!==|==|!=|<=|>=|<|>)/;
 const GUARD_RE = /\b(if|unless)\b/i;
 const LOGICAL_OR_TERNARY_RE = /(\?|&&|\|\|)/;
-/** Bare assertion keywords, word-boundary anchored so `throwing`, `rejection`
- * and `expectation` do not read as assertions. */
-const ASSERTION_WORD_RE = /\b(throw|reject|expect|invariant|assert)\b/i;
-/** #1347: an identifier that merely starts like an assertion
- * (`mustNotExceed`, `assertionsEnabled`) is a NAME, not an assertion, so the
- * `assert…`/`must…` prefixes count only in a call or member shape —
- * `assertEquals(…)`, `assert.ok(…)`, `mustBePositive(…)`. */
-const ASSERTION_CALL_RE = /\b(?:assert|must)[A-Za-z0-9_]*\s*[.(]/i;
+/** `throw` is a keyword wherever the language has it, and a bare `throw` is
+ * always a throw, so it alone keeps bare-word semantics (word-boundary
+ * anchored so `throwing` does not read as an assertion). */
+const THROW_KEYWORD_RE = /\bthrow\b/i;
+/** #1347: `reject`, `expect`, `invariant`, `assert` and `must…` are not
+ * keywords but library/identifier names, so a bare occurrence is a NAME —
+ * `const expect = state.requested;` is a copy, not enforcement. They count
+ * only in a call shape, possibly through a suffix (`expect(…)`,
+ * `assertEquals(…)`, `mustBePositive(…)`), or as a member call on the bare
+ * name (`Assert.ok(…)`, `invariant.call(…)`). The suffix may NOT be followed
+ * by a member dot: `expected.ceiling` / `rejected.length` are ordinary
+ * English identifiers copying a value, not assertions. */
+const ASSERTION_CALL_RE = /\b(?:assert|must|expect|reject|invariant)(?:[A-Za-z0-9_]*\s*\(|\s*\.[A-Za-z_$])/i;
 const MATCH_CALL_RE = /\.(includes|startsWith|endsWith|equals|match|test)\s*\(/i;
 
 /** End of a quoted span opened at `start`, honoring `\` escapes. An
@@ -419,20 +424,22 @@ function predicateCodeView(line: string): string {
  * property/parameter marker (`?:`). None of them is a comparison in any
  * language this gate reads, so removing them cannot lose an enforcement shape.
  *
- * A `?` followed by a digit-starting token is left alone: that is a ternary
- * with a leading-dot operand (`flag ? .5 : 1`), which no optional-member
- * spelling produces.
+ * Blanking is ADJACENCY-only: the non-predicate markers `?.`, `??` and `?:`
+ * are normally spelled with their follower glued to the `?`, while a ternary
+ * `?` is normally separated from its branch by whitespace. Matching a spaced
+ * `? .` instead would erase the `?` of a real ternary whose branch starts with
+ * a dot — `flag ? .5 : 1`, or the Swift-style contextual case
+ * `wide ? .large : .small` — downgrading genuine enforcement to non-predicate.
+ * The named cost of this direction: the legal-but-unformatted spaced optional
+ * chain `obj ? .value` reads as a ternary and survives (documented residual).
  *
- * Applied BEFORE span removal, which is what keeps a genuine ternary whose
- * branch is a literal — `clip(symbol ? TEMPLATE : path)` — intact: in the raw
- * text its `?` is followed by the opening quote, not by `:`, so it survives,
- * while the collapsed `? :` left behind by removing the span would otherwise
- * read as an optional-member marker and be erased. Blanking only ever removes
- * operator characters, so it cannot fabricate a quote or a comment for the scan
- * that follows.
+ * It still runs BEFORE span removal so a literal span cannot collapse a real
+ * ternary (`clip(symbol ? TEMPLATE : path)`) into a form the blanker reads as
+ * a marker. Blanking only ever removes operator characters, so it cannot
+ * fabricate a quote or a comment for the scan that follows.
  */
 function blankNonPredicateOperators(code: string): string {
-  return code.replace(/=>|->/g, " ").replace(/\?\s*(?:[?:]|\.(?![0-9]))/g, " ");
+  return code.replace(/=>|->/g, " ").replace(/\?(?:\?|:|\.(?![0-9]))/g, " ");
 }
 
 /**
@@ -447,18 +454,21 @@ function blankNonPredicateOperators(code: string): string {
  * inside identifiers, comments and string literals. The owner-anchored path
  * (#1343) dropped the lexical subject half, so there the shape was the whole
  * anti-copy core and a copy-only citation passed as `met`. The artifacts are
- * excluded here, in the helper shared by every consumer (legacy,
- * owner-anchored and distributed), so no path accepts a shape another rejects.
- * A TypeScript generic argument list (`Map<string, Ceiling>`) is still read as
- * a comparison: it is indistinguishable from an unspaced `a<b` without a
- * parser, and refusing both would reject real enforcement.
+  * excluded here, in the helper shared by every consumer (legacy,
+  * owner-anchored and distributed), so no path accepts a shape another rejects.
+  * Review follow-up: only the `throw` keyword keeps bare-word semantics; the
+  * non-keyword assertion names need their call/member shape, because
+  * `const expect = state.requested;` is exactly the copy this gate exists to
+  * refuse. A TypeScript generic argument list (`Map<string, Ceiling>`) is still
+  * read as a comparison: it is indistinguishable from an unspaced `a<b` without
+  * a parser, and refusing both would reject real enforcement.
  */
 function linePredicateSignal(rawLine: string): boolean {
   const line = predicateCodeView(blankNonPredicateOperators(rawLine));
   return COMPARISON_RE.test(line)
     || GUARD_RE.test(line)
     || LOGICAL_OR_TERNARY_RE.test(line)
-    || ASSERTION_WORD_RE.test(line)
+    || THROW_KEYWORD_RE.test(line)
     || ASSERTION_CALL_RE.test(line)
     || MATCH_CALL_RE.test(line);
 }

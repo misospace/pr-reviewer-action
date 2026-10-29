@@ -488,13 +488,24 @@ test("#1347: copy-only citations that merely look predicate-shaped are excluded"
     ["an assertion word in a string literal", "export const note = 'must not exceed the ceiling';"],
     ["an assertion word inside an identifier", "export const mustNotExceedTheCeiling = state.requested;"],
     ["an optional property declaration", "readonly ceiling?: number;"],
+    // #1347 review follow-up: non-keyword assertion names are identifiers, so
+    // a bare occurrence is a copy into an assertion-shaped name, not
+    // enforcement — they need a call or member shape to count.
+    ["an assignment to a bare `expect` identifier", "const expect = ceiling.requested;"],
+    ["an assignment to a bare `reject` identifier", "const reject = ceiling.requested;"],
+    ["an assignment to a bare `invariant` identifier", "const invariant = ceiling.requested;"],
+    ["an assignment to a bare `assert` identifier", "const assert = ceiling.requested;"],
+    // Suffix inflections of the assertion names are English identifiers, not
+    // assertions: a member read off `expected`/`rejected` must not smuggle the
+    // call/member shape back in.
+    ["a member read off an `expected` identifier", "const target = expected.ceiling;"],
+    ["a member read off a `rejected` identifier", "const reason = rejected.cause;"],
   ];
-  // Every artifact but the camelCase-identifier one carries the requirement's
-  // own word `ceiling` as a whole word on the line, so the legacy path's
-  // lexical half is satisfied there and only the shape can refuse it; the
-  // identifier case is pinned on the owner-anchored path alone, where no term
-  // is needed at all.
-  const lexicalCarried = [true, true, true, true, true, true, false, true];
+  // Every artifact carries the requirement's own word `ceiling` as a whole
+  // word on the line — except the camelCase-identifier one, which is pinned on
+  // the owner-anchored path alone, where no term is needed at all — so the
+  // legacy path's lexical half is satisfied and only the shape can refuse it.
+  const lexicalCarried = [true, true, true, true, true, true, false, true, true, true, true, true, true, false];
   for (const [index, [label, line]] of artifacts.entries()) {
     assert.equal(
       dispositionOfQuuxCitation(line, true),
@@ -522,6 +533,10 @@ test("#1347: real predicates on the cited line are still accepted", () => {
     // A `?` before a digit-starting operand is a ternary, never an
     // optional-member marker; blanking it would erase real enforcement.
     ["a ternary with a leading-dot operand", "const ratio = flag ? .5 : 1.0;"],
+    // #1347 review follow-up: leading-dot expressions are valid beyond
+    // numeric literals (Swift contextual enum cases), so a spaced `? .name`
+    // is a ternary branch, never an optional-member marker.
+    ["a ternary whose branch is a leading-dot case", "let scale = wide ? .ceiling : .default;"],
     // Both found by measuring the tightened shape against this repository's
     // own sources: removing a literal span collapses a real ternary's `? … :`
     // into `? :`, which must not then be erased as an optional-member marker.
@@ -530,6 +545,13 @@ test("#1347: real predicates on the cited line are still accepted", () => {
     ["a throw beside an arrow", "const reject = (state) => { if (state.requested > ceiling) throw new Error('over'); };"],
     ["an assert call", "assertEquals(state.requested, ceiling);"],
     ["an assert member call", "assert.ok(state.requested <= ceiling);"],
+    // #1347 review follow-up: the non-keyword assertion names pass on their
+    // call/member shape — which is what distinguishes enforcement from a copy
+    // into an assertion-shaped identifier.
+    ["an expect call", "expect(state.requested).toBeLessThanOrEqual(ceiling);"],
+    ["an invariant call", "invariant(Number.isFinite(ceiling), 'bad ceiling');"],
+    ["a promise-reject guard call", "if (state.requested > ceiling) reject(new RangeError('over ceiling'));"],
+    ["a bare throw keyword", "throw new RangeError('requested exceeds the ceiling');"],
     ["a must-prefixed call", "mustBeLessThanOrEqual(state.requested, ceiling);"],
     ["a match call", "if (kind.startsWith('ceiling')) { return ceiling; }"],
     ["a private-field comparison", "if (this.#ceiling > state.requested) {"],
@@ -590,6 +612,20 @@ test("#1347: the two named line-scan residuals are pinned rather than silently w
     dispositionOfQuuxCitation("const quoteRe = /\"/; if (state.requested > ceiling) {", true),
     "unverifiable",
     "a quote inside a regex literal is read as a string opening (documented limit)",
+  );
+  // Strict: `assert` lost its bare-word acceptance with the review follow-up,
+  // so a keyword-assert statement whose operand is a bare name — Python's
+  // `assert ceiling_ok` — is refused where an earlier shape accepted it.
+  // Assertions carrying a comparison (`assert x <= ceiling`) still pass.
+  assert.equal(
+    dispositionOfQuuxCitation("assert ceiling_ok", true),
+    "unverifiable",
+    "a bare-name keyword-assert operand is refused (documented limit)",
+  );
+  assert.equal(
+    dispositionOfQuuxCitation("assert ceiling_ok and state.requested <= ceiling", true),
+    "met",
+    "a keyword-assert carrying a real comparison must stay met",
   );
 });
 
