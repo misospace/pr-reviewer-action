@@ -64,7 +64,7 @@ Any time the classifier gives no deterministic basis to skip a role, auto fails 
 | Renovate PR refreshing only an image `@sha256:` digest in a HelmRelease | `image_digest_only` | none | **Zero selection** — image-digest-only trivial gate |
 | Renovate PR bumping an image tag (`litellm-database:v1.106.5` → `v1.106.6`) in a manifest (#11591) | `renovate_image_update` | none | **Zero selection** — benign image-refresh trivial gate |
 | Renovate PR bumping a security-infrastructure image (e.g. `authelia`) or changing an image's repository, or whose title reports a CVE | `renovate_image_update` | `dependency_security_sensitive` | `security` selected; correctness per the fall-through kind |
-| Renovate PR bumping a HelmRelease `chart` version | `renovate_chart_update` | none | **Zero selection** — benign chart-refresh trivial gate |
+| Renovate PR bumping a HelmRelease chart `version`/`appVersion` (not renaming the `chart:` value) | `renovate_chart_update` | none | **Zero selection** — benign chart-refresh trivial gate |
 | New 300-line non-test module, e.g. `src/platform/foo.ts` | `app_code` | none | `correctness` selected (direct `app_code` match, reinforced by the #871 substantial-change force-on); `security`/`tests` skipped |
 
 ## Where to see the decision
