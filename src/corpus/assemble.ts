@@ -77,6 +77,11 @@ export interface CorpusWorkspace {
   toolHarnessSmartMd: Uint8Array | null;
   evidenceProvidersMd: Uint8Array | null;
   imageDigestContextMd: Uint8Array | null;
+  /** #1337: the deterministic dependency-upgrade coverage accounting
+   * section (empty unless the run detected dependency changes). Optional
+   * so existing fixtures need no update: an absent field behaves like
+   * `null`. */
+  dependencyCoverageMd?: Uint8Array | null;
   linkedSourcesMd: Uint8Array | null;
   repoImpactTruncatedMd: Uint8Array | null;
   repoHistoryTruncatedMd: Uint8Array | null;
@@ -462,6 +467,12 @@ export function buildReviewCorpus(
     pushSection("# Evidence Providers", bytes(ws.evidenceProvidersMd));
   }
   pushSection("# Image Digest Provenance", bytes(ws.imageDigestContextMd));
+  // #1337: deterministic coverage accounting rides right after the
+  // provenance evidence it references. Empty unless dependency changes
+  // were detected — no section boundary for anything else.
+  if (nonEmpty(ws.dependencyCoverageMd)) {
+    pushSection(undefined, bytes(ws.dependencyCoverageMd!));
+  }
   // Lowest-value sections last — first to be dropped on truncation.
   pushSection("# Linked Sources", bytes(ws.linkedSourcesMd));
   pushSection("# Repository Impact Scan", bytes(ws.repoImpactTruncatedMd));
