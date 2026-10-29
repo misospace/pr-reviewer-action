@@ -248,3 +248,225 @@ test("the fingerprint separates enabled from disabled states (current-state iden
   assert.notEqual(disabled.fingerprint, enabled.fingerprint);
   assert.equal(resolve(instance(), "ignore-paths: [a/**]\n").fingerprint, enabled.fingerprint);
 });
+
+// #1350: the namespace/account shared review-policy layer.
+
+function scoped(config: InstanceConfig, text?: string, scope?: { owner: string; name: string }) {
+  return resolveEffectiveReviewConfig(
+    contract,
+    config,
+    text === undefined ? undefined : file(text),
+    scope === undefined ? {} : { scope },
+  );
+}
+
+const NAMESPACE_POLICY = {
+  name: "frontend",
+  owners: ["frontend-org"],
+  "reviewer-defaults": { "inline-findings-max": 10, "review-verbosity": "concise" },
+  "ignore-paths": ["generated/**"],
+  "review-instructions": ["Shared frontend review rule one.", "Shared rule two."],
+};
+
+function instanceWithNamespace(overrides: Record<string, unknown> = {}, policy: Record<string, unknown> = NAMESPACE_POLICY) {
+  return instance({ "namespace-policies": [policy], ...overrides });
+}
+
+test("no scope or no governing policy leaves the namespace layer inert", () => {
+  const withPolicy = instanceWithNamespace();
+  const noScope = scoped(withPolicy, "inline-findings-max: 8\n");
+  assert.equal(noScope.namespacePolicy, null);
+  assert.deepEqual([...noScope.namespaceReviewInstructions], []);
+  assert.deepEqual({ ...noScope.provenance }, { "reviewer-settings/inline-findings-max": "repository" });
+  assert.equal(noScope.reviewerSettings["inline-findings-max"], "8");
+  assert.equal(resolve(withPolicy).namespacePolicy, null);
+  const otherScope = scoped(withPolicy, undefined, { owner: "backend-org", name: "service" });
+  assert.equal(otherScope.namespacePolicy, null);
+  assert.equal(otherScope.fingerprint, resolve(instance()).fingerprint);
+});
+
+test("the namespace layer narrows the envelope and the repository narrows below it", () => {
+  const config = scoped(instanceWithNamespace(), "inline-findings-max: 5\n", { owner: "frontend-org", name: "web" });
+  assert.equal(config.namespacePolicy, "frontend");
+  assert.equal(config.reviewerSettings["inline-findings-max"], "5");
+  assert.equal(config.reviewerSettings["review-verbosity"], "concise");
+  // A repository attempt above the namespace ceiling is rejected with the
+  // namespace value as the ceiling; the namespace-set enum stands.
+  const tooWide = scoped(instanceWithNamespace(), "inline-findings-max: 15\n", { owner: "frontend-org", name: "web" });
+  assert.equal(tooWide.reviewerSettings["inline-findings-max"], "10");
+  assert.match(tooWide.warnings.join("\n"), /exceeds the operator ceiling of 10/);
+});
+
+test("namespace policy sets repo-policy inputs without the repository opt-in, and the repository cannot undo it", () => {
+  const policy = { name: "policy-holder", owners: ["org"], "reviewer-defaults": { "verdict-policy": "model" } };
+  const config = scoped(instanceWithNamespace({}, policy), "verdict-policy: strict\n", { owner: "org", name: "repo" });
+  assert.equal(config.reviewerSettings["verdict-policy"], "model");
+  assert.match(config.warnings.join("\n"), /did not enable allow-repo-policy-overrides/);
+});
+
+test("an instance-explicit value beats the namespace layer, which cannot widen", () => {
+  const policy = { name: "wide", owners: ["org"], "reviewer-defaults": { "review-verbosity": "normal" } };
+  const config = scoped(instanceWithNamespace({ "reviewer-defaults": { "review-verbosity": "concise" } }, policy), undefined, { owner: "org", name: "repo" });
+  assert.equal(config.reviewerSettings["review-verbosity"], "concise");
+  assert.match(config.warnings.join("\n"), /review-verbosity.*operator explicitly set/);
+  // But when the instance left the key unset, the namespace layer fills it.
+  const filled = scoped(instanceWithNamespace({}, policy), undefined, { owner: "org", name: "repo" });
+  assert.equal(filled.reviewerSettings["review-verbosity"], "normal");
+});
+
+test("guidance merges: ignore-paths union with namespace precedence, skip-only-paths single supplier", () => {
+  const policy = { ...NAMESPACE_POLICY, "skip-only-paths": ["src/**"] };
+  const config = scoped(
+    instanceWithNamespace({}, policy),
+    "ignore-paths: [generated/**, vendor/**]\nskip-only-paths: [app/**]\n",
+    { owner: "frontend-org", name: "web" },
+  );
+  assert.deepEqual([...config.ignorePaths], ["generated/**", "vendor/**"]);
+  assert.deepEqual([...config.skipOnlyPaths], ["src/**"]);
+  const joined = config.warnings.join("\n");
+  assert.match(joined, /namespace policy 'frontend' already restricts the reviewed path set/);
+});
+
+test("provenance records which layer supplied each shared rule (last writer wins)", () => {
+  const policy = {
+    ...NAMESPACE_POLICY,
+    "skip-only-paths": ["src/**"],
+    "require-suggested-fix": true,
+  };
+  const config = scoped(
+    instanceWithNamespace({ "reviewer-defaults": { "non-blocking-finding-categories": "docs,style" } }, policy),
+    "inline-findings-max: 5\nignore-paths: [generated/**, vendor/**]\nreview-instructions: [docs/rules.md]\n",
+    { owner: "frontend-org", name: "web" },
+  );
+  assert.deepEqual({ ...config.provenance }, {
+    "reviewer-settings/review-verbosity": "namespace:frontend",
+    "reviewer-settings/inline-findings-max": "repository",
+    "reviewer-settings/non-blocking-finding-categories": "instance",
+"ignore-paths/generated/**": "namespace:frontend",
+    "ignore-paths/vendor/**": "repository",
+    "skip-only-paths/src/**": "namespace:frontend",
+    "namespace-instructions/0": "namespace:frontend",
+    "namespace-instructions/1": "namespace:frontend",
+    "review-instructions/0": "repository",
+    "require-suggested-fix": "namespace:frontend",
+  });
+});
+
+test("require-suggested-fix is stricter-only across layers and attributed to its supplier", () => {
+  const policy = { ...NAMESPACE_POLICY, "require-suggested-fix": false };
+  const config = scoped(instanceWithNamespace({}, policy), "require-suggested-fix: true\n", { owner: "frontend-org", name: "web" });
+  assert.equal(config.requireSuggestedFix, true);
+  assert.equal(config.provenance["require-suggested-fix"], "repository");
+  const relaxed = scoped(instanceWithNamespace({}, policy), "require-suggested-fix: false\n", { owner: "frontend-org", name: "web" });
+  assert.equal(relaxed.requireSuggestedFix, false);
+  assert.equal(relaxed.provenance["require-suggested-fix"], undefined);
+});
+
+test("shared-policy changes participate in generation identity correctly", () => {
+  const scope = { owner: "frontend-org", name: "web" };
+  const base = scoped(instanceWithNamespace(), undefined, scope);
+  // Inline shared guidance is material, in listed order.
+  assert.notEqual(
+    scoped(instanceWithNamespace({}, { ...NAMESPACE_POLICY, "review-instructions": ["Different guidance."] }), undefined, scope).fingerprint,
+    base.fingerprint,
+  );
+  assert.notEqual(
+    scoped(instanceWithNamespace({}, { ...NAMESPACE_POLICY, "review-instructions": [...NAMESPACE_POLICY["review-instructions"] as string[]].reverse() }), undefined, scope).fingerprint,
+    base.fingerprint,
+  );
+  // A changed narrowed value is material.
+  assert.notEqual(
+    scoped(instanceWithNamespace({}, { ...NAMESPACE_POLICY, "reviewer-defaults": { "inline-findings-max": 8, "review-verbosity": "concise" } }), undefined, scope).fingerprint,
+    base.fingerprint,
+  );
+  // A policy rename that changes no effective value is NOT material:
+  // provenance and the policy name stay out of the fingerprint.
+  assert.equal(
+    scoped(instanceWithNamespace({}, { ...NAMESPACE_POLICY, name: "renamed" }), undefined, scope).fingerprint,
+    base.fingerprint,
+  );
+  // A policy that matches but adds nothing new (same ignore glob the repo
+  // already supplied, no settings, no instructions) does not churn identity.
+  assert.equal(
+    scoped(
+      instanceWithNamespace({}, { name: "frontend", owners: ["frontend-org"], "ignore-paths": ["generated/**"] }),
+      "ignore-paths: [generated/**]\n",
+      scope,
+    ).fingerprint,
+    resolve(instance(), "ignore-paths: [generated/**]\n").fingerprint,
+  );
+  // Namespace-less configs keep byte-identical fingerprints.
+  assert.equal(scoped(instance()).fingerprint, resolve(instance()).fingerprint);
+});
+
+test("different repositories resolve different namespace policies deterministically", () => {
+  const policies = [
+    { name: "frontend", owners: ["frontend-org"], "reviewer-defaults": { "review-verbosity": "concise" } },
+    { name: "backend", owners: ["backend-org"], "reviewer-defaults": { "inline-findings-max": 12 } },
+  ];
+  const config = instance({ "namespace-policies": policies });
+  assert.equal(scoped(config, undefined, { owner: "frontend-org", name: "web" }).reviewerSettings["review-verbosity"], "concise");
+  assert.equal(scoped(config, undefined, { owner: "backend-org", name: "api" }).reviewerSettings["inline-findings-max"], "12");
+});
+
+test("namespace inline guidance is carried as operator content with per-block provenance", () => {
+  const config = scoped(instanceWithNamespace(), undefined, { owner: "frontend-org", name: "web" });
+  assert.deepEqual([...config.namespaceReviewInstructions], NAMESPACE_POLICY["review-instructions"]);
+  assert.equal(config.provenance["namespace-instructions/0"], "namespace:frontend");
+  assert.equal(config.provenance["namespace-instructions/1"], "namespace:frontend");
+});
+
+// Review-pinned regressions (#1350 review): the namespace tier is an
+// authority tier, not a default-value coincidence.
+
+test("a namespace-set key beats the repository even when its value equals the contract default", () => {
+  const policy = { name: "pin", owners: ["org"], "reviewer-defaults": { "review-verbosity": "normal" } };
+  const config = scoped(instanceWithNamespace({}, policy), "review-verbosity: concise\n", { owner: "org", name: "repo" });
+  assert.equal(config.reviewerSettings["review-verbosity"], "normal");
+  assert.match(config.warnings.join("\n"), /review-verbosity.*operator explicitly set/);
+  assert.equal(config.provenance["reviewer-settings/review-verbosity"], "namespace:pin");
+});
+
+test("the namespace layer cannot widen an instance-explicit numeric ceiling", () => {
+  const policy = { name: "wide", owners: ["org"], "reviewer-defaults": { "inline-findings-max": 10 } };
+  const config = scoped(instanceWithNamespace({ "reviewer-defaults": { "inline-findings-max": 5 } }, policy), undefined, { owner: "org", name: "repo" });
+  assert.equal(config.reviewerSettings["inline-findings-max"], "5");
+  assert.match(config.warnings.join("\n"), /Namespace policy 'wide'.*exceeds the operator ceiling of 5/);
+  assert.equal(config.provenance["reviewer-settings/inline-findings-max"], "instance");
+});
+
+test("the namespace layer cannot grant the repository the policy-override gate", () => {
+  // `allow-repo-policy-overrides` is not a repo-configurable input, so a
+  // namespace policy naming it fails instance validation closed — the gate
+  // can only ever be the operator's own instance-level decision.
+  assert.throws(
+    () => instanceWithNamespace({}, { name: "gate", owners: ["org"], "reviewer-defaults": { "allow-repo-policy-overrides": "true" } }),
+    /allow-repo-policy-overrides.*not a repo-configurable input/,
+  );
+});
+
+test("resolution stays total for a validated instance with a scope (no throw on any claimed identity)", () => {
+  const policies = [
+    { name: "a", owners: ["org-a"], "reviewer-defaults": { "review-verbosity": "concise" } },
+    { name: "b", repositories: ["org-b/repo"] },
+  ];
+  const config = instance({ "namespace-policies": policies });
+  for (const scope of [{ owner: "org-a", name: "web" }, { owner: "org-b", name: "repo" }, { owner: "org-c", name: "x" }]) {
+    const resolved = scoped(config, undefined, scope);
+    assert.match(resolved.fingerprint, /^ecfg-v1-[0-9a-f]{64}$/);
+  }
+});
+
+test("an explicit namespace pin of the contract default is config state and changes the fingerprint", () => {
+  const scope = { owner: "org", name: "repo" };
+  const pinned = scoped(instanceWithNamespace({}, { name: "pin", owners: ["org"], "reviewer-defaults": { "review-verbosity": "normal" } }), undefined, scope);
+  assert.equal(pinned.reviewerSettings["review-verbosity"], "normal");
+  assert.notEqual(pinned.fingerprint, scoped(instance(), undefined, scope).fingerprint);
+});
+
+test("a malformed namespace scope fails closed with a typed error", () => {
+  assert.throws(
+    () => scoped(instanceWithNamespace(), undefined, { owner: "", name: "repo" }),
+    (error: unknown) => error instanceof EffectiveConfigError && /namespace scope/.test(error.message),
+  );
+});
