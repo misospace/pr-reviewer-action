@@ -109,6 +109,8 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   private readonly timeoutMs: number;
   private readonly fetchImpl: FetchLike;
   private jwtCache: { token: string; fetchedAt: number } | null = null;
+  /** #1341: the cause of the most recent `getPr()` failure, or null. */
+  private lastPrReadFailure: PlatformRequestError | null = null;
 
   constructor(options: ForgejoAdapterOptions) {
     const parsed = parsePlatformBaseUrl(options.baseUrl, "Forgejo API base URL");
@@ -273,17 +275,34 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   }
 
   async getPr(): Promise<unknown | null> {
+    this.lastPrReadFailure = null;
     const { owner, repo } = parseRepo(this.repo);
     try {
       const { status, data } = await requestJson(
         this.repoUrl("/pulls/", this.prNumber),
         (await this.options()),
       );
-      if (status !== 200) return null;
+      if (status !== 200) {
+        // #1341: a non-2xx response IS an answer — keep its status as the
+        // cause class (credential- and body-free by construction).
+        this.lastPrReadFailure = new PlatformRequestError(`PR read failed with HTTP status ${status}`, status, "http-status");
+        return null;
+      }
       return ForgejoAdapter.prToGithubShape(data, owner, repo, this.prNumber);
-    } catch {
+    } catch (error) {
+      // #1341: no usable response arrived — keep the seam's transport kind
+      // (`transport`, `redirect-blocked`, `too-large`, `origin-mismatch`,
+      // `invalid-json`) as the cause class.
+      this.lastPrReadFailure = error instanceof PlatformRequestError
+        ? error
+        : new PlatformRequestError("PR read failed", null, "transport");
       return null;
     }
+  }
+
+  /** #1341: the cause of the most recent `getPr()` failure, or null. */
+  prReadFailure(): PlatformRequestError | null {
+    return this.lastPrReadFailure;
   }
 
   async getPrDiff(): Promise<string> {

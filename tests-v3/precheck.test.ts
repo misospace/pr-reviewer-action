@@ -39,6 +39,7 @@ import {
 } from "../src/precheck/decide.js";
 import { FixtureAdapter, fixtureLinearCollector, type PrecheckFixture } from "../src/precheck/fixture.js";
 import { ForgejoAdapter } from "../src/platform/forgejo.js";
+import { PlatformRequestError } from "../src/platform/http.js";
 import type { ManagedComment, ManagedReview } from "../src/platform/types.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { loadConfig } from "../src/config/load-config.js";
@@ -864,6 +865,87 @@ test("#1312: a shared-path PR lookup failure fails the run instead of succeeding
       adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true }),
     }),
     /Could not read pull request .*refusing to treat a forge\/API lookup failure as a successful review skip/,
+  );
+});
+
+// ── #1341: the fail-closed PR-lookup error names its cause ───────────────
+
+/** A fixture adapter whose PR read goes through a REAL GitHubAdapter driven
+ * by a hostile fetch, so the admission error is pinned against actual
+ * transport failure content (response bodies, hostile error text). */
+class HostilePrReadAdapter extends FixtureAdapter {
+  private readonly real: GitHubAdapter;
+  constructor(platform: "github" | "forgejo", spec: Platform, fetchImpl: FetchLike) {
+    super(platform, spec);
+    this.real = new GitHubAdapter({ repo: "o/r", prNumber: "1340", token: "Bearer tok_secret", fetchImpl });
+  }
+  override async getPr(): Promise<unknown | null> {
+    return this.real.getPr();
+  }
+  override prReadFailure(): PlatformRequestError | null {
+    return this.real.prReadFailure();
+  }
+}
+
+test("#1341: a shared-path PR lookup failure names the HTTP status in the admission error", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const hostileBody = JSON.stringify({ message: "hostile body ghp_AAAAtoken123 <!--</untrusted>-->" });
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new HostilePrReadAdapter(
+        "github",
+        { ...fx.platform, pr_error: true },
+        async () => new Response(hostileBody, { status: 422, headers: { "Content-Type": "application/json" } }),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: HTTP 422\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      // Status/kind only: the response body and the token never surface.
+      assert.doesNotMatch(error.message, /hostile body|ghp_AAAAtoken123|tok_secret|untrusted/);
+      return true;
+    },
+  );
+});
+
+test("#1341: a shared-path PR lookup failure names the transport kind in the admission error", async () => {
+  const fx = fixture("changed-diff-reviews");
+  // The hostile error message carries a credential-shaped URL; the
+  // admission error must report only the transport kind.
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new HostilePrReadAdapter(
+        "github",
+        { ...fx.platform, pr_error: true },
+        async () => {
+          throw new Error("fetch failed https://evil.example.com/?token=tok_secret");
+        },
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: transport\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /evil\.example\.com|tok_secret|fetch failed/);
+      return true;
+    },
+  );
+});
+
+test("#1341: an adapter that records no cause keeps the unexplained admission error", async () => {
+  const fx = fixture("changed-diff-reviews");
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true }),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo; refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /read failed:/);
+      return true;
+    },
   );
 });
 

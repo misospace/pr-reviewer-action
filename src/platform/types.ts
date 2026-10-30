@@ -8,6 +8,7 @@
  * GitHub-REST pull shape, and everything beyond metadata reads fails closed.
  */
 
+import type { PlatformRequestError } from "./http.js";
 import type { IdentityResolution } from "./owner-identity.js";
 
 export interface ManagedComment {
@@ -47,6 +48,17 @@ export interface PlatformAdapter {
   preflightAuthentication?(): Promise<void>;
   /** PR object (GitHub REST shape) or null when the fetch fails. */
   getPr(): Promise<unknown | null>;
+  /** #1341: the cause of the most recent `getPr()` failure, as a
+   * credential-free `PlatformRequestError` carrying the HTTP `status` when a
+   * response arrived, or a transport `kind` (`transport`,
+   * `redirect-blocked`, `too-large`, `origin-mismatch`, `invalid-json`)
+   * when it did not. `null` after a successful read, before the first read,
+   * or when the adapter records no cause. The cause is status/kind only —
+   * never response-body content, never credential material — so a
+   * fail-closed admission error can name why the lookup failed without
+   * leaking either. Adapters that do not record a cause omit this method;
+   * callers then keep the unexplained message rather than inventing one. */
+  prReadFailure?(): PlatformRequestError | null;
   /** Raw unified diff text; "" when unavailable. */
   getPrDiff(): Promise<string>;
   listIssueComments(): Promise<ManagedComment[]>;
