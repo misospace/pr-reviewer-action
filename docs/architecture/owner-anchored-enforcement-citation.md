@@ -91,10 +91,14 @@ on text which is not a predicate at all** — an arrow function (`=>`, and the
 `->` spelling Ruby/PHP/C++ use) read as a `>` comparison, an optional chain
 (`?.`), nullish coalesce (`??`) or optional property marker (`x?: T`) read as a
 ternary, and an assertion-shaped word read inside an identifier, a comment or a
-string literal. Only `throw` — a keyword wherever it exists — keeps bare-word
-semantics; `reject`, `expect`, `invariant`, `assert` and `must…` are
-library/identifier names, so they count only in a call or member shape
-(`expect(…)`, `Assert.ok(…)`, `invariant(…)`), which is what separates
+string literal. Only `throw` keeps bare-word semantics — and only as the
+KEYWORD: `throw` is not a reserved word in every language (Python and Rust
+have no `throw` statement), so a property named `throw` (`state.throw`,
+`state?.throw`) is an ordinary name, not enforcement. `reject`, `expect`,
+`invariant`, `assert` and `must…` are library/identifier names, so they count
+only in a call shape (`expect(…)`, `Assert.ok(…)`, `invariant(…)`) or as a
+member CALL reached through the bare name (`assert.deep.equal(…)`); a member
+READ (`expect.value`) copies a value and is refused. That is what separates
 enforcement from `const expect = state.requested;`. The `?`-marker blanking is
 adjacency-only (`?.`, `??`, `?:` are spelled without a space), so a ternary
 whose branch starts with a dot — `flag ? .5 : 1`, or the Swift-style
@@ -104,8 +108,9 @@ accept the same shape. On owner-anchored rows this is what makes the disclosed
 rule real: a copy-only citation such as
 `const readCeiling = (state) => state.ceiling;`,
 `const ceiling = state?.requested;`,
-`const note = 'must not exceed the ceiling';` or
-`const expect = state.requested;` no longer passes as `met`.
+`const note = 'must not exceed the ceiling';`,
+`const expect = state.requested;` or
+`const value = state.throw;` no longer passes as `met`.
 
 What the coarse copy-detector still cannot tell you, named rather than silently
 wrong:
@@ -129,11 +134,16 @@ wrong:
   ternary: the legal-but-never-formatted optional chain `obj ? .value` survives
   as a `?` shape, because the alternative would erase the `?` of a real
   leading-dot branch (`wide ? .large : .small`).
-- A member read on a bare assertion name (`expect.value`, `must.not`) still
-  matches, because the accepted member shape is what makes `assert.ok(…)` work;
-  suffixed spellings are refused their member shape (`expected.ceiling`,
-  `rejected.length` are English identifiers, not assertions), so only the bare
-  names keep this permissive edge.
+- A member read on a bare assertion name (`expect.value`, `must.not`) is
+  refused: only a member CALL enforces (`assert.ok(…)`, `assert.deep.equal(…)`),
+  because a read copies a value. A suffixed spelling keeps no member shape at
+  all (`expected.ceiling`, `rejected.length` are English identifiers, not
+  assertions), so `expected.ok(…)` is refused too.
+- A bare `throw` outside statement position still reads as the keyword:
+  `throw = 1` (a binding named `throw`, in a language with no `throw`
+  statement) and `x = throw;` are accepted shapes. Only the member-property
+  case is distinguished, because that is the shape a copy-only citation
+  takes; telling the remaining positions apart would need a parser.
 - The assertion shapes are the spellings the corpus speaks. A parenless or
   underscore-joined idiom such as Ruby's `assert_equal ceiling, actual` was only
   ever matched by accident and is now refused; a keyword-assert statement whose
@@ -161,17 +171,18 @@ pre-#1347 baseline shape (embedded verbatim from base revision
 positional arg narrows the corpus to a path prefix), and prints the counts
 plus file:line samples of both change directions; the production logic is
 imported from source, never re-implemented, so the measurement cannot drift
-from the runtime. At the measured head (487 tracked `.ts` files, 216.6k
-lines) the tightening took accepted shapes from 54.2k to 37.6k: the sampled
+from the runtime. At the measured head (487 tracked `.ts` files, 216.8k
+lines) the tightening took accepted shapes from 54.3k to 37.6k: the sampled
 removed lines are arrows, optional chains, nullish coalescing, comment/doc
-text, string literals and optional-property declarations — none of them a
-comparison, guard, throw/assert or match call. The baseline comparison is
+text, string literals, optional-property declarations and member reads off an
+assertion name (`c.expect.…`) — none of them a comparison, guard, throw/assert
+or match call. The baseline comparison is
 not a pure subset: 68 lines became newly accepted, and every sampled one is
 a prefixed assertion-name call (`rejectUnknown(…)`, `expectFailed(…)`,
 `rejectCancelled(…)`) — call-shaped enforcement the tightened call-shape
 rule deliberately accepts and the old bare-word regex (`\breject\b`) could
 not match, not a loosened copy. A `src`-only scope reproduces the scale of
-the earlier unretained one-off run (297 files, 20.7k → 14.8k). That corpus
+the earlier unretained one-off run (297 files, 20.8k → 14.8k). That corpus
 is TypeScript, so it
 measures this product's own risk, not every language a reviewed repository might
 use. The same measurement caught one over-tightening: erasing a literal span
@@ -180,7 +191,15 @@ operator blanking runs *before* span removal. A review of the first fix caught
 a second one: a blanker that matched a **spaced** `? .` erased the `?` of a
 genuine ternary whose branch begins with a dot (`wide ? .large : .small`,
 valid Swift), so the blanker is adjacency-only — the non-predicate `?` markers
-never contain a space, and a ternary `?` always does.
+never contain a space, and a ternary `?` always does. A second review caught a
+third: the shape still read a member PROPERTY as the keyword and a member
+READ as an assertion call, so `state.throw` and `expect.value` passed as
+enforcement. The keyword check now refuses a member read — which is why it
+reads the unblanked code view, where the optional chain still carries its dot —
+and the assertion shape requires a member call. Measured against this
+repository's own sources, that refinement removed exactly five accepted lines
+(`c.expect.…` member reads in the golden-replay test) and added none, so it
+removed no enforcement.
 
 The cited-line requirement is itself a deliberate tightening over the first
 draft of this gate, which searched a ±3-line window around the owner

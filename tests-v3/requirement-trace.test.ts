@@ -500,12 +500,24 @@ test("#1347: copy-only citations that merely look predicate-shaped are excluded"
     // call/member shape back in.
     ["a member read off an `expected` identifier", "const target = expected.ceiling;"],
     ["a member read off a `rejected` identifier", "const reason = rejected.cause;"],
+    // #1347 review follow-up (head e866d92): a member PROPERTY is not the
+    // keyword, and a member READ is not a member call — `state.throw` is an
+    // ordinary name (`throw` is not a reserved word in Python or Rust), and
+    // `expect.value` copies a value instead of enforcing one.
+    ["a member property named `throw`", "const ceiling = state.throw;"],
+    ["an optional-chain member property named `throw`", "const ceiling = state?.throw;"],
+    ["a member read off an `expect` identifier", "const ceiling = expect.value;"],
+    ["a member read off a `must` identifier", "const ceiling = must.not;"],
   ];
   // Every artifact carries the requirement's own word `ceiling` as a whole
   // word on the line — except the camelCase-identifier one, which is pinned on
   // the owner-anchored path alone, where no term is needed at all — so the
   // legacy path's lexical half is satisfied and only the shape can refuse it.
-  const lexicalCarried = [true, true, true, true, true, true, false, true, true, true, true, true, true, false];
+  const lexicalCarried = [
+    true, true, true, true, true, true, false, true,
+    true, true, true, true, true, false,
+    true, true, true, true,
+  ];
   for (const [index, [label, line]] of artifacts.entries()) {
     assert.equal(
       dispositionOfQuuxCitation(line, true),
@@ -545,6 +557,11 @@ test("#1347: real predicates on the cited line are still accepted", () => {
     ["a throw beside an arrow", "const reject = (state) => { if (state.requested > ceiling) throw new Error('over'); };"],
     ["an assert call", "assertEquals(state.requested, ceiling);"],
     ["an assert member call", "assert.ok(state.requested <= ceiling);"],
+    // #1347 review follow-up (head e866d92): a member CALL reached through the
+    // bare assertion name still counts — the member read is what is refused,
+    // not the member access itself.
+    ["an assert member-chain call", "assert.deep.equal(state.requested, ceiling);"],
+    ["a must member call", "must.not.equal(state.requested, ceiling);"],
     // #1347 review follow-up: the non-keyword assertion names pass on their
     // call/member shape — which is what distinguishes enforcement from a copy
     // into an assertion-shaped identifier.
@@ -565,6 +582,70 @@ test("#1347: real predicates on the cited line are still accepted", () => {
       `a real predicate (${label}) on the cited line must stay met: ${line}`,
     );
   }
+});
+
+test("#1347: a member property is not the keyword, and a member read is not a member call", () => {
+  // The review follow-up on head e866d92: two copy-only shapes still passed
+  // the anti-copy gate through the shared shape check.
+  //
+  // 1. `throw` is a keyword only where the language has one — Python and Rust
+  //    have no `throw` statement — so a PROPERTY named `throw` (`state.throw`,
+  //    `state?.throw`) is an ordinary name whose value is copied. The keyword
+  //    check therefore refuses a member read, including through an optional
+  //    chain, whose dot the operator blanker would otherwise erase.
+  // 2. A member READ off an assertion name (`expect.value`, `must.not`) copies
+  //    a value; only a member CALL (`assert.ok(…)`, `assert.deep.equal(…)`)
+  //    enforces one.
+  //
+  // Both are pinned on the owner-anchored path (no term needed) and on the
+  // legacy path (the line carries the requirement's own word `ceiling`, so
+  // only the shape can refuse the citation).
+  const copies: Array<[string, string]> = [
+    ["a member property named `throw`", "const ceiling = state.throw;"],
+    ["an optional-chain member property named `throw`", "const ceiling = state?.throw;"],
+    ["a member read off an `expect` identifier", "const ceiling = expect.value;"],
+    ["a member read off a `must` identifier", "const ceiling = must.not;"],
+    ["a member read off an `assert` identifier", "const ceiling = assert.value;"],
+    ["a member read off an `invariant` identifier", "const ceiling = invariant.value;"],
+    ["a member read off a `reject` identifier", "const ceiling = reject.reason;"],
+  ];
+  for (const [label, line] of copies) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "unverifiable",
+      `a copy-only owner-anchored citation shaped like ${label} must not pass as met: ${line}`,
+    );
+    assert.equal(
+      dispositionOfQuuxCitation(line, false),
+      "unverifiable",
+      `the shared shape check must exclude ${label} on the legacy path too: ${line}`,
+    );
+  }
+  // The false-downgrade direction: the keyword and the member call still
+  // count, including where a member read sits on the same line.
+  const real: Array<[string, string]> = [
+    ["a throw keyword", "throw new RangeError('requested exceeds the ceiling');"],
+    ["a throw keyword after a member read", "const value = state.read; throw new Error('over ceiling');"],
+    ["a member call on the bare assertion name", "assert.ok(state.requested <= ceiling);"],
+    ["a member-chain call on the bare assertion name", "assert.deep.equal(state.requested, ceiling);"],
+  ];
+  for (const [label, line] of real) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "met",
+      `a real predicate (${label}) on the cited line must stay met: ${line}`,
+    );
+  }
+  // Named residual (permissive): a bare `throw` outside statement position
+  // still reads as the keyword — `throw = 1` is a binding named `throw` in a
+  // language with no `throw` statement. Only the member-property case is
+  // distinguished; telling the remaining positions apart needs a parser. Pinned
+  // here so a later change cannot move it silently.
+  assert.equal(
+    dispositionOfQuuxCitation("const ceiling = throw = 1;", true),
+    "met",
+    "a bare `throw` binding still reads as the throw keyword (documented limit)",
+  );
 });
 
 test("#1347: the comment and string scrubber is fed its own delimiters", () => {

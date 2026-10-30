@@ -270,7 +270,10 @@ function anyTestLocationValid(locations: readonly TraceLocation[], cache: FileTe
 // that survives only inside an identifier, a comment or a string literal. The
 // accepted shape is tightened in `linePredicateSignal`, which all three
 // consumers share, so the legacy and distributed paths move with it rather
-// than diverging.
+// than diverging. The review follow-ups narrowed the accepted shapes further:
+// only the `throw` KEYWORD counts (never a member property named `throw`),
+// and a non-keyword assertion name counts only in a call shape (never a
+// member read such as `expect.value`).
 // ---------------------------------------------------------------------------
 
 const PREDICATE_WINDOW_RADIUS = 3;
@@ -338,18 +341,27 @@ const COMPARISON_RE = /(===|!==|==|!=|<=|>=|<|>)/;
 const GUARD_RE = /\b(if|unless)\b/i;
 const LOGICAL_OR_TERNARY_RE = /(\?|&&|\|\|)/;
 /** `throw` is a keyword wherever the language has it, and a bare `throw` is
- * always a throw, so it alone keeps bare-word semantics (word-boundary
- * anchored so `throwing` does not read as an assertion). */
-const THROW_KEYWORD_RE = /\bthrow\b/i;
+ * always a throw — but only as the KEYWORD. `throw` is not a reserved word in
+ * every language (Python and Rust have no `throw` statement), so a member
+ * property named `throw` (`state.throw`, `state?.throw`) is an ordinary name
+ * whose value is copied, not enforcement. The lookbehind refuses a member
+ * read; the word-boundary anchor keeps `throwing` from reading as an
+ * assertion. The check runs on the UNBLANKED code view (see
+ * `throwKeywordSignal`), because the operator blanker erases the `?.` of an
+ * optional chain and would leave `state?.throw` looking like a bare keyword. */
+const THROW_KEYWORD_RE = /(?<![.\w$])throw\b/i;
 /** #1347: `reject`, `expect`, `invariant`, `assert` and `must…` are not
  * keywords but library/identifier names, so a bare occurrence is a NAME —
  * `const expect = state.requested;` is a copy, not enforcement. They count
  * only in a call shape, possibly through a suffix (`expect(…)`,
- * `assertEquals(…)`, `mustBePositive(…)`), or as a member call on the bare
- * name (`Assert.ok(…)`, `invariant.call(…)`). The suffix may NOT be followed
+ * `assertEquals(…)`, `mustBePositive(…)`), or as a member CALL reached
+ * through the bare name (`Assert.ok(…)`, `assert.deep.equal(…)`,
+ * `invariant.call(…)`). A member READ with no call (`expect.value`,
+ * `must.not`) copies a value and is refused. The suffix may NOT be followed
  * by a member dot: `expected.ceiling` / `rejected.length` are ordinary
  * English identifiers copying a value, not assertions. */
-const ASSERTION_CALL_RE = /\b(?:assert|must|expect|reject|invariant)(?:[A-Za-z0-9_]*\s*\(|\s*\.[A-Za-z_$])/i;
+const ASSERTION_CALL_RE =
+  /\b(?:assert|must|expect|reject|invariant)(?:[A-Za-z0-9_]*\s*\(|\s*(?:\.\s*[A-Za-z_$][A-Za-z0-9_$]*\s*)+\()/i;
 const MATCH_CALL_RE = /\.(includes|startsWith|endsWith|equals|match|test)\s*\(/i;
 
 /** End of a quoted span opened at `start`, honoring `\` escapes. An
@@ -454,14 +466,16 @@ function blankNonPredicateOperators(code: string): string {
  * inside identifiers, comments and string literals. The owner-anchored path
  * (#1343) dropped the lexical subject half, so there the shape was the whole
  * anti-copy core and a copy-only citation passed as `met`. The artifacts are
-  * excluded here, in the helper shared by every consumer (legacy,
-  * owner-anchored and distributed), so no path accepts a shape another rejects.
-  * Review follow-up: only the `throw` keyword keeps bare-word semantics; the
-  * non-keyword assertion names need their call/member shape, because
-  * `const expect = state.requested;` is exactly the copy this gate exists to
-  * refuse. A TypeScript generic argument list (`Map<string, Ceiling>`) is still
-  * read as a comparison: it is indistinguishable from an unspaced `a<b` without
-  * a parser, and refusing both would reject real enforcement.
+ * excluded here, in the helper shared by every consumer (legacy,
+ * owner-anchored and distributed), so no path accepts a shape another rejects.
+ * Review follow-up: only the `throw` KEYWORD counts, never a member property
+ * named `throw`; the non-keyword assertion names need their call shape — a
+ * member READ (`expect.value`) copies a value, only a member CALL
+ * (`assert.ok(…)`) enforces one — because `const expect = state.requested;` is
+ * exactly the copy this gate exists to refuse. A TypeScript generic argument
+ * list (`Map<string, Ceiling>`) is still
+ * read as a comparison: it is indistinguishable from an unspaced `a<b` without
+ * a parser, and refusing both would reject real enforcement.
  */
 /** Exported for the retained corpus measurement (#1347):
  * `scripts/measure_predicate_signal.mjs` re-runs this production shape over
@@ -472,9 +486,26 @@ export function linePredicateSignal(rawLine: string): boolean {
   return COMPARISON_RE.test(line)
     || GUARD_RE.test(line)
     || LOGICAL_OR_TERNARY_RE.test(line)
-    || THROW_KEYWORD_RE.test(line)
+    || throwKeywordSignal(rawLine)
     || ASSERTION_CALL_RE.test(line)
     || MATCH_CALL_RE.test(line);
+}
+
+/**
+ * `throw` counts only as the KEYWORD, never as a member property: a property
+ * named `throw` (`state.throw`, `state?.throw`) is an ordinary name whose
+ * value is copied, so a copy-only owner-anchored citation that reads one must
+ * not pass as enforcement.
+ *
+ * The check reads the UNBLANKED code view. The operator blanker erases the
+ * `?.` of an optional chain, so on the blanked view `state?.throw` would read
+ * as a bare `throw` keyword; the unblanked view keeps the dot that marks the
+ * member access, and the lookbehind in `THROW_KEYWORD_RE` refuses it. The
+ * blanked view is used for every other shape, where the erased operators are
+ * the artifacts being excluded.
+ */
+function throwKeywordSignal(rawLine: string): boolean {
+  return THROW_KEYWORD_RE.test(predicateCodeView(rawLine));
 }
 
 function windowLines(lines: readonly string[], line1Based: number, radius: number): readonly string[] {
