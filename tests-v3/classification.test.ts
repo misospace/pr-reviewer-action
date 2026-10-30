@@ -1280,6 +1280,47 @@ test("#1354: a link-shaped traversal inside an inline code span keeps the traver
   assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
 });
 
+test("#1354: the navigation-link discount is a Markdown rule — other documentation types keep the ordinary scan", () => {
+  // The discount's syntax model — inline links, fences, code spans — is
+  // Markdown syntax. A Markdown-link-shaped string in another documentation
+  // type is literal text, not rendered navigation, so it keeps its ordinary
+  // scan and fires (#1354).
+  const positives: [string, string][] = [
+    ["+[Guide](../README.md)\n", "docs/manual.rst"],
+    ["+[Guide](../README.md)\n", "docs/manual.adoc"],
+    ["+[Guide](../README.md)\n", "NOTES.txt"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+    assert.ok(
+      result.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"),
+      `${diff}: expected a fired traversal_literal signal, got ${JSON.stringify(result.pathHandlingProvenance.signals)}`,
+    );
+    assert.ok(
+      !result.pathHandlingProvenance.discounted.some((s) => s.source === "diff_nav_link"),
+      `${diff}: expected no discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+
+  // Markdown documentation keeps the discount: the boundary this issue asks
+  // for is unchanged.
+  const markdown = "+[Guide](../README.md)\n";
+  const markdownResult = classifyPr({
+    prFiles: files("docs/guide.md"),
+    diffText: markdown,
+    linkedIssues: [],
+  });
+  assert.equal(markdownResult.prKind, "app_code", markdown);
+  assert.ok(
+    markdownResult.pathHandlingProvenance.discounted.some(
+      (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+    ),
+    `${markdown}: expected a discounted diff_nav_link signal, got ${JSON.stringify(markdownResult.pathHandlingProvenance.discounted)}`,
+  );
+});
+
 test("#1354: every fence rule is checked against the fence token itself (#252)", () => {
   // Each rule of the fence reader gets a case that feeds the fence itself:
   // its character, its info string, its closer, and the diff streams.

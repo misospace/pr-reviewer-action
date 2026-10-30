@@ -935,6 +935,16 @@ function isDocumentationPath(path: string): boolean {
   return DOCUMENTATION_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
+/** Markdown documentation: the only file type whose prose the navigation-link
+ * discount reads. The discount's syntax model — inline links, fenced code
+ * blocks, inline code spans — is Markdown syntax. Other documentation types
+ * (`rst`, `txt`, `adoc`) keep the ordinary scan and fail toward detection: a
+ * Markdown-link-shaped string in an `.rst` file is literal text, not rendered
+ * navigation (#1354). */
+function isMarkdownPath(path: string): boolean {
+  return path.toLowerCase().endsWith(".md");
+}
+
 /** #1354: an ordinary parent-relative Markdown navigation link
  * (`[Guide](../README.md)`) is repo-internal navigation in rendered
  * documentation, not a filesystem traversal surface. In DOCUMENTATION chunks
@@ -951,7 +961,12 @@ function isDocumentationPath(path: string): boolean {
  * The discount is a PROSE rule: it applies to rendered documentation text
  * only. A line inside a fenced code block, and a link-shaped match inside an
  * inline code span, are example/quoted code, not prose — they keep the
- * ordinary traversal semantics and fail toward detection (#1354). */
+ * ordinary traversal semantics and fail toward detection (#1354).
+ *
+ * The discount is also a MARKDOWN rule: the syntax model above exists only in
+ * Markdown, so it applies to Markdown documentation only. A link-shaped
+ * string in another documentation type (`rst`, `txt`, `adoc`) is literal
+ * text, not rendered navigation, and keeps its ordinary scan semantics. */
 const MARKDOWN_INLINE_LINK_PATTERN = /!?\[[^\]]*\]\([^)]*\)/g;
 
 /** A Markdown fence line: an optional container prefix (a blockquote marker
@@ -1993,10 +2008,16 @@ export function evaluatePathHandlingSignals(
         ? isDocumentationPath(chunkFile)
         : filenames.length > 0 && filenames.every((name) => isDocumentationPath(name));
 
-    // #1354: the navigation-link discount is a PROSE rule, so the Markdown
-    // fence state decides which lines it applies to. Fenced example content
-    // is code and keeps the ordinary traversal semantics.
-    const proseLines = isDocumentation ? markdownProseLines(lines) : null;
+    // #1354: the navigation-link discount is a PROSE rule and a MARKDOWN
+    // rule, so it applies only to Markdown prose lines. Fenced example
+    // content is code and keeps the ordinary traversal semantics; other
+    // documentation types keep the ordinary scan entirely.
+    const navLinkMarkdown =
+      chunkFile !== null
+        ? isDocumentationPath(chunkFile) && isMarkdownPath(chunkFile)
+        : filenames.length > 0 &&
+          filenames.every((name) => isDocumentationPath(name) && isMarkdownPath(name));
+    const proseLines = navLinkMarkdown ? markdownProseLines(lines) : null;
 
     // #1331: a backtick opens a command substitution except in the JavaScript
     // family; `$(...)` executes only where the language evaluates it at
@@ -2017,16 +2038,17 @@ export function evaluatePathHandlingSignals(
       // only where they are inert data (#1331), the rest scan as-is.
       const symlinkClass = className === SYMLINK_SENSITIVE_CLASS;
       const traversalClass = className === "traversal_literal";
-      const navLinkScope = traversalClass && isDocumentation;
+      const navLinkScope = traversalClass && proseLines !== null;
       let fired = false;
       for (let index = 0; index < neutralized.length; index++) {
         const raw = lines[index] ?? "";
         // commentFree is the sole comment authority; the code views only
         // additionally handle quoted spans.
         const base = neutralized[index] ?? "";
-        // #1354: the navigation-link discount applies to prose lines only. A
-        // fenced or inline-code line scans unblanked, exactly like an
-        // executable file.
+        // #1354: the navigation-link discount applies to Markdown prose
+        // lines only. A fenced or inline-code line scans unblanked, exactly
+        // like an executable file, and so does a non-Markdown documentation
+        // file.
         const prose = proseLines === null ? false : (proseLines[index] ?? false);
         const scanLine = codeOnly
           ? stripQuotedSpans(base)
