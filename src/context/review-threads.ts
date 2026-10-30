@@ -24,6 +24,7 @@ import {
   parseTimestamp,
   predatesCutoff,
   SUPERSEDED_LABEL,
+  truncateBody,
   type PrThreadComment,
 } from "./pr-thread.js";
 // #762: the usefulness affordance this action appends to its own actionable
@@ -31,6 +32,7 @@ import {
 // stripped from the deterministic message extraction below exactly as the
 // finding trailer is.
 import { FEEDBACK_AFFORDANCE, stripRejectionCarryover } from "../publish/inline-findings.js";
+import { pyCodepointSlice } from "../platform/py.js";
 import { stripFindingIdentityMarkers } from "../outcomes/identity.js";
 
 export const SCHEMA_VERSION = 1;
@@ -70,11 +72,6 @@ export interface ReviewThreadView {
   category: string | null;
   own_finding: boolean;
   replies: number;
-}
-
-function codepointSlice(text: string, n: number): string {
-  const points = Array.from(text);
-  return points.length <= n ? text : points.slice(0, n).join("");
 }
 
 function optLine(value: unknown): number | null {
@@ -118,7 +115,7 @@ function findingFields(body: string): [string, string, string | null] {
     if (candidate && THREAD_FINDING_CATEGORIES.has(candidate)) category = candidate;
     text = text.slice(match[0].length);
   }
-  return [severity, codepointSlice(collapseWhitespace(text), MAX_MESSAGE_CHARS), category];
+  return [severity, pyCodepointSlice(collapseWhitespace(text), MAX_MESSAGE_CHARS), category];
 }
 
 export function normalizeThread(raw: unknown, marker: string = DEFAULT_MANAGED_MARKER): ReviewThread | null {
@@ -179,16 +176,8 @@ export function selectUnresolved(threads: readonly ReviewThread[], maxThreads: n
   return [unresolved.slice(0, Math.max(1, maxThreads)), unresolved.length];
 }
 
-function truncateBody(body: string): string {
-  if (Buffer.byteLength(body, "utf8") <= PER_COMMENT_MAX_BYTES) return body;
-  let clipped = Buffer.from(body, "utf8").subarray(0, PER_COMMENT_MAX_BYTES).toString("utf8");
-  const newline = clipped.lastIndexOf("\n");
-  if (newline >= 0) clipped = clipped.slice(0, newline);
-  return `${clipped.trimEnd()}\n[comment truncated]`;
-}
-
 function renderComment(comment: ReviewThreadComment, supersededBefore?: string | null): string {
-  let body = truncateBody(cleanBody(stripFindingIdentityMarkers(comment.body.replaceAll(FINDING_TRAILER, ""))));
+  let body = truncateBody(cleanBody(stripFindingIdentityMarkers(comment.body.replaceAll(FINDING_TRAILER, ""))), PER_COMMENT_MAX_BYTES, "[comment truncated]");
   if (body === "") body = "(empty after redaction)";
   const stamp = comment.createdAt || "unknown time";
   const superseded = predatesCutoff(comment.createdAt, supersededBefore)
@@ -267,7 +256,7 @@ export function enforcementView(threads: readonly ReviewThread[]): ReviewThreadV
       [severity, message, category] = findingFields(cleanBody(root.body));
     } else {
       severity = "minor";
-      message = codepointSlice(collapseWhitespace(cleanBody(root.body)), MAX_MESSAGE_CHARS);
+      message = pyCodepointSlice(collapseWhitespace(cleanBody(root.body)), MAX_MESSAGE_CHARS);
       category = null;
     }
     return {

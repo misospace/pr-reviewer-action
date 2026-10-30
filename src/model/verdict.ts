@@ -3,6 +3,7 @@ import { resolveReviewTriageDecision } from "./triage.js";
 import { normalizeDependencyCoverage } from "./dependency-coverage.js";
 import { VerdictParseFailure } from "./types.js";
 import { containsKnownSecret, maskDiagnostic } from "../context/redact.js";
+import { pyCodepointSlice } from "../platform/py.js";
 import { stripRevealedCapNoteTails } from "../confidence/result.js";
 
 /**
@@ -137,11 +138,6 @@ function codepointLength(text: string): number {
   return Array.from(text).length;
 }
 
-function codepointSlice(text: string, n: number): string {
-  const points = Array.from(text);
-  return points.length <= n ? text : points.slice(0, n).join("");
-}
-
 /** #766: port of `_normalize_thread_dispositions` — tri-state by key
  * presence, entries without a usable thread id dropped, unknown
  * disposition words preserved as `invalid`. */
@@ -162,7 +158,7 @@ function normalizeThreadDispositions(
     const disposition = THREAD_DISPOSITION_ALIASES[key] ?? "invalid";
     let evidence: string | null = null;
     if (typeof item.evidence === "string") {
-      evidence = codepointSlice(item.evidence.replace(SMART_REVIEW_REASON_CONTROL, " ").trim(), MAX_THREAD_EVIDENCE_CHARS) || null;
+      evidence = pyCodepointSlice(item.evidence.replace(SMART_REVIEW_REASON_CONTROL, " ").trim(), MAX_THREAD_EVIDENCE_CHARS) || null;
     }
     dispositions.push({ threadId, disposition, evidence });
     if (dispositions.length >= MAX_THREAD_DISPOSITIONS) break;
@@ -193,7 +189,7 @@ function normalizeHumanReviewDispositions(
       : "invalid";
     let evidence: string | null = null;
     if (typeof item.evidence === "string") {
-      evidence = codepointSlice(item.evidence.replace(SMART_REVIEW_REASON_CONTROL, " ").trim(), MAX_HUMAN_REVIEW_EVIDENCE_CHARS) || null;
+      evidence = pyCodepointSlice(item.evidence.replace(SMART_REVIEW_REASON_CONTROL, " ").trim(), MAX_HUMAN_REVIEW_EVIDENCE_CHARS) || null;
     }
     dispositions.push({ reviewId, disposition, evidence });
     if (dispositions.length >= MAX_HUMAN_REVIEW_DISPOSITIONS) break;
