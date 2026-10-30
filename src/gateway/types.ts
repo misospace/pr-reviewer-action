@@ -311,6 +311,7 @@ export function validatePerRequestBudget(
   value: GatewayPerRequestBudget,
   caps: GatewayBudgetLimits,
 ): GatewayPerRequestBudget {
+  const checkedCaps = validateBudgetLimits(caps);
   if (typeof value !== "object" || value === null) {
     throw new RangeError("gateway per-request budget must be a mapping");
   }
@@ -322,10 +323,10 @@ export function validatePerRequestBudget(
   if (!Number.isSafeInteger(maxCostMicros) || maxCostMicros < 0) {
     throw new RangeError("gateway per-request budget.maxCostMicros must be a safe non-negative integer");
   }
-  if (maxTokens > caps.maxTokens) {
+  if (maxTokens > checkedCaps.maxTokens) {
     throw new RangeError("gateway per-request budget.maxTokens must not exceed the run token cap");
   }
-  if (maxCostMicros > caps.maxCostMicros) {
+  if (maxCostMicros > checkedCaps.maxCostMicros) {
     throw new RangeError("gateway per-request budget.maxCostMicros must not exceed the run cost cap");
   }
   return Object.freeze({ maxTokens, maxCostMicros });
@@ -544,13 +545,15 @@ export type GatewayCallOutcome =
 export interface ModelGateway {
   /** Perform one budget-bounded, capability-checked model call. */
   call(input: GatewayCallInput): Promise<GatewayCallOutcome>;
-  /** Diagnostics only: the caps, the model credential REFERENCE, and the
-   * configured profile names. Never material, never tokens, never scope
-   * detail. The `toJSON` twin makes the natural controller diagnostic of
-   * stringifying the gateway yield names and caps only (the
-   * `WorkerCredentialPlan` serialization guard). */
+  /** Diagnostics only: the caps, the per-request reservation bound, the
+   * model credential REFERENCE, and the configured profile names. Never
+   * material, never tokens, never scope detail. The `toJSON` twin makes the
+   * natural controller diagnostic of stringifying the gateway yield names,
+   * caps, and the bound only (the `WorkerCredentialPlan` serialization
+   * guard). */
   describe(): {
     readonly caps: GatewayBudgetLimits;
+    readonly perRequestBudget: GatewayPerRequestBudget;
     readonly modelCredentialRef: string;
     readonly profileNames: readonly string[];
   };

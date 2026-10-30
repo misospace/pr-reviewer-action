@@ -609,6 +609,7 @@ test("gateway: diagnostics serialize to names, caps, and references only", () =>
   const h = harness();
   const described = h.gateway.describe();
   assert.deepEqual(described.caps, CAPS);
+  assert.deepEqual(described.perRequestBudget, PER_REQUEST, "the operator-bound the gateway books is observable");
   assert.equal(described.modelCredentialRef, "model-primary");
   assert.deepEqual(described.profileNames, [PROFILE]);
   const asJson = JSON.parse(JSON.stringify(h.gateway)) as Record<string, unknown>;

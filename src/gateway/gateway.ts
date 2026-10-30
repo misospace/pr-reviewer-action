@@ -248,6 +248,7 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
     describe() {
       return Object.freeze({
         caps,
+        perRequestBudget,
         modelCredentialRef: options.modelCredentialRef,
         profileNames: Object.freeze(Object.keys(profiles).sort()),
       });
