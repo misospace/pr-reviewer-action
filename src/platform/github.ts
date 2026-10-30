@@ -39,6 +39,16 @@ function parseJson(text: string): { ok: true; data: unknown } | { ok: false } {
   }
 }
 
+/** #1341: a usable PR payload is a non-array object carrying a numeric
+ * `number` — the one identity field both forges always return on a PR read.
+ * `null`, arrays, primitives, and PR-less objects (`{}`) are unusable
+ * payloads: a malformed successful read must fail closed with the named
+ * cause instead of proceeding to admission as an unprovable PR. */
+function isPrRecord(data: unknown): boolean {
+  return typeof data === "object" && data !== null && !Array.isArray(data)
+    && typeof (data as Record<string, unknown>).number === "number";
+}
+
 /** #970: the forge-reported author login of a raw comment/review object
  * (`user.login`). Never reads body content; a missing or non-string login is
  * `undefined` (unproven ownership, which callers fail closed on). */
@@ -228,7 +238,7 @@ export class GitHubAdapter implements PlatformReadAdapter {
         // #1341: a 2xx whose body is not a PR object is still a failed
         // read — name it instead of leaving the admission error
         // unexplained. (The returned value is unchanged: null, as before.)
-        if (data === null) {
+        if (!isPrRecord(data)) {
           this.lastPrReadFailure = new PlatformRequestError("PR read returned an unusable payload", null, "invalid-payload");
           return null;
         }

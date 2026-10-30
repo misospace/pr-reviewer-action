@@ -90,7 +90,10 @@ function startGithubMock(options: {
         res.end(JSON.stringify({ message: "not found" }));
         return;
       }
-      res.end(JSON.stringify(options.pr ?? { state: "open", draft: false }));
+      // #1341: a GitHub PR payload always carries a numeric `number` —
+      // the getPr payload contract treats a PR-less object as an
+      // invalid-payload read, so the mock serves a realistic record.
+      res.end(JSON.stringify({ number: 7, ...(options.pr ?? { state: "open", draft: false }) }));
       return;
     }
     if (url.startsWith("/repos/o/r/issues/7/comments")) {

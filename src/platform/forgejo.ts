@@ -228,9 +228,13 @@ export class ForgejoAdapter implements PlatformReadAdapter {
 
   /** Normalize a Forgejo PR payload into the GitHub shape (#254 golden
    * fixtures). head.repo.full_name missing → "" so fork detection fails
-   * closed; head.repo is never defaulted to the base repo. */
+   * closed; head.repo is never defaulted to the base repo. #1341: an empty
+   * or otherwise PR-less object is NOT synthesizable into a PR — a usable
+   * payload must at least carry the numeric `number` identity field both
+   * forges always return, so a malformed successful read records the
+   * invalid-payload cause instead of fabricating a PR-shaped value. */
   private static prToGithubShape(data: unknown, owner: string, repo: string, prNumber: string): unknown {
-    if (!isObject(data)) return null;
+    if (!isObject(data) || typeof data.number !== "number") return null;
     const head = isObject(data.head) ? data.head : {};
     const base = isObject(data.base) ? data.base : {};
     const branchRepoFullName = (branch: Record<string, unknown>): string => {

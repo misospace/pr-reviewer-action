@@ -1003,6 +1003,58 @@ test("#1341: a 200 response that is not a PR names the payload cause, not HTTP 2
   );
 });
 
+test("#1341: a 200 PR-less payload fails admission with the invalid-payload cause on both forges", async () => {
+  const fx = fixture("changed-diff-reviews");
+  // A 200 whose JSON body parses but is not a PR record (`{}`) is a failed
+  // read, not a reviewable PR: admission fails closed with the named
+  // invalid-payload cause instead of letting an unprovable payload proceed
+  // as a pr-state-unknown skip. The invalid-repo refusal stays pinned
+  // upstream (Forgejo throws before any request; platform-reads.test.ts).
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new SeamPrReadAdapter(
+        "github",
+        { ...fx.platform },
+        new GitHubAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          token: "Bearer tok_secret",
+          fetchImpl: async () => new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }),
+        }),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: invalid-payload\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /tok_secret/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new SeamPrReadAdapter(
+        "forgejo",
+        { ...fx.platform },
+        new ForgejoAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          baseUrl: "https://git.example.com",
+          token: "tok_secret",
+          fetchImpl: async () => new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }),
+        }),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: invalid-payload\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /tok_secret/);
+      return true;
+    },
+  );
+});
+
 test("#1341: a cause whose kind is not the HTTP-status class is never rendered as a status", async () => {
   const fx = fixture("changed-diff-reviews");
   // The fixture pins the formatter rule directly: a non-http-status kind

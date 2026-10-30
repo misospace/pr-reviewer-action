@@ -456,12 +456,12 @@ test("#1341: a PR read with no response records the transport kind as the cause 
 
 test("#1341: a successful PR read clears the recorded cause", async () => {
   let status = 500;
-  const fetchImpl: FetchLike = async () => new Response("{}", { status, headers: { "Content-Type": "application/json" } });
+  const fetchImpl: FetchLike = async () => new Response(JSON.stringify({ number: 1, state: "open" }), { status, headers: { "Content-Type": "application/json" } });
   const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "1", token: "Bearer t", fetchImpl });
   assert.equal(await adapter.getPr(), null);
   assert.equal(adapter.prReadFailure()?.status, 500);
   status = 200;
-  assert.deepEqual(await adapter.getPr(), {});
+  assert.deepEqual(await adapter.getPr(), { number: 1, state: "open" });
   assert.equal(adapter.prReadFailure(), null);
 });
 
@@ -469,6 +469,10 @@ test("#1341: a 2xx response with an unusable payload records the payload cause o
   // A 200 whose body is not a PR object is a failed read, not a fact about
   // the PR: the cause must be named (invalid-json / invalid-payload), and
   // a status that is not the failure (200) must not be reported as one.
+  // A PR record is a non-array object carrying a numeric `number`, so
+  // `{}` and `[]` are unusable payloads on BOTH forges — a PR-less object
+  // must never pass through (GitHub) or be synthesized into a PR shape
+  // (Forgejo).
   const githubInvalidJson = new GitHubAdapter({
     repo: "o/r",
     prNumber: "1",
@@ -489,6 +493,14 @@ test("#1341: a 2xx response with an unusable payload records the payload cause o
   assert.equal(await githubNullPayload.getPr(), null);
   assert.equal(githubNullPayload.prReadFailure()?.kind, "invalid-payload");
 
+  const githubEmptyObject = new GitHubAdapter({ repo: "o/r", prNumber: "1", token: "Bearer t", fetchImpl: jsonResponse({}) });
+  assert.equal(await githubEmptyObject.getPr(), null);
+  assert.equal(githubEmptyObject.prReadFailure()?.kind, "invalid-payload");
+
+  const githubArrayPayload = new GitHubAdapter({ repo: "o/r", prNumber: "1", token: "Bearer t", fetchImpl: jsonResponse([]) });
+  assert.equal(await githubArrayPayload.getPr(), null);
+  assert.equal(githubArrayPayload.prReadFailure()?.kind, "invalid-payload");
+
   const forgejoArrayPayload = new ForgejoAdapter({
     repo: "o/r",
     prNumber: "1",
@@ -498,6 +510,10 @@ test("#1341: a 2xx response with an unusable payload records the payload cause o
   });
   assert.equal(await forgejoArrayPayload.getPr(), null);
   assert.equal(forgejoArrayPayload.prReadFailure()?.kind, "invalid-payload");
+
+  const forgejoEmptyObject = new ForgejoAdapter({ repo: "o/r", prNumber: "1", baseUrl: "https://git.example.com", token: "t", fetchImpl: jsonResponse({}) });
+  assert.equal(await forgejoEmptyObject.getPr(), null);
+  assert.equal(forgejoEmptyObject.prReadFailure()?.kind, "invalid-payload");
 });
 
 test("#1341: an invalid repository reference is its own cause class", async () => {
