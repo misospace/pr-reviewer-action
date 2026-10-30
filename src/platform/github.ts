@@ -39,6 +39,16 @@ function parseJson(text: string): { ok: true; data: unknown } | { ok: false } {
   }
 }
 
+/** #1341: a usable PR payload is a non-array object carrying a numeric
+ * `number` — the one identity field both forges always return on a PR read.
+ * `null`, arrays, primitives, and PR-less objects (`{}`) are unusable
+ * payloads: a malformed successful read must fail closed with the named
+ * cause instead of proceeding to admission as an unprovable PR. */
+function isPrRecord(data: unknown): boolean {
+  return typeof data === "object" && data !== null && !Array.isArray(data)
+    && typeof (data as Record<string, unknown>).number === "number";
+}
+
 /** #970: the forge-reported author login of a raw comment/review object
  * (`user.login`). Never reads body content; a missing or non-string login is
  * `undefined` (unproven ownership, which callers fail closed on). */
@@ -91,6 +101,8 @@ export class GitHubAdapter implements PlatformReadAdapter {
   private readonly token: string | undefined;
   private readonly timeoutMs: number;
   private readonly fetchImpl: FetchLike;
+  /** #1341: the cause of the most recent `getPr()` failure, or null. */
+  private lastPrReadFailure: PlatformRequestError | null = null;
 
   constructor(options: GitHubAdapterOptions) {
     const parsed = parsePlatformBaseUrl(options.baseUrl ?? GITHUB_API_BASE, "GitHub API base URL");
@@ -212,14 +224,50 @@ export class GitHubAdapter implements PlatformReadAdapter {
   }
 
   async getPr(): Promise<unknown | null> {
+    this.lastPrReadFailure = null;
     const url = this.repoUrl("/pulls/", this.prNumber);
-    if (url === null) return null;
-    try {
-      const { status, data } = await requestJson(url, this.options());
-      return status === 200 ? data : null;
-    } catch {
+    if (url === null) {
+      // #1341: no request was possible — name that class rather than
+      // leaving the admission error unexplained.
+      this.lastPrReadFailure = new PlatformRequestError("PR read refused: invalid repository reference", null, "invalid-repo");
       return null;
     }
+    try {
+      const { status, data } = await requestJson(url, this.options());
+      if (status === 200) {
+        // #1341: a 2xx whose body is not a PR object is still a failed
+        // read — name it instead of leaving the admission error
+        // unexplained. (The returned value is unchanged: null, as before.)
+        if (!isPrRecord(data)) {
+          this.lastPrReadFailure = new PlatformRequestError("PR read returned an unusable payload", null, "invalid-payload");
+          return null;
+        }
+        return data;
+      }
+      // #1341: a non-2xx response IS an answer — keep its status as the
+      // cause class (credential- and body-free by construction).
+      this.lastPrReadFailure = new PlatformRequestError(`PR read failed with HTTP status ${status}`, status, "http-status");
+      return null;
+    } catch (error) {
+      // #1341: no usable response arrived — keep the seam's cause class
+      // (`transport`, `redirect-blocked`, `too-large`, `origin-mismatch`,
+      // `invalid-json`, `request-failed`) as a RE-WRAPPED error: the
+      // recorded cause's message is built from the kind alone, never the
+      // underlying error text, so the cause object carries no response
+      // content and no credential material.
+      const cause = error instanceof PlatformRequestError ? error : null;
+      this.lastPrReadFailure = new PlatformRequestError(
+        `PR read failed (${cause?.kind ?? "request-failed"})`,
+        cause?.status ?? null,
+        cause?.kind ?? "request-failed",
+      );
+      return null;
+    }
+  }
+
+  /** #1341: the cause of the most recent `getPr()` failure, or null. */
+  prReadFailure(): PlatformRequestError | null {
+    return this.lastPrReadFailure;
   }
 
   async getPrDiff(): Promise<string> {
