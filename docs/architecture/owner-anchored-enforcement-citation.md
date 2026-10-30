@@ -85,24 +85,168 @@ terms are generic (`data`, `close`, `never`, `content`), so it produced false
 downgrades far more often than true rejections (PR #1340 published
 `review_result=partial` on three consecutive reviews for exactly this reason).
 Dropping it inside declared surfaces moves the load to the declaration.
-Be honest about what remains: `linePredicateSignal` is the module's
-deliberately permissive shape heuristic — any comparison or ternary/logical
-operator, an `if`/`unless` guard, an assertion-shaped call — applied to raw
-text, not to parsed code. A line that only *looks* predicate-shaped therefore
-counts: an arrow function (`=>`), optional chaining (`?.`) and nullish
-coalescing (`??`) read as a comparison, and an assertion-shaped word inside an
-identifier, a comment or a string literal reads as an assertion. For
-owner-anchored rows this is therefore a coarse copy-detector, not a proof of
-concept: the cited line must carry one of those shapes, and a line that does
-can still be the wrong line of the right file — including a copy-only
-assignment that happens to be arrow-shaped (`const readCeiling = (state) =>
-state.requested;`). The load-bearing boundary for these rows is the
-maintainer-declared glob plus the cited-line predicate. Tightening the
-*accepted shape* (which predicate shapes count) would strengthen this gate
-further; it is deliberately left as follow-up work ([#1347]), not smuggled into
-this change, because the shape heuristic is shared with the legacy and
-distributed paths and tightening it there risks false downgrades across every
-consumer.
+Be honest about what remains: `linePredicateSignal` is still a shape heuristic
+over source text, not a parser. **#1347 closed the artifacts that made it fire
+on text which is not a predicate at all** — an arrow function (`=>`, and the
+`->` spelling Ruby/PHP/C++ use) read as a `>` comparison, an optional chain
+(`?.`), nullish coalesce (`??`) or optional property marker (`x?: T`) read as a
+ternary, and an assertion-shaped word read inside an identifier, a comment or a
+string literal. Only `throw` keeps bare-word semantics — and only as the
+KEYWORD: `throw` is not a reserved word in every language (Python and Rust
+have no `throw` statement), so a property named `throw` (`state.throw`,
+`state?.throw`) is an ordinary name, not enforcement. `reject`, `expect`,
+`invariant`, `assert` and `must…` are library/identifier names, so they count
+only in a call shape (`expect(…)`, `Assert.ok(…)`, `invariant(…)`) or as a
+member CALL reached through the bare name (`assert.deep.equal(…)`); a member
+READ (`expect.value`) copies a value and is refused. That is what separates
+enforcement from `const expect = state.requested;`. A comment or a string
+literal is prose on every line it covers, not only on the line that opens it,
+so a span still open on the next line is stripped there too. The `?`-marker blanking is
+adjacency-only (`?.`, `??`, `?:` are spelled without a space), so a ternary
+whose branch starts with a dot — `flag ? .5 : 1`, or the Swift-style
+contextual case `wide ? .large : .small` — keeps its `?`. Those rules live in
+the shared helper, so the legacy, owner-anchored and distributed paths all
+accept the same shape. On owner-anchored rows this is what makes the disclosed
+rule real: a copy-only citation such as
+`const readCeiling = (state) => state.ceiling;`,
+`const ceiling = state?.requested;`,
+`const note = 'must not exceed the ceiling';`,
+`const expect = state.requested;` or
+`const value = state.throw;` no longer passes as `met`.
+
+What the coarse copy-detector still cannot tell you, named rather than silently
+wrong:
+
+- A generic argument list (`Map<string, Ceiling>`) still reads as a comparison.
+  It is indistinguishable from an unspaced `a<b` without a parser, and refusing
+  both would reject real enforcement.
+- A regex literal (`const GT = />/;`) is still an accepted shape, and a `//`
+  inside an unquoted URL is treated as a comment opening.
+- Only single-quoted, double-quoted and backtick spans, `//`, `/* … */`, a `#`
+  comment at line start or after whitespace, and a doc-comment continuation line
+  are stripped — and a span that is still OPEN on the next line is stripped
+  there too, so a shape written inside a multi-line block comment or template
+  literal is prose on every line of that span, not only on the line that opened
+  it. Permissive residuals: a `#` glued directly to code is not a comment,
+  because `this.#ceiling > requested` is a private field and cutting there
+  would erase a real comparison — so an inline script comment written without
+  its own leading space still reads as code; and a template whose opening
+  backtick is preceded by an unpaired `/` in the code before it on that line
+  (a division, or a stray backtick inside a regex literal such as
+  `/[|;&<>`$]/`) stays line-local, because a stray backtick that opened a
+  file-wide span would swallow the rest of the file — a false downgrade is far
+  worse than the leak this closes. That residue is the pre-existing leak in
+  its permissive direction: a shape inside such a template still counts.
+  Strict residuals: a quote character inside a regex literal
+  (`if (/[="']/.test(key))`) opens a span that swallows the rest of the line,
+  so a real comparison after it is lost; a template literal's content is prose
+  whether the template ends on its line or later, so a comparison inside a
+  multi-line template (a SQL predicate in a query string, say) is not a shape
+  — the same rule the single-line string literal already follows; and a `*/`
+  inside a string inside a comment ends the comment there, as the language
+  reads it, so the code after it is read as code (and if that code opens an
+  unterminated string, the rest of the line is lost — an input that is
+  already invalid in every language with block comments).
+- A line that CLOSES a multi-line comment or template is read as code after
+  the closing delimiter, so the doc-comment `*` continuation rule does not
+  apply to it: the `*` rule covers a line whose first non-space character is
+  `*`, and a closing line is not one.
+- The adjacency-only `?` blanker resolves the spaced-`?` ambiguity toward the
+  ternary: the legal-but-never-formatted optional chain `obj ? .value` survives
+  as a `?` shape, because the alternative would erase the `?` of a real
+  leading-dot branch (`wide ? .large : .small`).
+- A member read on a bare assertion name (`expect.value`, `must.not`) is
+  refused: only a member CALL enforces (`assert.ok(…)`, `assert.deep.equal(…)`),
+  because a read copies a value. A suffixed spelling keeps no member shape at
+  all (`expected.ceiling`, `rejected.length` are English identifiers, not
+  assertions), so `expected.ok(…)` is refused too.
+- A bare `throw` outside statement position still reads as the keyword:
+  `throw = 1` (a binding named `throw`, in a language with no `throw`
+  statement) and `x = throw;` are accepted shapes. Only the member-property
+  case is distinguished, because that is the shape a copy-only citation
+  takes; telling the remaining positions apart would need a parser.
+- The assertion shapes are the spellings the corpus speaks. A parenless or
+  underscore-joined idiom such as Ruby's `assert_equal ceiling, actual` was only
+  ever matched by accident and is now refused; a keyword-assert statement whose
+  operand is a bare name — Python's `assert ceiling_ok` — is refused too, since
+  #1347's review follow-up requires a call/member shape for every
+  non-keyword assertion name (an operand carrying a real comparison,
+  `assert x <= ceiling`, still passes); and a language/style the regexes do
+  not recognize is the pre-existing limit of this heuristic.
+- A line that genuinely is predicate-shaped can still be the wrong line of the
+  right file.
+
+Each of these boundaries has a test, so a later change cannot move one silently
+— including the line-scan residuals above, which are pinned at their actual
+(permissive and strict) outcome rather than at an idealized one, and the
+open-span boundary, which is pinned in both directions: a shape inside a
+multi-line comment or template literal is refused, and the code around such a
+span is not.
+
+The load-bearing boundary for these rows remains the maintainer-declared glob
+plus the cited-line predicate.
+
+The tightening was measured against false downgrades, not only against the
+artifacts. The measurement is retained as a reproducible artifact (#1347
+review follow-up): `node scripts/measure_predicate_signal.mjs` re-runs the
+pre-#1347 baseline shape (embedded verbatim from base revision
+`8b91cf01bbadcf8c1f280c98227418089cd000fc`) against the shipped production
+shape over the git-tracked TypeScript files (an optional
+positional arg narrows the corpus to a path prefix), and prints the counts
+plus file:line samples of both change directions; the production logic is
+imported from source, never re-implemented, so the measurement cannot drift
+from the runtime. The production shape is read per FILE, because an open span
+carries across lines: the scan tracks the open block comment and template
+literal across the file's lines, so the measurement measures the shape the
+runtime applies. At the measured head (487 tracked `.ts` files, 217.3k
+lines) the tightening took accepted shapes from 54.4k to 37.7k: the sampled
+removed lines are arrows, optional chains, nullish coalescing, comment/doc
+text, string literals, optional-property declarations and member reads off an
+assertion name (`c.expect.…`) — none of them a comparison, guard, throw/assert
+or match call. The baseline comparison is
+not a pure subset: 68 lines became newly accepted, and every sampled one is
+a prefixed assertion-name call (`rejectUnknown(…)`, `expectFailed(…)`,
+`rejectCancelled(…)`) — call-shaped enforcement the tightened call-shape
+rule deliberately accepts and the old bare-word regex (`\breject\b`) could
+not match, not a loosened copy. A `src`-only scope reproduces the scale of
+the earlier unretained one-off run (297 files, 20.8k → 14.8k). That corpus
+is TypeScript, so it
+measures this product's own risk, not every language a reviewed repository might
+use. The same measurement caught one over-tightening: erasing a literal span
+collapses a real ternary such as `clip(symbol ? "x" : path)` into `? :`, so the
+operator blanking runs *before* span removal. A review of the first fix caught
+a second one: a blanker that matched a **spaced** `? .` erased the `?` of a
+genuine ternary whose branch begins with a dot (`wide ? .large : .small`,
+valid Swift), so the blanker is adjacency-only — the non-predicate `?` markers
+never contain a space, and a ternary `?` always does. A second review caught a
+third: the shape still read a member PROPERTY as the keyword and a member
+READ as an assertion call, so `state.throw` and `expect.value` passed as
+enforcement. The keyword check now refuses a member read — which is why it
+reads the unblanked code view, where the optional chain still carries its dot —
+and the assertion shape requires a member call. Measured against this
+repository's own sources, that refinement removed exactly five accepted lines
+(`c.expect.…` member reads in the golden-replay test) and added none, so it
+removed no enforcement. A later review caught a fourth: the span scan was
+line-local, so a shape inside a multi-line block comment or template literal
+counted as enforcement. The retained report measures that refinement on its
+own: it compares the shipped cross-line shape against the LINE-LOCAL view of
+the same scan (`cross_line_removed` / `cross_line_added`), so its
+false-downgrade rate is measured separately from the pre-#1347 baseline. At
+this head it removed 22 accepted lines and added one — a false-downgrade rate
+of 0.06% of the 37.7k shapes the line-local view accepted. Every one of the
+22 is span CONTENT, not a comparison the gate should have accepted: six are
+code inside a template literal's `${…}` interpolation, four are predicates
+inside a multi-line SQL template, and twelve are test fixtures whose content
+is a template literal (a child-process script, a review-body fingerprint).
+That is the disclosed rule applied consistently — a template literal's content
+is prose whether the template ends on its line or later — and the same content
+in a single-line string literal was already refused. The one added line is the
+code that follows a template's closing backtick, which the line-local scan
+used to swallow; one further line differs because the `${…}` interpolation is
+now skipped as a unit, so a nested template cannot end the outer one early.
+The measurement script is exercised by the test suite — its counting
+identities and the false-downgrade rate are pinned there — so the requirement
+traces to a test rather than to prose.
 
 The cited-line requirement is itself a deliberate tightening over the first
 draft of this gate, which searched a ±3-line window around the owner
@@ -140,9 +284,9 @@ is follow-up work.
 - Consider surfacing declared owner paths (or per-requirement owner hints, as
   the distributed hints already do) in the prompt corpus, so the owners-file
   exception is fully actionable for the model.
-- Consider a stricter accepted predicate *shape* for owner-anchored citations
-  (which predicate shapes count), measured against false-downgrade rates —
-  tracked as [#1347](https://github.com/misospace/pr-reviewer-action/issues/1347).
+- Consider excluding generic argument lists from the accepted predicate shape
+  without also rejecting an unspaced `a<b` (a parser-grade shape check) — the
+  one artifact #1347 named but deliberately left in place.
 
 ## Rejected alternatives
 
@@ -157,6 +301,17 @@ is follow-up work.
   an unrelated neighbouring comparison. The predicate stays on the cited line.
 - **Dropping the predicate for owner citations.** Rejected: the predicate is
   the anti-copy core (#854).
+- **Every unterminated backtick opens a file-wide template span.** Rejected on
+  the measurement: a stray backtick inside a regex literal (`/[|;&<>`$]/`) then
+  opened a span that swallowed the rest of the file and removed 1,781 accepted
+  lines from this repository's own sources — a false downgrade far worse than
+  the leak it closes. The template span is carried across lines only when no
+  unpaired `/` precedes the backtick on its line, and the `${…}` interpolation
+  is skipped as a unit so a nested template cannot end the outer one early.
+- **Reading a template literal's `${…}` interpolation as code.** Not
+  implemented: the interpolation is part of the template's span, so its content
+  is prose under the rule the single-line string literal already follows.
+  Treating it as code is parser-grade work with its own failure modes.
 
 ## Fixture delta
 

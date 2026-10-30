@@ -155,6 +155,7 @@ function capReason(value: unknown): string {
  * requirements (or both an enforcement and a test location) is read once. */
 class FileTextCache {
   private readonly linesByFile = new Map<string, string[] | null>();
+  private readonly signalsByFile = new Map<string, boolean[] | null>();
   constructor(private readonly workspace: string) {}
 
   private load(file: string): string[] | null {
@@ -187,6 +188,21 @@ class FileTextCache {
    * the checkout. 1-indexed callers convert via `lines[line - 1]`. */
   lines(file: string): string[] | null {
     return this.load(file);
+  }
+
+  /** The file's per-line predicate signal, or `null` when it is not a
+   * readable regular file in the checkout. Computed once per file, so a file
+   * cited by several requirements is scanned once.
+   *
+   * The open-span state is carried across the file's lines, so a shape inside
+   * a multi-line block comment or template literal is prose on EVERY line of
+   * that span, not only on the line that opened it. */
+  predicateSignals(file: string): boolean[] | null {
+    if (this.signalsByFile.has(file)) return this.signalsByFile.get(file) ?? null;
+    const lines = this.load(file);
+    const signals = lines === null ? null : filePredicateSignal(lines);
+    this.signalsByFile.set(file, signals);
+    return signals;
   }
 }
 
@@ -263,6 +279,17 @@ function anyTestLocationValid(locations: readonly TraceLocation[], cache: FileTe
 // owner-anchored predicate must sit ON the cited line (the lexical half was
 // what bounded which line could qualify there); every other citation still
 // needs the term and the predicate on the same line.
+//
+// #1347: with the lexical half gone the shape test alone was the anti-copy
+// core, and applied to raw text it accepted copy-only lines — an arrow
+// function, an optional chain, a nullish coalesce, or an assertion-shaped word
+// that survives only inside an identifier, a comment or a string literal. The
+// accepted shape is tightened in `linePredicateSignal`, which all three
+// consumers share, so the legacy and distributed paths move with it rather
+// than diverging. The review follow-ups narrowed the accepted shapes further:
+// only the `throw` KEYWORD counts (never a member property named `throw`),
+// and a non-keyword assertion name counts only in a call shape (never a
+// member read such as `expect.value`).
 // ---------------------------------------------------------------------------
 
 const PREDICATE_WINDOW_RADIUS = 3;
@@ -329,21 +356,389 @@ export function extractRequirementTerms(text: string, symbol?: string): string[]
 const COMPARISON_RE = /(===|!==|==|!=|<=|>=|<|>)/;
 const GUARD_RE = /\b(if|unless)\b/i;
 const LOGICAL_OR_TERNARY_RE = /(\?|&&|\|\|)/;
-const ASSERTION_CALL_RE = /\b(throw|reject|assert\w*|expect|invariant|must\w*)\b/i;
+/** `throw` is a keyword wherever the language has it, and a bare `throw` is
+ * always a throw — but only as the KEYWORD. `throw` is not a reserved word in
+ * every language (Python and Rust have no `throw` statement), so a member
+ * property named `throw` (`state.throw`, `state?.throw`) is an ordinary name
+ * whose value is copied, not enforcement. The lookbehind refuses a member
+ * read; the word-boundary anchor keeps `throwing` from reading as an
+ * assertion. The check runs on the UNBLANKED code view (see
+ * `throwKeywordSignal`), because the operator blanker erases the `?.` of an
+ * optional chain and would leave `state?.throw` looking like a bare keyword. */
+const THROW_KEYWORD_RE = /(?<![.\w$])throw\b/i;
+/** #1347: `reject`, `expect`, `invariant`, `assert` and `must…` are not
+ * keywords but library/identifier names, so a bare occurrence is a NAME —
+ * `const expect = state.requested;` is a copy, not enforcement. They count
+ * only in a call shape, possibly through a suffix (`expect(…)`,
+ * `assertEquals(…)`, `mustBePositive(…)`), or as a member CALL reached
+ * through the bare name (`Assert.ok(…)`, `assert.deep.equal(…)`,
+ * `invariant.call(…)`). A member READ with no call (`expect.value`,
+ * `must.not`) copies a value and is refused. The suffix may NOT be followed
+ * by a member dot: `expected.ceiling` / `rejected.length` are ordinary
+ * English identifiers copying a value, not assertions. */
+const ASSERTION_CALL_RE =
+  /\b(?:assert|must|expect|reject|invariant)(?:[A-Za-z0-9_]*\s*\(|\s*(?:\.\s*[A-Za-z_$][A-Za-z0-9_$]*\s*)+\()/i;
 const MATCH_CALL_RE = /\.(includes|startsWith|endsWith|equals|match|test)\s*\(/i;
 
-/** A line is predicate-shaped when it carries a comparison, a guard/logical
- * operator, an assertion-style call, or a string-match call — the shapes
- * that actually enforce something, as opposed to merely naming a value. */
-function linePredicateSignal(line: string): boolean {
-  return COMPARISON_RE.test(line)
-    || GUARD_RE.test(line)
-    || LOGICAL_OR_TERNARY_RE.test(line)
-    || ASSERTION_CALL_RE.test(line)
-    || MATCH_CALL_RE.test(line);
+/** Index of the quote that closes a span opened at `start`, honoring `\`
+ * escapes; `-1` when the span is not closed on this line. */
+function findClosingQuote(line: string, start: number, quote: string): number {
+  for (let index = start + 1; index < line.length; index += 1) {
+    const char = line[index] as string;
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === quote) return index;
+  }
+  return -1;
 }
 
-function windowLines(lines: readonly string[], line1Based: number, radius: number): readonly string[] {
+/**
+ * Cross-line span state for the code view (#1347): whether the previous line
+ * left a block comment or a template literal open.
+ *
+ * A span that is still open on the next line is prose there too. A line-local
+ * scan read `if (state.requested > ceiling)` or `mustNotExceed(…)` written
+ * INSIDE a multi-line block comment or template literal as enforcement,
+ * because only the line that opened the span was scrubbed. The state is
+ * carried across the file's lines so an open span is a span on every line it
+ * covers.
+ */
+interface CodeSpanState {
+  inBlockComment: boolean;
+  inTemplate: boolean;
+  /** Inside a `${ … }` interpolation inside a template literal. */
+  inInterpolation: boolean;
+  /** Brace depth inside that interpolation. */
+  interpolationDepth: number;
+}
+
+function freshSpanState(): CodeSpanState {
+  return { inBlockComment: false, inTemplate: false, inInterpolation: false, interpolationDepth: 0 };
+}
+
+/** How many times `char` occurs in `text`. */
+function countChar(text: string, char: string): number {
+  let count = 0;
+  for (const candidate of text) {
+    if (candidate === char) count += 1;
+  }
+  return count;
+}
+
+/**
+ * Scan template-literal content from `start` (just after the opening
+ * backtick) to its closing backtick. Returns the index just past the closing
+ * backtick, or `-1` when the template does not close on this line — the state
+ * then carries the open span (and an open interpolation) onto the next line.
+ *
+ * The `${ … }` interpolation is skipped as a unit, so a nested template inside
+ * it cannot terminate the outer template early, and the interpolation's own
+ * braces are counted so a `}` inside it does not close it either. This is not a
+ * parser: a `}` inside a NESTED template's text still ends the interpolation
+ * early, which is a named residual.
+ */
+function scanTemplateContent(line: string, start: number, state: CodeSpanState): number {
+  let index = start;
+  while (index < line.length) {
+    if (state.inInterpolation) {
+      const char = line[index] as string;
+      if (char === "{") {
+        state.interpolationDepth += 1;
+        index += 1;
+        continue;
+      }
+      if (char === "}") {
+        state.interpolationDepth -= 1;
+        index += 1;
+        if (state.interpolationDepth === 0) state.inInterpolation = false;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+    const char = line[index] as string;
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+    if (char === "`") return index + 1;
+    if (char === "$" && line[index + 1] === "{") {
+      state.inInterpolation = true;
+      state.interpolationDepth = 1;
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  return -1;
+}
+
+/** The two code views of one line, produced by ONE scan: the RAW view (spans
+ * removed, operators NOT blanked) and the BLANKED view (spans removed,
+ * non-predicate operators blanked).
+ *
+ * One scan, so the two views can never disagree about where a span starts or
+ * ends. A disagreement would let one view open a span the other does not, and
+ * the span state carries across lines, so the divergence would swallow the
+ * rest of the file — a false downgrade the shape check cannot afford. */
+interface LineCodeView {
+  raw: string;
+  blanked: string;
+}
+
+const EMPTY_LINE_VIEW: LineCodeView = { raw: "", blanked: "" };
+
+/**
+ * The line with its string literals and comments removed (#1347), carrying the
+ * open-span state across lines.
+ *
+ * An assertion-shaped word that survives only inside
+ * `const note = 'must not exceed the ceiling';` or `// must never be exceeded`
+ * is prose about the value, not enforcement of it, and a `>` inside a comment
+ * is not a comparison. The scan is deliberately language-agnostic: it drops
+ * `'…'`/`"…"`/`` `…` `` bodies (honoring `\` escapes; an unterminated quote
+ * takes the rest of the line, and an unterminated backtick opens a template
+ * span that CONTINUES on the next line), `//` line comments, `/* … *\/` blocks
+ * (an unclosed one CONTINUES on the next line), a `#` comment at line start or
+ * after whitespace (script languages — a `#` glued to an identifier is a
+ * private field, `this.#ceiling > requested`, and must survive), and a
+ * doc-comment continuation line whose first non-space character is `*`.
+ *
+ * Not a tokenizer, and the unmodeled cases are named rather than silently
+ * wrong. Permissive (a shape survives that is not one): a regex literal
+ * (`const gt = />/;`) and a `//` inside an unquoted URL pass through; a `#`
+ * that is glued directly to code is NOT treated as a comment, because
+ * `this.#ceiling > requested` is a private field and stripping from the `#`
+ * would erase the real comparison — so an inline script-language comment
+ * written without its space (`x = 1#if a > b`) still counts; and a template
+ * whose opening backtick is preceded by an unpaired `/` in the code before it
+ * on that line (a division, or a backtick inside a regex literal such as
+ * `/[|;&<>`$]/`) is treated as line-local, because a stray backtick that
+ * opened a file-wide template span would swallow the rest of the file — a
+ * false downgrade is far worse than the leak this closes.
+ * Strict (a real predicate is lost): a quote character inside a regex literal
+ * (`if (/[="']/.test(key))`) opens a span that consumes the rest of the line,
+ * and content inside a multi-line template literal is prose under the same
+ * rule the single-line string literal already follows.
+ */
+function scanCodeView(line: string, state: CodeSpanState): LineCodeView {
+  let index = 0;
+  let resumed = false;
+  // Resume a block comment opened on an earlier line: everything up to its
+  // terminator is comment text, and the rest of the line is code again. The
+  // terminator is the FIRST `*/`, as the language reads it — a `*/` inside a
+  // string inside the comment ends the comment there, and the code after it
+  // is read as code.
+  if (state.inBlockComment) {
+    const close = line.indexOf("*/");
+    if (close < 0) return EMPTY_LINE_VIEW;
+    index = close + 2;
+    state.inBlockComment = false;
+    resumed = true;
+  }
+  // Resume a template literal opened on an earlier line.
+  if (state.inTemplate) {
+    const close = scanTemplateContent(line, 0, state);
+    if (close < 0) return EMPTY_LINE_VIEW;
+    index = close;
+    state.inTemplate = false;
+    resumed = true;
+  }
+  // A doc-comment continuation line carries no code. It is skipped only when
+  // no span was resumed: a resumed line can be the one that CLOSES the span,
+  // and its trailing code is real.
+  if (!resumed && line.trimStart().startsWith("*")) return EMPTY_LINE_VIEW;
+  let raw = "";
+  let blanked = "";
+  // The code between two spans is a RUN. The operator blanker runs per run,
+  // which is the same as running it over the whole line first: a blanked pair
+  // (`=>`, `->`, `?.`, `??`, `?:`) is two adjacent characters, so it never
+  // straddles a span, and one scan produces both views — they can never
+  // disagree about where a span starts or ends.
+  let run = "";
+  const flush = (): void => {
+    if (run === "") return;
+    raw += run;
+    blanked += blankNonPredicateOperators(run);
+    run = "";
+  };
+  for (; index < line.length; index += 1) {
+    const char = line[index] as string;
+    if (char === "/" && line[index + 1] === "/") break;
+    if (char === "/" && line[index + 1] === "*") {
+      const close = line.indexOf("*/", index + 2);
+      if (close < 0) {
+        state.inBlockComment = true;
+        break;
+      }
+      index = close + 1;
+      flush();
+      continue;
+    }
+    if (char === "#" && (index === 0 || /\s/.test(line[index - 1] as string))) break;
+    if (char === "'" || char === '"') {
+      const close = findClosingQuote(line, index, char);
+      if (close < 0) {
+        // An unterminated quote takes the rest of the line.
+        flush();
+        raw += " ";
+        blanked += " ";
+        break;
+      }
+      index = close;
+      flush();
+      raw += " ";
+      blanked += " ";
+      continue;
+    }
+    if (char === "`") {
+      const close = scanTemplateContent(line, index + 1, state);
+      if (close < 0) {
+        // The template continues onto the next line — unless an unpaired `/`
+        // precedes the backtick in the code before it on this line, which is
+        // the conservative read (a division, or a stray backtick inside a
+        // regex literal). The count covers the pending run too, so the slash
+        // that opens the regex is counted with the rest.
+        if (countChar(raw + run, "/") % 2 === 0) {
+          state.inTemplate = true;
+        } else {
+          state.inTemplate = false;
+          state.inInterpolation = false;
+          state.interpolationDepth = 0;
+        }
+        flush();
+        raw += " ";
+        blanked += " ";
+        break;
+      }
+      index = close - 1;
+      flush();
+      raw += " ";
+      blanked += " ";
+      continue;
+    }
+    run += char;
+  }
+  flush();
+  return { raw, blanked };
+}
+
+/** The code views of a file's lines. */
+interface FileCodeViews {
+  raw: readonly string[];
+  blanked: readonly string[];
+}
+
+function computeCodeViews(lines: readonly string[]): FileCodeViews {
+  const raw: string[] = [];
+  const blanked: string[] = [];
+  const state = freshSpanState();
+  for (const line of lines) {
+    const view = scanCodeView(line, state);
+    raw.push(view.raw);
+    blanked.push(view.blanked);
+  }
+  return { raw, blanked };
+}
+
+/**
+ * Operator spellings that read as a predicate shape but enforce nothing
+ * (#1347): an arrow function (`=>`, and the `->` spelling Ruby/PHP/C++ use),
+ * an optional chain (`?.`), a nullish coalesce (`??`), and an optional
+ * property/parameter marker (`?:`). None of them is a comparison in any
+ * language this gate reads, so removing them cannot lose an enforcement shape.
+ *
+ * Blanking is ADJACENCY-only: the non-predicate markers `?.`, `??` and `?:`
+ * are normally spelled with their follower glued to the `?`, while a ternary
+ * `?` is normally separated from its branch by whitespace. Matching a spaced
+ * `? .` instead would erase the `?` of a real ternary whose branch starts with
+ * a dot — `flag ? .5 : 1`, or the Swift-style contextual case
+ * `wide ? .large : .small` — downgrading genuine enforcement to non-predicate.
+ * The named cost of this direction: the legal-but-unformatted spaced optional
+ * chain `obj ? .value` reads as a ternary and survives (documented residual).
+ *
+ * It is applied to each CODE RUN — the text between spans — which is the same
+ * as running it over the whole line FIRST: a blanked pair (`=>`, `->`, `?.`,
+ * `??`, `?:`) is two adjacent characters, so it never straddles a span, and
+ * one pair can never be split by a span. Running it before span removal is
+ * what keeps a literal span from collapsing a real ternary
+ * (`clip(symbol ? TEMPLATE : path)`) into a form the blanker reads as a
+ * marker. Blanking only ever removes operator characters, so it cannot
+ * fabricate a quote or a comment for the scan that follows.
+ */
+function blankNonPredicateOperators(code: string): string {
+  return code.replace(/=>|->/g, " ").replace(/\?(?:\?|:|\.(?![0-9]))/g, " ");
+}
+
+/**
+ * A line is predicate-shaped when its CODE (comments and string literals
+ * removed) carries a comparison, a guard/logical operator, an assertion-style
+ * call, or a string-match call — the shapes that actually enforce something,
+ * as opposed to merely naming a value.
+ *
+ * #1347: applied to raw text the shape test fired on text that is not a
+ * predicate at all — `>`/`<` matched arrow functions and generics, `?` matched
+ * `?.` and `??`, and `throw|reject|assert…|expect|invariant|must…` matched
+ * inside identifiers, comments and string literals. The owner-anchored path
+ * (#1343) dropped the lexical subject half, so there the shape was the whole
+ * anti-copy core and a copy-only citation passed as `met`. The artifacts are
+ * excluded here, in the helper shared by every consumer (legacy,
+ * owner-anchored and distributed), so no path accepts a shape another rejects.
+ * Review follow-up: only the `throw` KEYWORD counts, never a member property
+ * named `throw`; the non-keyword assertion names need their call shape — a
+ * member READ (`expect.value`) copies a value, only a member CALL
+ * (`assert.ok(…)`) enforces one — because `const expect = state.requested;` is
+ * exactly the copy this gate exists to refuse. A TypeScript generic argument
+ * list (`Map<string, Ceiling>`) is still
+ * read as a comparison: it is indistinguishable from an unspaced `a<b` without
+ * a parser, and refusing both would reject real enforcement.
+ */
+/** Exported for the retained corpus measurement (#1347):
+ * `scripts/measure_predicate_signal.mjs` re-runs this production shape over
+ * the repository's own sources so the false-downgrade measurement cannot
+ * drift from the shipped logic. Not part of any action contract.
+ *
+ * The shape is read per FILE, because a span that is still open on the next
+ * line is prose there too: the open block-comment and template-literal state
+ * is carried across the file's lines, so a shape inside a multi-line span
+ * never counts as enforcement on any line of that span. */
+export function filePredicateSignal(lines: readonly string[]): boolean[] {
+  const views = computeCodeViews(lines);
+  return lines.map((_, index) => predicateSignalIn(views, index));
+}
+
+/** The shipped production shape for one self-contained line — the single-line
+ * view of the same file-level scan, so the two cannot disagree. */
+export function linePredicateSignal(rawLine: string): boolean {
+  return filePredicateSignal([rawLine])[0] === true;
+}
+
+/**
+ * True when a line's code views carry an enforcement shape (#1347).
+ *
+ * The `throw` KEYWORD is read on the RAW view: a property named `throw`
+ * (`state.throw`, `state?.throw`) is an ordinary name whose value is copied,
+ * so a copy-only owner-anchored citation that reads one must not pass as
+ * enforcement. The operator blanker erases the `?.` of an optional chain, so
+ * on the blanked view `state?.throw` would read as a bare `throw` keyword; the
+ * raw view keeps the dot that marks the member access, and the lookbehind in
+ * `THROW_KEYWORD_RE` refuses it. The blanked view is used for every other
+ * shape, where the erased operators are the artifacts being excluded.
+ */
+function predicateSignalIn(views: FileCodeViews, index: number): boolean {
+  const raw = views.raw[index] ?? "";
+  const blanked = views.blanked[index] ?? "";
+  return COMPARISON_RE.test(blanked)
+    || GUARD_RE.test(blanked)
+    || LOGICAL_OR_TERNARY_RE.test(blanked)
+    || THROW_KEYWORD_RE.test(raw)
+    || ASSERTION_CALL_RE.test(blanked)
+    || MATCH_CALL_RE.test(blanked);
+}
+
+function windowLines<T>(lines: readonly T[], line1Based: number, radius: number): readonly T[] {
   const start = Math.max(0, line1Based - 1 - radius);
   const end = Math.min(lines.length, line1Based + radius);
   return lines.slice(start, end);
@@ -352,9 +747,9 @@ function windowLines(lines: readonly string[], line1Based: number, radius: numbe
 /** True when a predicate-shaped line occurs near one of the given citations. */
 function predicateSignalFound(locations: readonly TraceLocation[], cache: FileTextCache): boolean {
   for (const loc of locations) {
-    const lines = cache.lines(loc.file);
-    if (lines === null || loc.line > lines.length) continue;
-    if (windowLines(lines, loc.line, PREDICATE_WINDOW_RADIUS).some(linePredicateSignal)) return true;
+    const signals = cache.predicateSignals(loc.file);
+    if (signals === null || loc.line > signals.length) continue;
+    if (windowLines(signals, loc.line, PREDICATE_WINDOW_RADIUS).some((signal) => signal)) return true;
   }
   return false;
 }
@@ -367,10 +762,9 @@ function predicateSignalFound(locations: readonly TraceLocation[], cache: FileTe
  * criterion ("a real predicate on the cited line") rules out. */
 function citedLinePredicateFound(locations: readonly TraceLocation[], cache: FileTextCache): boolean {
   for (const loc of locations) {
-    const lines = cache.lines(loc.file);
-    if (lines === null || loc.line < 1 || loc.line > lines.length) continue;
-    const line = lines[loc.line - 1];
-    if (line !== undefined && linePredicateSignal(line)) return true;
+    const signals = cache.predicateSignals(loc.file);
+    if (signals === null || loc.line < 1 || loc.line > signals.length) continue;
+    if (signals[loc.line - 1] === true) return true;
   }
   return false;
 }
@@ -387,6 +781,13 @@ function citedLinePredicateFound(locations: readonly TraceLocation[], cache: Fil
  * location validity alone stands: a documented limitation, not a silent
  * pass-everything default, since this only fires when term extraction
  * itself found nothing to check.
+ *
+ * Note the asymmetry the two halves read: the shape test sees the scrubbed
+ * code view (#1347) while the term test still matches the raw line, so a
+ * genuine predicate followed by `// ceiling` on the same line counts. Pre-#1347
+ * behavior on the term half, kept deliberately: a requirement word a reviewer
+ * quotes in a comment beside the real comparison is evidence of the citation,
+ * not the copy, this gate exists to refuse.
  */
 export function enforcementPredicateFound(
   locations: readonly TraceLocation[],
@@ -394,15 +795,16 @@ export function enforcementPredicateFound(
   cache: FileTextCache,
 ): boolean {
   if (terms.length === 0) return true;
+  const termRe = new RegExp(`\\b(?:${terms.map(escapeRegExp).join("|")})\\b`, "i");
   for (const loc of locations) {
     const lines = cache.lines(loc.file);
-    if (lines === null || loc.line > lines.length) continue;
+    const signals = cache.predicateSignals(loc.file);
+    if (lines === null || signals === null || loc.line > lines.length) continue;
     const window = windowLines(lines, loc.line, PREDICATE_WINDOW_RADIUS);
-    for (const line of window) {
-      if (!linePredicateSignal(line)) continue;
-      for (const term of terms) {
-        if (new RegExp(`\\b${escapeRegExp(term)}\\b`, "i").test(line)) return true;
-      }
+    const windowSignals = windowLines(signals, loc.line, PREDICATE_WINDOW_RADIUS);
+    for (const [index, line] of window.entries()) {
+      if (windowSignals[index] !== true) continue;
+      if (termRe.test(line)) return true;
     }
   }
   return false;
