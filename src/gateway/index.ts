@@ -25,6 +25,7 @@ export {
   validateBudgetLimits,
   validateBudgetReservationRow,
   validateBudgetRunGeneration,
+  validatePerRequestBudget,
 } from "./types.js";
 export type {
   BudgetActualUsage,
@@ -43,6 +44,7 @@ export type {
   GatewayCallOutcome,
   GatewayCapabilityAuth,
   GatewayCapabilityIdentity,
+  GatewayPerRequestBudget,
   GatewayProfileEndpoint,
   GatewayProfilePricing,
   GatewayRefusalCode,

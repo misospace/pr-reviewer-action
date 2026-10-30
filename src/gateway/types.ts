@@ -286,10 +286,58 @@ function isSafeNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-/** The reservation a caller requests: the caller-supplied idempotency id, a
- * bounded token estimate, and a bounded cost estimate. The estimate is the
- * ADMISSION quantity the caps are enforced against before the wire call;
- * the settled usage (actuals) is what the accounting records. */
+/** The controller-side worst-case reservation the gateway books for a
+ * SINGLE model call. Admission reserves THIS operator-trusted bound and
+ * NEVER any worker-supplied figure: an untrusted worker cannot under-
+ * estimate (e.g. zero) to slip a request past the run's signed budget
+ * before the provider-billed actuals are recorded (the same posture as the
+ * response-byte ceiling, which is likewise operator config the worker cannot
+ * set). Sized by the operator to the largest single call the profile makes
+ * and bounded by the run's own caps so a single request can never reserve
+ * past them. */
+export interface GatewayPerRequestBudget {
+  readonly maxTokens: number;
+  readonly maxCostMicros: number;
+}
+
+/** Fail-closed validation of the per-request reservation bound against the
+ * run caps. Tokens reserve at least 1 (a request that reserves no tokens
+ * would make the token cap unenforceable — the same reason
+ * `validateBudgetLimits` requires the run token cap to be at least 1); cost
+ * may be 0 (a hard no-cost grant, satisfying a zero cost cap). The bound may
+ * never exceed the run caps it reserves inside. Throws `RangeError` (a
+ * construction-time programmer/configuration error). */
+export function validatePerRequestBudget(
+  value: GatewayPerRequestBudget,
+  caps: GatewayBudgetLimits,
+): GatewayPerRequestBudget {
+  if (typeof value !== "object" || value === null) {
+    throw new RangeError("gateway per-request budget must be a mapping");
+  }
+  const maxTokens = value.maxTokens;
+  const maxCostMicros = value.maxCostMicros;
+  if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) {
+    throw new RangeError("gateway per-request budget.maxTokens must be an integer of at least 1");
+  }
+  if (!Number.isSafeInteger(maxCostMicros) || maxCostMicros < 0) {
+    throw new RangeError("gateway per-request budget.maxCostMicros must be a safe non-negative integer");
+  }
+  if (maxTokens > caps.maxTokens) {
+    throw new RangeError("gateway per-request budget.maxTokens must not exceed the run token cap");
+  }
+  if (maxCostMicros > caps.maxCostMicros) {
+    throw new RangeError("gateway per-request budget.maxCostMicros must not exceed the run cost cap");
+  }
+  return Object.freeze({ maxTokens, maxCostMicros });
+}
+
+/** The budget reservation input shape: the caller-supplied idempotency id,
+ * a token bound, and a cost bound. The bound is the ADMISSION quantity the
+ * caps are enforced against before the wire call; the settled usage
+ * (actuals) is what the accounting records. The gateway passes its
+ * operator-trusted per-request bound here (never a worker figure); the
+ * field stays an explicit input because the durable #736 backend re-seeds
+ * historical rows whose bound was recorded at reserve time. */
 export interface BudgetReservationInput {
   readonly reservationId: string;
   readonly runId: string;
@@ -310,7 +358,8 @@ export interface BudgetActualUsage {
   readonly costMicros: number;
 }
 
-/** Committed/live usage totals across all runs the ledger accounts. */
+/** Committed/live usage totals — either across every run the ledger
+ * accounts, or scoped to one run (admission is per-run). */
 export interface BudgetUsageTotals {
   readonly requestCount: number;
   readonly tokens: number;
@@ -355,9 +404,15 @@ export interface BudgetLedger {
    * removed from the accounting. Re-refunding is an idempotent no-op;
    * refunding a committed row refuses with `reservation_mismatch`. */
   refund(reservationId: string): BudgetSettleResult;
-  /** Current accounting totals: committed rows count ACTUALS, live
-   * reserved rows count ESTIMATES, refunded rows count nothing. */
+  /** Current accounting totals ACROSS EVERY run the ledger accounts:
+   * committed rows count ACTUALS, live reserved rows count ESTIMATES,
+   * refunded rows count nothing. This is the controller-wide diagnostic;
+   * admission itself is per-run — use {@link usageFor} for one run. */
   usage(): BudgetUsageTotals;
+  /** One run's accounting totals — the quantity admission enforces the caps
+   * against. Committed rows for THIS run count ACTUALS, live reserved rows
+   * for THIS run count ESTIMATES, refunded rows count nothing. */
+  usageFor(runId: string): BudgetUsageTotals;
   /** The run's current cancellation generation (1 when the run has never
    * been cancelled). */
   generationFor(runId: string): number;
@@ -421,7 +476,10 @@ export interface MintedGatewayToken {
  * claims, the run's forge scope (for the credential broker's resolution
  * request), the accounting ids, and the transport-facing payload EXACTLY as
  * direct mode would supply it. No credential material is ever an input —
- * the gateway resolves it controller-side. */
+ * the gateway resolves it controller-side. The worker supplies NO budget
+ * estimate: the admission bound is the gateway's operator-trusted per-call
+ * reservation, so a worker cannot under-estimate to bypass the signed
+ * budget. */
 export interface GatewayCallInput {
   readonly token: string;
   readonly runId: string;
@@ -433,9 +491,6 @@ export interface GatewayCallInput {
   readonly usageId: string;
   /** The caller-supplied idempotency id of the budget reservation. */
   readonly reservationId: string;
-  /** The admission estimate the reservation reserves. */
-  readonly estimatedTokens: number;
-  readonly estimatedCostMicros: number;
   readonly platform: "github" | "forgejo";
   readonly installationId: string;
   readonly repoFullName: string;

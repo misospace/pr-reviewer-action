@@ -27,6 +27,9 @@ import { startMockServer } from "./helpers.js";
 const KEY_MATERIAL = "sk-vault-provider-key-0001";
 const SIGNING_KEY = "controller-signing-key-0123456789";
 const CAPS = validateBudgetLimits({ maxRequests: 40, maxTokens: 200_000, maxCostMicros: 5_000_000 });
+// The operator-trusted per-call reservation bound (never worker input);
+// sized well under the caps so a single request can reserve but many fit.
+const PER_REQUEST = { maxTokens: 20_000, maxCostMicros: 500_000 };
 const RUN_ID = "run-765";
 const PROFILE = "primary";
 
@@ -107,6 +110,7 @@ function harness(overrides: {
   const calls: ChatRequestInput[] = [];
   const gateway = createModelGateway({
     caps: CAPS,
+    perRequestBudget: PER_REQUEST,
     ledger,
     capability,
     broker: new InMemorySecretVault(overrides.vaultEntries ?? [vaultEntry(KEY_MATERIAL)], { now: time.now }),
@@ -133,8 +137,6 @@ function callInput(overrides: Partial<Parameters<ModelGateway["call"]>[0]> = {})
     role: "primary",
     usageId: "run-765:1",
     reservationId: "run-765:1",
-    estimatedTokens: 100,
-    estimatedCostMicros: 10,
     platform: "github",
     installationId: "inst-1",
     repoFullName: "o/r",
@@ -296,6 +298,55 @@ test("gateway: budget refusal is its own closed stop reason — never a provider
   assert.equal(h.calls.length, 0, "budget refusal happens before the wire");
 });
 
+test("gateway: admission reserves the operator per-call bound, never a worker figure", async () => {
+  const h = harness();
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  // The committed reservation row still carries the bound the gateway BOOKED
+  // for admission (the estimate) alongside the settled actuals. The booked
+  // bound is the operator's per-request budget — the worker no longer has a
+  // budget input at all, so there is nothing it can under-report.
+  const row = h.ledger.rows().find((r) => r.reservationId === "run-765:1");
+  assert.ok(row);
+  assert.equal(row!.estimatedTokens, PER_REQUEST.maxTokens, "admission reserved the operator bound");
+  assert.equal(row!.estimatedCostMicros, PER_REQUEST.maxCostMicros);
+  assert.equal(row!.actualTokens, 5, "but the accounting recorded the provider actuals");
+  assert.equal(row!.actualCostMicros, 39);
+});
+
+test("gateway: the budget is run-scoped — one run never consumes another's allowance", async () => {
+  // Tight caps shared by two runs through ONE ledger.
+  const tight = validateBudgetLimits({ maxRequests: 2, maxTokens: 100, maxCostMicros: 0 });
+  const time = clock();
+  const ledger1 = new InMemoryBudgetLedger(tight, { now: time.now });
+  const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now });
+  const gateway = createModelGateway({
+    caps: tight,
+    perRequestBudget: { maxTokens: 50, maxCostMicros: 0 },
+    ledger: ledger1,
+    capability,
+    broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: time.now }),
+    modelCredentialRef: "model-primary",
+    profiles: { [PROFILE]: { ...PRICED_PROFILE, pricing: undefined } },
+    now: time.now,
+    runChat: stubRunChat(okResponse()),
+  });
+  const tokenA = capability.mint({ runId: "run-a", modelProfile: PROFILE, generation: ledger1.generationFor("run-a"), limits: tight }).token;
+  const tokenB = capability.mint({ runId: "run-b", modelProfile: PROFILE, generation: ledger1.generationFor("run-b"), limits: tight }).token;
+  // Run A exhausts its own 2-request allowance.
+  assert.ok((await gateway.call(callInput({ token: tokenA, runId: "run-a", usageId: "run-a:1", reservationId: "run-a:1" }))).ok);
+  assert.ok((await gateway.call(callInput({ token: tokenA, runId: "run-a", usageId: "run-a:2", reservationId: "run-a:2" }))).ok);
+  const exhausted = await gateway.call(callInput({ token: tokenA, runId: "run-a", usageId: "run-a:3", reservationId: "run-a:3" }));
+  assert.equal(exhausted.ok, false);
+  if (!exhausted.ok) assert.equal(exhausted.code, "budget_exhausted");
+  // Run B still has its FULL allowance — run A's committed rows must not
+  // charge against it (the cross-run bug the review caught).
+  const runB = await gateway.call(callInput({ token: tokenB, runId: "run-b", usageId: "run-b:1", reservationId: "run-b:1" }));
+  assert.ok(runB.ok, JSON.stringify(runB));
+  assert.equal(ledger1.usageFor("run-a").requestCount, 2);
+  assert.equal(ledger1.usageFor("run-b").requestCount, 1);
+});
+
 test("gateway: the provider key never enters the worker-facing surface (serialization + refusal guards)", async () => {
   // A vault whose model credential is bound to a DIFFERENT profile forces a
   // credential refusal, exercising the refusal-reason path too.
@@ -367,6 +418,7 @@ test("gateway: restart/retry — a re-seeded ledger replays idempotently and kee
   const calls: ChatRequestInput[] = [];
   const gateway2 = createModelGateway({
     caps: CAPS,
+    perRequestBudget: PER_REQUEST,
     ledger: restarted,
     capability,
     broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: h.clock.now }),
@@ -381,9 +433,14 @@ test("gateway: restart/retry — a re-seeded ledger replays idempotently and kee
   if (!replay.ok) assert.equal(replay.code, "reservation_settled");
   assert.equal(calls.length, 0, "a replayed settled reservation never re-calls the provider");
   assert.deepEqual(restarted.usage(), h.ledger.usage());
-  // The re-seeded caps still bind: a fresh over-cap reservation refuses.
+  // The re-seeded caps still bind: with the run's token allowance nearly
+  // spent, a fresh gateway request — which reserves the operator per-call
+  // bound, never a worker figure — refuses on the token cap.
+  assert.ok(
+    restarted.reserve({ reservationId: "pre:2", runId: RUN_ID, generation: restarted.generationFor(RUN_ID), modelProfile: PROFILE, estimatedTokens: 180_000, estimatedCostMicros: 0 }).ok,
+  );
   const fresh = await gateway2.call(
-    callInput({ token: token2, reservationId: "run-765:2", usageId: "run-765:2", estimatedTokens: 199_996 }),
+    callInput({ token: token2, reservationId: "run-765:2", usageId: "run-765:2" }),
   );
   assert.equal(fresh.ok, false);
   if (!fresh.ok) assert.equal(fresh.code, "budget_exhausted");
@@ -414,6 +471,7 @@ test("gateway: direct mode vs gateway mode — the same wire request shape and o
     const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now });
     const gateway = createModelGateway({
       caps: CAPS,
+      perRequestBudget: PER_REQUEST,
       ledger,
       capability,
       broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: time.now }),
@@ -454,6 +512,7 @@ test("gateway: cancellation survives a restart — a gen-1 token still refuses a
   const calls: ChatRequestInput[] = [];
   const gateway2 = createModelGateway({
     caps: CAPS,
+    perRequestBudget: PER_REQUEST,
     ledger: restarted,
     capability,
     broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: h.clock.now }),
@@ -520,6 +579,7 @@ test("gateway: an unexpected transport-seam throw becomes a typed gateway_error 
   const h2 = harness();
   const gateway2 = createModelGateway({
     caps: CAPS,
+    perRequestBudget: PER_REQUEST,
     ledger: h2.ledger,
     capability: h2.capability,
     broker: throwingBroker,
@@ -569,8 +629,6 @@ test("gateway: malformed call inputs fail closed with invalid_request before any
     callInput({ token: h.token, runId: "bad run id" }),
     callInput({ token: h.token, modelProfile: "" }),
     callInput({ token: h.token, role: "not-a-role" as never }),
-    callInput({ token: h.token, estimatedTokens: -1 }),
-    callInput({ token: h.token, estimatedCostMicros: 0.5 }),
     callInput({ token: h.token, platform: "gitea" as never }),
     callInput({ token: h.token, repoFullName: "" }),
     callInput({ token: h.token, payload: null as never }),
@@ -591,6 +649,7 @@ test("gateway: construction fails closed on disagreeing caps, secret-shaped refe
   const ledger = new InMemoryBudgetLedger(CAPS, { now: time.now });
   const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now });
   const base = {
+    perRequestBudget: PER_REQUEST,
     ledger,
     capability,
     broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: time.now }),
@@ -602,6 +661,10 @@ test("gateway: construction fails closed on disagreeing caps, secret-shaped refe
     () => createModelGateway({ ...base, caps: validateBudgetLimits({ maxRequests: 41, maxTokens: 200_000, maxCostMicros: 5_000_000 }) }),
     /caps/,
   );
+  // The per-request reservation bound is validated against the run caps.
+  assert.throws(() => createModelGateway({ ...base, caps: CAPS, perRequestBudget: { maxTokens: 0, maxCostMicros: 0 } }), /per-request/);
+  assert.throws(() => createModelGateway({ ...base, caps: CAPS, perRequestBudget: { maxTokens: 200_001, maxCostMicros: 0 } }), /token cap/);
+  assert.throws(() => createModelGateway({ ...base, caps: CAPS, perRequestBudget: { maxTokens: 100, maxCostMicros: 5_000_001 } }), /cost cap/);
   assert.throws(() => createModelGateway({ ...base, caps: CAPS, modelCredentialRef: "sk-literal-secret-123" }), /secret/);
   assert.throws(
     () =>

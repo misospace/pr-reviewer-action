@@ -5,11 +5,14 @@
  * names: a controller restart or a worker retry can never DOUBLE-CHARGE a
  * run, and the accounting can never be SILENTLY EXCEEDED.
  *
- * - RESERVE BEFORE CALL: admission is decided against the ledger's totals
- *   (committed actuals + live reserved estimates) BEFORE the wire call; a
- *   reservation that would exceed any cap is refused with the closed code
- *   `budget_exhausted` — which is its OWN stop reason, never dressed up as
- *   a safety finding or a provider failure.
+ * - RESERVE BEFORE CALL: admission is decided against the REQUESTING RUN's
+ *   totals (its committed actuals + its live reserved estimates) BEFORE the
+ *   wire call; a reservation that would exceed any cap is refused with the
+ *   closed code `budget_exhausted` — which is its OWN stop reason, never
+ *   dressed up as a safety finding or a provider failure. The caps are a
+ *   RUN's allowance, so the projection is scoped to the run: a shared
+ *   controller ledger never lets one run consume another run's requests,
+ *   tokens, or cost.
  * - CALLER-SUPPLIED IDEMPOTENCY: the reservation id comes from the caller
  *   (e.g. `<runId>:<attempt>`). A retry with the same id after a crash or
  *   restart returns the SAME row — the estimate is counted once — and a
@@ -184,7 +187,7 @@ export class InMemoryBudgetLedger implements BudgetLedger {
       tokens: input.estimatedTokens,
       costMicros: input.estimatedCostMicros,
     };
-    const projected = addTotals(this.totals(), requested);
+    const projected = addTotals(this.totals(runId), requested);
     if (
       projected.requestCount > this.#caps.maxRequests ||
       projected.tokens > this.#caps.maxTokens ||
@@ -277,6 +280,11 @@ export class InMemoryBudgetLedger implements BudgetLedger {
     return this.totals();
   }
 
+  /** {@inheritDoc BudgetLedger.usageFor} */
+  usageFor(runId: string): BudgetUsageTotals {
+    return this.totals(runId);
+  }
+
   /** {@inheritDoc BudgetLedger.generationFor} */
   generationFor(runId: string): number {
     return this.#generations.get(runId) ?? 1;
@@ -306,11 +314,15 @@ export class InMemoryBudgetLedger implements BudgetLedger {
   }
 
   /** Committed rows count ACTUALS, live reserved rows count ESTIMATES,
-   * refunded rows count nothing. */
-  private totals(): BudgetUsageTotals {
+   * refunded rows count nothing. With a `runId` the totals are scoped to
+   * that run (this is what admission enforces — a run-scoped budget); with
+   * none it totals every run the ledger accounts (a controller-wide
+   * diagnostic). */
+  private totals(runId?: string): BudgetUsageTotals {
     const totals = { requestCount: 0, tokens: 0, costMicros: 0 };
     for (const row of this.#rows.values()) {
       if (row.state === "refunded") continue;
+      if (runId !== undefined && row.runId !== runId) continue;
       if (row.state === "committed") {
         totals.requestCount += row.actualRequestCount;
         totals.tokens += row.actualTokens;

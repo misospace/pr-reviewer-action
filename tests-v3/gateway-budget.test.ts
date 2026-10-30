@@ -303,3 +303,45 @@ test("budget: malformed inputs fail closed with typed refusals, and cancelRun th
   assert.throws(() => ledger1.cancelRun("bad run id"));
   assert.equal(ledger1.rows().length, 0);
 });
+
+test("budget: the caps are a RUN's allowance — one run never exhausts another's", () => {
+  const ledger1 = ledger();
+  // Run A consumes its own full 2-request allowance, then refuses.
+  assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "run-a:1" }).ok);
+  assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "run-a:2" }).ok);
+  const third = ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "run-a:3" });
+  assert.equal(third.ok, false);
+  if (!third.ok) assert.equal(third.code, "budget_exhausted");
+  // Run B is a SEPARATE allowance on the same shared ledger — run A's
+  // committed/reserved rows must not charge against it.
+  assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-b", reservationId: "run-b:1" }).ok);
+  assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-b", reservationId: "run-b:2" }).ok);
+  const runBThird = ledger1.reserve({ ...RESERVE, runId: "run-b", reservationId: "run-b:3" });
+  assert.equal(runBThird.ok, false);
+  if (!runBThird.ok) assert.equal(runBThird.code, "budget_exhausted");
+});
+
+test("budget: a run at its token cap does not block another run under it", () => {
+  // maxTokens 1000; run A commits 900, leaving 100 — its own next 901-token
+  // request refuses, but run B still has its full 1000.
+  const ledger1 = ledger();
+  assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "run-a:1", estimatedTokens: 900 }).ok);
+  assert.ok(ledger1.commit("run-a:1", { requestCount: 1, tokens: 900, costMicros: 10 }).ok);
+  const aOver = ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "run-a:2", estimatedTokens: 901 });
+  assert.equal(aOver.ok, false);
+  if (!aOver.ok) assert.equal(aOver.code, "budget_exhausted");
+  assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-b", reservationId: "run-b:1", estimatedTokens: 900 }).ok);
+});
+
+test("budget: usageFor is one run's totals; usage is the controller-wide total", () => {
+  const ledger1 = ledger();
+  assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "run-a:1" }).ok);
+  assert.ok(ledger1.commit("run-a:1", { requestCount: 1, tokens: 90, costMicros: 12 }).ok);
+  assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-b", reservationId: "run-b:1" }).ok);
+  assert.deepEqual(ledger1.usageFor("run-a"), { requestCount: 1, tokens: 90, costMicros: 12 });
+  assert.deepEqual(ledger1.usageFor("run-b"), { requestCount: 1, tokens: 100, costMicros: 10 });
+  // usage() aggregates both runs; an unseen run reports zero.
+  assert.deepEqual(ledger1.usage(), { requestCount: 2, tokens: 190, costMicros: 22 });
+  assert.deepEqual(ledger1.usageFor("run-none"), { requestCount: 0, tokens: 0, costMicros: 0 });
+});
+

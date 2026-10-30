@@ -5,8 +5,9 @@
  * (expired/cancelled/wrong-run/wrong-profile tokens refuse with their own
  * closed codes — verification comes FIRST, before any profile existence
  * check, so an unauthenticated caller cannot enumerate configured
- * profiles) → resolve the token's profile endpoint → reserve the run
- * budget BEFORE the wire call → resolve the provider credential through
+ * profiles) → resolve the token's profile endpoint → reserve the operator's
+ * per-call budget bound against the run's remaining allowance BEFORE the
+ * wire call → resolve the provider credential through
  * the #735 credential broker (purpose `model`, bound to the token's
  * profile and the run's forge scope) → call the provider through the
  * SHARED transport (`runChatRequest`) with the provider key traveling only
@@ -38,11 +39,13 @@
  */
 import {
   validateBudgetLimits,
+  validatePerRequestBudget,
   type BudgetLedger,
   type GatewayBudgetLimits,
   type GatewayCallInput,
   type GatewayCallOutcome,
   type GatewayCapabilityAuth,
+  type GatewayPerRequestBudget,
   type GatewayProfileEndpoint,
   type GatewayRefusalCode,
   type ModelGateway,
@@ -60,6 +63,10 @@ export interface ModelGatewayOptions {
    * two disagreeing cap sources would make admission and verification
    * diverge). */
   readonly caps: GatewayBudgetLimits;
+  /** The operator-trusted worst-case reservation booked for a single call.
+   * Admission reserves THIS, never a worker figure, so a worker cannot
+   * under-estimate to bypass the run budget; bounded by `caps`. */
+  readonly perRequestBudget: GatewayPerRequestBudget;
   readonly ledger: BudgetLedger;
   readonly capability: GatewayCapabilityAuth;
   readonly broker: CredentialBroker;
@@ -91,6 +98,7 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
   if (typeof options.broker?.resolve !== "function") {
     throw new RangeError("gateway broker must implement the credential broker seam");
   }
+  const perRequestBudget = validatePerRequestBudget(options.perRequestBudget, caps);
   if (typeof options.modelCredentialRef !== "string" || options.modelCredentialRef === "") {
     throw new RangeError("gateway modelCredentialRef must be a non-empty opaque reference");
   }
@@ -131,13 +139,16 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
         if (profile === undefined) {
           return refusal("unknown_profile", "the token's model profile has no gateway endpoint configuration", null, null);
         }
+        // The admission bound is the OPERATOR's per-request budget, never a
+        // worker figure: a worker cannot under-estimate (zero) to slip a
+        // request past the run's signed allowance before the actuals land.
         const reservation = options.ledger.reserve({
           reservationId: input.reservationId,
           runId: input.runId,
           generation: expectedGeneration,
           modelProfile: input.modelProfile,
-          estimatedTokens: input.estimatedTokens,
-          estimatedCostMicros: input.estimatedCostMicros,
+          estimatedTokens: perRequestBudget.maxTokens,
+          estimatedCostMicros: perRequestBudget.maxCostMicros,
         });
         if (!reservation.ok) {
           return refusal(reservation.code, reservation.reason, null, null);
@@ -386,12 +397,6 @@ function validateCallInput(input: GatewayCallInput): string {
   }
   if (typeof input.reservationId !== "string" || input.reservationId.length === 0 || input.reservationId.length > 128 || input.reservationId !== input.reservationId.trim()) {
     return "gateway call reservation id is malformed";
-  }
-  if (!Number.isSafeInteger(input.estimatedTokens) || input.estimatedTokens < 0) {
-    return "gateway call estimated tokens must be a safe non-negative integer";
-  }
-  if (!Number.isSafeInteger(input.estimatedCostMicros) || input.estimatedCostMicros < 0) {
-    return "gateway call estimated cost must be a safe non-negative integer";
   }
   if (input.platform !== "github" && input.platform !== "forgejo") {
     return "gateway call platform must be 'github' or 'forgejo'";
