@@ -935,6 +935,45 @@ function isDocumentationPath(path: string): boolean {
   return DOCUMENTATION_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
+/** #1354: an ordinary parent-relative Markdown navigation link
+ * (`[Guide](../README.md)`) is repo-internal navigation in rendered
+ * documentation, not a filesystem traversal surface. In DOCUMENTATION chunks
+ * only, the `traversal_literal` scan view blanks the destination of a
+ * Markdown inline link whose target is a relative path; everything else on
+ * the line — including traversal prose in the link text — keeps its existing
+ * semantics, and a suppressed destination is recorded as a discounted
+ * `diff_nav_link` signal rather than silently dropped. Executable files keep
+ * the unblanked view and fail toward detection: a quoted traversal literal
+ * there fires even when it is Markdown-link-shaped. Scheme (`https:`),
+ * protocol-relative (`//`), root-absolute (`/`) and fragment (`#`)
+ * destinations are left as-is: they are not repo-internal navigation. */
+const MARKDOWN_INLINE_LINK_PATTERN = /!?\[[^\]]*\]\([^)]*\)/g;
+
+function isRelativeNavigationDestination(destination: string): boolean {
+  const unwrapped = destination.startsWith("<") && destination.endsWith(">")
+    ? destination.slice(1, -1)
+    : destination;
+  if (unwrapped === "") return false;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(unwrapped)) return false;
+  if (unwrapped.startsWith("//")) return false;
+  if (unwrapped.startsWith("/")) return false;
+  if (unwrapped.startsWith("#")) return false;
+  return true;
+}
+
+function blankMarkdownNavDestinations(text: string): string {
+  return text.replace(MARKDOWN_INLINE_LINK_PATTERN, (match) => {
+    // The destination is the paren group after the label's `]`: the label
+    // itself may contain parentheses (`[docs (see ../x)](guide.md)`), so the
+    // boundary is the `](` pair, not the first `(`.
+    const open = match.lastIndexOf("](");
+    const close = match.lastIndexOf(")");
+    const destination = match.slice(open + 2, close).trim();
+    if (!isRelativeNavigationDestination(destination)) return match;
+    return match.slice(0, open + 2) + " ".repeat(Math.max(close - open - 2, 0)) + match.slice(close);
+  });
+}
+
 /** The symlink-operation class name, shared with `symlinkCodeView`, which
  * decides what counts as executable text for it (#1331). */
 const SYMLINK_SENSITIVE_CLASS = "symlink_sensitive";
@@ -1730,7 +1769,7 @@ function constructionOperandSpans(lines: string[], index: number): string {
  * files, and bounded line excerpts. */
 export interface PathHandlingSignal {
   signal: string;
-  source: "filename" | "diff" | "diff_test_file" | "filename_test_file" | "diff_comment";
+  source: "filename" | "diff" | "diff_test_file" | "filename_test_file" | "diff_comment" | "diff_nav_link";
   files: string[];
   samples: string[];
 }
@@ -1763,8 +1802,9 @@ function recordSignal(
 
 /** Bounded provenance for the path-handling signal model — why path handling
  * fired, and which signals were deliberately discounted: test-file backing
- * (`diff_test_file` / `filename_test_file`) and prose mentions that survive
- * only inside a comment (`diff_comment`, #960). */
+ * (`diff_test_file` / `filename_test_file`), prose mentions that survive
+ * only inside a comment (`diff_comment`, #960), and parent-relative Markdown
+ * navigation link destinations (`diff_nav_link`, #1354). */
 export interface PathHandlingProvenance {
   fired: boolean;
   signals: PathHandlingSignal[];
@@ -1846,6 +1886,7 @@ export function evaluatePathHandlingSignals(
       // lexical classes drop every quoted span, the symlink class drops them
       // only where they are inert data (#1331), the rest scan as-is.
       const symlinkClass = className === SYMLINK_SENSITIVE_CLASS;
+      const traversalClass = className === "traversal_literal";
       let fired = false;
       for (let index = 0; index < neutralized.length; index++) {
         const raw = lines[index] ?? "";
@@ -1856,12 +1897,27 @@ export function evaluatePathHandlingSignals(
           ? stripQuotedSpans(base)
           : symlinkClass
             ? symlinkCodeView(neutralized, index, backtickIsCommand, substitutionIsCommand)
-            : base;
+            : traversalClass && isDocumentation
+              ? blankMarkdownNavDestinations(base)
+              : base;
         if (matchesAny(scanLine, patterns)) {
           if (!fired) {
             recordSignal(buckets, className, source, chunkFile, pathSample(raw));
             fired = true;
           }
+          continue;
+        }
+        // #1354: a hit that survives outside comments but is suppressed only
+        // by the navigation-link view is a Markdown nav destination, not a
+        // traversal literal. Record it as discounted (never fired, never
+        // silently dropped) so the decision is explainable from the artifact
+        // alone.
+        if (
+          traversalClass && isDocumentation &&
+          matchesAny(commentFree[index] ?? "", patterns) &&
+          !matchesAny(blankMarkdownNavDestinations(commentFree[index] ?? ""), patterns)
+        ) {
+          recordSignal(discountedBuckets, className, "diff_nav_link", chunkFile, pathSample(raw));
           continue;
         }
         // #960: a hit that survives in the raw line but is gone once comments

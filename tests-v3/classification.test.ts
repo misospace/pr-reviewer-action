@@ -1156,6 +1156,96 @@ test("#960: a `../` that appears only in a comment or doc comment is not a trave
   }
 });
 
+// ── #1354: parent-relative Markdown navigation is not traversal ───────────
+
+test("#1354: an ordinary parent-relative Markdown navigation link is not a traversal literal", () => {
+  const negatives: [string, string][] = [
+    // The issue repro: a plain relative link in a documentation file.
+    ["+[Guide](../README.md)\n", "docs/guide.md"],
+    ["+[Guide](../README.md)\n", "README.md"],
+    // An image reference is the same navigation syntax.
+    ["+![Diagram](../assets/diagram.png)\n", "docs/guide.md"],
+    // Multi-level parent-relative navigation inside a sentence.
+    ["+See the [setup guide](../../docs/setup.md) before running.\n", "docs/guide.md"],
+    // Angle-bracket destination form.
+    ["+[Guide](<../README.md>)\n", "docs/guide.md"],
+    // A parenthesised label does not confuse destination extraction: the
+    // traversal prose in the label keeps firing, so this fires (preserved
+    // below); a benign label still discounts cleanly.
+    ["+[docs (see the guide)](../README.md)\n", "docs/guide.md"],
+  ];
+  for (const [diff, filename] of negatives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", diff);
+    assert.ok(!result.riskFlags.includes("path_handling_changes"), diff);
+    assert.equal(result.pathHandlingProvenance.fired, false, diff);
+    // The decision is recorded, not silently dropped.
+    assert.ok(
+      result.pathHandlingProvenance.discounted.some(
+        (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+      ),
+      `${diff}: expected a discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+
+  // The suppression is scoped to the link destination: traversal prose in the
+  // link TEXT, standalone traversal prose, real traversal in source, and
+  // non-relative destinations all keep their existing semantics (#968).
+  const preserved: [string, string][] = [
+    // Standalone traversal prose is not navigation syntax (#968 regression).
+    ["+see ../etc/passwd\n", "README.md"],
+    // Traversal prose inside the link text is still prose about traversal.
+    ["+[see ../etc/passwd](guide.md)\n", "README.md"],
+    // Real traversal in executable source still fires.
+    ['+open("../../etc/passwd")\n', "src/app.py"],
+    // Traversal prose on the same line as a navigation link still fires.
+    ["+see [guide](../README.md) and ../etc/passwd\n", "README.md"],
+    // A remote URL destination is not repo-internal navigation.
+    ["+docs live at [guide](https://example.com/a/../guide.md)\n", "README.md"],
+    // A root-absolute destination is not parent-relative navigation.
+    ["+[home](/index.md)\n+see ../etc/passwd\n", "docs/guide.md"],
+    // A parenthesised label does not hide its own traversal prose: the label
+    // text keeps its existing semantics.
+    ["+[docs (see ../etc/passwd)](guide.md)\n", "README.md"],
+    // Executable files fail toward detection (#749): a quoted traversal
+    // literal fires even when it is Markdown-link-shaped. The suppression is
+    // scoped to documentation chunks, not a quoted-string strip.
+    ['+open("[a](../../etc/passwd)")\n', "src/app.py"],
+    ['+const help = "[Guide](../README.md)";\n', "src/app.ts"],
+  ];
+  for (const [diff, filename] of preserved) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+  }
+
+  // A documentation navigation link does not suppress independent
+  // path-handling evidence elsewhere in the same diff.
+  const mixed = "+[Guide](../README.md)\n+open(\"../../etc/passwd\")\n";
+  const mixedResult = classifyPr({
+    prFiles: files("docs/guide.md"),
+    diffText: mixed,
+    linkedIssues: [],
+  });
+  assert.equal(mixedResult.prKind, "path_handling_changes", mixed);
+  assert.equal(mixedResult.pathHandlingProvenance.fired, true, mixed);
+});
+
+test("#1354: adversarial — a fake link label cannot hide a real traversal literal", () => {
+  // #252: the blanking must not swallow a traversal that sits outside the
+  // destination, and a malformed link-shaped prefix must not blank code.
+  const positives: [string, string][] = [
+    // The `../` is in the label side text after a broken link prefix.
+    ["+x = open(\"[a](b) ../../etc/passwd\")\n", "src/app.py"],
+    // An unbalanced bracket breaks the link shape; the traversal is real.
+    ["+[guide(../README.md)\n+open(\"../../etc/passwd\")\n", "src/app.py"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+  }
+});
+
 test("#960: a traversal literal in real code still fires, including next to an import and past a string-literal marker", () => {
   const positives: [string, string][] = [
     // Plain code, no comment anywhere.
