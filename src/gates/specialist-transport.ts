@@ -1,4 +1,5 @@
 import { maskKnownSecrets, redactText } from "../context/redact.js";
+import { pyCodepointSlice } from "../platform/py.js";
 import type { ApiFormat, NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { SpecialistDiscardedWireAttempt, SpecialistRequestFn, SpecialistTransportOutcome } from "../specialists/runner.js";
 import { describeTransportFailure, resolveEndpoint, TransportFailure } from "../transport/http.js";
@@ -48,11 +49,6 @@ export interface SpecialistTransportConfig {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function codePointSlice(text: string, max: number): string {
-  const points = Array.from(text);
-  return points.length <= max ? text : points.slice(0, max).join("");
 }
 
 /** The v2 SSE reassembler's result shape for a streamed turn.
@@ -248,7 +244,7 @@ const wire = {
       if (config.extraHeaders !== undefined) applyExtraHeaders({}, config.extraHeaders);
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : String(error);
-      const masked = codePointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey, ...extraSecrets])), 500);
+      const masked = pyCodepointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey, ...extraSecrets])), 500);
       return { ok: false, errorMessage: masked, wire_attempted: false };
     }
     let outcome: ChatRequestOutcome;
@@ -300,7 +296,7 @@ const wire = {
         }
       }
       const rawMessage = error instanceof Error ? error.message : String(error);
-      const masked = codePointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey, ...extraSecrets])), 500);
+      const masked = pyCodepointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey, ...extraSecrets])), 500);
       return wireTelemetry({ ok: false, errorMessage: masked, timeout: masked.toLowerCase().includes("timed out") });
     }
     if (outcome.status === "ok") {
@@ -317,7 +313,7 @@ const wire = {
     const terminal = classifyTerminalProviderFailure(outcome.failure);
     if (terminal !== null) latch.latch(laneKey, terminal.reason);
     const { message, timeout, status, statusDetail } = failureMessage(outcome, config.apiKey, extraSecrets);
-    const masked = codePointSlice(redactText(maskKnownSecrets(message, [config.apiKey, ...extraSecrets])), 500);
+    const masked = pyCodepointSlice(redactText(maskKnownSecrets(message, [config.apiKey, ...extraSecrets])), 500);
     return wireTelemetry({
       ok: false,
       errorMessage: masked,
