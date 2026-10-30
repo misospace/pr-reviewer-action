@@ -1,7 +1,7 @@
 import { requestText } from "../platform/http.js";
 import type { FetchLike } from "../platform/http.js";
 import { isPlainObject } from "../platform/jq.js";
-import { pyStr, pyStrip, pyTruthy } from "../platform/py.js";
+import { pyCodepointSlice, pyStr, pyStrip, pyTruthy } from "../platform/py.js";
 import { LINEAR_PRIORITY_LABELS, type LinkedIssue } from "../context/types.js";
 import { pyJsonDumpsLine } from "../context/py-json.js";
 
@@ -119,12 +119,6 @@ function strOr(value: unknown): string {
   return pyTruthy(value) ? pyStr(value) : "";
 }
 
-/** First `limit` code points (Python slicing), not UTF-16 units. */
-function codePointSlice(text: string, limit: number): string {
-  if (text.length <= limit) return text;
-  return [...text].slice(0, limit).join("");
-}
-
 function normalizeLinearIssue(payload: unknown, identifier: string): LinkedIssue {
   if (!isPlainObject(payload)) throw new LinearContextError("Linear returned an invalid response shape");
   if (pyTruthy(payload.errors)) {
@@ -155,7 +149,7 @@ function normalizeLinearIssue(payload: unknown, identifier: string): LinkedIssue
     repo: "",
     number: refNumber(resolvedIdentifier),
     title: strOr(issue.title),
-    body: codePointSlice(strOr(issue.description), MAX_DESCRIPTION_CHARS),
+    body: pyCodepointSlice(strOr(issue.description), MAX_DESCRIPTION_CHARS),
     url: strOr(issue.url),
     state: strOr(state.name),
     priority,

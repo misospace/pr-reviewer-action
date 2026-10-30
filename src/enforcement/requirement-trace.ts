@@ -523,7 +523,11 @@ const EMPTY_LINE_VIEW: LineCodeView = { raw: "", blanked: "" };
  * and content inside a multi-line template literal is prose under the same
  * rule the single-line string literal already follows.
  */
-function scanCodeView(line: string, state: CodeSpanState): LineCodeView {
+function scanCodeView(
+  line: string,
+  state: CodeSpanState,
+  blankGenerics: boolean,
+): LineCodeView {
   let index = 0;
   let resumed = false;
   // Resume a block comment opened on an earlier line: everything up to its
@@ -556,12 +560,17 @@ function scanCodeView(line: string, state: CodeSpanState): LineCodeView {
   // which is the same as running it over the whole line first: a blanked pair
   // (`=>`, `->`, `?.`, `??`, `?:`) is two adjacent characters, so it never
   // straddles a span, and one scan produces both views — they can never
-  // disagree about where a span starts or ends.
+  // disagree about where a span starts or ends. The generic-argument-list
+  // blanker (#1355) reads the RAW run first, so the operator blanker cannot
+  // turn a span it refused into one it accepts (`x<y??z>w` refuses at the
+  // `??`; after `??` is blanked the `<`/`>` comparison must survive).
   let run = "";
   const flush = (): void => {
     if (run === "") return;
     raw += run;
-    blanked += blankNonPredicateOperators(run);
+    blanked += blankNonPredicateOperators(
+      blankGenerics ? blankGenericArgumentLists(run) : run,
+    );
     run = "";
   };
   for (; index < line.length; index += 1) {
@@ -631,12 +640,15 @@ interface FileCodeViews {
   blanked: readonly string[];
 }
 
-function computeCodeViews(lines: readonly string[]): FileCodeViews {
+function computeCodeViews(
+  lines: readonly string[],
+  blankGenerics: boolean,
+): FileCodeViews {
   const raw: string[] = [];
   const blanked: string[] = [];
   const state = freshSpanState();
   for (const line of lines) {
-    const view = scanCodeView(line, state);
+    const view = scanCodeView(line, state, blankGenerics);
     raw.push(view.raw);
     blanked.push(view.blanked);
   }
@@ -666,10 +678,110 @@ function computeCodeViews(lines: readonly string[]): FileCodeViews {
  * what keeps a literal span from collapsing a real ternary
  * (`clip(symbol ? TEMPLATE : path)`) into a form the blanker reads as a
  * marker. Blanking only ever removes operator characters, so it cannot
- * fabricate a quote or a comment for the scan that follows.
+ * fabricate a quote or a comment for the scan that follows. The
+ * generic-argument-list blanker (#1355) runs on the same run, before this one
+ * and on the raw text: a complete generic span can never straddle a run
+ * either, because its content refuses quote characters and comments are
+ * removed before runs are formed.
  */
 function blankNonPredicateOperators(code: string): string {
   return code.replace(/=>|->/g, " ").replace(/\?(?:\?|:|\.(?![0-9]))/g, " ");
+}
+
+/**
+ * #1355: a generic argument list (`Map<string, number>`) used to read as a
+ * comparison — its `<`/`>` are the same characters `COMPARISON_RE` matches —
+ * so an owner-anchored copy-only citation such as
+ * `const ceiling = Map<string, number>;` passed as `met`. The list is blanked
+ * before the comparison is read, but ONLY a span that closes as a type list:
+ * the opening `<` must be GLUED to a name (`Map<`, never a spaced `a < b`),
+ * a matching `>` must exist at angle depth 0, and every character between
+ * must be type-like (identifiers, whitespace, commas, dots, `[`/`]`, and
+ * single `|`/`&`). Anything else refuses the span and the `<`/`>` survive —
+ * which is the direction the issue pins, because a real comparison never
+ * closes a type-like span: the unspaced `a<b` has no matching `>`, `a<=b`
+ * carries `=`, and `a<b && c>d`, `a<b || c>d`, `a<b ? c>d : e` refuse at the
+ * operator, so both comparisons keep firing.
+ *
+ * What IS blanked is the copy-only citation shape: `Map<string, number>`,
+ * nested `Map<string, Array<number>>`, unions `Array<string | number>`,
+ * qualified names `Foo.Bar<number>`, array types `Array<T[]>` — type
+ * annotations enforce nothing. The named residuals (#1355), all GLUED chains
+ * whose span happens to look like a type list and is indistinguishable from
+ * one without a parser: `a<b>c` (chained comparison), `a<b, c>d` (comma
+ * operator), `a<b|c>d` (single-bar bitwise or — distinct from the `||` that
+ * refuses the span), and a generic whose arguments are richer than bare
+ * identifiers — object literals `{ a: string }`, string-literal keys,
+ * function types, default type parameters — still refuse the span and keep
+ * reading as a comparison. A shift chain is refused, not blanked:
+ * `a<<b>>c` carries `<<`, which never occurs inside a valid argument list,
+ * so the span refuses and both operators survive. A generic list that WRAPS
+ * to the next line is not blanked either (the scan is run-scoped): its
+ * opening line still passes as enforcement — the pre-existing behavior,
+ * left in place because carrying an open-generic span across lines would
+ * swallow the comparisons after an unclosed `<`, the same file-wide-span
+ * failure the template-literal rule was measured against.
+ *
+ * Blanking can never add an ACCEPTED shape: it inserts spaces (never
+ * juxtaposes characters), and a `<` in a blanked span had already fired
+ * `COMPARISON_RE`, so the line was accepted before the blanker ran —
+ * `expect<Foo>(x)` even reads as an assertion call after `Foo` is blanked,
+ * but it was accepted as a comparison either way. The corpus measurement
+ * (`generic_added_total`, pinned 0) and an exhaustive brute force over the
+ * blanker's alphabet found no accept-status fabrication.
+ */
+function blankGenericArgumentLists(code: string): string {
+  let blanked = "";
+  let index = 0;
+  while (index < code.length) {
+    const char = code[index] as string;
+    if (
+      char === "<" && index > 0
+      && /[A-Za-z0-9_$]/.test(code[index - 1] as string)
+    ) {
+      const close = matchingGenericListClose(code, index);
+      if (close >= 0) {
+        blanked += " ".repeat(close + 1 - index);
+        index = close + 1;
+        continue;
+      }
+    }
+    blanked += char;
+    index += 1;
+  }
+  return blanked;
+}
+
+/** Characters a generic argument list may carry besides its own `<`/`>`:
+ * identifier text, whitespace, the argument separator, qualified-name dots,
+ * array/index brackets, and the single union/intersection bars. `&&`, `||`
+ * and every other operator (`= + - * / % ! ( ) { } ; : ?` quotes) marks the
+ * span as an EXPRESSION, not a type list, and refuses the blank. */
+const GENERIC_LIST_CONTENT_RE = /[A-Za-z0-9_$\s,.[\]|&]/;
+
+/** The index of the `>` that closes the generic argument list opened at
+ * `open` (a `<` glued to a name), or `-1` when the span is not a type list:
+ * no angle-depth-0 close on this run, or a non-type-like character inside. */
+function matchingGenericListClose(code: string, open: number): number {
+  let depth = 0;
+  for (let index = open; index < code.length; index += 1) {
+    const char = code[index] as string;
+    if (char === "<") {
+      // `<<` is a left shift, never part of an argument list (`>>` IS — it
+      // closes nested generics — so only the doubled `<` refuses the span).
+      if (code[index + 1] === "<") return -1;
+      depth += 1;
+      continue;
+    }
+    if (char === ">") {
+      depth -= 1;
+      if (depth === 0) return index;
+      continue;
+    }
+    if (!GENERIC_LIST_CONTENT_RE.test(char)) return -1;
+    if ((char === "&" || char === "|") && code[index + 1] === char) return -1;
+  }
+  return -1;
 }
 
 /**
@@ -690,10 +802,12 @@ function blankNonPredicateOperators(code: string): string {
  * named `throw`; the non-keyword assertion names need their call shape — a
  * member READ (`expect.value`) copies a value, only a member CALL
  * (`assert.ok(…)`) enforces one — because `const expect = state.requested;` is
- * exactly the copy this gate exists to refuse. A TypeScript generic argument
- * list (`Map<string, Ceiling>`) is still
- * read as a comparison: it is indistinguishable from an unspaced `a<b` without
- * a parser, and refusing both would reject real enforcement.
+ * exactly the copy this gate exists to refuse. #1355 closed the last artifact
+ * #1347 named: a generic argument list (`Map<string, Ceiling>`) is blanked
+ * before the comparison is read, while the unspaced real comparison `a<b`
+ * survives — the comparisons this gate must keep never close a type-like
+ * span, and the glued chains that do (`a<b>c`, `a<b|c>d`, `a<b, c>d`) are the
+ * named residual of `blankGenericArgumentLists`.
  */
 /** Exported for the retained corpus measurement (#1347):
  * `scripts/measure_predicate_signal.mjs` re-runs this production shape over
@@ -705,7 +819,19 @@ function blankNonPredicateOperators(code: string): string {
  * is carried across the file's lines, so a shape inside a multi-line span
  * never counts as enforcement on any line of that span. */
 export function filePredicateSignal(lines: readonly string[]): boolean[] {
-  const views = computeCodeViews(lines);
+  const views = computeCodeViews(lines, true);
+  return lines.map((_, index) => predicateSignalIn(views, index));
+}
+
+/** Exported for the retained corpus measurement (#1355): the shipped
+ * production pipeline with the generic-argument-list blanker disabled, so the
+ * refinement's false-downgrade rate is measured against the production logic
+ * itself rather than a re-implementation that could drift from it. Not part
+ * of any action contract. */
+export function filePredicateSignalIgnoringGenericArgumentLists(
+  lines: readonly string[],
+): boolean[] {
+  const views = computeCodeViews(lines, false);
   return lines.map((_, index) => predicateSignalIn(views, index));
 }
 
@@ -1721,7 +1847,12 @@ const MAX_SUBJECT_TERM_CHARS = 200;
  * `request`, `only`, `never`, … — and bare acronyms (`PR`, `API`, `URLs`),
  * which occur as ordinary prose in almost every diff, name nothing specific
  * enough to establish scope on their own. That generic overlap is what let
- * #956's unrelated standards leak in. */
+ * #956's unrelated standards leak in.
+ *
+ * #1346 extends the same reasoning to pairs: a phrase counts only when at
+ * least one of its words carries some specificity, so a bigram of two pure
+ * connectives ("only through", "never appear", "may appear" …) composes no
+ * concept and is dropped. See {@link GENERIC_PHRASE_WORDS}. */
 interface RequirementSubjectSignals {
   phrases: string[][];
   strongTerms: string[];
@@ -1737,6 +1868,58 @@ function isStrongTerm(word: string): boolean {
   if (word === word.toUpperCase()) return false; // pure acronym: HTTP, API, PR, URL
   if (/^[A-Z]{2,}s$/.test(word)) return false; // acronym + plural: URLs, APIs, JSONs
   return true; // identifier: sourceSha, repoDid, SQLite, HTTPServer, GitHub
+}
+
+/** #1346: words that carry no subject at all — connective adverbs,
+ * subject-less prepositions and particles, modals and quantifiers, and
+ * appearance verbs ("appear", "seem", "remain"). They are ordinary English
+ * prose: any diff's comments repeat them regardless of what the change
+ * touches, so a bigram made of two of them ("only through", "never appear",
+ * "may appear") names nothing an enforcing change would reference.
+ *
+ * The observed leak: PR #1342 (Renovate classifier kinds) scoped the AGENTS.md
+ * credential-transport standard in on two generic bigrams of its prose alone —
+ * the diff's added comments happened to contain "only through" and "never
+ * appear" while touching no credential or transport code — and the review had
+ * to disposition a boundary it cannot reach, three rounds running.
+ *
+ * This set is NOT {@link TERM_STOPWORDS}: those words are removed from the
+ * stream entirely (and from the broader enforcement-line term net below);
+ * these stay in the stream and in every mixed pair, and only suppress a
+ * bigram whose BOTH halves are generic. A pair keeps counting when either
+ * word is specific — `data never` (the #957 pinned case), `trust boundary`,
+ * `auth headers`. Words that name a domain concept even when they read as
+ * verbs here (`cross`, `forge`, `close`, `weaken`) are deliberately excluded:
+ * suppressing them would narrow real subject overlap, which the fail-closed
+ * direction of scope (#958 owner paths, no-provenance and linked-issue
+ * entries) cannot recover. */
+const GENERIC_PHRASE_WORDS: ReadonlySet<string> = new Set([
+  // connective adverbs / degree words
+  "only", "merely", "simply", "just", "even", "still", "ever", "never", "always",
+  "often", "rarely", "generally", "typically", "usually", "currently", "previously",
+  "eventually", "immediately", "directly", "exactly", "precisely", "respectively",
+  "quite", "very", "too", "instead", "rather", "otherwise", "thus", "hence",
+  "therefore", "however", "moreover", "furthermore", "further", "more", "most",
+  "less", "least", "much", "many", "few", "enough",
+  // subject-less prepositions and particles
+  "through", "throughout", "across", "along", "around", "above", "below",
+  "behind", "beyond", "inside", "outside", "during", "upon", "toward", "towards",
+  "out", "off",
+  // modals and quantifiers
+  "can", "cannot", "could", "would", "may", "might", "will", "both", "either",
+  "neither", "other", "others", "another", "same", "own", "some", "every",
+  "each", "none", "nothing", "everything", "something", "anything",
+  // appearance verbs
+  "appear", "appears", "appeared", "appearing", "seem", "seems", "seemed",
+  "occur", "occurs", "occurred", "occurring", "happen", "happens", "happened",
+  "happening", "remain", "remains", "remained", "stay", "stays", "stayed",
+  // adjectives of possibility
+  "able", "unable",
+]);
+
+/** True when a single word is generic under {@link GENERIC_PHRASE_WORDS}. */
+function genericPhraseWord(word: string): boolean {
+  return GENERIC_PHRASE_WORDS.has(word.toLowerCase());
 }
 
 /** #1000: a code span carrying `-` or `/` is ONE literal compound identifier,
@@ -1836,7 +2019,12 @@ export function requirementSubjectSignals(text: string): RequirementSubjectSigna
   });
   const phrases: string[][] = [];
   for (let i = 0; i < kept.length - 1; i += 1) {
-    if (kept[i + 1]!.index === kept[i]!.index + 1) phrases.push([kept[i]!.word, kept[i + 1]!.word]);
+    if (kept[i + 1]!.index !== kept[i]!.index + 1) continue;
+    // #1346: two generic connectives compose no concept — see
+    // GENERIC_PHRASE_WORDS. The atomic single-term phrases pushed below are
+    // never subject to this test: a code span is one literal identifier.
+    if (genericPhraseWord(kept[i]!.word) && genericPhraseWord(kept[i + 1]!.word)) continue;
+    phrases.push([kept[i]!.word, kept[i + 1]!.word]);
   }
   for (const term of atomic) phrases.push([term]);
   const strongTerms = kept.filter((entry) => isStrongTerm(entry.word)).map((entry) => entry.word.toLowerCase());
@@ -2059,8 +2247,9 @@ function ownershipTouched(compiled: readonly CompiledOwnership[], text: string, 
 /** A requirement's subject is touched when the changed text contains one of
  * its multi-word phrases (in any spelling) or one of its distinctive
  * identifier-shaped terms. Two plain words like `docs` and `repo` are
- * deliberately NOT enough — see `requirementSubjectSignals`. Bounded
- * heuristic, like `enforcementPredicateFound`. */
+ * deliberately NOT enough — see `requirementSubjectSignals`. Neither are two
+ * generic connectives like `only through` (#1346). Bounded heuristic, like
+ * `enforcementPredicateFound`. */
 function subjectTouched(text: string, changed: string): boolean {
   const { phrases, strongTerms } = requirementSubjectSignals(text);
   if (phrases.some((words) => phraseMatched(words, changed))) return true;
@@ -2081,7 +2270,10 @@ export interface RequirementTraceScope {
  * changed text every entry stays in scope (fail closed). #957 tightened the
  * subject test: only a multi-word phrase or an identifier-shaped single term
  * counts, so unrelated standards can no longer ride in on generic vocabulary
- * shared with every diff. #958 adds explicit `ownership` (from repository
+ * shared with every diff. #1346 tightened it one step further: a phrase counts
+ * only when at least one of its words is specific, so a generic connective
+ * bigram in ordinary prose ("only through", "never appear") is no scope
+ * evidence. #958 adds explicit `ownership` (from repository
  * config) so a change to a boundary's own file scopes its requirement in
  * even when the diff repeats none of its prose. */
 export function requirementTraceScope(

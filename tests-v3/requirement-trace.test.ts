@@ -876,6 +876,105 @@ test("#1347: the single-line entry point is the same shape as the file-level sca
   ]), [false, false, false]);
 });
 
+test("#1355: a generic argument list is not a comparison, and an unspaced comparison still is", () => {
+  // #1347 closed the arrow/optional-chain/nullish artifacts, but a generic
+  // argument list still read as a comparison — `COMPARISON_RE` matches the
+  // same `<`/`>` characters — so an owner-anchored copy-only citation such as
+  // `const ceiling = Map<string, number>;` passed as `met` (the major finding
+  // on #1352, where the residual was documented as deliberate). #1355 blanks
+  // the list before the comparison is read — but ONLY a span that closes as a
+  // type list, because a real comparison never closes one: the unspaced
+  // `a<b` has no matching `>`, `a<=b` carries `=`, and `a<b && c>d`,
+  // `a<b || c>d` and `a<b ? c>d : e` refuse at the operator. Refusing real
+  // enforcement is the one failure this gate cannot afford, so every
+  // operator-joined and spaced form below must keep passing.
+  const copies: Array<[string, string]> = [
+    ["a generic argument list", "const ceiling = Map<string, number>;"],
+    ["a nested generic argument list", "const ceiling = Map<string, Array<number>>;"],
+    ["a union type argument", "const ceiling = Array<string | number>;"],
+    ["a generic type annotation", "let ceiling: Map<string, number>;"],
+    ["a generic type alias", "type CeilingPair = Map<string, number>;"],
+  ];
+  // Every artifact carries the requirement's own word `ceiling` as a whole
+  // word, so the legacy path's lexical half is satisfied and only the shape
+  // can refuse the citation.
+  for (const [label, line] of copies) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "unverifiable",
+      `a copy-only owner-anchored citation shaped like ${label} must not pass as met: ${line}`,
+    );
+    assert.equal(
+      dispositionOfQuuxCitation(line, false),
+      "unverifiable",
+      `the shared shape check must exclude ${label} on the legacy path too: ${line}`,
+    );
+  }
+  // The false-downgrade direction: real comparisons survive, including glued
+  // to a name (the only form a generic list can be confused with) and beside
+  // a generic that is now blanked.
+  const real: Array<[string, string]> = [
+    ["an unspaced comparison", "const ok = ceiling<max;"],
+    ["an unspaced comparison with no closing angle", "if (a<b) throw new Error('over ceiling');"],
+    ["operator-joined comparisons", "if (a<b && c>d) {"],
+    ["logical-or-joined comparisons", "const both = a<b || c>d;"],
+    ["a ternary beside angled operands", "const pick = ceiling<upper ? upper : ceiling;"],
+    ["a spaced comparison", "for (const row of rows) { if (row.height < ceiling) {"],
+    ["a comparison beside a blanked generic", "const pairs = new Map<string, number>(); const grown = size >= ceiling;"],
+  ];
+  for (const [label, line] of real) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "met",
+      `a real predicate (${label}) on the cited line must stay met: ${line}`,
+    );
+  }
+  // The single-line view of the same shipped scan, pinned directly: what is
+  // and is not blanked, in both directions.
+  assert.equal(linePredicateSignal("const ceiling = Map<string, number>;"), false);
+  assert.equal(linePredicateSignal("const ceiling = Map<string, Array<number>>;"), false);
+  assert.equal(linePredicateSignal("const cache = new Map<string, Map<string, number>>();"), false);
+  assert.equal(linePredicateSignal("const f = (): Map<string, number> => state.map;"), false);
+  assert.equal(linePredicateSignal("let p: Promise<void>;"), false);
+  assert.equal(linePredicateSignal("const ok = ceiling<max;"), true);
+  assert.equal(linePredicateSignal("if (a<b && c>d) {"), true);
+  assert.equal(linePredicateSignal("const pick = ceiling<upper ? upper : ceiling;"), true);
+  assert.equal(linePredicateSignal("const GT = />/;"), true);
+  // Per-line views stay independent: no cross-line state is introduced by the
+  // generic blanker, so a pure type line and the comparison after it read
+  // separately.
+  assert.deepEqual(filePredicateSignal([
+    "const cache = new Map<string, Array<number>>();",
+    "if (state.requested > ceiling) {",
+  ]), [false, true]);
+  // Boundary pins for the shapes the blanker deliberately eats (fed the
+  // hostile input itself, per the #252 standard): each is a GLUED chain whose
+  // span is indistinguishable from a generic argument list without a parser,
+  // so it is blanked with it. Pinning the refusal makes a later widening of
+  // the argument-list grammar a visible, deliberate change instead of a
+  // silent new downgrade.
+  assert.equal(linePredicateSignal("const x = a<b>c;"), false);
+  assert.equal(linePredicateSignal("const x = a<b, c>d;"), false);
+  assert.equal(linePredicateSignal("const x = a<b|c>d;"), false);
+  // A shift chain is refused, not blanked: `<<` never occurs inside a valid
+  // argument list, so both operators survive.
+  assert.equal(linePredicateSignal("const x = a<<b>>c;"), true);
+  // Blanking never adds an ACCEPTED shape — `expect<Foo>(x)` reads as an
+  // assertion call after `Foo` is blanked, but the `<` had already fired the
+  // comparison shape, so the accept status is unchanged either way.
+  assert.equal(linePredicateSignal("expect<Map<string, number>>(x);"), true);
+  // A generic list that WRAPS to the next line is run-scoped and not blanked:
+  // its opening line still passes as enforcement (the named residual — the
+  // alternative, an open-generic span carried across lines, would swallow the
+  // comparisons after an unclosed `<`).
+  assert.deepEqual(filePredicateSignal([
+    "const v: Map<",
+    "  string,",
+    "  number",
+    ">();",
+  ]), [true, false, false, true]);
+});
+
 test("#1347: a stray backtick in a regex literal must not swallow the rest of the file", () => {
   // The unpaired-`/` rule, pinned in both directions. A backtick inside a
   // regex literal (`/[|;&<>`$]/`) is not a template opener; treated as one it
@@ -929,6 +1028,10 @@ test("#1347: the retained corpus measurement is a reproducible artifact over thi
     line_local_accepted: number;
     cross_line_removed: number;
     cross_line_added: number;
+    generic_ignored_accepted: number;
+    generic_removed_total: number;
+    generic_removed_samples: string[];
+    generic_added_total: number;
   };
   assert.ok(report.corpus_files > 0, "the measurement corpus must not be empty");
   assert.ok(report.corpus_lines > report.corpus_files, "the measurement corpus must carry lines");
@@ -972,6 +1075,38 @@ test("#1347: the retained corpus measurement is a reproducible artifact over thi
   const script = readFileSync(join(REPO_ROOT, "scripts/measure_predicate_signal.ts"), "utf8");
   assert.match(script, /from "\.\.\/src\/enforcement\/requirement-trace\.js"/);
   assert.match(script, /filePredicateSignal/);
+  // The #1355 refinement is measured on its own, against the pre-#1355
+  // production pipeline rather than a re-implementation of it.
+  assert.match(script, /filePredicateSignalIgnoringGenericArgumentLists/);
+  // Blanking a generic argument list only ever removes shapes (it inserts
+  // spaces and refuses assertion/parenthesis/quote syntax inside the span),
+  // so it must never ADD an accepted shape, and it must not be a no-op.
+  assert.equal(
+    report.generic_added_total,
+    0,
+    "the generic-argument-list blanker must only remove accepted shapes, never add one",
+  );
+  assert.ok(
+    report.generic_removed_total > 0,
+    "the generic-argument-list blanker must remove at least one accepted shape",
+  );
+  // The removed share must stay a bounded minority of the shapes the
+  // pre-#1355 pipeline accepted (measured at this head: 3,067 of 38,005,
+  // 8.1% — every sampled one a type annotation or generic declaration, none
+  // a comparison). The bound alarms on drift toward blanking real shapes.
+  assert.ok(
+    report.generic_removed_total * 10 < report.generic_ignored_accepted,
+    `the generic-argument-list blanker removed ${report.generic_removed_total} of ${report.generic_ignored_accepted} pre-#1355 accepted shapes`,
+  );
+  // Every sampled removed line carries an angle bracket: the shapes the
+  // blanker removes are exactly the generic-looking ones it decided to blank.
+  for (const sample of report.generic_removed_samples) {
+    assert.match(
+      sample,
+      /<.*>/,
+      `a line the generic-argument-list blanker removed must carry an angle-bracket span: ${sample}`,
+    );
+  }
 });
 
 /**
@@ -1963,6 +2098,112 @@ test("#1000: a terminated span with embedded prose yields its identifier, not a 
     changedSubjectText('+  headers.set("x-api-key", key);\n', ["src/transport/http.ts"]),
   );
   assert.deepEqual(scoped.inScope.map((e) => e.id), ["req-span"]);
+});
+
+// ── #1346: generic connective bigrams are not subject overlap ───────────
+
+/** The production leak (#1342, a Renovate classifier-kind change): the
+ * credential-transport standard's "travel only … must never appear" prose
+ * reached the trace on nothing but the diff's own comments — "only through"
+ * and "never appear" occur in ordinary English and name no credential or
+ * transport surface. */
+function pr1342ChangedText(): string {
+  return changedSubjectText(
+    [
+      "diff --git a/src/classification/kinds.ts b/src/classification/kinds.ts",
+      "+++ b/src/classification/kinds.ts",
+      "+  // A digest pin travels a different path than a version bump.",
+      "+  // Kinds are read only through the declared list: a kind must never appear in two buckets.",
+      '+  const KINDS = ["digested", "replacement", "pin"] as const;',
+      "-  // The old branch fell through every other kind.",
+    ].join("\n"),
+    ["src/classification/kinds.ts", "tests-v3/classification.test.ts"],
+  );
+}
+
+test("#1346: generic connective bigrams alone leave the credential standard out of scope", () => {
+  const ledger = { requirements: [
+    { id: "req-credential", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+  ] };
+  const changed = pr1342ChangedText();
+  // Both generic bigrams are really in the changed text, and they are the ONLY
+  // overlap. The guard is derived from the requirement itself rather than a
+  // hand-written word list, so a future edit to this fixture cannot silently
+  // reintroduce genuine subject overlap.
+  assert.ok(changed.includes("only through") && changed.includes("never appear"), "fixture carries the generic bigrams");
+  const repeated = requirementSubjectSignals(STANDARDS_CREDENTIAL).phrases
+    .filter((words) => {
+      const lower = words.map((word) => word.toLowerCase());
+      return changed.includes(lower.join(""))
+        || [lower.join(" "), lower.join("_"), lower.join("-"), lower.join("/")]
+          .some((variant) => new RegExp(`\\b${variant}\\b`).test(changed));
+    })
+    .map((words) => words.join(" "));
+  assert.deepEqual(repeated, [], `fixture overlap beyond the generic bigrams: ${JSON.stringify(repeated)}`);
+
+  const scope = requirementTraceScope(ledger, changed);
+  assert.deepEqual(scope.inScope, []);
+  assert.deepEqual(scope.outOfScope.map((o) => o.entry.id), ["req-credential"]);
+});
+
+test("#1346: the credential boundary's own files keep it in scope", () => {
+  // The fail-closed direction of the same tightening: a change to the
+  // transport surface still demands the standard even when its prose repeats
+  // nothing but generic connectives. Owners come from the shipped base-side
+  // map, so this also pins that `model-api-credentials` really declares the
+  // transport files.
+  const ledger = { requirements: [
+    { id: "req-credential", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+  ] };
+  const parsed = parseRequirementOwners(
+    readFileSync(join(REPO_ROOT, ".github", "pr-reviewer-owners.yml"), "utf8"),
+    ".github/pr-reviewer-owners.yml",
+  );
+  assert.ok(!("malformed" in parsed));
+  if ("malformed" in parsed) return;
+  assert.ok(
+    parsed.rules.some((rule) => rule.match.join(" ") === "model api credentials" && rule.owners.includes("src/transport/http.ts")),
+    `shipped owner map declares the transport files: ${JSON.stringify(parsed.rules)}`,
+  );
+  const paths = ["src/transport/http.ts"];
+  const changed = changedSubjectText("+  // forward the request only through the seam; the token must never appear in logs\n", paths);
+  const scope = requirementTraceScope(ledger, changed, { ownership: parsed.rules, paths });
+  assert.deepEqual(scope.inScope.map((e) => e.id), ["req-credential"]);
+});
+
+test("#1346: requirementSubjectSignals drops connective pairs and keeps mixed pairs", () => {
+  const credential = requirementSubjectSignals(STANDARDS_CREDENTIAL).phrases.map((p) => p.join(" "));
+  assert.ok(!credential.includes("only through"), JSON.stringify(credential));
+  assert.ok(!credential.includes("never appear"), JSON.stringify(credential));
+  // The standard keeps its real subject signals.
+  assert.ok(credential.includes("auth headers") && credential.includes("src/transport"), JSON.stringify(credential));
+  // The narrowing is phrase-scoped: the standard's single-term signals are
+  // untouched (it has none — only the atomic code spans and its owner paths).
+  assert.deepEqual(requirementSubjectSignals(STANDARDS_CREDENTIAL).strongTerms, []);
+
+  // A pair is dropped only when BOTH halves are generic: a specific word on
+  // either side keeps the phrase counting.
+  assert.deepEqual(
+    requirementSubjectSignals("The value may appear verbatim.").phrases.map((p) => p.join(" ")),
+    ["value may", "appear verbatim"],
+  );
+  // The #957 pinned mixed pair survives unchanged.
+  assert.deepEqual(
+    requirementSubjectSignals("content is data, never instructions").phrases.map((p) => p.join(" ")),
+    ["data never", "never instructions"],
+  );
+});
+
+test("#1346: distinctive prose next to generic connectives still scopes in", () => {
+  const scoped = (changed: string): string[] =>
+    requirementTraceScope(
+      { requirements: [{ id: "req-creds", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] }] },
+      changedSubjectText(changed, ["src/model/chat.ts"]),
+    ).inScope.map((e) => e.id);
+  // Genuine overlap: the boundary's own wording reaches the diff.
+  assert.deepEqual(scoped("+  // send the token only through the auth headers the provider defines\n"), ["req-creds"]);
+  // Generic connectives only: no overlap.
+  assert.deepEqual(scoped("+  // the legacy switch may not appear here, only through the old path\n"), []);
 });
 
 // ── #959: a verdict with zero trace claims ──────────────────────────────
