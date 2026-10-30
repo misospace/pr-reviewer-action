@@ -13,6 +13,9 @@
  *     an infinite loop — even a synchronous one — therefore cannot hold
  *     the review past the bound: the thread is killed and the call fails.
  *     The termination happens on EVERY timeout, on every path.
+ *   - The termination is AWAITED before the call fails, so the ORDER is a
+ *     fact and not a hope: a timed-out provider can never act after the
+ *     caller was told the call had failed.
  *   - A worker that CRASHES (an "error" event) or EXITS is the same
  *     failure: the host records the reason and every later call fails
  *     instantly instead of waiting for an answer that will never come.
@@ -77,6 +80,14 @@ export interface ProviderHostOptions {
    * ceiling; a FUNCTION is asked for the ceiling BEFORE EACH call, so the
    * effective budget can shrink as the build's own wall-clock budget does. */
   timeoutMs: number | (() => number);
+  /** The worker the provider runs in.
+   *
+   * The default starts a real worker thread. A TEST injects its own, so the
+   * ORDER of the timeout path — the worker is terminated, and only THEN does
+   * the call fail — is OBSERVED instead of raced for: an injected worker can
+   * hold its termination open, so a call that failed before the termination
+   * was released is a real regression, not a timing accident. */
+  worker?: Worker;
 }
 
 function messageOf(error: unknown): string {
@@ -115,15 +126,22 @@ class ProviderHost implements SyntaxProviderHost {
    * only once this settles. */
   private termination: Promise<void> = Promise.resolve();
 
-  constructor(registration: SyntaxProviderRegistration, workspace: string, timeoutMs: number | (() => number)) {
+  constructor(
+    registration: SyntaxProviderRegistration,
+    workspace: string,
+    timeoutMs: number | (() => number),
+    worker?: Worker,
+  ) {
     this.timeoutMs = timeoutMs;
-    this.worker = new Worker(WORKER_SOURCE, {
-      eval: true,
-      workerData: {
-        entryModule: workerEntryModule(),
-        payload: { registration, workspace },
-      },
-    });
+    this.worker =
+      worker ??
+      new Worker(WORKER_SOURCE, {
+        eval: true,
+        workerData: {
+          entryModule: workerEntryModule(),
+          payload: { registration, workspace },
+        },
+      });
     this.worker.on("message", (message: unknown) => {
       this.settle(message);
     });
@@ -187,11 +205,29 @@ class ProviderHost implements SyntaxProviderHost {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         const reason = `the syntax provider call "${method}" exceeded its ${timeoutMs}ms bound`;
-        reject(new SyntaxProviderTimeoutError(reason, timeoutMs));
+        const error = new SyntaxProviderTimeoutError(reason, timeoutMs);
+        // The recorded failure is the FIRST one: a timeout stays a timeout,
+        // so the builder can tell a bound that bit from a provider that
+        // merely failed.
+        const failure = this.failure ?? error;
+        if (this.failure === null) this.failure = failure;
         // The worker is TERMINATED — ALWAYS, on every timeout, on every
         // path: a provider that blocks cannot be waited out, and every
         // later call fails instantly.
-        this.fail(reason, timeoutMs);
+        const termination = this.worker.terminate().then(() => undefined).catch(() => undefined);
+        this.termination = termination;
+        // The call fails only ONCE THE WORKER IS GONE. A call that failed
+        // while the timed-out provider could still run would leave a live
+        // provider behind it: it could keep acting (writing files, holding
+        // resources) after the caller was told the call had failed.
+        // `terminate()` resolves when the thread has exited, so awaiting it
+        // makes the ORDER a fact instead of a hope.
+        void termination.then(() => {
+          // Every other pending call fails with the same reason: the bound
+          // is gone for all of them.
+          this.settleAll(failure);
+          reject(error);
+        });
       }, timeoutMs);
       this.pending.set(requestId, { resolve, reject, timer });
       try {
@@ -224,11 +260,16 @@ class ProviderHost implements SyntaxProviderHost {
   }
 
   /** The host failed: record the reason, fail every pending call and
-   * terminate the worker. A timeout stays a timeout, so the builder can
-   * tell a bound that bit from a provider that merely failed. */
-  private fail(reason: string, timeoutMs?: number): void {
+   * terminate the worker.
+   *
+   * This is the path of a worker that CRASHED, EXITED or could not be
+   * reached — the worker is already gone (or is being stopped) here, so
+   * there is nothing to wait for. A call that runs out of TIME takes the
+   * timeout path in `request()` instead, which terminates the worker and
+   * AWAITS that termination before failing the call. */
+  private fail(reason: string): void {
     if (this.failure === null) {
-      this.failure = timeoutMs === undefined ? new Error(reason) : new SyntaxProviderTimeoutError(reason, timeoutMs);
+      this.failure = new Error(reason);
     }
     this.settleAll(this.failure);
     // The termination is AWAITED by `close()`, so "no worker outlives the
@@ -251,5 +292,5 @@ class ProviderHost implements SyntaxProviderHost {
  * call, and every call is bounded by the host's ceiling — asked for afresh
  * before each call when the ceiling is a function. */
 export async function createProviderHost(options: ProviderHostOptions): Promise<SyntaxProviderHost> {
-  return new ProviderHost(options.registration, options.workspace, options.timeoutMs);
+  return new ProviderHost(options.registration, options.workspace, options.timeoutMs, options.worker);
 }

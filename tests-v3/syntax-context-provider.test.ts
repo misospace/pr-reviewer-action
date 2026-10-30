@@ -29,6 +29,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import type { Worker } from "node:worker_threads";
 import {
   buildSyntaxContext,
   createProviderHost,
@@ -428,6 +429,49 @@ test("the registry key is the id the artifact reports", async () => {
     providerFallbackReason: resolution.reason,
   });
   assert.equal(context.providerId, "ts");
+});
+
+test("the timeout fails the call only once the worker is terminated", async () => {
+  // The ORDER is the guarantee: a call that fails while the timed-out
+  // provider can still run leaves a LIVE provider behind it — it could keep
+  // acting (writing files, holding resources) after the caller was told the
+  // call had failed. The injected worker holds its termination open, so the
+  // order is OBSERVED instead of raced for: a call that failed before the
+  // termination was released is a real regression, not a timing accident.
+  const root = workspace({
+    "src/app.py": "def handle(item):\n    return item\n",
+  });
+  let releaseTermination = (): void => {};
+  const terminated = new Promise<number>((resolve) => {
+    releaseTermination = () => resolve(0);
+  });
+  const injected = {
+    on(): void {},
+    postMessage(): void {},
+    terminate: () => terminated,
+  };
+  const host = await createProviderHost({
+    registration: { id: "blocking", loader: { kind: "builtin" } },
+    workspace: root,
+    timeoutMs: 50,
+    worker: injected as unknown as Worker,
+  });
+  try {
+    let settled = false;
+    const call = host.declarations("src/app.py").catch(() => {
+      settled = true;
+    });
+    // The bound expires; the worker is terminated but its termination is
+    // still open, so the call cannot have failed yet.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(settled, false, "the call failed while the worker could still run");
+    releaseTermination();
+    await call;
+    assert.equal(settled, true, "the call did not fail after the worker was terminated");
+  } finally {
+    releaseTermination();
+    await host.close();
+  }
 });
 
 test("the worker's parsed-file cache holds ONE file", () => {
