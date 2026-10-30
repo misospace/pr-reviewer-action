@@ -102,6 +102,26 @@ test("public readiness redacts credential-shaped component names", async () => {
   for (const index of [1, 2, 4, 5, 6]) assert.equal(body.components[index]!.name, "unknown");
 });
 
+test("public readiness refuses plain identifiers over the documented 64-character limit", async () => {
+  const { context } = fixture();
+  context.deps.readiness = async () => ({
+    components: [
+      { name: "a".repeat(64), ok: true },
+      { name: "b".repeat(65), ok: true },
+      { name: "c".repeat(256), ok: true },
+      { name: "d".repeat(1_000), ok: true },
+    ],
+  });
+  const response = await dispatchAdminRoute(context, req("GET", "/readyz"));
+  const body = response.body as { components: { name: string }[] };
+  // Exactly at the limit is echoed verbatim; over it is REFUSED outright —
+  // never truncated into a different name the seam never declared.
+  assert.equal(body.components[0]!.name, "a".repeat(64));
+  assert.equal(body.components[1]!.name, "unknown");
+  assert.equal(body.components[2]!.name, "unknown");
+  assert.equal(body.components[3]!.name, "unknown");
+});
+
 test("public readiness bounds the component list but decides readiness over all of them", async () => {
   const { context } = fixture();
   const components = Array.from({ length: 200 }, (_, index) => ({ name: `component-${index}`, ok: true }));

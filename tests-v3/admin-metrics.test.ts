@@ -46,6 +46,31 @@ test("a cap of 1 holds only the overflow counter and never bumps it at construct
   assert.match(metrics.renderPrometheus(), /pr_reviewer_admin_metrics_overflow_total 0/);
 });
 
+test("tool-loop budget observability: requests, rounds, and stop reasons", () => {
+  const metrics = new AdminMetricsRegistry();
+  metrics.recordToolLoopRequests(24);
+  metrics.recordToolLoopRounds(10);
+  metrics.recordToolLoopRequests();
+  metrics.recordToolStop("budget");
+  const text = metrics.renderPrometheus();
+  assert.match(text, /pr_reviewer_admin_tool_loop_requests_total 25/);
+  assert.match(text, /pr_reviewer_admin_tool_loop_rounds_total 10/);
+  assert.match(text, /pr_reviewer_admin_tool_stops_total\{stop_reason="budget"\} 1/);
+  // Zero-label counters: no setter can attach an identifier to them.
+  assert.doesNotMatch(text, /pr_reviewer_admin_tool_loop_(?:requests|rounds)_total\{/);
+});
+
+test("tool-loop counters refuse malformed amounts", () => {
+  const metrics = new AdminMetricsRegistry();
+  metrics.recordToolLoopRequests(-5);
+  metrics.recordToolLoopRounds(Number.NaN);
+  metrics.recordToolLoopRounds(Number.POSITIVE_INFINITY);
+  // A refused update creates no series at all (only HELP/TYPE headers remain).
+  const samples = metrics.renderPrometheus().split("\n").filter((line) => line !== "" && !line.startsWith("#"));
+  assert.ok(!samples.some((line) => line.startsWith("pr_reviewer_admin_tool_loop_requests_total")));
+  assert.ok(!samples.some((line) => line.startsWith("pr_reviewer_admin_tool_loop_rounds_total")));
+});
+
 test("all rendered samples have parseable name/value syntax", () => {
   const metrics = new AdminMetricsRegistry();
   metrics.recordUsage("primary", 10, 2, 1, 3);

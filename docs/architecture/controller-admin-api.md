@@ -26,8 +26,9 @@ and stay on their **own public listener**. `createAdminHost`
   DSN, endpoint, or exception text, and this route is unauthenticated.
   Component names are echoed only when they are **plain identifiers**
   (`[A-Za-z0-9._-]`, at most 64 characters); any other name — a DSN, a
-  URL, free text, one carrying control/format/bidi characters — is refused
-  as `unknown`. That structural rule, not the redactor, is what keeps
+  URL, free text, one longer than the limit, or one carrying control/format/bidi
+  characters — is refused as `unknown`, never truncated into a different
+  name. That structural rule, not the redactor, is what keeps
   free-form seam text off the unauthenticated surface. Readiness is
   decided over **every** component the seam reports; only the exposed list
   is capped (64), and failing components are listed FIRST, so the cap
@@ -169,7 +170,10 @@ depth/age gauges, active workers by executor identity, review latency
 histograms, verdict/failure counters, model request counts, token/cache
 totals by role (cost provenance stays truthful — the same
 never-fabricated invariant as #736 lives in the usage records the daemon
-feeds in), tool-loop stop reasons, specialist usage, publication
+feeds in), tool-loop budget counters — request and round counters
+(`pr_reviewer_admin_tool_loop_requests_total`,
+`pr_reviewer_admin_tool_loop_rounds_total`, zero-label amounts fed from the
+loop telemetry) plus the stop-reason counter —, specialist usage, publication
 retry/failure, webhook verification outcomes, and
 cancellation/supersession counters.
 

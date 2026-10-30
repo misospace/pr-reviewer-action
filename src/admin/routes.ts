@@ -85,8 +85,10 @@ const MAX_READINESS_COMPONENTS = 64;
  * the redactor work on an unbounded string. */
 const MAX_NAME_INPUT = 256;
 const MAX_DETAIL_INPUT = 1024;
-/** The unauthenticated surface echoes PLAIN IDENTIFIERS only. */
-const PUBLIC_NAME = /^[A-Za-z0-9._-]{1,256}$/;
+/** The unauthenticated surface echoes PLAIN IDENTIFIERS only, and only up to
+ * the documented 64-character limit: a longer name is REFUSED outright, not
+ * truncated into a different name the seam never declared. */
+const PUBLIC_NAME = new RegExp(`^[A-Za-z0-9._-]{1,${MAX_COMPONENT_NAME}}$`);
 
 /** Replace credential-shaped substrings, credential assignments, and URL
  * userinfo. Pattern-based defense in depth, not a secret oracle. */
@@ -112,6 +114,11 @@ function publicComponentName(name: unknown): string {
   if (!PUBLIC_NAME.test(cleaned)) return "unknown";
   const redacted = redactSecretShapes(cleaned);
   if (redacted.length === 0) return "unknown";
+  // The bound is re-applied after redaction as cheap future-proofing: the
+  // identifier gate already forbids every assignment/userinfo shape and the
+  // credential shapes are longer than their `[REDACTED]` replacement, so
+  // here redaction can only shrink — but a future pattern must never be
+  // able to return an over-long public name.
   return redacted.slice(0, MAX_COMPONENT_NAME);
 }
 

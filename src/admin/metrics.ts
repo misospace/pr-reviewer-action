@@ -41,6 +41,8 @@ const DEFINITIONS: readonly AdminMetricDefinition[] = [
   { name: "pr_reviewer_admin_failures_total", help: "Failures by category", kind: "counter", labelNames: ["category"] },
   { name: "pr_reviewer_admin_model_requests_total", help: "Requests by allowlisted model route", kind: "counter", labelNames: ["model"] },
   { name: "pr_reviewer_admin_usage_tokens_total", help: "Usage tokens by role", kind: "counter", labelNames: ["role", "kind"] },
+  { name: "pr_reviewer_admin_tool_loop_requests_total", help: "Tool-loop tool-call requests", kind: "counter", labelNames: [] },
+  { name: "pr_reviewer_admin_tool_loop_rounds_total", help: "Tool-loop model rounds", kind: "counter", labelNames: [] },
   { name: "pr_reviewer_admin_tool_stops_total", help: "Tool loop stops by reason", kind: "counter", labelNames: ["stop_reason"] },
   { name: "pr_reviewer_admin_specialist_usage_total", help: "Specialist usage requests", kind: "counter", labelNames: [] },
   { name: "pr_reviewer_admin_publication_events_total", help: "Publication retries and failures", kind: "counter", labelNames: ["outcome"] },
@@ -146,6 +148,12 @@ export class AdminMetricsRegistry {
     if (role === "specialist") this.increment("pr_reviewer_admin_specialist_usage_total");
   }
   recordToolStop(reason: string): void { this.increment("pr_reviewer_admin_tool_stops_total", { stop_reason: reason }); }
+  /** Tool-loop budget observability (#737): calls and rounds per loop, fed
+   * from the loop telemetry the daemon already collects. Amounts only —
+   * never identifiers — and `increment` refuses non-finite or negative
+   * values, so a broken telemetry feed cannot poison the counter. */
+  recordToolLoopRequests(count = 1): void { this.increment("pr_reviewer_admin_tool_loop_requests_total", {}, count); }
+  recordToolLoopRounds(count = 1): void { this.increment("pr_reviewer_admin_tool_loop_rounds_total", {}, count); }
   recordPublication(outcome: AdminPublicationOutcome): void { this.increment("pr_reviewer_admin_publication_events_total", { outcome }); }
   recordWebhook(outcome: AdminWebhookOutcome): void { this.increment("pr_reviewer_admin_webhook_verifications_total", { outcome }); }
   recordCancellation(): void { this.increment("pr_reviewer_admin_cancellations_total"); }
