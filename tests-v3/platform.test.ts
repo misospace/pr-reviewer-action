@@ -420,13 +420,19 @@ test("#1341: a non-2xx PR read records the HTTP status as the cause on both forg
 });
 
 test("#1341: a PR read with no response records the transport kind as the cause on both forges", async () => {
+  // The rejected fetch's message carries a credential-shaped URL on
+  // purpose: the recorded cause must be rebuilt from the kind alone, so
+  // neither the message nor any leaked text reaches the cause object.
   const transport: FetchLike = async () => {
-    throw new Error("fetch failed");
+    throw new Error("fetch failed https://evil.example.com/?token=tok_secret");
   };
   const github = new GitHubAdapter({ repo: "o/r", prNumber: "1", token: "Bearer t", fetchImpl: transport });
   assert.equal(await github.getPr(), null);
   assert.equal(github.prReadFailure()?.status, null);
   assert.equal(github.prReadFailure()?.kind, "transport");
+  // Object-level pin for the re-wrap: the original error text (which here
+  // carries a credential-shaped URL) never reaches the cause object.
+  assert.doesNotMatch(github.prReadFailure()?.message ?? "", /evil|secret|credential/);
 
   const forgejo = new ForgejoAdapter({
     repo: "o/r",
@@ -503,4 +509,6 @@ test("#1341: an invalid repository reference is its own cause class", async () =
   // (it throws "Invalid repo full name" before any request,
   // platform-reads.test.ts) — that thrown error already names the
   // problem, so no cause latch is involved.
+  const forgejo = new ForgejoAdapter({ repo: "bad repo name", prNumber: "1", baseUrl: "https://git.example.com", token: "t", fetchImpl: jsonResponse({}) });
+  await assert.rejects(forgejo.getPr(), /Invalid repo full name/);
 });

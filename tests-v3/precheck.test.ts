@@ -1022,6 +1022,15 @@ test("#1341: a cause whose kind is not the HTTP-status class is never rendered a
     }),
     /Could not read pull request 42 for misospace\/demo \(read failed: redirect-blocked\);/,
   );
+  // An http-status kind without a numeric status must never render
+  // "HTTP null" — it falls back to the kind.
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true, pr_error_cause: { kind: "http-status" } }),
+    }),
+    /Could not read pull request 42 for misospace\/demo \(read failed: http-status\);/,
+  );
 });
 
 test("#1341: an adapter that records no cause keeps the unexplained admission error", async () => {

@@ -738,7 +738,7 @@ async function reviewPathOutputs(
     const cause = spec.adapter.prReadFailure?.() ?? null;
     const causeText = cause === null
       ? ""
-      : cause.kind === "http-status"
+      : cause.kind === "http-status" && typeof cause.status === "number"
         ? ` (read failed: HTTP ${cause.status})`
         : ` (read failed: ${cause.kind})`;
     throw new Error(
