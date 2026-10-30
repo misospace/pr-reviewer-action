@@ -117,3 +117,25 @@ export const POSITIVE_INTEGER_INPUTS = new Set([
 for (const id of ["repo-map-max-bytes", "pr-thread-max-bytes", "deep-review-corpus-max-bytes"]) {
   POSITIVE_INTEGER_INPUTS.delete(id);
 }
+
+/** Hygiene check shared by the config modules (#727/#1350): true when
+ * `value` contains any ASCII control character. Not a security guard — the
+ * config files are trusted operator input — but a control character in a
+ * name/path/URL is never what the operator meant and would only corrupt
+ * downstream diagnostics. Spelled as codepoint comparisons rather than a
+ * regex class so no literal control byte can ever land in this source file.
+ * Lives in this leaf module (not `instance-config.ts`) so the
+ * `namespace-policy.ts` ⇄ `instance-config.ts` pair stays cycle-free. */
+export function hasControlCharacters(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/** The trusted operator layers' fail-closed error. Lives here so
+ * `namespace-policy.ts` can subclass it without an import cycle through
+ * `instance-config.ts`; re-exported from `instance-config.ts` for the
+ * existing import sites. */
+export class InstanceConfigError extends Error {}
