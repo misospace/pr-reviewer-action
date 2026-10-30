@@ -99,7 +99,14 @@ have no `throw` statement), so a property named `throw` (`state.throw`,
 only in a call shape (`expect(…)`, `Assert.ok(…)`, `invariant(…)`) or as a
 member CALL reached through the bare name (`assert.deep.equal(…)`); a member
 READ (`expect.value`) copies a value and is refused. That is what separates
-enforcement from `const expect = state.requested;`. A comment or a string
+enforcement from `const expect = state.requested;`. #1355 closed the last
+artifact #1347 named: a generic argument list (`Map<string, Ceiling>`) no
+longer reads as a comparison — the list is blanked before the comparison is
+read, but ONLY a span that closes as a type list (a `<` glued to a name, a
+matching `>` at angle depth 0, and type-like characters inside), because a
+real comparison never closes one: the unspaced `a<b` has no matching `>`,
+`a<=b` carries `=`, and `a<b && c>d`, `a<b || c>d` and `a<b ? c>d : e` refuse
+at the operator, so those comparisons keep firing. A comment or a string
 literal is prose on every line it covers, not only on the line that opens it,
 so a span still open on the next line is stripped there too. The `?`-marker blanking is
 adjacency-only (`?.`, `??`, `?:` are spelled without a space), so a ternary
@@ -117,9 +124,30 @@ rule real: a copy-only citation such as
 What the coarse copy-detector still cannot tell you, named rather than silently
 wrong:
 
-- A generic argument list (`Map<string, Ceiling>`) still reads as a comparison.
-  It is indistinguishable from an unspaced `a<b` without a parser, and refusing
-  both would reject real enforcement.
+- The #1355 blanker eats a GLUED chain whose span happens to look like a
+  generic argument list — `a<b>c` (chained comparison), `a<b, c>d` (comma
+  operator), `a<b|c>d` (single-bar bitwise or; the doubled `||` refuses the
+  span) — because without a parser it is indistinguishable from
+  `Map<string, n>`. Every spaced form, every `=`-carrying comparison
+  (`a<=b`), every operator-joined form (`a<b && c>d`, `a<b || c>d`,
+  `a<b ? c>d : e`) and every shift chain (`a<<b>>c`, where `<<` never occurs
+  in an argument list) survives, and the eaten shapes are pinned as
+  deliberately-blanked residuals in the suite. The residual is the cost of
+  refusing `Map<string, n>`: glued chains of these shapes are
+  near-nonexistent in real review corpora where `Map<K, V>` is everywhere.
+- Generic argument lists with richer-than-bare arguments — object literals
+  (`Array<{ dir: string }>`), string-literal keys (`Record<"a", number>`),
+  function types, default type parameters, wildcards (`Vec<_>`) — refuse the
+  type-like span and still read as a comparison. Widening the argument
+  grammar is the open direction, not an open #1347 artifact; each widening
+  must re-measure the false-downgrade direction and revisit the pinned
+  residuals.
+- A generic list that WRAPS to the next line is not blanked (the scan is
+  run-scoped, with no open-generic state carried across lines): its opening
+  line still passes as enforcement. Carrying an open-generic span across
+  lines would swallow the comparisons after an unclosed `<` — the same
+  file-wide-span failure the template-literal rule was measured against — so
+  the residual stays, named.
 - A regex literal (`const GT = />/;`) is still an accepted shape, and a `//`
   inside an unquoted URL is treated as a comment opening.
 - Only single-quoted, double-quoted and backtick spans, `//`, `/* … */`, a `#`
@@ -248,6 +276,28 @@ The measurement script is exercised by the test suite — its counting
 identities and the false-downgrade rate are pinned there — so the requirement
 traces to a test rather than to prose.
 
+The #1355 generic-argument-list refinement is measured on its own by the same
+retained script: it compares the shipped shape against the same production
+pipeline with the blanker disabled (`filePredicateSignalIgnoringGenericArgumentLists`,
+imported from source so it cannot drift), and reports `generic_removed_total` /
+`generic_added_total` plus samples. Blanking only ever removes shapes — it
+inserts spaces and refuses assertion, parenthesis and quote syntax inside the
+span — and the report confirms `generic_added_total = 0`. At this measured
+head (489 tracked `.ts` files, 219.1k lines) the blanker removed 3,067 of the
+38,005 shapes the pre-#1355 pipeline accepted (8.1%): every sampled removed
+line is a type annotation, a generic declaration (`new Map<string,
+Promise<unknown>>()`, `Record<string, unknown>`, `ReturnType<typeof …>`) or a
+generic function signature — none is a comparison, guard, throw/assert or
+match call — while the unspaced `a<b` and every operator-joined comparison
+survive (pinned by test). The removed share is pinned at under 10% of the
+pre-#1355 accepted shapes as a coarse bound; the real downgrade protection is
+directional: this repository's own TypeScript spaces its comparisons, so the
+corpus counter can only move with generic-shaped lines — what actually
+protects real comparisons is the pinned refusal set (every `=`-carrying,
+operator-joined, spaced or unclosed comparison shape, and the shift chain),
+which a later widening of the argument-list grammar must revisit to keep the
+suite green, making the change deliberate instead of silent.
+
 The cited-line requirement is itself a deliberate tightening over the first
 draft of this gate, which searched a ±3-line window around the owner
 citation: with the lexical half dropped, a window let a copy-only cited line
@@ -284,9 +334,10 @@ is follow-up work.
 - Consider surfacing declared owner paths (or per-requirement owner hints, as
   the distributed hints already do) in the prompt corpus, so the owners-file
   exception is fully actionable for the model.
-- Consider excluding generic argument lists from the accepted predicate shape
-  without also rejecting an unspaced `a<b` (a parser-grade shape check) — the
-  one artifact #1347 named but deliberately left in place.
+- Generic argument lists are now excluded from the accepted predicate shape
+  (#1355) for bare-argument lists; richer argument forms (object literals,
+  string-literal keys, function types, defaults, wildcards) and wrapped
+  lists remain the named residual class in the boundary list above.
 
 ## Rejected alternatives
 

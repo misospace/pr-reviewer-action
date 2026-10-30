@@ -34,6 +34,14 @@
  * of lines the baseline accepted and the shipped shape refuses, and the two
  * differ by `newly_accepted_total`.
  *
+ * The #1355 refinement is measured on its own by the same pattern: the
+ * shipped shape against the same production pipeline with the
+ * generic-argument-list blanker disabled (the pre-#1355 shape, imported from
+ * source rather than re-implemented). `generic_removed_total` counts the
+ * lines whose only accepted shape was a generic argument list; blanking can
+ * only remove shapes, so `generic_added_total` is expected to stay 0 and is
+ * reported for exactly that check.
+ *
  * Optional positional args narrow the corpus to git path prefixes
  * (e.g. `node scripts/measure_predicate_signal.mjs src`); default is every
  * git-tracked TypeScript file.
@@ -45,7 +53,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { filePredicateSignal, linePredicateSignal } from "../src/enforcement/requirement-trace.js";
+import { filePredicateSignal, filePredicateSignalIgnoringGenericArgumentLists, linePredicateSignal } from "../src/enforcement/requirement-trace.js";
 
 const BASE_COMPARISON_RE = /(===|!==|==|!=|<=|>=|<|>)/;
 const BASE_GUARD_RE = /\b(if|unless)\b/i;
@@ -87,10 +95,14 @@ let removedTotal = 0;
 let lineLocalAccepted = 0;
 let crossLineRemoved = 0;
 let crossLineAdded = 0;
+let genericIgnoredAccepted = 0;
+let genericRemoved = 0;
+let genericAdded = 0;
 const newlyAccepted: string[] = [];
 const removedSamples: string[] = [];
 const crossLineRemovedSamples: string[] = [];
 const crossLineAddedSamples: string[] = [];
+const genericRemovedSamples: string[] = [];
 let newlyAcceptedTotal = 0;
 
 for (const relative of tracked) {
@@ -107,6 +119,11 @@ for (const relative of tracked) {
   // measures this refinement's false-downgrade rate on its own, separately
   // from the pre-#1347 baseline.
   const lineLocalSignals = fileLines.map((line) => linePredicateSignal(line));
+  // The same shipped pipeline with the generic-argument-list blanker
+  // (#1355) disabled, so the refinement's false-downgrade rate is measured
+  // against the production logic itself rather than a re-implementation
+  // of it.
+  const genericIgnoredSignals = filePredicateSignalIgnoringGenericArgumentLists(fileLines);
   for (const [index, line] of fileLines.entries()) {
     const base = baselineLinePredicateSignal(line);
     const current = currentSignals[index] === true;
@@ -138,6 +155,15 @@ for (const relative of tracked) {
         crossLineAddedSamples.push(`${relative}:${index + 1}: ${line.trim().slice(0, 120)}`);
       }
     }
+    const genericIgnored = genericIgnoredSignals[index] === true;
+    if (genericIgnored) genericIgnoredAccepted += 1;
+    if (genericIgnored && !current) {
+      genericRemoved += 1;
+      if (genericRemovedSamples.length < 25) {
+        genericRemovedSamples.push(`${relative}:${index + 1}: ${line.trim().slice(0, 120)}`);
+      }
+    }
+    if (current && !genericIgnored) genericAdded += 1;
   }
 }
 
@@ -163,5 +189,14 @@ const report = {
   cross_line_added: crossLineAdded,
   cross_line_removed_samples: crossLineRemovedSamples,
   cross_line_added_samples: crossLineAddedSamples,
+  /** The #1355 refinement measured on its own: what the generic-argument-list
+   * blanker took away from the pre-#1355 production pipeline (lines whose
+   * only accepted shape was a generic argument list) and added to it.
+   * Blanking only removes shapes, so `generic_added_total` is expected to be
+   * 0 and is reported for exactly that check. */
+  generic_ignored_accepted: genericIgnoredAccepted,
+  generic_removed_total: genericRemoved,
+  generic_removed_samples: genericRemovedSamples,
+  generic_added_total: genericAdded,
 };
 console.log(JSON.stringify(report, null, 2));

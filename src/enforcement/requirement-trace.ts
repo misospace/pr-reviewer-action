@@ -523,7 +523,11 @@ const EMPTY_LINE_VIEW: LineCodeView = { raw: "", blanked: "" };
  * and content inside a multi-line template literal is prose under the same
  * rule the single-line string literal already follows.
  */
-function scanCodeView(line: string, state: CodeSpanState): LineCodeView {
+function scanCodeView(
+  line: string,
+  state: CodeSpanState,
+  blankGenerics: boolean,
+): LineCodeView {
   let index = 0;
   let resumed = false;
   // Resume a block comment opened on an earlier line: everything up to its
@@ -556,12 +560,17 @@ function scanCodeView(line: string, state: CodeSpanState): LineCodeView {
   // which is the same as running it over the whole line first: a blanked pair
   // (`=>`, `->`, `?.`, `??`, `?:`) is two adjacent characters, so it never
   // straddles a span, and one scan produces both views — they can never
-  // disagree about where a span starts or ends.
+  // disagree about where a span starts or ends. The generic-argument-list
+  // blanker (#1355) reads the RAW run first, so the operator blanker cannot
+  // turn a span it refused into one it accepts (`x<y??z>w` refuses at the
+  // `??`; after `??` is blanked the `<`/`>` comparison must survive).
   let run = "";
   const flush = (): void => {
     if (run === "") return;
     raw += run;
-    blanked += blankNonPredicateOperators(run);
+    blanked += blankNonPredicateOperators(
+      blankGenerics ? blankGenericArgumentLists(run) : run,
+    );
     run = "";
   };
   for (; index < line.length; index += 1) {
@@ -631,12 +640,15 @@ interface FileCodeViews {
   blanked: readonly string[];
 }
 
-function computeCodeViews(lines: readonly string[]): FileCodeViews {
+function computeCodeViews(
+  lines: readonly string[],
+  blankGenerics: boolean,
+): FileCodeViews {
   const raw: string[] = [];
   const blanked: string[] = [];
   const state = freshSpanState();
   for (const line of lines) {
-    const view = scanCodeView(line, state);
+    const view = scanCodeView(line, state, blankGenerics);
     raw.push(view.raw);
     blanked.push(view.blanked);
   }
@@ -666,10 +678,110 @@ function computeCodeViews(lines: readonly string[]): FileCodeViews {
  * what keeps a literal span from collapsing a real ternary
  * (`clip(symbol ? TEMPLATE : path)`) into a form the blanker reads as a
  * marker. Blanking only ever removes operator characters, so it cannot
- * fabricate a quote or a comment for the scan that follows.
+ * fabricate a quote or a comment for the scan that follows. The
+ * generic-argument-list blanker (#1355) runs on the same run, before this one
+ * and on the raw text: a complete generic span can never straddle a run
+ * either, because its content refuses quote characters and comments are
+ * removed before runs are formed.
  */
 function blankNonPredicateOperators(code: string): string {
   return code.replace(/=>|->/g, " ").replace(/\?(?:\?|:|\.(?![0-9]))/g, " ");
+}
+
+/**
+ * #1355: a generic argument list (`Map<string, number>`) used to read as a
+ * comparison — its `<`/`>` are the same characters `COMPARISON_RE` matches —
+ * so an owner-anchored copy-only citation such as
+ * `const ceiling = Map<string, number>;` passed as `met`. The list is blanked
+ * before the comparison is read, but ONLY a span that closes as a type list:
+ * the opening `<` must be GLUED to a name (`Map<`, never a spaced `a < b`),
+ * a matching `>` must exist at angle depth 0, and every character between
+ * must be type-like (identifiers, whitespace, commas, dots, `[`/`]`, and
+ * single `|`/`&`). Anything else refuses the span and the `<`/`>` survive —
+ * which is the direction the issue pins, because a real comparison never
+ * closes a type-like span: the unspaced `a<b` has no matching `>`, `a<=b`
+ * carries `=`, and `a<b && c>d`, `a<b || c>d`, `a<b ? c>d : e` refuse at the
+ * operator, so both comparisons keep firing.
+ *
+ * What IS blanked is the copy-only citation shape: `Map<string, number>`,
+ * nested `Map<string, Array<number>>`, unions `Array<string | number>`,
+ * qualified names `Foo.Bar<number>`, array types `Array<T[]>` — type
+ * annotations enforce nothing. The named residuals (#1355), all GLUED chains
+ * whose span happens to look like a type list and is indistinguishable from
+ * one without a parser: `a<b>c` (chained comparison), `a<b, c>d` (comma
+ * operator), `a<b|c>d` (single-bar bitwise or — distinct from the `||` that
+ * refuses the span), and a generic whose arguments are richer than bare
+ * identifiers — object literals `{ a: string }`, string-literal keys,
+ * function types, default type parameters — still refuse the span and keep
+ * reading as a comparison. A shift chain is refused, not blanked:
+ * `a<<b>>c` carries `<<`, which never occurs inside a valid argument list,
+ * so the span refuses and both operators survive. A generic list that WRAPS
+ * to the next line is not blanked either (the scan is run-scoped): its
+ * opening line still passes as enforcement — the pre-existing behavior,
+ * left in place because carrying an open-generic span across lines would
+ * swallow the comparisons after an unclosed `<`, the same file-wide-span
+ * failure the template-literal rule was measured against.
+ *
+ * Blanking can never add an ACCEPTED shape: it inserts spaces (never
+ * juxtaposes characters), and a `<` in a blanked span had already fired
+ * `COMPARISON_RE`, so the line was accepted before the blanker ran —
+ * `expect<Foo>(x)` even reads as an assertion call after `Foo` is blanked,
+ * but it was accepted as a comparison either way. The corpus measurement
+ * (`generic_added_total`, pinned 0) and an exhaustive brute force over the
+ * blanker's alphabet found no accept-status fabrication.
+ */
+function blankGenericArgumentLists(code: string): string {
+  let blanked = "";
+  let index = 0;
+  while (index < code.length) {
+    const char = code[index] as string;
+    if (
+      char === "<" && index > 0
+      && /[A-Za-z0-9_$]/.test(code[index - 1] as string)
+    ) {
+      const close = matchingGenericListClose(code, index);
+      if (close >= 0) {
+        blanked += " ".repeat(close + 1 - index);
+        index = close + 1;
+        continue;
+      }
+    }
+    blanked += char;
+    index += 1;
+  }
+  return blanked;
+}
+
+/** Characters a generic argument list may carry besides its own `<`/`>`:
+ * identifier text, whitespace, the argument separator, qualified-name dots,
+ * array/index brackets, and the single union/intersection bars. `&&`, `||`
+ * and every other operator (`= + - * / % ! ( ) { } ; : ?` quotes) marks the
+ * span as an EXPRESSION, not a type list, and refuses the blank. */
+const GENERIC_LIST_CONTENT_RE = /[A-Za-z0-9_$\s,.[\]|&]/;
+
+/** The index of the `>` that closes the generic argument list opened at
+ * `open` (a `<` glued to a name), or `-1` when the span is not a type list:
+ * no angle-depth-0 close on this run, or a non-type-like character inside. */
+function matchingGenericListClose(code: string, open: number): number {
+  let depth = 0;
+  for (let index = open; index < code.length; index += 1) {
+    const char = code[index] as string;
+    if (char === "<") {
+      // `<<` is a left shift, never part of an argument list (`>>` IS — it
+      // closes nested generics — so only the doubled `<` refuses the span).
+      if (code[index + 1] === "<") return -1;
+      depth += 1;
+      continue;
+    }
+    if (char === ">") {
+      depth -= 1;
+      if (depth === 0) return index;
+      continue;
+    }
+    if (!GENERIC_LIST_CONTENT_RE.test(char)) return -1;
+    if ((char === "&" || char === "|") && code[index + 1] === char) return -1;
+  }
+  return -1;
 }
 
 /**
@@ -690,10 +802,12 @@ function blankNonPredicateOperators(code: string): string {
  * named `throw`; the non-keyword assertion names need their call shape — a
  * member READ (`expect.value`) copies a value, only a member CALL
  * (`assert.ok(…)`) enforces one — because `const expect = state.requested;` is
- * exactly the copy this gate exists to refuse. A TypeScript generic argument
- * list (`Map<string, Ceiling>`) is still
- * read as a comparison: it is indistinguishable from an unspaced `a<b` without
- * a parser, and refusing both would reject real enforcement.
+ * exactly the copy this gate exists to refuse. #1355 closed the last artifact
+ * #1347 named: a generic argument list (`Map<string, Ceiling>`) is blanked
+ * before the comparison is read, while the unspaced real comparison `a<b`
+ * survives — the comparisons this gate must keep never close a type-like
+ * span, and the glued chains that do (`a<b>c`, `a<b|c>d`, `a<b, c>d`) are the
+ * named residual of `blankGenericArgumentLists`.
  */
 /** Exported for the retained corpus measurement (#1347):
  * `scripts/measure_predicate_signal.mjs` re-runs this production shape over
@@ -705,7 +819,19 @@ function blankNonPredicateOperators(code: string): string {
  * is carried across the file's lines, so a shape inside a multi-line span
  * never counts as enforcement on any line of that span. */
 export function filePredicateSignal(lines: readonly string[]): boolean[] {
-  const views = computeCodeViews(lines);
+  const views = computeCodeViews(lines, true);
+  return lines.map((_, index) => predicateSignalIn(views, index));
+}
+
+/** Exported for the retained corpus measurement (#1355): the shipped
+ * production pipeline with the generic-argument-list blanker disabled, so the
+ * refinement's false-downgrade rate is measured against the production logic
+ * itself rather than a re-implementation that could drift from it. Not part
+ * of any action contract. */
+export function filePredicateSignalIgnoringGenericArgumentLists(
+  lines: readonly string[],
+): boolean[] {
+  const views = computeCodeViews(lines, false);
   return lines.map((_, index) => predicateSignalIn(views, index));
 }
 
