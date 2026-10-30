@@ -1415,6 +1415,67 @@ test("#1354: an encoded traversal destination matches no traversal pattern at al
   );
 });
 
+test("#1354: adversarial — the blanked region is a destination, not the paren group (#252)", () => {
+  // Each shape below is link-shaped but carries no CommonMark destination, so
+  // nothing is discounted and the traversal keeps the scan it had before
+  // #1354. A discount that reads a wider region than rendered navigation would
+  // hide traversal that is not a navigation target at all.
+  const positives: [string, string][] = [
+    // A destination carries no blank character: this group is the word `see`
+    // followed by ordinary text, so the traversal inside it is code text.
+    ['+[a](see open("../../etc/passwd")\n', "README.md"],
+    // The angle form ends at its `>` and carries no unescaped blank inside.
+    ["+[Guide](<a b>../../etc/passwd)\n", "README.md"],
+    // An escaped `\[` is a literal bracket, not a link opener.
+    ["+Escaped form \\[a](../../etc/passwd) is not a link.\n", "README.md"],
+    // An escaped `\]` cannot close the label, so no link starts here either.
+    ['+[a\\](../../etc/passwd)\n', "README.md"],
+    // A backslash escapes no blank in a destination: the run ends at the raw
+    // blank, and the traversal after it keeps the scan.
+    ['+[a](../x\\ ../../etc/passwd)\n', "README.md"],
+    // A title is attribute text, not a navigation target.
+    ['+[Guide](guide.md "see ../../etc/passwd")\n', "README.md"],
+    // A control character inside the group invalidates the destination.
+    ["+[Guide](../README\u0000.md)\n", "README.md"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(
+      result.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"),
+      `${diff}: expected a fired traversal_literal signal, got ${JSON.stringify(result.pathHandlingProvenance.signals)}`,
+    );
+    // Nothing was discounted either: the provenance never claims a navigation
+    // link that the renderer would not produce.
+    assert.ok(
+      !result.pathHandlingProvenance.discounted.some((s) => s.source === "diff_nav_link"),
+      `${diff}: expected no discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+
+  // The destination rule does not narrow the discount the issue asked for: a
+  // titled link, a padded destination, and an angle destination with a title
+  // are all still rendered navigation.
+  const negatives: [string, string][] = [
+    ['+[Guide](../README.md "the guide")\n', "README.md"],
+    ["+[Guide](  ../README.md  )\n", "docs/guide.md"],
+    ['+[Guide](<../README.md> "the guide")\n', "README.md"],
+    // An escaped BACKSLASH does not escape the opener: this is a real link.
+    ["+\\\\[Guide](../README.md)\n", "README.md"],
+  ];
+  for (const [diff, filename] of negatives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", diff);
+    assert.equal(result.pathHandlingProvenance.fired, false, diff);
+    assert.ok(
+      result.pathHandlingProvenance.discounted.some(
+        (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+      ),
+      `${diff}: expected a discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+});
+
 test("#960: a traversal literal in real code still fires, including next to an import and past a string-literal marker", () => {
   const positives: [string, string][] = [
     // Plain code, no comment anywhere.

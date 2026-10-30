@@ -966,8 +966,20 @@ function isMarkdownPath(path: string): boolean {
  * The discount is also a MARKDOWN rule: the syntax model above exists only in
  * Markdown, so it applies to Markdown documentation only. A link-shaped
  * string in another documentation type (`rst`, `txt`, `adoc`) is literal
- * text, not rendered navigation, and keeps its ordinary scan semantics. */
-const MARKDOWN_INLINE_LINK_PATTERN = /!?\[[^\]]*\]\([^)]*\)/g;
+ * text, not rendered navigation, and keeps its ordinary scan semantics.
+ *
+ * The blanked region is a DESTINATION, not the paren group: a group that
+ * CommonMark does not read as a destination is not navigation either, and an
+ * escaped `\[` is not a link opener at all. The label reads backslash escapes
+ * too, so an escaped `\]` cannot close a label and start a link. See
+ * `markdownDestinationSpan` and `escapedMarkdownLinkOpener`.
+ *
+ * Known limit of a diff-local Markdown view, accepted because reading it the
+ * other way would cost the feature it exists for: an INDENTED code block and
+ * a fence opened ABOVE the shown hunk are invisible here, so their link-shaped
+ * content is read as prose. The exposed surface stays bounded to a traversal
+ * inside a relative link destination — the exact shape this discount is for. */
+const MARKDOWN_INLINE_LINK_PATTERN = /!?\[(?:[^\]\\]|\\.)*\]\([^)]*\)/g;
 
 /** A Markdown fence line: an optional container prefix (a blockquote marker
  * or a list marker), then whitespace, then a run of 3 or more backticks or 3
@@ -997,6 +1009,73 @@ function isRelativeNavigationDestination(destination: string): boolean {
   return true;
 }
 
+/** Markdown's inline whitespace (CommonMark's blank characters, minus the
+ * newlines a diff line cannot carry). */
+function isMarkdownInlineBlank(char: string): boolean {
+  return char === " " || char === "\t" || char === "\f" || char === "\r";
+}
+
+/** A C0 control character or DEL. Neither can appear in a destination, and a
+ * line that carries one inside a link-shaped group is not rendered
+ * navigation: the scan keeps firing (#1354, fail toward detection). */
+function isControlCharacter(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return code < 0x20 || code === 0x7f;
+}
+
+/** The destination inside an inline link's paren group, as [start, end)
+ * offsets in the group text, or `null` when the group holds no destination.
+ *
+ * CommonMark: a destination is either the angle form, which carries no
+ * unescaped blank or control character and ends at its `>`, or a run that
+ * stops at the first blank character. What follows a destination is a title or
+ * ordinary text — never a navigation target — so it is NOT blanked: the
+ * traversal in `[Guide](guide.md "see ../../etc/passwd")` is a title, and the
+ * traversal in `[a](see open("../../etc/passwd")` is code text in a group that
+ * was never a destination at all (#1354).
+ *
+ * A backslash escapes nothing in the plain form: a raw blank ends the run
+ * whether or not it is escaped, so `[a](../x\ ../../etc/passwd)` has the
+ * destination `../x\` and the traversal after it keeps the scan — a link shape
+ * whose destination ends at an escaped blank renders no link that could reach
+ * outside the repo (#1354, fail toward detection). */
+function markdownDestinationSpan(group: string): [number, number] | null {
+  let start = 0;
+  while (start < group.length && isMarkdownInlineBlank(group[start] ?? "")) start += 1;
+  if (start >= group.length) return null;
+  if (group[start] === "<") {
+    for (let index = start + 1; index < group.length; index += 1) {
+      const char = group[index] ?? "";
+      if (char === "\\") {
+        index += 1;
+        continue;
+      }
+      if (char === ">") return [start, index + 1];
+      if (isMarkdownInlineBlank(char) || isControlCharacter(char)) return null;
+    }
+    return null;
+  }
+  let end = start;
+  while (end < group.length) {
+    const char = group[end] ?? "";
+    if (isMarkdownInlineBlank(char)) break;
+    if (isControlCharacter(char)) return null;
+    end += 1;
+  }
+  return end > start ? [start, end] : null;
+}
+
+/** A `[` preceded by an odd number of backslashes is an escaped literal
+ * bracket, not a link opener (CommonMark), so the link shape it starts is
+ * literal text and keeps the ordinary scan (#1354). */
+function escapedMarkdownLinkOpener(text: string, bracket: number): boolean {
+  let backslashes = 0;
+  for (let index = bracket - 1; index >= 0 && text[index] === "\\"; index -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
 function blankMarkdownNavDestinations(text: string): string {
   const codeSpans = inlineCodeSpans(text);
   return text.replace(MARKDOWN_INLINE_LINK_PATTERN, (...args: unknown[]) => {
@@ -1010,14 +1089,24 @@ function blankMarkdownNavDestinations(text: string): string {
     // code, not a navigation link: it is left as-is, so the traversal literal
     // inside it keeps its ordinary semantics.
     if (codeSpans.some(([start, end]) => offset >= start && offset < end)) return match;
-    // The destination is the paren group after the label's `]`: the label
-    // itself may contain parentheses (`[docs (see ../x)](guide.md)`), so the
-    // boundary is the `](` pair, not the first `(`.
+    // An escaped `\[` (or `\![`) opens no link, so nothing on its right is a
+    // destination.
+    const bracket = match.startsWith("!") ? offset + 1 : offset;
+    if (escapedMarkdownLinkOpener(text, bracket)) return match;
+    // The destination group is the paren group after the label's `]`: the
+    // label itself may contain parentheses (`[docs (see ../x)](guide.md)`), so
+    // the boundary is the `](` pair, not the first `(`.
     const open = match.lastIndexOf("](");
-    const close = match.lastIndexOf(")");
-    const destination = match.slice(open + 2, close).trim();
+    const group = match.slice(open + 2, match.length - 1);
+    const span = markdownDestinationSpan(group);
+    if (span === null) return match;
+    const destination = group.slice(span[0], span[1]);
     if (!isRelativeNavigationDestination(destination)) return match;
-    return match.slice(0, open + 2) + " ".repeat(Math.max(close - open - 2, 0)) + match.slice(close);
+    return (
+      match.slice(0, open + 2 + span[0]) +
+      " ".repeat(span[1] - span[0]) +
+      match.slice(open + 2 + span[1])
+    );
   });
 }
 
