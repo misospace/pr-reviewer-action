@@ -458,3 +458,49 @@ test("#1341: a successful PR read clears the recorded cause", async () => {
   assert.deepEqual(await adapter.getPr(), {});
   assert.equal(adapter.prReadFailure(), null);
 });
+
+test("#1341: a 2xx response with an unusable payload records the payload cause on both forges", async () => {
+  // A 200 whose body is not a PR object is a failed read, not a fact about
+  // the PR: the cause must be named (invalid-json / invalid-payload), and
+  // a status that is not the failure (200) must not be reported as one.
+  const githubInvalidJson = new GitHubAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    token: "Bearer tok_secret",
+    fetchImpl: async () => new Response("<html>hostile body ghp_AAAAtoken123</html>", { status: 200, headers: { "Content-Type": "text/html" } }),
+  });
+  assert.equal(await githubInvalidJson.getPr(), null);
+  const jsonCause = githubInvalidJson.prReadFailure();
+  assert.equal(jsonCause?.kind, "invalid-json");
+  assert.doesNotMatch(jsonCause?.message ?? "", /hostile body|ghp_AAAAtoken123|tok_secret/);
+
+  const githubNullPayload = new GitHubAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    token: "Bearer t",
+    fetchImpl: async () => new Response("null", { status: 200, headers: { "Content-Type": "application/json" } }),
+  });
+  assert.equal(await githubNullPayload.getPr(), null);
+  assert.equal(githubNullPayload.prReadFailure()?.kind, "invalid-payload");
+
+  const forgejoArrayPayload = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    baseUrl: "https://git.example.com",
+    token: "t",
+    fetchImpl: jsonResponse([]),
+  });
+  assert.equal(await forgejoArrayPayload.getPr(), null);
+  assert.equal(forgejoArrayPayload.prReadFailure()?.kind, "invalid-payload");
+});
+
+test("#1341: an invalid repository reference is its own cause class", async () => {
+  const github = new GitHubAdapter({ repo: "bad repo name", prNumber: "1", token: "Bearer t", fetchImpl: jsonResponse({}) });
+  assert.equal(await github.getPr(), null);
+  assert.equal(github.prReadFailure()?.kind, "invalid-repo");
+  assert.equal(github.prReadFailure()?.status, null);
+  // Forgejo keeps its pinned fail-closed refusal for an invalid repo ref
+  // (it throws "Invalid repo full name" before any request,
+  // platform-reads.test.ts) — that thrown error already names the
+  // problem, so no cause latch is involved.
+});

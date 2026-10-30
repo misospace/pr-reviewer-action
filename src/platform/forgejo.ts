@@ -276,6 +276,9 @@ export class ForgejoAdapter implements PlatformReadAdapter {
 
   async getPr(): Promise<unknown | null> {
     this.lastPrReadFailure = null;
+    // An invalid repo ref keeps the pinned fail-closed refusal (it throws
+    // before any request, platform-reads.test.ts; the thrown error already
+    // names the problem) — #1341 records causes for READ failures below.
     const { owner, repo } = parseRepo(this.repo);
     try {
       const { status, data } = await requestJson(
@@ -288,14 +291,28 @@ export class ForgejoAdapter implements PlatformReadAdapter {
         this.lastPrReadFailure = new PlatformRequestError(`PR read failed with HTTP status ${status}`, status, "http-status");
         return null;
       }
-      return ForgejoAdapter.prToGithubShape(data, owner, repo, this.prNumber);
+      const pr = ForgejoAdapter.prToGithubShape(data, owner, repo, this.prNumber);
+      if (pr === null) {
+        // #1341: a 2xx whose body is not a PR object is still a failed
+        // read — name it instead of leaving the admission error
+        // unexplained. (The returned value is unchanged: null, as before.)
+        this.lastPrReadFailure = new PlatformRequestError("PR read returned an unusable payload", null, "invalid-payload");
+        return null;
+      }
+      return pr;
     } catch (error) {
-      // #1341: no usable response arrived — keep the seam's transport kind
+      // #1341: no usable response arrived — keep the seam's cause class
       // (`transport`, `redirect-blocked`, `too-large`, `origin-mismatch`,
-      // `invalid-json`) as the cause class.
-      this.lastPrReadFailure = error instanceof PlatformRequestError
-        ? error
-        : new PlatformRequestError("PR read failed", null, "transport");
+      // `invalid-json`, `request-failed`) as a RE-WRAPPED error: the
+      // recorded cause's message is built from the kind alone, never the
+      // underlying error text, so the cause object carries no response
+      // content and no credential material.
+      const cause = error instanceof PlatformRequestError ? error : null;
+      this.lastPrReadFailure = new PlatformRequestError(
+        `PR read failed (${cause?.kind ?? "request-failed"})`,
+        cause?.status ?? null,
+        cause?.kind ?? "request-failed",
+      );
       return null;
     }
   }

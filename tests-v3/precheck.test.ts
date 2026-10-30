@@ -870,14 +870,20 @@ test("#1312: a shared-path PR lookup failure fails the run instead of succeeding
 
 // ── #1341: the fail-closed PR-lookup error names its cause ───────────────
 
-/** A fixture adapter whose PR read goes through a REAL GitHubAdapter driven
+/** A fixture adapter whose PR read goes through a REAL forge adapter driven
  * by a hostile fetch, so the admission error is pinned against actual
- * transport failure content (response bodies, hostile error text). */
-class HostilePrReadAdapter extends FixtureAdapter {
-  private readonly real: GitHubAdapter;
-  constructor(platform: "github" | "forgejo", spec: Platform, fetchImpl: FetchLike) {
+ * transport failure content (response bodies, hostile error text) on both
+ * forges. The fixture spec itself stays benign — the failure comes from the
+ * injected adapter, not a fixture flag. */
+class SeamPrReadAdapter extends FixtureAdapter {
+  private readonly real: { getPr(): Promise<unknown | null>; prReadFailure(): PlatformRequestError | null };
+  constructor(
+    platform: "github" | "forgejo",
+    spec: Platform,
+    real: { getPr(): Promise<unknown | null>; prReadFailure(): PlatformRequestError | null },
+  ) {
     super(platform, spec);
-    this.real = new GitHubAdapter({ repo: "o/r", prNumber: "1340", token: "Bearer tok_secret", fetchImpl });
+    this.real = real;
   }
   override async getPr(): Promise<unknown | null> {
     return this.real.getPr();
@@ -893,10 +899,15 @@ test("#1341: a shared-path PR lookup failure names the HTTP status in the admiss
   await assert.rejects(
     runPrecheck({
       env: fx.env,
-      adapter: new HostilePrReadAdapter(
+      adapter: new SeamPrReadAdapter(
         "github",
-        { ...fx.platform, pr_error: true },
-        async () => new Response(hostileBody, { status: 422, headers: { "Content-Type": "application/json" } }),
+        { ...fx.platform },
+        new GitHubAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          token: "Bearer tok_secret",
+          fetchImpl: async () => new Response(hostileBody, { status: 422, headers: { "Content-Type": "application/json" } }),
+        }),
       ),
     }),
     (error: unknown) => {
@@ -909,6 +920,33 @@ test("#1341: a shared-path PR lookup failure names the HTTP status in the admiss
   );
 });
 
+test("#1341: the Forgejo adapter reaches the same admission error shape", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const hostileBody = JSON.stringify({ message: "hostile body ghp_AAAAtoken123" });
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new SeamPrReadAdapter(
+        "forgejo",
+        { ...fx.platform },
+        new ForgejoAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          baseUrl: "https://git.example.com",
+          token: "tok_secret",
+          fetchImpl: async () => new Response(hostileBody, { status: 422, headers: { "Content-Type": "application/json" } }),
+        }),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: HTTP 422\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /hostile body|ghp_AAAAtoken123|tok_secret/);
+      return true;
+    },
+  );
+});
+
 test("#1341: a shared-path PR lookup failure names the transport kind in the admission error", async () => {
   const fx = fixture("changed-diff-reviews");
   // The hostile error message carries a credential-shaped URL; the
@@ -916,12 +954,17 @@ test("#1341: a shared-path PR lookup failure names the transport kind in the adm
   await assert.rejects(
     runPrecheck({
       env: fx.env,
-      adapter: new HostilePrReadAdapter(
+      adapter: new SeamPrReadAdapter(
         "github",
-        { ...fx.platform, pr_error: true },
-        async () => {
-          throw new Error("fetch failed https://evil.example.com/?token=tok_secret");
-        },
+        { ...fx.platform },
+        new GitHubAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          token: "Bearer tok_secret",
+          fetchImpl: async () => {
+            throw new Error("fetch failed https://evil.example.com/?token=tok_secret");
+          },
+        }),
       ),
     }),
     (error: unknown) => {
@@ -930,6 +973,54 @@ test("#1341: a shared-path PR lookup failure names the transport kind in the adm
       assert.doesNotMatch(error.message, /evil\.example\.com|tok_secret|fetch failed/);
       return true;
     },
+  );
+});
+
+test("#1341: a 200 response that is not a PR names the payload cause, not HTTP 200", async () => {
+  const fx = fixture("changed-diff-reviews");
+  // A cause may carry a status that is NOT the failure: a 200 whose body
+  // is not a PR object reports the invalid-json class, never "HTTP 200".
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new SeamPrReadAdapter(
+        "github",
+        { ...fx.platform },
+        new GitHubAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          token: "Bearer tok_secret",
+          fetchImpl: async () => new Response("<html>hostile body ghp_AAAAtoken123</html>", { status: 200, headers: { "Content-Type": "text/html" } }),
+        }),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: invalid-json\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /HTTP 200|hostile body|ghp_AAAAtoken123|tok_secret/);
+      return true;
+    },
+  );
+});
+
+test("#1341: a cause whose kind is not the HTTP-status class is never rendered as a status", async () => {
+  const fx = fixture("changed-diff-reviews");
+  // The fixture pins the formatter rule directly: a non-http-status kind
+  // with a status attached (e.g. invalid-json over a 200) renders the
+  // kind, and the http-status kind renders the failing status.
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true, pr_error_cause: { status: 200, kind: "invalid-json" } }),
+    }),
+    /Could not read pull request 42 for misospace\/demo \(read failed: invalid-json\);/,
+  );
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true, pr_error_cause: { status: 302, kind: "redirect-blocked" } }),
+    }),
+    /Could not read pull request 42 for misospace\/demo \(read failed: redirect-blocked\);/,
   );
 });
 

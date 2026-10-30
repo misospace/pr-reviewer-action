@@ -49,15 +49,18 @@ export interface PlatformAdapter {
   /** PR object (GitHub REST shape) or null when the fetch fails. */
   getPr(): Promise<unknown | null>;
   /** #1341: the cause of the most recent `getPr()` failure, as a
-   * credential-free `PlatformRequestError` carrying the HTTP `status` when a
-   * response arrived, or a transport `kind` (`transport`,
-   * `redirect-blocked`, `too-large`, `origin-mismatch`, `invalid-json`)
-   * when it did not. `null` after a successful read, before the first read,
-   * or when the adapter records no cause. The cause is status/kind only —
-   * never response-body content, never credential material — so a
-   * fail-closed admission error can name why the lookup failed without
-   * leaking either. Adapters that do not record a cause omit this method;
-   * callers then keep the unexplained message rather than inventing one. */
+   * `PlatformRequestError` carrying the HTTP `status` when a response
+   * arrived (kind `http-status`), or a failure-class `kind` —
+   * `transport`, `redirect-blocked`, `too-large`, `origin-mismatch`,
+   * `invalid-json`, `invalid-payload`, `invalid-repo`,
+   * `request-failed` — when it did not. `null` after a successful read,
+   * before the first read, or when the adapter records no cause. The
+   * cause is status/kind only — the message is built from the kind alone,
+   * never the underlying error text — so it carries no response-body
+   * content and no credential material, and a fail-closed admission error
+   * can name why the lookup failed without leaking either. Adapters that
+   * do not record a cause omit this method; callers then keep the
+   * unexplained message rather than inventing one. */
   prReadFailure?(): PlatformRequestError | null;
   /** Raw unified diff text; "" when unavailable. */
   getPrDiff(): Promise<string>;

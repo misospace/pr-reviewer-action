@@ -224,18 +224,33 @@ export class GitHubAdapter implements PlatformReadAdapter {
     }
     try {
       const { status, data } = await requestJson(url, this.options());
-      if (status === 200) return data;
+      if (status === 200) {
+        // #1341: a 2xx whose body is not a PR object is still a failed
+        // read — name it instead of leaving the admission error
+        // unexplained. (The returned value is unchanged: null, as before.)
+        if (data === null) {
+          this.lastPrReadFailure = new PlatformRequestError("PR read returned an unusable payload", null, "invalid-payload");
+          return null;
+        }
+        return data;
+      }
       // #1341: a non-2xx response IS an answer — keep its status as the
       // cause class (credential- and body-free by construction).
       this.lastPrReadFailure = new PlatformRequestError(`PR read failed with HTTP status ${status}`, status, "http-status");
       return null;
     } catch (error) {
-      // #1341: no response arrived — keep the seam's transport kind
+      // #1341: no usable response arrived — keep the seam's cause class
       // (`transport`, `redirect-blocked`, `too-large`, `origin-mismatch`,
-      // `invalid-json`) as the cause class.
-      this.lastPrReadFailure = error instanceof PlatformRequestError
-        ? error
-        : new PlatformRequestError("PR read failed", null, "transport");
+      // `invalid-json`, `request-failed`) as a RE-WRAPPED error: the
+      // recorded cause's message is built from the kind alone, never the
+      // underlying error text, so the cause object carries no response
+      // content and no credential material.
+      const cause = error instanceof PlatformRequestError ? error : null;
+      this.lastPrReadFailure = new PlatformRequestError(
+        `PR read failed (${cause?.kind ?? "request-failed"})`,
+        cause?.status ?? null,
+        cause?.kind ?? "request-failed",
+      );
       return null;
     }
   }
