@@ -370,6 +370,38 @@ export class ReviewQueueController {
     return true;
   }
 
+  /** Take over an ACTIVE record's lease after a controller restart
+   * (#1348).
+   *
+   * WHY: a recovered record whose worker is PROVABLY alive must never
+   * become dispatchable again — a redispatch runs the same review twice
+   * (duplicate model spend). `recover()` requeues every active record
+   * whose lease is absent or expired, so the daemon needs a seam that
+   * claims the record FIRST and keeps its lease alive while it
+   * re-reconciles the orphaned worker.
+   *
+   * The claim is deliberately narrow, and an uncertain claim changes
+   * NOTHING: the record must exist, be in `starting`/`running`, have NO
+   * in-process dispatch entry (a live dispatch owns its own settle path
+   * and must stay the only writer), and the owner token must be a
+   * non-empty string. The claim takes the lease (owner, expiry,
+   * `updatedAtMs`) and persists it, so the expiry path sees a live lease
+   * and leaves the record alone. */
+  adoptRecovered(jobId: string, owner: string): boolean {
+    if (typeof owner !== "string" || owner === "") return false;
+    this.ensureLoaded();
+    const record = this.records.get(jobId);
+    if (record === undefined) return false;
+    if (record.state !== "starting" && record.state !== "running") return false;
+    // A live in-process dispatch owns this record; its own settle path
+    // must stay the only writer.
+    if (this.controllers.has(jobId)) return false;
+    const now = this.nowMsFn();
+    this.records.set(jobId, withRenewedLease(record, owner, now, this.options.leaseTtlMs));
+    this.save();
+    return true;
+  }
+
   /** Stop intake, drain active work for up to `drainMs` of the injected
    * clock (driving `tick` + microtask flushes — NO real sleeping; the
    * drain is bounded at 128 passes and stops early once a pass makes no
@@ -860,7 +892,10 @@ export class ReviewQueueController {
     now: number,
   ): void {
     this.publishInFlight.add(jobId);
-    void this.runPublish(jobId, "", record, now, /*requireLeaseMatch*/ false);
+    // Fire-and-forget, but NEVER unhandled: a durable-write failure in the
+    // background publish must not crash the process. The record stays
+    // `publishing` and the next tick retries the publish.
+    void this.runPublish(jobId, "", record, now, /*requireLeaseMatch*/ false).catch(() => undefined);
   }
 
   /** Background publish from `settleCompleted`: the in-process
@@ -873,7 +908,7 @@ export class ReviewQueueController {
     record: JobRecord,
     now: number,
   ): void {
-    void this.runPublish(jobId, token, record, now, /*requireLeaseMatch*/ true);
+    void this.runPublish(jobId, token, record, now, /*requireLeaseMatch*/ true).catch(() => undefined);
   }
 
   /** Shared background publish driver. Always mutates the record

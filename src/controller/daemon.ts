@@ -45,6 +45,11 @@
  *   through the #733 `reconcile`/`cancel` seam and feeds settled results
  *   back through the queue's `resolveRecovered` seam (a settled result is
  *   never rerun; a superseded recovered worker is cancelled by identity).
+ *   The reconciliation runs BEFORE the queue's own `recover()`: a record
+ *   whose worker is provably alive is ADOPTED (its lease is taken over
+ *   and kept alive) instead of being requeued into a second dispatch of
+ *   the same review, and only the records no live worker was proven for
+ *   fall through to the lease-expiry path.
  *   SIGTERM/SIGINT close intake, drain active work for a bounded window,
  *   cancel the remainder, and flush durable state.
  *
@@ -251,9 +256,10 @@ export interface ControllerDaemon {
   ingest(event: CanonicalForgeEvent): Promise<"scheduled" | "duplicate" | "ignored">;
   /** Hand one minted generation to the queue — the reconciliation pass's
    * handoff (the poll mints the generation; the daemon owns the queue).
-   * A failed handoff releases the durable reservation, so the head is
-   * re-discovered instead of staying suppressed. */
-  enqueue(job: ReviewJob): void;
+   * A failed handoff releases the durable reservation BEFORE the failure
+   * propagates, so the head is re-discovered instead of staying
+   * suppressed. */
+  enqueue(job: ReviewJob): Promise<void>;
   /** The generation ledger the operator's ingress/reconciliation binds. */
   readonly ledger: GenerationLedger;
   /** The operator host when `webhook` was configured. */
@@ -438,7 +444,16 @@ class ControlPlaneGenerationLedger implements GenerationLedger {
  * and the adoption ladder's writes are the controller reconciler's and
  * the operator API's concern (#727/#737), and an intake that minted
  * adoption records from webhook deliveries could be driven by hostile
- * repository events. */
+ * repository events.
+ *
+ * THE CURRENT POLICY RE-GATES AN EXISTING RECORD. A stored adoption is
+ * the operator's own past act, not a permanent licence: #727 makes the
+ * operator denylist the hard-off layer that beats everything else, so a
+ * repository adopted BEFORE a policy change stops scheduling once the
+ * operator denylists it (or once the mode gate no longer makes it
+ * eligible). The stored epoch and fingerprint are carried ONLY after the
+ * gate passes — a refused repository contributes no generation identity
+ * at all. */
 export function createAdoptionIdentityResolver(options: {
   readonly instance: InstanceConfig;
   readonly controlPlane: ControlPlaneStore;
@@ -454,6 +469,21 @@ export function createAdoptionIdentityResolver(options: {
     );
     if (existing !== null) {
       if (!existing.enabled) return null;
+      const gate = decideAdoption(options.instance.adoption, {
+        identity,
+        // The stored record IS the operator's own adoption act (the intake
+        // never mints adoption records), so the explicit opt-in is present.
+        operatorOptedIn: true,
+        operatorOptedOut: false,
+        // Repository-config narrowing is not an intake input: it is
+        // resolved from the trusted base tree at workspace time.
+        repositoryConfigEnabled: null,
+      });
+      // `disabled` is the denylist's hard off; `discovered` means the
+      // current mode gate no longer makes the repository eligible.
+      // `eligible`/`enabled` keep the stored adoption (the "skip" default
+      // for NEWLY discovered repositories does not un-adopt one).
+      if (gate.state === "disabled" || gate.state === "discovered") return null;
       const buildOptions: BuildJobOptions = {
         ...(existing.configFingerprint !== ""
           ? { configFingerprint: existing.configFingerprint }
@@ -500,6 +530,23 @@ interface DaemonRuntime {
   /** The run ids already reconciled against the queue's records, so the
    * reconciliation pass does not re-read a settled run on every tick. */
   readonly settledRuns: Set<string>;
+}
+
+/** A recovered worker this daemon ADOPTED: the executor seam proved the
+ * worker is still alive, so the daemon took over the record's lease
+ * instead of letting the queue redispatch it. The daemon keeps the lease
+ * alive and re-reconciles the worker on every tick until it settles —
+ * the settled outcome then travels through the recovery seam, never
+ * through a new dispatch. */
+interface AdoptedRecoveredWorker {
+  readonly jobId: string;
+  readonly request: ExecutionRequest;
+  /** The executors the recovery pass may ask about this correlation
+   * identity (the executor the request names, plus the backends the
+   * daemon already constructed). */
+  readonly executors: readonly Executor[];
+  /** The lease owner token this daemon holds the record under. */
+  readonly owner: string;
 }
 
 /** Mirror the control-plane runs whose attempt the queue has retired.
@@ -756,10 +803,13 @@ function createDaemonJobExecutor(
           // The result channel is untrusted at this seam (the same rule
           // `toQueueJobExecutor` enforces): re-validate the shape, then
           // prove the correlation identity against the request the
-          // daemon itself built.
+          // daemon itself built. The run directory is the validation
+          // scope: the artifact the result names must live INSIDE it
+          // (the publication reads that artifact, so a path that
+          // escapes the run directory is refused here, never followed).
           let validated: ExecutionResult;
           try {
-            validated = validateExecutionResult(collected);
+            validated = validateExecutionResult(collected, { runDir: request.runDir });
           } catch (err) {
             // An unusable result is a FAILED attempt: the run says so
             // instead of staying `running` for a worker that is already
@@ -949,7 +999,6 @@ export async function startControllerDaemon(
   };
   const controller = new ReviewQueueController(queueStore, schedulerOptions, now);
   (runtime as { controller: ReviewQueueController }).controller = controller;
-  controller.recover();
 
   // 5. Recovered live-lease workers: ask the executor seam what became of
   //    them (the envelope on disk is the correlation record) and feed a
@@ -957,6 +1006,15 @@ export async function startControllerDaemon(
   //    never rerun (#733). A recovered worker whose generation was
   //    superseded/cancelled while the daemon was down is cancelled by
   //    identity (`Executor.cancel`).
+  //
+  //    THE RECONCILIATION RUNS BEFORE `recover()`. `recover()` requeues
+  //    every active record whose lease is absent or expired, which makes
+  //    the record dispatchable again — and a redispatch of a record whose
+  //    worker is still alive runs the same review TWICE (duplicate model
+  //    spend). Reconciling first proves what became of the orphaned
+  //    worker while the record is still active, so only the records no
+  //    live worker was proven for fall through to the lease-expiry path.
+  const adoptedWorkers = new Map<string, AdoptedRecoveredWorker>();
   const recovered = controller
     .snapshot()
     .records.filter((record) => record.state === "starting" || record.state === "running");
@@ -966,7 +1024,11 @@ export async function startControllerDaemon(
     try {
       envelope = JSON.parse(readFileSync(requestPath, "utf8"));
     } catch {
-      continue; // no provable envelope: the lease-expiry path owns it
+      // No provable envelope: the executor writes the request envelope
+      // BEFORE it launches the worker, so its absence PROVES that no
+      // worker was ever launched for this attempt — a redispatch cannot
+      // duplicate work, and the lease-expiry path owns the record.
+      continue;
     }
     let request: ExecutionRequest;
     try {
@@ -974,39 +1036,81 @@ export async function startControllerDaemon(
     } catch {
       continue; // an unprovable envelope is never acted on
     }
+    // The executor that ran the attempt: a fresh daemon's selector cache
+    // is empty until a profile is selected, so the fan-out over the
+    // already-constructed backends alone could never reach the orphaned
+    // worker.
+    const { executors, named } = recoveryExecutors(selector, request);
     try {
       if (record.cancelRequested) {
-        await cancelRecoveredWorker(selector, request);
-        await controller.resolveRecovered(record.job.jobId, {
-          status: "cancelled",
-          resultHeadSha: "",
-          failureCategory: "",
-        });
+        const cancel = await cancelRecoveredWorker(executors, request);
+        if (cancel.kind === "terminated") {
+          await controller.resolveRecovered(record.job.jobId, {
+            status: "cancelled",
+            resultHeadSha: "",
+            failureCategory: "",
+          });
+        }
+        // `failed` (the termination could not be confirmed): the record
+        // stays active — the lease-expiry path remains the backstop.
         continue;
       }
-      const outcome = await reconcileRecoveredWorker(selector, request);
-      if (outcome !== null) {
-        await controller.resolveRecovered(record.job.jobId, outcome);
+      const answer = await reconcileRecoveredWorker(executors, request);
+      if (answer.kind === "settled") {
+        // A settled worker is NEVER rerun: the result is routed through
+        // the recovery seam instead of being recomputed.
+        await controller.resolveRecovered(record.job.jobId, answer.outcome);
+        continue;
       }
-      // `running`/`none`: the lease-expiry path owns redispatch decisions.
+      if (answer.kind === "running" && named !== null) {
+        // The worker is PROVABLY alive: the daemon ADOPTS the record's
+        // lease so the queue cannot make it dispatchable again. The
+        // daemon keeps the lease alive and re-reconciles the worker on
+        // every tick until it settles.
+        const owner = recoveryLeaseOwner(instanceId, record.job.jobId);
+        if (controller.adoptRecovered(record.job.jobId, owner)) {
+          adoptedWorkers.set(record.job.jobId, {
+            jobId: record.job.jobId,
+            request,
+            executors,
+            owner,
+          });
+        }
+        continue;
+      }
+      // `none`, or an answer from a backend that is NOT the executor the
+      // request names: the lease-expiry path owns the record.
     } catch {
       // Startup reconciliation is best-effort: an uncertain executor
       // answer leaves the record to the lease-expiry path (fail closed).
     }
   }
 
-  // 6. Intake: ledger, adoption resolver, dispatch → enqueue.
+  // 6. The queue's own crash recovery: requeue the records the
+  //    lease-expiry path owns (the ones no live worker was proven for).
+  controller.recover();
+
+  // 7. Intake: ledger, adoption resolver, dispatch → enqueue.
   const ledger = new ControlPlaneGenerationLedger(options.controlPlane, now, claimTtlMs);
   /** Hand one minted generation to the queue. A failed handoff releases
    * the DURABLE reservation (the dispatch contract): the release is
-   * awaited, because a claim left behind suppresses the redelivery until
-   * its horizon expires. The handoff failure is the error the caller
-   * owns; a failed release never masks it. */
-  const enqueueGeneration = (job: ReviewJob): void => {
+   * AWAITED before the failure propagates, because a claim left behind
+   * suppresses the redelivery until its horizon expires — with a network
+   * store the process could otherwise return (or die) before
+   * `release-idempotency` commits. The handoff failure is the error the
+   * caller owns; a failed release never masks it (the ledger keeps the
+   * ownership token, so a later release attempt can retry it). */
+  const enqueueGeneration = async (job: ReviewJob): Promise<void> => {
     try {
       controller.enqueue(job);
     } catch (err) {
-      void ledger.remove(job.jobId).catch(() => undefined);
+      try {
+        await ledger.remove(job.jobId);
+      } catch {
+        // The release itself failed: the durable claim may still be
+        // standing, but the handoff error is the caller's error and is
+        // never masked by it.
+      }
       throw err;
     }
   };
@@ -1018,7 +1122,7 @@ export async function startControllerDaemon(
       now,
     });
 
-  // 7. Timers, ingress server, lifecycle.
+  // 8. Timers, ingress server, lifecycle.
   let timer: NodeJS.Timeout | null = null;
   let reconcileTimer: NodeJS.Timeout | null = null;
   let server: Server | null = null;
@@ -1033,7 +1137,39 @@ export async function startControllerDaemon(
     if (ticking || stopped) return;
     ticking = true;
     try {
+      // The ADOPTED workers keep their lease BEFORE the queue's own expiry
+      // pass runs: a record whose worker is provably alive must never fall
+      // back to the lease-expiry path — a redispatch would run the same
+      // review twice (duplicate model spend).
+      for (const adopted of [...adoptedWorkers.values()]) {
+        const record = controller.recordFor(adopted.jobId);
+        if (record === null || (record.state !== "starting" && record.state !== "running")) {
+          // The record stopped being active (it settled, or the queue
+          // retired it): the daemon stops tracking it.
+          adoptedWorkers.delete(adopted.jobId);
+          continue;
+        }
+        if (!controller.heartbeat(adopted.jobId, adopted.owner)) {
+          // The lease lapsed between two ticks: re-claim it before the
+          // expiry pass, so the live worker is never redispatched.
+          if (!controller.adoptRecovered(adopted.jobId, adopted.owner)) {
+            adoptedWorkers.delete(adopted.jobId);
+          }
+        }
+      }
       await controller.tick();
+      // Re-reconcile the adopted workers: one that settled since the last
+      // pass is settled through the recovery seam (never rerun).
+      for (const adopted of [...adoptedWorkers.values()]) {
+        try {
+          const answer = await reconcileRecoveredWorker(adopted.executors, adopted.request);
+          if (answer.kind !== "settled") continue;
+          await controller.resolveRecovered(adopted.jobId, answer.outcome);
+          adoptedWorkers.delete(adopted.jobId);
+        } catch {
+          // best-effort; retried on the next tick
+        }
+      }
       // A recovered (or superseded) running record with no in-process
       // dispatch cannot be aborted through the scheduler's controller
       // map — the daemon cancels its worker by identity and settles it.
@@ -1050,7 +1186,8 @@ export async function startControllerDaemon(
           continue;
         }
         try {
-          const cancel = await cancelRecoveredWorker(selector, request);
+          const { executors } = recoveryExecutors(selector, request);
+          const cancel = await cancelRecoveredWorker(executors, request);
           if (cancel.kind === "terminated") {
             await controller.resolveRecovered(record.job.jobId, {
               status: "cancelled",
@@ -1071,6 +1208,52 @@ export async function startControllerDaemon(
       await reconcileRunRecords(runtime);
     } finally {
       ticking = false;
+    }
+  };
+
+  /** Drain the ADOPTED workers (live foreign processes this daemon took
+   * over after a restart) inside the shutdown budget.
+   *
+   * An adopted worker must never be ORPHANED by the daemon's own
+   * shutdown: a worker that settles inside the window publishes through
+   * the recovery seam (never rerun), and a worker that is still running
+   * when the window closes is terminated by correlation identity — the
+   * same rule the tick's cancellation path follows. The queue's own
+   * shutdown then retires the records (`failureReason` "shutdown").
+   *
+   * The drain drives bounded passes and flushes microtasks (NO real
+   * sleeping), like the queue's own shutdown drain. */
+  const drainAdoptedWorkers = async (budgetMs: number): Promise<void> => {
+    if (adoptedWorkers.size === 0) return;
+    const deadline = now() + Math.max(0, budgetMs);
+    for (let pass = 0; pass < 32 && adoptedWorkers.size > 0; pass += 1) {
+      for (const adopted of [...adoptedWorkers.values()]) {
+        try {
+          const answer = await reconcileRecoveredWorker(adopted.executors, adopted.request);
+          if (answer.kind !== "settled") continue;
+          await controller.resolveRecovered(adopted.jobId, answer.outcome);
+          adoptedWorkers.delete(adopted.jobId);
+        } catch {
+          // best-effort: retried on the next pass
+        }
+      }
+      if (adoptedWorkers.size === 0) return;
+      if (now() >= deadline) break;
+      // Flush the microtasks the reconcile/publish resolutions schedule.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    // The window closed: terminate whatever is still running, so no
+    // adopted worker is left behind.
+    for (const adopted of [...adoptedWorkers.values()]) {
+      try {
+        await cancelRecoveredWorker(adopted.executors, adopted.request);
+      } catch {
+        // best-effort: the queue's shutdown retires the record either
+        // way, and the next daemon's recovery reconciles the worker.
+      }
+      adoptedWorkers.delete(adopted.jobId);
     }
   };
 
@@ -1127,17 +1310,17 @@ export async function startControllerDaemon(
         // the queue's own jobId dedupe makes this handoff idempotent, so
         // the job is enqueued anyway and the generation runs.
         if (controller.recordFor(dispatched.job.jobId) === null) {
-          enqueueGeneration(dispatched.job);
+          await enqueueGeneration(dispatched.job);
           return "scheduled";
         }
         return "duplicate";
       }
       const job = dispatched.job;
-      enqueueGeneration(job);
+      await enqueueGeneration(job);
       return "scheduled";
     },
-    enqueue(job) {
-      enqueueGeneration(job);
+    async enqueue(job) {
+      await enqueueGeneration(job);
     },
     async stop() {
       if (stopped) return;
@@ -1149,6 +1332,11 @@ export async function startControllerDaemon(
       if (server !== null) {
         await new Promise<void>((resolve) => server!.close(() => resolve()));
       }
+      // The ADOPTED workers (live foreign processes this daemon took
+      // over after a restart) are drained BEFORE the queue's own
+      // shutdown: an adopted worker must never be ORPHANED by the
+      // daemon's own shutdown.
+      await drainAdoptedWorkers(drainMs);
       await controller.shutdown(drainMs);
       if (snapshotStore !== null) await snapshotStore.flush();
     },
@@ -1188,37 +1376,96 @@ export async function startControllerDaemon(
   return daemon;
 }
 
-/** Reconcile one recovered execution across every constructed backend:
- * the first non-`none` answer wins (a backend with nothing to say never
- * overrides one that found the worker). */
-async function reconcileRecoveredWorker(
+/** The answer one recovery pass got about a recovered execution. The
+ * three states are kept apart on purpose: `none` (nothing was ever
+ * found — the lease-expiry path owns the record), `running` (the worker
+ * is provably alive — the record must not become dispatchable again),
+ * and `settled` (the result exists and MUST NOT be rerun). */
+type RecoveredWorkerAnswer =
+  | { readonly kind: "none" }
+  | { readonly kind: "running" }
+  | { readonly kind: "settled"; readonly outcome: ExecutionOutcome };
+
+/** The lease owner token the daemon claims a recovered record under.
+ * Unique per daemon process (like the scheduler's own dispatch tokens):
+ * a late resolution from an abandoned attempt can never match it. */
+function recoveryLeaseOwner(instanceId: string, jobId: string): string {
+  return `recovery-${jobId.slice(0, 8)}-${instanceId}`;
+}
+
+/** The executors a recovery pass may ask about one correlation identity.
+ *
+ * The FIRST entry is the executor the recovered request names
+ * (`profiles.executor`): a fresh daemon's selector cache is EMPTY until
+ * a profile is selected, so the fan-out over the already-constructed
+ * backends alone could never reach the worker that ran the attempt — the
+ * restarted controller would redispatch work that is still running. The
+ * named executor is therefore constructed on demand (`forProfile` caches
+ * it), and the already-constructed backends follow it.
+ *
+ * `named` is `null` when the profile cannot be resolved (an unknown or
+ * unwired profile): the daemon must not crash on it, and whatever the
+ * remaining backends answer is UNPROVABLE (the executor that ran the
+ * attempt is unreachable), so such a record stays with the lease-expiry
+ * path. */
+function recoveryExecutors(
   selector: ExecutorSelector,
   request: ExecutionRequest,
-): Promise<ExecutionOutcome | null> {
+): { readonly executors: readonly Executor[]; readonly named: Executor | null } {
+  let named: Executor | null = null;
+  try {
+    named = selector.forProfile(request.profiles.executor);
+  } catch {
+    named = null;
+  }
+  const executors: Executor[] = [];
+  if (named !== null) executors.push(named);
   for (const executor of selector.all()) {
+    if (executors.includes(executor)) continue;
+    executors.push(executor);
+  }
+  return { executors, named };
+}
+
+/** Reconcile one recovered execution across the recovery executors: the
+ * first non-`none` answer wins (a backend with nothing to say never
+ * overrides one that found the worker). */
+async function reconcileRecoveredWorker(
+  executors: readonly Executor[],
+  request: ExecutionRequest,
+): Promise<RecoveredWorkerAnswer> {
+  for (const executor of executors) {
     const outcome = await executor.reconcile(request);
     if (outcome.kind === "settled") {
       const result = outcome.result;
-      return Object.freeze({
-        status: result.status,
-        resultHeadSha: result.status === "completed" ? result.resultHeadSha : "",
-        failureCategory:
-          result.failureCategory === "" ? "executor-error" : result.failureCategory,
-      });
+      return {
+        kind: "settled",
+        outcome: Object.freeze({
+          status: result.status,
+          resultHeadSha: result.status === "completed" ? result.resultHeadSha : "",
+          failureCategory:
+            result.failureCategory === "" ? "executor-error" : result.failureCategory,
+        }),
+      };
     }
-    if (outcome.kind === "running") return null;
+    if (outcome.kind === "running") return { kind: "running" };
   }
-  return null;
+  return { kind: "none" };
 }
 
-/** Cancel one recovered execution by correlation identity across every
- * constructed backend. `terminated` means the worker is provably gone. */
+/** Cancel one recovered execution by correlation identity across the
+ * recovery executors. `terminated` means the worker is provably gone.
+ *
+ * An EMPTY executor set proves nothing: there was no backend to ask, so
+ * the termination CANNOT be confirmed — the answer is `failed` (the
+ * worker may still be running), never a vacuous `terminated`. */
 async function cancelRecoveredWorker(
-  selector: ExecutorSelector,
+  executors: readonly Executor[],
   request: ExecutionRequest,
 ): Promise<{ kind: "terminated" } | { kind: "failed" }> {
+  if (executors.length === 0) return { kind: "failed" };
   let failed = false;
-  for (const executor of selector.all()) {
+  for (const executor of executors) {
     const outcome = await executor.cancel(request);
     if (outcome.kind === "terminated") return { kind: "terminated" };
     if (outcome.kind === "failed") failed = true;

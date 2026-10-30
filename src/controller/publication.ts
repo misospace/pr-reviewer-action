@@ -16,6 +16,20 @@
  *   result may publish at all: an expired or stale-head result is never
  *   written over the current head.
  *
+ * WHAT IS PUBLISHED. The published content is the worker's structured
+ * REVIEW artifact — the coordinate the executor's own result contract
+ * names (`ExecutionResult.resultArtifactPath`: "path of the worker's
+ * structured review-result artifact; the publication layer consumes
+ * this, not stdout"). The `result.json` envelope beside it is the
+ * EXECUTION wrapper (status, correlation identity, artifact path), never
+ * the review itself: publishing the wrapper would persist execution
+ * metadata where the review belongs. The envelope is therefore READ and
+ * VALIDATED (the executor's own `validateExecutionResult`, so a foreign
+ * correlation identity, an unknown field, or an artifact path outside the
+ * run directory is refused), and the artifact it names is read
+ * (bounded, no-follow, proven contained) and canonicalized into the
+ * durable payload.
+ *
  * The forge write itself is an injected `ForgeWriteCapability` the daemon
  * binds from the platform layer (`src/platform/`, the GitHub App client or
  * the Forgejo client). No forge CLI exists anywhere in this path, and no
@@ -38,15 +52,21 @@ import { gateJobPublication } from "../ingress/dispatch.js";
 import type { JobPublisher } from "../queue/scheduler.js";
 import type { JobRecord } from "../queue/types.js";
 import { containsSecretShapedContent } from "../context/redact.js";
-import type {
-  ControlPlaneStore,
-  PublicationRecord,
-  StateMutation,
-  UsageCostProvenance,
-  UsageRecord,
-  UsageRole,
+import {
+  PUBLICATION_PAYLOAD_MAX_CHARS,
+  type ControlPlaneStore,
+  type PublicationRecord,
+  type StateMutation,
+  type UsageCostProvenance,
+  type UsageRecord,
+  type UsageRole,
 } from "../state/index.js";
 import { proveContained, readBoundedFileNoFollow } from "../executor/paths.js";
+import {
+  MAX_EXECUTION_RESULT_FILE_BYTES,
+  validateExecutionResult,
+  type ExecutionResult,
+} from "../executor/index.js";
 import {
   executionResultPath,
   executionRunId,
@@ -104,80 +124,166 @@ function boundedDetail(value: string, cap: number): string {
   return `${singleLine.slice(0, Math.max(0, cap - 1))}…`;
 }
 
-/** Outcome of reading the worker's result artifact for publication. */
+/** Outcome of reading the worker's review artifact for publication. */
 type ArtifactOutcome =
   | { readonly kind: "ok"; readonly payload: string; readonly usage: readonly UsageRecord[] }
   | { readonly kind: "unavailable"; readonly reason: string };
 
-/** Read the worker's structured result file (the `./execution.js` layout)
- * and canonicalize it into the durable payload. Containment is proven, the
- * read is no-follow and byte-capped, the correlation identity is checked
- * against the layout-derived run id, and the raw bytes must already BE the
- * canonical encoding of the object they parse to (a duplicate-key payload
- * that hides content behind a lossy parse is refused, never adopted). A
- * planted or foreign file is never adopted as a publication payload. */
-async function readResultPayload(
+/** Read the EXECUTION envelope the worker wrote (`<runDir>/result.json`)
+ * and validate it against the executor's own result contract (#733).
+ *
+ * The envelope is the correlation record: it names the review artifact
+ * (`resultArtifactPath`) the publication consumes. It is validated with
+ * the executor's OWN validator — an unknown field, a foreign correlation
+ * identity, or an artifact path outside the run directory is refused
+ * here, never normalized. */
+async function readExecutionEnvelope(
   runsRoot: string,
   jobId: string,
   attempt: number,
-  nowMs: number,
-): Promise<ArtifactOutcome> {
+): Promise<
+  | { readonly kind: "ok"; readonly result: ExecutionResult }
+  | { readonly kind: "unavailable"; readonly reason: string }
+> {
   const runDir = executionRunDir(runsRoot, jobId, attempt);
-  const resultPath = executionResultPath(runsRoot, jobId, attempt);
-  const proof = await proveContained(runDir, resultPath);
+  const envelopePath = executionResultPath(runsRoot, jobId, attempt);
+  const proof = await proveContained(runDir, envelopePath);
   if (!proof.contained) {
-    return { kind: "unavailable", reason: "result artifact path is not provably contained" };
+    return { kind: "unavailable", reason: "execution result envelope is not provably contained" };
   }
-  const read = await readBoundedFileNoFollow(resultPath, 1_048_576);
+  const read = await readBoundedFileNoFollow(envelopePath, MAX_EXECUTION_RESULT_FILE_BYTES);
   if (read.kind === "missing") {
-    return { kind: "unavailable", reason: "worker result artifact is missing" };
+    return { kind: "unavailable", reason: "worker execution result envelope is missing" };
   }
   if (read.kind === "invalid") {
-    return { kind: "unavailable", reason: "worker result artifact is unreadable" };
+    return { kind: "unavailable", reason: "worker execution result envelope is unreadable" };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(read.text);
   } catch {
-    return { kind: "unavailable", reason: "worker result artifact is not JSON" };
+    return { kind: "unavailable", reason: "worker execution result envelope is not JSON" };
+  }
+  let result: ExecutionResult;
+  try {
+    result = validateExecutionResult(parsed, { runDir });
+  } catch {
+    return { kind: "unavailable", reason: "worker execution result envelope is invalid" };
+  }
+  if (result.runId !== executionRunId(jobId, attempt) || result.jobId !== jobId) {
+    return { kind: "unavailable", reason: "worker execution result envelope belongs to another run" };
+  }
+  if (result.status !== "completed") {
+    return { kind: "unavailable", reason: "worker execution result envelope is not a completed result" };
+  }
+  return { kind: "ok", result };
+}
+
+/** Read the worker's structured REVIEW artifact — the coordinate the
+ * validated execution result names — and canonicalize it into the
+ * durable payload.
+ *
+ * Containment is proven against the run directory (no symlink, no hard
+ * link, canonical directory inside the run dir), the read is no-follow
+ * and byte-capped, and the payload is the CANONICAL encoding of exactly
+ * the object that was parsed: the durable bytes and the replayed bytes
+ * are the same thing, and the duplicate-key hiding trick is structurally
+ * impossible (the parse keeps only the LAST occurrence, and the
+ * published bytes ARE that parse). The usage attestation rides on the
+ * review artifact; a malformed entry refuses the whole publication
+ * (an untrustworthy attestation is no attestation). */
+async function readReviewArtifact(
+  runsRoot: string,
+  jobId: string,
+  attempt: number,
+  artifactPath: string,
+  runId: string,
+  nowMs: number,
+): Promise<ArtifactOutcome> {
+  const runDir = executionRunDir(runsRoot, jobId, attempt);
+  const proof = await proveContained(runDir, artifactPath);
+  if (!proof.contained) {
+    return { kind: "unavailable", reason: "review artifact path is not provably contained" };
+  }
+  const read = await readBoundedFileNoFollow(artifactPath, PUBLICATION_PAYLOAD_MAX_CHARS);
+  if (read.kind === "missing") {
+    return { kind: "unavailable", reason: "worker review artifact is missing" };
+  }
+  if (read.kind === "invalid") {
+    return { kind: "unavailable", reason: "worker review artifact is unreadable" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(read.text);
+  } catch {
+    return { kind: "unavailable", reason: "worker review artifact is not JSON" };
   }
   if (!isPlainObject(parsed)) {
-    return { kind: "unavailable", reason: "worker result artifact is not a JSON object" };
+    return { kind: "unavailable", reason: "worker review artifact is not a JSON object" };
   }
-  const expectedRunId = executionRunId(jobId, attempt);
-  if (parsed["runId"] !== expectedRunId || parsed["jobId"] !== jobId) {
-    return { kind: "unavailable", reason: "worker result artifact belongs to another run" };
-  }
-  // Canonical single-line encoding of exactly the object that was parsed:
-  // the durable bytes and the replayed bytes are the same thing, and the
-  // duplicate-key hiding trick is structurally impossible.
   const canonical = JSON.stringify(parsed);
-  if (canonical !== read.text) {
-    return { kind: "unavailable", reason: "worker result artifact is not canonical JSON" };
+  if (canonical.length > PUBLICATION_PAYLOAD_MAX_CHARS) {
+    return { kind: "unavailable", reason: "worker review artifact is too large to publish" };
   }
   if (containsSecretShapedContent(canonical)) {
-    return { kind: "unavailable", reason: "worker result artifact carries secret-shaped content" };
+    return { kind: "unavailable", reason: "worker review artifact carries secret-shaped content" };
   }
-  const rawUsage = parsed["usage"];
-  const usage: UsageRecord[] = [];
-  if (rawUsage !== undefined) {
-    if (!Array.isArray(rawUsage)) {
-      return { kind: "unavailable", reason: "worker result artifact usage is not a list" };
-    }
-    for (let index = 0; index < rawUsage.length; index += 1) {
-      const entry = rawUsage[index];
-      const record = isPlainObject(entry)
-        ? usageRecordFrom(entry, expectedRunId, index, nowMs)
-        : null;
-      // Fail closed: an artifact whose usage attestation is malformed is
-      // an untrustworthy artifact — no publication rides on it.
-      if (record === null) {
-        return { kind: "unavailable", reason: "worker result artifact carries an invalid usage entry" };
-      }
-      usage.push(record);
-    }
+  const usage = usageRecordsFrom(parsed, runId, nowMs);
+  if (usage === null) {
+    return { kind: "unavailable", reason: "worker review artifact carries an invalid usage entry" };
   }
   return { kind: "ok", payload: canonical, usage };
+}
+
+/** The publication artifact of one attempt: the validated execution
+ * envelope (which names the review artifact) and the review artifact
+ * itself. The envelope's head must agree with the queue record's
+ * durable head: two different heads mean the artifact on disk is not
+ * the result the queue is publishing. */
+async function readPublicationArtifact(
+  runsRoot: string,
+  jobId: string,
+  attempt: number,
+  resultHeadSha: string,
+  nowMs: number,
+): Promise<ArtifactOutcome> {
+  const envelope = await readExecutionEnvelope(runsRoot, jobId, attempt);
+  if (envelope.kind === "unavailable") return envelope;
+  if (envelope.result.resultHeadSha !== resultHeadSha) {
+    return { kind: "unavailable", reason: "execution result envelope head disagrees with the queue record" };
+  }
+  return readReviewArtifact(
+    runsRoot,
+    jobId,
+    attempt,
+    envelope.result.resultArtifactPath,
+    envelope.result.runId,
+    nowMs,
+  );
+}
+
+/** The usage entries the worker's review artifact MAY carry. An artifact
+ * without usage records none — usage is never fabricated (#736: cost
+ * provenance is never invented). A malformed entry refuses the whole
+ * batch: fail closed. */
+function usageRecordsFrom(
+  parsed: Record<string, unknown>,
+  runId: string,
+  nowMs: number,
+): UsageRecord[] | null {
+  const rawUsage = parsed["usage"];
+  if (rawUsage === undefined) return [];
+  if (!Array.isArray(rawUsage)) return null;
+  const usage: UsageRecord[] = [];
+  for (let index = 0; index < rawUsage.length; index += 1) {
+    const entry = rawUsage[index];
+    const record = isPlainObject(entry)
+      ? usageRecordFrom(entry, runId, index, nowMs)
+      : null;
+    if (record === null) return null;
+    usage.push(record);
+  }
+  return usage;
 }
 
 function usageRecordFrom(entry: RawUsageEntry, runId: string, index: number, nowMs: number): UsageRecord | null {
@@ -260,7 +366,13 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
         payload = existing.resultPayload;
         usage = [];
       } else {
-        const artifact = await readResultPayload(deps.runsRoot, jobId, record.attempt, nowMs);
+        const artifact = await readPublicationArtifact(
+          deps.runsRoot,
+          jobId,
+          record.attempt,
+          record.resultHeadSha,
+          nowMs,
+        );
         if (artifact.kind === "unavailable") {
           // No durable publication record exists yet (resultPayload is
           // REQUIRED, so a record cannot be written without its payload):

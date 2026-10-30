@@ -233,3 +233,76 @@ test("a recovered resolution whose generation was superseded is retired as super
     "a superseded generation's result can never publish",
   );
 });
+
+test("an active record with no in-process dispatch is adopted by a new lease owner", async () => {
+  const executor = new ControllableExecutor();
+  const store = new InMemoryQueueStore();
+  const controller = new ReviewQueueController(store, baseOptions(executor), () => 1000);
+  controller.enqueue(makeJob("job-1"));
+  await controller.tick();
+  assert.equal(executor.records.length, 1);
+
+  // A restarted controller: its in-memory handle map is empty, so the
+  // abandoned record can be claimed.
+  const restarted = new ReviewQueueController(store, baseOptions(executor), () => 1000);
+  restarted.recover();
+  const before = restarted.recordFor("job-1")!;
+  assert.equal(before.state, "running");
+  const claimed = restarted.adoptRecovered("job-1", "recovery-owner");
+  assert.equal(claimed, true, "the active record is claimed");
+  const adopted = restarted.recordFor("job-1")!;
+  assert.equal(adopted.leaseOwner, "recovery-owner", "the lease owner is the new holder");
+  assert.equal(adopted.leaseExpiresAtMs, 2000, "the lease is live under the new owner");
+  assert.equal(adopted.state, "running", "the claimed record stays active");
+  // The expiry path sees a live lease: the record is never requeued into
+  // a second dispatch of the same review.
+  await restarted.tick();
+  assert.equal(restarted.recordFor("job-1")!.state, "running");
+  assert.equal(executor.records.length, 1, "the review was never rerun");
+  // The adopted record settles through the recovery seam.
+  assert.equal(
+    await restarted.resolveRecovered("job-1", {
+      status: "completed",
+      resultHeadSha: HEAD,
+      failureCategory: "",
+    }),
+    true,
+  );
+  assert.ok(
+    restarted.recordFor("job-1")!.state === "publishing" ||
+      restarted.recordFor("job-1")!.state === "completed",
+    "the adopted record settles through the recovery seam",
+  );
+});
+
+test("a claim an uncertain record cannot take changes nothing", async () => {
+  const executor = new ControllableExecutor();
+  const store = new InMemoryQueueStore();
+  const controller = new ReviewQueueController(store, baseOptions(executor), () => 1000);
+  controller.enqueue(makeJob("job-1"));
+  await controller.tick();
+
+  // A live in-process dispatch owns the record: the claim refuses.
+  assert.equal(controller.adoptRecovered("job-1", "recovery-owner"), false);
+  assert.notEqual(controller.recordFor("job-1")!.leaseOwner, "recovery-owner");
+  // An empty owner token is not a claim.
+  assert.equal(controller.adoptRecovered("job-1", ""), false);
+  // An unknown record is not a claim.
+  assert.equal(controller.adoptRecovered("job-missing", "recovery-owner"), false);
+
+  // A terminal record is not a claim either.
+  const restarted = new ReviewQueueController(store, baseOptions(executor), () => 1000);
+  restarted.recover();
+  assert.equal(
+    await restarted.resolveRecovered("job-1", {
+      status: "completed",
+      resultHeadSha: HEAD,
+      failureCategory: "",
+    }),
+    true,
+  );
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  await restarted.tick();
+  assert.equal(restarted.recordFor("job-1")!.state, "completed");
+  assert.equal(restarted.adoptRecovered("job-1", "recovery-owner"), false);
+});

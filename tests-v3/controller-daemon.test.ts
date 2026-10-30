@@ -8,14 +8,21 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   InMemoryControlPlaneStore,
+  type AdoptedRepositoryRecord,
   type ControlPlaneStore,
+  type IdempotencyKeyRecord,
+  type InstallationRecord,
+  type PublicationRecord,
+  type RunRecord,
+  type StateMutation,
+  type UsageAggregate,
 } from "../src/state/index.js";
 import { emptyQueueSnapshot, type QueueStore } from "../src/queue/index.js";
 import type { CanonicalForgeEvent } from "../src/events/types.js";
@@ -102,6 +109,14 @@ function event(overrides: Partial<CanonicalForgeEvent> = {}): CanonicalForgeEven
 class FakeExecution implements Executor {
   readonly started: ExecutionRequest[] = [];
   readonly signals: AbortSignal[] = [];
+  /** How many times the daemon asked this executor about a correlation
+   * identity: the evidence that a recovery pass REACHED the executor
+   * (a fresh daemon constructs it only when the recovered request's
+   * profile names it). */
+  reconcileCalls = 0;
+  /** How many times the daemon asked this executor to TERMINATE a
+   * correlation identity (the recovery cancellation path). */
+  cancelCalls = 0;
   reconcileOutcome:
     | { kind: "none" }
     | { kind: "running" }
@@ -118,24 +133,10 @@ class FakeExecution implements Executor {
   /** Make the current (hung) execution settle completed. */
   finish(overrides: Partial<ExecutionResult> = {}): void {
     const request = this.started[this.started.length - 1]!;
-    const result: ExecutionResult = {
-      status: "completed",
-      runId: request.runId,
-      jobId: request.jobId,
-      resultHeadSha: request.headSha,
-      failureCategory: "",
-      failureMessage: "",
-      resultArtifactPath: request.resultPath,
-      diagnostics: "",
-      artifactPaths: [],
-      resourceMs: 5,
-      observedAtMs: Date.now(),
-      ...overrides,
-    };
-    writeFileSync(request.resultPath, JSON.stringify(result), "utf8");
-    this.settled = result;
-    this.reconcileOutcome = { kind: "settled", result };
-    for (const resolve of this.resolvers.splice(0)) resolve(result);
+    const settled = settledOutcomeFor(request, overrides);
+    this.settled = settled.result;
+    this.reconcileOutcome = { kind: "settled", result: settled.result };
+    for (const resolve of this.resolvers.splice(0)) resolve(settled.result);
   }
 
   /** TEST-ONLY: clear every pending poll timer so a test process can exit
@@ -201,12 +202,47 @@ class FakeExecution implements Executor {
   }
 
   async reconcile(): Promise<FakeExecution["reconcileOutcome"]> {
+    this.reconcileCalls += 1;
     return this.reconcileOutcome;
   }
 
   async cancel(): Promise<FakeExecution["cancelOutcome"]> {
+    this.cancelCalls += 1;
     return this.cancelOutcome;
   }
+}
+
+/** The settled outcome of an attempt whose worker produced its review:
+ * the worker writes TWO files — the structured REVIEW artifact (the
+ * content the publication consumes) and the execution envelope beside it
+ * (the correlation record that NAMES the artifact) — and the reconcile
+ * answer carries the same result. */
+function settledOutcomeFor(
+  request: ExecutionRequest,
+  overrides: Partial<ExecutionResult> = {},
+): { readonly kind: "settled"; readonly result: ExecutionResult } {
+  const reviewPath = join(request.runDir, "review.json");
+  writeFileSync(
+    reviewPath,
+    JSON.stringify({ verdict: "issues", summary: "a fake finding", headSha: request.headSha }),
+    "utf8",
+  );
+  const result: ExecutionResult = {
+    status: "completed",
+    runId: request.runId,
+    jobId: request.jobId,
+    resultHeadSha: request.headSha,
+    failureCategory: "",
+    failureMessage: "",
+    resultArtifactPath: reviewPath,
+    diagnostics: "",
+    artifactPaths: [],
+    resourceMs: 5,
+    observedAtMs: Date.now(),
+    ...overrides,
+  };
+  writeFileSync(request.resultPath, JSON.stringify(result), "utf8");
+  return { kind: "settled", result };
 }
 
 interface Harness {
@@ -848,4 +884,367 @@ test("a poll platform that disagrees with the intake platform fails closed", asy
   } finally {
     for (const dir of Object.values(dirs)) rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── the second review round's blockers ─────────────────────────────────────
+//
+// 5. A stored adoption is the operator's PAST act: the CURRENT policy
+//    re-gates it, so the operator denylist (the #727 hard-off layer)
+//    stops a repository that was adopted before the policy changed.
+// 6. A failed queue handoff AWAITS the durable release of the generation
+//    claim before the failure propagates: a claim left behind suppresses
+//    the redelivery until its horizon expires.
+
+/** A control plane whose `release-idempotency` mutations are slow: the
+ * durable release must be COMPLETE before the handoff failure surfaces. */
+function controlPlaneWithSlowRelease(
+  inner: ControlPlaneStore,
+  delayMs: number,
+): { readonly controlPlane: ControlPlaneStore; readonly released: () => boolean } {
+  const state = { released: false };
+  const controlPlane: ControlPlaneStore = {
+    async apply(batch: readonly StateMutation[]): Promise<void> {
+      if (batch.some((mutation) => mutation.kind === "release-idempotency")) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        state.released = true;
+      }
+      await inner.apply(batch);
+    },
+    claimRun: (runId, owner, nowMs, ttlMs) => inner.claimRun(runId, owner, nowMs, ttlMs),
+    heartbeatRun: (runId, owner, nowMs, ttlMs) => inner.heartbeatRun(runId, owner, nowMs, ttlMs),
+    getInstallation: (installationId: string): Promise<InstallationRecord | null> =>
+      inner.getInstallation(installationId),
+    getAdoptedRepository: (
+      platform: "github" | "forgejo",
+      installationId: string,
+      repoFullName: string,
+    ): Promise<AdoptedRepositoryRecord | null> =>
+      inner.getAdoptedRepository(platform, installationId, repoFullName),
+    getRun: (runId: string): Promise<RunRecord | null> => inner.getRun(runId),
+    getPublication: (jobId: string): Promise<PublicationRecord | null> =>
+      inner.getPublication(jobId),
+    getIdempotencyKey: (key: string): Promise<IdempotencyKeyRecord | null> =>
+      inner.getIdempotencyKey(key),
+    aggregateUsage: (): Promise<UsageAggregate> => inner.aggregateUsage(),
+    exportState: () => inner.exportState(),
+  };
+  return { controlPlane, released: () => state.released };
+}
+
+/** An enabled adoption record, as the operator API would have written it. */
+async function adoptRepository(
+  controlPlane: ControlPlaneStore,
+  overrides: Partial<AdoptedRepositoryRecord> = {},
+): Promise<void> {
+  await controlPlane.apply([
+    {
+      kind: "put-adopted-repository",
+      record: {
+        platform: "github",
+        installationId: "12345",
+        repoFullName: "owner/repo",
+        adoptionEpoch: "1",
+        configFingerprint: "0123456789abcdef",
+        headFingerprint: "",
+        enabled: true,
+        adoptedAtMs: 1000,
+        updatedAtMs: 1000,
+        ...overrides,
+      },
+    },
+  ]);
+}
+
+test("an existing enabled adoption record re-passes the current operator policy", async (t) => {
+  const controlPlane = new InMemoryControlPlaneStore();
+  await adoptRepository(controlPlane);
+  const h = await start({
+    controlPlane,
+    options: {
+      instance: {
+        ...instanceConfig(),
+        adoption: {
+          mode: "all_allowed",
+          allowlist: [],
+          // The operator denylists the repository AFTER it was adopted:
+          // #727 makes the denylist the hard-off layer that beats
+          // everything, including a stored adoption.
+          denylist: ["owner/repo"],
+          discoveredDefault: "adopt",
+        },
+      } as InstanceConfig,
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(event()), "ignored");
+  assert.equal(h.fake.started.length, 0, "a denylisted repository never schedules");
+});
+
+test("an existing enabled adoption record keeps scheduling while the current policy allows it", async (t) => {
+  const controlPlane = new InMemoryControlPlaneStore();
+  await adoptRepository(controlPlane);
+  const h = await start({ controlPlane });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  assert.equal(h.fake.started.length, 1);
+});
+
+test("a failed queue handoff awaits the durable release before it fails", async (t) => {
+  // The queue store refuses every durable commit FROM NOW ON: the
+  // enqueue handoff fails, which is exactly the case the dispatch
+  // contract releases.
+  let failSaves = false;
+  const failingStore: QueueStore = {
+    load: () => emptyQueueSnapshot(),
+    save: () => {
+      if (failSaves) throw new Error("queue store unavailable");
+    },
+  };
+  const inner = new InMemoryControlPlaneStore();
+  const { controlPlane, released } = controlPlaneWithSlowRelease(inner, 200);
+  const h = await start({ controlPlane, options: { queueStore: failingStore } });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  failSaves = true;
+  await assert.rejects(() => h.daemon.ingest(event()), /queue store unavailable/);
+  // The durable release COMPLETED before the failure surfaced: a claim
+  // left behind (the fire-and-forget release) would suppress the
+  // redelivery until the claim's horizon expires.
+  assert.equal(released(), true, "the release-idempotency mutation committed before the failure");
+  const keys = (await inner.exportState()).idempotencyKeys;
+  assert.equal(
+    keys.filter((entry) => entry.key.startsWith("generation:")).length,
+    0,
+    "no durable generation claim survives a failed enqueue",
+  );
+});
+
+// ── the restart-recovery duplicate-spend blockers ─────────────────────────
+//
+// 1. A restarted daemon's executor selector cache is EMPTY until a
+//    profile is selected: the recovery pass must CONSTRUCT the executor
+//    the recovered request names, or the orphaned worker is unreachable.
+// 2. The recovery reconciliation must run BEFORE the queue's own
+//    `recover()`: a record whose worker is provably alive must not be
+//    made dispatchable — a redispatch runs the same review twice.
+
+/** The durable queue snapshot the daemon persists: the recovery
+ * evidence (which records are active and who holds their lease). */
+interface DurableQueueRecord {
+  readonly job: { readonly jobId: string };
+  readonly state: string;
+  readonly leaseOwner: string;
+}
+
+function durableQueueRecords(durableStateDir: string): readonly DurableQueueRecord[] {
+  const raw = JSON.parse(
+    readFileSync(join(durableStateDir, "queue-snapshot.json"), "utf8"),
+  ) as { readonly records: readonly DurableQueueRecord[] };
+  return raw.records;
+}
+
+/** The clock of a restarted daemon whose abandoned attempt's lease has
+ * already expired: the lease-expiry path owns the record unless the
+ * recovery seam settled (or adopted) it first. */
+function clockPastTheAbandonedLease(): () => number {
+  return () => Date.now() + 3_600_000;
+}
+
+test("a restarted daemon reaches the orphaned worker through the executor its request names", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const request = h.fake.started[0]!;
+
+  // The daemon dies with the worker still running (the crashed-process
+  // image); the worker produced its review before the restart.
+  h.daemon.abandon();
+  const settled = settledOutcomeFor(request);
+
+  const secondFake = new FakeExecution(true);
+  secondFake.reconcileOutcome = settled;
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: secondFake,
+    options: { now: clockPastTheAbandonedLease() },
+  });
+  t.after(() => {
+    h.fake.dispose();
+    secondFake.dispose();
+    h2.daemon.abandon();
+    cleanup(h);
+  });
+
+  await waitFor(() => h2.forgePublishes.length > 0);
+  assert.ok(
+    secondFake.reconcileCalls > 0,
+    "the executor the recovered request names was constructed and asked",
+  );
+  assert.equal(secondFake.started.length, 0, "the review was never rerun");
+  assert.equal(h2.forgePublishes.length, 1, "the recovered result published exactly once");
+});
+
+test("a recovered record whose worker is provably alive is not redispatched", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const request = h.fake.started[0]!;
+
+  // The daemon dies with the worker still running, and the abandoned
+  // attempt's lease expires while it is down.
+  h.daemon.abandon();
+
+  const secondFake = new FakeExecution(true);
+  secondFake.reconcileOutcome = { kind: "running" };
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: secondFake,
+    options: { now: clockPastTheAbandonedLease() },
+  });
+  t.after(() => {
+    h.fake.dispose();
+    secondFake.dispose();
+    h2.daemon.abandon();
+    cleanup(h);
+  });
+
+  // The recovery pass reached the worker and proved it alive.
+  await waitFor(() => secondFake.reconcileCalls > 0);
+  // Several ticks later the record is still the adopted one: a redispatch
+  // would run the same review twice (duplicate model spend).
+  await settleFor(300);
+  assert.equal(secondFake.started.length, 0, "the live worker was never redispatched");
+  const record = durableQueueRecords(h.dirs.durableStateDir).find(
+    (entry) => entry.job.jobId === request.jobId,
+  );
+  assert.notEqual(record, undefined, "the record is still in the durable queue");
+  assert.equal(record!.state, "running", "the adopted record stays active");
+  assert.notEqual(record!.leaseOwner, "", "the daemon holds the adopted record's lease");
+});
+
+test("a recovered record whose worker settled is settled through the recovery seam", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const request = h.fake.started[0]!;
+
+  // The daemon dies with the worker still running; the worker settles
+  // before the restart.
+  h.daemon.abandon();
+  const settled = settledOutcomeFor(request);
+
+  const secondFake = new FakeExecution(true);
+  secondFake.reconcileOutcome = settled;
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: secondFake,
+  });
+  t.after(() => {
+    h.fake.dispose();
+    secondFake.dispose();
+    h2.daemon.abandon();
+    cleanup(h);
+  });
+
+  await waitFor(() => h2.forgePublishes.length > 0);
+  assert.equal(secondFake.started.length, 0, "the settled review was never rerun");
+  assert.equal(h2.forgePublishes.length, 1, "the recovered result published exactly once");
+  const publication = await h.controlPlane.getPublication(request.jobId);
+  assert.notEqual(publication, null);
+  assert.equal(publication!.publicationState, "published");
+  // The record was SETTLED through the recovery seam (never requeued into
+  // a second dispatch of the same review).
+  await waitFor(() =>
+    durableQueueRecords(h.dirs.durableStateDir).some(
+      (entry) => entry.job.jobId === request.jobId && entry.state === "completed",
+    ),
+  );
+});
+
+test("a recovered request whose executor profile is unknown never crashes the restart", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  h.daemon.abandon();
+
+  // The operator's config no longer knows the profile the recovered
+  // request names: the recovery pass must not crash the restart, and the
+  // answer it can reach is unprovable — the record stays with the
+  // lease-expiry path.
+  const secondFake = new FakeExecution(true);
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: secondFake,
+    options: {
+      instance: {
+        ...instanceConfig(),
+        executorProfiles: [],
+        defaultExecutorProfile: "",
+      } as InstanceConfig,
+    },
+  });
+  t.after(() => {
+    h.fake.dispose();
+    secondFake.dispose();
+    h2.daemon.abandon();
+    cleanup(h);
+  });
+
+  assert.equal(h2.daemon.stopped, false, "the restarted daemon is running");
+  await settleFor(200);
+  assert.equal(secondFake.reconcileCalls, 0, "no executor could be reached for the unknown profile");
+  assert.equal(secondFake.started.length, 0, "the review was not redispatched");
+});
+
+test("a graceful stop terminates an adopted worker instead of orphaning it", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+
+  // The daemon dies with the worker still running; the restarted daemon
+  // adopts the live worker (its lease is kept alive, never redispatched).
+  h.daemon.abandon();
+  const secondFake = new FakeExecution(true);
+  secondFake.reconcileOutcome = { kind: "running" };
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: secondFake,
+    options: { drainMs: 50 },
+  });
+  t.after(() => {
+    h.fake.dispose();
+    secondFake.dispose();
+    cleanup(h);
+  });
+  await waitFor(() => secondFake.reconcileCalls > 0);
+
+  // The graceful stop drains the adopted worker and then TERMINATES it
+  // by correlation identity: an adopted worker must never be orphaned
+  // by the daemon's own shutdown.
+  await h2.daemon.stop();
+  assert.equal(secondFake.cancelCalls > 0, true, "the adopted worker was terminated by identity");
 });
