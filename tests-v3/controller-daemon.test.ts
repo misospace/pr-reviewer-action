@@ -62,6 +62,7 @@ function instanceConfig(): InstanceConfig {
     defaultExecutorProfile: "default",
     evidenceProfiles: [],
     defaultEvidenceProfile: null,
+    namespacePolicies: [],
     adoption: {
       mode: "all_allowed",
       allowlist: [],

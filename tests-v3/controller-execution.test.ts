@@ -225,6 +225,7 @@ function instanceWith(profiles: InstanceConfig["executorProfiles"]): InstanceCon
     defaultExecutorProfile: null,
     evidenceProfiles: [],
     defaultEvidenceProfile: null,
+    namespacePolicies: [],
     adoption: {
       mode: "all_allowed",
       allowlist: [],
