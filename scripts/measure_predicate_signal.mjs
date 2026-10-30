@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
  * Launcher for `scripts/measure_predicate_signal.ts` (#1347): bundles the
- * measurement with esbuild's JS API — so the shipped production
- * `linePredicateSignal` is imported from the working-tree source, never
- * re-implemented — writes the bundle to a fresh private temp directory, and
+ * measurement with esbuild's JS API — so the shipped production shape is
+ * imported from the working-tree source, never re-implemented — writes the
+ * bundle to a fresh private temp directory, and
  * requires it. No credentials are involved, so unlike
  * `scripts/confidence_bridge.mjs` there is no user-cache reuse; every run
  * bundles fresh. Quiet by design; the measurement prints its JSON report on

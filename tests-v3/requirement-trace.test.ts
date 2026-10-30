@@ -23,8 +23,10 @@ import {
   MAX_TRACE_REPAIR_SUMMARY_ID_CHARS,
   MAX_TRACE_REPAIR_SUMMARY_IDS,
   distributedRequirementHints,
-  extractRequirementTerms,
-  ledgerRequirementsById,
+extractRequirementTerms,
+filePredicateSignal,
+ledgerRequirementsById,
+linePredicateSignal,
   mergeTraceClaims,
   missingTraceRequirementIds,
   renderRequirementTraceMarkdown,
@@ -708,6 +710,268 @@ test("#1347: the two named line-scan residuals are pinned rather than silently w
     "met",
     "a keyword-assert carrying a real comparison must stay met",
   );
+});
+
+/**
+ * #1347 (review follow-up, head e62d8dc): an open span is a span.
+ *
+ * The code view was line-local, so a multi-line block comment or template
+ * literal leaked: only the line that OPENED the span was scrubbed, and the
+ * lines inside it were read as code. A shape written inside such a span —
+ * `if (state.requested > ceiling)` or `mustNotExceed(…)` — then counted as
+ * enforcement, which is exactly the copy the anti-copy gate exists to refuse.
+ * The open-span state is now carried across the file's lines, so a span is a
+ * span on every line it covers.
+ */
+function dispositionOfQuuxFile(lines: readonly string[], citedLine: number, ownerAnchored = true): string | undefined {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/boundary/gate.ts", lines);
+    const claim = metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: citedLine }], [VALID_TEST_LOCATION]);
+    const trace = ownerAnchored
+      ? validateRequirementTrace([claim], quuxLedger(), workspace, undefined, { ownership: quuxOwnership() })
+      : validateRequirementTrace([claim], quuxLedger(), workspace);
+    return trace.rows.find((row) => row.requirement_id === "req-quux")?.disposition;
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+}
+
+test("#1347: a shape inside an open multi-line comment or template literal is prose, not enforcement", () => {
+  const spans: Array<[string, string[]]> = [
+    ["a block comment with `*` continuation lines", [
+      "/*",
+      " * if (state.requested > ceiling) { throw new Error('over'); }",
+      " */",
+    ]],
+    ["a block comment whose lines do not begin with `*`", [
+      "/*",
+      "if (state.requested > ceiling) { throw new Error('over'); }",
+      "*/",
+    ]],
+    ["a template literal", [
+      "const message = `",
+      "if (state.requested > ceiling) { throw new Error('over'); }",
+      "`;",
+    ]],
+    ["a template literal with an interpolation", [
+      "const message = `",
+      "  ${state.requested > ceiling}",
+      "`;",
+    ]],
+    // #252: the fence is fed its own delimiters — an unterminated span never
+    // closes, so every line after it is prose too.
+    ["an unterminated block comment", [
+      "/*",
+      "if (state.requested > ceiling) { throw new Error('over'); }",
+    ]],
+    ["an unterminated template literal", [
+      "const message = `",
+      "if (state.requested > ceiling) { throw new Error('over'); }",
+    ]],
+  ];
+  for (const [label, lines] of spans) {
+    assert.equal(
+      dispositionOfQuuxFile(lines, 2, true),
+      "unverifiable",
+      `a shape inside ${label} must not pass as enforcement on the owner-anchored path`,
+    );
+    assert.equal(
+      dispositionOfQuuxFile(lines, 2, false),
+      "unverifiable",
+      `the shared shape check must exclude ${label} on the legacy path too`,
+    );
+  }
+});
+
+test("#1347: the span tracking must not eat the code around the span", () => {
+  // The false-downgrade direction: carrying the span state across lines must
+  // not swallow the code BEFORE the span, the code AFTER it, or the code that
+  // follows a closing delimiter on the same line.
+  const real: Array<[string, string[], number]> = [
+    ["enforcement after a closed multi-line comment", [
+      "/* explanation of the rule",
+      "   continued explanation */",
+      "if (state.requested > ceiling) { throw new Error('over'); }",
+    ], 3],
+    ["code after the closing delimiter on the same line", [
+      "/* explanation",
+      "*/ const ok = state.requested <= ceiling;",
+    ], 2],
+    ["enforcement before a comment opens on the same line", [
+      "const ok = state.requested <= ceiling; /* trailing note",
+      "   more note */",
+    ], 1],
+    ["code after a template literal closes on the same line", [
+      "const message = `",
+      "  text",
+      "`; const ok = state.requested <= ceiling;",
+    ], 3],
+    ["a comparison beside a closed span", [
+      "/* note */ if (state.requested > ceiling) { throw new Error('over'); }",
+    ], 1],
+  ];
+  for (const [label, lines, cited] of real) {
+    assert.equal(
+      dispositionOfQuuxFile(lines, cited, true),
+      "met",
+      `real enforcement (${label}) must stay met on the owner-anchored path`,
+    );
+    assert.equal(
+      dispositionOfQuuxFile(lines, cited, false),
+      "met",
+      `real enforcement (${label}) must stay met on the legacy path too`,
+    );
+  }
+});
+
+test("#1347: a distributed seam citation inside an open span is refused like any other copy", () => {
+  // The distributed path calls the same shared helper (`predicateSignalFound`),
+  // so the copy must not pass by being cited through a declared seam: the
+  // shape inside the open span is prose on every line of that span.
+  const workspace = makeWorkspace();
+  try {
+    const seamFiles = ["src/context/redact.ts", "src/render/fence-safe.ts", "src/prompt/instruction-separation.ts"];
+    for (const file of seamFiles) {
+      writeFile(workspace, file, [
+        "/*",
+        "if (expectedValue !== guardValue) throw new Error('mismatch');",
+        "*/",
+      ]);
+    }
+    writeUntrustedTestFixtures(workspace);
+    const trace = validateRequirementTrace(
+      [metTraceClaim(
+        "req-untrusted",
+        seamFiles.map((file) => ({ file, line: 2 })),
+        UNTRUSTED_TEST_LOCATIONS,
+      )],
+      traceLedger("req-untrusted", STANDARDS_UNTRUSTED),
+      workspace,
+      undefined,
+      { ownership: UNTRUSTED_DISTRIBUTED_OWNERSHIP },
+    );
+    assertUnverifiableWithNotes(trace, "req-untrusted", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1347: the single-line entry point is the same shape as the file-level scan", () => {
+  // `linePredicateSignal` is the single-line view of the file-level scan, so
+  // the two cannot disagree — the retained measurement reads the file-level
+  // one, the suite reads both.
+  assert.equal(linePredicateSignal("const ok = state.requested <= ceiling;"), true);
+  assert.equal(linePredicateSignal("const ceiling = state.requested;"), false);
+  assert.equal(linePredicateSignal("const note = 'must not exceed the ceiling';"), false);
+  assert.deepEqual(filePredicateSignal([
+    "const message = `",
+    "if (state.requested > ceiling) { throw new Error('over'); }",
+    "`;",
+  ]), [false, false, false]);
+  assert.deepEqual(filePredicateSignal([
+    "/*",
+    "if (state.requested > ceiling) { throw new Error('over'); }",
+    "*/",
+  ]), [false, false, false]);
+});
+
+test("#1347: a stray backtick in a regex literal must not swallow the rest of the file", () => {
+  // The unpaired-`/` rule, pinned in both directions. A backtick inside a
+  // regex literal (`/[|;&<>`$]/`) is not a template opener; treated as one it
+  // opened a span that swallowed the rest of the FILE and removed 1,781
+  // accepted lines from this repository's own sources — a false downgrade far
+  // worse than the leak it closes. The code before the backtick carries an
+  // unpaired `/`, so the template span stays line-local.
+  const stray = [
+    "const metachars = /[|;&<>`$]/;",
+    "const ok = state.requested <= ceiling;",
+  ];
+  assert.equal(
+    dispositionOfQuuxFile(stray, 2, true),
+    "met",
+    "a stray backtick in a regex literal must not swallow the enforcement that follows it",
+  );
+  // The even-parity counterpart: a template opener with no unpaired slash
+  // before it IS tracked across lines.
+  const tracked = [
+    "const message = `",
+    "if (state.requested > ceiling) { throw new Error('over'); }",
+    "`;",
+  ];
+  assert.equal(
+    dispositionOfQuuxFile(tracked, 2, true),
+    "unverifiable",
+    "a template opener with no unpaired slash before it must be tracked across lines",
+  );
+});
+
+test("#1347: the retained corpus measurement is a reproducible artifact over this repository's own sources", () => {
+  // The issue's constraint: the shape heuristic is shared with the legacy and
+  // distributed paths, so tightening it must be MEASURED against false
+  // downgrades — and the measurement must be a retained artifact, not an
+  // unretained one-off run. This runs the retained script and pins its
+  // accounting, so the requirement traces to a test instead of to prose.
+  const output = execFileSync(process.execPath, ["scripts/measure_predicate_signal.mjs"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const report = JSON.parse(output) as {
+    corpus_files: number;
+    corpus_lines: number;
+    baseline_accepted: number;
+    current_accepted: number;
+    removed: number;
+    removed_total: number;
+    newly_accepted_total: number;
+    newly_accepted_samples: string[];
+    line_local_accepted: number;
+    cross_line_removed: number;
+    cross_line_added: number;
+  };
+  assert.ok(report.corpus_files > 0, "the measurement corpus must not be empty");
+  assert.ok(report.corpus_lines > report.corpus_files, "the measurement corpus must carry lines");
+  // The counting identities: the net difference the report prints must be
+  // the removed lines minus the added ones, in both comparisons.
+  assert.equal(
+    report.removed_total - report.newly_accepted_total,
+    report.baseline_accepted - report.current_accepted,
+    "the removed count must be the removed lines minus the added ones",
+  );
+  assert.equal(
+    report.line_local_accepted - report.cross_line_removed,
+    report.current_accepted - report.cross_line_added,
+    "the cross-line delta must reconcile with both accepted counts",
+  );
+  assert.equal(report.removed, report.baseline_accepted - report.current_accepted);
+  assert.ok(
+    report.current_accepted < report.baseline_accepted,
+    "the tightened shape must accept fewer shapes than the pre-#1347 baseline",
+  );
+  // The false-downgrade rate of the cross-line refinement, measured on its
+  // own: carrying the open-span state across lines must not refuse a
+  // meaningful share of the shapes the line-local view accepted.
+  assert.ok(
+    report.cross_line_removed * 100 <= report.line_local_accepted,
+    `the cross-line refinement refused ${report.cross_line_removed} of ${report.line_local_accepted} accepted shapes`,
+  );
+  // The baseline is not a pure subset: the tightened call-shape rule accepts
+  // prefixed assertion calls the old bare-word regex could not match. Every
+  // sampled one must be such a call — a newly accepted line that is NOT
+  // call-shaped enforcement would mean the shape was loosened.
+  for (const sample of report.newly_accepted_samples) {
+    assert.match(
+      sample,
+      /\b(?:assert|must|expect|reject|invariant)[A-Za-z0-9_]*\s*\(/i,
+      `a newly accepted line must be a prefixed assertion-name call: ${sample}`,
+    );
+  }
+  // The production shape is the shipped one: the script bundles the working
+  // tree's source, so it cannot drift from the runtime.
+  const script = readFileSync(join(REPO_ROOT, "scripts/measure_predicate_signal.ts"), "utf8");
+  assert.match(script, /from "\.\.\/src\/enforcement\/requirement-trace\.js"/);
+  assert.match(script, /filePredicateSignal/);
 });
 
 /**
