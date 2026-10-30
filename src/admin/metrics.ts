@@ -66,7 +66,15 @@ export class AdminMetricsRegistry {
       ["model", new Set((options.allowedModels ?? []).slice(0, this.allowlistCap))],
       ["executor", new Set((options.allowedExecutors ?? []).slice(0, this.allowlistCap))],
     ]);
+    // Fixed zero-label counters are pre-created so their own lookups never
+    // need a new series: the overflow counter cannot recurse into the
+    // cap-rejection branch below, and the audit-failure counter stays
+    // recordable even when the cap is already full (a full cap is exactly
+    // when audit-sink failures are most likely to matter). A cap of 1 can
+    // hold only the overflow counter, so the audit pre-create is skipped
+    // there rather than spuriously bumping overflow at construction.
     this.update("pr_reviewer_admin_metrics_overflow_total", {}, 0, false);
+    if (this.maxSeries >= 2) this.update("pr_reviewer_admin_audit_failures_total", {}, 0, false);
   }
 
   increment(name: string, labels: Readonly<Record<string, string>> = {}, amount = 1): void { this.update(name, labels, amount, true); }

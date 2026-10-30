@@ -161,11 +161,11 @@ test("authenticated admin status keeps a bounded, redacted readiness detail", as
 test("readiness detail redacts quoted and keyed credential assignments", async () => {
   const { context } = fixture();
   context.deps.readiness = async () => ({
-    components: [{ name: "database", ok: false, degraded: true, detail: `{"password": "quoted-secret", "private_key": "pk-live-1234", "client_secret": 'single-quoted', "dsn": "postgres://db.internal:5432/prod?password=query-secret", "escaped": "a\\"b"}` }],
+    components: [{ name: "database", ok: false, degraded: true, detail: `{"password": "quoted-secret", "private_key": "pk-live-1234", "client_secret": 'single-quoted', "client_key": "ck-live-9876543210", "access_key": "AKIAIOSFODNN7EXAMPLE", "dsn": "postgres://db.internal:5432/prod?password=query-secret", "escaped": "a\\"b"}` }],
   });
   const response = await dispatchAdminRoute(context, req("GET", "/admin/status", { authorization: "Bearer secret-value" }));
   const serialized = JSON.stringify(response.body);
-  assert.doesNotMatch(serialized, /quoted-secret|pk-live-1234|single-quoted|query-secret/);
+  assert.doesNotMatch(serialized, /quoted-secret|pk-live-1234|single-quoted|ck-live-9876543210|AKIAIOSFODNN7EXAMPLE|query-secret/);
   assert.match(serialized, /REDACTED/);
 });
 
@@ -185,13 +185,15 @@ test("diagnostics redact credential keys, secret shapes, and URL userinfo", asyn
   context.deps.diagnostics = async () => ({
     endpoint: "https://user:password@example.test/path",
     message: "api_key=sk-12345678901234567890",
+    access_key: "AKIAIOSFODNN7EXAMPLE",
+    client_key: "ck-live-9876543210",
     token: "secret-value",
     nested: { leak: "value" } as unknown as string,
     ok: true,
   });
   const response = await dispatchAdminRoute(context, req("GET", "/admin/diagnostics", { authorization: "Bearer secret-value" }));
   const body = JSON.stringify(response.body);
-  assert.doesNotMatch(body, /secret-value|sk-12345678901234567890|user:password|nested|leak/);
+  assert.doesNotMatch(body, /secret-value|sk-12345678901234567890|user:password|nested|leak|access_key|client_key|AKIAIOSFODNN7EXAMPLE|ck-live-9876543210/);
   assert.match(body, /REDACTED/);
   assert.match(body, /"ok":true/);
 });

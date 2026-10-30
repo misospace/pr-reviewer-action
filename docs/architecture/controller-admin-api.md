@@ -154,7 +154,13 @@ cannot grow unbounded from real-world identifiers because:
   `other`);
 - a hard series cap (default 512) rejects further distinct series; every
   rejected update bumps
-  `pr_reviewer_admin_metrics_overflow_total` instead.
+  `pr_reviewer_admin_metrics_overflow_total` instead. The two fixed
+  zero-label counters (`pr_reviewer_admin_metrics_overflow_total`,
+  `pr_reviewer_admin_audit_failures_total`) are pre-created in the
+  constructor, so the audit-failure counter stays recordable even when
+  the cap is already full — the overflow counter's own update can never
+  recurse into the cap-rejection branch. (A cap of 1 can hold only the
+  overflow counter, so the audit pre-create is skipped there.)
 
 There is deliberately **no** setter that accepts a PR number, head SHA,
 commit message, prompt/model text, or file path as a label. The
@@ -171,19 +177,25 @@ cancellation/supersession counters.
 
 The daemon feeds `/admin/diagnostics` values it already redacted, and
 the admin layer applies its OWN pass anyway: keys whose names look
-credential-shaped (`token`, `secret`, `password`, `credential`,
-`api_key`, `private_key`, `auth`) are dropped, and every surviving string
-value is passed through the shared redactor:
+credential-shaped are dropped, and every surviving string
+value is passed through the shared redactor. Both key vocabularies are
+DERIVED from the canonical `SECRET_KEY_ALTERNATION` constant
+(`src/context/redact.ts`, #1170) — the same single source of truth behind
+every key-name rule in the repository (`api_key`, `token`, `password`,
+`secret`, `access_key`, `auth_token`, `private_key`, `client_key`) — plus
+admin-only names the canonical list does not carry (`passwd`, `pwd`,
+`credential`, `authorization`), so a canonical credential key cannot go
+unredacted here when it is added there. The key-drop test is unanchored
+and case-insensitive (`token` alone covers `access_token`,
+`refresh_token`, `auth_token` spellings):
 
 - **credential shapes** — provider key prefixes (`sk-…`, `ghp_…`/`gho_…`/
   `ghu_…`/`ghs_…`/`ghr_…`, `github_pat_…`, `glpat-…`, `xox*…`, `AKIA…`,
   `AIza…`), `Bearer …`/`Basic …` authorization values, and JWTs;
 - **credential assignments** — `key=value` and `key: value` forms whose
-  key names a credential (`password`, `passwd`, `pwd`, `secret`, `token`,
-  `api_key`, `apikey`, `access_token`, `refresh_token`, `credential`,
-  `private_key`, `authorization`), with quoted or unquoted values. This is
-  what protects the free-form readiness `detail`, where there is no key
-  structure to drop on;
+  key names a credential from the derived vocabulary above, with quoted or
+  unquoted values. This is what protects the free-form readiness `detail`,
+  where there is no key structure to drop on;
 - **URL userinfo** — `scheme://user:pass@host` becomes
   `scheme://[REDACTED]@host`. The credential part may contain `/` (base64)
   and the host may contain `@`, so the match runs to the last `@` of the
