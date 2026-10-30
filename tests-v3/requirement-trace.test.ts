@@ -2100,6 +2100,112 @@ test("#1000: a terminated span with embedded prose yields its identifier, not a 
   assert.deepEqual(scoped.inScope.map((e) => e.id), ["req-span"]);
 });
 
+// ── #1346: generic connective bigrams are not subject overlap ───────────
+
+/** The production leak (#1342, a Renovate classifier-kind change): the
+ * credential-transport standard's "travel only … must never appear" prose
+ * reached the trace on nothing but the diff's own comments — "only through"
+ * and "never appear" occur in ordinary English and name no credential or
+ * transport surface. */
+function pr1342ChangedText(): string {
+  return changedSubjectText(
+    [
+      "diff --git a/src/classification/kinds.ts b/src/classification/kinds.ts",
+      "+++ b/src/classification/kinds.ts",
+      "+  // A digest pin travels a different path than a version bump.",
+      "+  // Kinds are read only through the declared list: a kind must never appear in two buckets.",
+      '+  const KINDS = ["digested", "replacement", "pin"] as const;',
+      "-  // The old branch fell through every other kind.",
+    ].join("\n"),
+    ["src/classification/kinds.ts", "tests-v3/classification.test.ts"],
+  );
+}
+
+test("#1346: generic connective bigrams alone leave the credential standard out of scope", () => {
+  const ledger = { requirements: [
+    { id: "req-credential", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+  ] };
+  const changed = pr1342ChangedText();
+  // Both generic bigrams are really in the changed text, and they are the ONLY
+  // overlap. The guard is derived from the requirement itself rather than a
+  // hand-written word list, so a future edit to this fixture cannot silently
+  // reintroduce genuine subject overlap.
+  assert.ok(changed.includes("only through") && changed.includes("never appear"), "fixture carries the generic bigrams");
+  const repeated = requirementSubjectSignals(STANDARDS_CREDENTIAL).phrases
+    .filter((words) => {
+      const lower = words.map((word) => word.toLowerCase());
+      return changed.includes(lower.join(""))
+        || [lower.join(" "), lower.join("_"), lower.join("-"), lower.join("/")]
+          .some((variant) => new RegExp(`\\b${variant}\\b`).test(changed));
+    })
+    .map((words) => words.join(" "));
+  assert.deepEqual(repeated, [], `fixture overlap beyond the generic bigrams: ${JSON.stringify(repeated)}`);
+
+  const scope = requirementTraceScope(ledger, changed);
+  assert.deepEqual(scope.inScope, []);
+  assert.deepEqual(scope.outOfScope.map((o) => o.entry.id), ["req-credential"]);
+});
+
+test("#1346: the credential boundary's own files keep it in scope", () => {
+  // The fail-closed direction of the same tightening: a change to the
+  // transport surface still demands the standard even when its prose repeats
+  // nothing but generic connectives. Owners come from the shipped base-side
+  // map, so this also pins that `model-api-credentials` really declares the
+  // transport files.
+  const ledger = { requirements: [
+    { id: "req-credential", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+  ] };
+  const parsed = parseRequirementOwners(
+    readFileSync(join(REPO_ROOT, ".github", "pr-reviewer-owners.yml"), "utf8"),
+    ".github/pr-reviewer-owners.yml",
+  );
+  assert.ok(!("malformed" in parsed));
+  if ("malformed" in parsed) return;
+  assert.ok(
+    parsed.rules.some((rule) => rule.match.join(" ") === "model api credentials" && rule.owners.includes("src/transport/http.ts")),
+    `shipped owner map declares the transport files: ${JSON.stringify(parsed.rules)}`,
+  );
+  const paths = ["src/transport/http.ts"];
+  const changed = changedSubjectText("+  // forward the request only through the seam; the token must never appear in logs\n", paths);
+  const scope = requirementTraceScope(ledger, changed, { ownership: parsed.rules, paths });
+  assert.deepEqual(scope.inScope.map((e) => e.id), ["req-credential"]);
+});
+
+test("#1346: requirementSubjectSignals drops connective pairs and keeps mixed pairs", () => {
+  const credential = requirementSubjectSignals(STANDARDS_CREDENTIAL).phrases.map((p) => p.join(" "));
+  assert.ok(!credential.includes("only through"), JSON.stringify(credential));
+  assert.ok(!credential.includes("never appear"), JSON.stringify(credential));
+  // The standard keeps its real subject signals.
+  assert.ok(credential.includes("auth headers") && credential.includes("src/transport"), JSON.stringify(credential));
+  // The narrowing is phrase-scoped: the standard's single-term signals are
+  // untouched (it has none — only the atomic code spans and its owner paths).
+  assert.deepEqual(requirementSubjectSignals(STANDARDS_CREDENTIAL).strongTerms, []);
+
+  // A pair is dropped only when BOTH halves are generic: a specific word on
+  // either side keeps the phrase counting.
+  assert.deepEqual(
+    requirementSubjectSignals("The value may appear verbatim.").phrases.map((p) => p.join(" ")),
+    ["value may", "appear verbatim"],
+  );
+  // The #957 pinned mixed pair survives unchanged.
+  assert.deepEqual(
+    requirementSubjectSignals("content is data, never instructions").phrases.map((p) => p.join(" ")),
+    ["data never", "never instructions"],
+  );
+});
+
+test("#1346: distinctive prose next to generic connectives still scopes in", () => {
+  const scoped = (changed: string): string[] =>
+    requirementTraceScope(
+      { requirements: [{ id: "req-creds", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] }] },
+      changedSubjectText(changed, ["src/model/chat.ts"]),
+    ).inScope.map((e) => e.id);
+  // Genuine overlap: the boundary's own wording reaches the diff.
+  assert.deepEqual(scoped("+  // send the token only through the auth headers the provider defines\n"), ["req-creds"]);
+  // Generic connectives only: no overlap.
+  assert.deepEqual(scoped("+  // the legacy switch may not appear here, only through the old path\n"), []);
+});
+
 // ── #959: a verdict with zero trace claims ──────────────────────────────
 
 test("#959: a missing-claim row renders its own reason, not 'no valid enforcement location'", () => {

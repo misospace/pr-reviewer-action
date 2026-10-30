@@ -17,17 +17,13 @@
  */
 import { createHash } from "node:crypto";
 import { redactText } from "../context/redact.js";
+import { pyCodepointSlice } from "../platform/py.js";
 import { safePath } from "../findings/safe-path.js";
 
 /** Longest message text the identity digests — the same bound the review
  * thread extraction applies to finding messages (`MAX_MESSAGE_CHARS`), so an
  * unbounded model message cannot grow the digest input without bound. */
 const MAX_IDENTITY_MESSAGE_CODEPOINTS = 500;
-
-function codepointSlice(text: string, n: number): string {
-  const points = Array.from(text);
-  return points.length <= n ? text : points.slice(0, n).join("");
-}
 
 function collapseWhitespace(text: string): string {
   return text.split(/\s+/).filter((part) => part !== "").join(" ");
@@ -50,7 +46,7 @@ export interface FindingIdentityInput {
  * forged inside another field. Digests are low-cardinality by construction
  * and carry no secret material: the message is redacted before hashing. */
 export function findingIdentity(input: FindingIdentityInput): string {
-  const message = codepointSlice(collapseWhitespace(redactText(input.message)), MAX_IDENTITY_MESSAGE_CODEPOINTS);
+  const message = pyCodepointSlice(collapseWhitespace(redactText(input.message)), MAX_IDENTITY_MESSAGE_CODEPOINTS);
   const key = JSON.stringify([
     input.path.trim(),
     input.severity.trim().toLowerCase(),
