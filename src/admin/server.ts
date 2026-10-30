@@ -64,6 +64,15 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
   const authenticator = new AdminAuthenticator(options.token);
   const registry = new AdminMetricsRegistry(options);
   const nowMs = options.nowMs ?? Date.now;
+  // A broken clock must never break the request path: an unusable value
+  // falls back to wall-clock time instead of propagating.
+  const safeNowMs = (): number => {
+    let value: number;
+    try { value = nowMs(); } catch { return Date.now(); }
+    if (!Number.isFinite(value) || value < 0) return Date.now();
+    const truncated = Math.trunc(value);
+    return Number.isSafeInteger(truncated) ? truncated : Date.now();
+  };
   const requestId = options.requestId ?? randomUUID;
   const handler = (request: IncomingMessage, response: ServerResponse): void => {
     void (async () => {
@@ -80,14 +89,14 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
           try { body = JSON.parse(raw.body.toString("utf8")) as unknown; } catch { send(response, 400, { error: "invalid request" }); return; }
         }
       }
-      const responseData = await dispatchAdminRoute({ deps: options.deps, auth: authenticator, metrics: registry }, {
+      const responseData = await dispatchAdminRoute({ deps: options.deps, auth: authenticator, metrics: registry, nowMs: safeNowMs }, {
         method,
         pathname: url.pathname,
         search: url.search,
         ...(request.headers.authorization === undefined ? {} : { authorization: request.headers.authorization }),
         ...(request.headers["content-type"] === undefined ? {} : { contentType: request.headers["content-type"] }),
         ...(body === undefined ? {} : { body }),
-        requestId: `${requestId()}-${Math.max(0, Math.floor(nowMs())).toString(36)}`,
+        requestId: `${requestId()}-${safeNowMs().toString(36)}`,
       });
       send(response, responseData.status, responseData.body, responseData.contentType);
     })().catch(() => {

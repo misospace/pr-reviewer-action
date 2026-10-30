@@ -62,10 +62,40 @@ export interface ReadinessComponent {
   readonly degraded?: boolean;
   readonly detail?: string;
 }
+/** Readiness as the UNAUTHENTICATED `/readyz` route may expose it.
+ *
+ * The public surface is synthetic by construction: a bounded component name
+ * (a plain identifier, or `unknown` when the seam's name is anything else)
+ * and the two booleans. The seam's free-form `detail` string never reaches
+ * this projection — a readiness seam may populate it with a DSN, endpoint,
+ * or exception text.
+ */
+export interface PublicReadinessComponent {
+  readonly name: string;
+  readonly ok: boolean;
+  readonly degraded: boolean;
+}
+/** Readiness as the AUTHENTICATED `/admin/status` route may expose it.
+ *
+ * Same synthetic fields plus the seam's `detail`, bounded and
+ * secret-redacted. The operator keeps the "why" without the admin surface
+ * becoming a credential channel.
+ */
+export interface AdminReadinessComponent extends PublicReadinessComponent {
+  readonly detail?: string;
+}
+/** The identity of the mutation an audit record describes. */
+export interface AdminAuditTarget {
+  readonly kind: "run" | "pr";
+  /** The validated, bounded identifier of the mutated run or PR. */
+  readonly id: string;
+}
 export interface AdminAuditEvent {
+  /** Settlement time of the mutation, stamped by the admin layer. */
+  readonly atMs: number;
   readonly action: "rereview" | "cancel";
   readonly requestId: string;
-  readonly target: string;
+  readonly target: AdminAuditTarget;
   readonly outcome: "accepted" | "refused" | "error";
 }
 export interface ControllerAdminDeps {

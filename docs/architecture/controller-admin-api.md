@@ -19,10 +19,29 @@ and stay on their **own public listener**. `createAdminHost`
 - `GET /healthz` — liveness: a fixed `{"status":"ok"}` body, no component
   probes, no configuration echo. Exposing it leaks nothing.
 - `GET /readyz` — readiness: the injected `readiness()` components
-  (`{ name, ok, degraded?, detail? }`); `200` when every component is ok
-  and not degraded, `503` otherwise, with the failing components named.
-  During control-plane store, forge, or executor degradation the endpoint
-  answers `503` — a load balancer or the operator can see WHY.
+  projected onto **synthetic fields only** (`{ name, ok, degraded }`);
+  `200` when every component is ok and not degraded, `503` otherwise, with
+  the failing components named. The seam's free-form `detail` string is
+  never part of this projection — a readiness seam may populate it with a
+  DSN, endpoint, or exception text, and this route is unauthenticated.
+  Component names are echoed only when they are **plain identifiers**
+  (`[A-Za-z0-9._-]`, at most 64 characters); any other name — a DSN, a
+  URL, free text, one carrying control/format/bidi characters — is refused
+  as `unknown`. That structural rule, not the redactor, is what keeps
+  free-form seam text off the unauthenticated surface. Readiness is
+  decided over **every** component the seam reports; only the exposed list
+  is capped (64), and failing components are listed FIRST, so the cap
+  cannot hide the component that made the endpoint answer `503`. Flags
+  fail closed — a malformed flag (`"yes"`, `1`) is treated as unhealthy —
+  but an ABSENT `degraded` flag (`null`/`undefined`, what a JSON-sourced
+  seam yields for an unset boolean) is absent, not a failure, so a
+  healthy component is never pulled out of rotation by its own silence
+  (an absent `ok` still fails closed). During control-plane store, forge,
+  or executor degradation the endpoint answers `503` — a load balancer
+  sees THAT a component is degraded, and its name only when the seam's
+  name is a plain identifier. The operator's "why", including the names
+  the public route refuses, lives on the authenticated `/admin/status`
+  route.
 - `GET /metrics` — Prometheus text exposition (below).
 - `GET /admin/*` — the authenticated admin namespace.
 
@@ -43,8 +62,10 @@ independent of admin authentication configuration.
   unavailable, never open. An empty or whitespace-only token is a
   construction error.
 - `/healthz`, `/readyz`, and `/metrics` deliberately require no auth:
-  they expose only synthetic or bounded-aggregate data (see metrics),
-  never configuration, secrets, or run content.
+  they expose only synthetic or bounded-aggregate data (see metrics) —
+  component identifiers and flags, never free-form configuration, secrets,
+  or run content. The readiness seam's free-form `detail` is excluded from
+  the public projection entirely.
 - Authorization *beyond* the bearer token (who may cancel what) is
   delegated to the injected mutation seams; the admin layer enforces
   authentication, request shape, and bounds only. No request field is
@@ -57,7 +78,7 @@ independent of admin authentication configuration.
 | `/healthz` | GET | liveness (fixed body) |
 | `/readyz` | GET | component readiness, 503 on degradation |
 | `/metrics` | GET | Prometheus text, `text/plain; version=0.0.4` |
-| `/admin/status` | GET | adoption entries + queue/executor status |
+| `/admin/status` | GET | adoption entries + queue/executor status + bounded readiness detail |
 | `/admin/runs` | GET | paged run list (`?limit=` 1–200 default 50, `?cursor=`) |
 | `/admin/runs/{runId}` | GET | run detail: lifecycle, publication summary, per-role usage aggregates |
 | `/admin/runs/{runId}/cancel` | POST | cancel a non-terminal run |
@@ -78,13 +99,46 @@ never echo request content.
 - **Cancel only targets a live run:** unknown run → `404`, terminal run
   → `409` (also the idempotent second-cancel outcome), active run →
   `202`. The effect seam may still refuse; refusals are `409` too.
-- **Auditability:** every mutation settles first, then records
-  `{ atMs, requestId, action, target, outcome }` through the injected
-  `audit` sink. Audit-sink failure never fails the HTTP response (the
-  operator action already happened) but is never swallowed silently — it
-  bumps `pr_reviewer_admin_audit_failures_total`. This is a deliberate
+- **Auditability:** every mutation attempt that carries a validated target
+  settles first, then records `{ atMs, requestId, action, target, outcome }`
+  through the injected `audit` sink. `target` is `{ kind: "run" | "pr",
+  id }`, where `id` is the validated, bounded identifier of the mutated run
+  or PR — the sink can tell WHICH run was cancelled or WHICH PR was
+  rereviewed without an external log. `outcome` is `accepted` (the effect
+  happened), `refused` (the seam or the admin layer declined — unknown
+  run, terminal run, or a refused effect), or `error` (an effect or
+  lookup seam threw). `atMs` is stamped when the audit record is written,
+  i.e. after the effect settled, through an injectable clock (`Date.now`
+  by default; a clock that throws or returns a non-finite, negative, or
+  unsafe value falls back to `Date.now`, so a broken clock can never
+  record a false timestamp or break the mutation path), so the sink never
+  has to reconstruct when the mutation settled. Audit-sink failure never
+  fails the HTTP response (the operator action already happened) but is
+  never swallowed silently — it bumps
+  `pr_reviewer_admin_audit_failures_total`. This is a deliberate
   tradeoff: auditing after settlement keeps the audit record truthful
   about what actually happened.
+
+## Readiness exposure (two projections, one seam)
+
+`readiness()` returns the seam's own component view (`{ name, ok,
+degraded?, detail? }`). Two routes project it, with different exposure:
+
+| Route | Projection | `detail` |
+|---|---|---|
+| `/readyz` (public) | `{ name, ok, degraded }` — the name only when it is a plain identifier, otherwise `unknown` | dropped entirely |
+| `/admin/status` (bearer) | `{ name, ok, degraded, detail? }` — the sanitized name the public route refuses | bounded to 512 chars, secret-redacted |
+
+The public projection is synthetic **by construction** — the admin layer
+builds it field by field instead of forwarding the seam's objects, and a
+component name is echoed only when it is a plain identifier. The
+identifier rule is PUBLIC-ONLY: the authenticated route keeps the
+loosely sanitized name (`control-plane store`, a redacted DSN) because
+the operator needs it, and that route is bearer-protected. The
+authenticated projection also keeps the operator's "why" while still
+refusing to become a credential channel: the same redaction pass the
+diagnostics route uses applies to `detail` (see below), and the failing
+components are listed first there too.
 
 ## Metrics (bounded cardinality, by construction)
 
@@ -118,11 +172,37 @@ cancellation/supersession counters.
 The daemon feeds `/admin/diagnostics` values it already redacted, and
 the admin layer applies its OWN pass anyway: keys whose names look
 credential-shaped (`token`, `secret`, `password`, `credential`,
-`api_key`, `private_key`, `auth`) are dropped, credential-shaped string
-values (`sk-…`, `ghp_…`, `AKIA…`, bearer strings) are replaced, and URLs
-with embedded userinfo are redacted. Entries are bounded (128 keys,
-2048-char values). No admin route returns secret material; nothing in
-the surface reads repository files.
+`api_key`, `private_key`, `auth`) are dropped, and every surviving string
+value is passed through the shared redactor:
+
+- **credential shapes** — provider key prefixes (`sk-…`, `ghp_…`/`gho_…`/
+  `ghu_…`/`ghs_…`/`ghr_…`, `github_pat_…`, `glpat-…`, `xox*…`, `AKIA…`,
+  `AIza…`), `Bearer …`/`Basic …` authorization values, and JWTs;
+- **credential assignments** — `key=value` and `key: value` forms whose
+  key names a credential (`password`, `passwd`, `pwd`, `secret`, `token`,
+  `api_key`, `apikey`, `access_token`, `refresh_token`, `credential`,
+  `private_key`, `authorization`), with quoted or unquoted values. This is
+  what protects the free-form readiness `detail`, where there is no key
+  structure to drop on;
+- **URL userinfo** — `scheme://user:pass@host` becomes
+  `scheme://[REDACTED]@host`. The credential part may contain `/` (base64)
+  and the host may contain `@`, so the match runs to the last `@` of the
+  token.
+
+Entries are bounded (128 keys, 2048-char values); readiness components
+are bounded (64 names of 64 chars, details of 512 chars). Every
+seam-supplied string is truncated BEFORE the patterns run, so a hostile
+seam cannot make the redactor work on an unbounded string. Nothing in the
+surface reads repository files.
+
+This redaction is **defense in depth, not a secret oracle**: pattern
+matching cannot recognize every credential encoding, and a token glued to
+a preceding letter or digit (e.g. `xsk-…`) is not matched, deliberately —
+without that guard an ordinary word containing `sk-` (`task-runner`,
+`risk-management`) would be mangled. The structural guarantee, not the
+pattern, is what makes the boundary sound: the unauthenticated routes
+carry no free-form seam text at all, and the authenticated routes are
+bearer-protected. The daemon must still not feed secrets into a seam.
 
 ## Testing posture
 
@@ -131,9 +211,19 @@ the surface reads repository files.
 always (pure dispatch + real `http.createServer` on an ephemeral port):
 auth on every admin route (reads and mutations), unconfigured-token
 503s, webhook-handler independence, degraded-readiness 503 semantics,
+the public readiness projection (a hostile `detail` never leaves the
+unauthenticated route, a credential-shaped component NAME is redacted, and
+a DSN-shaped name is refused as `unknown` — over the wire as well as in
+dispatch), the bounded component list with failing components listed
+first and readiness still decided over every component, fail-closed
+readiness flags with an absent flag treated as absent, bounded work on a
+hostile readiness seam, the bounded/redacted readiness detail on the
+authenticated route (including quoted and keyed credential assignments),
 metrics cardinality sanity and parseable exposition, diagnostics
 redaction, rereview/cancel effect + audit ordering and refusal codes,
-body cap, and fixed 404s.
+audit target identity and settlement timestamp on both mutation paths
+(including refused, failed-lookup, and error outcomes), a broken audit
+clock, body cap, and fixed 404s.
 
 ## Out of scope
 
