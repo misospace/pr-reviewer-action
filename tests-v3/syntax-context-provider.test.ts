@@ -37,6 +37,7 @@ import {
   MAX_SYNTAX_WORKER_CACHED_FILES,
   registerSyntaxProvider,
   resolveSyntaxProvider,
+  SyntaxProviderTimeoutError,
 } from "../src/context/syntax/index.js";
 import { detectLanguage } from "../src/context/change-anchors.js";
 
@@ -445,10 +446,14 @@ test("the timeout fails the call only once the worker is terminated", async () =
   const terminated = new Promise<number>((resolve) => {
     releaseTermination = () => resolve(0);
   });
+  let terminationRequested = false;
   const injected = {
     on(): void {},
     postMessage(): void {},
-    terminate: () => terminated,
+    terminate: () => {
+      terminationRequested = true;
+      return terminated;
+    },
   };
   const host = await createProviderHost({
     registration: { id: "blocking", loader: { kind: "builtin" } },
@@ -458,16 +463,23 @@ test("the timeout fails the call only once the worker is terminated", async () =
   });
   try {
     let settled = false;
-    const call = host.declarations("src/app.py").catch(() => {
+    let failure: unknown = null;
+    const call = host.declarations("src/app.py").catch((error: unknown) => {
       settled = true;
+      failure = error;
     });
     // The bound expires; the worker is terminated but its termination is
     // still open, so the call cannot have failed yet.
     await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.ok(terminationRequested, "the bound did not expire, so nothing was terminated");
     assert.equal(settled, false, "the call failed while the worker could still run");
     releaseTermination();
-    await call;
+    // Bounded: a regression that never settles the call FAILS the test
+    // instead of hanging the suite.
+    assert.notEqual(await withDeadline(call, 5_000), null, "the call never failed");
     assert.equal(settled, true, "the call did not fail after the worker was terminated");
+    assert.ok(failure instanceof SyntaxProviderTimeoutError, `the call failed with ${String(failure)}`);
+    assert.match((failure as SyntaxProviderTimeoutError).message, /exceeded its 50ms bound/);
   } finally {
     releaseTermination();
     await host.close();

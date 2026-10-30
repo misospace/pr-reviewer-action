@@ -84,9 +84,12 @@ export interface ProviderHostOptions {
    *
    * The default starts a real worker thread. A TEST injects its own, so the
    * ORDER of the timeout path — the worker is terminated, and only THEN does
-   * the call fail — is OBSERVED instead of raced for: an injected worker can
-   * hold its termination open, so a call that failed before the termination
-   * was released is a real regression, not a timing accident. */
+   * the timed-out call fail — is OBSERVED instead of raced for: an injected
+   * worker can hold its termination open, so a call that failed before the
+   * termination was released is a real regression, not a timing accident.
+   *
+   * An injected worker never receives the registration or the workspace: it
+   * is a TEST seam, and the shipped path always builds a real worker. */
   worker?: Worker;
 }
 
@@ -209,25 +212,37 @@ class ProviderHost implements SyntaxProviderHost {
         // The recorded failure is the FIRST one: a timeout stays a timeout,
         // so the builder can tell a bound that bit from a provider that
         // merely failed.
-        const failure = this.failure ?? error;
-        if (this.failure === null) this.failure = failure;
+        if (this.failure === null) this.failure = error;
+        const failure = this.failure;
+        // Every OTHER pending call fails at once, with the same reason: the
+        // bound is gone for all of them, and a worker that is being
+        // terminated can never answer them.
+        this.settleAll(failure);
         // The worker is TERMINATED — ALWAYS, on every timeout, on every
         // path: a provider that blocks cannot be waited out, and every
         // later call fails instantly.
-        const termination = this.worker.terminate().then(() => undefined).catch(() => undefined);
+        let termination: Promise<void>;
+        try {
+          termination = this.worker.terminate().then(() => undefined).catch(() => undefined);
+        } catch {
+          // A termination that cannot even be REQUESTED must not leave the
+          // caller waiting: the call fails as it did before.
+          termination = Promise.resolve();
+        }
         this.termination = termination;
-        // The call fails only ONCE THE WORKER IS GONE. A call that failed
-        // while the timed-out provider could still run would leave a live
-        // provider behind it: it could keep acting (writing files, holding
-        // resources) after the caller was told the call had failed.
-        // `terminate()` resolves when the thread has exited, so awaiting it
-        // makes the ORDER a fact instead of a hope.
-        void termination.then(() => {
-          // Every other pending call fails with the same reason: the bound
-          // is gone for all of them.
-          this.settleAll(failure);
-          reject(error);
-        });
+        // The timed-out call fails only ONCE THE WORKER IS GONE. A call
+        // that failed while the timed-out provider could still run would
+        // leave a live provider behind it: it could keep acting (writing
+        // files, holding resources) after the caller was told the call had
+        // failed. `terminate()` resolves when the thread has exited, so
+        // awaiting it makes the ORDER a fact instead of a hope. The builder
+        // already awaited this same termination, so the build's total time
+        // is unchanged.
+        void termination
+          .then(() => reject(error))
+          // The rejection is the caller's answer; a throw in this callback
+          // must not become an unhandled rejection.
+          .catch(() => undefined);
       }, timeoutMs);
       this.pending.set(requestId, { resolve, reject, timer });
       try {

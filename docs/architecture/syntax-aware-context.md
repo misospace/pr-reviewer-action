@@ -81,14 +81,15 @@ is what makes the bound *interruptible*:
 - the worker is terminated on **every** timeout, on **every** path: a
   timeout that did not kill the worker would leave the provider running
   while the build had already moved on;
-- the termination is **awaited before the call fails**, so the order is a
-  fact and not a hope: a timed-out provider can never act after the caller
-  was told the call had failed. (A call that failed while the worker could
-  still run left a live provider behind it — the ordering is what the
-  `tests-v3/syntax-context-provider.test.ts` regression
+- the termination is **awaited before the timed-out call fails**, so the
+  order is a fact and not a hope: a timed-out provider can never act after
+  the caller was told its call had failed. (Every other call in flight
+  fails at once, with the same reason: the bound is gone for all of them,
+  and a worker that is being terminated can never answer them.) The
+  ordering is what the `tests-v3/syntax-context-provider.test.ts` regression
   "the timeout fails the call only once the worker is terminated" pins, with
   an injected worker whose termination is held open, so the order is
-  observed rather than raced for);
+  observed rather than raced for;
 - a worker that **crashes** (an "error" event) or **exits** is the same
   failure: the host records the reason, and every later call fails
   instantly instead of waiting for an answer that will never come;
@@ -181,8 +182,9 @@ timer is **real** time (`setTimeout`), not the injectable monotonic clock,
 so the bound holds against a provider that blocks. It is also the **only**
 timer of a call: the host owns it and terminates the worker when it
 expires, so a call has exactly one bound and one termination path. The
-termination is **awaited before the call fails**, so a timed-out provider
-can never keep acting after the caller was told the call had failed.
+termination is **awaited before the timed-out call fails**, so a timed-out
+provider can never keep acting after the caller was told its call had
+failed.
 
 A provider call that exceeds its bound is reported as **its own bound**,
 not as the wall-clock deadline — the per-call ceiling is what expired, and
