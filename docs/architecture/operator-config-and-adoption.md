@@ -3,25 +3,28 @@
 This document is the normative definition of the Renovate-style configuration
 and adoption model for Operator mode — the self-hosted controller that reviews
 many repositories without committing a workflow to any of them (#725). It
-defines the three config layers, the trust boundaries between them, the
-adoption lifecycle, the profile model, and the effective-config fingerprint
+defines the config layers, the trust boundaries between them, the adoption
+lifecycle, the profile model, and the effective-config fingerprint
 that [#728](https://github.com/misospace/pr-reviewer-action/issues/728)
 consumes as the config component of review-job identity.
 
 The scaffolding is implemented and tested in `src/config/` as pure, wired-to-
 nothing modules: `instance-config.ts` (operator schema), `adoption.ts`
 (adoption state machine), `effective-config.ts` (resolution + fingerprint),
-`instructions.ts` (trusted-base reads of referenced instruction files), on
-top of `repository-config.ts` and `contract.ts` (the existing Action-mode
-repository-config layer from #777). Controller wiring (ingress, queue,
-execution) is downstream: #728, #729–#731, #733–#735. The Action's runtime
-behavior is unchanged by this contract.
+`namespace-policy.ts` (the #1350 namespace/account shared-review-policy
+layer), `instructions.ts` (trusted-base reads of referenced instruction
+files), on top of `repository-config.ts` and `contract.ts` (the existing
+Action-mode repository-config layer from #777). Controller wiring (ingress,
+queue, execution) is downstream: #728, #729–#731, #733–#735. The Action's
+runtime behavior is unchanged by this contract.
 
 ## The three layers and precedence
 
 ```text
 hard security policy        (structural — what the validators refuse to express)
   > operator policy         (instance config: trusted, validated, fails closed)
+    > namespace policy      (operator-managed shared review rules per
+                             account/organization: #1350, `namespace-policies`)
     > repository config     (base-side .github/pr-reviewer.yml: untrusted)
       > engine defaults     (the action contract defaults)
 ```
@@ -108,6 +111,84 @@ repository layer narrows it with the exact code the Action uses.
 Queue and storage are intentionally minimal in v1; #731 (durable queue) and
 #736 (durable state) extend them as additive schema-version work.
 
+### The namespace/account shared review policy layer (#1350)
+
+Between the instance envelope and the repository config, the operator may
+declare `namespace-policies` in the instance config: one bounded review-rule
+set per forge account/organization, reused by every repository that account
+owns. This closes #1350's gap — related repositories share review guidance
+without copy/paste and without asking the operator to change global policy.
+
+```yaml
+namespace-policies:
+  - name: frontend                 # lowercase kebab slug
+    owners: ["frontend-org"]       # account/organization logins (provider-neutral)
+    exclude-owners: []             # carve-outs, never matched by this policy
+    repositories: ["frontend/web"] # optional refinements ("owner/name")
+    exclude-repositories: []
+    reviewer-defaults:             # the same keys/values rules as reviewer-defaults
+      inline-findings-max: 10
+      review-verbosity: concise
+    ignore-paths: ["generated/**"]
+    skip-only-paths: []            # when set, the repository cannot add to it
+    review-instructions:           # operator-authored INLINE guidance text
+      - "Frontend PRs must keep generated code out of review scope."
+    require-suggested-fix: true
+```
+
+Properties (all normative):
+
+- **Provider-neutral scope.** GitHub organizations, GitLab groups, and
+  Forgejo/Gitea owners all map onto one normalized account identity:
+  case-insensitive owner logins and `owner/name` pairs (`parseRepoRef`
+  grammar, lowercased at validation). Matching is deterministic:
+  include/exclude at account and repository granularity, and at most one
+  policy governs a given account or repository — ambiguous claims fail
+  instance validation closed (`NamespacePolicyError`), and exclusions only
+  ever carve matches out of the policy that declares them, never resolve a
+  conflict between two policies. v1 limitation, stated plainly: the same
+  login string on two different forge integrations maps to the same policy
+  scope; forge-scoped disambiguation would be an additive schema change.
+- **Trusted ceiling unchanged.** The layer adds no expressible authority:
+  `reviewer-defaults` keys must be `repo-configurable` contract inputs
+  validated by the same per-type rules (`normalizeCandidate`), inline
+  `review-instructions` are bounded operator-authored text (65 536 bytes per
+  block, 16 blocks per policy, 131 072 bytes across all policies), and there
+  is no field that could express an endpoint, credential, tool/MCP/command
+  grant, network/host allowlist, executor, or fork-privilege change.
+  Unknown fields are rejected everywhere.
+- **Narrow-only cascade.** The namespace layer is applied through the same
+  `applyRepositoryConfigValues` implementation between the envelope and the
+  repository config: numeric ceilings chain (instance ceiling → namespace
+  narrows below it → repository narrows below the namespace ceiling), and
+  enum/boolean explicit-wins chains (an instance-explicit value beats the
+  namespace layer; a namespace-set key beats the repository). Because the
+  namespace policy is operator-authored, it may set `repo-policy` inputs
+  without the `allow-repo-policy-overrides` opt-in — that gate exists to
+  protect the operator FROM repositories, not from itself. `ignore-paths`
+  unions (additive narrowing); `skip-only-paths` has a single supplier —
+  when the namespace layer sets the gate, a repository's list is ignored
+  with a warning, since a union would widen and globs do not compose
+  textually. Profiles and `enabled` remain repository-only.
+- **Provenance is inspectable.** `EffectiveReviewConfig.provenance` maps
+  every shared rule (`reviewer-settings/<id>`, `ignore-paths/<glob>`,
+  `skip-only-paths/<glob>`, `review-instructions/<i>`,
+  `namespace-instructions/<i>`, `require-suggested-fix`) to the layer that
+  supplied it — `instance`, `repository`, or `namespace:<policy>`. Scalar
+  settings record the LAST WRITER of the effective value (a repository
+  narrowing a namespace ceiling is attributed to the repository);
+  list-valued rules record the FIRST supplier in merge order (the
+  namespace layer merges first, so a glob both layers supplied is
+  attributed to the namespace — the entry is identical either way). It is
+  deliberately excluded from the fingerprint: it describes where rules came
+  from, not what they are, so a policy rename that changes no effective
+  value does not churn review generations.
+- **PR-head content cannot touch it.** The layer lives in operator config,
+  never in any repository tree — there is no read path from a base or PR
+  head to a namespace policy, so a PR can never change (or disable) the
+  shared policy governing its own review, nor the policy other repositories
+  inherit.
+
 ### Layer 3 — repository reviewer config
 
 The same file, the same locations, the same trust rules as the Action mode
@@ -117,7 +198,8 @@ the PR head. One repository-config language serves both modes:
 
 - **Contract-input keys** (the existing kebab-case input ids): narrowed
   through `applyRepositoryConfigValues` — the one narrow-not-widen
-  implementation shared with the Action path — over the operator envelope.
+  implementation shared with the Action path — over the operator envelope
+  as already narrowed by the repository's matched namespace policy (#1350).
   In Action mode the operator layer is the workflow `with:` inputs; in
   Operator mode it is `reviewer-defaults`.
 - **Operator-mode extension keys** (`REPOSITORY_CONFIG_EXTENSION_KEYS`):
@@ -150,6 +232,10 @@ broken.
 
 - **Instance config** (trusted): fail closed. A typed
   `InstanceConfigError` for any problem — never a partial application.
+  Namespace-policy problems (`namespace-policy.ts`) are the same class:
+  `NamespacePolicyError` subclasses `InstanceConfigError`, so a problem in
+  the shared-policy layer fails instance validation closed under the same
+  error type.
 - **Repository config** (untrusted): fail conservative. Warn, ignore the
   broken part, and resolve the rest under the operator envelope; a review
   never silently runs with wider authority because its config was broken.
@@ -237,8 +323,16 @@ ecfg-v1-<sha256-hex>
 
 The fingerprint hashes the **material** effective config with canonical
 sorted-key JSON (`pythonJsonStringify`, the byte-exact `json.dumps(sort_keys=True)`
-replica): resolved profile contents, narrowed reviewer settings, path sets,
-instruction list, and `require-suggested-fix`. Normalization rules:
+replica): resolved profile contents, narrowed reviewer settings (including
+namespace-layer narrowing), path sets, instruction list, and
+`require-suggested-fix`. The namespace layer's inline shared instruction
+blocks (#1350) are hashed in listed order when present, under a key included
+only when non-empty — so deployments without namespace policies keep
+byte-identical fingerprints across the upgrade. A namespace layer that
+explicitly PINS a value equal to the contract default is also material
+(the key enters `reviewerSettings`): pinning is config state — an
+explicit operator decision recorded in a shared policy — and its removal
+reverts to a different state. Normalization rules:
 
 - `ignore-paths` / `skip-only-paths` are set-like: sorted before hashing, so
   reordering them does not churn job identity.
@@ -288,9 +382,12 @@ The issue's minimum security-test list maps to pinned cases:
 | unknown model/executor profile rejected | `effective-config.test.ts` (reject/fallback policy tests) |
 | repository absent config uses operator defaults | `effective-config.test.ts` ("resolves entirely to operator defaults") |
 | allow/deny/adoption behavior deterministic | `adoption.test.ts` (determinism + full mode/precedence matrix) |
-| config/reference size caps | `instance-config.test.ts` (byte cap, bounds), `effective-config.test.ts` (glob/instruction caps), `instructions.test.ts` (per-file + aggregate byte caps enforced at read time), `repository-config.test.ts` (file cap) |
+| config/reference size caps | `instance-config.test.ts` (byte cap, bounds), `effective-config.test.ts` (glob/instruction caps), `instructions.test.ts` (per-file + aggregate byte caps enforced at read time), `repository-config.test.ts` (file cap), `namespace-policy.test.ts` (policy/identity/instruction caps) |
 | malformed config never grants defaults broader than operator policy | `instance-config.test.ts` (malformed instance throws), `effective-config.test.ts` (malformed repo file fails conservative) |
 | resolution failure is never silent absence | `repository-config.test.ts` (unresolvable ref / non-git workspace throw; `resolveRepositoryConfig` degrades with the diagnostic), `instructions.test.ts` (same read-failure rule) |
+| cross-repository policy cannot grant infrastructure/credential/tool authority beyond the trusted ceiling (#1350) | `namespace-policy.test.ts` (non-repo-configurable/secret `reviewer-defaults` keys rejected; no infrastructure field exists in the schema), `effective-config.test.ts` (namespace values flow through the same narrow-not-widen application; instance-explicit beats namespace; repository narrows below the namespace ceiling) |
+| namespace matching is deterministic and ambiguous governance fails closed (#1350) | `namespace-policy.test.ts` (case-normalized include/exclude matching; at most one policy per account/repository; overlap rejected; resolver ambiguity guard) |
+| namespace shared-policy changes are fingerprinted into review-generation identity (#1350) | `effective-config.test.ts` (inline guidance and narrowed values change the fingerprint; a rename with no effective change does not; namespace-less configs keep byte-identical fingerprints) |
 
 ## Deferred wiring
 

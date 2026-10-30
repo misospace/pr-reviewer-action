@@ -29,6 +29,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import type { Worker } from "node:worker_threads";
 import {
   buildSyntaxContext,
   createProviderHost,
@@ -36,6 +37,7 @@ import {
   MAX_SYNTAX_WORKER_CACHED_FILES,
   registerSyntaxProvider,
   resolveSyntaxProvider,
+  SyntaxProviderTimeoutError,
 } from "../src/context/syntax/index.js";
 import { detectLanguage } from "../src/context/change-anchors.js";
 
@@ -428,6 +430,60 @@ test("the registry key is the id the artifact reports", async () => {
     providerFallbackReason: resolution.reason,
   });
   assert.equal(context.providerId, "ts");
+});
+
+test("the timeout fails the call only once the worker is terminated", async () => {
+  // The ORDER is the guarantee: a call that fails while the timed-out
+  // provider can still run leaves a LIVE provider behind it — it could keep
+  // acting (writing files, holding resources) after the caller was told the
+  // call had failed. The injected worker holds its termination open, so the
+  // order is OBSERVED instead of raced for: a call that failed before the
+  // termination was released is a real regression, not a timing accident.
+  const root = workspace({
+    "src/app.py": "def handle(item):\n    return item\n",
+  });
+  let releaseTermination = (): void => {};
+  const terminated = new Promise<number>((resolve) => {
+    releaseTermination = () => resolve(0);
+  });
+  let terminationRequested = false;
+  const injected = {
+    on(): void {},
+    postMessage(): void {},
+    terminate: () => {
+      terminationRequested = true;
+      return terminated;
+    },
+  };
+  const host = await createProviderHost({
+    registration: { id: "blocking", loader: { kind: "builtin" } },
+    workspace: root,
+    timeoutMs: 50,
+    worker: injected as unknown as Worker,
+  });
+  try {
+    let settled = false;
+    let failure: unknown = null;
+    const call = host.declarations("src/app.py").catch((error: unknown) => {
+      settled = true;
+      failure = error;
+    });
+    // The bound expires; the worker is terminated but its termination is
+    // still open, so the call cannot have failed yet.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.ok(terminationRequested, "the bound did not expire, so nothing was terminated");
+    assert.equal(settled, false, "the call failed while the worker could still run");
+    releaseTermination();
+    // Bounded: a regression that never settles the call FAILS the test
+    // instead of hanging the suite.
+    assert.notEqual(await withDeadline(call, 5_000), null, "the call never failed");
+    assert.equal(settled, true, "the call did not fail after the worker was terminated");
+    assert.ok(failure instanceof SyntaxProviderTimeoutError, `the call failed with ${String(failure)}`);
+    assert.match((failure as SyntaxProviderTimeoutError).message, /exceeded its 50ms bound/);
+  } finally {
+    releaseTermination();
+    await host.close();
+  }
 });
 
 test("the worker's parsed-file cache holds ONE file", () => {

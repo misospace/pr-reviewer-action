@@ -279,7 +279,9 @@ narrowing (`ignore-paths`, `skip-only-paths`), `review-instructions`,
 `require-suggested-fix`, and `enabled` — all of which only narrow, disable,
 or select operator-approved profiles. In this Action those extension keys
 are unknown keys: warned about and inert, exactly like any other
-non-repo-configurable key above. The full model — the three config layers,
-the adoption lifecycle, profile resolution, and the effective-config
+non-repo-configurable key above. The full model — the config layers
+(including the #1350 namespace/account shared-review-policy layer that sits
+between the operator envelope and this file), the
+adoption lifecycle, profile resolution, and the effective-config
 fingerprint the canonical job contract consumes — is defined in
 [`docs/architecture/operator-config-and-adoption.md`](architecture/operator-config-and-adoption.md).
