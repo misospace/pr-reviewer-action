@@ -1847,7 +1847,12 @@ const MAX_SUBJECT_TERM_CHARS = 200;
  * `request`, `only`, `never`, … — and bare acronyms (`PR`, `API`, `URLs`),
  * which occur as ordinary prose in almost every diff, name nothing specific
  * enough to establish scope on their own. That generic overlap is what let
- * #956's unrelated standards leak in. */
+ * #956's unrelated standards leak in.
+ *
+ * #1346 extends the same reasoning to pairs: a phrase counts only when at
+ * least one of its words carries some specificity, so a bigram of two pure
+ * connectives ("only through", "never appear", "may appear" …) composes no
+ * concept and is dropped. See {@link GENERIC_PHRASE_WORDS}. */
 interface RequirementSubjectSignals {
   phrases: string[][];
   strongTerms: string[];
@@ -1863,6 +1868,58 @@ function isStrongTerm(word: string): boolean {
   if (word === word.toUpperCase()) return false; // pure acronym: HTTP, API, PR, URL
   if (/^[A-Z]{2,}s$/.test(word)) return false; // acronym + plural: URLs, APIs, JSONs
   return true; // identifier: sourceSha, repoDid, SQLite, HTTPServer, GitHub
+}
+
+/** #1346: words that carry no subject at all — connective adverbs,
+ * subject-less prepositions and particles, modals and quantifiers, and
+ * appearance verbs ("appear", "seem", "remain"). They are ordinary English
+ * prose: any diff's comments repeat them regardless of what the change
+ * touches, so a bigram made of two of them ("only through", "never appear",
+ * "may appear") names nothing an enforcing change would reference.
+ *
+ * The observed leak: PR #1342 (Renovate classifier kinds) scoped the AGENTS.md
+ * credential-transport standard in on two generic bigrams of its prose alone —
+ * the diff's added comments happened to contain "only through" and "never
+ * appear" while touching no credential or transport code — and the review had
+ * to disposition a boundary it cannot reach, three rounds running.
+ *
+ * This set is NOT {@link TERM_STOPWORDS}: those words are removed from the
+ * stream entirely (and from the broader enforcement-line term net below);
+ * these stay in the stream and in every mixed pair, and only suppress a
+ * bigram whose BOTH halves are generic. A pair keeps counting when either
+ * word is specific — `data never` (the #957 pinned case), `trust boundary`,
+ * `auth headers`. Words that name a domain concept even when they read as
+ * verbs here (`cross`, `forge`, `close`, `weaken`) are deliberately excluded:
+ * suppressing them would narrow real subject overlap, which the fail-closed
+ * direction of scope (#958 owner paths, no-provenance and linked-issue
+ * entries) cannot recover. */
+const GENERIC_PHRASE_WORDS: ReadonlySet<string> = new Set([
+  // connective adverbs / degree words
+  "only", "merely", "simply", "just", "even", "still", "ever", "never", "always",
+  "often", "rarely", "generally", "typically", "usually", "currently", "previously",
+  "eventually", "immediately", "directly", "exactly", "precisely", "respectively",
+  "quite", "very", "too", "instead", "rather", "otherwise", "thus", "hence",
+  "therefore", "however", "moreover", "furthermore", "further", "more", "most",
+  "less", "least", "much", "many", "few", "enough",
+  // subject-less prepositions and particles
+  "through", "throughout", "across", "along", "around", "above", "below",
+  "behind", "beyond", "inside", "outside", "during", "upon", "toward", "towards",
+  "out", "off",
+  // modals and quantifiers
+  "can", "cannot", "could", "would", "may", "might", "will", "both", "either",
+  "neither", "other", "others", "another", "same", "own", "some", "every",
+  "each", "none", "nothing", "everything", "something", "anything",
+  // appearance verbs
+  "appear", "appears", "appeared", "appearing", "seem", "seems", "seemed",
+  "occur", "occurs", "occurred", "occurring", "happen", "happens", "happened",
+  "happening", "remain", "remains", "remained", "stay", "stays", "stayed",
+  // adjectives of possibility
+  "able", "unable",
+]);
+
+/** True when a single word is generic under {@link GENERIC_PHRASE_WORDS}. */
+function genericPhraseWord(word: string): boolean {
+  return GENERIC_PHRASE_WORDS.has(word.toLowerCase());
 }
 
 /** #1000: a code span carrying `-` or `/` is ONE literal compound identifier,
@@ -1962,7 +2019,12 @@ export function requirementSubjectSignals(text: string): RequirementSubjectSigna
   });
   const phrases: string[][] = [];
   for (let i = 0; i < kept.length - 1; i += 1) {
-    if (kept[i + 1]!.index === kept[i]!.index + 1) phrases.push([kept[i]!.word, kept[i + 1]!.word]);
+    if (kept[i + 1]!.index !== kept[i]!.index + 1) continue;
+    // #1346: two generic connectives compose no concept — see
+    // GENERIC_PHRASE_WORDS. The atomic single-term phrases pushed below are
+    // never subject to this test: a code span is one literal identifier.
+    if (genericPhraseWord(kept[i]!.word) && genericPhraseWord(kept[i + 1]!.word)) continue;
+    phrases.push([kept[i]!.word, kept[i + 1]!.word]);
   }
   for (const term of atomic) phrases.push([term]);
   const strongTerms = kept.filter((entry) => isStrongTerm(entry.word)).map((entry) => entry.word.toLowerCase());
@@ -2185,8 +2247,9 @@ function ownershipTouched(compiled: readonly CompiledOwnership[], text: string, 
 /** A requirement's subject is touched when the changed text contains one of
  * its multi-word phrases (in any spelling) or one of its distinctive
  * identifier-shaped terms. Two plain words like `docs` and `repo` are
- * deliberately NOT enough — see `requirementSubjectSignals`. Bounded
- * heuristic, like `enforcementPredicateFound`. */
+ * deliberately NOT enough — see `requirementSubjectSignals`. Neither are two
+ * generic connectives like `only through` (#1346). Bounded heuristic, like
+ * `enforcementPredicateFound`. */
 function subjectTouched(text: string, changed: string): boolean {
   const { phrases, strongTerms } = requirementSubjectSignals(text);
   if (phrases.some((words) => phraseMatched(words, changed))) return true;
@@ -2207,7 +2270,10 @@ export interface RequirementTraceScope {
  * changed text every entry stays in scope (fail closed). #957 tightened the
  * subject test: only a multi-word phrase or an identifier-shaped single term
  * counts, so unrelated standards can no longer ride in on generic vocabulary
- * shared with every diff. #958 adds explicit `ownership` (from repository
+ * shared with every diff. #1346 tightened it one step further: a phrase counts
+ * only when at least one of its words is specific, so a generic connective
+ * bigram in ordinary prose ("only through", "never appear") is no scope
+ * evidence. #958 adds explicit `ownership` (from repository
  * config) so a change to a boundary's own file scopes its requirement in
  * even when the diff repeats none of its prose. */
 export function requirementTraceScope(
