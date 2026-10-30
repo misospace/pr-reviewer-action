@@ -1246,6 +1246,134 @@ test("#1354: adversarial — a fake link label cannot hide a real traversal lite
   }
 });
 
+test("#1354: a fenced code example in a documentation file keeps the traversal literal", () => {
+  // The docs-only suppression is a PROSE rule. Inside a fenced block the
+  // content is an executable example, not rendered prose, so the
+  // navigation-link discount does not apply and the traversal literal keeps
+  // its ordinary semantics.
+  const positives: [string, string][] = [
+    // A Markdown-shaped string inside a fenced example is code, not a
+    // navigation link: the traversal literal fires.
+    ["+```python\n+open(\"[a](../../etc/passwd)\")\n+```\n", "README.md"],
+    // A benign navigation link inside a fence is example content too, so it
+    // keeps its pre-#1354 behavior and still fires.
+    ["+```markdown\n+[Guide](../README.md)\n+```\n", "README.md"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+    // Fence content is not prose: it must not be discounted away either.
+    assert.ok(
+      !result.pathHandlingProvenance.discounted.some((s) => s.source === "diff_nav_link"),
+      `${diff}: expected no discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+});
+
+test("#1354: a link-shaped traversal inside an inline code span keeps the traversal literal", () => {
+  // An inline code span is quoted code, not prose: the navigation-link
+  // discount must not apply to it.
+  const diff = "+run `open(\"[a](../../etc/passwd)\")` first\n";
+  const result = classifyPr({ prFiles: files("README.md"), diffText: diff, linkedIssues: [] });
+  assert.equal(result.prKind, "path_handling_changes", diff);
+  assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+});
+
+test("#1354: every fence rule is checked against the fence token itself (#252)", () => {
+  // Each rule of the fence reader gets a case that feeds the fence itself:
+  // its character, its info string, its closer, and the diff streams.
+  const positives: [string, string][] = [
+    // A tilde fence is a fence.
+    ["+~~~\n+open(\"[a](../../etc/passwd)\")\n+~~~\n", "README.md"],
+    // A fence nested in a list carries the container's indent, and the diff
+    // does not give that indent. It is still a fence.
+    ["+    ```python\n+    open(\"[a](../../etc/passwd)\")\n+    ```\n", "README.md"],
+    // A fence can open on the same line as a list bullet.
+    ["+- ```python\n+  open(\"[a](../../etc/passwd)\")\n+  ```\n", "README.md"],
+    // ... and inside a blockquote.
+    ["+> ```python\n+> open(\"[a](../../etc/passwd)\")\n+> ```\n", "README.md"],
+    // A fence-like line with the other character neither closes the open
+    // fence nor opens a second one.
+    ["+~~~\n+open(\"[a](../../etc/passwd)\")\n+```\n+more prose\n", "README.md"],
+    // A closer shorter than the opener does not close it.
+    ["+````\n+open(\"[a](../../etc/passwd)\")\n+```\n+more prose\n", "README.md"],
+    // A fence that is never closed keeps the rest of the chunk as code.
+    ["+```python\n+open(\"[a](../../etc/passwd)\")\n", "README.md"],
+    // The removed side of the diff carries its own fence state.
+    ["-```python\n-open(\"[a](../../etc/passwd)\")\n-```\n", "README.md"],
+    // A context line whose two streams disagree is code, not prose: the new
+    // file closed the fence, the old file did not.
+    [" ```python\n+```\n open(\"[a](../../etc/passwd)\")\n", "README.md"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+  }
+
+  // One rule keeps a line in prose: CommonMark rejects a backtick fence whose
+  // info string holds a backtick, so that line opens no fence.
+  const prose = "+```py`x\n+open(\"[a](../../etc/passwd)\")\n+```\n";
+  const proseResult = classifyPr({ prFiles: files("README.md"), diffText: prose, linkedIssues: [] });
+  assert.equal(proseResult.prKind, "app_code", prose);
+  assert.ok(
+    proseResult.pathHandlingProvenance.discounted.some(
+      (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+    ),
+    `${prose}: expected a discounted diff_nav_link signal, got ${JSON.stringify(proseResult.pathHandlingProvenance.discounted)}`,
+  );
+
+  // A hunk header is not content, but git prints the section heading after
+  // the second `@@`, and that heading is file text: a navigation link in it
+  // is navigation like any other.
+  const heading = "@@ -1,3 +1,4 @@ see the [Guide](../README.md)\n+more prose\n";
+  const headingResult = classifyPr({
+    prFiles: files("README.md"),
+    diffText: heading,
+    linkedIssues: [],
+  });
+  assert.equal(headingResult.prKind, "app_code", heading);
+  assert.equal(headingResult.pathHandlingProvenance.fired, false, heading);
+  assert.ok(
+    headingResult.pathHandlingProvenance.discounted.some(
+      (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+    ),
+    `${heading}: expected a discounted diff_nav_link signal, got ${JSON.stringify(headingResult.pathHandlingProvenance.discounted)}`,
+  );
+});
+
+test("#1354: prose after a fenced block is prose again, so its navigation link is discounted", () => {
+  const diff = "+```python\n+open(\"[a](../../etc/passwd)\")\n+```\n+[Guide](../README.md)\n";
+  const result = classifyPr({ prFiles: files("README.md"), diffText: diff, linkedIssues: [] });
+  assert.equal(result.prKind, "path_handling_changes", diff);
+  assert.equal(result.pathHandlingProvenance.fired, true, diff);
+  // The link after the fence is prose again: it is discounted, not fired.
+  assert.ok(
+    result.pathHandlingProvenance.discounted.some(
+      (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+    ),
+    `${diff}: expected a discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+  );
+});
+
+test("#1354: an encoded traversal destination matches no traversal pattern at all", () => {
+  // `..%2Fetc%2Fpasswd` is not a `../` literal, so the pattern never matches
+  // it: there is no signal to fire and none to discount.
+  const diff = "+[Guide](..%2Fetc%2Fpasswd)\n";
+  const result = classifyPr({ prFiles: files("README.md"), diffText: diff, linkedIssues: [] });
+  assert.equal(result.prKind, "app_code", diff);
+  assert.equal(result.pathHandlingProvenance.fired, false, diff);
+  assert.ok(
+    !result.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"),
+    `${diff}: expected no fired traversal_literal signal, got ${JSON.stringify(result.pathHandlingProvenance.signals)}`,
+  );
+  assert.ok(
+    !result.pathHandlingProvenance.discounted.some((s) => s.signal === "traversal_literal"),
+    `${diff}: expected no discounted traversal_literal signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+  );
+});
+
 test("#960: a traversal literal in real code still fires, including next to an import and past a string-literal marker", () => {
   const positives: [string, string][] = [
     // Plain code, no comment anywhere.
