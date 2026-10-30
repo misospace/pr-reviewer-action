@@ -44,9 +44,16 @@ import { parse as parseYaml } from "yaml";
 import { parseRepoRef } from "../platform/repo-ref.js";
 import type { ActionContract } from "./contract.js";
 import type { AdoptionPolicy } from "./adoption.js";
-import { SECRET_INPUTS } from "./schema.js";
+import { validateNamespacePolicies, type NamespacePolicy } from "./namespace-policy.js";
+import { SECRET_INPUTS, InstanceConfigError, hasControlCharacters } from "./schema.js";
 import type { ApiFormat } from "./types.js";
 import { normalizeCandidate } from "./repository-config.js";
+
+// Shared hygiene helper and the trusted-layer error live in the leaf
+// `schema.ts` so `namespace-policy.ts` can use/subclass them without an
+// import cycle through this module; re-exported here for the existing
+// import sites.
+export { InstanceConfigError, hasControlCharacters };
 
 /** Hard byte cap on the instance config file itself. The file is trusted
  * operator input, but the controller still bounds what it will ever parse. */
@@ -212,6 +219,15 @@ export interface InstanceConfig {
   readonly defaultExecutorProfile: string | null;
   readonly evidenceProfiles: readonly EvidenceProfile[];
   readonly defaultEvidenceProfile: string | null;
+  /** Operator-managed namespace/account shared review policies (#1350):
+   * one bounded review-rule set per forge account/organization, matched
+   * deterministically and layered between the operator envelope and the
+   * repository config. Operator config data — never repository-supplied
+   * content — so a PR can never change the shared policy governing its own
+   * review. Validated by `namespace-policy.ts`; any problem fails this
+   * validation closed (`NamespacePolicyError`, an `InstanceConfigError`
+   * subclass, propagates). */
+  readonly namespacePolicies: readonly NamespacePolicy[];
   readonly adoption: AdoptionPolicy;
   /** Global reviewer defaults — the envelope repository config may narrow.
    * Keys are `repo-configurable` contract input ids, normalized to the
@@ -223,8 +239,6 @@ export interface InstanceConfig {
   readonly queue: InstanceQueue;
   readonly storage: InstanceStorage;
 }
-
-export class InstanceConfigError extends Error {}
 
 function fail(path: string, why: string): never {
   throw new InstanceConfigError(`${path}: ${why}`);
@@ -239,20 +253,6 @@ function rejectUnknown(item: Record<string, unknown>, allowed: readonly string[]
   for (const key of Object.keys(item)) {
     if (!allowed.includes(key)) fail(path, `unsupported field '${key}'`);
   }
-}
-
-/** Hygiene check shared by the config modules: true when `value` contains
- * any ASCII control character. Not a security guard — the config file is
- * trusted operator input — but a control character in a name/path/URL is
- * never what the operator meant and would only corrupt downstream
- * diagnostics. Spelled as codepoint comparisons rather than a regex class
- * so no literal control byte can ever land in this source file. */
-export function hasControlCharacters(value: string): boolean {
-  for (const char of value) {
-    const code = char.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f) return true;
-  }
-  return false;
 }
 
 function stringAt(value: unknown, path: string): string {
@@ -624,6 +624,7 @@ export function validateInstanceConfig(value: unknown, contract: ActionContract)
     [
       "version", "unknown-profile-policy", "forges", "model-profiles", "default-model-profile",
       "executor-profiles", "default-executor-profile", "evidence-profiles", "default-evidence-profile",
+      "namespace-policies",
       "adoption", "reviewer-defaults", "allow-repo-policy-overrides", "queue", "storage",
     ],
     "instance config",
@@ -699,6 +700,7 @@ export function validateInstanceConfig(value: unknown, contract: ActionContract)
     defaultExecutorProfile,
     evidenceProfiles: evidence,
     defaultEvidenceProfile,
+    namespacePolicies: validateNamespacePolicies(root["namespace-policies"], contract),
     adoption: root.adoption === undefined
       ? Object.freeze({ mode: "allowlist" as const, allowlist: Object.freeze([]) as readonly string[], denylist: Object.freeze([]) as readonly string[], discoveredDefault: "skip" as const })
       : validateAdoption(root.adoption, "instance config.adoption"),

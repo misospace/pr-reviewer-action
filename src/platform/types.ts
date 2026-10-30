@@ -8,6 +8,7 @@
  * GitHub-REST pull shape, and everything beyond metadata reads fails closed.
  */
 
+import type { PlatformRequestError } from "./http.js";
 import type { IdentityResolution } from "./owner-identity.js";
 
 export interface ManagedComment {
@@ -47,6 +48,23 @@ export interface PlatformAdapter {
   preflightAuthentication?(): Promise<void>;
   /** PR object (GitHub REST shape) or null when the fetch fails. */
   getPr(): Promise<unknown | null>;
+  /** #1341: the cause of the most recent `getPr()` failure, as a
+   * `PlatformRequestError` whose `kind` is the failure class —
+   * `http-status` when a non-2xx response arrived (the `status` IS the
+   * failure), or `transport`, `redirect-blocked`, `too-large`,
+   * `origin-mismatch`, `invalid-json`, `invalid-payload`, `invalid-repo`,
+   * `request-failed` otherwise. On non-`http-status` kinds `status`, when
+   * present, is only the status of the response the failure occurred on
+   * (e.g. 200 for an `invalid-json` body), never the failure itself, so
+   * consumers must render the kind, not the status. `null` after a
+   * successful read, before the first read, or when the adapter records
+   * no cause. The cause is status/kind only — the message is built from
+   * the kind alone, never the underlying error text — so it carries no
+   * response-body content and no credential material, and a fail-closed
+   * admission error can name why the lookup failed without leaking
+   * either. Adapters that do not record a cause omit this method;
+   * callers then keep the unexplained message rather than inventing one. */
+  prReadFailure?(): PlatformRequestError | null;
   /** Raw unified diff text; "" when unavailable. */
   getPrDiff(): Promise<string>;
   listIssueComments(): Promise<ManagedComment[]>;

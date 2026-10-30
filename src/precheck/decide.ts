@@ -727,8 +727,22 @@ async function reviewPathOutputs(
   // result. The human-triggered comment-command path keeps its earlier
   // fail-soft comment-pr-lookup-failed return before it reaches this seam.
   if (prObject === null || prObject === undefined) {
+    // #1341: name the cause class when the adapter recorded one. A cause
+    // whose kind is the HTTP-status class reports the failing status; any
+    // other kind reports the kind itself — a cause may carry a status
+    // that is NOT the failure (an invalid-json/too-large cause over a 200
+    // response), so the status is only shown when it IS the cause. Only
+    // `status`/`kind` are ever formatted, never the error message, so the
+    // admission error cannot carry response-body content or credential
+    // material even if an underlying transport message did.
+    const cause = spec.adapter.prReadFailure?.() ?? null;
+    const causeText = cause === null
+      ? ""
+      : cause.kind === "http-status" && typeof cause.status === "number"
+        ? ` (read failed: HTTP ${cause.status})`
+        : ` (read failed: ${cause.kind})`;
     throw new Error(
-      `ERROR: Could not read pull request ${env.PR_NUMBER ?? ""} for ${repo}; refusing to treat a forge/API lookup failure as a successful review skip.`,
+      `ERROR: Could not read pull request ${env.PR_NUMBER ?? ""} for ${repo}${causeText}; refusing to treat a forge/API lookup failure as a successful review skip.`,
     );
   }
   const identity = normalizePrIdentity(prObject);
