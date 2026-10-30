@@ -122,7 +122,9 @@ export type BudgetRefusalCode = (typeof BUDGET_REFUSAL_CODES)[number];
  * endpoint configured for the token's profile, the credential broker
  * refused, a reservation was already settled so a replayed id may not
  * re-call the provider, a caller-supplied usage id failed durable-shape
- * validation, the transport itself failed, or the transport/broker seam
+ * validation, the provider's completion carried the model credential (the
+ * content gate refuses the call rather than publishing the key), the
+ * transport itself failed, or the transport/broker seam
  * threw an unexpected non-transport error — the gateway call is a TOTAL
  * function and converts that into this typed refusal instead of
  * rejecting). Derived from the sub-vocabularies so the sets cannot drift
@@ -134,6 +136,7 @@ export const GATEWAY_REFUSAL_CODES = Object.freeze([
   "credential_refused",
   "reservation_settled",
   "usage_record_invalid",
+  "provider_response_unsafe",
   "transport_failure",
   "gateway_error",
 ] as const);
@@ -164,6 +167,15 @@ export interface GatewayProfileEndpoint {
   readonly connectTimeoutSec: number;
   /** Response-byte ceiling override (#745); unset = transport default. */
   readonly maxResponseBytes?: number | undefined;
+  /** Operator-configured extra headers (#1037), applied to the gateway's
+   * transport call exactly as direct mode applies them — gateway mode is
+   * not a lesser endpoint (an operator's proxy/token headers reach the
+   * provider identically). OPERATOR config, never worker input, and never
+   * a place for credential material (the transport's own fence refuses the
+   * auth/protocol header names it owns). The VALUES are secret-shaped often
+   * enough (proxy tokens) that the gateway masks them like the provider
+   * credential on every response surface. */
+  readonly extraHeaders?: Readonly<Record<string, string>> | undefined;
   readonly pricing?: GatewayProfilePricing | undefined;
 }
 
@@ -274,6 +286,22 @@ export function validateBudgetRunGeneration(value: unknown): BudgetRunGeneration
   return Object.freeze({ runId, generation });
 }
 
+/** The durable payload one controller persists and a restarted controller
+ * re-seeds from: the reservation rows AND the per-run cancellation-generation
+ * rows, TOGETHER, as ONE object.
+ *
+ * One payload, both halves, deliberately: cancellation is not inferable
+ * from reservation rows (a cancelled run may have no newer-generation
+ * reservation at all), so a controller that persisted the accounting half
+ * alone would resurrect a cancelled run's outstanding older-generation
+ * capability tokens after a restart. Producing and consuming a single
+ * object makes "persist both halves" a property of the API instead of a
+ * promise in a comment. */
+export interface BudgetDurableState {
+  readonly rows: readonly BudgetReservationRow[];
+  readonly generations: readonly BudgetRunGenerationRow[];
+}
+
 function rowIdentifier(value: unknown, max: number): string | null {
   if (typeof value !== "string" || value.length === 0 || value.length > max) return null;
   if (value !== value.trim()) return null;
@@ -377,10 +405,12 @@ export type BudgetSettleResult =
 
 /** The budget ledger seam (#765): reserve-before-call accounting for one
  * controller's model gateway. The in-memory implementation is the tests/dev
- * backend (like `InMemoryControlPlaneStore`); the reservation ROWS are the
- * durable shape a #736 backend persists so a restarted controller re-seeds
- * the ledger and a worker retry replays idempotently — never double-charging
- * and never silently exceeding the accounting contract. */
+ * backend (like `InMemoryControlPlaneStore`); the durable PAYLOAD it
+ * produces ({@link BudgetDurableState}) is the shape a #736 backend
+ * persists so a restarted controller re-seeds the ledger — the accounting
+ * AND the cancellation state together — and a worker retry replays
+ * idempotently, never double-charging and never silently exceeding the
+ * accounting contract. */
 export interface BudgetLedger {
   /** The caps this ledger enforces (the same limits capability tokens must
    * carry). */
@@ -422,8 +452,8 @@ export interface BudgetLedger {
    * The bump is recorded in the DURABLE generation rows (see
    * `generationRows`), so it survives a controller restart. */
   cancelRun(runId: string): number;
-  /** Every recorded reservation row (re-seed a restarted ledger from
-   * these; no credential material, ever). */
+  /** Every recorded reservation row (a durable backend persists these; no
+   * credential material, ever). */
   rows(): readonly BudgetReservationRow[];
   /** Every recorded per-run cancellation-generation row — the second half
    * of the durable re-seed payload. NOT inferable from the reservation
@@ -431,6 +461,12 @@ export interface BudgetLedger {
    * these rows a restart would resurrect a cancelled run's outstanding
    * older-generation tokens. */
   generationRows(): readonly BudgetRunGenerationRow[];
+  /** The durable payload as ONE object: the reservation rows and the
+   * per-run cancellation generations together. A controller persists this
+   * object and a restarted ledger re-seeds from it, so the cancellation
+   * state cannot be left behind by accident (the accounting half alone
+   * does not carry it). */
+  durableState(): BudgetDurableState;
 }
 
 /** The capability-token authority seam (#765): mirrors the #735
@@ -508,13 +544,16 @@ export interface GatewayCallInput {
 }
 
 /** The gateway call outcome. Success carries the normalized response, the
- * raw provider body (exactly as direct mode's `ChatRequestOutcome` would),
- * and the validated `UsageRecord` the controller persists. Failure carries
+ * raw provider body (direct mode's `ChatRequestOutcome` body, MASKED
+ * against the call's secrets — a provider can quote the credential it was
+ * given back into its own body), and the validated `UsageRecord` the
+ * controller persists. Failure carries
  * a closed refusal code with a fixed bounded reason, the recorded usage row
  * when one was produced (a failed request records its attempt with zero
  * tokens and unknown cost — honest accounting, refunded reservation), and
  * the underlying `TransportFailure` when the failure came from the wire so
- * routing/fallback logic sees the same typed failure direct mode sees.
+ * routing/fallback logic sees the same typed failure direct mode sees (its
+ * free text masked the same way).
  * `call` is a TOTAL function: it never rejects — an unexpected throw from
  * the transport or broker seam becomes a `gateway_error` refusal with the
  * reservation refunded. No outcome — success, refusal, or transport

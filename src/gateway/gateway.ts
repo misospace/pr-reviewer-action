@@ -30,7 +30,17 @@
  * policy), and it never lets provider credentials reach the review
  * workspace: the gateway's outcomes carry the normalized response, the raw
  * provider body, and the usage record — never key material — and the
- * gateway object itself serializes to names and caps only.
+ * gateway object itself serializes to names and caps only. Because the
+ * provider can quote the credential it was given straight back into its own
+ * answer, the boundary closes those three paths itself (`./sanitize.ts`):
+ * the raw provider body and a transport failure body are MASKED, and a
+ * completion that carries the credential is REFUSED rather than published
+ * or masked into a corrupted verdict.
+ *
+ * Gateway mode is not a lesser endpoint: the operator's per-profile
+ * config (base URL, timeouts, response-byte ceiling, extra headers) is
+ * applied exactly as direct mode applies it, so a provider that needs the
+ * operator's proxy/token headers behaves identically in both modes.
  *
  * Budget refusal is its own stop reason (`budget_exhausted`, a closed
  * refusal code): it is never evidence about the PR and must never be
@@ -53,9 +63,11 @@ import {
 import { RUN_ID_RE, isSecretShapedValue, isValidProfileName, type CredentialBroker, type ResolutionRefusalCode } from "../credentials/types.js";
 import { runChatRequest, type ChatRequestInput, type ChatRequestOutcome } from "../transport/transport.js";
 import { TransportFailure } from "../transport/http.js";
+import { applyExtraHeaders } from "../transport/headers.js";
 import type { NormalizedModelResponse } from "../model/types.js";
 import { usageWithoutCost } from "../state/usage.js";
 import { validateUsage, type UsageCostProvenance, type UsageRecord } from "../state/types.js";
+import { gatewayCallSecrets, maskProviderBody, maskTransportFailure, responseCarriesKnownSecret } from "./sanitize.js";
 
 export interface ModelGatewayOptions {
   /** The run budget caps every capability token must carry and the ledger
@@ -181,7 +193,9 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
         }
         // The response-byte ceiling is the OPERATOR's profile config, never
         // worker input; extra headers are operator config the transport
-        // seam applies itself — the worker supplies neither.
+        // seam applies itself — the worker supplies neither. Gateway mode
+        // is not a lesser endpoint: an operator's proxy/token headers reach
+        // the provider exactly as they do in direct mode.
         const outcome = await runChat({
           baseUrl: profile.baseUrl,
           apiFormat: profile.apiFormat,
@@ -191,9 +205,34 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
           requestTimeoutSec: profile.requestTimeoutSec,
           connectTimeoutSec: profile.connectTimeoutSec,
           ...(profile.maxResponseBytes !== undefined ? { maxResponseBytes: profile.maxResponseBytes } : {}),
+          ...(profile.extraHeaders !== undefined ? { extraHeaders: profile.extraHeaders } : {}),
           ...(input.signal !== undefined ? { signal: input.signal } : {}),
         });
+        // The secrets this call must never let escape: the resolved provider
+        // credential plus the VALUES of the operator's extra headers (they
+        // routinely carry proxy tokens), plus each value's JSON-escaped
+        // spelling (a provider that echoes the credential inside a JSON
+        // string writes it escaped). The transport owns the base list, so
+        // gateway mode and direct mode mask the same bytes.
+        const secrets = gatewayCallSecrets(resolved.material.value, profile.extraHeaders);
         if (outcome.status === "ok") {
+          // CONTENT GATE: a response that quotes the credential fails the
+          // whole call (the #1094 rule — refuse content, never mask a
+          // verdict). The scan covers EVERY provider-authored string in
+          // the response (the completion text, the tool calls, the error
+          // payload, and the `id`/`model`/`finishReason` metadata), leaf
+          // by leaf. The provider billed the call, so the attempt is
+          // recorded honestly and the reservation is refunded.
+          if (responseCarriesKnownSecret(outcome.response, secrets)) {
+            options.ledger.refund(input.reservationId);
+            reservedId = null;
+            return refusal(
+              "provider_response_unsafe",
+              "the provider's response carried the model credential; the call was refused",
+              attemptRecord(input, now()),
+              null,
+            );
+          }
           const usage = buildUsageRecord(input, outcome.response, profile.pricing, now());
           if (usage === null) {
             // The provider-billed call succeeded but produced an
@@ -218,7 +257,12 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
           return Object.freeze({
             ok: true as const,
             response: outcome.response,
-            raw: outcome.raw,
+            // The RAW body is a provider-authored diagnostic surface: a
+            // provider can quote the credential it was given straight back
+            // into it, so it is masked before it reaches the worker-facing
+            // surface (#1149 composition — configured values first, then the
+            // generic credential-shape heuristics).
+            raw: maskProviderBody(outcome.raw, secrets),
             usage,
           });
         }
@@ -229,7 +273,8 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
           code: "transport_failure",
           reason: `model request failed (${outcome.failure.kind})`,
           usage: attemptRecord(input, now()),
-          transportFailure: outcome.failure,
+          // The preserved non-2xx body is provider-authored too: masked.
+          transportFailure: maskTransportFailure(outcome.failure, secrets),
         });
       } catch (error) {
         if (reservedId !== null) {
@@ -356,12 +401,37 @@ function validateProfiles(
         throw new RangeError(`gateway profile '${name}' pricing must be non-negative integer micros per million tokens`);
       }
     }
+    if (endpoint.extraHeaders !== undefined) {
+      validateExtraHeaders(name, endpoint.extraHeaders);
+    }
     checked[name] = Object.freeze({
       ...endpoint,
       ...(endpoint.pricing !== undefined ? { pricing: Object.freeze({ ...endpoint.pricing }) } : {}),
+      ...(endpoint.extraHeaders !== undefined ? { extraHeaders: Object.freeze({ ...endpoint.extraHeaders }) } : {}),
     });
   }
   return Object.freeze(checked);
+}
+
+/** Validate the operator's extra-header set for one profile through the
+ * TRANSPORT's own fence (`applyExtraHeaders`): RFC 7230 token names, values
+ * free of control characters and latin-1 only, no collision with a header
+ * the transport owns (the auth/protocol/framing set — so an operator can
+ * never override the auth header this gateway authenticates with), no
+ * case-insensitive duplicates, and at most `MAX_EXTRA_HEADERS` pairs. A
+ * hand-built map that skipped the startup parser fails closed on the same
+ * rules instead of reaching the wire malformed. The transport's message
+ * names the offending NAME and never a value. */
+function validateExtraHeaders(profileName: string, headers: Readonly<Record<string, string>>): void {
+  if (typeof headers !== "object" || headers === null || Array.isArray(headers)) {
+    throw new RangeError(`gateway profile '${profileName}' extraHeaders must be a mapping of header name to value`);
+  }
+  try {
+    applyExtraHeaders({}, headers);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "the header set is malformed";
+    throw new RangeError(`gateway profile '${profileName}' extraHeaders are invalid: ${detail}`);
+  }
 }
 
 function isSafeBaseUrl(value: string): boolean {

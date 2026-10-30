@@ -19,14 +19,16 @@
  *   different identity under the same id is a `reservation_mismatch`
  *   refusal, never a quiet overwrite.
  * - RESTART-SAFE SHAPE: the ledger is an in-memory tests/dev backend (the
- *   same posture as `InMemoryControlPlaneStore`), but the reservation ROWS
- *   and the per-run CANCELLATION-GENERATION rows it records are the durable
- *   shape: a durable #736 backend persists both and re-seeds a restarted
- *   ledger, so the idempotency AND the cancellation state survive the
- *   process. Without the generation rows a restart would resurrect a
- *   cancelled run's outstanding older-generation tokens — cancellation is
- *   not inferable from reservation rows. The rows carry no credential
- *   material.
+ *   same posture as `InMemoryControlPlaneStore`), but the durable PAYLOAD
+ *   it produces — `durableState()`, ONE object carrying the reservation
+ *   rows AND the per-run CANCELLATION-GENERATION rows — is what a durable
+ *   #736 backend persists and re-seeds a restarted ledger from. One
+ *   payload, both halves: cancellation is NOT inferable from reservation
+ *   rows (a cancelled run may have no gen-2 reservation at all), so a
+ *   controller that persisted the accounting half alone would resurrect a
+ *   cancelled run's outstanding older-generation tokens — the API makes
+ *   that omission visible instead of leaving it to a comment. The payload
+ *   carries no credential material.
  * - SETTLEMENT IS EXACT: a committed row counts its ACTUAL usage, a live
  *   reservation counts its ESTIMATE, a refunded row (failed request)
  *   counts nothing. A crash between commit and response replays as an
@@ -49,6 +51,7 @@ import {
   validateBudgetReservationRow,
   validateBudgetRunGeneration,
   type BudgetActualUsage,
+  type BudgetDurableState,
   type BudgetLedger,
   type BudgetRefusalCode,
   type BudgetReservationInput,
@@ -73,16 +76,15 @@ export interface InMemoryBudgetLedgerOptions {
   /** Injected clock, epoch milliseconds (injected for deterministic tests
    * and so the controller's own clock source is explicit). */
   readonly now?: (() => number) | undefined;
-  /** Durable reservation rows a restarted controller re-seeds the ledger
-   * from (e.g. replayed from the #736 store). Every row is validated; a
-   * duplicate reservation id is refused at construction. */
-  readonly rows?: readonly BudgetReservationRow[] | undefined;
-  /** Durable per-run cancellation-generation rows — the second half of the
-   * re-seed payload. Without them a restarted ledger would reset unseen
-   * runs to generation 1 and resurrect a cancelled run's outstanding
-   * older-generation tokens. A duplicate run id is refused at
-   * construction. */
-  readonly generations?: readonly BudgetRunGenerationRow[] | undefined;
+  /** The durable payload a restarted controller re-seeds the ledger from
+   * (e.g. replayed from the #736 store): the reservation rows AND the
+   * per-run cancellation-generation rows TOGETHER. One object, both halves
+   * — the API makes "persist the accounting but forget the cancellation"
+   * a visible act rather than an omission, because a cancelled run's
+   * outstanding older-generation tokens must stay refused after a restart.
+   * Every row is validated; a duplicate reservation id (or a duplicate run
+   * id in the generation half) is refused at construction. */
+  readonly state?: BudgetDurableState | undefined;
 }
 
 export class InMemoryBudgetLedger implements BudgetLedger {
@@ -99,8 +101,12 @@ export class InMemoryBudgetLedger implements BudgetLedger {
     this.#now = options.now ?? Date.now;
     this.#rows = new Map();
     this.#generations = new Map();
-    if (options.generations !== undefined) {
-      for (const row of options.generations) {
+    if (options.state !== undefined) {
+      const state = options.state;
+      if (typeof state !== "object" || state === null || !Array.isArray(state.rows) || !Array.isArray(state.generations)) {
+        throw new BudgetLedgerError("budget ledger seed state must carry both a rows array and a generations array");
+      }
+      for (const row of state.generations) {
         const checked = validateBudgetRunGeneration(row);
         if (checked === null) {
           throw new BudgetLedgerError("budget ledger seed generation row is malformed");
@@ -112,9 +118,7 @@ export class InMemoryBudgetLedger implements BudgetLedger {
         }
         this.#generations.set(checked.runId, checked.generation);
       }
-    }
-    if (options.rows !== undefined) {
-      for (const row of options.rows) {
+      for (const row of state.rows) {
         const checked = validateBudgetReservationRow(row);
         if (checked === null) {
           throw new BudgetLedgerError("budget ledger seed row is malformed");
@@ -311,6 +315,11 @@ export class InMemoryBudgetLedger implements BudgetLedger {
       [...this.#generations.entries()]
         .map(([runId, generation]) => Object.freeze({ runId, generation })),
     );
+  }
+
+  /** {@inheritDoc BudgetLedger.durableState} */
+  durableState(): BudgetDurableState {
+    return Object.freeze({ rows: this.rows(), generations: this.generationRows() });
   }
 
   /** Committed rows count ACTUALS, live reserved rows count ESTIMATES,

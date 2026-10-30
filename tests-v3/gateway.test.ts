@@ -17,6 +17,8 @@ import type { ChatRequestInput, ChatRequestOutcome } from "../src/transport/tran
 import type { NormalizedModelResponse, TransportWirePayload } from "../src/model/types.js";
 import { validateUsage } from "../src/state/types.js";
 import { startMockServer } from "./helpers.js";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 
 /**
  * The model gateway (#765): capability verification, run-scoped budgets,
@@ -413,7 +415,7 @@ test("gateway: restart/retry — a re-seeded ledger replays idempotently and kee
   const first = await h.gateway.call(callInput({ token: h.token }));
   assert.ok(first.ok, JSON.stringify(first));
   // The controller restarts; the durable rows re-seed a fresh ledger.
-  const restarted = new InMemoryBudgetLedger(CAPS, { now: h.clock.now, rows: h.ledger.rows(), generations: h.ledger.generationRows() });
+  const restarted = new InMemoryBudgetLedger(CAPS, { now: h.clock.now, state: h.ledger.durableState() });
   const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: h.clock.now });
   const calls: ChatRequestInput[] = [];
   const gateway2 = createModelGateway({
@@ -507,7 +509,7 @@ test("gateway: cancellation survives a restart — a gen-1 token still refuses a
   const h = harness();
   h.ledger.cancelRun(RUN_ID);
   // The controller restarts and re-seeds from the durable rows + generation rows.
-  const restarted = new InMemoryBudgetLedger(CAPS, { now: h.clock.now, rows: h.ledger.rows(), generations: h.ledger.generationRows() });
+  const restarted = new InMemoryBudgetLedger(CAPS, { now: h.clock.now, state: h.ledger.durableState() });
   const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: h.clock.now });
   const calls: ChatRequestInput[] = [];
   const gateway2 = createModelGateway({
@@ -697,3 +699,223 @@ test("gateway: construction fails closed on disagreeing caps, secret-shaped refe
       }),
   );
 });
+
+test("gateway: a provider that reflects the credential into the raw body is masked before it reaches the worker", async () => {
+  // A provider (or a hostile endpoint posing as one) can quote the
+  // credential it was given straight back into its own answer. The raw body
+  // is a worker-facing surface, so the gateway masks it before it leaves.
+  const echoing = async (): Promise<ChatRequestOutcome> => ({
+    status: "ok",
+    response: okResponse(),
+    raw: {
+      echo: `your Authorization header was Bearer ${KEY_MATERIAL}`,
+      nested: { again: KEY_MATERIAL, list: [KEY_MATERIAL] },
+    },
+  });
+  const h = harness({ runChat: echoing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  const raw = JSON.stringify(outcome.raw);
+  assert.ok(!raw.includes(KEY_MATERIAL), "the reflected credential never reaches the worker-facing surface");
+  assert.ok(raw.includes("⟦•⟧"), "the reflection is masked in place, not silently dropped");
+  assert.ok(!JSON.stringify(outcome).includes(KEY_MATERIAL), "no outcome field carries the credential");
+  // The call itself still succeeded: masking a diagnostic surface never
+  // turns a provider answer into a refusal.
+  assert.equal(outcome.usage.inputTokens, 3);
+});
+
+test("gateway: a completion that carries the credential fails the call closed instead of publishing it", async () => {
+  const echoing = async (): Promise<ChatRequestOutcome> => ({
+    status: "ok",
+    response: { ...okResponse(), content: `the model key is ${KEY_MATERIAL}` },
+    raw: { content: "ok" },
+  });
+  const h = harness({ runChat: echoing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "provider_response_unsafe");
+    assert.ok(!JSON.stringify(outcome).includes(KEY_MATERIAL), "the refusal carries no credential");
+    assert.ok(!outcome.reason.includes(KEY_MATERIAL), "the refusal reason is fixed, never an echo");
+    // The provider billed the call: the attempt is recorded honestly.
+    assert.notEqual(outcome.usage, null);
+    assert.equal(outcome.usage?.requestCount, 1);
+    assert.equal(outcome.usage?.inputTokens, 0);
+    assert.equal(outcome.usage?.costProvenance, "unknown");
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the reservation was refunded");
+});
+
+test("gateway: a transport failure body that echoes the credential is masked", async () => {
+  const failing = async (): Promise<ChatRequestOutcome> => ({
+    status: "failure",
+    failure: new TransportFailure("http_status", `upstream rejected the request (${KEY_MATERIAL})`, {
+      status: 401,
+      body: JSON.stringify({ error: `invalid Authorization: Bearer ${KEY_MATERIAL}` }),
+    }),
+  });
+  const h = harness({ runChat: failing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "transport_failure");
+    assert.equal(outcome.transportFailure?.kind, "http_status");
+    assert.equal(outcome.transportFailure?.status, 401, "the typed failure shape is preserved");
+    assert.ok(!JSON.stringify(outcome).includes(KEY_MATERIAL), "the failure body never carries the credential");
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 });
+});
+
+test("gateway: operator extra headers reach the transport exactly as they do in direct mode", async () => {
+  const proxyToken = "proxy-token-abc-123";
+  const calls: ChatRequestInput[] = [];
+  const withHeaders: GatewayProfileEndpoint = {
+    ...PRICED_PROFILE,
+    extraHeaders: { "x-litellm-session-id": "sess-42", "x-proxy-token": proxyToken },
+  };
+  const echoing = async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    calls.push(input);
+    return { status: "ok", response: okResponse(), raw: { echoed: `proxy said ${proxyToken}` } };
+  };
+  const h = harness({ profile: withHeaders, runChat: echoing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  assert.deepEqual(
+    calls[0]!.extraHeaders,
+    { "x-litellm-session-id": "sess-42", "x-proxy-token": proxyToken },
+    "the transport receives the operator's headers",
+  );
+  // A header value is secret-shaped often enough (proxy tokens) that it is
+  // masked like the provider credential on every response surface.
+  assert.ok(!JSON.stringify(outcome.raw).includes(proxyToken), "an echoed header value never reaches the worker");
+  // A profile without configured headers sends none — nothing is invented.
+  const plain = harness();
+  await plain.gateway.call(callInput({ token: plain.token }));
+  assert.equal(plain.calls[0]!.extraHeaders, undefined);
+});
+
+test("gateway: an invalid operator extra-header set fails closed at construction", () => {  const time = clock();
+  const base = {
+    caps: CAPS,
+    perRequestBudget: PER_REQUEST,
+    ledger: new InMemoryBudgetLedger(CAPS, { now: time.now }),
+    capability: createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now }),
+    broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: time.now }),
+    modelCredentialRef: "model-primary",
+    now: time.now,
+  };
+  const withHeaders = (extraHeaders: Record<string, string>) =>
+    createModelGateway({ ...base, profiles: { [PROFILE]: { ...PRICED_PROFILE, extraHeaders } } });
+  // The transport's own fence: the auth header the gateway authenticates
+  // with can never be overridden by an operator's extra headers...
+  assert.throws(() => withHeaders({ authorization: "Bearer other" }), /extraHeaders/);
+  // ...a malformed header name fails...
+  assert.throws(() => withHeaders({ "bad name": "value" }), /extraHeaders/);
+  // ...a control character in a value fails (request splitting)...
+  assert.throws(() => withHeaders({ "x-a": "line\nbreak" }), /extraHeaders/);
+  // ...and a non-string value fails closed too.
+  assert.throws(() => withHeaders({ "x-a": 7 as unknown as string }), /extraHeaders/);
+});
+
+test("gateway: a provider that reflects the credential into the response metadata is refused, not published", async () => {
+  // `id`, `model` and `finishReason` are provider-authored strings copied
+  // verbatim out of the provider body — echo surfaces exactly like the
+  // completion text, so the content gate covers them too.
+  const echoing = async (): Promise<ChatRequestOutcome> => ({
+    status: "ok",
+    response: { ...okResponse(), id: `resp-${KEY_MATERIAL}`, model: KEY_MATERIAL, finishReason: KEY_MATERIAL },
+    raw: { ok: true },
+  });
+  const h = harness({ runChat: echoing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "provider_response_unsafe");
+    assert.ok(!JSON.stringify(outcome).includes(KEY_MATERIAL), "the echoed credential never reaches the worker");
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the reservation was refunded");
+});
+
+test("gateway: a credential with a JSON-escaped character is caught wherever the provider writes it", async () => {
+  // A credential carrying a quote is written ESCAPED inside a JSON
+  // string, so neither the raw spelling nor a stringify-and-search finds
+  // it: the gateway scans leaf by leaf and masks the escaped spelling too.
+  const quoted = 'sk-vault-"quoted"-key-01';
+  const echoing = async (): Promise<ChatRequestOutcome> => ({
+    status: "ok",
+    response: {
+      ...okResponse(),
+      toolCalls: [{ id: "call-1", type: "function", function: { name: "read", arguments: JSON.stringify({ path: quoted }) } }],
+    },
+    raw: { echoed: JSON.stringify({ path: quoted }) },
+  });
+  const h = harness({ vaultEntries: [vaultEntry(quoted)], runChat: echoing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false, "the escaped echo is caught, not published");
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "provider_response_unsafe");
+    assert.ok(!JSON.stringify(outcome).includes(quoted), "the escaped credential never reaches the worker");
+  }
+  // The raw-body surface masks the escaped spelling too.
+  const rawOnly = async (): Promise<ChatRequestOutcome> => ({
+    status: "ok",
+    response: okResponse(),
+    raw: { echoed: JSON.stringify({ path: quoted }) },
+  });
+  const h2 = harness({ vaultEntries: [vaultEntry(quoted)], runChat: rawOnly });
+  const masked = await h2.gateway.call(callInput({ token: h2.token }));
+  assert.ok(masked.ok, JSON.stringify(masked));
+  assert.ok(!JSON.stringify(masked.raw).includes("quoted"), "the escaped credential is masked out of the raw body");
+});
+
+test("gateway: Action mode stays unaffected — nothing outside the library imports it", () => {
+  // "Gateway mode is not required by Action mode" is an acceptance
+  // criterion, so it gets a deterministic guard rather than a promise in
+  // the design doc: no file in the shipped runtime tree outside
+  // src/gateway/ may import the library, and neither the shipped action
+  // definition nor its contract may expose a gateway surface.
+  const repoRoot = resolve(__dirname, "..", "..");
+  const offenders: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (full === join(repoRoot, "src", "gateway")) continue;
+        walk(full);
+        continue;
+      }
+      if (!/\.(?:ts|mts|cts|js|mjs|cjs)$/.test(entry.name)) continue;
+      for (const specifier of importSpecifiers(readFileSync(full, "utf8"))) {
+        if (specifier.split("/").includes("gateway")) {
+          offenders.push(`${relative(repoRoot, full)} -> ${specifier}`);
+        }
+      }
+    }
+  };
+  walk(join(repoRoot, "src"));
+  assert.deepEqual(offenders, [], "the gateway library stays unwired from the shipped runtime tree");
+  for (const definition of ["action.yml", "contracts/action-v3.yml"]) {
+    const text = readFileSync(join(repoRoot, definition), "utf8");
+    assert.ok(!/gateway/i.test(text), `${definition} exposes no gateway surface`);
+  }
+});
+
+/** Every module specifier a source file imports, in every form the tree
+ * can use: a static `from "…"`, a bare `import "…"`, a dynamic
+ * `import("…")`, and a CommonJS `require("…")`, in either quote style. */
+function importSpecifiers(source: string): string[] {
+  const found: string[] = [];
+  const patterns = [
+    /\bfrom\s*["']([^"']+)["']/g,
+    /\bimport\s*["']([^"']+)["']/g,
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+    /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      if (match[1] !== undefined) found.push(match[1]);
+    }
+  }
+  return found;
+}
+

@@ -8,7 +8,10 @@
  * restart or worker retry idempotent, and the gateway seam
  * (`./gateway.js`) that verifies, reserves, resolves the provider
  * credential through the #735 broker, calls through the shared transport,
- * and records #736-shaped usage.
+ * and records #736-shaped usage — plus the boundary sanitization
+ * (`./sanitize.js`) that keeps a provider-echoed credential from escaping
+ * through the raw provider body, the completion content, or a transport
+ * failure body.
  *
  * Operator-mode library (like `src/queue/`, `src/executor/`,
  * `src/credentials/`, and `src/state/`): the future controller daemon
@@ -29,6 +32,7 @@ export {
 } from "./types.js";
 export type {
   BudgetActualUsage,
+  BudgetDurableState,
   BudgetLedger,
   BudgetRefusalCode,
   BudgetReservationInput,

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { InMemoryBudgetLedger } from "../src/gateway/budget.js";
-import { validateBudgetLimits, type BudgetReservationRow } from "../src/gateway/types.js";
+import { validateBudgetLimits, type BudgetDurableState, type BudgetReservationRow } from "../src/gateway/types.js";
 
 /**
  * The budget ledger (#765): reserve-before-call with caller-supplied
@@ -171,7 +171,7 @@ test("budget: restart replay — a re-seeded ledger returns the same reservation
   assert.ok(before.commit("run-765:1", { requestCount: 1, tokens: 90, costMicros: 12 }).ok);
 
   // The controller restarts and re-seeds from the durable rows.
-  const after = new InMemoryBudgetLedger(CAPS, { rows: before.rows(), generations: before.generationRows() });
+  const after = new InMemoryBudgetLedger(CAPS, { state: before.durableState() });
   assert.deepEqual(after.usage(), before.usage());
   const replay = after.reserve(RESERVE);
   assert.ok(replay.ok);
@@ -206,9 +206,9 @@ test("budget: cancellation survives a restart — generation rows are part of th
   assert.equal(before.cancelRun("run-765"), 2);
   // Re-seed from BOTH durable halves: reservation rows alone would reset
   // the run to generation 1 and resurrect the cancelled gen-1 capability.
-  const afterRowsOnly = new InMemoryBudgetLedger(CAPS, { rows: before.rows() });
+  const afterRowsOnly = new InMemoryBudgetLedger(CAPS, { state: { rows: before.rows(), generations: [] } });
   assert.equal(afterRowsOnly.generationFor("run-765"), 1, "without generation rows the cancel is lost — that is why they exist");
-  const after = new InMemoryBudgetLedger(CAPS, { rows: before.rows(), generations: before.generationRows() });
+  const after = new InMemoryBudgetLedger(CAPS, { state: before.durableState() });
   assert.equal(after.generationFor("run-765"), 2);
   // A NEW gen-1 reservation is refused again after the restart...
   const stale = after.reserve({ ...RESERVE, reservationId: "run-765:stale" });
@@ -226,8 +226,43 @@ test("budget: cancellation survives a restart — generation rows are part of th
   if (!mismatch.ok) assert.equal(mismatch.code, "reservation_mismatch");
   assert.deepEqual(after.generationRows(), [{ runId: "run-765", generation: 2 }]);
   // Malformed and duplicate generation rows refuse construction.
-  assert.throws(() => new InMemoryBudgetLedger(CAPS, { generations: [{ runId: "run-765", generation: 0 }] }));
-  assert.throws(() => new InMemoryBudgetLedger(CAPS, { generations: [{ runId: "run-765", generation: 2 }, { runId: "run-765", generation: 3 }] }));
+  assert.throws(() => new InMemoryBudgetLedger(CAPS, { state: { rows: [], generations: [{ runId: "run-765", generation: 0 }] } }));
+  assert.throws(() => new InMemoryBudgetLedger(CAPS, { state: { rows: [], generations: [{ runId: "run-765", generation: 2 }, { runId: "run-765", generation: 3 }] } }));
+});
+
+test("budget: the durable payload is ONE object — a restart from it keeps the cancellation", () => {
+  const before = ledger();
+  assert.ok(before.reserve(RESERVE).ok);
+  assert.equal(before.cancelRun("run-765"), 2);
+  // ONE payload, BOTH halves: the controller persists this object and the
+  // restarted ledger re-seeds from it, so the accounting AND the
+  // cancellation state travel together — a stale gen-1 capability stays
+  // refused after the restart instead of being resurrected.
+  const payload = before.durableState();
+  assert.equal(payload.rows.length, 1);
+  assert.deepEqual(payload.generations, [{ runId: "run-765", generation: 2 }]);
+  const after = new InMemoryBudgetLedger(CAPS, { state: payload });
+  assert.equal(after.generationFor("run-765"), 2);
+  const stale = after.reserve({ ...RESERVE, reservationId: "run-765:stale" });
+  assert.equal(stale.ok, false);
+  if (!stale.ok) assert.equal(stale.code, "cancelled");
+  // The payload is plain data — it round-trips through JSON the way a #736
+  // backend persists it, and carries no credential material.
+  const roundTripped = JSON.parse(JSON.stringify(payload)) as BudgetDurableState;
+  const restarted = new InMemoryBudgetLedger(CAPS, { state: roundTripped });
+  assert.equal(restarted.generationFor("run-765"), 2);
+  assert.deepEqual(restarted.durableState(), payload);
+  // A payload missing a half is refused at construction rather than
+  // silently seeding a half-ledger.
+  assert.throws(
+    () => new InMemoryBudgetLedger(CAPS, { state: { rows: [] } as unknown as BudgetDurableState }),
+    /seed state/,
+    "a payload missing a half is refused with the ledger error, not a type error",
+  );
+  assert.throws(
+    () => new InMemoryBudgetLedger(CAPS, { state: null as unknown as BudgetDurableState }),
+    /seed state/,
+  );
 });
 
 test("budget: committed actuals beyond the reserved estimate are flagged overran, not hidden", () => {
@@ -262,7 +297,7 @@ test("budget: commit requires at least one request", () => {
   assert.throws(
     () =>
       new InMemoryBudgetLedger(CAPS, {
-        rows: [{ ...RESERVE, state: "committed", actualRequestCount: 0, actualTokens: 5, actualCostMicros: 5, overran: true, reservedAtMs: 1, settledAtMs: 2 } as unknown as BudgetReservationRow],
+        state: { rows: [{ ...RESERVE, state: "committed", actualRequestCount: 0, actualTokens: 5, actualCostMicros: 5, overran: true, reservedAtMs: 1, settledAtMs: 2 } as unknown as BudgetReservationRow], generations: [] },
       }),
   );
 });
@@ -272,15 +307,15 @@ test("budget: seed rows are validated — malformed and duplicate rows refuse co
   const reserved = seeded.reserve(RESERVE);
   assert.ok(reserved.ok);
   assert.throws(
-    () => new InMemoryBudgetLedger(CAPS, { rows: [{ ...RESERVE, estimatedTokens: "many" } as unknown as BudgetReservationRow] }),
+    () => new InMemoryBudgetLedger(CAPS, { state: { rows: [{ ...RESERVE, estimatedTokens: "many" } as unknown as BudgetReservationRow], generations: [] } }),
   );
   assert.throws(
-    () => new InMemoryBudgetLedger(CAPS, { rows: reserved.ok ? [reserved.reservation, reserved.reservation] : [] }),
+    () => new InMemoryBudgetLedger(CAPS, { state: { rows: reserved.ok ? [reserved.reservation, reserved.reservation] : [], generations: [] } }),
   );
   assert.throws(
     () =>
       new InMemoryBudgetLedger(CAPS, {
-        rows: [{ ...RESERVE, state: "committed", settledAtMs: 0 } as unknown as BudgetReservationRow],
+        state: { rows: [{ ...RESERVE, state: "committed", settledAtMs: 0 } as unknown as BudgetReservationRow], generations: [] },
       }),
   );
 });
