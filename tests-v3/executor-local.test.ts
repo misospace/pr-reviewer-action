@@ -1034,6 +1034,7 @@ test("cancel: an in-memory cleanup that leaves an unconfirmed tree fails instead
             snapshot: [4243],
             killedAfterGrace: [],
             survived: [4243],
+            unreaped: [],
             issues: [],
           },
         });
