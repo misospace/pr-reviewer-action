@@ -40,6 +40,14 @@ export type ConfidenceConcernSeverity = (typeof CONFIDENCE_CONCERN_SEVERITIES)[n
  * apart from merge-readiness verifier results. */
 export const CONFIDENCE_RUBRIC_VERSION = "merge-readiness-verifier-v1";
 
+// Output bounds the parser applies. Declared above the wire schema because
+// the schema mirrors two of them (`maxItems`, and the entry shape the bounds
+// exist to protect) — one source for both, so neither can drift.
+export const MAX_CONFIDENCE_REASON_CHARS = 600;
+export const MAX_CONFIDENCE_CONCERNS = 8;
+export const MAX_CONFIDENCE_CONCERN_FILE_CHARS = 300;
+export const MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS = 400;
+
 /**
  * #1368: the scorer's OWN compact strict-mode JSON schema, carried on the
  * wire only under the operator's structured-output assertion
@@ -53,14 +61,20 @@ export const CONFIDENCE_RUBRIC_VERSION = "merge-readiness-verifier-v1";
  * Like the verdict schema, every property is in `required` (OpenAI strict
  * mode requires that) with optionality expressed via the null type, and
  * `additionalProperties: false` everywhere. The schema and
- * `parseConfidenceAnswer` stay compatible in BOTH directions: every answer
- * the schema admits parses (score in range, concern vocabulary respected,
- * `cannot_verify` fail-closed), and every answer the parser KEEPS is
- * schema-admissible — a concern the parser keeps always carries a validated
- * type/severity pair and non-empty file/evidence, and the schema never forces
- * a value the parser would have to drop. The wire enum for `risk` is the four
- * meaningful bands (plus null); a malformed risk still degrades to `unknown`
- * in the parser. The schema rides BOTH wire families through
+ * `parseConfidenceAnswer` are compatible in both directions: every answer the
+ * parser KEEPS is schema-admissible — a kept concern always carries a
+ * validated type/severity pair and a non-empty `file` and `evidence`, which is
+ * why both strings are `minLength: 1` (JSON Schema does not enforce
+ * "non-empty" through `type` alone, and an entry the parser would drop must
+ * not be schema-admissible in the first place) — and every answer the schema
+ * admits either parses or fails CLOSED. The one correlation strict mode cannot
+ * express: a null `score` MEANS `cannot_verify`, but a null `score` with
+ * `cannot_verify: false` stays schema-admissible, and there the parser fails
+ * the whole answer closed as `malformed_score` — never a defaulted 0 or 5.
+ * `maxItems` mirrors `MAX_CONFIDENCE_CONCERNS`, so a structured answer cannot
+ * silently overflow the bound the parser applies. The wire enum for `risk` is
+ * the four meaningful bands (plus null); a malformed risk still degrades to
+ * `unknown` in the parser. The schema rides BOTH wire families through
  * `ModelRequestConfig`'s `responseSchema` (see `src/model/request.ts`).
  */
 export const CONFIDENCE_ANSWER_JSON_SCHEMA: Record<string, unknown> = {
@@ -83,14 +97,15 @@ export const CONFIDENCE_ANSWER_JSON_SCHEMA: Record<string, unknown> = {
     reason: { type: "string" },
     concerns: {
       type: "array",
+      maxItems: MAX_CONFIDENCE_CONCERNS,
       items: {
         type: "object",
         properties: {
           type: { type: "string", enum: [...CONFIDENCE_CONCERN_TYPES] },
           severity: { type: "string", enum: [...CONFIDENCE_CONCERN_SEVERITIES] },
-          file: { type: "string", description: "Path the concern is grounded in; never empty" },
-          line: { type: ["integer", "null"] },
-          evidence: { type: "string", description: "Short supporting quote from the supplied diff or description; never empty" },
+          file: { type: "string", minLength: 1, description: "Path the concern is grounded in; never empty" },
+          line: { type: ["integer", "null"], minimum: 0, description: "1-based line the concern is grounded on; null when you cannot pin one" },
+          evidence: { type: "string", minLength: 1, description: "Short supporting quote from the supplied diff or description; never empty" },
         },
         required: ["type", "severity", "file", "line", "evidence"],
         additionalProperties: false,
@@ -197,11 +212,6 @@ export function scoredConfidenceResult(input: {
 }
 
 // ── Bounded answer parsing ───────────────────────────────────────────────
-
-export const MAX_CONFIDENCE_REASON_CHARS = 600;
-export const MAX_CONFIDENCE_CONCERNS = 8;
-export const MAX_CONFIDENCE_CONCERN_FILE_CHARS = 300;
-export const MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS = 400;
 
 /**
  * Re-apply a documented field bound AFTER credential masking/redaction
@@ -521,6 +531,11 @@ export function parseConfidenceAnswer(raw: string): ConfidenceParseOutcome {
   const reason = stripRevealedCapNoteTails(reasonHead);
   const concerns: ConfidenceConcern[] = [];
   if (Array.isArray(parsed.concerns)) {
+    // An answer over the bound loses its TAIL, and a lost entry could have
+    // carried the concern cap — so the truncation is recorded, never silent.
+    // (The wire schema mirrors this bound with `maxItems`, so this fires only
+    // for a provider that ignored the schema.)
+    if (parsed.concerns.length > MAX_CONFIDENCE_CONCERNS) notes.push(`concerns_truncated_${MAX_CONFIDENCE_CONCERNS}`);
     for (const entry of parsed.concerns.slice(0, MAX_CONFIDENCE_CONCERNS)) {
       const { concern, note } = parseConcern(entry);
       if (concern !== null) concerns.push(concern);

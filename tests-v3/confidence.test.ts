@@ -13,6 +13,7 @@ import {
   applyConfidenceCeilings,
   confidenceOutputFields,
   extractConfidenceJson,
+  MAX_CONFIDENCE_CONCERNS,
   parseConfidenceAnswer,
   stripConfidenceCapNoteTails,
   stripRevealedCapNoteTails,
@@ -1458,6 +1459,23 @@ test("#1369: concerns with invalid type or severity are dropped with an action-o
   }
 });
 
+test("#1368 review: concerns past the bound are truncated WITH a note", () => {
+  const concerns = Array.from({ length: MAX_CONFIDENCE_CONCERNS + 4 }, (_unused, i) => ({
+    type: "unsupported_finding", severity: "major", file: `src/f${i}.ts`, line: i, evidence: "quote",
+  }));
+  const parsed = parseConfidenceAnswer(JSON.stringify({ score: 5, risk: "low", reason: "over the bound", concerns }));
+  assert.ok(parsed.ok);
+  if (parsed.ok) {
+    assert.equal(parsed.answer.concerns.length, MAX_CONFIDENCE_CONCERNS);
+    // The lost tail is never invisible: it could have carried the concern cap.
+    assert.deepEqual(parsed.answer.notes, [`concerns_truncated_${MAX_CONFIDENCE_CONCERNS}`]);
+  }
+  // At the bound, nothing is dropped and nothing is noted.
+  const atBound = parseConfidenceAnswer(JSON.stringify({ score: 5, risk: "low", concerns: concerns.slice(0, MAX_CONFIDENCE_CONCERNS) }));
+  assert.ok(atBound.ok);
+  if (atBound.ok) assert.deepEqual(atBound.answer.notes, []);
+});
+
 test("#1369: a fully valid concern parses with type and severity", () => {
   const parsed = parseConfidenceAnswer(JSON.stringify({
     score: 4, risk: "medium", reason: "one gap",
@@ -1717,20 +1735,27 @@ test("#1368/#1369: the scorer schema IS the verifier contract the parser require
   const risk = schema.properties.risk as { type: string[]; enum: unknown[] };
   assert.deepEqual(risk.type, ["string", "null"]);
   assert.deepEqual(risk.enum, ["low", "medium", "high", "critical", null]);
-  const concerns = schema.properties.concerns as { type: string; items: Record<string, unknown> };
+  const concerns = schema.properties.concerns as { type: string; maxItems: number; items: Record<string, unknown> };
   assert.equal(concerns.type, "array");
+  // The answer bound is mirrored, so a structured answer cannot overflow the
+  // parser's own slice silently.
+  assert.equal(concerns.maxItems, MAX_CONFIDENCE_CONCERNS);
   // The concern entry carries the parser-required closed vocabularies — from
   // the parser's OWN constants, so the two cannot drift apart again.
   assert.deepEqual(concerns.items.required, ["type", "severity", "file", "line", "evidence"]);
   assert.equal(concerns.items.additionalProperties, false);
-  const concernProps = concerns.items.properties as Record<string, { type?: unknown; enum?: readonly string[] }>;
+  const concernProps = concerns.items.properties as Record<string, { type?: unknown; enum?: readonly string[]; minLength?: number; minimum?: number }>;
   assert.deepEqual(concernProps.type!.enum, [...CONFIDENCE_CONCERN_TYPES]);
   assert.deepEqual(concernProps.severity!.enum, [...CONFIDENCE_CONCERN_SEVERITIES]);
   // A concern the parser KEEPS always has a non-empty file and evidence, so
-  // the schema never admits (or forces) an entry the parser must drop.
+  // the schema must not ADMIT the empty entry the parser would drop —
+  // `type: "string"` alone does not express that, `minLength` does.
   assert.equal(concernProps.file!.type, "string");
+  assert.equal(concernProps.file!.minLength, 1);
   assert.equal(concernProps.evidence!.type, "string");
+  assert.equal(concernProps.evidence!.minLength, 1);
   assert.deepEqual(concernProps.line!.type, ["integer", "null"]);
+  assert.equal(concernProps.line!.minimum, 0);
 
   // Direction 1: a schema-admissible concern survives the parser with its
   // vocabulary intact (the pre-#1369 entry shape — file/line/evidence only —
@@ -1809,6 +1834,18 @@ test("#1368 review: the declared prompt budget is an actual bound at call time",
     });
     assert.equal(fits.result.status, "scored");
     assert.equal(requests, 1);
+    // The comparison is exact, not off by one: a prompt that fills the budget
+    // to the byte is a request that fits, so it must be SENT.
+    const exact = await runConfidenceScorer({
+      profile: profile({ baseUrl: server.url, promptTokens: (1_000 + 3_000) / 4 }),
+      primaryApiKey: "",
+      prompt: { system: "s".repeat(1_000), user: "u".repeat(3_000) },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(exact.result.status, "scored");
+    assert.equal(requests, 2);
   } finally {
     await server.close();
   }
@@ -1834,12 +1871,12 @@ test("#1368 review: the minimum prompt budget holds the real minimum-shape reque
   assert.ok(CONFIDENCE_MINIMUM_PROMPT_TOKENS > 1_024);
   assert.ok(Buffer.byteLength(minimum.system, "utf8") < CONFIDENCE_MINIMUM_PROMPT_TOKENS * 4);
   // And a real diff at exactly the floor still fits at that budget, with the
-  // pins rendered at their longest realistic shape (40-hex SHAs, the longest
-  // `review_result` and required-checks tokens) — the tightest real request
-  // the floor promises to hold.
+  // request rendered in its smallest REAL shape: full-length SHA pins, the
+  // longest `review_result` and required-checks tokens, and the empty findings
+  // and coverage serializations the builder itself produces.
   const withFloorDiff = buildConfidencePrompt({
-    headSha: "0".repeat(40), baseSha: "1".repeat(40), diff: "d".repeat(CONFIDENCE_PROMPT_DIFF_FLOOR_BYTES),
-    prTitle: "", prBody: "", findings: [], reviewSummary: "", reviewResult: "partial",
+    headSha: "0".repeat(64), baseSha: "1".repeat(64), diff: "d".repeat(CONFIDENCE_PROMPT_DIFF_FLOOR_BYTES),
+    prTitle: "", prBody: "", findings: [], reviewSummary: "", reviewResult: "findings",
     requiredChecks: "incomplete", coverage: {}, secrets: [],
     promptTokens: CONFIDENCE_MINIMUM_PROMPT_TOKENS,
   });

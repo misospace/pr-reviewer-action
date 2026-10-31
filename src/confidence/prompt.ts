@@ -204,37 +204,50 @@ const DIFF_ENVELOPE_OVERHEAD_BYTES = Buffer.byteLength(
   "utf8",
 );
 
-/** The fixed, content-independent pins rendered at their LONGEST realistic
- * shape for the minimum measurement. The floor promises that "a window at
- * least this large can carry a real request", so a fixed token is never
- * understated: a call the engine actually makes always carries 40-hex SHAs (an
- * unresolved pin refuses the call outright, #1155 — the shorter `unknown`
- * rendering is never sent), and `review_result` and the required-checks status
- * use the longest token in their closed vocabularies (7 and 10 characters). */
+/** The fixed, content-independent lines rendered at their LONGEST realistic
+ * shape for the minimum measurement, so the floor never understates them: a
+ * call the engine actually makes always carries a full SHA (40-hex on GitHub,
+ * 64-hex on a SHA-256 Forgejo repository — an unresolved pin refuses the call
+ * outright, #1155, so the shorter `unknown` rendering is never sent), and
+ * `review_result` and the required-checks status use the longest token in
+ * their closed vocabularies (8 and 10 characters). */
 const MINIMUM_SHAPE_PINS = {
-  headSha: "0".repeat(40),
-  baseSha: "0".repeat(40),
-  reviewResult: "partial",
+  headSha: "0".repeat(64),
+  baseSha: "0".repeat(64),
+  reviewResult: "findings",
   requiredChecks: "incomplete",
 } as const;
 
+/** The empty-shape serializations the builder itself produces for no findings
+ * and no coverage record, so the measurement is a request the builder can
+ * really render rather than a shorter fiction. */
+const MINIMUM_SHAPE_FINDINGS = "[]";
+const MINIMUM_SHAPE_COVERAGE = "{}";
+
 /**
  * #1368 review: the smallest prompt budget that can carry a REAL verifier
- * request at all — the system prompt, every fixed section rendered EMPTY, and
- * the diff envelope at its largest scaffolding holding its floor of diff
- * bytes, all counted with the SAME bytes/4 estimate the budget is enforced
- * with. This is the minimum shape the declared-context clamp must fit, so a
- * declared `ai-confidence-model-context-tokens` window that cannot hold the
+ * request — the system prompt, the fixed lines at their longest realistic
+ * shape, every content section at its EMPTY shape, and the diff envelope at
+ * its largest scaffolding holding its floor of diff bytes, all counted with
+ * the SAME bytes/4 estimate the budget is enforced with. This is the minimum
+ * shape the declared-context clamp must fit, so a declared
+ * `ai-confidence-model-context-tokens` window that cannot hold the
  * SYSTEM-INCLUSIVE minimum fails the scorer closed instead of resolving a
  * profile whose every request would break the bound it declared.
  *
- * Derived from the one rendering path above, so it cannot drift from what
+ * It is the floor of a RENDERABLE request, not a promise about a sized PR:
+ * real title/body/diff/findings content needs room ABOVE the floor, and when
+ * it does not fit, `runConfidenceScorer` refuses the call
+ * (`prompt_over_budget`) rather than overrun the declared budget.
+ *
+ * Derived from the one rendering path below, so it cannot drift from what
  * `buildConfidencePrompt` actually sends.
  */
 export const CONFIDENCE_MINIMUM_PROMPT_TOKENS = computeConfidenceMinimumPromptTokens();
 
 function computeConfidenceMinimumPromptTokens(): number {
-  const empty = (label: string, maxBytes: number): string => untrustedSection(label, "", maxBytes, []);
+  const section = (label: string, content: string, maxBytes: number): string =>
+    untrustedSection(label, content, maxBytes, []);
   // `[preDiff, "", ...postDiff]` measures the two join separators that surround
   // the diff envelope exactly, exactly as `buildConfidencePrompt` does.
   const scaffolding = [
@@ -243,14 +256,14 @@ function computeConfidenceMinimumPromptTokens(): number {
       MINIMUM_SHAPE_PINS.baseSha,
       MINIMUM_SHAPE_PINS.reviewResult,
       MINIMUM_SHAPE_PINS.requiredChecks,
-      empty("pr_title", CONFIDENCE_TITLE_MAX_BYTES),
-      empty("pr_body", CONFIDENCE_BODY_MAX_BYTES),
+      section("pr_title", "", CONFIDENCE_TITLE_MAX_BYTES),
+      section("pr_body", "", CONFIDENCE_BODY_MAX_BYTES),
     ),
     "",
     ...postDiffLines(
-      empty("findings", CONFIDENCE_FINDINGS_MAX_BYTES),
-      empty("review_summary", CONFIDENCE_SUMMARY_MAX_BYTES),
-      empty("coverage_claim", CONFIDENCE_COVERAGE_MAX_BYTES),
+      section("findings", MINIMUM_SHAPE_FINDINGS, CONFIDENCE_FINDINGS_MAX_BYTES),
+      section("review_summary", "", CONFIDENCE_SUMMARY_MAX_BYTES),
+      section("coverage_claim", MINIMUM_SHAPE_COVERAGE, CONFIDENCE_COVERAGE_MAX_BYTES),
     ),
   ].join("\n");
   const bytes = Buffer.byteLength(SYSTEM_PROMPT, "utf8")

@@ -780,25 +780,62 @@ test("#1368: budgets clamp deterministically against the declared model context"
 
   // The invariant, swept: every window that resolves enabled keeps prompt +
   // completion inside the declared window AND never leaves a prompt budget
-  // below the system-inclusive floor, whatever the configured budgets.
+  // below the system-inclusive floor. Asymmetric budgets are swept too, so a
+  // tiny completion budget beside a huge prompt budget (and the reverse) hits
+  // both the "clamp the prompt" and the "reduce both" branches.
+  const budgetPairs: [string, string][] = [
+    ["1", "1"],
+    ["1", "131072"],
+    ["131072", "1"],
+    ["1024", "4096"],
+    ["4096", "1024"],
+    ["32768", "8192"],
+    ["4096", "4096"],
+  ];
   for (const window of [FLOOR + 1, FLOOR + 4_096, 20_000, 102_400, 200_000]) {
-    for (const configured of ["1", "1024", "4096", "32768", "131072"]) {
+    for (const [maxTokensConfigured, promptTokensConfigured] of budgetPairs) {
       const swept = resolveConfidenceProfile(env({
-        AI_CONFIDENCE_MAX_TOKENS: configured,
-        AI_CONFIDENCE_PROMPT_TOKENS: configured,
+        AI_CONFIDENCE_MAX_TOKENS: maxTokensConfigured,
+        AI_CONFIDENCE_PROMPT_TOKENS: promptTokensConfigured,
         AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: String(window),
       }));
-      assert.equal(swept.profile.enabled, true, `window=${window} configured=${configured}`);
+      assert.equal(swept.profile.enabled, true, `window=${window} budgets=${maxTokensConfigured}/${promptTokensConfigured}`);
       assert.ok(
         swept.profile.promptTokens + swept.profile.maxTokens <= window,
-        `window=${window} configured=${configured}: ${swept.profile.promptTokens}+${swept.profile.maxTokens} over ${window}`,
+        `window=${window} budgets=${maxTokensConfigured}/${promptTokensConfigured}: ${swept.profile.promptTokens}+${swept.profile.maxTokens} over ${window}`,
       );
       assert.ok(
         swept.profile.promptTokens >= FLOOR,
-        `window=${window} configured=${configured}: prompt budget ${swept.profile.promptTokens} below the ${FLOOR}-token floor`,
+        `window=${window} budgets=${maxTokensConfigured}/${promptTokensConfigured}: prompt budget ${swept.profile.promptTokens} below the ${FLOOR}-token floor`,
+      );
+      assert.ok(
+        swept.profile.maxTokens >= 1,
+        `window=${window} budgets=${maxTokensConfigured}/${promptTokensConfigured}: completion budget ${swept.profile.maxTokens}`,
       );
     }
   }
+
+  // A prompt budget below the floor is raised to it — with a declared window
+  // that has room for it, and without one.
+  const raisedWithWindow = resolveConfidenceProfile(env({
+    AI_CONFIDENCE_PROMPT_TOKENS: "600", AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "20000",
+  }));
+  assert.equal(raisedWithWindow.profile.promptTokens, FLOOR);
+  assert.ok(raisedWithWindow.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS raised")));
+  const raisedNoWindow = resolveConfidenceProfile(env({ AI_CONFIDENCE_PROMPT_TOKENS: "600" }));
+  assert.equal(raisedNoWindow.profile.promptTokens, FLOOR);
+  assert.ok(raisedNoWindow.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS raised")));
+  // A window too small never reports a raise it then discards: the fail-closed
+  // warning is the only budget warning that run makes.
+  const tooSmallWithTinyBudget = resolveConfidenceProfile(env({
+    AI_CONFIDENCE_PROMPT_TOKENS: "600", AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "512",
+  }));
+  assert.equal(tooSmallWithTinyBudget.profile.enabled, false);
+  assert.deepEqual(
+    tooSmallWithTinyBudget.warnings.filter((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS")),
+    [],
+    JSON.stringify(tooSmallWithTinyBudget.warnings),
+  );
 
   // Fitting budgets are never touched and never warn.
   const fits = resolveConfidenceProfile({
