@@ -177,6 +177,43 @@ test("the engine writes nothing implicitly to process streams when sinks are exp
   assert.deepEqual(seen, [], "no implicit process-stream writes escaped the engine");
 });
 
+test("#1380: dependency-update classification drives the claim pass dependency mode end-to-end", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const adapter: PlatformReadAdapter = {
+      ...mockPlatform(),
+      getPr: async () => ({
+        number: 7, title: "chore(deps): bump lodash from 1.2.3 to 4.5.6",
+        body: "Only one file changed. No CRDs changed and the CRD schema is unchanged.",
+        state: "open", draft: false, head: { sha: "a".repeat(40), ref: "renovate/lodash-4.x" }, base: { ref: "main" },
+        user: { login: "someone" }, changed_files: 1, additions: 2, deletions: 2,
+      }),
+      getPrDiff: async () => "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1,4 +1,4 @@\n-  \"version\": \"1.2.3\",\n-  \"lodash\": \"1.2.3\",\n+  \"version\": \"4.5.6\",\n+  \"lodash\": \"4.5.6\",\n",
+      listPrFiles: async () => ({ ok: true, data: [{ filename: "package-lock.json", status: "modified", additions: 2, deletions: 2, changes: 4 }] }),
+    };
+    const req = request(server.url, f.runDir);
+    req.inputs = { ...req.inputs, "claim-falsification": "true" };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
+    assert.equal(result.outputs.verdict, "approve");
+    const classification = JSON.parse(readFileSync(join(f.runDir, "classification.json"), "utf8")) as { pr_kind?: string };
+    assert.equal(classification.pr_kind, "dependency_upgrade");
+    const claimRequests = server.requests.filter((r) => r.body.includes("You extract the claims a pull request makes"));
+    assert.equal(claimRequests.length, 1);
+    assert.match(claimRequests[0]!.body, /Machine-generated dependency metadata/);
+    const record = JSON.parse(readFileSync(join(f.runDir, "claim-falsification.json"), "utf8")) as {
+      claims: { claim: string }[];
+      status: string;
+    };
+    const texts = record.claims.map((c) => c.claim);
+    assert.ok(texts.some((t) => t.includes("CRD schema is unchanged")), JSON.stringify(texts));
+    assert.ok(!texts.some((t) => t.includes("Only one file changed")), JSON.stringify(texts));
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
 test("the env adapter and engine produce identical structured results", async () => {
   const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
   const f = fixture();

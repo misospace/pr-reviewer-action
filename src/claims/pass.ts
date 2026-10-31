@@ -10,7 +10,7 @@
  * recorded in the artifact's errors. Always fail-soft: an exception from
  * either half is caught and reported as an empty artifact, never thrown. */
 
-import { extractClaimsDeterministic } from "./extract.js";
+import { extractClaimsDeterministic, isDependencyMetadataSentence } from "./extract.js";
 import { runClaimFalsificationModelPass, type ClaimModelPassConfig } from "./model.js";
 import type { SpecialistRequestFn } from "../specialists/runner.js";
 import { MAX_CLAIMS, MAX_ERRORS, type ClaimsArtifact } from "./types.js";
@@ -20,6 +20,7 @@ export interface ClaimFalsificationInput {
   body: string;
   files: unknown;
   diff: string;
+  dependencyUpdate?: boolean;
   /** When present, one bounded model pass always runs and its claims merge
    * after the deterministic ones — the deterministic scan is evidence, never
    * proof the PR body was fully captured (#898 review). Absent/undefined (no
@@ -35,7 +36,7 @@ export interface ClaimFalsificationInput {
 
 export interface ClaimFalsificationResult {
   artifact: ClaimsArtifact;
-  status: "ok" | "empty" | "error" | "timeout";
+  status: "ok" | "empty" | "error" | "timeout" | "filtered";
   errorKind: string | null;
   error: string | null;
 }
@@ -70,9 +71,22 @@ function mergeArtifacts(primary: ClaimsArtifact, extra: ClaimsArtifact): ClaimsA
   };
 }
 
+/** #1380: drop dependency-metadata claims the bounded model pass emitted on
+ * top of a dependency-update scan; an artifact left claim-less reports
+ * "none" again. */
+function filterDependencyMetadataClaims(artifact: ClaimsArtifact): ClaimsArtifact {
+  const claims = artifact.claims.filter((claim) => !isDependencyMetadataSentence(claim.claim));
+  if (claims.length === artifact.claims.length) return artifact;
+  return { ...artifact, claims, method: claims.length > 0 ? artifact.method : "none" };
+}
+
 export async function runClaimFalsificationPass(input: ClaimFalsificationInput): Promise<ClaimFalsificationResult> {
   try {
-    const deterministic = extractClaimsDeterministic({ prBody: input.body, diffText: input.diff });
+    const dependencyUpdate = input.dependencyUpdate === true;
+    const deterministic = extractClaimsDeterministic({ prBody: input.body, diffText: input.diff, dependencyUpdate });
+    if (dependencyUpdate && deterministic.claims.length === 0 && deterministic.errors.length === 0) {
+      return { artifact: deterministic, status: "filtered", errorKind: null, error: null };
+    }
     if (!input.model) {
       const status = deterministic.claims.length > 0 ? "ok" : "empty";
       return { artifact: deterministic, status, errorKind: null, error: null };
@@ -82,16 +96,18 @@ export async function runClaimFalsificationPass(input: ClaimFalsificationInput):
       body: input.body,
       files: input.files,
       diff: input.diff,
+      dependencyUpdate,
       config: input.model.config,
       requestFn: input.model.requestFn,
     });
+    const modelArtifact = dependencyUpdate ? filterDependencyMetadataClaims(fallback.artifact) : fallback.artifact;
     if (deterministic.claims.length === 0) {
-      return { artifact: fallback.artifact, status: fallback.status, errorKind: fallback.errorKind, error: fallback.error };
+      return { artifact: modelArtifact, status: fallback.status, errorKind: fallback.errorKind, error: fallback.error };
     }
     // Deterministic claims exist: the model pass augments them. Whatever it
     // returns, the deterministic claims stand — a model failure is recorded
     // in the artifact, never discards the scan's result.
-    const merged = mergeArtifacts(deterministic, fallback.artifact);
+    const merged = mergeArtifacts(deterministic, modelArtifact);
     if (fallback.status !== "ok" && fallback.error) {
       merged.errors = [...merged.errors, `model fallback ${fallback.status}: ${fallback.error}`].slice(0, MAX_ERRORS);
     }

@@ -63,6 +63,57 @@ const COMMENT_LINE_RE = /^(\/\/|\/\*\*?|\*(?!\/)|#(?!!)|"""|'''|--(?:\s|$)|<!--)
 const BOT_TEMPLATE_RE =
   /\b(?:renovate|dependabot|greenkeeper)\b|rebase[/-]retry|rebase-check/i;
 
+/** #1380: machine-generated dependency-metadata statements, matched by
+ * vocabulary shape only (never a bot name, so any forge's automation is
+ * covered): an exact version/tag old→new pair, digest presence/absence
+ * phrasing, changed-file counts, and automerge/branch-scheduling/rebase
+ * status boilerplate. A sentence carrying real compatibility vocabulary
+ * ("backwards compatible", "breaking changes") or a normative policy modal
+ * ("must never") is exempt — those are the semantic claims the pass exists to
+ * falsify. Static patterns over untrusted text: hostile input cannot disable
+ * or reshape them. */
+const DEPENDENCY_VERSION_TOKEN_SRC =
+  "(?:\\d+(?:\\.\\d+){2,}[\\w.+-]*|v\\d[\\w.+-]*|[\\w.+-]*[:@/]v?\\d[\\w.+-]*)";
+const DEPENDENCY_VERSION_PAIR_RE = new RegExp(
+  "(?:\\bfrom\\s+" + DEPENDENCY_VERSION_TOKEN_SRC + "\\s+to\\s+" + DEPENDENCY_VERSION_TOKEN_SRC +
+    "\\b|\\b" + DEPENDENCY_VERSION_TOKEN_SRC + "\\s*(?:→|->|—|\\bto\\b)\\s*" + DEPENDENCY_VERSION_TOKEN_SRC + "\\b)",
+  "i",
+);
+
+const DEPENDENCY_DIGEST_PATTERNS: RegExp[] = [
+  /\bsha(?:256|512)?[:=][0-9a-f]{6,}\b/i,
+  /\b(?:old|previous|prior)\s+(?:digests?|checksums?)\b/i,
+  /\bdigests?\s+(?:is|are|was|were|remains?|stays?)\s+(?:unchanged|identical|absent)\s*[.!?]?\s*$/i,
+  /\bdigests?\b[^!?]{0,40}?\bno\s+longer\s+(?:present|valid|used|referenced|available|needed|matched?)\b/i,
+];
+
+const DEPENDENCY_FILE_COUNT_RE =
+  /\b(?:only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+files?\b[^!?]{0,40}?\b(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b[^!?]{0,40}?\bonly\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+files?\b|only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\s+files?\b|only\s+the\s+(?:[\w-]+\s+)?(?:files?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|a\s+single\s+(?:files?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b)/i;
+
+const DEPENDENCY_AUTOMERGE_RE =
+  /\b(?:auto[- ]?merg\w*\b[^.!?]*\b(?:disabl\w*|enabl\w*|configured?|by config|schedul\w*|pending|waiting|allow\w*|disallow\w*|retry|checkbox|check this box|turned? (?:on|off))|(?:rebas\w+|schedul\w+)\b[^.!?]*\b(?:rebas\w+|schedul\w+|disabl\w*|enabl\w*|pending|waiting|retry|checkbox|automat\w*|by config|configured)\b)/i;
+
+const DEPENDENCY_SEMANTIC_EXEMPT_RE =
+  /\b(?:backward(?:s)?[- ]?compatib\w*|back[- ]compatib\w*|breaking[- ]changes?|(?:must|should)\s+(?:never|not))\b/i;
+
+/** Bridge/markdown decoration characters are blanked out before matching:
+ * the version-pair bridges then reduce to plain whitespace runs (no class
+ * overlap with the token charset, so no superlinear backtracking on hostile
+ * input), and the tested prefix is bounded. */
+const DEPENDENCY_DECORATION_RE = /[`*_]/g;
+const DEPENDENCY_MATCH_MAX_CHARS = 2000;
+
+export function isDependencyMetadataSentence(sentence: string): boolean {
+  if (DEPENDENCY_SEMANTIC_EXEMPT_RE.test(sentence)) return false;
+  const normalized = sentence.replace(DEPENDENCY_DECORATION_RE, " ").trim().slice(0, DEPENDENCY_MATCH_MAX_CHARS);
+  return (
+    DEPENDENCY_VERSION_PAIR_RE.test(normalized) ||
+    DEPENDENCY_FILE_COUNT_RE.test(normalized) ||
+    DEPENDENCY_AUTOMERGE_RE.test(normalized) ||
+    DEPENDENCY_DIGEST_PATTERNS.some((pattern) => pattern.test(normalized))
+  );
+}
+
 /** HTML comments carry bot anchors (`<!-- rebase-check -->`,
  * `<!--renovate-debug:...-->`) and are never claim prose. The second pattern
  * drops an unterminated `<!--` and everything after it: a hostile body cannot
@@ -432,7 +483,7 @@ function resolveItems(
  * whole-sentence claim anchored at `path:symbol` (or `path:line` with no
  * enclosing symbol). The same sentence in two blocks (copy-pasted docstrings)
  * merges into one claim listing both anchors. */
-function extractDiffCommentClaims(diffText: string): Claim[] {
+function extractDiffCommentClaims(diffText: string, dependencyUpdate = false): Claim[] {
   const claims: Claim[] = [];
   const seen = new Map<string, Claim>();
   const addedLines = walkAddedLines(diffText);
@@ -449,6 +500,7 @@ function extractDiffCommentClaims(diffText: string): Claim[] {
         (line) => !(line.path === block.path && line.newLine >= block.firstNewLine && line.newLine <= block.lastNewLine),
       );
       for (const sentence of splitSentences(block.text)) {
+        if (dependencyUpdate && isDependencyMetadataSentence(sentence)) continue;
         if (!CLAIM_KEYWORDS_RE.test(sentence)) continue;
         const text = clip(sentence, MAX_CLAIM_CHARS);
         const key = text.toLowerCase();
@@ -500,7 +552,7 @@ function splitSentences(body: string): string[] {
  * identifier or flag-like token the sentence names (falls back to no items
  * when none appear in the diff — the render step then tells the reviewer to
  * enumerate items themselves). */
-function extractPrBodyClaims(body: string, diffText: string): Claim[] {
+function extractPrBodyClaims(body: string, diffText: string, dependencyUpdate = false): Claim[] {
   const strippedBody = body
     .replace(HTML_COMMENT_RE, " ")
     .replace(HTML_COMMENT_UNTERMINATED_RE, " ");
@@ -509,6 +561,7 @@ function extractPrBodyClaims(body: string, diffText: string): Claim[] {
   const claims: Claim[] = [];
   for (const sentence of splitSentences(strippedBody)) {
     if (BOT_TEMPLATE_RE.test(sentence)) continue;
+    if (dependencyUpdate && isDependencyMetadataSentence(sentence)) continue;
     if (!CLAIM_KEYWORDS_RE.test(sentence)) continue;
     const identifiers = [...sentence.matchAll(INLINE_CODE_RE)].map((m) => m[1]!).filter(Boolean);
     const tokens = extractFlagTokens(sentence);
@@ -536,17 +589,21 @@ function extractPrBodyClaims(body: string, diffText: string): Claim[] {
  * resolved at least one concrete item before body claims with none, then the
  * diff-comment claims. Bounded to `MAX_CLAIMS`/`MAX_ITEMS_PER_CLAIM`; never
  * throws. */
-export function extractClaimsDeterministic(input: { prBody: string; diffText: string }): ClaimsArtifact {
+export function extractClaimsDeterministic(input: {
+  prBody: string;
+  diffText: string;
+  dependencyUpdate?: boolean;
+}): ClaimsArtifact {
   const errors: string[] = [];
   let commentClaims: Claim[] = [];
   let bodyClaims: Claim[] = [];
   try {
-    commentClaims = extractDiffCommentClaims(input.diffText ?? "");
+    commentClaims = extractDiffCommentClaims(input.diffText ?? "", input.dependencyUpdate === true);
   } catch (cause) {
     errors.push(`diff comment scan failed: ${cause instanceof Error ? cause.message : String(cause)}`);
   }
   try {
-    bodyClaims = extractPrBodyClaims(input.prBody ?? "", input.diffText ?? "");
+    bodyClaims = extractPrBodyClaims(input.prBody ?? "", input.diffText ?? "", input.dependencyUpdate === true);
   } catch (cause) {
     errors.push(`PR body scan failed: ${cause instanceof Error ? cause.message : String(cause)}`);
   }
