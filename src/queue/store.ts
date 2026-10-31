@@ -330,11 +330,11 @@ function checkSnapshotEnvelope(value: unknown): readonly unknown[] {
   }
   for (const key of Object.keys(value)) {
     if (!SNAPSHOT_KEYS.includes(key)) {
-      throw new Error(`queue snapshot: unknown top-level key "${key}"`);
+      throw new Error("queue snapshot: unknown top-level key present");
     }
   }
   if (value["version"] !== 1) {
-    throw new Error(`queue snapshot: version must be 1, got ${String(value["version"])}`);
+    throw new Error("queue snapshot: unsupported version");
   }
   const records = value["records"];
   if (!Array.isArray(records)) {
@@ -530,7 +530,15 @@ export class JsonFileQueueStore implements QueueStore {
       }
       renameSync(tmp, this.filePath);
       try {
-        const dirFd = openSync(dir, "r");
+        // The explicit 0600 mode is required even though this open never
+        // CREATES anything (the mode applies only at creation, so it is
+        // inert for the read-only directory fd): the CWE-377
+        // insecure-temporary-file rule flags ANY `fs.open` on a path
+        // tainted by the OS temp dir unless the call carries a
+        // restrictive mode — and tests (and operators) hand this store
+        // `os.tmpdir()` paths. Same resolution as the durable rate-limit
+        // store's directory fsync (#1295, #1322).
+        const dirFd = openSync(dir, "r", 0o600);
         try {
           fsyncSync(dirFd);
         } finally {

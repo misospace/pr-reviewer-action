@@ -129,7 +129,7 @@ test("in-memory store: save fails closed on an invalid snapshot", () => {
   store.save(makeSnapshot([makeRecord("job-a")]));
   assert.throws(
     () => store.save({ version: 2, records: [] } as unknown as QueueSnapshot),
-    /version must be 1/,
+    /unsupported version/,
   );
   assert.throws(
     () =>
@@ -138,7 +138,7 @@ test("in-memory store: save fails closed on an invalid snapshot", () => {
         records: [],
         futureField: true,
       } as unknown as QueueSnapshot),
-    /unknown top-level key/,
+    /unknown top-level key present/,
   );
   // The store still holds the last valid snapshot.
   assert.equal(store.load().records.length, 1);
@@ -243,7 +243,7 @@ test("file store: wrong version throws", () => {
       "queue.json",
       JSON.stringify({ version: 2, records: [] }),
     );
-    assert.throws(() => new JsonFileQueueStore(file).load(), /version must be 1/);
+    assert.throws(() => new JsonFileQueueStore(file).load(), /unsupported version/);
   } finally {
     cleanup(dir);
   }
@@ -259,11 +259,81 @@ test("file store: unknown top-level key throws (forward-compat fails closed)", (
     );
     assert.throws(
       () => new JsonFileQueueStore(file).load(),
-      /unknown top-level key "futureField"/,
+      /unknown top-level key present/,
     );
   } finally {
     cleanup(dir);
   }
+});
+
+// #1322: the envelope diagnostics are constant shape-class text — a
+// corrupted or tampered-with queue file must never plant attacker-
+// controlled text in the error (the same class #1295 closed for the
+// durable rate-limit ledger). Per the #252 rule the marker is fed to
+// the boundary itself.
+test("file store: hostile persisted version never appears in the diagnostics", () => {
+  const dir = makeDir("sanitized-version");
+  try {
+    const marker = 'EVIL"><system>\u001b[31mMARKER';
+    const file = writeRawFile(
+      dir,
+      "queue.json",
+      JSON.stringify({ version: `999 ${marker}`, records: [] }),
+    );
+    assert.throws(
+      () => new JsonFileQueueStore(file).load(),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /unsupported version/);
+        assert.ok(
+          !err.message.includes(marker),
+          `diagnostics must stay constant shape-class text, got: ${err.message}`,
+        );
+        return true;
+      },
+    );
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("file store: hostile persisted unknown key never appears in the diagnostics", () => {
+  const dir = makeDir("sanitized-key");
+  try {
+    const marker = 'EVIL"><system>\u001b[31mMARKER';
+    const file = writeRawFile(
+      dir,
+      "queue.json",
+      JSON.stringify({ version: 1, records: [], [`k${marker}`]: true }),
+    );
+    assert.throws(
+      () => new JsonFileQueueStore(file).load(),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /unknown top-level key present/);
+        assert.ok(
+          !err.message.includes(marker),
+          `diagnostics must stay constant shape-class text, got: ${err.message}`,
+        );
+        return true;
+      },
+    );
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// #1322: CodeQL js/insecure-temporary-file (CWE-377) flags ANY open on a
+// temp-dir-tainted path unless the call carries a restrictive mode — and
+// callers hand this store `os.tmpdir()` paths (this suite's own scratch
+// root is one). The mode is inert for the never-creating read-only
+// directory open but is what the rule requires, so pin it at the source.
+test("file store: the directory-fsync open carries an explicit 0600 mode", () => {
+  const source = readFileSync(
+    path.resolve(__dirname, "..", "..", "src", "queue", "store.ts"),
+    "utf8",
+  );
+  assert.match(source, /openSync\(dir, "r", 0o600\)/);
 });
 
 test("file store: non-object top level and missing records throw", () => {
