@@ -242,31 +242,31 @@ inputs:
     required: false
     default: "false"
   ai-confidence-model:
-    description: "Model for the opt-in independent post-review confidence scorer (#1073). Empty (the default) disables the scorer entirely: no extra model call is made and every confidence-* output stays empty. When set, the scorer runs once after the completed review and grades how confident the review is (integer 0-5 plus a risk band and a short reason); the result is advisory telemetry only — it never affects the verdict, the findings, approval, or any merge gate."
+    description: "Model opt-in independent post-review merge-safety verifier (#1073, #1369). Empty (the default) disables the verifier entirely: no extra model call made and every confidence-* output stays empty. Set, the verifier runs once after the completed review, reads the PR description and diff itself, and audits the completed review against the actual change - hunting missed blocker/major defects (correctness, security, availability, data loss, CI/config, supply chain) and materially unsupported or contradicted blocker/major findings - reporting a merge-readiness score (integer 0-5), risk band, short reason, structured concerns (type missed_issue|unsupported_finding, severity blocker|major, file/line/evidence), and a cannot_verify fail-closed answer when the supplied evidence is too incomplete to verify. Result is advisory telemetry only - never affects verdict, findings, approval, or merge gate."
     required: false
     default: ""
   ai-confidence-base-url:
-    description: "Base URL of the confidence scorer's endpoint. Empty (the default) inherits the primary lane's endpoint AND its credential, which keeps configuration simple but makes the scoring less independent: the same endpoint that produced the review grades it, so shared blind spots and correlated errors go unnoticed. Set a distinct base URL to score against an independent backend. A distinct base URL NEVER implicitly inherits the primary API key — set ai-confidence-api-key explicitly."
+    description: "Base URL of the confidence verifier's endpoint. Empty (the default) inherits the primary lane's endpoint AND its credential, which keeps configuration simple but makes the scoring less independent: the same endpoint that produced the review audits it, so shared blind spots and correlated errors go unnoticed. Set a distinct base URL to verify against an independent backend. A distinct base URL NEVER implicitly inherits the primary API key — set ai-confidence-api-key explicitly."
     required: false
     default: ""
   ai-confidence-api-format:
-    description: API request/response format for the confidence scorer's endpoint (openai or anthropic). Empty (the default) inherits the primary lane's format.
+    description: API request/response format for the confidence verifier's endpoint (openai or anthropic). Empty (the default) inherits the primary lane's format.
     required: false
     default: ""
   ai-confidence-api-key:
-    description: API key for the confidence scorer's endpoint. Empty inherits the primary API key ONLY when ai-confidence-base-url is also empty (scorer on the same endpoint); with a distinct ai-confidence-base-url the scorer uses only its own key and never reuses the primary credential. An explicitly configured key is always used as-is.
+    description: API key for the confidence verifier's endpoint. Empty inherits the primary API key ONLY when ai-confidence-base-url is also empty (verifier on the same endpoint); with a distinct ai-confidence-base-url the verifier uses only its own key and never reuses the primary credential. An explicitly configured key is always used as-is.
     required: false
     default: ""
   ai-confidence-reasoning-effort:
-    description: "Reasoning effort for the confidence scorer's model call. Free-form, bounded string (lowercase letters, digits, '-', and '_'; up to 32 characters) passed through verbatim like ai-reasoning-effort — providers and proxies define their own effort vocabulary and none is imposed here. Unlike the review lanes, an empty value (the default) does NOT inherit ai-reasoning-effort: the scorer is an independent lane and omits the field entirely unless explicitly configured. A value that fails validation is dropped as unset with a warning naming the input. Operator-only: never repo-configurable, matching the other ai-* reasoning inputs."
+    description: "Reasoning effort for the confidence verifier's model call. Free-form, bounded string (lowercase letters, digits, '-', and '_'; up to 32 characters) passed through verbatim like ai-reasoning-effort — providers and proxies define their own effort vocabulary and none is imposed here. Unlike the review lanes, an empty value (the default) does NOT inherit ai-reasoning-effort: the verifier is an independent lane and omits the field entirely unless explicitly configured. A value that fails validation is dropped as unset with a warning naming the input. Operator-only: never repo-configurable, matching the other ai-* reasoning inputs."
     required: false
     default: ""
   ai-confidence-timeout-sec:
-    description: Wall-clock timeout in seconds for the confidence scorer's model request. Default 120; must be a positive integer. A scorer that times out or fails degrades to confidence-status=unscored and never affects the review itself.
+    description: Wall-clock timeout in seconds for the confidence verifier's model request. Default 120; must be a positive integer. A verifier that times out or fails degrades to confidence-status=unscored and never affects the review itself.
     required: false
     default: "120"
   ai-confidence-enable-for-forks:
-    description: "If true, allow the confidence scorer to run on cross-repository pull requests. Default false: on a fork PR the scorer's prompt would send the review's own privileged output (final findings, summary, coverage account, review_result, required checks) to a separate endpoint under a privileged credential. Off on forks means the run publishes no confidence surface at all (no model call, no artifacts, empty confidence-* outputs), with a WARNING naming this input. Set true only when the scorer endpoint is one that may see that review content."
+    description: "If true, allow the confidence verifier to run on cross-repository pull requests. Default false: on a fork PR the verifier's prompt would send the review's own privileged output (final findings, summary, coverage account, review_result, required checks) to a separate endpoint under a privileged credential. Off on forks means the run publishes no confidence surface at all (no model call, no artifacts, empty confidence-* outputs), with a WARNING naming this input. Set true only when the verifier endpoint is one that may see that review content."
     required: false
     default: "false"
   ai-stream:
@@ -707,15 +707,15 @@ outputs:
   review-triage-routing:
     description: "Deterministic reviewer-routing status (#1005) when review-triage-routing-mode ran: 'not_required', 'no_targets', 'invalid', 'advisory', 'request', or 'fork_blocked'. Empty when review-triage or review-triage-routing-mode is off. The model selects only configured logical target ids; concrete GitHub users/teams come only from trusted base-ref configuration, and an invalid or uncertain state never mutates the forge. This review-step output reports the routing intent; the published review additionally reports the publish-time outcome ('requested' or 'request_failed')."
   confidence-status:
-    description: "Confidence scorer outcome (#1073): 'scored' when the scorer ran and produced a usable score, 'unscored' when it was enabled but the call failed, timed out, produced no usable score, the run would not publish at all (the publish-step-skipped defensive branch — config resolution rejects an unrecognized publish-mode before the review runs, so this branch should never fire: the scorer never calls the model for a review that will not publish), or a required proof-context pin (head SHA, base SHA, review_result) did not resolve (#1155 — the scorer never grades a prompt it cannot anchor), and empty when the scorer is disabled (ai-confidence-model unset)."
+    description: "Independent merge-safety verifier outcome (#1073, #1369): 'scored' when the verifier ran and produced a usable merge-readiness result, 'unscored' when enabled but the call failed, timed out, produced no usable score, the model declared cannot_verify (evidence too incomplete to verify the change - fails closed, never a guessed score), the run would not publish at all (the publish-step-skipped defensive branch - config resolution rejects unrecognized publish-mode before review runs, branch should never fire: the verifier never calls the model for a review that will not publish), or a required proof-context pin (head SHA, base SHA, review_result) did not resolve (#1155 - the verifier never audits a prompt it cannot anchor); empty when the verifier is disabled (ai-confidence-model unset)."
   confidence-score:
-    description: Integer 0-5 confidence score from the scorer; empty when the scorer is disabled or did not produce a usable score (never a spurious 0). Advisory telemetry only — never affects the verdict, findings, or approval.
+    description: "Integer 0-5 merge-readiness score from the independent verifier (#1369): 5 means no blocker/major finding stands and the verifier sees no material problem of its own, down to 0 = the change should not merge in anything close to its current form. Deterministic ceilings apply on top: a blocker finding caps 2, a major finding or incomplete coverage caps 3, and any verifier-raised concern caps 4. Empty when the verifier is disabled or did not produce a usable score (never a spurious 0). Advisory telemetry only - never affects verdict, findings, or approval."
   confidence-risk:
-    description: Risk band the scorer reported for the review ('low', 'medium', 'high', or 'critical') — the scorer's own band, not a value derived from the score; 'unknown' when the scorer ran but produced no usable score, or returned a risk band outside the closed enum; empty when the scorer is disabled.
+    description: Risk band the verifier reported for the review ('low', 'medium', 'high', or 'critical') - the verifier's own blast-radius band, not a value derived from the score; 'unknown' when the verifier ran but produced no usable score, or returned a risk band outside the closed enum; empty when the verifier is disabled.
   confidence-reason:
-    description: Bounded text explanation from the scorer; possibly empty when the model gave none; empty when the scorer is disabled. Model-authored text, redacted before publication.
+    description: Bounded text explanation from the verifier (its audit of the review against the diff); possibly empty when the model gave none; empty when the verifier is disabled. Model-authored text, redacted before publication.
   confidence-model:
-    description: Model identity that produced the confidence score (which endpoint/model actually scored the review); empty when the scorer is disabled or did not run.
+    description: Model identity that produced the confidence result (which endpoint/model actually audited the review); empty when the verifier is disabled or did not run.
   findings:
     description: Normalized structured findings as a JSON array (empty array when the model produced none)
   review-markdown:

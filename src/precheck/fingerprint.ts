@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from "node:fs";
 import { extraHeaderFingerprint } from "../transport/headers.js";
 import { ACTION_VERSION } from "../version.js";
+import { CONFIDENCE_RUBRIC_VERSION } from "../confidence/result.js";
 
 /** Precheck fingerprinting (#674) — the faithful TS port of
  * `pr_reviewer/precheck.py`. The marker form `<diff_fp>|cfg:<config_hash>`
@@ -423,6 +424,10 @@ export function collectConfigLines(env: Record<string, string>): string[] {
       // preserving baseline fingerprints.
       if (key === "AI_CONFIDENCE_MODEL") {
         lines.push(`SCORER_ACTION_VERSION=${ACTION_VERSION}`);
+        // #1369: the rubric version invalidates cached scores when the
+        // scoring semantics change, independent of release versioning —
+        // a rubric change re-verifies even within one action release.
+        lines.push(`SCORER_RUBRIC_VERSION=${CONFIDENCE_RUBRIC_VERSION}`);
       }
       lines.push(`${key}=${value}`);
       continue;

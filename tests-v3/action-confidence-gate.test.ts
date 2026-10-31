@@ -241,6 +241,9 @@ test("#1073/#1158 action: comment mode publishes the sticky comment and the scor
     }
     assert.equal(result.confidenceScoreArtifact?.status, "scored");
     assert.equal(result.confidenceScoreArtifact?.score, 4);
+    // #1369: the artifact carries the verifier rubric marker (version 2).
+    assert.equal(result.confidenceScoreArtifact?.version, 2);
+    assert.equal(result.confidenceScoreArtifact?.rubric, "merge-readiness-verifier-v1");
     // #1158: the publish step ran from the publish mode alone — the sticky
     // comment (with its confidence section) was published.
     assert.equal(result.commentPosts.length, 1, "the sticky comment did not publish");

@@ -213,6 +213,7 @@ function applyScore(argv: string[]): void {
       concerns: parsed.answer.concerns,
       model,
       caps: ceilings.caps,
+      parserNotes: parsed.answer.notes,
     });
   } catch {
     fail("apply-score", "result_build_failed");
@@ -239,6 +240,10 @@ function applyScore(argv: string[]): void {
         secrets,
       ),
       concerns: base.concerns.map((concern) => ({
+        // Closed-vocabulary enum tokens (parser-validated), not model free
+        // text — carried through unmasked, like `line` (#1369).
+        type: concern.type,
+        severity: concern.severity,
         file: boundConfidenceField(maskText(concern.file), MAX_CONFIDENCE_CONCERN_FILE_CHARS),
         line: concern.line,
         evidence: boundConfidenceField(maskText(concern.evidence), MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS),

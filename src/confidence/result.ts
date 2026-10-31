@@ -1,21 +1,26 @@
 /**
  * #1073: the deterministic result contract and tolerant parser for the
- * independent post-review confidence scorer.
+ * independent post-review confidence scorer — as of #1369 an INDEPENDENT
+ * MERGE-SAFETY VERIFIER: it reads the PR description and diff itself and
+ * audits the completed primary review against the change, rather than
+ * grading the review's evidence quality.
  *
- * The scorer is advisory telemetry only: its answer never touches the
+ * The verifier is advisory telemetry only: its answer never touches the
  * verdict, the findings, the review-result state, required checks, the
  * escalation reason, native review events, or approvals, and it never writes
  * into any `reviewRecord` field the enforcement/marker pipeline reads. This
  * module owns the shape every consumer (outputs, step summary, published
  * section, marker, persisted artifact) reads, plus the tolerant parser for
- * the scorer's free-form answer.
+ * the verifier's free-form answer.
  *
  * Parser policy: a malformed value is flagged `unknown` or fails the whole
  * answer closed — it is never silently defaulted or CLAMPED to a confident
  * `5`/`low`. A missing, non-integer, or OUT-OF-RANGE `score` fails the answer
  * to `unscored` (#1140 review: an out-of-range integer like 999 must never
  * become a qualified top score); the answer only ever becomes a number
- * through an explicit in-range integer the model produced.
+ * through an explicit in-range integer the model produced. A `cannot_verify`
+ * answer fails closed to `unscored` too (#1369): uncertainty the model
+ * declared is never promoted to a confident pass.
  */
 
 import { maskKnownSecrets } from "../context/redact.js";
@@ -23,10 +28,27 @@ import { maskKnownSecrets } from "../context/redact.js";
 export const CONFIDENCE_RISK_VALUES = ["low", "medium", "high", "critical", "unknown"] as const;
 export type ConfidenceRisk = (typeof CONFIDENCE_RISK_VALUES)[number];
 
+/** #1369: the closed vocabulary for the verifier's own concerns — what kind
+ * of audit disagreement the entry records. */
+export const CONFIDENCE_CONCERN_TYPES = ["missed_issue", "unsupported_finding"] as const;
+export type ConfidenceConcernType = (typeof CONFIDENCE_CONCERN_TYPES)[number];
+export const CONFIDENCE_CONCERN_SEVERITIES = ["blocker", "major"] as const;
+export type ConfidenceConcernSeverity = (typeof CONFIDENCE_CONCERN_SEVERITIES)[number];
+
+/** #1369: the rubric the verifier scores against, versioned so persisted
+ * artifacts and the precheck fingerprint can tell prose-quality-era scores
+ * apart from merge-readiness verifier results. */
+export const CONFIDENCE_RUBRIC_VERSION = "merge-readiness-verifier-v1";
+
 export type ConfidenceStatus = "disabled" | "scored" | "unscored";
 
-/** One bounded advisory concern the scorer attached to its answer. */
+/** One bounded advisory concern the verifier attached to its answer. */
 export interface ConfidenceConcern {
+  /** Closed-vocabulary audit kind: what the verifier is flagging. */
+  type: ConfidenceConcernType;
+  /** Closed-vocabulary severity (blocker/major): the advisory relevance of
+   * the concern. Advisory only — it never gates anything by itself. */
+  severity: ConfidenceConcernSeverity;
   file: string;
   line: number | null;
   evidence: string;
@@ -57,6 +79,12 @@ export interface ConfidenceResult {
   /** Deterministic ceilings that fired, action-owned tokens, e.g.
    * "blocker_cap_2". Empty for disabled/unscored. */
   caps: string[];
+  /** #1369: action-owned parser notes from the scored answer (e.g. a
+   * `concern_dropped_*` token when a malformed concern entry was dropped, or
+   * `risk_unknown_malformed`). Persisted in the artifact so a dropped
+   * concern — and the ceiling implication it would have carried — stays
+   * operator-visible. Empty for disabled/unscored. */
+  parserNotes: string[];
 }
 
 export const CONFIDENCE_DISABLED: ConfidenceResult = Object.freeze({
@@ -68,6 +96,7 @@ export const CONFIDENCE_DISABLED: ConfidenceResult = Object.freeze({
   model: "",
   cause: "",
   caps: Object.freeze([]) as readonly string[] as string[],
+  parserNotes: Object.freeze([]) as readonly string[] as string[],
 }) as ConfidenceResult;
 
 export function unscoredConfidenceResult(cause: string, model = ""): ConfidenceResult {
@@ -80,6 +109,7 @@ export function unscoredConfidenceResult(cause: string, model = ""): ConfidenceR
     model,
     cause,
     caps: [],
+    parserNotes: [],
   };
 }
 
@@ -90,6 +120,7 @@ export function scoredConfidenceResult(input: {
   concerns: ConfidenceConcern[];
   model: string;
   caps: string[];
+  parserNotes: string[];
 }): ConfidenceResult {
   return {
     status: "scored",
@@ -100,6 +131,7 @@ export function scoredConfidenceResult(input: {
     model: input.model,
     cause: "",
     caps: input.caps,
+    parserNotes: input.parserNotes,
   };
 }
 
@@ -290,13 +322,14 @@ export function maskComposedConfidenceReason(composed: string, secrets: readonly
     : masked.slice(masked.length - MAX_CONFIDENCE_REASON_CHARS);
 }
 
-/** A successfully parsed, pre-ceiling scorer answer. */
+/** A successfully parsed, pre-ceiling verifier answer. */
 export interface ParsedConfidenceAnswer {
   score: number;
   risk: ConfidenceRisk;
   reason: string;
   concerns: ConfidenceConcern[];
-  /** Parser notes (unknown risk) — action-owned tokens. */
+  /** Parser notes — action-owned tokens: malformed-risk
+   * `risk_unknown_malformed` and #1369's `concern_dropped_*` drop notes. */
   notes: string[];
 }
 
@@ -334,22 +367,43 @@ export function extractConfidenceJson(raw: string): Record<string, unknown> | nu
   return null;
 }
 
-function parseConcern(entry: unknown): ConfidenceConcern | null {
-  if (!isRecord(entry)) return null;
+/** #1369: the outcome of one concern-entry parse — either a fully validated
+ * concern, or the action-owned note explaining why the entry was dropped. */
+interface ParsedConcern {
+  concern: ConfidenceConcern | null;
+  note: string;
+}
+
+function parseConcern(entry: unknown): ParsedConcern {
+  if (!isRecord(entry)) return { concern: null, note: "concern_dropped_not_an_object" };
+  const typeValue = entry.type;
+  const type = typeof typeValue === "string"
+    && (CONFIDENCE_CONCERN_TYPES as readonly string[]).includes(typeValue)
+    ? typeValue as ConfidenceConcernType
+    : null;
+  if (type === null) return { concern: null, note: "concern_dropped_invalid_type" };
+  const severityValue = entry.severity;
+  const severity = typeof severityValue === "string"
+    && (CONFIDENCE_CONCERN_SEVERITIES as readonly string[]).includes(severityValue)
+    ? severityValue as ConfidenceConcernSeverity
+    : null;
+  if (severity === null) return { concern: null, note: "concern_dropped_invalid_severity" };
   const file = typeof entry.file === "string" ? entry.file.trim().slice(0, MAX_CONFIDENCE_CONCERN_FILE_CHARS) : "";
   const evidence = typeof entry.evidence === "string"
     ? entry.evidence.replace(/\s+/g, " ").trim().slice(0, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS)
     : "";
+  // A concern without both a location and grounded evidence is not auditable
+  // advisory telemetry — it is dropped, with a note, never guessed.
+  if (file === "" || evidence === "") return { concern: null, note: "concern_dropped_missing_field" };
   const lineValue = entry.line;
   const line = typeof lineValue === "number" && Number.isInteger(lineValue) && lineValue >= 0
     ? lineValue
     : null;
-  if (file === "" && evidence === "") return null;
-  return { file, line, evidence };
+  return { concern: { type, severity, file, line, evidence }, note: "" };
 }
 
 /**
- * Tolerant bounded parse of the scorer's answer across OpenAI/Anthropic/
+ * Tolerant bounded parse of the verifier's answer across OpenAI/Anthropic/
  * self-hosted response shapes. `score` must be an IN-RANGE (0..5) integer:
  * non-integers AND out-of-range integers are both rejected as
  * `malformed_score` — clamping `999` to a published `5` would let a
@@ -357,10 +411,25 @@ function parseConcern(entry: unknown): ConfidenceConcern | null {
  * is validated against the enum with anything malformed flagged `unknown`
  * (the answer stays scored — the integer is the primary signal); `reason`
  * and every concern field are bounded.
+ *
+ * #1369: a `cannot_verify` answer (`cannot_verify: true`, or the legacy-ish
+ * `status: "cannot_verify"` shape) fails the whole answer closed to
+ * `unscored(cannot_verify)` BEFORE the score is read or validated — declared
+ * uncertainty must never be promoted to a scored result, and a hostile or
+ * confused answer pairing `cannot_verify` with a confident `5` must never
+ * publish the 5. Concern entries missing a valid `type`/`severity` or an
+ * empty `file`/`evidence` are DROPPED with an action-owned parser note
+ * (`concern_dropped_*`) in `notes`; kept concerns always carry the closed
+ * vocabulary.
  */
 export function parseConfidenceAnswer(raw: string): ConfidenceParseOutcome {
   const parsed = extractConfidenceJson(raw);
   if (parsed === null) return { ok: false, cause: "malformed_answer" };
+  if (parsed.cannot_verify === true || parsed.status === "cannot_verify") {
+    // The verifier said it could not verify: fail closed to unscored without
+    // reading or validating the score at all.
+    return { ok: false, cause: "cannot_verify" };
+  }
   const notes: string[] = [];
   const scoreValue = parsed.score;
   if (typeof scoreValue !== "number" || !Number.isFinite(scoreValue) || !Number.isInteger(scoreValue)
@@ -389,11 +458,14 @@ export function parseConfidenceAnswer(raw: string): ConfidenceParseOutcome {
     MAX_CONFIDENCE_REASON_CHARS,
   );
   const reason = stripRevealedCapNoteTails(reasonHead);
-  const concerns = Array.isArray(parsed.concerns)
-    ? parsed.concerns.slice(0, MAX_CONFIDENCE_CONCERNS)
-      .map(parseConcern)
-      .filter((concern): concern is ConfidenceConcern => concern !== null)
-    : [];
+  const concerns: ConfidenceConcern[] = [];
+  if (Array.isArray(parsed.concerns)) {
+    for (const entry of parsed.concerns.slice(0, MAX_CONFIDENCE_CONCERNS)) {
+      const { concern, note } = parseConcern(entry);
+      if (concern !== null) concerns.push(concern);
+      else if (note !== "") notes.push(note);
+    }
+  }
   return { ok: true, answer: { score, risk, reason, concerns, notes } };
 }
 
@@ -408,13 +480,18 @@ export interface ConfidenceCeilingInput {
 }
 
 /**
- * Deterministic score ceilings, applied AFTER parsing — the scorer's own
- * opinion can never outrank what the review actually found:
+ * Deterministic score ceilings, applied AFTER parsing — the verifier's own
+ * opinion can never outrank what the review actually found, nor its own
+ * audit disagreement:
  * - any blocker finding → score capped at 2;
  * - any major finding → score capped at 3 (blocker wins when both fire);
  * - incomplete/partial review coverage → capped at 3: insufficient proof
- *   context must never produce an eligible confident pass.
- * Each fired cap is recorded in `caps` and noted in the reason.
+ *   context must never produce an eligible confident pass;
+ * - #1369: any structured concern the verifier itself raised → capped at 4:
+ *   an independent concern can never score 5, deterministically, not just by
+ *   prompt instruction.
+ * Each fired cap is recorded in `caps` and noted in the reason. The
+ * concern cap applies AFTER the finding/coverage caps; the lower cap wins.
  */
 export function applyConfidenceCeilings(
   answer: ParsedConfidenceAnswer,
@@ -448,6 +525,15 @@ export function applyConfidenceCeilings(
   if (coverageIncomplete && score > 3) {
     score = 3;
     caps.push("incomplete_coverage_cap_3");
+  }
+  // #1369: the verifier's own structured concern caps the score at 4 —
+  // "an independent concern can never score 5" is deterministic here, not a
+  // prompt hope. Kept concerns always carry a validated closed-vocabulary
+  // severity, so any kept concern qualifies. Applied last: the
+  // blocker/major/coverage caps above still win when they land lower.
+  if (answer.concerns.some((concern) => concern.severity === "blocker" || concern.severity === "major") && score > 4) {
+    score = 4;
+    caps.push("verifier_concern_cap_4");
   }
   if (caps.length === 0) {
     return { score, risk: answer.risk, reason: cleanReason, caps };

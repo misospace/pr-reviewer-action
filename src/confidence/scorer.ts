@@ -212,6 +212,7 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
       concerns: parsed.answer.concerns,
       model: profile.model,
       caps: ceilings.caps,
+      parserNotes: parsed.answer.notes,
     }),
     requestPayload: payload.body,
     rawResponse: outcome.raw,
@@ -229,6 +230,7 @@ function disabledResult(): ConfidenceResult {
     model: "",
     cause: "",
     caps: [],
+    parserNotes: [],
   };
 }
 
