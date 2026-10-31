@@ -1,5 +1,80 @@
 # Changelog
 
+## [3.9.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.8.0...source-v3.9.0) (2026-10-31)
+
+
+### Features
+
+* **#1257:** add publish-status output to disambiguate superseded runs ([#1313](https://github.com/misospace/pr-reviewer-action/issues/1313)) ([1b7ff5f](https://github.com/misospace/pr-reviewer-action/commit/1b7ff5f1215d2753341e5ad5089401d3b42d4fd9))
+* **#1294:** wire the follow-up controller — consume follow_up events in Action and operator modes ([#1299](https://github.com/misospace/pr-reviewer-action/issues/1299)) ([8223ad0](https://github.com/misospace/pr-reviewer-action/commit/8223ad0061606455f27c923358386e74b16f4c0d))
+* **#1295:** durable cross-process RateLimitStore for follow-up Q&A budgets ([#1318](https://github.com/misospace/pr-reviewer-action/issues/1318)) ([298d579](https://github.com/misospace/pr-reviewer-action/commit/298d579346fdd17a79d47daf4158d17b4140b9d2))
+* **#1301:** refuse closed/merged PRs at shared review admission ([#1303](https://github.com/misospace/pr-reviewer-action/issues/1303)) ([4815925](https://github.com/misospace/pr-reviewer-action/commit/4815925aec629bb23e0dd87f694ac242650ef323))
+* **#1337:** dependency-upgrade coverage accounting ([#1356](https://github.com/misospace/pr-reviewer-action/issues/1356)) ([b6788fd](https://github.com/misospace/pr-reviewer-action/commit/b6788fd0d09975aa0e84e078806d0d5ac12d29d3))
+* **#1343:** owner-anchored enforcement citation acceptance ([#1345](https://github.com/misospace/pr-reviewer-action/issues/1345)) ([688ebd6](https://github.com/misospace/pr-reviewer-action/commit/688ebd6832b548a86080da8552e92be5b6f2602a))
+* **#1348:** wire the production controller daemon/runtime ([#1353](https://github.com/misospace/pr-reviewer-action/issues/1353)) ([1c7b4be](https://github.com/misospace/pr-reviewer-action/commit/1c7b4bef10d8972558ba67cd677cd3fac1a012b3))
+* **#1349:** read-only operator MCP endpoint for reviews, findings, and review policy ([#1373](https://github.com/misospace/pr-reviewer-action/issues/1373)) ([b54200f](https://github.com/misospace/pr-reviewer-action/commit/b54200fee25137320a09674c17d54a0ede59e5f7))
+* **#1369:** evolve post-review confidence scorer into independent merge-safety verifier ([#1371](https://github.com/misospace/pr-reviewer-action/issues/1371)) ([7fc3073](https://github.com/misospace/pr-reviewer-action/commit/7fc307374ad865f67e6d3ee309a50fa36c6e6d3b))
+* **#733:** executor boundary with local reference backend and OCI worker-image contract ([#1289](https://github.com/misospace/pr-reviewer-action/issues/1289)) ([9032bc3](https://github.com/misospace/pr-reviewer-action/commit/9032bc354628e99984fb3dd33bfcaae2897f9060))
+* **#734:** Kubernetes executor — one ephemeral Job per review execution ([#1329](https://github.com/misospace/pr-reviewer-action/issues/1329)) ([c9d920f](https://github.com/misospace/pr-reviewer-action/commit/c9d920fb3d799212862345428bb7e1f1534d27f9))
+* **#735:** credential broker and per-review secret scoping ([#1327](https://github.com/misospace/pr-reviewer-action/issues/1327)) ([06cf501](https://github.com/misospace/pr-reviewer-action/commit/06cf501dd8373afa8cb9a2fd90d8d0e465b23a16))
+* **#736:** durable control-plane state, PostgreSQL backend, usage provenance, queue compaction ([#1333](https://github.com/misospace/pr-reviewer-action/issues/1333)) ([98f2dfb](https://github.com/misospace/pr-reviewer-action/commit/98f2dfb0adb67eca08d9fd0cf17a861018d01bba))
+* **#737:** controller HTTP/admin API — bearer admin auth, bounded metrics, audited mutations ([#1359](https://github.com/misospace/pr-reviewer-action/issues/1359)) ([949a702](https://github.com/misospace/pr-reviewer-action/commit/949a7024096ce63472438dad387d18009eedbcae))
+* **#763:** shared conversational PR follow-up core + forge-capability comment post ([4832986](https://github.com/misospace/pr-reviewer-action/commit/483298678b08953d350aad0e82dfbdde7aa8b069))
+* **#764:** optional syntax-aware related-code context stage ([#1321](https://github.com/misospace/pr-reviewer-action/issues/1321)) ([0f6fb83](https://github.com/misospace/pr-reviewer-action/commit/0f6fb83feb95c9384443d450827773a0daa86fc3))
+* **#765:** model gateway library with run-scoped budgets and provider-key isolation ([#1360](https://github.com/misospace/pr-reviewer-action/issues/1360)) ([81c3818](https://github.com/misospace/pr-reviewer-action/commit/81c38185554dba3b828894b7bfa03dae18905cec))
+* **classifier:** recognize Renovate image/chart updates and consider dependency security risk ([#1342](https://github.com/misospace/pr-reviewer-action/issues/1342)) ([7a37962](https://github.com/misospace/pr-reviewer-action/commit/7a379629c8f8f4c46665d7cd990c75b14fc49b75))
+* **config:** namespace/account shared review-policy layer ([#1350](https://github.com/misospace/pr-reviewer-action/issues/1350)) ([#1357](https://github.com/misospace/pr-reviewer-action/issues/1357)) ([8b2dff9](https://github.com/misospace/pr-reviewer-action/commit/8b2dff9dab5306dc8288ed40d618a6a13438b0f0))
+* **deps:** update dependency @types/node (24.19.2 → 26.6.5) ([#1323](https://github.com/misospace/pr-reviewer-action/issues/1323)) ([c7db160](https://github.com/misospace/pr-reviewer-action/commit/c7db160e0be141400a09342b83b9212df2a1c9ec))
+* **deps:** update node.js (26.12.1 → v26.13.0) ([#1328](https://github.com/misospace/pr-reviewer-action/issues/1328)) ([af2652b](https://github.com/misospace/pr-reviewer-action/commit/af2652bbd9d7b1562f1d9e7bfcdde305a743dfc9))
+
+
+### Bug Fixes
+
+* **#1250:** align standalone publish CLI inline-findings default ([8183835](https://github.com/misospace/pr-reviewer-action/commit/81838354c00511f89ce60192642e93397ffae27d))
+* **#1251:** consolidate inherited fallback tier settings and defaults ([1c34807](https://github.com/misospace/pr-reviewer-action/commit/1c34807e55bd7de381feeb027921caefa1c9f143))
+* **#1253:** remove the unreachable REVIEW_CONTEXT_PROFILE smart overrides ([#1324](https://github.com/misospace/pr-reviewer-action/issues/1324)) ([09efb3c](https://github.com/misospace/pr-reviewer-action/commit/09efb3cc8b33ada2d26cec59a24b70ecd4365529))
+* **#1260:** pass an allowlisted gitEnv to tool subprocesses, never the stage env ([#1316](https://github.com/misospace/pr-reviewer-action/issues/1316)) ([076724e](https://github.com/misospace/pr-reviewer-action/commit/076724eebd8051efb16ee5e61aac390c2a59aa0b)), closes [#1260](https://github.com/misospace/pr-reviewer-action/issues/1260)
+* **#1264:** recognize no-noun input-absence claims in blocker verification ([#1309](https://github.com/misospace/pr-reviewer-action/issues/1309)) ([639cc6d](https://github.com/misospace/pr-reviewer-action/commit/639cc6dab1f17323ab2b1fe172b9316564d511c2))
+* **#1269:** rebase triage cap-note boundary fix onto current main ([#1296](https://github.com/misospace/pr-reviewer-action/issues/1296)) ([c1a4968](https://github.com/misospace/pr-reviewer-action/commit/c1a4968dff0a1e907c5a13e316353a090066ce63))
+* **#1282:** preserve findings when inline findings review is rejected ([33a10ed](https://github.com/misospace/pr-reviewer-action/commit/33a10edc12059a0c08c3023215bb42a47dcb6a84))
+* **#1283:** bound the aggregate published findings summary to the publish size limit ([#1314](https://github.com/misospace/pr-reviewer-action/issues/1314)) ([4978c6d](https://github.com/misospace/pr-reviewer-action/commit/4978c6d6d811ec923364161773b916956420f02a))
+* **#1284:** bound the model-controlled path in blocking annotations and the gate summary ([#1315](https://github.com/misospace/pr-reviewer-action/issues/1315)) ([48883cb](https://github.com/misospace/pr-reviewer-action/commit/48883cbfe44e6a1ed7550c6468e6d7c7bdb187c9))
+* **#1305:** bound ambiguous primary retry latency; hand off promptly to fallback ([#1306](https://github.com/misospace/pr-reviewer-action/issues/1306)) ([238f8d7](https://github.com/misospace/pr-reviewer-action/commit/238f8d7b04bfb021feddd375816fca79cfadd4e2))
+* **#1310:** fail closed when the follow-up PR state cannot be proven ([#1317](https://github.com/misospace/pr-reviewer-action/issues/1317)) ([a29725a](https://github.com/misospace/pr-reviewer-action/commit/a29725a60a8d645f18ee5d724c02219fbc4db7b6))
+* **#1312:** distinguish draft uncertainty from PR lookup failure ([#1319](https://github.com/misospace/pr-reviewer-action/issues/1319)) ([05b69ad](https://github.com/misospace/pr-reviewer-action/commit/05b69ad8aeed4aa83f50d39025de1f351661c3e1))
+* **#1312:** distinguish draft uncertainty from PR lookup failure ([#1320](https://github.com/misospace/pr-reviewer-action/issues/1320)) ([16850d4](https://github.com/misospace/pr-reviewer-action/commit/16850d49e97bcd445999b4a515b1990608131286))
+* **#1322:** constant shape-class queue-snapshot diagnostics + explicit 0600 on the directory-fsync open ([#1374](https://github.com/misospace/pr-reviewer-action/issues/1374)) ([2f6cd98](https://github.com/misospace/pr-reviewer-action/commit/2f6cd9863a24aa11b1115b17db3cac9cae16dad4))
+* **#1335:** symlink provenance sample carries the matched token from carried argv ([#1375](https://github.com/misospace/pr-reviewer-action/issues/1375)) ([334ebdf](https://github.com/misospace/pr-reviewer-action/commit/334ebdf891260de17e90eb9aa15e6e62a5a0c152))
+* **#1346:** drop generic connective bigrams from requirement subject scope ([#1363](https://github.com/misospace/pr-reviewer-action/issues/1363)) ([8d32c20](https://github.com/misospace/pr-reviewer-action/commit/8d32c20347fc0919788746fcda6b01d4e1b9d777))
+* **#1347:** exclude non-predicate text artifacts from the trace shape check ([#1352](https://github.com/misospace/pr-reviewer-action/issues/1352)) ([9516c57](https://github.com/misospace/pr-reviewer-action/commit/9516c575824ef00d05833f240c2abb90b032e5b2))
+* **#1354:** exclude parent-relative Markdown navigation links from traversal_literal ([#1365](https://github.com/misospace/pr-reviewer-action/issues/1365)) ([dd9c11e](https://github.com/misospace/pr-reviewer-action/commit/dd9c11e1786e7e2abfa786c830e536f5d4088bd0))
+* **#1355:** exclude generic argument lists from the predicate shape ([#1362](https://github.com/misospace/pr-reviewer-action/issues/1362)) ([ddf8c87](https://github.com/misospace/pr-reviewer-action/commit/ddf8c877d08c9407df68f0550926e5402203630b))
+* **#1361:** scope gateway budget reservation-id idempotency to the run ([#1376](https://github.com/misospace/pr-reviewer-action/issues/1376)) ([0bb0d13](https://github.com/misospace/pr-reviewer-action/commit/0bb0d134ab1882cc78bc6a4f3179868d9455d956))
+* **classification:** quoted diagnostics fire `symlink_sensitive` ([#1334](https://github.com/misospace/pr-reviewer-action/issues/1334)) ([d376f48](https://github.com/misospace/pr-reviewer-action/commit/d376f48fd1d12064225a8c0c961f815d039fdf48))
+* **deps:** update dependency @types/node (26.6.5 → 26.6.6) ([#1330](https://github.com/misospace/pr-reviewer-action/issues/1330)) ([5451522](https://github.com/misospace/pr-reviewer-action/commit/5451522dc11a07ce2a8aaf7eb8a66ee6bce9fd00))
+* **deps:** update dependency astro (7.4.2 → 7.4.3) ([#1326](https://github.com/misospace/pr-reviewer-action/issues/1326)) ([87377ee](https://github.com/misospace/pr-reviewer-action/commit/87377eea38c76d8232f93598c22ff5afad4cee09))
+* **deps:** update dependency astro (7.4.3 → 7.4.4) ([#1332](https://github.com/misospace/pr-reviewer-action/issues/1332)) ([bfd39c9](https://github.com/misospace/pr-reviewer-action/commit/bfd39c93648f37005060b0d08ab79b9131d595a8))
+* **native_loop:** preserve required investigation gaps when verdict turn fails after deadline ([#1340](https://github.com/misospace/pr-reviewer-action/issues/1340)) ([8d11823](https://github.com/misospace/pr-reviewer-action/commit/8d1182370a6ff667d573b5d7396fadf3b4a1a57f))
+* **platform:** name the cause in the [#1312](https://github.com/misospace/pr-reviewer-action/issues/1312) fail-closed PR-lookup error ([#1341](https://github.com/misospace/pr-reviewer-action/issues/1341)) ([#1358](https://github.com/misospace/pr-reviewer-action/issues/1358)) ([462efb6](https://github.com/misospace/pr-reviewer-action/commit/462efb6692090086e54e884f10d6f368de9fb2f6))
+
+
+### Chores
+
+* **#1252:** remove obsolete v2 keyword escalation and required-check matching ([#1304](https://github.com/misospace/pr-reviewer-action/issues/1304)) ([6d80de9](https://github.com/misospace/pr-reviewer-action/commit/6d80de9f409fa3f2ae792d774f3f80d52556686a))
+* **#1254:** make re-review label cleanup fail-safe at the publish call site ([#1311](https://github.com/misospace/pr-reviewer-action/issues/1311)) ([17b8bae](https://github.com/misospace/pr-reviewer-action/commit/17b8bae11e8d6a130f7df6044d67c3855ba9b37f))
+* **deps:** lock file maintenance ([#1292](https://github.com/misospace/pr-reviewer-action/issues/1292)) ([88d7334](https://github.com/misospace/pr-reviewer-action/commit/88d733457d49cecd98fbc023f29bbb1c8d198d3b))
+
+
+### Documentation
+
+* **#1256:** document fallback corpus re-truncation 120k-byte cap ([#1308](https://github.com/misospace/pr-reviewer-action/issues/1308)) ([6d3e832](https://github.com/misospace/pr-reviewer-action/commit/6d3e83202779bee86da61c83938daa542533467e))
+* remove external project reference ([8b91cf0](https://github.com/misospace/pr-reviewer-action/commit/8b91cf01bbadcf8c1f280c98227418089cd000fc))
+
+
+### Refactors
+
+* one canonical implementation for duplicated string-bound helpers ([#1364](https://github.com/misospace/pr-reviewer-action/issues/1364)) ([29a3de0](https://github.com/misospace/pr-reviewer-action/commit/29a3de0e0f7a9ce91c670b0983bf7595b2a64cfb))
+
 ## [3.8.0](https://github.com/misospace/pr-reviewer-action/compare/source-v3.7.0...source-v3.8.0) (2026-10-26)
 
 
