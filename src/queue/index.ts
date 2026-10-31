@@ -13,6 +13,7 @@ export {
   isTerminalState,
   prIdentityKey,
   canTransition,
+  transitionPath,
   newJobRecord,
   withState,
 } from "./types.js";

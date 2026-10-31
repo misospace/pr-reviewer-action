@@ -193,13 +193,14 @@ observations must carry the PR `id` (a missing `id` on one side sends
 head or a material config-fingerprint change re-keys.
 `shouldSchedule` remains the single scheduling policy: `follow_up` and
 terminal kinds never mint review generations through dispatch.
-`reconcileForgejoRepositories` reuses the same identity path for its poll
+`reconcileRepositories` (the platform-agnostic missed-webhook pass — `platform: "forgejo"` here) reuses the same identity path for its poll
 and never throws — a failed repository is reported and the pass continues.
 
 `dispatchCanonicalEvent` reserves through `ledger.addIfAbsent`, the atomic
 reserve-and-check: a "scheduled" outcome means RESERVED, not enqueued, so
 a failed queue handoff must release the reservation via `ledger.remove`
-(durable lifecycle: #736).
+(durable lifecycle: #736 — the release is DURABLE, so the redelivery re-mints
+instead of waiting out the claim horizon).
 
 `gateJobPublication` is the publication gate: `isExpired` first (an
 expired job skips the head fetch entirely), then fetch the current head,

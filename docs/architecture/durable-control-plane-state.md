@@ -139,6 +139,20 @@ durable dedupe for redeliveries is the control plane's idempotency-key
 layer, so a deployment's compaction retention must never be shorter
 than its idempotency-key horizon.
 
+**The idempotency-key layer is an acquire/release contract, not a
+flag.** A claim carries a BINDING, and the binding is the reservation's
+owner: the controller's generation claim binds `review-generation#<token>`
+with a fresh token per reservation, so `claim-idempotency` answers the
+only question that matters across a restart — *does somebody else own
+this key?* A claim whose binding differs from the stored one is refused
+(`StateConflictError`), which is what makes a redelivery after a restart
+a duplicate instead of a second mint. `release-idempotency` is the
+matching release: it frees the key ONLY for the binding the caller owns
+(a key bound to different work is refused; an expired key owns nothing
+and may be released by anyone; an absent key is a successful no-op), so
+a failed enqueue releases the durable claim instead of suppressing the
+redelivery until the horizon expires.
+
 ## Migrations
 
 `src/state/migrations.ts` embeds the schema as versioned data

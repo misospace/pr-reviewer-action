@@ -10,9 +10,10 @@ This layer is **not wired into the Action runtime** — `action.yml`,
 from the Action path, and Action mode behaves exactly as before. It is
 operator-mode (#725) infrastructure for a self-hosted controller, exactly like
 [#730](self-hosted-forgejo-ingress.md): the controller owns its own server,
-queue, and worker lifecycle. The webhook handler and the reconciliation loop for
-the GitHub App path are **follow-on work** (see Follow-ons) — this phase is the
-auth + capability substrate they will sit on.
+queue, and worker lifecycle. The webhook intake and the reconciliation pass
+for the GitHub App path now ship with the controller daemon (#1348) — see
+[The webhook intake](#the-webhook-intake-1348); this phase is the auth +
+capability substrate they sit on.
 
 Why the App path needs its own client at all: the App credential **lifecycle is
 not something a forge CLI can own**. `gh` (like any CLI) can *carry* a supplied
@@ -35,6 +36,61 @@ of any kind**; every request goes through `src/platform/http.ts`'s
 | `github-app-signature.ts` | `X-Hub-Signature-256` computation/verification: `sha256=` + lowercase-hex HMAC-SHA256 over the **raw** body, constant-time compare after a length equality check |
 | `github-app-auth.ts` | `GitHubAppAuthenticator`: the RS256 App JWT mint, the cached, repo-scoped installation-token broker with permanent/transient failure classification, and `appIdentity()` — the `GET /app`-proven bot login |
 | `github-app-client.ts` | `GitHubAppCapabilityClient`: the read (`listOpenPullRequests`, `getPullRequest`) and write (`upsertIssueComment`, `createReview`, `createCommitStatus`, `createCheckRun`) capability seam |
+| `github-webhook-handler.ts` | the GitHub App **webhook intake** (#1348): `X-Hub-Signature-256` verified over the raw body BEFORE any parse, the `X-GitHub-Event` → envelope-name projection, and the fixed-body HTTP contract the controller daemon serves |
+
+## The webhook intake (#1348)
+
+`github-webhook-handler.ts` is the GitHub App intake the controller daemon
+binds (`webhook.platform: "github"`); the daemon serves it through the same
+operator host the Forgejo path uses, so there is one router, one follow-up
+consumer and one durable Q&A budget per instance.
+
+Two properties decide its trust boundary:
+
+- **The signature covers the raw body, and it is verified before any
+  parse.** `verifyGitHubWebhookSignature` refuses an empty secret, a
+  duplicated header, a missing `sha256=` prefix, and a digest that is not
+  exactly 64 lowercase hex characters, so unauthenticated bytes never
+  reach a JSON parser. Every rejection answers a fixed status and a fixed
+  body: the payload, the secret, the signature header and any error text
+  are never echoed back.
+- **`X-GitHub-Event` is an unauthenticated HINT, and it only selects the
+  event VOCABULARY.** GitHub delivers the event name only in that header
+  (the body carries no `name`/`event` field), while the #728 normalizer
+  reads the name from the envelope — so `projectGitHubWebhookPayload`
+  copies the header onto `name` when the signed payload carries none of
+  its own. It never rewrites the signed `action` and never mutates its
+  input.
+
+  The header may only name a vocabulary the SIGNED BODY can authorize: a
+  `pull_request` header needs a `pull_request` object in the signed body,
+  an `issue_comment` header needs a `comment` object, and so on — a
+  header whose shape the body does not carry is REFUSED (the delivery is
+  ignored, never dispatched). Within a supported vocabulary the
+  normalizer's kind map admits only the vocabulary/action pairs the signed
+  body authorizes, and its own gates drop the rest.
+
+  **Known limit (stated, not hidden):** GitHub signs the body only, so a
+  captured signed delivery can be REPLAYED under a different header, and
+  the vocabulary may be re-aimed within the action map. The blast radius
+  is bounded: the durable generation ledger dedupes the replayed
+  generation (one review per head+config), the exact-head publication
+  gate still refuses a stale head, and the review is of the PR head the
+  signed body carries.
+
+The handler mirrors the Forgejo one response-for-response (405/400/413/401
+on the refusals, `200 {"status":"ignored"}` for an unroutable delivery,
+`202 {"status":"accepted","kind":"…"}` for an accepted one, a fixed 500
+for a throwing dispatch), routes a canonical `follow_up` delivery to the
+injected router instead of the dispatch seam, and bounds the body at
+`DEFAULT_MAX_WEBHOOK_BODY_BYTES`.
+
+**Reconciliation** converges on the same generation id the webhook would
+have minted: `reconcileRepositories` polls through the same
+`listOpenPullRequests` lister this client exposes, and the caller
+declares the platform it polls — the platform is part of the generation
+identity, so a poll mislabelled as the other forge would never converge
+with its own webhook delivery.
 
 ## Credential lifecycle
 
@@ -219,13 +275,13 @@ semantics.
 | credentials and key material stay inside the seam | `#private` key containment, header-only credentials, fixed credential-free errors, origin binding | `tests-v3/ingress-github-app-auth.test.ts`, `tests-v3/ingress-github-app-client.test.ts` |
 | a retried publication converges | marker lookup → PATCH, POST only when absent; loud failure on a failed lookup, on page-bound exhaustion, and on a marker-less body | `tests-v3/ingress-github-app-client.test.ts` |
 | managed-comment identity cannot be spoofed by the PR author | `appIdentity()` (`GET /app` with the App JWT) + `ownerMatchesIdentity` before any PATCH; foreign/unknown/unprovable ownership fails closed | `tests-v3/ingress-github-app-client.test.ts` |
-| webhook handler + reconciliation for the App path | not in this phase | — |
+| webhook handler + reconciliation for the App path | `github-webhook-handler.ts` (signature over the raw body, envelope-name projection, fixed bodies) + `reconcileRepositories` over this client’s `listOpenPullRequests` | `tests-v3/ingress-github-webhook.test.ts`, `tests-v3/ingress-reconcile.test.ts` |
 
 ## Follow-ons
 
-The GitHub App **webhook server** (Node `http` handler + canonical-event
-projection over `X-Hub-Signature-256`), the reconciliation wiring, the queue /
-durable-ledger lifecycle (#731/#736), the credential broker (#735), and
-executor/worker lifecycle (#733) are follow-on issues. `reconcile.ts` already
-takes a lister callback, so `listOpenPullRequests` is the only surface
-reconciliation needs from this phase.
+The queue / durable-ledger lifecycle (#731/#736), the credential broker
+(#735), and the executor/worker lifecycle (#733) are follow-on issues for
+the App path — the webhook intake and the reconciliation pass now ship
+(with the controller daemon, #1348), so an App deployment reaches the
+canonical event, the durable generation ledger, the durable queue and the
+durable publication path.

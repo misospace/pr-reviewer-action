@@ -542,6 +542,58 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
           "claim-idempotency: key is bound to different work",
         );
       }
+      case "release-idempotency": {
+        const { key, binding, nowMs } = mutation;
+        if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) {
+          throw new RangeError(
+            `release-idempotency: nowMs must be finite, got ${String(nowMs)}`,
+          );
+        }
+        if (typeof key !== "string" || key === "") {
+          throw new Error("release-idempotency: malformed key");
+        }
+        if (typeof binding !== "string" || binding === "") {
+          throw new Error("release-idempotency: malformed binding");
+        }
+        // Release ONLY the caller's own binding: the delete is the atomic
+        // ownership check, so a key bound to different work is never
+        // removed by a caller that does not own it.
+        const deleted = await client.query(
+          "DELETE FROM cp_idempotency_keys WHERE key = $1 AND binding = $2",
+          [key, binding],
+        );
+        if ((deleted.rowCount ?? 0) > 0) return;
+        const existing = await client.query(
+          "SELECT binding, expires_at_ms FROM cp_idempotency_keys WHERE key = $1 FOR UPDATE",
+          [key],
+        );
+        // Nothing to release: the claim is already gone.
+        if ((existing.rowCount ?? 0) === 0) return;
+        const storedBinding = String(existing.rows[0]!["binding"]);
+        const storedExpiry = safeCount(existing.rows[0]!["expires_at_ms"]);
+        if (storedBinding === binding) {
+          // The row's binding IS ours but the binding-scoped DELETE did not
+          // remove it (it was re-written concurrently): the release must
+          // still free the key, exactly as the in-memory backend does — a
+          // caller told the claim is released must find it GONE.
+          await client.query(
+            "DELETE FROM cp_idempotency_keys WHERE key = $1 AND binding = $2",
+            [key, binding],
+          );
+          return;
+        }
+        // An EXPIRED key owns nothing: it may be released by anyone.
+        if (storedExpiry !== 0 && storedExpiry <= nowMs) {
+          await client.query(
+            "DELETE FROM cp_idempotency_keys WHERE key = $1 AND expires_at_ms <= $2",
+            [key, nowMs],
+          );
+          return;
+        }
+        throw new StateConflictError(
+          "release-idempotency: key is bound to different work",
+        );
+      }
       case "put-publication": {
         const record = validatePublication(mutation.record);
         if (record === null) {

@@ -133,6 +133,45 @@ export function canTransition(
   return (TRANSITIONS[from] as readonly string[]).includes(to);
 }
 
+/** The legal hops from `from` to `to` over the SAME transition table
+ * (the states to move TO, `from` itself excluded), or `null` when the
+ * state machine cannot reach `to` from `from`.
+ *
+ * The control-plane run mirror uses it to stay inside the settled state
+ * machine while converging on the target state: a run whose intermediate
+ * step was lost (a crashed daemon, a lost lease) still reaches its
+ * terminal state through the legal hops instead of being stranded. The
+ * path is derived from the one table — never a second state machine. */
+export function transitionPath(
+  from: JobLifecycleState,
+  to: JobLifecycleState,
+): readonly JobLifecycleState[] | null {
+  if (from === to) return [];
+  const seen = new Set<JobLifecycleState>([from]);
+  const queue: JobLifecycleState[] = [from];
+  const cameFrom = new Map<JobLifecycleState, JobLifecycleState>();
+  while (queue.length > 0) {
+    const current = queue.shift() as JobLifecycleState;
+    for (const next of TRANSITIONS[current]) {
+      if (seen.has(next)) continue;
+      seen.add(next);
+      cameFrom.set(next, current);
+      if (next === to) {
+        const path: JobLifecycleState[] = [to];
+        let cursor = to;
+        while (cameFrom.has(cursor)) {
+          cursor = cameFrom.get(cursor) as JobLifecycleState;
+          path.unshift(cursor);
+        }
+        // `from` is the caller's current state, not a hop.
+        return path.slice(1);
+      }
+      queue.push(next);
+    }
+  }
+  return null;
+}
+
 /** Fail closed on a non-finite clock: a `NaN`/`±Infinity` epoch means
  * the time arithmetic is unknowable. */
 function requireFiniteMs(value: number, label: string): void {

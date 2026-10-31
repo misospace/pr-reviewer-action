@@ -1,5 +1,13 @@
-/** Missed-webhook reconciliation poll for the self-hosted Forgejo controller
- * (#730).
+/** Missed-webhook reconciliation poll for the self-hosted controller
+ * (#730 Forgejo, #729 GitHub App).
+ *
+ * PLATFORM: the pass is platform-agnostic — the GitHub App capability
+ * client and the Forgejo ingress client expose the same
+ * `listOpenPullRequests` lister — and the caller declares WHICH forge it
+ * polls through `options.platform`. The platform is part of the canonical
+ * event's identity, so a poll MUST name it: a poll mislabelled as the
+ * other platform would mint a DIFFERENT generation than the webhook
+ * delivery of the same head, and the two would never converge.
  *
  * Convergence invariant: a poll of the same PR/head/config MUST converge on
  * the SAME generation id the webhook would have minted, because identity is
@@ -40,17 +48,38 @@ export interface ReconcileReport {
 }
 
 export interface ReconcileOptions {
+  /** The forge platform the poll observes. It is part of the canonical
+   * event's identity, so a poll MUST name the platform it polls: a poll
+   * mislabelled as the other platform would mint a DIFFERENT generation
+   * than the webhook delivery of the same head, and the two would never
+   * converge. */
+  readonly platform: "github" | "forgejo";
   readonly listOpenPullRequests: (repo: string) => Promise<ReadResult<unknown[]>>;
   readonly repos: readonly string[];
   readonly ledger: GenerationLedger;
   readonly buildOptions?: BuildJobOptions | undefined;
   readonly installationId?: string | undefined;
+  /** The queue handoff for the discovered generations (the same seam the
+   * follow-up host uses). When provided, each minted job is handed over
+   * here and a REFUSED handoff releases the durable reservation — the
+   * dispatch contract — so the head is re-discovered on the next pass
+   * instead of staying suppressed until the claim's horizon expires.
+   *
+   * Absent → the caller owns the handoff AND the release: a caller that
+   * enqueues the returned jobs itself MUST release the reservation when
+   * its handoff fails (`ledger.remove(job.jobId)`). */
+  readonly enqueueJob?: ((job: ReviewJob) => boolean | Promise<boolean>) | undefined;
 }
 
 /** Poll every configured repository and schedule the review generations the
  * ledger has not seen yet. Never throws: a failed or throwing repository is
- * reported in `failedRepositories` and the pass continues. */
-export async function reconcileForgejoRepositories(
+ * reported in `failedRepositories` and the pass continues.
+ *
+ * The pass is PLATFORM-AGNOSTIC: the GitHub App capability client and the
+ * Forgejo ingress client both expose the same `listOpenPullRequests`
+ * lister, so one reconciliation implementation serves both forges — the
+ * platform is the caller's declaration of WHICH forge it polls. */
+export async function reconcileRepositories(
   options: ReconcileOptions,
 ): Promise<ReconcileReport> {
   const jobs: ReviewJob[] = [];
@@ -76,7 +105,7 @@ export async function reconcileForgejoRepositories(
       for (const entry of listed.data) {
         discovered += 1;
         const event = reconciliationPollEvent(
-          "forgejo",
+          options.platform,
           entry,
           options.installationId === undefined ? {} : { installationId: options.installationId },
         );
@@ -103,6 +132,23 @@ export async function reconcileForgejoRepositories(
         if (!(await options.ledger.addIfAbsent(job.jobId))) {
           skipped += 1;
           continue;
+        }
+        // The reservation is taken; the job is handed over. A REFUSED
+        // handoff releases it (the dispatch contract), so the head is
+        // re-discovered on the next pass instead of staying suppressed
+        // until the claim's horizon expires.
+        if (options.enqueueJob !== undefined) {
+          let handedOver = false;
+          try {
+            handedOver = await options.enqueueJob(job);
+          } catch {
+            handedOver = false;
+          }
+          if (!handedOver) {
+            await Promise.resolve(options.ledger.remove(job.jobId)).catch(() => undefined);
+            skipped += 1;
+            continue;
+          }
         }
         jobs.push(job);
       }

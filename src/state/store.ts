@@ -103,6 +103,14 @@ export type StateMutation =
       /** Expiry epoch ms for a newly created key; 0 = never. */
       readonly expiresAtMs: number;
     }
+  | {
+      readonly kind: "release-idempotency";
+      readonly key: string;
+      /** The binding the caller owns; a key bound to DIFFERENT work is
+       * never released by this caller. */
+      readonly binding: string;
+      readonly nowMs: number;
+    }
   | { readonly kind: "put-publication"; readonly record: PublicationRecord }
   | {
       readonly kind: "record-publication-attempt";
@@ -561,6 +569,39 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
         }
         throw new StateConflictError(
           "claim-idempotency: key is bound to different work",
+        );
+      }
+      case "release-idempotency": {
+        const { key, binding, nowMs } = mutation;
+        if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) {
+          throw new RangeError(
+            `release-idempotency: nowMs must be finite, got ${String(nowMs)}`,
+          );
+        }
+        if (typeof key !== "string" || key === "") {
+          throw new Error("release-idempotency: malformed key");
+        }
+        if (typeof binding !== "string" || binding === "") {
+          throw new Error("release-idempotency: malformed binding");
+        }
+        const existing = tables.idempotencyKeys.get(key);
+        // Nothing to release: the claim is already gone (or was never
+        // taken). Releasing an absent key is a successful no-op.
+        if (existing === undefined) return;
+        if (existing.binding === binding) {
+          tables.idempotencyKeys.delete(key);
+          return;
+        }
+        // An EXPIRED key owns nothing: it may be released by anyone, and
+        // the next claim takes it over.
+        if (existing.expiresAtMs !== 0 && existing.expiresAtMs <= nowMs) {
+          tables.idempotencyKeys.delete(key);
+          return;
+        }
+        // A live key bound to DIFFERENT work is never released by a
+        // caller that does not own it.
+        throw new StateConflictError(
+          "release-idempotency: key is bound to different work",
         );
       }
       case "put-publication": {
