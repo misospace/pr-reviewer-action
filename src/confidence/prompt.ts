@@ -78,8 +78,11 @@ export interface ConfidencePromptInputs {
   secrets: readonly (string | null | undefined)[];
   /** #1368: the scorer's overall prompt budget in tokens
    * (`ConfidenceProfile.promptTokens`). Unset keeps the documented default
-   * (`CONFIDENCE_DEFAULT_PROMPT_TOKENS`). When the assembled prompt exceeds
-   * the budget under the bytes/4 estimate, the diff section's byte bound
+   * (`CONFIDENCE_DEFAULT_PROMPT_TOKENS`). The budget covers the WHOLE prompt
+   * the provider request sends — the system prompt AND the user message —
+   * so a context clamp that bounds `promptTokens + maxTokens` bounds the
+   * real request (#1368 review). When the assembled prompt exceeds the
+   * budget under the bytes/4 estimate, the diff section's byte bound
    * shrinks so the total fits — the diff is the only realistically
    * oversized section — with the envelope's existing explicit truncation
    * marker. The per-section byte caps stay in force as ADDITIONAL bounds. */
@@ -220,13 +223,18 @@ export function buildConfidencePrompt(inputs: ConfidencePromptInputs): Confidenc
     "Run the verification now. Respond with ONLY the JSON object described in your instructions.",
   ];
   // #1368: overall token budget over the assembled prompt, estimated as
-  // bytes/4 (an approximation, not a tokenizer). When the total exceeds the
-  // budget the DIFF section's byte bound shrinks so the total fits — the
-  // diff is the only realistically oversized section — and the envelope's
-  // existing explicit truncation marker states the cut. The per-section
-  // byte caps above stay in force as additional bounds.
+  // bytes/4 (an approximation, not a tokenizer). The budget covers the
+  // system prompt too — the provider request sends system + user, so the
+  // accounting must include both for the context clamp's
+  // `promptTokens + maxTokens <= modelContextTokens` invariant to hold
+  // (#1368 review). When the total exceeds the budget the DIFF section's
+  // byte bound shrinks so the total fits — the diff is the only
+  // realistically oversized section — and the envelope's existing explicit
+  // truncation marker states the cut. The per-section byte caps above stay
+  // in force as additional bounds.
   const promptTokens = inputs.promptTokens ?? CONFIDENCE_DEFAULT_PROMPT_TOKENS;
   const budgetBytes = promptTokens * 4;
+  const systemBytes = Buffer.byteLength(SYSTEM_PROMPT, "utf8");
   // The diff envelope's own scaffolding at its LARGEST shape (truncation
   // note included), so the non-diff measurement errs conservative and the
   // shrunk total stays under the budget.
@@ -239,7 +247,8 @@ export function buildConfidencePrompt(inputs: ConfidencePromptInputs): Confidenc
   );
   // `[preDiff, "", postDiff].join("\n")` measures the two join separators
   // around the diff envelope exactly, so nothing is under-counted.
-  const nonDiffBytes = Buffer.byteLength([...preDiff, "", ...postDiff].join("\n"), "utf8")
+  const nonDiffBytes = systemBytes
+    + Buffer.byteLength([...preDiff, "", ...postDiff].join("\n"), "utf8")
     + diffEnvelopeOverheadBytes;
   const diffRaw = inputs.diff ?? "";
   const diffMaxBytes = Math.min(Buffer.byteLength(diffRaw, "utf8"), CONFIDENCE_DIFF_MAX_BYTES);

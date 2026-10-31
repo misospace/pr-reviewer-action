@@ -726,15 +726,34 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   // context clamps — so the profile is the single source the scorer reads.
   const maxTokensDefault = 4096;
   const promptTokensDefault = 98304;
+  // #1368 review: the smallest prompt budget the context clamp ever leaves —
+  // the floor that keeps a tiny window from starving the prompt to zero, and
+  // the minimum shape a declared window must be able to fit (floor prompt +
+  // a positive completion budget) for the scorer to run at all.
+  const confidencePromptFloorTokens = 1024;
   let maxTokens = positiveIntFrom(env, "AI_CONFIDENCE_MAX_TOKENS", maxTokensDefault, warnings);
   let promptTokens = positiveIntFrom(env, "AI_CONFIDENCE_PROMPT_TOKENS", promptTokensDefault, warnings);
   const modelContextTokens = positiveIntFrom(env, "AI_CONFIDENCE_MODEL_CONTEXT_TOKENS", 0, warnings);
   const anthropicEffortSupported = confidenceCapabilityFlag(env, "AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT");
   const structuredOutputSupported = confidenceCapabilityFlag(env, "AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT");
   // Deterministic clamping against a declared context window. Never fatal:
-  // each clamp is announced and the budgets stay positive (the prompt floor
-  // keeps a tiny window from starving the prompt to zero).
+  // each clamp is announced, and the declared window is an ACTUAL bound —
+  // the resolved budgets always satisfy promptTokens + maxTokens <=
+  // modelContextTokens (#1368 review). When the window cannot fit the
+  // minimum prompt budget plus a positive completion budget at all
+  // (window <= the 1024-token prompt floor), no shape fits and the scorer
+  // fails closed: disabled, loudly, before any call is ever attempted.
   if (modelContextTokens > 0) {
+    if (modelContextTokens <= confidencePromptFloorTokens) {
+      // Fail closed: no prompt+completion shape fits a window this small,
+      // and a declared context bound is an actual bound — the scorer is
+      // disabled (no call, no artifact), loudly, instead of producing an
+      // over-budget request (#1368 review).
+      warnings.push(
+        `confidence scorer disabled: the declared ai-confidence-model-context-tokens window (${modelContextTokens}) cannot fit the minimum prompt budget (${confidencePromptFloorTokens}) plus a positive completion budget; raise ai-confidence-model-context-tokens or unset it`,
+      );
+      return { profile: disabledConfidenceProfile(), warnings };
+    }
     if (maxTokens > modelContextTokens) {
       warnings.push(
         `AI_CONFIDENCE_MAX_TOKENS clamped to ${modelContextTokens}: the declared ai-confidence-model-context-tokens window (${modelContextTokens}) is smaller than the configured completion budget`,
@@ -742,11 +761,26 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
       maxTokens = modelContextTokens;
     }
     if (promptTokens + maxTokens > modelContextTokens) {
-      const clampedPrompt = Math.max(modelContextTokens - maxTokens, 1024);
-      warnings.push(
-        `AI_CONFIDENCE_PROMPT_TOKENS clamped to ${clampedPrompt}: prompt plus completion budgets must fit the declared ai-confidence-model-context-tokens window (${modelContextTokens})`,
-      );
-      promptTokens = clampedPrompt;
+      const remaining = modelContextTokens - maxTokens;
+      if (remaining >= confidencePromptFloorTokens) {
+        warnings.push(
+          `AI_CONFIDENCE_PROMPT_TOKENS clamped to ${remaining}: prompt plus completion budgets must fit the declared ai-confidence-model-context-tokens window (${modelContextTokens})`,
+        );
+        promptTokens = remaining;
+      } else {
+        // The completion budget leaves less than the prompt floor: reduce
+        // BOTH budgets deterministically so prompt + completion fits the
+        // window exactly. Never fatal, both reductions announced.
+        const clampedMax = modelContextTokens - confidencePromptFloorTokens;
+        warnings.push(
+          `AI_CONFIDENCE_MAX_TOKENS reduced to ${clampedMax}: the declared ai-confidence-model-context-tokens window (${modelContextTokens}) cannot fit the configured completion budget plus the minimum prompt budget (${confidencePromptFloorTokens})`,
+        );
+        warnings.push(
+          `AI_CONFIDENCE_PROMPT_TOKENS clamped to ${confidencePromptFloorTokens}: prompt plus completion budgets must fit the declared ai-confidence-model-context-tokens window (${modelContextTokens})`,
+        );
+        maxTokens = clampedMax;
+        promptTokens = confidencePromptFloorTokens;
+      }
     }
   }
   // #1368: a configured effort that cannot be sent must never be silent —

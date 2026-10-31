@@ -1769,7 +1769,12 @@ test("#1368: the prompt budget shrinks the diff section deterministically with a
     requiredChecks: "complete", coverage: {}, secrets: [],
   });
   assert.ok(!fits.user.includes("[TRUNCATED:"), "a comfortably-fitting prompt is never cut");
-  assert.equal(Buffer.byteLength(fits.user, "utf8") <= CONFIDENCE_DEFAULT_PROMPT_TOKENS * 4, true);
+  // #1368 review: the budget covers the WHOLE provider request's prompt —
+  // system + user — not just the user message.
+  assert.equal(
+    Buffer.byteLength(fits.system, "utf8") + Buffer.byteLength(fits.user, "utf8") <= CONFIDENCE_DEFAULT_PROMPT_TOKENS * 4,
+    true,
+  );
 
   // Over budget: the diff shrinks so the total fits, and the cut is stated
   // in-band. Everything else (findings, summary, body) keeps its own caps.
@@ -1783,7 +1788,7 @@ test("#1368: the prompt budget shrinks the diff section deterministically with a
     requiredChecks: "complete", coverage: {}, secrets: [],
     promptTokens: overBudgetTokens,
   });
-  const totalBytes = Buffer.byteLength(shrunk.user, "utf8");
+  const totalBytes = Buffer.byteLength(shrunk.system, "utf8") + Buffer.byteLength(shrunk.user, "utf8");
   assert.ok(totalBytes <= overBudgetTokens * 4, `assembled prompt exceeded the budget: ${totalBytes}`);
   assert.ok(shrunk.user.includes("[TRUNCATED: this section was cut at its byte bound"), "the cut is explicit in-band");
   // Exactly one cut: the diff; the other sections fit their own bounds.
@@ -1808,5 +1813,53 @@ test("#1368: the prompt budget shrinks the diff section deterministically with a
   assert.ok(
     Buffer.byteLength(starvedEnvelope, "utf8") > CONFIDENCE_PROMPT_DIFF_FLOOR_BYTES,
     "the diff never shrinks below its floor",
+  );
+});
+
+test("#1368 review: the prompt budget accounts for the system prompt, not just the user message", async () => {
+  const { buildConfidencePrompt } = await import("../src/confidence/prompt.js");
+  const base = {
+    headSha: "h", baseSha: "b",
+    prTitle: "t", prBody: "b",
+    findings: [], reviewSummary: "s", reviewResult: "clean",
+    requiredChecks: "complete", coverage: {}, secrets: [],
+  };
+  const probeDiff = "d".repeat(64_000);
+  const diffEnvelopeOf = (prompt: ReturnType<typeof buildConfidencePrompt>): string =>
+    prompt.user.match(/<untrusted_review_content kind="diff">[\s\S]*?\n<\/untrusted_review_content>/)![0];
+  // A generous budget renders the probe diff whole, so the user message's
+  // non-diff byte weight (scaffolding + smallest-shape diff envelope) can
+  // be measured exactly.
+  const probe = buildConfidencePrompt({ ...base, diff: probeDiff, promptTokens: 1_000_000 });
+  assert.ok(!probe.user.includes("[TRUNCATED:"));
+  const systemBytes = Buffer.byteLength(probe.system, "utf8");
+  assert.ok(systemBytes > 0, "the scorer has a non-empty system prompt");
+  const nonDiffUserBytes = Buffer.byteLength(probe.user, "utf8") - probeDiff.length;
+  // The budget's own accounting reserves the LARGEST-shape diff envelope
+  // (truncation note included); the difference against the whole-diff
+  // envelope above is measurable from a floor-degraded build of the same
+  // diff (cut to exactly the 4096-byte floor, newline-free content).
+  const floored = buildConfidencePrompt({ ...base, diff: probeDiff, promptTokens: 100 });
+  const largestOverheadExtra = (Buffer.byteLength(diffEnvelopeOf(floored), "utf8") - 4_096)
+    - (Buffer.byteLength(diffEnvelopeOf(probe), "utf8") - probeDiff.length);
+  assert.ok(largestOverheadExtra > 0, "the truncation-note envelope shape is strictly larger");
+
+  // A budget that user-only accounting would call roomy enough for the
+  // whole diff — but which system-inclusive accounting knows cannot fit it.
+  // The midpoint keeps the discriminator clear of both edges and of the
+  // bytes/4 rounding.
+  const budgetBytes = nonDiffUserBytes + probeDiff.length + Math.floor(largestOverheadExtra / 2);
+  const budgetTokens = Math.ceil(budgetBytes / 4);
+  const discriminated = buildConfidencePrompt({ ...base, diff: probeDiff, promptTokens: budgetTokens });
+  assert.ok(
+    discriminated.user.includes("[TRUNCATED:"),
+    "a budget that only fits when the system prompt is ignored must still shrink the diff",
+  );
+  // The same budget genuinely covers system + scaffolding + the shrunken
+  // diff: the invariant the context clamp relies on holds on the wire.
+  assert.ok(
+    Buffer.byteLength(discriminated.system, "utf8") + Buffer.byteLength(discriminated.user, "utf8")
+      <= budgetTokens * 4,
+    "system + shrunken diff + scaffolding stays within the budget accounting",
   );
 });

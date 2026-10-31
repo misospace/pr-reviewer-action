@@ -1589,7 +1589,8 @@ test("#1368: the confidence-score.json artifact carries additive request provena
     assert.equal(scored.result.outputs.confidenceStatus, "scored");
     const artifact = JSON.parse(readFileSync(join(scored.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
     // Every pre-existing key is untouched; the provenance block is additive.
-    assert.equal(artifact.version, 1);
+    // #1369 bumped the artifact to version 2 (rubric version rides along).
+    assert.equal(artifact.version, 2);
     assert.equal(artifact.status, "scored");
     assert.equal(artifact.model, SCORER_MODEL);
     assert.deepEqual(artifact.request, {

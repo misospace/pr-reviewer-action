@@ -699,16 +699,18 @@ test("#1368: an invalid token budget falls back to its default with a warning na
 });
 
 test("#1368: budgets clamp deterministically against the declared model context", () => {
-  // An completion budget wider than the window is clamped to the window;
-  // the prompt then clamps too (prompt + completion must fit the window),
-  // floored at 1024.
+  // A completion budget wider than the window is clamped to the window; the
+  // prompt then clamps too (prompt + completion must fit the window), and
+  // the declared window stays an ACTUAL bound (#1368 review).
   const maxClamped = resolveConfidenceProfile({
     AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
     AI_CONFIDENCE_MAX_TOKENS: "5000", AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "4096",
   });
-  assert.equal(maxClamped.profile.maxTokens, 4096);
+  assert.equal(maxClamped.profile.maxTokens, 3072);
   assert.equal(maxClamped.profile.promptTokens, 1024);
+  assert.ok(maxClamped.profile.promptTokens + maxClamped.profile.maxTokens <= 4096);
   assert.ok(maxClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS clamped")));
+  assert.ok(maxClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS reduced")));
   assert.ok(maxClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS clamped")));
 
   // Prompt + completion over the window clamps the prompt, keeping room for
@@ -723,14 +725,62 @@ test("#1368: budgets clamp deterministically against the declared model context"
   assert.equal(promptClamped.profile.maxTokens, 4096);
   assert.ok(promptClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS clamped")));
 
-  // A window too small for even the 1024 floor + completion: the floor wins.
-  const floored = resolveConfidenceProfile({
+  // The 1024 prompt floor never overrides the window: when the completion
+  // budget leaves less than the floor, BOTH budgets are reduced
+  // deterministically so prompt + completion fits the window exactly
+  // (#1368 review blocker 1 — the floor used to break the invariant).
+  const dualReduced = resolveConfidenceProfile({
     AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
     AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "2048",
   });
-  assert.equal(floored.profile.maxTokens, 2048);
-  assert.equal(floored.profile.promptTokens, 1024);
-  assert.ok(floored.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS clamped")));
+  assert.equal(dualReduced.profile.maxTokens, 1024);
+  assert.equal(dualReduced.profile.promptTokens, 1024);
+  assert.ok(dualReduced.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS reduced")));
+  assert.ok(dualReduced.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS clamped")));
+
+  // Boundary: the default completion budget against a window exactly equal
+  // to it reduces the completion to window - floor, never over the window.
+  const equalWindow = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "4096",
+  });
+  assert.equal(equalWindow.profile.maxTokens, 3072);
+  assert.equal(equalWindow.profile.promptTokens, 1024);
+
+  // Boundary: the smallest window that can still fit the minimum shape
+  // (1024-token prompt + a positive completion budget).
+  const smallestFitting = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "1025",
+  });
+  assert.equal(smallestFitting.profile.enabled, true);
+  assert.equal(smallestFitting.profile.maxTokens, 1);
+  assert.equal(smallestFitting.profile.promptTokens, 1024);
+
+  // An explicitly configured completion budget below the floor is reduced
+  // the same way — the floor stays the minimum prompt shape whatever the
+  // operator configured.
+  const explicitSmall = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MAX_TOKENS: "1000", AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "1025",
+  });
+  assert.equal(explicitSmall.profile.maxTokens, 1);
+  assert.equal(explicitSmall.profile.promptTokens, 1024);
+  assert.ok(explicitSmall.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS reduced")));
+
+  // Boundary: a window that cannot fit the minimum shape fails the scorer
+  // profile closed — disabled, loudly, never an over-budget request.
+  for (const tooSmall of ["1024", "512"]) {
+    const failedClosed = resolveConfidenceProfile({
+      AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+      AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: tooSmall,
+    });
+    assert.equal(failedClosed.profile.enabled, false, `context=${tooSmall}`);
+    assert.ok(
+      failedClosed.warnings.some((message) => message.includes("confidence scorer disabled") && message.includes("ai-confidence-model-context-tokens")),
+      `context=${tooSmall}: ${JSON.stringify(failedClosed.warnings)}`,
+    );
+  }
 
   // Fitting budgets are never touched and never warn.
   const fits = resolveConfidenceProfile({
