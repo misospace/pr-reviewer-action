@@ -2203,6 +2203,111 @@ test("#1331: the symlink recovery stays bounded on a hostile line", () => {
   assert.ok(ms < 2000, `hostile lines took ${ms.toFixed(0)}ms, expected well under 2000ms`);
 });
 
+test("#1335: a symlink hit recovered from carried argv samples the matched token", () => {
+  // The fires below are correct and attributable — but the signal is recorded
+  // while scanning the line the call OPENS on, so sampling that line alone
+  // (`+subprocess.run(`) left the artifact without the matched token, against
+  // the "explainable from the artifact alone" contract. The excerpt must show
+  // what matched even when the argv was carried past the line break or moved
+  // one element per line.
+  const cases: [string, string[]][] = [
+    ["shell-string argv carried past the line break", ['+subprocess.run(', '+\t"readlink -f x",', '+\tshell=True,', '+)']],
+    ["argv moved one element per line", ['+subprocess.check_output([', '+\t"readlink",', '+\tuser_path,', '+])']],
+    ["interpreter argv carried past the line break", ['+subprocess.run([', '+\t"bash",', '+\t"-c",', '+\t"readlink -f x",', '+])']],
+    [
+      "hostile carried argv stays inside the sample bounds",
+      ['+subprocess.run(', `+\t"readlink \u0001${"x".repeat(400)}",`, '+\tshell=True,', '+)'],
+    ],
+  ];
+  for (const [label, lines] of cases) {
+    const result = classifyPr({
+      prFiles: files("tool.py"),
+      diffText: selfLocationDiff("tool.py", lines),
+      linkedIssues: [],
+    });
+    const fired = result.pathHandlingProvenance.signals.find(
+      (s) => s.signal === "symlink_sensitive" && s.source === "diff",
+    );
+    assert.ok(fired, `${label}: must keep firing`);
+    assert.ok(
+      (fired?.samples ?? []).some((sample) => sample.includes("readlink")),
+      `${label}: the sample must contain the matched token, got ${JSON.stringify(fired?.samples)}`,
+    );
+    // The redirected excerpt obeys the same provenance bounds as every
+    // other sample: bounded length, control-character-free.
+    for (const sample of fired?.samples ?? []) {
+      assert.ok(sample.length <= 160, `${label}: sample exceeds MAX_PATH_SAMPLE_CHARS`);
+      for (const ch of sample) {
+        const code = ch.codePointAt(0) ?? 0;
+        assert.ok(code >= 0x20 || ch === " ", `${label}: control char escaped into sample: ${code}`);
+        assert.notEqual(code, 0x7f);
+      }
+    }
+  }
+
+  // A match visible on the scanned line itself keeps sampling that line —
+  // only excerpts that would omit the token are redirected.
+  const single = classifyPr({
+    prFiles: files("tool.py"),
+    diffText: selfLocationDiff("tool.py", ["+os.readlink(user_path)"]),
+    linkedIssues: [],
+  });
+  const singleFired = single.pathHandlingProvenance.signals.find(
+    (s) => s.signal === "symlink_sensitive" && s.source === "diff",
+  );
+  assert.deepEqual(singleFired?.samples, ["+os.readlink(user_path)"]);
+
+  // A mention on the opener that the scan itself discounts — inside a
+  // comment, or as inert quoted text the fired view strips — must not pin
+  // the sample to the inert form while the real trigger is carried from a
+  // following line.
+  const discountedOpenerCases: [string, string[]][] = [
+    ["comment mention on the opener", ['+subprocess.run(  # readlink the loop', '+\t"readlink -f x",', '+\tshell=True,', '+)']],
+    ["inert value-position mention on the opener", ['+parser.add_argument("--readlink"); subprocess.run(', '+\t"readlink -f x",', '+\tshell=True,', '+)']],
+  ];
+  for (const [label, lines] of discountedOpenerCases) {
+    const result = classifyPr({
+      prFiles: files("tool.py"),
+      diffText: selfLocationDiff("tool.py", lines),
+      linkedIssues: [],
+    });
+    const fired = result.pathHandlingProvenance.signals.find(
+      (s) => s.signal === "symlink_sensitive" && s.source === "diff",
+    );
+    assert.ok(fired, `${label}: must fire`);
+    assert.ok(
+      (fired?.samples ?? []).some((sample) => sample.includes("readlink -f x")),
+      `${label}: the sample must follow the carried trigger, got ${JSON.stringify(fired?.samples)}`,
+    );
+  }
+
+  // Same-line recovery keeps the raw-line sample too: the excerpt already
+  // shows the token AND the construct that fired. Redirecting these to the
+  // recovered run would drop the diff marker and leave a bare token that
+  // reads like the inert value-position form #1331 stopped firing.
+  const sameLineCases: [string, string, string[]][] = [
+    ["argv token on the scanned line", "tool.py", ['+subprocess.check_output(["readlink", user_path])']],
+    ["backtick command on the scanned line", "tool.sh", ['+target="`readlink -f $1`"']],
+    ["command substitution on the scanned line", "tool.sh", ['+target="$(readlink "$1")"']],
+  ];
+  for (const [label, file, lines] of sameLineCases) {
+    const result = classifyPr({
+      prFiles: files(file),
+      diffText: selfLocationDiff(file, lines),
+      linkedIssues: [],
+    });
+    const fired = result.pathHandlingProvenance.signals.find(
+      (s) => s.signal === "symlink_sensitive" && s.source === "diff",
+    );
+    assert.ok(fired, `${label}: must keep firing`);
+    assert.deepEqual(
+      fired?.samples,
+      [lines[0]],
+      `${label}: the sample must stay the scanned line, got ${JSON.stringify(fired?.samples)}`,
+    );
+  }
+});
+
 // ── Specialist role selection (#633 port) ─────────────────────────────────
 
 test("lane tables select roles from kind and flags", () => {
