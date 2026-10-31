@@ -1,5 +1,5 @@
 {
-  "plan": "/Users/joryirving/git/pr-reviewer-action/evals/confidence-calibration/sample-plan.json",
+  "plan": "evals/confidence-calibration/sample-plan.json",
   "plan_digest": "sha256:9cac323ae33dfbae",
   "conditions": [
     "same-model",

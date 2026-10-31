@@ -128,33 +128,46 @@ operator-configured in eval):
    cause of both failures above; `medium` matches the production dogfood
    configuration for this model and is the production-faithful setting.
 
-Provider quota exhaustion (a shared 5-hour rolling window) killed a sweep
-mid-phase: 1 real review plus 15 of the runtime's graceful "AI review could
-not run" notices, which carry parseable `ai-output.json` verdicts and would
-poison scoring. That work dir was **quarantined and never scored** (its
-`runs.json` backed up as `runs.json.sweep5-poisoned.bak`). The remaining 15
-entries were completed by an operator-directed **parallel fill** (4 workers,
-each with its own work dir — the harness shares a per-repo clone inside a
-work dir, so concurrent same-repo entries would race on checkout) through the
-same harness entry point (`eval_harness.run_review_for_pr`, `tools_off`,
-identical env), then assembled into a canonical runs dir mirroring the
-driver's record schema exactly; assembly was refused unless every row was a
-real review.
+**Provider spend and the quota deviation (operational, not observational).**
+A shared 5-hour provider quota window killed one sweep mid-phase after 1 real
+review; the 15 entries in that sweep returned the runtime's graceful "AI
+review could not run" notices, which carry parseable `ai-output.json`
+verdicts and would poison scoring. That work dir was **quarantined and never
+scored** (its `runs.json` backed up as `runs.json.sweep5-poisoned.bak`). The
+same 15 predeclared entries were then re-run — by an operator-directed
+parallel fill (4 workers, each with its own work dir: the harness shares a
+per-repo clone inside a work dir, so concurrent same-repo entries would race
+on checkout) through the same harness entry point
+(`eval_harness.run_review_for_pr`, `tools_off`, identical env) — **solely to
+obtain the intended usable primary artifacts for the unchanged predeclared
+sample.** To be precise about what this did and did not do: the sample
+remained the same 16 predeclared PRs; the failed and quota-exhausted attempts
+produced no usable primary evidence and entered no quality denominator; no
+entry was substituted, dropped, or duplicated as a scored observation; `n`
+was not inflated and no repeated scored observation exists (one canonical
+primary per entry, one score per condition×repeat). This did technically
+deviate from #1286's literal "no retries or quota-exhaustion re-sweeps"
+execution wording — the deviation is disclosed here as an operational
+recovery, and it does not change the statistical sample or any measured
+outcome: the re-runs replaced unusable evidence for the identical entries the
+plan already fixed, they added no observations.
 
-**Honest spend accounting against the predeclared ceilings:** ~7
-primary-review-equivalents were consumed by the aborted bring-up sweeps and
-the validation review before the canonical set existed (each abort a
-diagnosed configuration failure, listed above); the canonical 16 primary
-reviews then ran clean. Total primary-review attempts ≈ 22–23 against the
-declared 16. Scorer calls: 3 were spent against a misconfigured scoring
-attempt (run dirs resolved outside the runs dir — `_resolve_run_dir`
-requires artifacts inside the runs dir — so 45/48 rows were
-`primary_artifacts_missing`; 2 same-model calls returned `malformed_answer`,
-1 heterogeneous call scored) before the canonical scoring run; the canonical
-dir's own ledger then spent exactly **48/48 calls** (32 same-model + 16
-heterogeneous, repeats deviation below), 54 054 completion tokens against
-the 60 000 ceiling, ~12 min total scoring wall time against the 2 h budget.
-The fresh-runs-dir ledger reset is the runbook's own documented mechanism.
+**Disclosed provider/operational spend (not observations, not sample
+members):** ~7 primary-review-equivalents were consumed by the aborted
+bring-up sweeps and the validation review before the canonical set existed
+(each abort a diagnosed configuration failure, listed above) — operational
+overage against the predeclared 16-primary-review budget, reported here for
+cost honesty; they are not counted as reviews or observations anywhere in
+the quality metrics. Total primary-review wire attempts ≈ 22–23. Scorer
+calls: 3 were spent against a misconfigured scoring attempt (run dirs
+resolved outside the runs dir — `_resolve_run_dir` requires artifacts inside
+the runs dir — so 45/48 rows were `primary_artifacts_missing`; 2 same-model
+calls returned `malformed_answer`, 1 heterogeneous call scored) before the
+canonical scoring run; the canonical dir's own ledger then spent exactly
+**48/48 calls** (32 same-model + 16 heterogeneous, repeats deviation below),
+54 054 completion tokens against the 60 000 ceiling, ~12 min total scoring
+wall time against the 2 h budget. The fresh-runs-dir ledger reset is the
+runbook's own documented mechanism.
 
 **Deviations from the predeclared plan:**
 
@@ -177,6 +190,9 @@ copy), per-row scores in the table below. Primary review mode: `tools_off`
 (driver default; the plan does not pin one).
 
 ## Live quality results (2026-10-30)
+
+**Scorer-quality metrics across the whole sample** (all 16 entries; the
+gate-specific slice follows in the next section):
 
 Evidence states: **same-model 32/32 rows primary_ok, 0 scored; heterogeneous
 16/16 rows primary_ok, 16/16 scored.** Every same-model call returned
@@ -222,17 +238,66 @@ Per-row heterogeneous scores (score / risk / primary verdict):
 | courier-64-clean | clean | 3 | high | request_changes |
 | alert-triage-71-clean | clean | 3 | medium | request_changes |
 
-Reading of the decisive rows:
+## The #1075 merge-gate slice: zero separation at both candidate thresholds
+
+The whole-sample metrics in the previous section are **scorer-quality
+measurements across all 16 entries**; they are not the incremental effect of
+the proposed #1075 merge gate. The gate is only ever consulted for rows that
+are **already eligible on the primary review's own evidence** — per #1075's
+pass contract: a fresh, scored review at the same exact head/config/rubric,
+`review-result` complete/clean enough under existing policy, **no blocking
+findings, no unmet required checks, no partial/unknown tool/requirement
+coverage** — and a high model score never waives those conditions.
+
+Applying that contract to the committed heterogeneous rows: 14 of 16 are
+gate-ineligible by the primary's own verdict (`request_changes` →
+`review_result: "issues"`), several of them additionally carrying blocker
+findings or incomplete required checks. Exactly **2 rows are gate-eligible**,
+verified against every clause of the contract (verdict, blocker count,
+required-checks state, and `partial_coverage: null` / clean required-checks
+in each row's committed `review-coverage.json`):
+
+| gate-eligible row | kind | primary | required checks | coverage | score |
+| --- | --- | --- | --- | --- | --- |
+| `courier-46-61` | **vulnerable** (defect-anchored) | approve | complete | no partial coverage | **4** |
+| `pr-reviewer-action-133-clean` | clean | approve | none required | no partial coverage | **4** |
+
+**Gate-specific interpretation — the primary reading of the live evidence:**
+
+- At **threshold 4**: both eligible rows pass (`score >= 4`) — the gate
+  admits the defective PR and the clean PR alike, so the defective PR merges.
+- At **threshold 5**: both eligible rows fail — the gate blocks everything,
+  including the clean PR.
+- Therefore the gate-eligible sample provides **zero separation between the
+  defective and the clean case at either candidate threshold.** There is no
+  positive evidence supporting threshold 4 or threshold 5 as a gate.
+- The slice is tiny (**n = 2 gate-eligible**); no statistical precision is
+  claimed for it. But the burden here is not precision — it is any positive
+  evidence at all, and there is none: the single gate-eligible defective PR
+  scored identically to the single gate-eligible clean PR.
+
+One structural point for reading the whole-sample numbers correctly: because
+the primary review itself caught 7 of the 8 defective PRs
+(`request_changes`), those rows never reach a confidence gate — the gate's
+exposure is exactly the primary's error surface (approves on defective PRs),
+which this sample caught once. The 7/8 clean-block figure below says
+nothing about that surface; it measures scorer quality across the full
+sample.
+
+## Reading of the decisive rows (full-sample scorer quality)
 
 - **The one false-green is the gate's worst case, realized.** `courier-46-61`
   is a known-defective PR the primary *approved*; the heterogeneous scorer
   scored that review **4** — at candidate threshold 4 it would green-light
   the merge. The only live test of the "scorer catches a wrong approve on a
   defective PR" path failed.
-- **Threshold 4 also blocks 7 of 8 clean PRs** (unnecessary blocks), 3 of
-  them flagged high/critical risk by the scorer itself. Threshold 5 blocks
-  all 8 clean PRs and still scores the defective `courier-46-61` below it
-  (no false green, but the gate would block every clean merge).
+- **Scorer quality across the whole sample (not the gate's incremental
+  block rate):** threshold 4 scores 7 of 8 clean PRs below threshold
+  (unnecessary blocks by the scorer-quality reading), 3 of them flagged
+  high/critical risk by the scorer itself; threshold 5 scores all 8 clean
+  PRs below it. These rows are gate-ineligible on their primary verdicts —
+  the numbers calibrate the scorer, they are not the block rate a #1075
+  gate would have produced.
 - **Risk bands do not track defect severity:** 7/8 vulnerable rows sit
   below the defect-anchored expected band (e.g. `pr-reviewer-action-131-274`
   anchors a blocker-severity defect; the scorer said `high`, expected
@@ -245,21 +310,31 @@ Reading of the decisive rows:
   all 32 same-model calls returned `malformed_answer` at exactly 1024
   completion tokens — the production scorer's fixed `max_tokens`
   (`CONFIDENCE_MAX_TOKENS = 1024`, `src/confidence/scorer.ts`) is consumed
-  by MiniMax-M3.1's thinking channel before any JSON is emitted, because the
-  production scorer request sends no effort field and the model defaults to
-  maximum thinking when unset. The anchoring/variance control therefore
-  cannot function on this model family under the production request shape —
-  and the same incompatibility exists for the production confidence scorer
-  whenever the configured model defaults to unbounded thinking.
+  by MiniMax-M3.1's thinking channel before any JSON is emitted. Under the
+  current production confidence-scorer **Anthropic** request shape, effort
+  is not emitted because scorer-side Anthropic effort support is
+  deliberately disabled: `runConfidenceScorer` passes
+  `anthropicEffortSupported: false` ("No lane opt-ins exist for the
+  scorer"), and `buildModelRequest` emits `output_config.effort` only under
+  that opt-in — the forwarded `profile.reasoningEffort` is dead on the
+  Anthropic wire. (OpenAI-format scorer requests are different: they carry a
+  configured `reasoning_effort` verbatim.) The anchoring/variance control
+  therefore cannot function on this model family under the production
+  Anthropic scorer request shape, and the same incompatibility exists for
+  the production confidence scorer whenever an Anthropic-format scorer is
+  pointed at a model that defaults to unbounded thinking.
 
 ## Recommendation: no-ship (keep advisory; do not enable gating) — now evidence-backed
 
-- **Do not introduce a confidence-based merge gate.** At threshold 4 the
-  gate demonstrably green-lights the exact failure it exists to prevent
-  (1/1 conditional false-green on a known-defective, primary-approved PR)
-  while blocking 7/8 clean PRs; at threshold 5 it blocks every clean PR.
-  Risk bands — the gate's other input — do not track defect severity
-  (7/8 below band).
+- **Do not introduce a confidence-based merge gate.** On the gate-eligible
+  slice — the only rows a #1075 gate would ever see — there is **zero
+  separation between defective and clean at either candidate threshold**
+  (both eligible rows score 4: threshold 4 admits the defective PR,
+  threshold 5 blocks everything). On the whole sample, the scorer-quality
+  readings point the same way: threshold 4's single conditional false-green
+  is the exact failure the gate exists to prevent, 7/8 clean PRs score
+  below it, and risk bands — the gate's other input — do not track defect
+  severity (7/8 below band).
 - **The variance control produced no evidence at all:** 32/32 same-model
   calls malformed. There is no anchoring measurement, so nothing supports
   treating a same-model score as stable even if the heterogeneous arm had
@@ -281,6 +356,10 @@ Reading of the decisive rows:
 - n is 8 defective + 8 clean — wide intervals at this n. That cuts toward
   caution on its own, but the decision does not rest on precision: every
   measured direction is wrong at both candidate thresholds.
+- The gate-eligible slice is smaller still: **n = 2** (one defective, one
+  clean). Zero separation at n = 2 is not a precise estimate of gate error
+  rates — it is the absence of any positive evidence, which is what a
+  go/no-go needs to overcome.
 
 ## How to run the live pilot (operator)
 
@@ -366,7 +445,8 @@ end.
     not by omission.
   - n = 8 defective + 8 clean scored rows; intervals are wide. Numbers are
     triage, not proof — but the no-ship recommendation rests on direction,
-    not precision.
+    not precision. The #1075 gate-eligible slice is n = 2 (see its section
+    above) and shows zero separation at both candidate thresholds.
   - false-green@t is measured on the POST-ceiling score: rows where the
     primary itself reported blocker/major findings are bounded by the
     deterministic ceilings, so the metric is only fully live on rows where
@@ -398,10 +478,17 @@ end.
   operator's `AI_TOKENS_PARAM`, e.g. `max_completion_tokens`); there
   is no cancellation signal — so an endpoint that only accepts
   `max_completion_tokens` would surface as a recorded live failure, not a
-  silent wire difference; and the bridge sends no `reasoning_effort` field
-  (production sends the tier-configured `profile.reasoningEffort` —
-  `src/confidence/scorer.ts` — while the pilot's plan declares no effort,
-  so the bridge passes an empty effort).
+  silent wire difference; and the bridge passes an empty effort where
+  production forwards the tier-configured `profile.reasoningEffort`
+  (`src/confidence/scorer.ts`). On the **Anthropic** wire this difference is
+  inert: the scorer call site hardcodes `anthropicEffortSupported: false`
+  ("No lane opt-ins exist for the scorer") and `buildModelRequest` emits
+  `output_config.effort` only under that opt-in, so production's
+  Anthropic-format scorer request carries no effort field either — the
+  pilot's empty-effort shape matches the effective production wire for this
+  arm. The difference is live only on the **OpenAI-compatible** wire, where
+  production emits a configured `reasoning_effort` verbatim and the bridge
+  does not.
 - Credential isolation: production refuses to send a primary credential to a
   distinct endpoint (`src/confidence/scorer.ts`, the scorer call site), and
   the pilot has no inherited-credential path at all — every live condition
