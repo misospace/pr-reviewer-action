@@ -21,7 +21,7 @@ import {
 import type { ConfidenceProfile } from "../src/routing/tiers.js";
 import { resolveConfidenceProfile } from "../src/routing/tiers.js";
 import { renderIndependentConfidenceBlock } from "../src/publish/publish.js";
-import { CONFIDENCE_CONCERN_TYPES, CONFIDENCE_CONCERN_SEVERITIES, CONFIDENCE_RUBRIC_VERSION } from "../src/confidence/result.js";
+import { CONFIDENCE_CONCERN_TYPES, CONFIDENCE_CONCERN_SEVERITIES } from "../src/confidence/result.js";
 
 function profile(overrides: Partial<ConfidenceProfile> = {}): ConfidenceProfile {
   return {

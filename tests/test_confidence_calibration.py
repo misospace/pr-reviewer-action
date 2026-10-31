@@ -403,9 +403,9 @@ def test_bridge_malformed_risk_becomes_unknown_but_stays_scored(tmp_path: Path) 
 
 def test_bridge_concern_fields_are_bounded(tmp_path: Path) -> None:
     concerns = [
-        {"file": "f" * 1000, "line": 3, "evidence": "e" * 2000},
-        {"file": "g.ts", "line": "not-a-number", "evidence": "ok"},
-        {"file": "h.ts", "line": 7, "evidence": "ok"},
+        {"type": "missed_issue", "severity": "major", "file": "f" * 1000, "line": 3, "evidence": "e" * 2000},
+        {"type": "missed_issue", "severity": "major", "file": "g.ts", "line": "not-a-number", "evidence": "ok"},
+        {"type": "unsupported_finding", "severity": "major", "file": "h.ts", "line": 7, "evidence": "ok"},
     ] * 5
     result = apply_score(raw_answer(3, "medium", "concerns", concerns), tmp_path=tmp_path)
     assert len(result["concerns"]) <= 8
@@ -1447,7 +1447,9 @@ def test_apply_score_masks_over_limit_field_back_under_limit(monkeypatch: pytest
     monkeypatch.setenv("PILOT_TEST_LANE_SECRET", "s")
     work = Path(tempfile.mkdtemp())
     evidence = "x" * 395 + " s " + "y" * 50  # > MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS after masking
-    answer = raw_answer(3, "medium", "fine", concerns=[{"file": "a.txt", "line": None, "evidence": evidence}])
+    answer = raw_answer(3, "medium", "fine", concerns=[{
+        "type": "missed_issue", "severity": "major", "file": "a.txt", "line": None, "evidence": evidence,
+    }])
     result = apply_score_via_bridge(answer, [], {}, "m", work, secret_env_names=["PILOT_TEST_LANE_SECRET"])
     assert len(result["concerns"][0]["evidence"]) <= 400
     assert "super" not in json.dumps(result)
