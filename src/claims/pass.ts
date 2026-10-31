@@ -6,14 +6,17 @@
  * any adequacy test the scan itself could compute is circular (every
  * keyword-bearing sentence is captured by construction), so one keyword hit
  * must never suppress the one pass that can read invariants the vocabulary
- * misses. A model failure never discards a deterministic result — it is
+ * misses. #1380's one exception: a dependency update whose filtered scan left
+ * no candidate claims returns status `filtered` and never spends the model
+ * call on deterministic trivia. A model failure never discards a
+ * deterministic result — it is
  * recorded in the artifact's errors. Always fail-soft: an exception from
  * either half is caught and reported as an empty artifact, never thrown. */
 
-import { extractClaimsDeterministic, isDependencyMetadataSentence } from "./extract.js";
+import { extractClaimsDeterministic, filterDependencyMetadataSentence } from "./extract.js";
 import { runClaimFalsificationModelPass, type ClaimModelPassConfig } from "./model.js";
 import type { SpecialistRequestFn } from "../specialists/runner.js";
-import { MAX_CLAIMS, MAX_ERRORS, type ClaimsArtifact } from "./types.js";
+import { MAX_CLAIMS, MAX_ERRORS, type Claim, type ClaimsArtifact } from "./types.js";
 
 export interface ClaimFalsificationInput {
   title: string;
@@ -21,11 +24,13 @@ export interface ClaimFalsificationInput {
   files: unknown;
   diff: string;
   dependencyUpdate?: boolean;
-  /** When present, one bounded model pass always runs and its claims merge
-   * after the deterministic ones — the deterministic scan is evidence, never
-   * proof the PR body was fully captured (#898 review). Absent/undefined (no
-   * model config resolved) skips it entirely — deterministic-only, never an
-   * error. */
+   /** When present, one bounded model pass runs and its claims merge after
+    * the deterministic ones — the deterministic scan is evidence, never proof
+    * the PR body was fully captured (#898 review). On a dependency update
+    * whose filtered scan left no candidate claims, the pass returns status
+    * `filtered` and the model call is never spent; when semantic claims
+    * remain, the model pass still runs. Absent/undefined (no model config
+    * resolved) skips it entirely — deterministic-only, never an error. */
   model?:
     | {
         config: ClaimModelPassConfig;
@@ -72,11 +77,22 @@ function mergeArtifacts(primary: ClaimsArtifact, extra: ClaimsArtifact): ClaimsA
 }
 
 /** #1380: drop dependency-metadata claims the bounded model pass emitted on
- * top of a dependency-update scan; an artifact left claim-less reports
- * "none" again. */
+ * top of a dependency-update scan; a mixed model claim keeps its semantic
+ * remainder (same clause granularity as the deterministic filter), and an
+ * artifact left claim-less reports "none" again. */
 function filterDependencyMetadataClaims(artifact: ClaimsArtifact): ClaimsArtifact {
-  const claims = artifact.claims.filter((claim) => !isDependencyMetadataSentence(claim.claim));
-  if (claims.length === artifact.claims.length) return artifact;
+  let changed = false;
+  const claims: Claim[] = [];
+  for (const claim of artifact.claims) {
+    const kept = filterDependencyMetadataSentence(claim.claim);
+    if (kept === null) {
+      changed = true;
+      continue;
+    }
+    if (kept !== claim.claim) changed = true;
+    claims.push(kept === claim.claim ? claim : { ...claim, claim: kept });
+  }
+  if (!changed) return artifact;
   return { ...artifact, claims, method: claims.length > 0 ? artifact.method : "none" };
 }
 

@@ -66,12 +66,12 @@ const BOT_TEMPLATE_RE =
 /** #1380: machine-generated dependency-metadata statements, matched by
  * vocabulary shape only (never a bot name, so any forge's automation is
  * covered): an exact version/tag old→new pair, digest presence/absence
- * phrasing, changed-file counts, and automerge/branch-scheduling/rebase
- * status boilerplate. A sentence carrying real compatibility vocabulary
- * ("backwards compatible", "breaking changes") or a normative policy modal
- * ("must never") is exempt — those are the semantic claims the pass exists to
- * falsify. Static patterns over untrusted text: hostile input cannot disable
- * or reshape them. */
+ * phrasing, changed-file/manifest counts, and automerge/branch-scheduling/
+ * rebase status boilerplate. A sentence carrying real compatibility
+ * vocabulary ("backwards compatible", "breaking changes") or a normative
+ * policy modal ("must never") is exempt — those are the semantic claims the
+ * pass exists to falsify. Static patterns over untrusted text: hostile input
+ * cannot disable or reshape them. */
 const DEPENDENCY_VERSION_TOKEN_SRC =
   "(?:\\d+(?:\\.\\d+){2,}[\\w.+-]*|v\\d[\\w.+-]*|[\\w.+-]*[:@/]v?\\d[\\w.+-]*)";
 const DEPENDENCY_VERSION_PAIR_RE = new RegExp(
@@ -88,7 +88,7 @@ const DEPENDENCY_DIGEST_PATTERNS: RegExp[] = [
 ];
 
 const DEPENDENCY_FILE_COUNT_RE =
-  /\b(?:only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+files?\b[^!?]{0,40}?\b(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b[^!?]{0,40}?\bonly\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+files?\b|only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\s+files?\b|only\s+the\s+(?:[\w-]+\s+)?(?:files?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|a\s+single\s+(?:files?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b)/i;
+  /\b(?:only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?|lockfiles?)\b[^!?]{0,40}?\b(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b[^!?]{0,40}?\bonly\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?)\b|only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\s+(?:files?|manifests?|lockfiles?)\b|only\s+the\s+(?:[\w-]+\s+)?(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|a\s+single\s+(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b)/i;
 
 const DEPENDENCY_AUTOMERGE_RE =
   /\b(?:auto[- ]?merg\w*\b[^.!?]*\b(?:disabl\w*|enabl\w*|configured?|by config|schedul\w*|pending|waiting|allow\w*|disallow\w*|retry|checkbox|check this box|turned? (?:on|off))|(?:rebas\w+|schedul\w+)\b[^.!?]*\b(?:rebas\w+|schedul\w+|disabl\w*|enabl\w*|pending|waiting|retry|checkbox|automat\w*|by config|configured)\b)/i;
@@ -103,6 +103,15 @@ const DEPENDENCY_SEMANTIC_EXEMPT_RE =
 const DEPENDENCY_DECORATION_RE = /[`*_]/g;
 const DEPENDENCY_MATCH_MAX_CHARS = 2000;
 
+/** #1380 review: a sentence carrying BOTH machine-generated metadata and a
+ * real semantic assertion ("Only one file changed; the CRD schema is
+ * unchanged") must keep its semantic remainder — whole-sentence dropping
+ * discarded exactly the valuable claim the pass exists to falsify. Clauses
+ * are split on sentence-internal `;` and `, and`/`, but` boundaries only
+ * (never a bare comma, which lives inside ordinary prose); static patterns
+ * over untrusted text, no backtracking-shaped constructs. */
+const DEPENDENCY_CLAUSE_SPLIT_RE = /;\s*|,\s+(?:and|but)\s+/;
+
 export function isDependencyMetadataSentence(sentence: string): boolean {
   if (DEPENDENCY_SEMANTIC_EXEMPT_RE.test(sentence)) return false;
   const normalized = sentence.replace(DEPENDENCY_DECORATION_RE, " ").trim().slice(0, DEPENDENCY_MATCH_MAX_CHARS);
@@ -112,6 +121,21 @@ export function isDependencyMetadataSentence(sentence: string): boolean {
     DEPENDENCY_AUTOMERGE_RE.test(normalized) ||
     DEPENDENCY_DIGEST_PATTERNS.some((pattern) => pattern.test(normalized))
   );
+}
+
+/** Dependency mode's sentence gate: `null` drops the sentence, a string is
+ * what continues into keyword filtering (the sentence unchanged when it
+ * carries no metadata clause, otherwise its surviving semantic clauses
+ * joined). A semantic-exempt sentence is always kept whole — its normative
+ * vocabulary outranks any metadata it also mentions. */
+export function filterDependencyMetadataSentence(sentence: string): string | null {
+  if (DEPENDENCY_SEMANTIC_EXEMPT_RE.test(sentence)) return sentence;
+  const clauses = sentence.split(DEPENDENCY_CLAUSE_SPLIT_RE).map((clause) => clause.trim()).filter(Boolean);
+  if (clauses.length <= 1) return isDependencyMetadataSentence(sentence) ? null : sentence;
+  const kept = clauses.filter((clause) => !isDependencyMetadataSentence(clause));
+  if (kept.length === clauses.length) return sentence;
+  if (kept.length === 0) return null;
+  return kept.join("; ");
 }
 
 /** HTML comments carry bot anchors (`<!-- rebase-check -->`,
@@ -500,9 +524,10 @@ function extractDiffCommentClaims(diffText: string, dependencyUpdate = false): C
         (line) => !(line.path === block.path && line.newLine >= block.firstNewLine && line.newLine <= block.lastNewLine),
       );
       for (const sentence of splitSentences(block.text)) {
-        if (dependencyUpdate && isDependencyMetadataSentence(sentence)) continue;
-        if (!CLAIM_KEYWORDS_RE.test(sentence)) continue;
-        const text = clip(sentence, MAX_CLAIM_CHARS);
+        const kept = dependencyUpdate ? filterDependencyMetadataSentence(sentence) : sentence;
+        if (kept === null) continue;
+        if (!CLAIM_KEYWORDS_RE.test(kept)) continue;
+        const text = clip(kept, MAX_CLAIM_CHARS);
         const key = text.toLowerCase();
         const { items, itemsTruncated: resolvedTruncated } = resolveItems([], tokens, siblings);
         let itemsTruncated = resolvedTruncated;
@@ -561,13 +586,14 @@ function extractPrBodyClaims(body: string, diffText: string, dependencyUpdate = 
   const claims: Claim[] = [];
   for (const sentence of splitSentences(strippedBody)) {
     if (BOT_TEMPLATE_RE.test(sentence)) continue;
-    if (dependencyUpdate && isDependencyMetadataSentence(sentence)) continue;
-    if (!CLAIM_KEYWORDS_RE.test(sentence)) continue;
-    const identifiers = [...sentence.matchAll(INLINE_CODE_RE)].map((m) => m[1]!).filter(Boolean);
-    const tokens = extractFlagTokens(sentence);
+    const kept = dependencyUpdate ? filterDependencyMetadataSentence(sentence) : sentence;
+    if (kept === null) continue;
+    if (!CLAIM_KEYWORDS_RE.test(kept)) continue;
+    const identifiers = [...kept.matchAll(INLINE_CODE_RE)].map((m) => m[1]!).filter(Boolean);
+    const tokens = extractFlagTokens(kept);
     const { items, itemsTruncated } = resolveItems(identifiers, tokens, addedLines);
     claims.push({
-      claim: clip(sentence, MAX_CLAIM_CHARS),
+      claim: clip(kept, MAX_CLAIM_CHARS),
       source: "pr_body",
       scope: clip(identifiers.join(", ") || "the PR's stated invariant", MAX_SCOPE_CHARS),
       items,

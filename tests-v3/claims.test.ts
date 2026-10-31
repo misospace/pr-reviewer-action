@@ -495,6 +495,9 @@ test("#1380: the dependency-metadata filter recognizes metadata vocabulary, neve
     "New digest sha256:abcdef0123456789 is present.",
     "The digest is unchanged.",
     "Only one file changed.",
+    "Only one manifest changed.",
+    "Only the manifests were modified.",
+    "A single manifest changed.",
     "This update touches only 2 files.",
     "Only 3 modified files shipped.",
     "Only the lockfile changed.",
@@ -530,6 +533,45 @@ test("#1380: a normative automerge/rebase policy survives dependency mode even w
     dependencyUpdate: true,
   });
   assert.equal(result.claims.length, 2, JSON.stringify(result.claims.map((c) => c.claim)));
+});
+
+test("#1380 review: the issue's manifest changed-file example is metadata, not a claim", () => {
+  const result = extractClaimsDeterministic({
+    prBody: "Only one manifest changed.",
+    diffText: "",
+    dependencyUpdate: true,
+  });
+  assert.equal(result.claims.length, 0, JSON.stringify(result.claims.map((c) => c.claim)));
+});
+
+test("#1380 review: a mixed metadata+semantic sentence keeps its semantic clause", () => {
+  const result = extractClaimsDeterministic({
+    prBody: "Only one file changed; the CRD schema is unchanged.",
+    diffText: "",
+    dependencyUpdate: true,
+  });
+  const texts = result.claims.map((c) => c.claim);
+  assert.equal(result.claims.length, 1, JSON.stringify(texts));
+  assert.match(texts[0]!, /the CRD schema is unchanged/);
+  assert.ok(!texts[0]!.includes("Only one file changed"), JSON.stringify(texts));
+});
+
+test("#1380 review: a mixed sentence with only metadata clauses is still fully dropped", () => {
+  const result = extractClaimsDeterministic({
+    prBody: "Version changed from 1.2.3 to 4.5.6, and only the lockfile changed.",
+    diffText: "",
+    dependencyUpdate: true,
+  });
+  assert.equal(result.claims.length, 0, JSON.stringify(result.claims.map((c) => c.claim)));
+});
+
+test("#1380 review: a mixed sentence is left untouched outside dependency mode", () => {
+  const result = extractClaimsDeterministic({
+    prBody: "Only one file changed; the CRD schema is unchanged.",
+    diffText: "",
+  });
+  assert.equal(result.claims.length, 1, JSON.stringify(result.claims.map((c) => c.claim)));
+  assert.match(result.claims[0]!.claim, /Only one file changed; the CRD schema is unchanged/);
 });
 
 test("#1380: a pathological underscore/version sentence cannot stall the dependency filter", { timeout: 10000 }, () => {
@@ -940,6 +982,30 @@ test("#1380: model-emitted dependency metadata is dropped by the post-filter, se
   assert.ok(texts.some((t) => t.includes("signed images")), JSON.stringify(texts));
   assert.ok(texts.some((t) => t.includes("CRD schema is unchanged")), JSON.stringify(texts));
   assert.ok(!texts.some((t) => /1\.0\.0|one file changed/.test(t)), JSON.stringify(texts));
+});
+
+test("#1380 review: a mixed model claim keeps its semantic remainder through the post-filter", async () => {
+  const openai = {
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          claims: [{ claim: "Only one file changed; the CRD schema is unchanged" }],
+        }),
+      },
+    }],
+  };
+  const result = await runClaimFalsificationPass({
+    title: "t",
+    body: "No CRDs changed and the CRD schema is unchanged.",
+    files: [],
+    diff: "",
+    dependencyUpdate: true,
+    model: { config: modelConfig, requestFn: stubRequestFn(openai) },
+  });
+  assert.equal(result.status, "ok");
+  const texts = result.artifact.claims.map((c) => c.claim);
+  assert.ok(texts.some((t) => t.includes("CRD schema is unchanged")), JSON.stringify(texts));
+  assert.ok(!texts.some((t) => t.includes("one file changed")), JSON.stringify(texts));
 });
 
 test("#1380: the dependency-mode model pass prompt carries the metadata instruction", async () => {
