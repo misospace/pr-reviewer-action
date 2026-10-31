@@ -2214,6 +2214,10 @@ test("#1335: a symlink hit recovered from carried argv samples the matched token
     ["shell-string argv carried past the line break", ['+subprocess.run(', '+\t"readlink -f x",', '+\tshell=True,', '+)']],
     ["argv moved one element per line", ['+subprocess.check_output([', '+\t"readlink",', '+\tuser_path,', '+])']],
     ["interpreter argv carried past the line break", ['+subprocess.run([', '+\t"bash",', '+\t"-c",', '+\t"readlink -f x",', '+])']],
+    [
+      "hostile carried argv stays inside the sample bounds",
+      ['+subprocess.run(', `+\t"readlink \u0001${"x".repeat(400)}",`, '+\tshell=True,', '+)'],
+    ],
   ];
   for (const [label, lines] of cases) {
     const result = classifyPr({
@@ -2229,6 +2233,16 @@ test("#1335: a symlink hit recovered from carried argv samples the matched token
       (fired?.samples ?? []).some((sample) => sample.includes("readlink")),
       `${label}: the sample must contain the matched token, got ${JSON.stringify(fired?.samples)}`,
     );
+    // The redirected excerpt obeys the same provenance bounds as every
+    // other sample: bounded length, control-character-free.
+    for (const sample of fired?.samples ?? []) {
+      assert.ok(sample.length <= 160, `${label}: sample exceeds MAX_PATH_SAMPLE_CHARS`);
+      for (const ch of sample) {
+        const code = ch.codePointAt(0) ?? 0;
+        assert.ok(code >= 0x20 || ch === " ", `${label}: control char escaped into sample: ${code}`);
+        assert.notEqual(code, 0x7f);
+      }
+    }
   }
 
   // A match visible on the scanned line itself keeps sampling that line —
@@ -2242,6 +2256,32 @@ test("#1335: a symlink hit recovered from carried argv samples the matched token
     (s) => s.signal === "symlink_sensitive" && s.source === "diff",
   );
   assert.deepEqual(singleFired?.samples, ["+os.readlink(user_path)"]);
+
+  // Same-line recovery keeps the raw-line sample too: the excerpt already
+  // shows the token AND the construct that fired. Redirecting these to the
+  // recovered run would drop the diff marker and leave a bare token that
+  // reads like the inert value-position form #1331 stopped firing.
+  const sameLineCases: [string, string, string[]][] = [
+    ["argv token on the scanned line", "tool.py", ['+subprocess.check_output(["readlink", user_path])']],
+    ["backtick command on the scanned line", "tool.sh", ['+target="`readlink -f $1`"']],
+    ["command substitution on the scanned line", "tool.sh", ['+target="$(readlink "$1")"']],
+  ];
+  for (const [label, file, lines] of sameLineCases) {
+    const result = classifyPr({
+      prFiles: files(file),
+      diffText: selfLocationDiff(file, lines),
+      linkedIssues: [],
+    });
+    const fired = result.pathHandlingProvenance.signals.find(
+      (s) => s.signal === "symlink_sensitive" && s.source === "diff",
+    );
+    assert.ok(fired, `${label}: must keep firing`);
+    assert.deepEqual(
+      fired?.samples,
+      [lines[0]],
+      `${label}: the sample must stay the scanned line, got ${JSON.stringify(fired?.samples)}`,
+    );
+  }
 });
 
 // ── Specialist role selection (#633 port) ─────────────────────────────────

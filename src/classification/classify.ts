@@ -1408,19 +1408,34 @@ function pathSample(line: string): string {
   return cleaned.trim().slice(0, MAX_PATH_SAMPLE_CHARS);
 }
 
-function symlinkSample(raw: string, view: string, patterns: readonly RegExp[]): string {
-  /** #1335: the symlink view can match a run RECOVERED from a following
-   * line — an exec call's argument list carried past the line break, or
-   * argv moved one element per line — where the line being scanned alone
-   * would record an excerpt that never contains the matched token (the
-   * pre-#1331 scan sampled the argv line itself, because that line matched
-   * on its own). When the scanned line's own view (the first segment of the
-   * view, which `symlinkCodeView` joins with newlines) does not explain the
-   * hit, the excerpt comes from the recovered run that matched it, under
-   * the same bounds and sanitization as every other sample. Firing,
+function symlinkSample(
+  raw: string,
+  ownLine: string,
+  view: string,
+  patterns: readonly RegExp[],
+): string {
+  /** #1335: the symlink view can match a run CARRIED from a following line —
+   * an exec call's argument list past the line break, or argv moved one
+   * element per line — where the line being scanned alone would record an
+   * excerpt that never contains the matched token (the pre-#1331 scan
+   * sampled the argv line itself, because that line matched on its own).
+   * The excerpt is redirected to the carried run ONLY when the scanned line
+   * cannot explain the hit itself: neither its comment-free text nor its
+   * stripped view (the first segment of the view, which `symlinkCodeView`
+   * joins with newlines) matches. Same-line recovery — a backtick, a
+   * command substitution, an argv-position quoted token on the line —
+   * therefore keeps sampling the raw line, whose excerpt already shows both
+   * the token and the construct that fired; redirecting there would drop
+   * the diff marker and leave a bare token that reads like the inert
+   * value-position form #1331 just stopped firing. The redirected excerpt
+   * obeys the same bounds and sanitization as every other sample. Firing,
    * attribution, and the discount branches are untouched: sample text only. */
   const [own, ...carried] = view.split("\n");
-  if (carried.length > 0 && !matchesAny(own ?? "", patterns)) {
+  if (
+    carried.length > 0 &&
+    !matchesAny(own ?? "", patterns) &&
+    !matchesAny(ownLine, patterns)
+  ) {
     for (const run of carried) {
       if (matchesAny(run, patterns)) return pathSample(run);
     }
@@ -2173,7 +2188,9 @@ export function evaluatePathHandlingSignals(
               className,
               source,
               chunkFile,
-              symlinkClass ? symlinkSample(raw, scanLine, patterns) : pathSample(raw),
+              symlinkClass
+                ? symlinkSample(raw, commentFree[index] ?? "", scanLine, patterns)
+                : pathSample(raw),
             );
             fired = true;
           }
