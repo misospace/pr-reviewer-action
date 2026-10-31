@@ -47,7 +47,7 @@ import {
   type ClaimsArtifact,
 } from "./types.js";
 
-const CLAIM_KEYWORDS_RE =
+export const CLAIM_KEYWORDS_RE =
   /\b(only|never|always|must|validat(?:es?|ion)|cross[- ]check(?:ed|s)?|fails?[- ]closed|bound to|byte[- ]identical|identical|guarantees?|ensures?|invariant|cannot|no longer|at most|exactly|every|each|all (?:consumers|callers|call sites)|parity|unchanged|backward[- ]compatible)\b/i;
 
 const COMMENT_LINE_RE = /^(\/\/|\/\*\*?|\*(?!\/)|#(?!!)|"""|'''|--(?:\s|$)|<!--)/;
@@ -88,7 +88,7 @@ const DEPENDENCY_DIGEST_PATTERNS: RegExp[] = [
 ];
 
 const DEPENDENCY_FILE_COUNT_RE =
-  /\b(?:only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?|lockfiles?)\b[^!?]{0,40}?\b(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b[^!?]{0,40}?\bonly\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?)\b|only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\s+(?:files?|manifests?|lockfiles?)\b|only\s+the\s+(?:[\w-]+\s+)?(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|a\s+single\s+(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b)/i;
+  /\b(?:only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?|lockfiles?)\b[^!?]{0,40}?\b(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b[^!?]{0,40}?\bonly\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?|lockfiles?)\b|only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\s+(?:files?|manifests?|lockfiles?)\b|only\s+the\s+(?:[\w-]+\s+)?(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|a\s+single\s+(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b)/i;
 
 const DEPENDENCY_AUTOMERGE_RE =
   /\b(?:auto[- ]?merg\w*\b[^.!?]*\b(?:disabl\w*|enabl\w*|configured?|by config|schedul\w*|pending|waiting|allow\w*|disallow\w*|retry|checkbox|check this box|turned? (?:on|off))|(?:rebas\w+|schedul\w+)\b[^.!?]*\b(?:rebas\w+|schedul\w+|disabl\w*|enabl\w*|pending|waiting|retry|checkbox|automat\w*|by config|configured)\b)/i;
@@ -107,10 +107,13 @@ const DEPENDENCY_MATCH_MAX_CHARS = 2000;
  * real semantic assertion ("Only one file changed; the CRD schema is
  * unchanged") must keep its semantic remainder — whole-sentence dropping
  * discarded exactly the valuable claim the pass exists to falsify. Clauses
- * are split on sentence-internal `;` and `, and`/`, but` boundaries only
- * (never a bare comma, which lives inside ordinary prose); static patterns
- * over untrusted text, no backtracking-shaped constructs. */
-const DEPENDENCY_CLAUSE_SPLIT_RE = /;\s*|,\s+(?:and|but)\s+/;
+ * are split on sentence-internal `;` and conjunction boundaries (`and`,
+ * `but`, `while`, with or without a leading comma): a false split is benign
+ * because every half is re-tested independently and an all-semantic sentence
+ * is returned unchanged, while failing to split fails toward dropping the
+ * semantic claim. Static patterns over untrusted text, no backtracking-
+ * shaped constructs. */
+const DEPENDENCY_CLAUSE_SPLIT_RE = /;\s*|\s+(?:and|but|while)\s+/;
 
 export function isDependencyMetadataSentence(sentence: string): boolean {
   if (DEPENDENCY_SEMANTIC_EXEMPT_RE.test(sentence)) return false;

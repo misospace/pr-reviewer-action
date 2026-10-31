@@ -13,7 +13,7 @@
  * recorded in the artifact's errors. Always fail-soft: an exception from
  * either half is caught and reported as an empty artifact, never thrown. */
 
-import { extractClaimsDeterministic, filterDependencyMetadataSentence } from "./extract.js";
+import { extractClaimsDeterministic, filterDependencyMetadataSentence, CLAIM_KEYWORDS_RE } from "./extract.js";
 import { runClaimFalsificationModelPass, type ClaimModelPassConfig } from "./model.js";
 import type { SpecialistRequestFn } from "../specialists/runner.js";
 import { MAX_CLAIMS, MAX_ERRORS, type Claim, type ClaimsArtifact } from "./types.js";
@@ -24,13 +24,13 @@ export interface ClaimFalsificationInput {
   files: unknown;
   diff: string;
   dependencyUpdate?: boolean;
-   /** When present, one bounded model pass runs and its claims merge after
-    * the deterministic ones — the deterministic scan is evidence, never proof
-    * the PR body was fully captured (#898 review). On a dependency update
-    * whose filtered scan left no candidate claims, the pass returns status
-    * `filtered` and the model call is never spent; when semantic claims
-    * remain, the model pass still runs. Absent/undefined (no model config
-    * resolved) skips it entirely — deterministic-only, never an error. */
+  /** When present, one bounded model pass runs and its claims merge after
+   * the deterministic ones — the deterministic scan is evidence, never proof
+   * the PR body was fully captured (#898 review). On a dependency update
+   * whose filtered scan left no candidate claims, the pass returns status
+   * `filtered` and the model call is never spent; when semantic claims
+   * remain, the model pass still runs. Absent/undefined (no model config
+   * resolved) skips it entirely — deterministic-only, never an error. */
   model?:
     | {
         config: ClaimModelPassConfig;
@@ -78,17 +78,28 @@ function mergeArtifacts(primary: ClaimsArtifact, extra: ClaimsArtifact): ClaimsA
 
 /** #1380: drop dependency-metadata claims the bounded model pass emitted on
  * top of a dependency-update scan; a mixed model claim keeps its semantic
- * remainder (same clause granularity as the deterministic filter), and an
- * artifact left claim-less reports "none" again. */
+ * remainder (same clause granularity as the deterministic filter). A
+ * rewritten remainder must still carry claim vocabulary: clause splitting
+ * can rescue a metadata clause that matches no pattern on its own, and
+ * without the deterministic scan's keyword gate it would surface as a
+ * standalone trivia claim. Claims dedup by normalized text, and an artifact
+ * left claim-less reports "none" again. */
 function filterDependencyMetadataClaims(artifact: ClaimsArtifact): ClaimsArtifact {
   let changed = false;
   const claims: Claim[] = [];
+  const seen = new Set<string>();
   for (const claim of artifact.claims) {
     const kept = filterDependencyMetadataSentence(claim.claim);
-    if (kept === null) {
+    if (kept === null || (kept !== claim.claim && !CLAIM_KEYWORDS_RE.test(kept))) {
       changed = true;
       continue;
     }
+    const key = normalizeClaimText(kept);
+    if (seen.has(key)) {
+      changed = true;
+      continue;
+    }
+    seen.add(key);
     if (kept !== claim.claim) changed = true;
     claims.push(kept === claim.claim ? claim : { ...claim, claim: kept });
   }
@@ -118,7 +129,17 @@ export async function runClaimFalsificationPass(input: ClaimFalsificationInput):
     });
     const modelArtifact = dependencyUpdate ? filterDependencyMetadataClaims(fallback.artifact) : fallback.artifact;
     if (deterministic.claims.length === 0) {
-      return { artifact: modelArtifact, status: fallback.status, errorKind: fallback.errorKind, error: fallback.error };
+      // The scan produced no claims (possibly via an error): the model
+      // artifact stands alone, but the scan's errors stay visible.
+      return {
+        artifact: {
+          ...modelArtifact,
+          errors: [...deterministic.errors, ...modelArtifact.errors].slice(0, MAX_ERRORS),
+        },
+        status: fallback.status,
+        errorKind: fallback.errorKind,
+        error: fallback.error,
+      };
     }
     // Deterministic claims exist: the model pass augments them. Whatever it
     // returns, the deterministic claims stand — a model failure is recorded

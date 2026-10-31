@@ -565,6 +565,28 @@ test("#1380 review: a mixed sentence with only metadata clauses is still fully d
   assert.equal(result.claims.length, 0, JSON.stringify(result.claims.map((c) => c.claim)));
 });
 
+test("#1380 review: bare conjunction clauses split too — 'and' keeps the semantic half", () => {
+  const result = extractClaimsDeterministic({
+    prBody: "Only one file changed and the CRD schema is unchanged.",
+    diffText: "",
+    dependencyUpdate: true,
+  });
+  const texts = result.claims.map((c) => c.claim);
+  assert.equal(result.claims.length, 1, JSON.stringify(texts));
+  assert.match(texts[0]!, /the CRD schema is unchanged/);
+});
+
+test("#1380 review: a 'while' clause keeps its semantic half", () => {
+  const result = extractClaimsDeterministic({
+    prBody: "This update touches only 2 files while keeping the schema unchanged.",
+    diffText: "",
+    dependencyUpdate: true,
+  });
+  const texts = result.claims.map((c) => c.claim);
+  assert.equal(result.claims.length, 1, JSON.stringify(texts));
+  assert.match(texts[0]!, /keeping the schema unchanged/);
+});
+
 test("#1380 review: a mixed sentence is left untouched outside dependency mode", () => {
   const result = extractClaimsDeterministic({
     prBody: "Only one file changed; the CRD schema is unchanged.",
@@ -1006,6 +1028,67 @@ test("#1380 review: a mixed model claim keeps its semantic remainder through the
   const texts = result.artifact.claims.map((c) => c.claim);
   assert.ok(texts.some((t) => t.includes("CRD schema is unchanged")), JSON.stringify(texts));
   assert.ok(!texts.some((t) => t.includes("one file changed")), JSON.stringify(texts));
+});
+
+test("#1380 review: a rewritten model remainder without claim vocabulary is not rescued as trivia", async () => {
+  const openai = {
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          claims: [
+            { claim: "Only one file changed; the new digest is present" },
+            { claim: "Only one file changed; the CRD schema is unchanged" },
+          ],
+        }),
+      },
+    }],
+  };
+  const result = await runClaimFalsificationPass({
+    title: "t",
+    body: "No CRDs changed and the CRD schema is unchanged.",
+    files: [],
+    diff: "",
+    dependencyUpdate: true,
+    model: { config: modelConfig, requestFn: stubRequestFn(openai) },
+  });
+  assert.equal(result.status, "ok");
+  const texts = result.artifact.claims.map((c) => c.claim);
+  assert.ok(texts.some((t) => t.includes("CRD schema is unchanged")), JSON.stringify(texts));
+  assert.ok(!texts.some((t) => t.includes("digest is present")), JSON.stringify(texts));
+});
+
+test("#1380 review: the scan-error model path dedups rewritten remainders and carries scan errors", async () => {
+  const openai = {
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          claims: [
+            { claim: "Only one file changed; the CRD schema is unchanged" },
+            { claim: "The CRD schema is unchanged" },
+          ],
+        }),
+      },
+    }],
+  };
+  const brokenBody = new Proxy(new String("Only one file changed. No CRDs changed and the CRD schema is unchanged."), {
+    get(target, property) {
+      if (property === "replace") return (): string => { throw new Error("scan exploded"); };
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  }) as unknown as string;
+  const result = await runClaimFalsificationPass({
+    title: "t",
+    body: brokenBody,
+    files: [],
+    diff: "",
+    dependencyUpdate: true,
+    model: { config: modelConfig, requestFn: stubRequestFn(openai) },
+  });
+  assert.equal(result.status, "ok");
+  const texts = result.artifact.claims.map((c) => c.claim);
+  assert.equal(texts.filter((t) => /CRD schema is unchanged/i.test(t)).length, 1, JSON.stringify(texts));
+  assert.ok(result.artifact.errors.some((e) => e.includes("scan exploded")), JSON.stringify(result.artifact.errors));
 });
 
 test("#1380: the dependency-mode model pass prompt carries the metadata instruction", async () => {
