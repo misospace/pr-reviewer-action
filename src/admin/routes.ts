@@ -8,6 +8,7 @@
 import type { AdminAuthenticator } from "./auth.js";
 import type { AdminMetricsRegistry } from "./metrics.js";
 import { SECRET_KEY_ALTERNATION } from "../context/redact.js";
+import { redactSecretShapes } from "../context/secret-shape.js";
 import {
   validatePrKey,
   validateReason,
@@ -44,37 +45,17 @@ const JSON = "application/json; charset=utf-8";
 const fixed = (status: number, body: unknown): AdminRouteResponse => ({ status, body, contentType: JSON });
 const denied = (status: number): AdminRouteResponse => fixed(status, { error: status === 503 ? "admin unavailable" : "unauthorized" });
 
-/** Credential SHAPES. The leading guard allows a separator (`_`, `-`, `.`,
- * quotes) before the token but not a letter or digit, so `prefix_sk-…` is
- * caught while an ordinary word that merely contains `sk-` is not. */
-const SECRET_SHAPE = /(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[A-Za-z0-9_-]{20,}|Bearer\s+\S+|Basic\s+[A-Za-z0-9+/=]{8,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/g;
-/** `key=value` / `key: value` credential assignments. The key vocabulary is
- * DERIVED from the canonical `SECRET_KEY_ALTERNATION` (src/context/redact.ts,
- * #1170) — the single source of truth behind every key-name rule in the
- * repository — plus admin-only names the canonical list does not carry
- * (`passwd`, `pwd`, `credential`, `authorization`; `access_token` /
- * `refresh_token` are already covered by the canonical `token` alternative).
- * A second hand-copied vocabulary is exactly the drift class #1170 closed:
- * canonical names (`access_key`, `client_key`) must redact here too. The
- * diagnostics route drops credential-shaped KEYS, but a free-form string
- * (readiness `detail`) carries no key structure — the assignment rule is
- * what protects it. The value may be quoted: JSON-shaped exception and DSN
- * blobs quote theirs. */
-const CREDENTIAL_ASSIGNMENT = new RegExp(
-  `((?:${SECRET_KEY_ALTERNATION}|passwd|pwd|credential|authorization)["']?\\s*[:=]\\s*)("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[^"'\\s,;}]+)`,
-  "gi",
-);
-/** Diagnostics KEYS that are dropped wholesale. Same derived vocabulary as
- * `CREDENTIAL_ASSIGNMENT` (unanchored, case-insensitive — `token` alone
- * already covers `access_token`/`refresh_token`/`auth_token` spellings),
+/** Diagnostics KEYS that are dropped wholesale. The vocabulary is the
+ * canonical `SECRET_KEY_ALTERNATION` (src/context/redact.ts, #1170) plus
+ * admin-only names the canonical list does not carry (`passwd`, `pwd`,
+ * `credential`, `auth`), applied unanchored and case-insensitive — `token`
+ * alone already covers `access_token`/`refresh_token`/`auth_token` spellings,
  * so a canonical credential key (`access_key`, `client_key`) never reaches
- * the response as a key, whatever its value shape. */
+ * the response as a key, whatever its value shape. The diagnostics route
+ * drops credential-shaped KEYS, but a free-form string (readiness `detail`)
+ * carries no key structure — the shared `redactSecretShapes` assignment rule
+ * is what protects it. */
 const SENSITIVE_DIAGNOSTIC_KEY = new RegExp(`(?:${SECRET_KEY_ALTERNATION}|passwd|pwd|credential|auth)`, "i");
-/** URL userinfo: `scheme://user:pass@host`. The credential part may contain
- * `/` (base64) and the host may contain `@`, so the match runs to the LAST
- * `@` of the token. The scheme repetition is bounded so the pattern cannot
- * go quadratic on a long run of lowercase characters. */
-const USERINFO_URL = /([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s]+@/gi;
 /** Control, format, line, and paragraph characters — ANSI escapes, bidi
  * overrides, zero-width joiners. Replaced, never rendered. */
 const UNSAFE_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
@@ -89,12 +70,6 @@ const MAX_DETAIL_INPUT = 1024;
  * the documented 64-character limit: a longer name is REFUSED outright, not
  * truncated into a different name the seam never declared. */
 const PUBLIC_NAME = new RegExp(`^[A-Za-z0-9._-]{1,${MAX_COMPONENT_NAME}}$`);
-
-/** Replace credential-shaped substrings, credential assignments, and URL
- * userinfo. Pattern-based defense in depth, not a secret oracle. */
-function redactSecretShapes(value: string): string {
-  return value.replace(SECRET_SHAPE, "[REDACTED]").replace(CREDENTIAL_ASSIGNMENT, "$1[REDACTED]").replace(USERINFO_URL, "$1[REDACTED]@");
-}
 
 /** Bounded, sanitized component name for the AUTHENTICATED surface. */
 function boundedComponentName(name: unknown): string {

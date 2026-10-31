@@ -25,9 +25,11 @@ const VERDICTS: readonly AdminVerdict[] = ["approve", "request_changes"];
 const FAILURES: readonly AdminFailureCategory[] = ["timeout", "provider", "executor", "publication", "cancelled", "unknown"];
 const STOP_REASONS: readonly AdminToolStopReason[] = ["completed", "budget", "denied", "error", "unknown"];
 const PROVENANCE = ["provider-reported", "configured-estimate", "unknown", "mixed"] as const;
+const MCP_OUTCOMES = ["ok", "denied", "invalid", "error", "too_large"] as const;
+export type AdminMcpOutcome = (typeof MCP_OUTCOMES)[number];
 const FIXED_VALUES: Readonly<Record<string, readonly string[]>> = {
   state: STATES, verdict: VERDICTS, category: FAILURES, role: ROLES,
-  stop_reason: STOP_REASONS, outcome: ["retry", "failure", "accepted", "rejected"],
+  stop_reason: STOP_REASONS, outcome: ["retry", "failure", "accepted", "rejected", ...MCP_OUTCOMES],
   provenance: PROVENANCE, kind: ["input", "output", "cache_read", "cache_write"],
 };
 const DEFINITIONS: readonly AdminMetricDefinition[] = [
@@ -49,6 +51,8 @@ const DEFINITIONS: readonly AdminMetricDefinition[] = [
   { name: "pr_reviewer_admin_webhook_verifications_total", help: "Webhook verification outcomes", kind: "counter", labelNames: ["outcome"] },
   { name: "pr_reviewer_admin_cancellations_total", help: "Run cancellations", kind: "counter", labelNames: [] },
   { name: "pr_reviewer_admin_supersessions_total", help: "Run supersessions", kind: "counter", labelNames: [] },
+  { name: "pr_reviewer_admin_mcp_requests_total", help: "Operator MCP tool calls by bounded outcome", kind: "counter", labelNames: ["outcome"] },
+  { name: "pr_reviewer_admin_mcp_auth_failures_total", help: "Operator MCP authentication failures", kind: "counter", labelNames: [] },
 ];
 
 export interface AdminMetricsOptions { readonly maxSeries?: number; readonly allowlistCap?: number; readonly allowedModels?: readonly string[]; readonly allowedExecutors?: readonly string[] }
@@ -77,6 +81,10 @@ export class AdminMetricsRegistry {
     // there rather than spuriously bumping overflow at construction.
     this.update("pr_reviewer_admin_metrics_overflow_total", {}, 0, false);
     if (this.maxSeries >= 2) this.update("pr_reviewer_admin_audit_failures_total", {}, 0, false);
+    // The MCP auth-failure counter is pre-created for the same reason: it
+    // must stay recordable even when the cap is already full (a flood of
+    // denied requests is exactly when it matters most).
+    if (this.maxSeries >= 3) this.update("pr_reviewer_admin_mcp_auth_failures_total", {}, 0, false);
   }
 
   increment(name: string, labels: Readonly<Record<string, string>> = {}, amount = 1): void { this.update(name, labels, amount, true); }
@@ -158,6 +166,15 @@ export class AdminMetricsRegistry {
   recordWebhook(outcome: AdminWebhookOutcome): void { this.increment("pr_reviewer_admin_webhook_verifications_total", { outcome }); }
   recordCancellation(): void { this.increment("pr_reviewer_admin_cancellations_total"); }
   recordSupersession(): void { this.increment("pr_reviewer_admin_supersessions_total"); }
+  /** #1349 operator MCP observability: tool-call outcomes through the fixed
+   * enum (cardinality cannot grow from identifiers) and authentication
+   * failures as a zero-label counter. Amounts only — never tokens, request
+   * bodies, or identifiers. */
+  recordMcpRequest(outcome: AdminMcpOutcome): void {
+    if (!MCP_OUTCOMES.includes(outcome)) return;
+    this.increment("pr_reviewer_admin_mcp_requests_total", { outcome });
+  }
+  recordMcpAuthFailure(): void { this.increment("pr_reviewer_admin_mcp_auth_failures_total"); }
 
   renderPrometheus(): string {
     const lines: string[] = [];
