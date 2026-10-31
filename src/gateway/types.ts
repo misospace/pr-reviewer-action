@@ -366,7 +366,9 @@ export function validatePerRequestBudget(
  * (actuals) is what the accounting records. The gateway passes its
  * operator-trusted per-request bound here (never a worker figure); the
  * field stays an explicit input because the durable #736 backend re-seeds
- * historical rows whose bound was recorded at reserve time. */
+ * historical rows whose bound was recorded at reserve time. The
+ * idempotency identity is the PAIR `(runId, reservationId)` (#1361), so
+ * the id only needs to be unique WITHIN the run. */
 export interface BudgetReservationInput {
   readonly reservationId: string;
   readonly runId: string;
@@ -415,26 +417,36 @@ export interface BudgetLedger {
   /** The caps this ledger enforces (the same limits capability tokens must
    * carry). */
   caps(): GatewayBudgetLimits;
-  /** Reserve admission for one request BEFORE the wire call. A retry with
-   * the same `reservationId` after a crash/restart returns the SAME row —
-   * no double-charge — and refuses a different identity under the same id
-   * (`reservation_mismatch`). A reservation that would exceed any cap is
-   * refused with `budget_exhausted`; a reservation for a generation older
-   * than the run's current one is refused with `cancelled`. */
+  /** Reserve admission for one request BEFORE the wire call. The
+   * idempotency identity is the PAIR `(runId, reservationId)`, never the
+   * reservation id alone (#1361): a retry of the same pair after a
+   * crash/restart returns the SAME row — no double-charge — and refuses a
+   * different identity under the same pair (`reservation_mismatch`), but a
+   * DIFFERENT run using the same reservation id gets its OWN row. No run
+   * can occupy another run's reservation ids or learn whether they exist.
+   * A reservation that would exceed any cap is refused with
+   * `budget_exhausted`; a reservation for a generation older than the
+   * run's current one is refused with `cancelled`. */
   reserve(input: BudgetReservationInput): BudgetReserveResult;
   /** Settle a live reservation with the actual usage: the committed
    * accounting switches from the estimate to the actuals (`requestCount`
-   * must be at least 1). When the actuals exceed the reserved estimate
-   * bounds, the row is flagged `overran` — admission gated on the
-   * estimate; the ledger records reality and makes the overshoot visible.
-   * Re-committing a committed row with IDENTICAL actuals is an idempotent
-   * no-op (a crash between commit and response replays safely); any other
-   * settle-state conflict refuses with `reservation_mismatch`. */
-  commit(reservationId: string, actual: BudgetActualUsage): BudgetSettleResult;
+   * must be at least 1). The row is addressed by the PAIR
+   * `(runId, reservationId)` — the settle lookup is run-scoped exactly
+   * like the replay, so an id one run shares with another can never be
+   * settled across runs (`unknown_reservation` when the pair matches no
+   * row). When the actuals exceed the reserved estimate bounds, the row is
+   * flagged `overran` — admission gated on the estimate; the ledger
+   * records reality and makes the overshoot visible. Re-committing a
+   * committed row with IDENTICAL actuals is an idempotent no-op (a crash
+   * between commit and response replays safely); any other settle-state
+   * conflict refuses with `reservation_mismatch`. */
+  commit(runId: string, reservationId: string, actual: BudgetActualUsage): BudgetSettleResult;
   /** Refund a live reservation (failed request): the reserved estimate is
-   * removed from the accounting. Re-refunding is an idempotent no-op;
-   * refunding a committed row refuses with `reservation_mismatch`. */
-  refund(reservationId: string): BudgetSettleResult;
+   * removed from the accounting. The row is addressed by the PAIR
+   * `(runId, reservationId)` like {@link commit}. Re-refunding is an
+   * idempotent no-op; refunding a committed row refuses with
+   * `reservation_mismatch`. */
+  refund(runId: string, reservationId: string): BudgetSettleResult;
   /** Current accounting totals ACROSS EVERY run the ledger accounts:
    * committed rows count ACTUALS, live reserved rows count ESTIMATES,
    * refunded rows count nothing. This is the controller-wide diagnostic;
@@ -526,7 +538,10 @@ export interface GatewayCallInput {
   /** The caller-supplied idempotency identity of the usage record this call
    * produces (e.g. `<runId>:<seq>`). */
   readonly usageId: string;
-  /** The caller-supplied idempotency id of the budget reservation. */
+  /** The caller-supplied idempotency id of the budget reservation; unique
+   * within the run — the ledger's idempotency identity is the PAIR
+   * `(runId, reservationId)` (#1361), so another run using the same id is
+   * a distinct reservation, not a conflict. */
   readonly reservationId: string;
   readonly platform: "github" | "forgejo";
   readonly installationId: string;

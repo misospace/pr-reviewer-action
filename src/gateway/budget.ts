@@ -13,11 +13,16 @@
  *   RUN's allowance, so the projection is scoped to the run: a shared
  *   controller ledger never lets one run consume another run's requests,
  *   tokens, or cost.
- * - CALLER-SUPPLIED IDEMPOTENCY: the reservation id comes from the caller
- *   (e.g. `<runId>:<attempt>`). A retry with the same id after a crash or
- *   restart returns the SAME row — the estimate is counted once — and a
- *   different identity under the same id is a `reservation_mismatch`
- *   refusal, never a quiet overwrite.
+ * - CALLER-SUPPLIED IDEMPOTENCY, RUN-SCOPED (#1361): the idempotency
+ *   identity is the PAIR `(runId, reservationId)`, never the reservation
+ *   id alone. A retry of the same pair after a crash or restart returns
+ *   the SAME row — the estimate is counted once — and a different
+ *   identity under the same pair is a `reservation_mismatch` refusal,
+ *   never a quiet overwrite. A DIFFERENT run using the same reservation
+ *   id gets its OWN row: one run's rows are invisible to another run's
+ *   idempotency lookup, so an untrusted worker can neither pre-occupy
+ *   the ids another run would later use (cross-run squatting was a
+ *   liveness nuisance) nor probe whether a guessed id exists.
  * - RESTART-SAFE SHAPE: the ledger is an in-memory tests/dev backend (the
  *   same posture as `InMemoryControlPlaneStore`), but the durable PAYLOAD
  *   it produces — `durableState()`, ONE object carrying the reservation
@@ -82,15 +87,23 @@ export interface InMemoryBudgetLedgerOptions {
    * — the API makes "persist the accounting but forget the cancellation"
    * a visible act rather than an omission, because a cancelled run's
    * outstanding older-generation tokens must stay refused after a restart.
-   * Every row is validated; a duplicate reservation id (or a duplicate run
-   * id in the generation half) is refused at construction. */
+   * Every row is validated; a duplicate `(runId, reservationId)` PAIR (or
+   * a duplicate run id in the generation half) is refused at construction
+   * — the same reservation id under two different runs is two distinct
+   * rows (#1361). */
   readonly state?: BudgetDurableState | undefined;
 }
 
 export class InMemoryBudgetLedger implements BudgetLedger {
   readonly #caps: GatewayBudgetLimits;
   readonly #now: () => number;
-  readonly #rows: Map<string, BudgetReservationRow>;
+  /** Reservation rows grouped by run: the OUTER key is the `runId`, the
+   * INNER key the caller-supplied `reservationId`. Grouping is what makes
+   * the idempotency identity the PAIR `(runId, reservationId)` (#1361) —
+   * a replay, a mismatch, and a settle are all SAME-RUN lookups, so one
+   * run can neither occupy another run's reservation ids nor learn whether
+   * they exist. */
+  readonly #rows: Map<string, Map<string, BudgetReservationRow>>;
   readonly #generations: Map<string, number>;
 
   constructor(caps: GatewayBudgetLimits, options: InMemoryBudgetLedgerOptions = {}) {
@@ -123,12 +136,13 @@ export class InMemoryBudgetLedger implements BudgetLedger {
         if (checked === null) {
           throw new BudgetLedgerError("budget ledger seed row is malformed");
         }
-        if (this.#rows.has(checked.reservationId)) {
+        const runRows = this.#rowsForRun(checked.runId);
+        if (runRows.has(checked.reservationId)) {
           throw new BudgetLedgerError(
-            `budget ledger: reservation id '${checked.reservationId}' provided more than once`,
+            `budget ledger: reservation id '${checked.reservationId}' provided more than once for run '${checked.runId}'`,
           );
         }
-        this.#rows.set(checked.reservationId, checked);
+        runRows.set(checked.reservationId, checked);
         const recorded = this.#generations.get(checked.runId);
         if (recorded === undefined || checked.generation > recorded) {
           this.#generations.set(checked.runId, checked.generation);
@@ -165,20 +179,23 @@ export class InMemoryBudgetLedger implements BudgetLedger {
     if (!isSafeNonNegativeInteger(input.estimatedCostMicros)) {
       return refusal("invalid_request", "reservation estimated cost must be a safe non-negative integer");
     }
-    // Idempotent replay first: the same id under the same identity returns
-    // the SAME row — the estimate is never counted twice, whatever the
-    // row's state (the gateway refuses to re-call the provider for an
-    // already-settled row; the ledger's job is to hand back the truth).
-    const existing = this.#rows.get(reservationId);
+    // Idempotent replay first: the same `(runId, reservationId)` pair
+    // under the same identity returns the SAME row — the estimate is never
+    // counted twice, whatever the row's state (the gateway refuses to
+    // re-call the provider for an already-settled row; the ledger's job is
+    // to hand back the truth). The lookup is scoped to the run (#1361):
+    // another run holding the same id is invisible here and cannot force a
+    // mismatch against its row — a squatter neither blocks the victim nor
+    // learns whether the id is taken.
+    const existing = this.#rows.get(runId)?.get(reservationId);
     if (existing !== undefined) {
       if (
-        existing.runId !== runId ||
         existing.generation !== input.generation ||
         existing.modelProfile !== modelProfile ||
         existing.estimatedTokens !== input.estimatedTokens ||
         existing.estimatedCostMicros !== input.estimatedCostMicros
       ) {
-        return refusal("reservation_mismatch", "reservation id is already recorded with a different identity");
+        return refusal("reservation_mismatch", "reservation id is already recorded for this run with a different identity");
       }
       return { ok: true, reservation: existing };
     }
@@ -214,15 +231,20 @@ export class InMemoryBudgetLedger implements BudgetLedger {
       reservedAtMs: this.#now(),
       settledAtMs: 0,
     });
-    this.#rows.set(reservationId, row);
+    this.#rowsForRun(runId).set(reservationId, row);
     return { ok: true, reservation: row };
   }
 
   /** {@inheritDoc BudgetLedger.commit} */
-  commit(reservationId: string, actual: BudgetActualUsage): BudgetSettleResult {
-    const row = this.#rows.get(reservationId);
-    if (row === undefined) {
-      return refusal("unknown_reservation", "reservation id is not recorded by this ledger");
+  commit(runId: string, reservationId: string, actual: BudgetActualUsage): BudgetSettleResult {
+    // Settle is a SAME-RUN lookup like the replay (#1361): the row is
+    // addressed by the PAIR `(runId, reservationId)`, so a caller can
+    // never settle a row that merely carries a reservation id its own run
+    // also uses. A malformed or unseen run id simply matches no row.
+    const runRows = this.#rows.get(runId);
+    const row = runRows?.get(reservationId);
+    if (runRows === undefined || row === undefined) {
+      return refusal("unknown_reservation", "reservation id is not recorded by this ledger for this run");
     }
     if (
       !isSafeNonNegativeInteger(actual.requestCount) ||
@@ -254,15 +276,16 @@ export class InMemoryBudgetLedger implements BudgetLedger {
       overran,
       settledAtMs: this.#now(),
     });
-    this.#rows.set(reservationId, settled);
+    runRows.set(reservationId, settled);
     return { ok: true, row: settled };
   }
 
   /** {@inheritDoc BudgetLedger.refund} */
-  refund(reservationId: string): BudgetSettleResult {
-    const row = this.#rows.get(reservationId);
-    if (row === undefined) {
-      return refusal("unknown_reservation", "reservation id is not recorded by this ledger");
+  refund(runId: string, reservationId: string): BudgetSettleResult {
+    const runRows = this.#rows.get(runId);
+    const row = runRows?.get(reservationId);
+    if (runRows === undefined || row === undefined) {
+      return refusal("unknown_reservation", "reservation id is not recorded by this ledger for this run");
     }
     if (row.state === "committed") {
       return refusal("reservation_mismatch", "reservation was committed and cannot be refunded");
@@ -275,7 +298,7 @@ export class InMemoryBudgetLedger implements BudgetLedger {
       state: "refunded",
       settledAtMs: this.#now(),
     });
-    this.#rows.set(reservationId, settled);
+    runRows.set(reservationId, settled);
     return { ok: true, row: settled };
   }
 
@@ -306,7 +329,9 @@ export class InMemoryBudgetLedger implements BudgetLedger {
 
   /** {@inheritDoc BudgetLedger.rows} */
   rows(): readonly BudgetReservationRow[] {
-    return Object.freeze([...this.#rows.values()]);
+    return Object.freeze(
+      [...this.#rows.values()].flatMap((runRows) => [...runRows.values()]),
+    );
   }
 
   /** {@inheritDoc BudgetLedger.generationRows} */
@@ -322,6 +347,19 @@ export class InMemoryBudgetLedger implements BudgetLedger {
     return Object.freeze({ rows: this.rows(), generations: this.generationRows() });
   }
 
+  /** The reservation rows of ONE run, creating the run's group on first
+   * write. Every read and write of a reservation goes through the
+   * `(runId, reservationId)` pair — never the reservation id alone
+   * (#1361). */
+  #rowsForRun(runId: string): Map<string, BudgetReservationRow> {
+    let runRows = this.#rows.get(runId);
+    if (runRows === undefined) {
+      runRows = new Map();
+      this.#rows.set(runId, runRows);
+    }
+    return runRows;
+  }
+
   /** Committed rows count ACTUALS, live reserved rows count ESTIMATES,
    * refunded rows count nothing. With a `runId` the totals are scoped to
    * that run (this is what admission enforces — a run-scoped budget); with
@@ -329,17 +367,19 @@ export class InMemoryBudgetLedger implements BudgetLedger {
    * diagnostic). */
   private totals(runId?: string): BudgetUsageTotals {
     const totals = { requestCount: 0, tokens: 0, costMicros: 0 };
-    for (const row of this.#rows.values()) {
-      if (row.state === "refunded") continue;
-      if (runId !== undefined && row.runId !== runId) continue;
-      if (row.state === "committed") {
-        totals.requestCount += row.actualRequestCount;
-        totals.tokens += row.actualTokens;
-        totals.costMicros += row.actualCostMicros;
-      } else {
-        totals.requestCount += 1;
-        totals.tokens += row.estimatedTokens;
-        totals.costMicros += row.estimatedCostMicros;
+    for (const [groupedRunId, runRows] of this.#rows) {
+      if (runId !== undefined && groupedRunId !== runId) continue;
+      for (const row of runRows.values()) {
+        if (row.state === "refunded") continue;
+        if (row.state === "committed") {
+          totals.requestCount += row.actualRequestCount;
+          totals.tokens += row.actualTokens;
+          totals.costMicros += row.actualCostMicros;
+        } else {
+          totals.requestCount += 1;
+          totals.tokens += row.estimatedTokens;
+          totals.costMicros += row.estimatedCostMicros;
+        }
       }
     }
     return totals;
