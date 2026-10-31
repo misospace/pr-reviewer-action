@@ -11,8 +11,10 @@ import {
   createCancellationScope,
   leakedEnvKeys,
   pgrepAvailable,
+  processCanExecute,
   runProcess,
   terminateProcessTree,
+  terminateProcessTreeByPid,
 } from "../src/runtime/index.js";
 
 const execFileBounded = promisify(execFile);
@@ -20,6 +22,17 @@ const execFileBounded = promisify(execFile);
 function workspace(): string {
   return mkdtempSync(join(tmpdir(), "v3-runtime-"));
 }
+
+/**
+ * Launch-side readiness in these fixtures used a hard 5s ceiling, which
+ * assumes an unloaded runner: a cold `bash`/`node` boot plus one pid-file
+ * write under CPU starvation in a constrained sandbox can exceed it with no
+ * product fault (#1377). The waits poll for success and return the moment
+ * the file lands, so the generous ceiling costs nothing when healthy and
+ * still fails, naming the missing pid file, when the workload truly never
+ * launches.
+ */
+const LOAD_TOLERANT_FILE_WAIT_MS = 30_000;
 
 function sleepTreeScript(dir: string, name: string): { args: string[]; pidFiles: { child: string; grandchild: string } } {
   const child = join(dir, `${name}.child.pid`);
@@ -33,16 +46,36 @@ function sleepTreeScript(dir: string, name: string): { args: string[]; pidFiles:
   };
 }
 
-function pidDead(pid: number): boolean {
+/**
+ * A tree node counts as terminated when it can no longer EXECUTE — the
+ * property the cleanup owns. A killed-but-unreaped zombie keeps answering
+ * `kill(pid, 0)` (forever, under a PID 1 that never reaps orphans, e.g. a
+ * container init), so the raw signal probe is not the property. The runtime
+ * predicate is the single definition; the dedicated zombie fixtures below
+ * pin it against `/proc` ground truth, so these call sites are not circular.
+ */
+function terminated(pid: number): boolean {
+  return !processCanExecute(pid);
+}
+
+/** `/proc/<pid>/stat` field 3 (`state`), or "" when unreadable. */
+function procState(pid: number): string {
   try {
-    process.kill(pid, 0);
-    return false;
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return "";
+    return stat.slice(close + 1).trim().split(/\s+/)[0] ?? "";
   } catch {
-    return true;
+    return "";
   }
 }
 
-async function waitForFile(path: string, timeoutMs = 5000): Promise<void> {
+const hasProc = (() => {
+  const probe = procState(process.pid);
+  return probe.length > 0;
+})();
+
+async function waitForFile(path: string, timeoutMs = LOAD_TOLERANT_FILE_WAIT_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -151,8 +184,11 @@ test("timeout terminates the child AND its grandchild (spawn-then-hang fixture)"
   await waitForFile(tree.pidFiles.grandchild);
   const childPid = Number.parseInt(readFileSync(tree.pidFiles.child, "utf8"), 10);
   const grandchildPid = Number.parseInt(readFileSync(tree.pidFiles.grandchild, "utf8"), 10);
-  assert.ok(pidDead(childPid), "leader should be dead");
-  assert.ok(pidDead(grandchildPid), "grandchild should be dead — wrapper-only cleanup is the #634 bug");
+  assert.ok(terminated(childPid), "leader must be terminated (dead or unreaped zombie — it cannot execute)");
+  assert.ok(
+    terminated(grandchildPid),
+    "grandchild must be terminated (dead or unreaped zombie) — wrapper-only cleanup is the #634 bug",
+  );
   assert.ok(result.termination !== null);
   assert.equal(result.termination!.survived.length, 0);
 });
@@ -229,7 +265,7 @@ test("descendant that escapes the process group is swept by the snapshot", async
 
   await waitForFile(escapedPidFile);
   const escapedPid = Number.parseInt(readFileSync(escapedPidFile, "utf8"), 10);
-  assert.ok(pidDead(escapedPid), "detached (new process group) descendant must still be reaped");
+  assert.ok(terminated(escapedPid), "detached (new process group) descendant must still be reaped");
   assert.ok(result.termination !== null);
   assert.ok(
     result.termination!.snapshot.includes(escapedPid),
@@ -589,7 +625,12 @@ test("parent SIGTERM during concurrent work: bounded finalize + tree cleanup (en
         fs.writeFileSync(${JSON.stringify(join(dir, "child-outcome.json"))}, JSON.stringify({ status: r.status }));
         fs.writeFileSync(${JSON.stringify(marker)}, 'done');
       },
-      deadlineMs: 5000,
+      // The finalize deadline is the handler's OWN bound on tree cleanup, and
+      // cleanup is a few seconds at most; 5s assumed an unloaded runner and
+      // let CPU starvation cut the deadline before the finalize wrote its
+      // markers (#1377). Still a hard bound — the end-to-end property under
+      // test is boundedness, and a hanging finalize still loses the race.
+      deadlineMs: 15000,
     });
     handler.attach();
   `;
@@ -617,11 +658,121 @@ test("parent SIGTERM during concurrent work: bounded finalize + tree cleanup (en
 
     const childPid = Number.parseInt(readFileSync(tree.pidFiles.child, "utf8"), 10);
     const grandchildPid = Number.parseInt(readFileSync(tree.pidFiles.grandchild, "utf8"), 10);
-    assert.ok(pidDead(childPid), "cancelled parent's child tree must be terminated");
-    assert.ok(pidDead(grandchildPid), "cancelled parent's grandchild tree must be terminated");
+    assert.ok(terminated(childPid), "cancelled parent's child tree must be terminated");
+    assert.ok(terminated(grandchildPid), "cancelled parent's grandchild tree must be terminated");
   } finally {
     // Idempotent on success (the tree is already down); on any failure path
     // it kills the probe and its 60s sleeper instead of leaking them.
     await child.abort();
+  }
+});
+
+// ── zombie-aware termination (#1377) ────────────────────────────────────
+
+/**
+ * The boundary token itself, not a benign stand-in (#252): a real
+ * unreaped zombie. `bash` backgrounds a short `sleep` and then blocks in
+ * its own foreground command — bash does not reap background jobs while a
+ * foreground command holds it, so the exited child stays a ZOMBIE. A zombie
+ * keeps answering `kill(pid, 0)`, and an orphan re-parented to a PID 1 that
+ * never `wait()`s (a container init or bare shell) stays that way forever:
+ * the exact false-survivor shape that made the tree fixtures red in
+ * constrained sandboxes while CI's reaping init hid the bug.
+ */
+function zombieHolderScript(pidFile: string): string[] {
+  return [
+    "-c",
+    `sleep 0.2 & echo $! > ${JSON.stringify(pidFile)}; sleep 60`,
+  ];
+}
+
+/** Poll `/proc` until the pid is a confirmed zombie, or fail with the last
+ * observed state so a host that reaps too fast is explicit, not silent. */
+async function awaitZombie(pid: number, label: string): Promise<void> {
+  const deadline = Date.now() + LOAD_TOLERANT_FILE_WAIT_MS;
+  let state = "";
+  while (Date.now() < deadline) {
+    state = procState(pid);
+    if (state === "Z") return;
+    if (state === "") {
+      throw new Error(`${label}: pid ${pid} vanished before it could be observed as a zombie`);
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+  throw new Error(`${label}: pid ${pid} never reached zombie state (last observed state '${state}')`);
+}
+
+const NO_PROC_SKIP_REASON =
+  "no /proc on this platform: zombie-vs-alive distinction is Linux-only by design, the kill-probe fallback keeps the historical strict semantics (covered by every other fixture here)";
+
+test("processCanExecute is false for a killed-but-unreaped zombie (ground truth /proc)", async (t) => {
+  if (!(await requireTreeTooling(t))) return;
+  if (!hasProc) {
+    t.skip(NO_PROC_SKIP_REASON);
+    return;
+  }
+  const dir = workspace();
+  const zombiePidFile = join(dir, "zombie.pid");
+  const holder = runProcess({
+    file: "bash",
+    args: zombieHolderScript(zombiePidFile),
+    env: buildChildEnv(["PATH", "HOME"]),
+    timeoutMs: 30_000,
+  });
+  try {
+    await waitForFile(zombiePidFile);
+    const zombiePid = Number.parseInt(readFileSync(zombiePidFile, "utf8"), 10);
+    await awaitZombie(zombiePid, "zombie-holder");
+    assert.equal(procState(zombiePid), "Z", "fixture precondition: an unreaped zombie");
+    assert.equal(
+      processCanExecute(zombiePid),
+      false,
+      "a zombie cannot execute: it is terminated, even while kill(pid, 0) keeps answering",
+    );
+    assert.ok(holder.pid !== null);
+    assert.equal(processCanExecute(holder.pid), true, "the still-running holder must stay counted as alive");
+  } finally {
+    await holder.abort();
+  }
+});
+
+test("a zombie inside the snapshot is reported unreaped, never as a survivor", async (t) => {
+  if (!(await requireTreeTooling(t))) return;
+  if (!hasProc) {
+    t.skip(NO_PROC_SKIP_REASON);
+    return;
+  }
+  const dir = workspace();
+  const zombiePidFile = join(dir, "in-tree-zombie.pid");
+  // The leader IGNORES TERM, so it stays alive (and non-reaping) through the
+  // whole grace: the zombie is guaranteed to sit in the snapshot at
+  // verification time regardless of how fast the host's init reaps orphans.
+  // The KILL escalation ends the leader, exactly the path a TERM-ignoring
+  // tree takes.
+  const leader = runProcess({
+    file: "bash",
+    args: ["-c", `sleep 0.2 & echo $! > ${JSON.stringify(zombiePidFile)}; trap '' TERM; sleep 60`],
+    env: buildChildEnv(["PATH", "HOME"]),
+  });
+  try {
+    await waitForFile(zombiePidFile);
+    const zombiePid = Number.parseInt(readFileSync(zombiePidFile, "utf8"), 10);
+    await awaitZombie(zombiePid, "in-tree zombie");
+    assert.ok(leader.pid !== null);
+    const report = await terminateProcessTreeByPid(leader.pid, { graceMs: 500 });
+    assert.ok(report.swept, "the pgrep sweep ran (preflight guarantees it here)");
+    assert.ok(
+      report.snapshot.includes(zombiePid),
+      "the unreaped zombie is still a child of the leader and must be in the pre-signal snapshot",
+    );
+    assert.deepEqual(report.survived, [], "a zombie cannot execute: it must never be reported as a survivor");
+    for (const pid of report.unreaped) {
+      assert.ok(report.snapshot.includes(pid), "unreaped entries come from the snapshot");
+    }
+    assert.equal(processCanExecute(zombiePid), false, "the sweep must leave the zombie unable to execute");
+  } finally {
+    await leader.abort();
   }
 });

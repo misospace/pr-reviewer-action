@@ -14,6 +14,7 @@ export {
   MAX_TREE_NODES,
   pgrepAvailable,
   preflightTreeCleanup,
+  processCanExecute,
   terminateProcessTree,
   terminateProcessTreeByPid,
   type TerminationReport,
