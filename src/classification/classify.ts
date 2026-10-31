@@ -935,6 +935,274 @@ function isDocumentationPath(path: string): boolean {
   return DOCUMENTATION_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
+/** Markdown documentation: the only file type whose prose the navigation-link
+ * discount reads. The discount's syntax model — inline links, fenced code
+ * blocks, inline code spans — is Markdown syntax. Other documentation types
+ * (`rst`, `txt`, `adoc`) keep the ordinary scan and fail toward detection: a
+ * Markdown-link-shaped string in an `.rst` file is literal text, not rendered
+ * navigation (#1354). */
+function isMarkdownPath(path: string): boolean {
+  return path.toLowerCase().endsWith(".md");
+}
+
+/** #1354: an ordinary parent-relative Markdown navigation link
+ * (`[Guide](../README.md)`) is repo-internal navigation in rendered
+ * documentation, not a filesystem traversal surface. In DOCUMENTATION chunks
+ * only, the `traversal_literal` scan view blanks the destination of a
+ * Markdown inline link whose target is a relative path; everything else on
+ * the line — including traversal prose in the link text — keeps its existing
+ * semantics, and a suppressed destination is recorded as a discounted
+ * `diff_nav_link` signal rather than silently dropped. Executable files keep
+ * the unblanked view and fail toward detection: a quoted traversal literal
+ * there fires even when it is Markdown-link-shaped. Scheme (`https:`),
+ * protocol-relative (`//`), root-absolute (`/`) and fragment (`#`)
+ * destinations are left as-is: they are not repo-internal navigation.
+ *
+ * The discount is a PROSE rule: it applies to rendered documentation text
+ * only. A line inside a fenced code block, and a link-shaped match inside an
+ * inline code span, are example/quoted code, not prose — they keep the
+ * ordinary traversal semantics and fail toward detection (#1354).
+ *
+ * The discount is also a MARKDOWN rule: the syntax model above exists only in
+ * Markdown, so it applies to Markdown documentation only. A link-shaped
+ * string in another documentation type (`rst`, `txt`, `adoc`) is literal
+ * text, not rendered navigation, and keeps its ordinary scan semantics.
+ *
+ * The blanked region is a DESTINATION, not the paren group: a group that
+ * CommonMark does not read as a destination is not navigation either, and an
+ * escaped `\[` is not a link opener at all. The label reads backslash escapes
+ * too, so an escaped `\]` cannot close a label and start a link. See
+ * `markdownDestinationSpan` and `escapedMarkdownLinkOpener`.
+ *
+ * Known limit of a diff-local Markdown view, accepted because reading it the
+ * other way would cost the feature it exists for: an INDENTED code block and
+ * a fence opened ABOVE the shown hunk are invisible here, so their link-shaped
+ * content is read as prose. The exposed surface stays bounded to a traversal
+ * inside a relative link destination — the exact shape this discount is for. */
+const MARKDOWN_INLINE_LINK_PATTERN = /!?\[(?:[^\]\\]|\\.)*\]\([^)]*\)/g;
+
+/** A Markdown fence line: an optional container prefix (a blockquote marker
+ * or a list marker), then whitespace, then a run of 3 or more backticks or 3
+ * or more tildes. The run's character and length are the fence's identity.
+ *
+ * The indentation limit is loose on purpose. CommonMark allows up to three
+ * spaces of indent RELATIVE to the container, and the container's indent (a
+ * list item, a blockquote) is not in the diff, so a fence nested in a list
+ * can carry four spaces or more, and a fence can open on the same line as a
+ * list bullet. Reading such a line as a fence keeps the block's content code,
+ * which fails toward detection: a fence recognized too eagerly turns a
+ * discount into a fired signal, never the other way round. */
+const MARKDOWN_FENCE_PATTERN = /^\s*(?:>\s*)*(?:(?:[-*+]|\d+[.)])\s+)?\s*(`{3,}|~{3,})/;
+
+/** The open fence of one diff stream. */
+type MarkdownFence = { char: string; length: number };
+
+function isRelativeNavigationDestination(destination: string): boolean {
+  const unwrapped = destination.startsWith("<") && destination.endsWith(">")
+    ? destination.slice(1, -1)
+    : destination;
+  if (unwrapped === "") return false;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(unwrapped)) return false;
+  if (unwrapped.startsWith("//")) return false;
+  if (unwrapped.startsWith("/")) return false;
+  if (unwrapped.startsWith("#")) return false;
+  return true;
+}
+
+/** Markdown's inline whitespace (CommonMark's blank characters, minus the
+ * newlines a diff line cannot carry). */
+function isMarkdownInlineBlank(char: string): boolean {
+  return char === " " || char === "\t" || char === "\f" || char === "\r";
+}
+
+/** A C0 control character or DEL. Neither can appear in a destination, and a
+ * line that carries one inside a link-shaped group is not rendered
+ * navigation: the scan keeps firing (#1354, fail toward detection). */
+function isControlCharacter(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return code < 0x20 || code === 0x7f;
+}
+
+/** The destination inside an inline link's paren group, as [start, end)
+ * offsets in the group text, or `null` when the group holds no destination.
+ *
+ * CommonMark: a destination is either the angle form, which carries no
+ * unescaped blank or control character and ends at its `>`, or a run that
+ * stops at the first blank character. What follows a destination is a title or
+ * ordinary text — never a navigation target — so it is NOT blanked: the
+ * traversal in `[Guide](guide.md "see ../../etc/passwd")` is a title, and the
+ * traversal in `[a](see open("../../etc/passwd")` is code text in a group that
+ * was never a destination at all (#1354).
+ *
+ * A backslash escapes nothing in the plain form: a raw blank ends the run
+ * whether or not it is escaped, so `[a](../x\ ../../etc/passwd)` has the
+ * destination `../x\` and the traversal after it keeps the scan — a link shape
+ * whose destination ends at an escaped blank renders no link that could reach
+ * outside the repo (#1354, fail toward detection). */
+function markdownDestinationSpan(group: string): [number, number] | null {
+  let start = 0;
+  while (start < group.length && isMarkdownInlineBlank(group[start] ?? "")) start += 1;
+  if (start >= group.length) return null;
+  if (group[start] === "<") {
+    for (let index = start + 1; index < group.length; index += 1) {
+      const char = group[index] ?? "";
+      if (char === "\\") {
+        index += 1;
+        continue;
+      }
+      if (char === ">") return [start, index + 1];
+      if (isMarkdownInlineBlank(char) || isControlCharacter(char)) return null;
+    }
+    return null;
+  }
+  let end = start;
+  while (end < group.length) {
+    const char = group[end] ?? "";
+    if (isMarkdownInlineBlank(char)) break;
+    if (isControlCharacter(char)) return null;
+    end += 1;
+  }
+  return end > start ? [start, end] : null;
+}
+
+/** A `[` preceded by an odd number of backslashes is an escaped literal
+ * bracket, not a link opener (CommonMark), so the link shape it starts is
+ * literal text and keeps the ordinary scan (#1354). */
+function escapedMarkdownLinkOpener(text: string, bracket: number): boolean {
+  let backslashes = 0;
+  for (let index = bracket - 1; index >= 0 && text[index] === "\\"; index -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function blankMarkdownNavDestinations(text: string): string {
+  const codeSpans = inlineCodeSpans(text);
+  return text.replace(MARKDOWN_INLINE_LINK_PATTERN, (...args: unknown[]) => {
+    const match = args[0] as string;
+    // The match offset is the second-to-last callback argument, because the
+    // last one is the whole string. Reading it by position keeps this guard
+    // correct if the link pattern ever gains a capture group, which would
+    // otherwise shift the arguments and silence the code-span rule.
+    const offset = args[args.length - 2] as number;
+    // A link-shaped match that starts inside an inline code span is quoted
+    // code, not a navigation link: it is left as-is, so the traversal literal
+    // inside it keeps its ordinary semantics.
+    if (codeSpans.some(([start, end]) => offset >= start && offset < end)) return match;
+    // An escaped `\[` (or `\![`) opens no link, so nothing on its right is a
+    // destination.
+    const bracket = match.startsWith("!") ? offset + 1 : offset;
+    if (escapedMarkdownLinkOpener(text, bracket)) return match;
+    // The destination group is the paren group after the label's `]`: the
+    // label itself may contain parentheses (`[docs (see ../x)](guide.md)`), so
+    // the boundary is the `](` pair, not the first `(`.
+    const open = match.lastIndexOf("](");
+    const group = match.slice(open + 2, match.length - 1);
+    const span = markdownDestinationSpan(group);
+    if (span === null) return match;
+    const destination = group.slice(span[0], span[1]);
+    if (!isRelativeNavigationDestination(destination)) return match;
+    return (
+      match.slice(0, open + 2 + span[0]) +
+      " ".repeat(span[1] - span[0]) +
+      match.slice(open + 2 + span[1])
+    );
+  });
+}
+
+/** The inline code spans of a line, as [start, end) index ranges. A backtick
+ * run opens a span and the NEXT run of EXACTLY the same length closes it; a
+ * run with no such partner is literal text. The discount is a prose rule, so
+ * a link-shaped match inside a code span is quoted code and keeps its
+ * ordinary scan semantics — the code-span reading fails toward detection. */
+function inlineCodeSpans(text: string): [number, number][] {
+  const runs: { start: number; length: number }[] = [];
+  const pattern = /`+/g;
+  let match = pattern.exec(text);
+  while (match !== null) {
+    runs.push({ start: match.index, length: match[0].length });
+    match = pattern.exec(text);
+  }
+  const spans: [number, number][] = [];
+  let open: { start: number; length: number } | null = null;
+  for (const run of runs) {
+    if (open === null) {
+      open = run;
+      continue;
+    }
+    // A run of a different length cannot close the span: it is its content.
+    if (run.length !== open.length) continue;
+    spans.push([open.start, run.start + run.length]);
+    open = null;
+  }
+  return spans;
+}
+
+/** One step of the Markdown fence state machine for a single diff stream: is
+ * this line code, and what fence (if any) is open afterwards. With no open
+ * fence, a fence-shaped line is an opener — but a BACKTICK fence whose info
+ * string contains a backtick is not an opener (CommonMark), so it stays
+ * ordinary content. With an open fence, a closer repeats the SAME character,
+ * is at least as long as the opener's run, and has nothing but whitespace
+ * after it; a fence-shaped line with the other character neither closes the
+ * open fence nor opens a second one — it is ordinary content inside the open
+ * fence, so the block stays open. */
+function markdownFenceStep(
+  content: string,
+  open: MarkdownFence | null,
+): { isCode: boolean; open: MarkdownFence | null } {
+  const match = MARKDOWN_FENCE_PATTERN.exec(content);
+  if (open === null) {
+    if (match === null) return { isCode: false, open: null };
+    const run = match[1] ?? "";
+    const info = content.slice(match[0].length);
+    if (run.startsWith("`") && info.includes("`")) return { isCode: false, open: null };
+    return { isCode: true, open: { char: run[0] ?? "`", length: run.length } };
+  }
+  if (match === null) return { isCode: true, open };
+  const run = match[1] ?? "";
+  if (run[0] !== open.char || run.length < open.length) return { isCode: true, open };
+  if (content.slice(match[0].length).trim() !== "") return { isCode: true, open };
+  return { isCode: true, open: null };
+}
+
+/** Which chunk lines are Markdown PROSE, per line. A `+` line belongs to the
+ * NEW file only, a `-` line to the OLD file only, and a context line to BOTH,
+ * so one fence state is tracked per stream. A context line is prose only when
+ * BOTH streams say prose: disagreement is read as code, the conservative
+ * direction (more scrutiny, never fewer). A line with no diff marker (a hunk
+ * header, an index line) is not content, and the fence state carries across
+ * it, so a fence opened in one hunk still covers the next. The discount is a
+ * prose rule: code contexts keep their ordinary scan and fail toward
+ * detection. */
+function markdownProseLines(lines: readonly string[]): boolean[] {
+  // A line with no diff marker is not content, and it keeps the prose view:
+  // git prints the section heading after the second `@@`, and that heading is
+  // file text, so a navigation link in it is navigation like any other.
+  const prose: boolean[] = new Array(lines.length).fill(true);
+  let openNew: MarkdownFence | null = null;
+  let openOld: MarkdownFence | null = null;
+  lines.forEach((line, index) => {
+    const marker = diffMarker(line);
+    if (marker === "\u0000") return;
+    const content = line.slice(1);
+    let newCode = false;
+    let oldCode = false;
+    if (marker === "+" || marker === " ") {
+      const step = markdownFenceStep(content, openNew);
+      openNew = step.open;
+      newCode = step.isCode;
+    }
+    if (marker === "-" || marker === " ") {
+      const step = markdownFenceStep(content, openOld);
+      openOld = step.open;
+      oldCode = step.isCode;
+    }
+    prose[index] = !newCode && !oldCode;
+  });
+  return prose;
+}
+
 /** The symlink-operation class name, shared with `symlinkCodeView`, which
  * decides what counts as executable text for it (#1331). */
 const SYMLINK_SENSITIVE_CLASS = "symlink_sensitive";
@@ -1730,7 +1998,7 @@ function constructionOperandSpans(lines: string[], index: number): string {
  * files, and bounded line excerpts. */
 export interface PathHandlingSignal {
   signal: string;
-  source: "filename" | "diff" | "diff_test_file" | "filename_test_file" | "diff_comment";
+  source: "filename" | "diff" | "diff_test_file" | "filename_test_file" | "diff_comment" | "diff_nav_link";
   files: string[];
   samples: string[];
 }
@@ -1763,8 +2031,9 @@ function recordSignal(
 
 /** Bounded provenance for the path-handling signal model — why path handling
  * fired, and which signals were deliberately discounted: test-file backing
- * (`diff_test_file` / `filename_test_file`) and prose mentions that survive
- * only inside a comment (`diff_comment`, #960). */
+ * (`diff_test_file` / `filename_test_file`), prose mentions that survive
+ * only inside a comment (`diff_comment`, #960), and parent-relative Markdown
+ * navigation link destinations (`diff_nav_link`, #1354). */
 export interface PathHandlingProvenance {
   fired: boolean;
   signals: PathHandlingSignal[];
@@ -1828,6 +2097,17 @@ export function evaluatePathHandlingSignals(
         ? isDocumentationPath(chunkFile)
         : filenames.length > 0 && filenames.every((name) => isDocumentationPath(name));
 
+    // #1354: the navigation-link discount is a PROSE rule and a MARKDOWN
+    // rule, so it applies only to Markdown prose lines. Fenced example
+    // content is code and keeps the ordinary traversal semantics; other
+    // documentation types keep the ordinary scan entirely.
+    const navLinkMarkdown =
+      chunkFile !== null
+        ? isDocumentationPath(chunkFile) && isMarkdownPath(chunkFile)
+        : filenames.length > 0 &&
+          filenames.every((name) => isDocumentationPath(name) && isMarkdownPath(name));
+    const proseLines = navLinkMarkdown ? markdownProseLines(lines) : null;
+
     // #1331: a backtick opens a command substitution except in the JavaScript
     // family; `$(...)` executes only where the language evaluates it at
     // string-evaluation time (shell family, PowerShell — see
@@ -1846,22 +2126,44 @@ export function evaluatePathHandlingSignals(
       // lexical classes drop every quoted span, the symlink class drops them
       // only where they are inert data (#1331), the rest scan as-is.
       const symlinkClass = className === SYMLINK_SENSITIVE_CLASS;
+      const traversalClass = className === "traversal_literal";
+      const navLinkScope = traversalClass && proseLines !== null;
       let fired = false;
       for (let index = 0; index < neutralized.length; index++) {
         const raw = lines[index] ?? "";
         // commentFree is the sole comment authority; the code views only
         // additionally handle quoted spans.
         const base = neutralized[index] ?? "";
+        // #1354: the navigation-link discount applies to Markdown prose
+        // lines only. A fenced or inline-code line scans unblanked, exactly
+        // like an executable file, and so does a non-Markdown documentation
+        // file.
+        const prose = proseLines === null ? false : (proseLines[index] ?? false);
         const scanLine = codeOnly
           ? stripQuotedSpans(base)
           : symlinkClass
             ? symlinkCodeView(neutralized, index, backtickIsCommand, substitutionIsCommand)
-            : base;
+            : navLinkScope && prose
+              ? blankMarkdownNavDestinations(base)
+              : base;
         if (matchesAny(scanLine, patterns)) {
           if (!fired) {
             recordSignal(buckets, className, source, chunkFile, pathSample(raw));
             fired = true;
           }
+          continue;
+        }
+        // #1354: a hit that survives outside comments but is suppressed only
+        // by the navigation-link view is a Markdown nav destination, not a
+        // traversal literal. Record it as discounted (never fired, never
+        // silently dropped) so the decision is explainable from the artifact
+        // alone. A code line is not prose: it must fire, not be discounted.
+        if (
+          navLinkScope && prose &&
+          matchesAny(commentFree[index] ?? "", patterns) &&
+          !matchesAny(blankMarkdownNavDestinations(commentFree[index] ?? ""), patterns)
+        ) {
+          recordSignal(discountedBuckets, className, "diff_nav_link", chunkFile, pathSample(raw));
           continue;
         }
         // #960: a hit that survives in the raw line but is gone once comments

@@ -1156,6 +1156,326 @@ test("#960: a `../` that appears only in a comment or doc comment is not a trave
   }
 });
 
+// ── #1354: parent-relative Markdown navigation is not traversal ───────────
+
+test("#1354: an ordinary parent-relative Markdown navigation link is not a traversal literal", () => {
+  const negatives: [string, string][] = [
+    // The issue repro: a plain relative link in a documentation file.
+    ["+[Guide](../README.md)\n", "docs/guide.md"],
+    ["+[Guide](../README.md)\n", "README.md"],
+    // An image reference is the same navigation syntax.
+    ["+![Diagram](../assets/diagram.png)\n", "docs/guide.md"],
+    // Multi-level parent-relative navigation inside a sentence.
+    ["+See the [setup guide](../../docs/setup.md) before running.\n", "docs/guide.md"],
+    // Angle-bracket destination form.
+    ["+[Guide](<../README.md>)\n", "docs/guide.md"],
+    // A parenthesised label does not confuse destination extraction: the
+    // traversal prose in the label keeps firing, so this fires (preserved
+    // below); a benign label still discounts cleanly.
+    ["+[docs (see the guide)](../README.md)\n", "docs/guide.md"],
+  ];
+  for (const [diff, filename] of negatives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", diff);
+    assert.ok(!result.riskFlags.includes("path_handling_changes"), diff);
+    assert.equal(result.pathHandlingProvenance.fired, false, diff);
+    // The decision is recorded, not silently dropped.
+    assert.ok(
+      result.pathHandlingProvenance.discounted.some(
+        (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+      ),
+      `${diff}: expected a discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+
+  // The suppression is scoped to the link destination: traversal prose in the
+  // link TEXT, standalone traversal prose, real traversal in source, and
+  // non-relative destinations all keep their existing semantics (#968).
+  const preserved: [string, string][] = [
+    // Standalone traversal prose is not navigation syntax (#968 regression).
+    ["+see ../etc/passwd\n", "README.md"],
+    // Traversal prose inside the link text is still prose about traversal.
+    ["+[see ../etc/passwd](guide.md)\n", "README.md"],
+    // Real traversal in executable source still fires.
+    ['+open("../../etc/passwd")\n', "src/app.py"],
+    // Traversal prose on the same line as a navigation link still fires.
+    ["+see [guide](../README.md) and ../etc/passwd\n", "README.md"],
+    // A remote URL destination is not repo-internal navigation.
+    ["+docs live at [guide](https://example.com/a/../guide.md)\n", "README.md"],
+    // A root-absolute destination is not parent-relative navigation.
+    ["+[home](/index.md)\n+see ../etc/passwd\n", "docs/guide.md"],
+    // A parenthesised label does not hide its own traversal prose: the label
+    // text keeps its existing semantics.
+    ["+[docs (see ../etc/passwd)](guide.md)\n", "README.md"],
+    // Executable files fail toward detection (#749): a quoted traversal
+    // literal fires even when it is Markdown-link-shaped. The suppression is
+    // scoped to documentation chunks, not a quoted-string strip.
+    ['+open("[a](../../etc/passwd)")\n', "src/app.py"],
+    ['+const help = "[Guide](../README.md)";\n', "src/app.ts"],
+  ];
+  for (const [diff, filename] of preserved) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+  }
+
+  // A documentation navigation link does not suppress independent
+  // path-handling evidence elsewhere in the same diff.
+  const mixed = "+[Guide](../README.md)\n+open(\"../../etc/passwd\")\n";
+  const mixedResult = classifyPr({
+    prFiles: files("docs/guide.md"),
+    diffText: mixed,
+    linkedIssues: [],
+  });
+  assert.equal(mixedResult.prKind, "path_handling_changes", mixed);
+  assert.equal(mixedResult.pathHandlingProvenance.fired, true, mixed);
+});
+
+test("#1354: adversarial — a fake link label cannot hide a real traversal literal", () => {
+  // #252: the blanking must not swallow a traversal that sits outside the
+  // destination, and a malformed link-shaped prefix must not blank code.
+  const positives: [string, string][] = [
+    // The `../` is in the label side text after a broken link prefix.
+    ["+x = open(\"[a](b) ../../etc/passwd\")\n", "src/app.py"],
+    // An unbalanced bracket breaks the link shape; the traversal is real.
+    ["+[guide(../README.md)\n+open(\"../../etc/passwd\")\n", "src/app.py"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+  }
+});
+
+test("#1354: a fenced code example in a documentation file keeps the traversal literal", () => {
+  // The docs-only suppression is a PROSE rule. Inside a fenced block the
+  // content is an executable example, not rendered prose, so the
+  // navigation-link discount does not apply and the traversal literal keeps
+  // its ordinary semantics.
+  const positives: [string, string][] = [
+    // A Markdown-shaped string inside a fenced example is code, not a
+    // navigation link: the traversal literal fires.
+    ["+```python\n+open(\"[a](../../etc/passwd)\")\n+```\n", "README.md"],
+    // A benign navigation link inside a fence is example content too, so it
+    // keeps its pre-#1354 behavior and still fires.
+    ["+```markdown\n+[Guide](../README.md)\n+```\n", "README.md"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+    // Fence content is not prose: it must not be discounted away either.
+    assert.ok(
+      !result.pathHandlingProvenance.discounted.some((s) => s.source === "diff_nav_link"),
+      `${diff}: expected no discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+});
+
+test("#1354: a link-shaped traversal inside an inline code span keeps the traversal literal", () => {
+  // An inline code span is quoted code, not prose: the navigation-link
+  // discount must not apply to it.
+  const diff = "+run `open(\"[a](../../etc/passwd)\")` first\n";
+  const result = classifyPr({ prFiles: files("README.md"), diffText: diff, linkedIssues: [] });
+  assert.equal(result.prKind, "path_handling_changes", diff);
+  assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+});
+
+test("#1354: the navigation-link discount is a Markdown rule — other documentation types keep the ordinary scan", () => {
+  // The discount's syntax model — inline links, fences, code spans — is
+  // Markdown syntax. A Markdown-link-shaped string in another documentation
+  // type is literal text, not rendered navigation, so it keeps its ordinary
+  // scan and fires (#1354).
+  const positives: [string, string][] = [
+    ["+[Guide](../README.md)\n", "docs/manual.rst"],
+    ["+[Guide](../README.md)\n", "docs/manual.adoc"],
+    ["+[Guide](../README.md)\n", "NOTES.txt"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+    assert.ok(
+      result.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"),
+      `${diff}: expected a fired traversal_literal signal, got ${JSON.stringify(result.pathHandlingProvenance.signals)}`,
+    );
+    assert.ok(
+      !result.pathHandlingProvenance.discounted.some((s) => s.source === "diff_nav_link"),
+      `${diff}: expected no discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+
+  // Markdown documentation keeps the discount: the boundary this issue asks
+  // for is unchanged.
+  const markdown = "+[Guide](../README.md)\n";
+  const markdownResult = classifyPr({
+    prFiles: files("docs/guide.md"),
+    diffText: markdown,
+    linkedIssues: [],
+  });
+  assert.equal(markdownResult.prKind, "app_code", markdown);
+  assert.ok(
+    markdownResult.pathHandlingProvenance.discounted.some(
+      (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+    ),
+    `${markdown}: expected a discounted diff_nav_link signal, got ${JSON.stringify(markdownResult.pathHandlingProvenance.discounted)}`,
+  );
+});
+
+test("#1354: every fence rule is checked against the fence token itself (#252)", () => {
+  // Each rule of the fence reader gets a case that feeds the fence itself:
+  // its character, its info string, its closer, and the diff streams.
+  const positives: [string, string][] = [
+    // A tilde fence is a fence.
+    ["+~~~\n+open(\"[a](../../etc/passwd)\")\n+~~~\n", "README.md"],
+    // A fence nested in a list carries the container's indent, and the diff
+    // does not give that indent. It is still a fence.
+    ["+    ```python\n+    open(\"[a](../../etc/passwd)\")\n+    ```\n", "README.md"],
+    // A fence can open on the same line as a list bullet.
+    ["+- ```python\n+  open(\"[a](../../etc/passwd)\")\n+  ```\n", "README.md"],
+    // ... and inside a blockquote.
+    ["+> ```python\n+> open(\"[a](../../etc/passwd)\")\n+> ```\n", "README.md"],
+    // A fence-like line with the other character neither closes the open
+    // fence nor opens a second one.
+    ["+~~~\n+open(\"[a](../../etc/passwd)\")\n+```\n+more prose\n", "README.md"],
+    // A closer shorter than the opener does not close it.
+    ["+````\n+open(\"[a](../../etc/passwd)\")\n+```\n+more prose\n", "README.md"],
+    // A fence that is never closed keeps the rest of the chunk as code.
+    ["+```python\n+open(\"[a](../../etc/passwd)\")\n", "README.md"],
+    // The removed side of the diff carries its own fence state.
+    ["-```python\n-open(\"[a](../../etc/passwd)\")\n-```\n", "README.md"],
+    // A context line whose two streams disagree is code, not prose: the new
+    // file closed the fence, the old file did not.
+    [" ```python\n+```\n open(\"[a](../../etc/passwd)\")\n", "README.md"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(result.riskFlags.includes("path_handling_changes"), diff);
+  }
+
+  // One rule keeps a line in prose: CommonMark rejects a backtick fence whose
+  // info string holds a backtick, so that line opens no fence.
+  const prose = "+```py`x\n+open(\"[a](../../etc/passwd)\")\n+```\n";
+  const proseResult = classifyPr({ prFiles: files("README.md"), diffText: prose, linkedIssues: [] });
+  assert.equal(proseResult.prKind, "app_code", prose);
+  assert.ok(
+    proseResult.pathHandlingProvenance.discounted.some(
+      (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+    ),
+    `${prose}: expected a discounted diff_nav_link signal, got ${JSON.stringify(proseResult.pathHandlingProvenance.discounted)}`,
+  );
+
+  // A hunk header is not content, but git prints the section heading after
+  // the second `@@`, and that heading is file text: a navigation link in it
+  // is navigation like any other.
+  const heading = "@@ -1,3 +1,4 @@ see the [Guide](../README.md)\n+more prose\n";
+  const headingResult = classifyPr({
+    prFiles: files("README.md"),
+    diffText: heading,
+    linkedIssues: [],
+  });
+  assert.equal(headingResult.prKind, "app_code", heading);
+  assert.equal(headingResult.pathHandlingProvenance.fired, false, heading);
+  assert.ok(
+    headingResult.pathHandlingProvenance.discounted.some(
+      (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+    ),
+    `${heading}: expected a discounted diff_nav_link signal, got ${JSON.stringify(headingResult.pathHandlingProvenance.discounted)}`,
+  );
+});
+
+test("#1354: prose after a fenced block is prose again, so its navigation link is discounted", () => {
+  const diff = "+```python\n+open(\"[a](../../etc/passwd)\")\n+```\n+[Guide](../README.md)\n";
+  const result = classifyPr({ prFiles: files("README.md"), diffText: diff, linkedIssues: [] });
+  assert.equal(result.prKind, "path_handling_changes", diff);
+  assert.equal(result.pathHandlingProvenance.fired, true, diff);
+  // The link after the fence is prose again: it is discounted, not fired.
+  assert.ok(
+    result.pathHandlingProvenance.discounted.some(
+      (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+    ),
+    `${diff}: expected a discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+  );
+});
+
+test("#1354: an encoded traversal destination matches no traversal pattern at all", () => {
+  // `..%2Fetc%2Fpasswd` is not a `../` literal, so the pattern never matches
+  // it: there is no signal to fire and none to discount.
+  const diff = "+[Guide](..%2Fetc%2Fpasswd)\n";
+  const result = classifyPr({ prFiles: files("README.md"), diffText: diff, linkedIssues: [] });
+  assert.equal(result.prKind, "app_code", diff);
+  assert.equal(result.pathHandlingProvenance.fired, false, diff);
+  assert.ok(
+    !result.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"),
+    `${diff}: expected no fired traversal_literal signal, got ${JSON.stringify(result.pathHandlingProvenance.signals)}`,
+  );
+  assert.ok(
+    !result.pathHandlingProvenance.discounted.some((s) => s.signal === "traversal_literal"),
+    `${diff}: expected no discounted traversal_literal signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+  );
+});
+
+test("#1354: adversarial — the blanked region is a destination, not the paren group (#252)", () => {
+  // Each shape below is link-shaped but carries no CommonMark destination, so
+  // nothing is discounted and the traversal keeps the scan it had before
+  // #1354. A discount that reads a wider region than rendered navigation would
+  // hide traversal that is not a navigation target at all.
+  const positives: [string, string][] = [
+    // A destination carries no blank character: this group is the word `see`
+    // followed by ordinary text, so the traversal inside it is code text.
+    ['+[a](see open("../../etc/passwd")\n', "README.md"],
+    // The angle form ends at its `>` and carries no unescaped blank inside.
+    ["+[Guide](<a b>../../etc/passwd)\n", "README.md"],
+    // An escaped `\[` is a literal bracket, not a link opener.
+    ["+Escaped form \\[a](../../etc/passwd) is not a link.\n", "README.md"],
+    // An escaped `\]` cannot close the label, so no link starts here either.
+    ['+[a\\](../../etc/passwd)\n', "README.md"],
+    // A backslash escapes no blank in a destination: the run ends at the raw
+    // blank, and the traversal after it keeps the scan.
+    ['+[a](../x\\ ../../etc/passwd)\n', "README.md"],
+    // A title is attribute text, not a navigation target.
+    ['+[Guide](guide.md "see ../../etc/passwd")\n', "README.md"],
+    // A control character inside the group invalidates the destination.
+    ["+[Guide](../README\u0000.md)\n", "README.md"],
+  ];
+  for (const [diff, filename] of positives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "path_handling_changes", diff);
+    assert.ok(
+      result.pathHandlingProvenance.signals.some((s) => s.signal === "traversal_literal"),
+      `${diff}: expected a fired traversal_literal signal, got ${JSON.stringify(result.pathHandlingProvenance.signals)}`,
+    );
+    // Nothing was discounted either: the provenance never claims a navigation
+    // link that the renderer would not produce.
+    assert.ok(
+      !result.pathHandlingProvenance.discounted.some((s) => s.source === "diff_nav_link"),
+      `${diff}: expected no discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+
+  // The destination rule does not narrow the discount the issue asked for: a
+  // titled link, a padded destination, and an angle destination with a title
+  // are all still rendered navigation.
+  const negatives: [string, string][] = [
+    ['+[Guide](../README.md "the guide")\n', "README.md"],
+    ["+[Guide](  ../README.md  )\n", "docs/guide.md"],
+    ['+[Guide](<../README.md> "the guide")\n', "README.md"],
+    // An escaped BACKSLASH does not escape the opener: this is a real link.
+    ["+\\\\[Guide](../README.md)\n", "README.md"],
+  ];
+  for (const [diff, filename] of negatives) {
+    const result = classifyPr({ prFiles: files(filename), diffText: diff, linkedIssues: [] });
+    assert.equal(result.prKind, "app_code", diff);
+    assert.equal(result.pathHandlingProvenance.fired, false, diff);
+    assert.ok(
+      result.pathHandlingProvenance.discounted.some(
+        (s) => s.signal === "traversal_literal" && s.source === "diff_nav_link",
+      ),
+      `${diff}: expected a discounted diff_nav_link signal, got ${JSON.stringify(result.pathHandlingProvenance.discounted)}`,
+    );
+  }
+});
+
 test("#960: a traversal literal in real code still fires, including next to an import and past a string-literal marker", () => {
   const positives: [string, string][] = [
     // Plain code, no comment anywhere.
