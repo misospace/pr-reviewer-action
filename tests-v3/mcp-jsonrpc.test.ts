@@ -57,3 +57,12 @@ test("protocol version is echoed only when plausible", () => {
   assert.equal(sanitizeProtocolVersion(undefined), MCP_PROTOCOL_VERSION);
   assert.equal(sanitizeProtocolVersion(""), MCP_PROTOCOL_VERSION);
 });
+
+test("protocol version accepts exactly the documented separator set and nothing else", () => {
+  for (const accepted of ["2024-11-05+rev_1", "v1.2.3-rc.1_2", "a", "a+b", "a_b", "a-b", "a.b"]) {
+    assert.equal(sanitizeProtocolVersion(accepted), accepted);
+  }
+  for (const refused of ["-2024", ".2024", "+2024", "_2024", "2024/11-05", "2024:11", "2024 11", "2024*", "2024%00", "2024\u0000", "é", "2024\u200b"]) {
+    assert.equal(sanitizeProtocolVersion(refused), MCP_PROTOCOL_VERSION);
+  }
+});

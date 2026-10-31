@@ -78,6 +78,6 @@ export function sanitizeProtocolVersion(clientVersion: unknown): string {
   // Must START with an alphanumeric: a version is a date-like identifier,
   // so separator-led shapes (an all-underscore `__proto__`-lookalike) are
   // refused, never echoed.
-  if (!/^[A-Za-z0-9][A-Za-z0-9.\-+_.]*$/.test(clientVersion)) return MCP_PROTOCOL_VERSION;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(clientVersion)) return MCP_PROTOCOL_VERSION;
   return clientVersion;
 }
