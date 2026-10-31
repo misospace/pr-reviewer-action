@@ -16,29 +16,50 @@ test("fixed enums reject arbitrary labels and allowlists collapse overflow", () 
 });
 
 test("series cap uses one overflow counter without creating more series", () => {
-  // The registry pre-creates TWO fixed zero-label counters (overflow and
-  // audit failures), so the cap must leave room for them plus the series
-  // under test; the assertion is that the cap itself creates no new series.
-  const metrics = new AdminMetricsRegistry({ maxSeries: 3, allowedModels: ["a", "b", "c"] });
+  // The registry pre-creates THREE fixed zero-label counters (overflow,
+  // audit failures, and the #1349 MCP auth-failure counter), so the cap
+  // must leave room for them plus the series under test; the assertion is
+  // that the cap itself creates no new series.
+  const metrics = new AdminMetricsRegistry({ maxSeries: 6, allowedModels: ["a", "b", "c"] });
   metrics.recordModelRequest("a");
   metrics.recordModelRequest("b");
   metrics.recordModelRequest("c");
-  assert.equal(metrics.seriesCount, 3);
+  assert.equal(metrics.seriesCount, 6);
   metrics.recordModelRequest("a");
   metrics.recordFailure("provider");
   const text = metrics.renderPrometheus();
-  assert.match(text, /pr_reviewer_admin_metrics_overflow_total 3/);
+  assert.match(text, /pr_reviewer_admin_metrics_overflow_total 1/);
 });
 test("audit-failure counter stays recordable when the series cap is full", () => {
-  // The cap is already entirely consumed by the two pre-created fixed
+  // The cap is already entirely consumed by the pre-created fixed
   // counters, so this is the exact shape the review flagged: an audit-sink
   // failure must still be recorded, not only as an overflow bump.
-  const metrics = new AdminMetricsRegistry({ maxSeries: 2 });
+  const metrics = new AdminMetricsRegistry({ maxSeries: 3 });
   metrics.bumpAuditFailure();
   metrics.bumpAuditFailure();
   const text = metrics.renderPrometheus();
   assert.match(text, /pr_reviewer_admin_audit_failures_total 2/);
   assert.doesNotMatch(text, /pr_reviewer_admin_metrics_overflow_total [1-9]/);
+});
+test("mcp auth-failure counter stays recordable when the series cap is full (#1349)", () => {
+  // Same shape as the audit-failure counter: a flood of denied MCP
+  // requests is exactly when the counter matters most, so it is
+  // pre-created and recordable even when every series slot is taken.
+  const metrics = new AdminMetricsRegistry({ maxSeries: 3 });
+  metrics.recordMcpAuthFailure();
+  metrics.recordMcpAuthFailure();
+  const text = metrics.renderPrometheus();
+  assert.match(text, /pr_reviewer_admin_mcp_auth_failures_total 2/);
+  assert.doesNotMatch(text, /pr_reviewer_admin_metrics_overflow_total [1-9]/);
+});
+test("mcp request outcomes render through the fixed enum (#1349)", () => {
+  const metrics = new AdminMetricsRegistry();
+  metrics.recordMcpRequest("ok");
+  metrics.recordMcpRequest("denied");
+  metrics.recordMcpRequest("ok");
+  const text = metrics.renderPrometheus();
+  assert.match(text, /pr_reviewer_admin_mcp_requests_total\{outcome="ok"\} 2/);
+  assert.match(text, /pr_reviewer_admin_mcp_requests_total\{outcome="denied"\} 1/);
 });
 test("a cap of 1 holds only the overflow counter and never bumps it at construction", () => {
   const metrics = new AdminMetricsRegistry({ maxSeries: 1 });
