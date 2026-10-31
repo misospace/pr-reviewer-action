@@ -67,15 +67,20 @@ export const MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS = 400;
  * why both strings are `minLength: 1` (JSON Schema does not enforce
  * "non-empty" through `type` alone, and an entry the parser would drop must
  * not be schema-admissible in the first place) — and every answer the schema
- * admits either parses or fails CLOSED. The one correlation strict mode cannot
- * express: a null `score` MEANS `cannot_verify`, but a null `score` with
- * `cannot_verify: false` stays schema-admissible, and there the parser fails
- * the whole answer closed as `malformed_score` — never a defaulted 0 or 5.
- * `maxItems` mirrors `MAX_CONFIDENCE_CONCERNS`, so a structured answer cannot
- * silently overflow the bound the parser applies. The wire enum for `risk` is
- * the four meaningful bands (plus null); a malformed risk still degrades to
- * `unknown` in the parser. The schema rides BOTH wire families through
- * `ModelRequestConfig`'s `responseSchema` (see `src/model/request.ts`).
+ * admits either parses or fails CLOSED. Two residuals are deliberate: a
+ * whitespace-only `file`/`evidence` stays schema-admissible (a whitespace
+ * constraint needs `pattern`, whose endpoint support the operator caveat in
+ * `contracts/action-v3.yml` already covers), and the parser trims it away and
+ * records `concern_dropped_missing_field`, so it is never silently lost; and
+ * strict mode cannot express the `score`/`cannot_verify` correlation, so a null
+ * `score` with `cannot_verify: false` is admissible and the parser fails the
+ * whole answer closed as `malformed_score` — never a defaulted 0 or 5.
+ * `maxItems` mirrors `MAX_CONFIDENCE_CONCERNS`, and the parser notes
+ * `concerns_truncated_<N>` if an answer over the bound still arrives. The wire
+ * enum for `risk` is the four meaningful bands (plus null); a malformed risk
+ * still degrades to `unknown` in the parser. The schema rides BOTH wire
+ * families through `ModelRequestConfig`'s `responseSchema` (see
+ * `src/model/request.ts`).
  */
 export const CONFIDENCE_ANSWER_JSON_SCHEMA: Record<string, unknown> = {
   type: "object",

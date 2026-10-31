@@ -1851,6 +1851,53 @@ test("#1368 review: the declared prompt budget is an actual bound at call time",
   }
 });
 
+test("#1368 review: the floor also holds the engine's own smallest request", async () => {
+  const { buildConfidencePrompt, CONFIDENCE_MINIMUM_PROMPT_TOKENS, CONFIDENCE_PROMPT_DIFF_FLOOR_BYTES } =
+    await import("../src/confidence/prompt.js");
+  // The shape `src/engine/review.ts` actually hands the builder on the smallest
+  // possible run: real 40-hex SHAs, a real `reviewCoverage` record (never
+  // `{}`), the shortest status tokens, and no description/summary/findings.
+  const engineMinimum = buildConfidencePrompt({
+    headSha: "a".repeat(40), baseSha: "b".repeat(40),
+    diff: "d".repeat(CONFIDENCE_PROMPT_DIFF_FLOOR_BYTES),
+    prTitle: "", prBody: "", findings: [], reviewSummary: "", reviewResult: "clean",
+    requiredChecks: "complete",
+    coverage: {
+      version: 1,
+      tool_loop_ran: false,
+      enforcement_harness: null,
+      route: "legacy",
+      partial_coverage: null,
+      required_checks: "complete",
+    },
+    secrets: [],
+    promptTokens: CONFIDENCE_MINIMUM_PROMPT_TOKENS,
+  });
+  const bytes = Buffer.byteLength(engineMinimum.system, "utf8") + Buffer.byteLength(engineMinimum.user, "utf8");
+  assert.ok(
+    bytes <= CONFIDENCE_MINIMUM_PROMPT_TOKENS * 4,
+    `engine's smallest request is ${bytes} bytes, over the ${CONFIDENCE_MINIMUM_PROMPT_TOKENS}-token floor`,
+  );
+});
+
+test("#1368 review: a whitespace-only concern is dropped WITH a note", () => {
+  // The schema's `minLength: 1` rules out an empty quote; a whitespace-only
+  // one stays admissible (a whitespace constraint would need `pattern`, whose
+  // endpoint support the strict-mode caveat already warns about). The parser
+  // trims it away, and the drop is recorded rather than silent.
+  for (const entry of [
+    { type: "missed_issue", severity: "blocker", file: " ", line: 3, evidence: "quote" },
+    { type: "missed_issue", severity: "blocker", file: "src/a.ts", line: 3, evidence: " \t " },
+  ]) {
+    const parsed = parseConfidenceAnswer(JSON.stringify({ score: 5, risk: "low", concerns: [entry] }));
+    assert.ok(parsed.ok, JSON.stringify(entry));
+    if (parsed.ok) {
+      assert.deepEqual(parsed.answer.concerns, [], JSON.stringify(entry));
+      assert.deepEqual(parsed.answer.notes, ["concern_dropped_missing_field"], JSON.stringify(entry));
+    }
+  }
+});
+
 test("#1368 review: the minimum prompt budget holds the real minimum-shape request", async () => {
   const { buildConfidencePrompt, CONFIDENCE_MINIMUM_PROMPT_TOKENS, CONFIDENCE_PROMPT_DIFF_FLOOR_BYTES } =
     await import("../src/confidence/prompt.js");

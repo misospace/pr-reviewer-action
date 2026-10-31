@@ -210,7 +210,8 @@ const DIFF_ENVELOPE_OVERHEAD_BYTES = Buffer.byteLength(
  * 64-hex on a SHA-256 Forgejo repository — an unresolved pin refuses the call
  * outright, #1155, so the shorter `unknown` rendering is never sent), and
  * `review_result` and the required-checks status use the longest token in
- * their closed vocabularies (8 and 10 characters). */
+ * their closed vocabularies (`findings` and `incomplete`, 8 and 10 characters;
+ * `src/enforcement/verdict-policy.ts` and `markerReviewResult`). */
 const MINIMUM_SHAPE_PINS = {
   headSha: "0".repeat(64),
   baseSha: "0".repeat(64),
@@ -218,19 +219,24 @@ const MINIMUM_SHAPE_PINS = {
   requiredChecks: "incomplete",
 } as const;
 
-/** The empty-shape serializations the builder itself produces for no findings
- * and no coverage record, so the measurement is a request the builder can
- * really render rather than a shorter fiction. */
+/** The smallest serializations the shipped call sites actually produce: no
+ * findings renders `[]`, and `src/engine/review.ts`'s `reviewCoverage` always
+ * carries its six fixed keys, so the measurement below is the smallest request
+ * the ENGINE can send rather than a shorter fiction. A new coverage key widens
+ * the real request past this floor — `tests-v3/confidence.test.ts` pins the
+ * engine-shaped case so that drift fails a test instead of quietly producing
+ * enabled-but-refusing profiles. */
 const MINIMUM_SHAPE_FINDINGS = "[]";
-const MINIMUM_SHAPE_COVERAGE = "{}";
+const MINIMUM_SHAPE_COVERAGE
+  = '{"version":1,"tool_loop_ran":false,"enforcement_harness":null,"route":"primary","partial_coverage":null,"required_checks":"incomplete"}';
 
 /**
  * #1368 review: the smallest prompt budget that can carry a REAL verifier
  * request — the system prompt, the fixed lines at their longest realistic
- * shape, every content section at its EMPTY shape, and the diff envelope at
- * its largest scaffolding holding its floor of diff bytes, all counted with
- * the SAME bytes/4 estimate the budget is enforced with. This is the minimum
- * shape the declared-context clamp must fit, so a declared
+ * shape, the content sections at their empty serialization, and the diff
+ * envelope at its largest scaffolding holding its floor of diff bytes, all
+ * counted with the SAME bytes/4 estimate the budget is enforced with. This is
+ * the minimum shape the declared-context clamp must fit, so a declared
  * `ai-confidence-model-context-tokens` window that cannot hold the
  * SYSTEM-INCLUSIVE minimum fails the scorer closed instead of resolving a
  * profile whose every request would break the bound it declared.
