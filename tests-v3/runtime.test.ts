@@ -726,6 +726,10 @@ test("processCanExecute is false for a killed-but-unreaped zombie (ground truth 
     const zombiePid = Number.parseInt(readFileSync(zombiePidFile, "utf8"), 10);
     await awaitZombie(zombiePid, "zombie-holder");
     assert.equal(procState(zombiePid), "Z", "fixture precondition: an unreaped zombie");
+    // The boundary paradox itself (#252): the kill probe still answers for a
+    // process that cannot execute. Without this, a future predicate that
+    // merely wrapped `kill(pid, 0)` would pass every other assertion here.
+    assert.doesNotThrow(() => process.kill(zombiePid, 0), "zombie precondition: kill(pid, 0) keeps answering");
     assert.equal(
       processCanExecute(zombiePid),
       false,
@@ -768,6 +772,19 @@ test("a zombie inside the snapshot is reported unreaped, never as a survivor", a
       "the unreaped zombie is still a child of the leader and must be in the pre-signal snapshot",
     );
     assert.deepEqual(report.survived, [], "a zombie cannot execute: it must never be reported as a survivor");
+    // Pin the split itself in the direction that is deterministic on ANY
+    // init: a pid still observed as a zombie at this instant was a zombie
+    // during the sweep too (a zombie cannot un-die), so the sweep must have
+    // classified it `unreaped`. The converse cannot be pinned: on a host
+    // whose init reaps orphans, the re-parented zombie legitimately becomes
+    // `gone` right after the KILL escalation, and an out-of-tree reaper can
+    // not be constructed — the sweep kills every in-tree parent by design.
+    if (procState(zombiePid) === "Z") {
+      assert.ok(
+        report.unreaped.includes(zombiePid),
+        "a snapshot pid still a zombie at verification time must be classified unreaped",
+      );
+    }
     for (const pid of report.unreaped) {
       assert.ok(report.snapshot.includes(pid), "unreaped entries come from the snapshot");
     }
