@@ -1,5 +1,6 @@
 import type { EnvLike } from "../tools/budget.js";
 import { REASONING_EFFORT_PATTERN } from "../config/load-config.js";
+import { CONFIDENCE_MINIMUM_PROMPT_TOKENS } from "../confidence/prompt.js";
 
 /**
  * Review routing and tier bindings, ported from scripts/sections/classification.sh
@@ -729,10 +730,28 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   // #1368 review: the smallest prompt budget the context clamp ever leaves —
   // the floor that keeps a tiny window from starving the prompt to zero, and
   // the minimum shape a declared window must be able to fit (floor prompt +
-  // a positive completion budget) for the scorer to run at all.
-  const confidencePromptFloorTokens = 1024;
+  // a positive completion budget) for the scorer to run at all. It is the
+  // SYSTEM-INCLUSIVE minimum: the scorer's system prompt, every fixed section
+  // rendered empty, and the diff at its byte floor. A bare 1,024 left the
+  // system prompt and the section scaffolding outside the bound, so a window
+  // that "fit" the floor still resolved a profile whose every request exceeded
+  // the window it declared. Derived from the prompt builder's own rendering,
+  // so it cannot drift from what the scorer actually sends.
+  const confidencePromptFloorTokens = CONFIDENCE_MINIMUM_PROMPT_TOKENS;
   let maxTokens = positiveIntFrom(env, "AI_CONFIDENCE_MAX_TOKENS", maxTokensDefault, warnings);
   let promptTokens = positiveIntFrom(env, "AI_CONFIDENCE_PROMPT_TOKENS", promptTokensDefault, warnings);
+  // #1368 review: a prompt budget below the floor cannot hold even the
+  // scorer's smallest real request, so the lane would resolve "enabled" and
+  // then refuse every call. It is raised to the floor and announced — the
+  // same drop-loudly-never-fatal treatment every other unusable value gets.
+  // The declared-context clamps below may still lower it, but never under the
+  // floor, so an enabled profile's budget always describes a sendable request.
+  if (promptTokens < confidencePromptFloorTokens) {
+    warnings.push(
+      `AI_CONFIDENCE_PROMPT_TOKENS raised to ${confidencePromptFloorTokens}: the configured prompt budget (${promptTokens}) cannot hold the scorer's smallest real request (its system prompt and section scaffolding plus the smallest usable diff)`,
+    );
+    promptTokens = confidencePromptFloorTokens;
+  }
   const modelContextTokens = positiveIntFrom(env, "AI_CONFIDENCE_MODEL_CONTEXT_TOKENS", 0, warnings);
   const anthropicEffortSupported = confidenceCapabilityFlag(env, "AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT");
   const structuredOutputSupported = confidenceCapabilityFlag(env, "AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT");
@@ -741,8 +760,8 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   // the resolved budgets always satisfy promptTokens + maxTokens <=
   // modelContextTokens (#1368 review). When the window cannot fit the
   // minimum prompt budget plus a positive completion budget at all
-  // (window <= the 1024-token prompt floor), no shape fits and the scorer
-  // fails closed: disabled, loudly, before any call is ever attempted.
+  // (window <= the system-inclusive prompt floor), no shape fits and the
+  // scorer fails closed: disabled, loudly, before any call is ever attempted.
   if (modelContextTokens > 0) {
     if (modelContextTokens <= confidencePromptFloorTokens) {
       // Fail closed: no prompt+completion shape fits a window this small,
@@ -750,7 +769,7 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
       // disabled (no call, no artifact), loudly, instead of producing an
       // over-budget request (#1368 review).
       warnings.push(
-        `confidence scorer disabled: the declared ai-confidence-model-context-tokens window (${modelContextTokens}) cannot fit the minimum prompt budget (${confidencePromptFloorTokens}) plus a positive completion budget; raise ai-confidence-model-context-tokens or unset it`,
+        `confidence scorer disabled: the declared ai-confidence-model-context-tokens window (${modelContextTokens}) cannot fit the minimum prompt budget (${confidencePromptFloorTokens}, the scorer's system prompt and section scaffolding plus the smallest usable diff) plus a positive completion budget; raise ai-confidence-model-context-tokens or unset it`,
       );
       return { profile: disabledConfidenceProfile(), warnings };
     }

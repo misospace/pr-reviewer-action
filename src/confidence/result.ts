@@ -44,36 +44,60 @@ export const CONFIDENCE_RUBRIC_VERSION = "merge-readiness-verifier-v1";
  * #1368: the scorer's OWN compact strict-mode JSON schema, carried on the
  * wire only under the operator's structured-output assertion
  * (`ai-confidence-structured-output-support`) — never the pinned verdict
- * schema. It matches what `parseConfidenceAnswer` tolerates: every property
- * is in `required` (OpenAI strict mode requires that) with optionality
- * expressed via the null type, exactly like the verdict schema's
- * nullable-but-required fields. The wire enum for `risk` is the four
- * meaningful bands; a malformed risk still degrades to `unknown` in the
- * parser, so the schema and the parser stay compatible in both directions.
- * The schema rides BOTH wire families through `ModelRequestConfig`'s
- * `responseSchema` (see `src/model/request.ts`).
+ * schema. It is the #1369 VERIFIER contract, not the pre-#1369 prose-grader
+ * shape: every concern entry must carry the closed-vocabulary `type` and
+ * `severity` the parser requires, and the fail-closed `cannot_verify` answer
+ * has its own valid branch (`cannot_verify: true` with a null `score` and
+ * `risk`, which the parser fails closed before it ever reads the score).
+ *
+ * Like the verdict schema, every property is in `required` (OpenAI strict
+ * mode requires that) with optionality expressed via the null type, and
+ * `additionalProperties: false` everywhere. The schema and
+ * `parseConfidenceAnswer` stay compatible in BOTH directions: every answer
+ * the schema admits parses (score in range, concern vocabulary respected,
+ * `cannot_verify` fail-closed), and every answer the parser KEEPS is
+ * schema-admissible — a concern the parser keeps always carries a validated
+ * type/severity pair and non-empty file/evidence, and the schema never forces
+ * a value the parser would have to drop. The wire enum for `risk` is the four
+ * meaningful bands (plus null); a malformed risk still degrades to `unknown`
+ * in the parser. The schema rides BOTH wire families through
+ * `ModelRequestConfig`'s `responseSchema` (see `src/model/request.ts`).
  */
 export const CONFIDENCE_ANSWER_JSON_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: {
-    score: { type: "integer", minimum: 0, maximum: 5 },
-    risk: { type: "string", enum: ["low", "medium", "high", "critical"] },
+    /** #1369 fail-closed uncertainty answer: `true` (with `score`/`risk`
+     * null) when the supplied evidence is too truncated or incomplete to
+     * verify the change. Never promoted to a score. */
+    cannot_verify: {
+      type: "boolean",
+      description: "true when the supplied evidence is too truncated or incomplete to verify the change; then score and risk are null, concerns is empty, and reason says why",
+    },
+    score: {
+      type: ["integer", "null"],
+      minimum: 0,
+      maximum: 5,
+      description: "Merge readiness 0-5; null ONLY together with cannot_verify true",
+    },
+    risk: { type: ["string", "null"], enum: ["low", "medium", "high", "critical", null] },
     reason: { type: "string" },
     concerns: {
       type: "array",
       items: {
         type: "object",
         properties: {
-          file: { type: ["string", "null"] },
+          type: { type: "string", enum: [...CONFIDENCE_CONCERN_TYPES] },
+          severity: { type: "string", enum: [...CONFIDENCE_CONCERN_SEVERITIES] },
+          file: { type: "string", description: "Path the concern is grounded in; never empty" },
           line: { type: ["integer", "null"] },
-          evidence: { type: ["string", "null"] },
+          evidence: { type: "string", description: "Short supporting quote from the supplied diff or description; never empty" },
         },
-        required: ["file", "line", "evidence"],
+        required: ["type", "severity", "file", "line", "evidence"],
         additionalProperties: false,
       },
     },
   },
-  required: ["score", "risk", "reason", "concerns"],
+  required: ["cannot_verify", "score", "risk", "reason", "concerns"],
   additionalProperties: false,
 };
 

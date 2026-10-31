@@ -11,7 +11,10 @@
  *   resolver already guarantees it);
  * - a failure of any kind (timeout, quota/429/5xx, network, malformed
  *   answer) degrades to `unscored` with a redacted, action-owned cause —
- *   the review itself still publishes unchanged.
+ *   the review itself still publishes unchanged;
+ * - the profile's declared budgets are actual bounds: a prompt that does not
+ *   fit `ConfidenceProfile.promptTokens` is refused before the wire, never
+ *   sent over the bound (#1368 review).
  */
 import type { ChatRequestInput, ChatRequestOutcome } from "../transport/transport.js";
 import { runChatRequestOnce } from "../transport/transport.js";
@@ -139,6 +142,24 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   if (!profile.inheritedTransport && profile.credentialSource === "primary") {
     return {
       result: unscoredConfidenceResult("credential_isolation"),
+      requestPayload: null, rawResponse: null, diagnostic: "",
+    };
+  }
+  // #1368 review: the declared prompt budget is an ACTUAL bound. The prompt
+  // builder shrinks the diff section to hold it, but its 4,096-byte diff floor
+  // is the SMALLEST usable diff, not permission to overrun: once the fixed
+  // sections alone leave less than the floor, the assembled request is over
+  // the budget — and through the declared-context clamp, over the declared
+  // context window. Refuse it here: no wire attempt, no request artifact,
+  // `unscored` with an action-owned cause. `CONFIDENCE_MINIMUM_PROMPT_TOKENS`
+  // is the resolver's system-inclusive floor, so an empty-evidence prompt can
+  // never reach this branch; it fires only when the run's own evidence does
+  // not fit the budget the operator declared.
+  const promptBytes = Buffer.byteLength(input.prompt.system, "utf8")
+    + Buffer.byteLength(input.prompt.user, "utf8");
+  if (promptBytes > profile.promptTokens * 4) {
+    return {
+      result: unscoredConfidenceResult("prompt_over_budget"),
       requestPayload: null, rawResponse: null, diagnostic: "",
     };
   }

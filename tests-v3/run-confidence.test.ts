@@ -1080,6 +1080,22 @@ test("#1073: the scorer is default-off on a fork PR — no request, no artifact,
     const trusted = await runConfidenceRun(server, scorerInputs, `private notes: ${FORK_MARKER}`);
     assert.equal(scorerRequests(server), 2);
     assert.equal(trusted.result.outputs.confidenceStatus, "scored");
+
+    // The gate's default and its explicit "false" are the same state: naming
+    // the input must not be a second, weaker code path. Both shapes stay
+    // silent, so a change to how the flag is parsed cannot pass the
+    // default-off assertion by accident.
+    const explicitlyOff = await runConfidenceRun(
+      server,
+      { ...scorerInputs, "ai-confidence-enable-for-forks": "false" },
+      `private notes: ${FORK_MARKER}`,
+      true,
+      { env: { IS_FORK_PR: "true" } },
+    );
+    assert.equal(scorerRequests(server), 2, "the explicit false override must not add a scorer call");
+    assert.equal(explicitlyOff.result.outputs.confidenceStatus, "");
+    assert.ok(!existsSync(join(explicitlyOff.runDir, "confidence-score.json")));
+    assert.match(explicitlyOff.logs.join("\n"), /ai-confidence-enable-for-forks/);
   } finally {
     await server.close();
   }
@@ -1700,6 +1716,67 @@ test("#1368: a configured Anthropic scorer effort without the opt-in warns namin
     assert.equal(assertedBodies.length, 2);
     const assertedBody = JSON.parse(assertedBodies[1]!) as Record<string, unknown>;
     assert.deepEqual(assertedBody.output_config, { effort: "high" });
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1368: a prompt budget too small for the evidence never reaches the wire", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] })));
+  }));
+  try {
+    // A body at the prompt's section cap plus a 3,000-token budget (above the
+    // smallest-real-request floor, so the resolver keeps it as configured):
+    // even the diff floor cannot fit, and the declared budget stays a bound.
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-prompt-tokens": "3000",
+    }, "body ".padEnd(20_000, "x"), true);
+    // The declared budget is an actual bound: the scorer refuses the request
+    // instead of sending a prompt over it.
+    assert.equal(run.result.outputs.confidenceStatus, "unscored");
+    assert.equal(scorerRequests(server), 0, "an over-budget prompt must never reach the wire");
+    const artifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(artifact.status, "unscored");
+    assert.equal(artifact.cause, "prompt_over_budget");
+    assert.equal((artifact.request as Record<string, unknown>).prompt_tokens, 3000);
+    assert.ok(!existsSync(join(run.runDir, "confidence-request.json")));
+    assert.ok(
+      run.logs.some((line) => line.includes("confidence scorer: unscored (prompt_over_budget)")),
+      JSON.stringify(run.logs),
+    );
+    // Advisory only: the review itself publishes unchanged.
+    assert.equal(run.result.outputs.verdict, "approve");
+    assert.ok(existsSync(join(run.runDir, "review-body.md")));
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1368: a prompt budget below the smallest real request is raised with a warning", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] })));
+  }));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-prompt-tokens": "600",
+    }, "", true);
+    // Raised, not refused: the lane still scores, and the raise is announced
+    // by the exact input name.
+    const warning = run.logs.filter((line) => line.includes("AI_CONFIDENCE_PROMPT_TOKENS raised"));
+    assert.equal(warning.length, 1, `expected one raise warning: ${JSON.stringify(run.logs)}`);
+    assert.match(warning[0]!, /cannot hold the scorer's smallest real request/);
+    assert.equal(run.result.outputs.confidenceStatus, "scored");
+    assert.equal(scorerRequests(server), 1);
+    const artifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    const promptTokens = Number((artifact.request as Record<string, unknown>).prompt_tokens);
+    assert.ok(promptTokens > 600, `expected the budget raised above 600, got ${promptTokens}`);
   } finally {
     await server.close();
   }
