@@ -1408,6 +1408,26 @@ function pathSample(line: string): string {
   return cleaned.trim().slice(0, MAX_PATH_SAMPLE_CHARS);
 }
 
+function symlinkSample(raw: string, view: string, patterns: readonly RegExp[]): string {
+  /** #1335: the symlink view can match a run RECOVERED from a following
+   * line — an exec call's argument list carried past the line break, or
+   * argv moved one element per line — where the line being scanned alone
+   * would record an excerpt that never contains the matched token (the
+   * pre-#1331 scan sampled the argv line itself, because that line matched
+   * on its own). When the scanned line's own view (the first segment of the
+   * view, which `symlinkCodeView` joins with newlines) does not explain the
+   * hit, the excerpt comes from the recovered run that matched it, under
+   * the same bounds and sanitization as every other sample. Firing,
+   * attribution, and the discount branches are untouched: sample text only. */
+  const [own, ...carried] = view.split("\n");
+  if (carried.length > 0 && !matchesAny(own ?? "", patterns)) {
+    for (const run of carried) {
+      if (matchesAny(run, patterns)) return pathSample(run);
+    }
+  }
+  return pathSample(raw);
+}
+
 /** Lexical view of a line for the code-only material classes: every quoted
  * span is removed (quote chars doubled, contents dropped — string contents,
  * interpolation included, are data, not code identifiers). Comments are NOT
@@ -2148,7 +2168,13 @@ export function evaluatePathHandlingSignals(
               : base;
         if (matchesAny(scanLine, patterns)) {
           if (!fired) {
-            recordSignal(buckets, className, source, chunkFile, pathSample(raw));
+            recordSignal(
+              buckets,
+              className,
+              source,
+              chunkFile,
+              symlinkClass ? symlinkSample(raw, scanLine, patterns) : pathSample(raw),
+            );
             fired = true;
           }
           continue;

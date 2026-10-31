@@ -2203,6 +2203,47 @@ test("#1331: the symlink recovery stays bounded on a hostile line", () => {
   assert.ok(ms < 2000, `hostile lines took ${ms.toFixed(0)}ms, expected well under 2000ms`);
 });
 
+test("#1335: a symlink hit recovered from carried argv samples the matched token", () => {
+  // The fires below are correct and attributable — but the signal is recorded
+  // while scanning the line the call OPENS on, so sampling that line alone
+  // (`+subprocess.run(`) left the artifact without the matched token, against
+  // the "explainable from the artifact alone" contract. The excerpt must show
+  // what matched even when the argv was carried past the line break or moved
+  // one element per line.
+  const cases: [string, string[]][] = [
+    ["shell-string argv carried past the line break", ['+subprocess.run(', '+\t"readlink -f x",', '+\tshell=True,', '+)']],
+    ["argv moved one element per line", ['+subprocess.check_output([', '+\t"readlink",', '+\tuser_path,', '+])']],
+    ["interpreter argv carried past the line break", ['+subprocess.run([', '+\t"bash",', '+\t"-c",', '+\t"readlink -f x",', '+])']],
+  ];
+  for (const [label, lines] of cases) {
+    const result = classifyPr({
+      prFiles: files("tool.py"),
+      diffText: selfLocationDiff("tool.py", lines),
+      linkedIssues: [],
+    });
+    const fired = result.pathHandlingProvenance.signals.find(
+      (s) => s.signal === "symlink_sensitive" && s.source === "diff",
+    );
+    assert.ok(fired, `${label}: must keep firing`);
+    assert.ok(
+      (fired?.samples ?? []).some((sample) => sample.includes("readlink")),
+      `${label}: the sample must contain the matched token, got ${JSON.stringify(fired?.samples)}`,
+    );
+  }
+
+  // A match visible on the scanned line itself keeps sampling that line —
+  // only excerpts that would omit the token are redirected.
+  const single = classifyPr({
+    prFiles: files("tool.py"),
+    diffText: selfLocationDiff("tool.py", ["+os.readlink(user_path)"]),
+    linkedIssues: [],
+  });
+  const singleFired = single.pathHandlingProvenance.signals.find(
+    (s) => s.signal === "symlink_sensitive" && s.source === "diff",
+  );
+  assert.deepEqual(singleFired?.samples, ["+os.readlink(user_path)"]);
+});
+
 // ── Specialist role selection (#633 port) ─────────────────────────────────
 
 test("lane tables select roles from kind and flags", () => {
