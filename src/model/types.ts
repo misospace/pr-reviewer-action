@@ -49,6 +49,13 @@ export interface ModelRequestConfig {
    * prompt-only. `json_object` is never sent on this wire family regardless
    * (no Anthropic-native equivalent exists to opt into). Ignored by OpenAI. */
   anthropicStructuredOutputSupported: boolean;
+  /** #1368: the INNER JSON schema object used instead of the pinned verdict
+   * schema when `responseFormat === "json_schema"` — the confidence scorer's
+   * own compact answer contract (`CONFIDENCE_ANSWER_JSON_SCHEMA`). Absent
+   * (the default) keeps the request bytes unchanged: OpenAI carries the
+   * verdict schema wrapper, Anthropic the verdict output format, exactly as
+   * before. */
+  responseSchema?: Record<string, unknown>;
 }
 
 /**

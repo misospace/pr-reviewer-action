@@ -1569,3 +1569,137 @@ test("#1369: a cannot_verify answer persists an unscored artifact with the v2 ru
     await server.close();
   }
 });
+
+// ── #1368: model-aware budgets and capability assertions, end to end ─────
+
+test("#1368: the confidence-score.json artifact carries additive request provenance", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] })));
+  }));
+  try {
+    const scored = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-max-tokens": "2048",
+      "ai-confidence-prompt-tokens": "65536",
+      "ai-confidence-model-context-tokens": "70000",
+      "ai-confidence-reasoning-effort": "medium",
+    });
+    assert.equal(scored.result.outputs.confidenceStatus, "scored");
+    const artifact = JSON.parse(readFileSync(join(scored.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    // Every pre-existing key is untouched; the provenance block is additive.
+    assert.equal(artifact.version, 1);
+    assert.equal(artifact.status, "scored");
+    assert.equal(artifact.model, SCORER_MODEL);
+    assert.deepEqual(artifact.request, {
+      max_tokens: 2048,
+      prompt_tokens: 65536,
+      model_context_tokens: 70000,
+      reasoning_effort_sent: true,
+      anthropic_effort_support: false,
+      structured_output_support: false,
+    });
+
+    // The unscored paths carry the provenance too (the profile was enabled).
+    const failing = await startMockServer(routedHandler((_req, _body, res) => {
+      res.statusCode = 429;
+      res.end("rate limited");
+    }));
+    try {
+      const unscored = await runConfidenceRun(failing, {
+        "ai-confidence-model": SCORER_MODEL,
+        "ai-confidence-base-url": failing.url,
+      });
+      const unscoredArtifact = JSON.parse(readFileSync(join(unscored.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+      assert.equal(unscoredArtifact.status, "unscored");
+      assert.deepEqual(unscoredArtifact.request, {
+        max_tokens: 4096,
+        prompt_tokens: 98304,
+        model_context_tokens: 0,
+        reasoning_effort_sent: false,
+        anthropic_effort_support: false,
+        structured_output_support: false,
+      });
+    } finally {
+      await failing.close();
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1368: the configured scorer budget reaches the wire and the disabled run stays byte-identical", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] })));
+  }));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-max-tokens": "8192",
+      "ai-confidence-reasoning-effort": "low",
+    });
+    assert.equal(run.result.outputs.confidenceStatus, "scored");
+    const bodies = scorerRequestBodies(server);
+    assert.equal(bodies.length, 1);
+    const parsed = JSON.parse(bodies[0]!) as Record<string, unknown>;
+    assert.equal(parsed.max_tokens, 8192, "the configured budget rides the scorer wire");
+    assert.equal(parsed.reasoning_effort, "low");
+    assert.equal("response_format" in parsed, false, "no structured output without the assertion");
+
+    // Disabled: zero scorer calls, and no confidence surface — unchanged.
+    const off = await runConfidenceRun(server, {});
+    assert.equal(scorerRequests(server), 1, "the disabled run added no scorer call");
+    assert.equal(off.result.outputs.confidenceStatus, "");
+    assert.ok(!existsSync(join(off.runDir, "confidence-score.json")));
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1368: a configured Anthropic scorer effort without the opt-in warns naming the input and stays off the wire", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] })));
+  }));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-api-format": "anthropic",
+      "ai-confidence-reasoning-effort": "high",
+    }, "", true);
+    assert.equal(run.result.outputs.confidenceStatus, "scored");
+    // The warning names the exact input that turns the effort on.
+    const warning = run.logs.filter((line) => line.includes("ai-confidence-anthropic-effort-support"));
+    assert.equal(warning.length, 1, `expected one inactive-effort warning: ${JSON.stringify(run.logs)}`);
+    assert.match(warning[0]!, /output_config\.effort/);
+    // And the wire carries no effort field.
+    const bodies = scorerRequestBodies(server);
+    assert.equal(bodies.length, 1);
+    assert.equal(bodies[0]!.includes("effort"), false);
+
+    // The opt-in silences the warning and the effort rides the wire.
+    const asserted = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-api-format": "anthropic",
+      "ai-confidence-reasoning-effort": "high",
+      "ai-confidence-anthropic-effort-support": "true",
+    });
+    assert.equal(asserted.result.outputs.confidenceStatus, "scored");
+    assert.equal(
+      run.logs.filter((line) => line.includes("ai-confidence-anthropic-effort-support")).length,
+      1,
+      "the asserted run added no new warning",
+    );
+    const assertedBodies = scorerRequestBodies(server);
+    assert.equal(assertedBodies.length, 2);
+    const assertedBody = JSON.parse(assertedBodies[1]!) as Record<string, unknown>;
+    assert.deepEqual(assertedBody.output_config, { effort: "high" });
+  } finally {
+    await server.close();
+  }
+});

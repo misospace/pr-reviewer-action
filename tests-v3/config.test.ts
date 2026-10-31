@@ -41,7 +41,7 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  assert.equal(contract.inputs.length, 170);
+  assert.equal(contract.inputs.length, 175);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
 });
 
@@ -701,4 +701,40 @@ test("#1073: ai-confidence-reasoning-effort is registered for the free-form shap
     process.emitWarning = originalEmit;
   }
   assert.ok(warnings.some((message) => message.includes("ai-confidence-reasoning-effort")));
+});
+
+test("#1368: the confidence scorer's budgets validate as positive integers and its flags as booleans", () => {
+  const raw = Object.fromEntries(contract.inputs.map((input) => [input.id, input.default === undefined ? "present" : String(input.default)]));
+  // Defaults: 4096 / 98304 parse to numbers; the context window stays ""
+  // (unknown), and both capability flags parse to false.
+  const defaults = loadConfig(contract, raw);
+  assert.equal(defaults.aiConfidenceMaxTokens, 4096);
+  assert.equal(defaults.aiConfidencePromptTokens, 98304);
+  assert.equal(defaults.aiConfidenceModelContextTokens, "");
+  assert.equal(defaults.aiConfidenceAnthropicEffortSupport, false);
+  assert.equal(defaults.aiConfidenceStructuredOutputSupport, false);
+  // An empty budget value falls back to its contract default (the loader
+  // treats "" as unset for integers).
+  assert.equal(loadConfig(contract, { ...raw, "ai-confidence-max-tokens": "" }).aiConfidenceMaxTokens, 4096);
+  // Positive-integer validation.
+  for (const id of ["ai-confidence-max-tokens", "ai-confidence-prompt-tokens", "ai-confidence-model-context-tokens"] as const) {
+    assert.equal(loadConfig(contract, { ...raw, [id]: "1" })[toCamelCase(id) as "aiConfidenceMaxTokens"], 1, id);
+    assert.throws(() => loadConfig(contract, { ...raw, [id]: "0" }), /must be at least 1/, id);
+    assert.throws(() => loadConfig(contract, { ...raw, [id]: "-4" }), /must be at least 1/, id);
+    assert.throws(() => loadConfig(contract, { ...raw, [id]: "2.5" }), /must be an integer/, id);
+    assert.throws(() => loadConfig(contract, { ...raw, [id]: "abc" }), /must be an integer/, id);
+  }
+  // Boolean validation: only the exact words parse; anything else throws.
+  for (const id of ["ai-confidence-anthropic-effort-support", "ai-confidence-structured-output-support"] as const) {
+    assert.equal(loadConfig(contract, { ...raw, [id]: "true" })[toCamelCase(id) as "aiConfidenceAnthropicEffortSupport"], true, id);
+    assert.throws(() => loadConfig(contract, { ...raw, [id]: "yes" }), /must be 'true' or 'false'/, id);
+  }
+  // Every new schema entry is declared in the contract.
+  for (const id of [
+    "ai-confidence-anthropic-effort-support", "ai-confidence-structured-output-support",
+    "ai-confidence-max-tokens", "ai-confidence-prompt-tokens", "ai-confidence-model-context-tokens",
+  ]) {
+    assert.ok(BOOLEAN_INPUTS.has(id) || INTEGER_INPUTS.has(id), id);
+    assert.ok(contract.inputs.some((input) => input.id === id), id);
+  }
 });

@@ -92,7 +92,7 @@ BRIDGE_LAUNCHER = REPO_ROOT / "scripts" / "confidence_bridge.mjs"
 # projection below spends it, the live request sends the production
 # import through the bridge; pinned equal by
 # ``tests/test_confidence_calibration.py::test_scorer_max_tokens_matches_production``).
-SCORER_MAX_TOKENS = 1024
+SCORER_MAX_TOKENS = 4096
 
 # The per-pilot lifetime scorer-spend ledger, stored in the RUNS DIR (the
 # pilot instance): the scorer's call ceiling is a lifetime bound for that

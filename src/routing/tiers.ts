@@ -215,10 +215,11 @@ export function laneAnthropicEffortSupported(
 }
 
 /** #998: the input name that carries the effort opt-in for one lane. */
-export function anthropicEffortSupportInput(lane: "primary" | "smart" | "fallback" | "specialist"): string {
+export function anthropicEffortSupportInput(lane: "primary" | "smart" | "fallback" | "specialist" | "confidence"): string {
   if (lane === "smart") return "ai-smart-anthropic-effort-support";
   if (lane === "specialist") return "ai-specialist-anthropic-effort-support";
   if (lane === "fallback") return "ai-fallback-anthropic-effort-support";
+  if (lane === "confidence") return "ai-confidence-anthropic-effort-support";
   // The base assertion scopes the base and primary lanes.
   return "ai-anthropic-effort-support";
 }
@@ -244,7 +245,7 @@ export function effectiveWireEffort(
  * it never mentions a secret. Silent omission alone is what made a configured
  * effort indistinguishable from an ignored one (#1049 review). */
 export function anthropicEffortInactiveWarning(
-  lane: "primary" | "smart" | "fallback" | "specialist",
+  lane: "primary" | "smart" | "fallback" | "specialist" | "confidence",
   effort: string,
   boundary = "",
 ): string {
@@ -555,6 +556,28 @@ export interface ConfidenceProfile {
    * Provenance, not value equality — an operator may deliberately reuse
    * the same secret on a distinct endpoint, and that must stay allowed. */
   credentialSource: "own" | "primary";
+  /** #1368: the scorer's completion/output budget in tokens (positive
+   * integer). Provider accounting may include reasoning/thinking tokens
+   * inside this budget, so it must leave room for hidden reasoning plus the
+   * final structured JSON answer; default 4096. A scorer that exhausts the
+   * budget degrades to unscored — it never affects the review. */
+  maxTokens: number;
+  /** #1368: the scorer's prompt budget in tokens (~96k default). A
+   * deterministic bytes/4 estimate bounds the assembled prompt with explicit
+   * in-band truncation when exceeded. */
+  promptTokens: number;
+  /** #1368: the operator-declared context window of the confidence model,
+   * for deterministic budget validation; 0 = unknown (no clamping). */
+  modelContextTokens: number;
+  /** #1368: the operator's assertion that the scorer's Anthropic-compatible
+   * endpoint accepts `output_config.effort`. Never inherited from any other
+   * lane (capability assertions never cross lanes); false keeps the
+   * Anthropic request byte-identical even when an effort is configured. */
+  anthropicEffortSupported: boolean;
+  /** #1368: the operator's assertion that the scorer's endpoint (either wire
+   * family) accepts structured output with the scorer's own compact JSON
+   * schema. False (the default) keeps the request bytes unchanged. */
+  structuredOutputSupported: boolean;
 }
 
 export interface ConfidenceResolution {
@@ -579,12 +602,16 @@ function primaryLane(env: EnvLike): { baseUrl: string; model: string; apiFormat:
 }
 
 /** The disabled profile every early return shares: no endpoint, no
- * credential, no model — nothing the run could dial. */
+ * credential, no model — nothing the run could dial. The #1368 budget and
+ * capability fields carry their documented defaults so the shape stays
+ * uniform for every consumer. */
 function disabledConfidenceProfile(): ConfidenceProfile {
   return {
     enabled: false, baseUrl: "", model: "", apiFormat: "", apiKey: "",
     requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false,
     credentialSource: "own",
+    maxTokens: 4096, promptTokens: 98304, modelContextTokens: 0,
+    anthropicEffortSupported: false, structuredOutputSupported: false,
   };
 }
 
@@ -594,6 +621,28 @@ function disabledConfidenceProfile(): ConfidenceProfile {
  * "true" upstream — so this reads state, it does not decide it. */
 function isForkPr(env: EnvLike): boolean {
   return env.IS_FORK_PR === "true";
+}
+
+/** #1368: one positive-integer env value, or its documented default with a
+ * WARNING naming the input — the same drop-loudly-never-fatal style
+ * `effortFrom` uses. An empty value means "not set" and takes the default
+ * silently (the contract's own unset shape). */
+function positiveIntFrom(env: EnvLike, key: string, fallback: number, warnings: string[]): number {
+  const raw = (env[key] ?? "").trim();
+  if (raw === "") return fallback;
+  const parsed = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : Number.NaN;
+  if (!Number.isFinite(parsed) || !Number.isSafeInteger(parsed) || parsed < 1) {
+    warnings.push(`${key} ignored: the value must be a positive integer; the default ${fallback} is used`);
+    return fallback;
+  }
+  return parsed;
+}
+
+/** #1368: the boolean capability-assertion convention every lane opt-in
+ * shares — true only on the exact word "true", so nothing is ever enabled by
+ * accident (malformed values are off, never an opt-in). */
+function confidenceCapabilityFlag(env: EnvLike, key: string): boolean {
+  return (env[key] ?? "").trim().toLowerCase() === "true";
 }
 
 export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
@@ -672,6 +721,40 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   const effort = effortFrom(env, "AI_CONFIDENCE_REASONING_EFFORT");
   if (effort.warning !== null) warnings.push(effort.warning);
 
+  // #1368: the scorer's own budgets and capability assertions. Every value
+  // is resolved here — defaults, validation warnings, and the deterministic
+  // context clamps — so the profile is the single source the scorer reads.
+  const maxTokensDefault = 4096;
+  const promptTokensDefault = 98304;
+  let maxTokens = positiveIntFrom(env, "AI_CONFIDENCE_MAX_TOKENS", maxTokensDefault, warnings);
+  let promptTokens = positiveIntFrom(env, "AI_CONFIDENCE_PROMPT_TOKENS", promptTokensDefault, warnings);
+  const modelContextTokens = positiveIntFrom(env, "AI_CONFIDENCE_MODEL_CONTEXT_TOKENS", 0, warnings);
+  const anthropicEffortSupported = confidenceCapabilityFlag(env, "AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT");
+  const structuredOutputSupported = confidenceCapabilityFlag(env, "AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT");
+  // Deterministic clamping against a declared context window. Never fatal:
+  // each clamp is announced and the budgets stay positive (the prompt floor
+  // keeps a tiny window from starving the prompt to zero).
+  if (modelContextTokens > 0) {
+    if (maxTokens > modelContextTokens) {
+      warnings.push(
+        `AI_CONFIDENCE_MAX_TOKENS clamped to ${modelContextTokens}: the declared ai-confidence-model-context-tokens window (${modelContextTokens}) is smaller than the configured completion budget`,
+      );
+      maxTokens = modelContextTokens;
+    }
+    if (promptTokens + maxTokens > modelContextTokens) {
+      const clampedPrompt = Math.max(modelContextTokens - maxTokens, 1024);
+      warnings.push(
+        `AI_CONFIDENCE_PROMPT_TOKENS clamped to ${clampedPrompt}: prompt plus completion budgets must fit the declared ai-confidence-model-context-tokens window (${modelContextTokens})`,
+      );
+      promptTokens = clampedPrompt;
+    }
+  }
+  // #1368: a configured effort that cannot be sent must never be silent —
+  // the same truth-telling warning the review lanes emit (#1049 review).
+  if (apiFormat === "anthropic" && effort.value !== "" && !anthropicEffortSupported) {
+    warnings.push(anthropicEffortInactiveWarning("confidence", effort.value));
+  }
+
   return {
     profile: {
       enabled: true,
@@ -683,6 +766,11 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
       reasoningEffort: effort.value,
       inheritedTransport,
       credentialSource: apiKey !== "" || distinctEndpoint ? "own" : "primary",
+      maxTokens,
+      promptTokens,
+      modelContextTokens,
+      anthropicEffortSupported,
+      structuredOutputSupported,
     },
     warnings,
   };
