@@ -392,12 +392,25 @@ test("a cap eviction drops the IDENTITY-FREE scope first: a live identity record
 
 // ── sidecar lock ────────────────────────────────────────────────────────
 
+/** The child fixtures below contend for the commit lock, but a real holder
+ * keeps it only for the duration of its own commit. Under parallel load the
+ * wall clock a child needs is dominated by cold Node boot and CPU starvation,
+ * not by the lock itself, so the fixture waits much longer than a loaded
+ * runner can plausibly take for six short commits (~3s ceiling here) while
+ * fail-closed semantics stay untouched: exhaustion still throws, and the
+ * dedicated lock-busy / stale-lock tests pin their own tiny budgets. */
+const XPROC_LOCK_BUDGET = { lockAttempts: 600, lockRetryDelayMs: 5 };
+
 test("concurrent PROCESSES commit every charge exactly once (no lost update)", async () => {
   const { filePath } = scratch("xproc");
   const modulePath = require.resolve("../src/followup/durable-rate-limit.js");
   const childScript = `
     const { DurableRateLimitStore } = require(process.argv[1]);
-    const store = new DurableRateLimitStore({ filePath: process.argv[2], lockRetryDelayMs: 5 });
+    const store = new DurableRateLimitStore({
+      filePath: process.argv[2],
+      lockAttempts: ${XPROC_LOCK_BUDGET.lockAttempts},
+      lockRetryDelayMs: ${XPROC_LOCK_BUDGET.lockRetryDelayMs},
+    });
     store.record("pr:github:owner/repo#7", 10_000 + Number(process.argv[3]));
     if (store.degradedReason !== null) {
       process.stderr.write(String(store.degradedReason));
@@ -1225,7 +1238,11 @@ test("concurrent PROCESSES redelivering the SAME request charge it once", async 
   const modulePath = require.resolve("../src/followup/durable-rate-limit.js");
   const childScript = `
     const { DurableRateLimitStore } = require(process.argv[1]);
-    const store = new DurableRateLimitStore({ filePath: process.argv[2], lockRetryDelayMs: 5 });
+    const store = new DurableRateLimitStore({
+      filePath: process.argv[2],
+      lockAttempts: ${XPROC_LOCK_BUDGET.lockAttempts},
+      lockRetryDelayMs: ${XPROC_LOCK_BUDGET.lockRetryDelayMs},
+    });
     const scopes = [
       { key: "pr:github:owner/repo#7", rule: { limit: 6, windowMs: 60000 } },
       { key: "actor:github:owner/repo#7:alice", rule: { limit: 6, windowMs: 60000 } },
