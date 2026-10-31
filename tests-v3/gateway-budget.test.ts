@@ -29,13 +29,13 @@ test("budget: reserve records an estimate, commit settles actuals, refund remove
   const reserved = ledger1.reserve(RESERVE);
   assert.ok(reserved.ok);
   assert.deepEqual(ledger1.usage(), { requestCount: 1, tokens: 100, costMicros: 10 });
-  const committed = ledger1.commit(RESERVE.reservationId, { requestCount: 1, tokens: 90, costMicros: 12 });
+  const committed = ledger1.commit(RESERVE.runId, RESERVE.reservationId, { requestCount: 1, tokens: 90, costMicros: 12 });
   assert.ok(committed.ok);
   assert.deepEqual(ledger1.usage(), { requestCount: 1, tokens: 90, costMicros: 12 });
 
   const ledger2 = ledger();
   assert.ok(ledger2.reserve(RESERVE).ok);
-  assert.ok(ledger2.refund(RESERVE.reservationId).ok);
+  assert.ok(ledger2.refund(RESERVE.runId, RESERVE.reservationId).ok);
   assert.deepEqual(ledger2.usage(), { requestCount: 0, tokens: 0, costMicros: 0 });
 });
 
@@ -64,7 +64,7 @@ test("budget: unknown pricing contributes 0 cost but tokens and requests still c
   const zero = new InMemoryBudgetLedger(zeroCostCaps);
   const reserved = zero.reserve({ ...RESERVE, estimatedCostMicros: 0 });
   assert.ok(reserved.ok);
-  assert.ok(zero.commit(RESERVE.reservationId, { requestCount: 1, tokens: 80, costMicros: 0 }).ok);
+  assert.ok(zero.commit(RESERVE.runId, RESERVE.reservationId, { requestCount: 1, tokens: 80, costMicros: 0 }).ok);
   assert.deepEqual(zero.usage(), { requestCount: 1, tokens: 80, costMicros: 0 });
   // A nonzero cost estimate cannot hide under a zero cost cap.
   const refused = zero.reserve({ ...RESERVE, reservationId: "run-765:2" });
@@ -84,11 +84,10 @@ test("budget: a retry with the same reservation id returns the SAME reservation 
   assert.deepEqual(ledger1.usage(), { requestCount: 1, tokens: 100, costMicros: 10 });
 });
 
-test("budget: a different identity under the same reservation id is a mismatch, never an overwrite", () => {
+test("budget: a different identity under the same reservation id in the SAME run is a mismatch, never an overwrite", () => {
   const ledger1 = ledger();
   assert.ok(ledger1.reserve(RESERVE).ok);
   for (const mutated of [
-    { ...RESERVE, runId: "run-other" },
     { ...RESERVE, generation: 2 },
     { ...RESERVE, modelProfile: "escalated" },
     { ...RESERVE, estimatedTokens: 101 },
@@ -99,6 +98,61 @@ test("budget: a different identity under the same reservation id is a mismatch, 
     if (!refused.ok) assert.equal(refused.code, "reservation_mismatch");
   }
   assert.deepEqual(ledger1.usage(), { requestCount: 1, tokens: 100, costMicros: 10 });
+});
+
+test("budget: the same reservation id under a DIFFERENT run reserves its own row (#1361)", () => {
+  const ledger1 = ledger();
+  // Run A owns `shared:1`. Run B (e.g. an untrusted worker that guessed
+  // run A's deterministic id) reserves the SAME id: its own row, not a
+  // replay of run A's and not a mismatch against it.
+  assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "shared:1" }).ok);
+  const squatted = ledger1.reserve({ ...RESERVE, runId: "run-b", reservationId: "shared:1" });
+  assert.ok(squatted.ok, "a different run using the same id gets its own reservation");
+  // Two distinct rows, each charged to its own run.
+  assert.equal(ledger1.rows().length, 2);
+  assert.deepEqual(ledger1.usageFor("run-a"), { requestCount: 1, tokens: 100, costMicros: 10 });
+  assert.deepEqual(ledger1.usageFor("run-b"), { requestCount: 1, tokens: 100, costMicros: 10 });
+  assert.deepEqual(ledger1.usage(), { requestCount: 2, tokens: 200, costMicros: 20 });
+  // Same-run replay still returns the SAME row for each run independently.
+  const replayA = ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "shared:1" });
+  const replayB = ledger1.reserve({ ...RESERVE, runId: "run-b", reservationId: "shared:1" });
+  assert.ok(replayA.ok && replayB.ok);
+  if (replayA.ok && replayB.ok && squatted.ok) {
+    assert.notEqual(replayA.reservation, replayB.reservation, "different runs never share the row");
+    assert.equal(replayB.reservation, squatted.reservation, "the run's own retry still replays its own row");
+  }
+  assert.deepEqual(ledger1.usage(), { requestCount: 2, tokens: 200, costMicros: 20 }, "replays never double-charge");
+  // A mismatch stays a SAME-RUN rule: run B diverging on its own pair
+  // refuses against run B's row, and run A's row is untouched either way.
+  const mismatchB = ledger1.reserve({ ...RESERVE, runId: "run-b", reservationId: "shared:1", estimatedTokens: 101 });
+  assert.equal(mismatchB.ok, false);
+  if (!mismatchB.ok) assert.equal(mismatchB.code, "reservation_mismatch");
+});
+
+test("budget: settle addresses the (runId, reservationId) pair — never another run's row (#1361)", () => {
+  const ledger1 = ledger();
+  assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "shared:1" }).ok);
+  assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-b", reservationId: "shared:1" }).ok);
+  // Committing run A's pair settles ONLY run A's row.
+  const committedA = ledger1.commit("run-a", "shared:1", { requestCount: 1, tokens: 90, costMicros: 12 });
+  assert.ok(committedA.ok);
+  const rows = ledger1.rows();
+  assert.equal(rows.find((row) => row.runId === "run-a")?.state, "committed");
+  assert.equal(rows.find((row) => row.runId === "run-b")?.state, "reserved", "run B's same-id row is untouched");
+  assert.deepEqual(ledger1.usage(), { requestCount: 2, tokens: 190, costMicros: 22 });
+  // A pair no run holds refuses with unknown_reservation — an unseen run
+  // id matches nothing, it never falls back to another run's same-id row.
+  const wrongRun = ledger1.commit("run-c", "shared:1", { requestCount: 1, tokens: 1, costMicros: 1 });
+  assert.equal(wrongRun.ok, false);
+  if (!wrongRun.ok) assert.equal(wrongRun.code, "unknown_reservation");
+  const wrongRunRefund = ledger1.refund("run-c", "shared:1");
+  assert.equal(wrongRunRefund.ok, false);
+  if (!wrongRunRefund.ok) assert.equal(wrongRunRefund.code, "unknown_reservation");
+  // Refund is pair-scoped too: refunding run B's pair leaves run A's
+  // committed row settled with its actuals.
+  assert.ok(ledger1.refund("run-b", "shared:1").ok);
+  assert.deepEqual(ledger1.usageFor("run-a"), { requestCount: 1, tokens: 90, costMicros: 12 });
+  assert.deepEqual(ledger1.usageFor("run-b"), { requestCount: 0, tokens: 0, costMicros: 0 });
 });
 
 test("budget: concurrent reservations are safe — the cap admits exactly what fits", async () => {
@@ -135,31 +189,31 @@ test("budget: cancellation is a generation bump — older generations stop reser
 test("budget: settle-state transitions are exact — no refund after commit, no double commit", () => {
   const ledger1 = ledger();
   assert.ok(ledger1.reserve(RESERVE).ok);
-  assert.ok(ledger1.commit(RESERVE.reservationId, { requestCount: 1, tokens: 90, costMicros: 12 }).ok);
-  const refundAfterCommit = ledger1.refund(RESERVE.reservationId);
+  assert.ok(ledger1.commit(RESERVE.runId, RESERVE.reservationId, { requestCount: 1, tokens: 90, costMicros: 12 }).ok);
+  const refundAfterCommit = ledger1.refund(RESERVE.runId, RESERVE.reservationId);
   assert.equal(refundAfterCommit.ok, false);
   if (!refundAfterCommit.ok) assert.equal(refundAfterCommit.code, "reservation_mismatch");
   // Idempotent replay of the same actuals is a no-op, not a second charge.
-  const replay = ledger1.commit(RESERVE.reservationId, { requestCount: 1, tokens: 90, costMicros: 12 });
+  const replay = ledger1.commit(RESERVE.runId, RESERVE.reservationId, { requestCount: 1, tokens: 90, costMicros: 12 });
   assert.ok(replay.ok);
   assert.deepEqual(ledger1.usage(), { requestCount: 1, tokens: 90, costMicros: 12 });
-  const divergent = ledger1.commit(RESERVE.reservationId, { requestCount: 1, tokens: 91, costMicros: 12 });
+  const divergent = ledger1.commit(RESERVE.runId, RESERVE.reservationId, { requestCount: 1, tokens: 91, costMicros: 12 });
   assert.equal(divergent.ok, false);
   if (!divergent.ok) assert.equal(divergent.code, "reservation_mismatch");
 
   const ledger2 = ledger();
   assert.ok(ledger2.reserve(RESERVE).ok);
-  assert.ok(ledger2.refund(RESERVE.reservationId).ok);
-  assert.ok(ledger2.refund(RESERVE.reservationId).ok);
-  const commitAfterRefund = ledger2.commit(RESERVE.reservationId, { requestCount: 1, tokens: 90, costMicros: 12 });
+  assert.ok(ledger2.refund(RESERVE.runId, RESERVE.reservationId).ok);
+  assert.ok(ledger2.refund(RESERVE.runId, RESERVE.reservationId).ok);
+  const commitAfterRefund = ledger2.commit(RESERVE.runId, RESERVE.reservationId, { requestCount: 1, tokens: 90, costMicros: 12 });
   assert.equal(commitAfterRefund.ok, false);
   if (!commitAfterRefund.ok) assert.equal(commitAfterRefund.code, "reservation_mismatch");
   assert.deepEqual(ledger2.usage(), { requestCount: 0, tokens: 0, costMicros: 0 });
 
-  const unknown = ledger2.commit("no-such-reservation", { requestCount: 1, tokens: 1, costMicros: 1 });
+  const unknown = ledger2.commit("run-765", "no-such-reservation", { requestCount: 1, tokens: 1, costMicros: 1 });
   assert.equal(unknown.ok, false);
   if (!unknown.ok) assert.equal(unknown.code, "unknown_reservation");
-  const unknownRefund = ledger2.refund("no-such-reservation");
+  const unknownRefund = ledger2.refund("run-765", "no-such-reservation");
   assert.equal(unknownRefund.ok, false);
   if (!unknownRefund.ok) assert.equal(unknownRefund.code, "unknown_reservation");
 });
@@ -168,7 +222,7 @@ test("budget: restart replay — a re-seeded ledger returns the same reservation
   const before = ledger();
   assert.ok(before.reserve(RESERVE).ok);
   assert.ok(before.reserve({ ...RESERVE, reservationId: "run-765:2", estimatedTokens: 50 }).ok);
-  assert.ok(before.commit("run-765:1", { requestCount: 1, tokens: 90, costMicros: 12 }).ok);
+  assert.ok(before.commit("run-765", "run-765:1", { requestCount: 1, tokens: 90, costMicros: 12 }).ok);
 
   // The controller restarts and re-seeds from the durable rows.
   const after = new InMemoryBudgetLedger(CAPS, { state: before.durableState() });
@@ -269,19 +323,19 @@ test("budget: committed actuals beyond the reserved estimate are flagged overran
   const ledger1 = ledger();
   // Estimate 1 token; actuals 5 tokens and more cost than estimated.
   assert.ok(ledger1.reserve({ ...RESERVE, estimatedTokens: 1, estimatedCostMicros: 1 }).ok);
-  const committed = ledger1.commit("run-765:1", { requestCount: 1, tokens: 5, costMicros: 3 });
+  const committed = ledger1.commit("run-765", "run-765:1", { requestCount: 1, tokens: 5, costMicros: 3 });
   assert.ok(committed.ok);
   assert.equal(committed.ok ? committed.row.overran : null, true);
   assert.deepEqual(ledger1.usage(), { requestCount: 1, tokens: 5, costMicros: 3 }, "the ledger records reality");
   // Within bounds stays false; refunds never carry the flag.
   const ledger2 = ledger();
   assert.ok(ledger2.reserve(RESERVE).ok);
-  const within = ledger2.commit("run-765:1", { requestCount: 1, tokens: 90, costMicros: 10 });
+  const within = ledger2.commit("run-765", "run-765:1", { requestCount: 1, tokens: 90, costMicros: 10 });
   assert.ok(within.ok);
   assert.equal(within.ok ? within.row.overran : null, false);
   const ledger3 = ledger();
   assert.ok(ledger3.reserve(RESERVE).ok);
-  const refunded = ledger3.refund("run-765:1");
+  const refunded = ledger3.refund("run-765", "run-765:1");
   assert.ok(refunded.ok);
   assert.equal(refunded.ok ? refunded.row.overran : null, false);
 });
@@ -289,11 +343,11 @@ test("budget: committed actuals beyond the reserved estimate are flagged overran
 test("budget: commit requires at least one request", () => {
   const ledger1 = ledger();
   assert.ok(ledger1.reserve(RESERVE).ok);
-  const zero = ledger1.commit("run-765:1", { requestCount: 0, tokens: 90, costMicros: 10 });
+  const zero = ledger1.commit("run-765", "run-765:1", { requestCount: 0, tokens: 90, costMicros: 10 });
   assert.equal(zero.ok, false);
   if (!zero.ok) assert.equal(zero.code, "invalid_request");
   // A seeded committed row with zero requests is malformed.
-  assert.ok(ledger1.commit("run-765:1", { requestCount: 1, tokens: 90, costMicros: 10 }).ok);
+  assert.ok(ledger1.commit("run-765", "run-765:1", { requestCount: 1, tokens: 90, costMicros: 10 }).ok);
   assert.throws(
     () =>
       new InMemoryBudgetLedger(CAPS, {
@@ -317,6 +371,22 @@ test("budget: seed rows are validated — malformed and duplicate rows refuse co
       new InMemoryBudgetLedger(CAPS, {
         state: { rows: [{ ...RESERVE, state: "committed", settledAtMs: 0 } as unknown as BudgetReservationRow], generations: [] },
       }),
+  );
+  // Cross-run same-id rows are distinct idempotency pairs (#1361): the
+  // durable re-seed replays both, while the SAME pair twice still refuses.
+  const crossRun = ledger();
+  assert.ok(crossRun.reserve({ ...RESERVE, runId: "run-a", reservationId: "shared:1" }).ok);
+  assert.ok(crossRun.reserve({ ...RESERVE, runId: "run-b", reservationId: "shared:1" }).ok);
+  const reseeded = new InMemoryBudgetLedger(CAPS, { state: crossRun.durableState() });
+  assert.equal(reseeded.rows().length, 2, "both same-id rows under different runs survive the re-seed");
+  assert.deepEqual(reseeded.usage(), crossRun.usage());
+  assert.ok(reseeded.reserve({ ...RESERVE, runId: "run-a", reservationId: "shared:1" }).ok);
+  assert.ok(reseeded.reserve({ ...RESERVE, runId: "run-b", reservationId: "shared:1" }).ok);
+  assert.equal(reseeded.rows().length, 2, "each run replays its OWN row across the restart — no new charge");
+  const first = reseeded.rows()[0]!;
+  assert.throws(
+    () => new InMemoryBudgetLedger(CAPS, { state: { rows: [first, first], generations: [] } }),
+    "the same (runId, reservationId) pair provided twice is still refused",
   );
 });
 
@@ -361,7 +431,7 @@ test("budget: a run at its token cap does not block another run under it", () =>
   // request refuses, but run B still has its full 1000.
   const ledger1 = ledger();
   assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "run-a:1", estimatedTokens: 900 }).ok);
-  assert.ok(ledger1.commit("run-a:1", { requestCount: 1, tokens: 900, costMicros: 10 }).ok);
+  assert.ok(ledger1.commit("run-a", "run-a:1", { requestCount: 1, tokens: 900, costMicros: 10 }).ok);
   const aOver = ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "run-a:2", estimatedTokens: 901 });
   assert.equal(aOver.ok, false);
   if (!aOver.ok) assert.equal(aOver.code, "budget_exhausted");
@@ -371,7 +441,7 @@ test("budget: a run at its token cap does not block another run under it", () =>
 test("budget: usageFor is one run's totals; usage is the controller-wide total", () => {
   const ledger1 = ledger();
   assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-a", reservationId: "run-a:1" }).ok);
-  assert.ok(ledger1.commit("run-a:1", { requestCount: 1, tokens: 90, costMicros: 12 }).ok);
+  assert.ok(ledger1.commit("run-a", "run-a:1", { requestCount: 1, tokens: 90, costMicros: 12 }).ok);
   assert.ok(ledger1.reserve({ ...RESERVE, runId: "run-b", reservationId: "run-b:1" }).ok);
   assert.deepEqual(ledger1.usageFor("run-a"), { requestCount: 1, tokens: 90, costMicros: 12 });
   assert.deepEqual(ledger1.usageFor("run-b"), { requestCount: 1, tokens: 100, costMicros: 10 });

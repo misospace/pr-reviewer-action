@@ -127,6 +127,7 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
       // refusal with the reservation refunded — a seam crash must never
       // escape as a raw rejection or strand a reservation.
       let reservedId: string | null = null;
+      let reservedRunId = "";
       try {
         const shape = validateCallInput(input);
         if (shape !== "") {
@@ -174,6 +175,11 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
           );
         }
         reservedId = input.reservationId;
+        // The ledger's own frozen row carries the run identity it accepted
+        // at reserve time: capture it for the catch-path refund so the
+        // total-function guarantee never depends on re-reading a
+        // caller-owned `input` object from inside `catch`.
+        reservedRunId = reservation.reservation.runId;
         const resolved = await options.broker.resolve(options.modelCredentialRef, {
           purpose: "model",
           platform: input.platform,
@@ -182,7 +188,7 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
           profileName: input.modelProfile,
         });
         if (!resolved.ok) {
-          options.ledger.refund(input.reservationId);
+          options.ledger.refund(input.runId, input.reservationId);
           reservedId = null;
           return refusal(
             "credential_refused",
@@ -224,7 +230,7 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
           // by leaf. The provider billed the call, so the attempt is
           // recorded honestly and the reservation is refunded.
           if (responseCarriesKnownSecret(outcome.response, secrets)) {
-            options.ledger.refund(input.reservationId);
+            options.ledger.refund(input.runId, input.reservationId);
             reservedId = null;
             return refusal(
               "provider_response_unsafe",
@@ -239,17 +245,17 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
             // unvalidatable usage record: fail closed — refund the
             // reservation AND still record the attempt honestly (never
             // erase a provider-billed call from the accounting).
-            options.ledger.refund(input.reservationId);
+            options.ledger.refund(input.runId, input.reservationId);
             reservedId = null;
             return refusal("usage_record_invalid", "the produced usage record failed durable-shape validation", attemptRecord(input, now()), null);
           }
-          const committed = options.ledger.commit(input.reservationId, {
+          const committed = options.ledger.commit(input.runId, input.reservationId, {
             requestCount: 1,
             tokens: usage.inputTokens + usage.outputTokens,
             costMicros: usage.costMicros,
           });
           if (!committed.ok) {
-            options.ledger.refund(input.reservationId);
+            options.ledger.refund(input.runId, input.reservationId);
             reservedId = null;
             return refusal(committed.code, committed.reason, usage, null);
           }
@@ -266,7 +272,7 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
             usage,
           });
         }
-        options.ledger.refund(input.reservationId);
+        options.ledger.refund(input.runId, input.reservationId);
         reservedId = null;
         return Object.freeze({
           ok: false as const,
@@ -280,7 +286,7 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
         if (reservedId !== null) {
           // A committed row refuses the refund safely, so this can never
           // double-credit a settled reservation.
-          options.ledger.refund(reservedId);
+          options.ledger.refund(reservedRunId, reservedId);
         }
         return refusal(
           "gateway_error",

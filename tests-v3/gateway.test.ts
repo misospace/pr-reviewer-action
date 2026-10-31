@@ -6,6 +6,7 @@ import { InMemoryBudgetLedger } from "../src/gateway/budget.js";
 import {
   GATEWAY_REFUSAL_CODES,
   validateBudgetLimits,
+  type BudgetLedger,
   type GatewayProfileEndpoint,
   type ModelGateway,
 } from "../src/gateway/types.js";
@@ -91,7 +92,7 @@ function okResponse(): NormalizedModelResponse {
 
 interface Harness {
   gateway: ModelGateway;
-  ledger: InMemoryBudgetLedger;
+  ledger: BudgetLedger;
   calls: ChatRequestInput[];
   clock: ReturnType<typeof clock>;
   capability: ReturnType<typeof createGatewayCapabilityAuth>;
@@ -103,7 +104,7 @@ function harness(overrides: {
   profiles?: Record<string, GatewayProfileEndpoint>;
   vaultEntries?: VaultEntry[];
   runChat?: (input: ChatRequestInput) => Promise<ChatRequestOutcome>;
-  ledger?: InMemoryBudgetLedger;
+  ledger?: BudgetLedger | undefined;
 } = {}): Harness {
   const time = clock();
   const ledger = overrides.ledger ?? new InMemoryBudgetLedger(CAPS, { now: time.now });
@@ -347,6 +348,35 @@ test("gateway: the budget is run-scoped — one run never consumes another's all
   assert.ok(runB.ok, JSON.stringify(runB));
   assert.equal(ledger1.usageFor("run-a").requestCount, 2);
   assert.equal(ledger1.usageFor("run-b").requestCount, 1);
+});
+
+test("gateway: a squatter pre-occupying another run's reservation id cannot block the victim's call (#1361)", async () => {
+  // An untrusted worker for another run guesses this run's deterministic
+  // reservation id and books it under its OWN run first. Idempotency is
+  // the (runId, reservationId) pair, so the victim's call reserves its own
+  // row and proceeds — the squatter neither mismatches, blocks, nor
+  // learns anything about the id's use by another run.
+  const h = harness();
+  assert.ok(
+    h.ledger.reserve({
+      reservationId: "run-765:1",
+      runId: "run-squatter",
+      generation: 1,
+      modelProfile: PROFILE,
+      estimatedTokens: 10,
+      estimatedCostMicros: 0,
+    }).ok,
+  );
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  assert.equal(h.calls.length, 1, "the provider was called exactly once for the victim run");
+  // The victim settled its OWN same-id row; the squatter's row stays live
+  // and is charged to the squatter's run only.
+  const rows = h.ledger.rows().filter((r) => r.reservationId === "run-765:1");
+  assert.equal(rows.length, 2);
+  assert.equal(rows.find((r) => r.runId === RUN_ID)?.state, "committed");
+  assert.equal(rows.find((r) => r.runId === "run-squatter")?.state, "reserved");
+  assert.deepEqual(h.ledger.usageFor("run-squatter"), { requestCount: 1, tokens: 10, costMicros: 0 });
 });
 
 test("gateway: the provider key never enters the worker-facing surface (serialization + refusal guards)", async () => {
@@ -594,6 +624,56 @@ test("gateway: an unexpected transport-seam throw becomes a typed gateway_error 
   assert.equal(refused.ok, false);
   if (!refused.ok) assert.equal(refused.code, "gateway_error");
   assert.deepEqual(h2.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 });
+});
+
+test("gateway: the catch-path refund never re-reads the caller's input — call stays total over a hostile input object", async () => {
+  // #1361 review: once the ledger has RECORDED the reservation, the
+  // catch-path refund must not depend on re-reading the caller-owned
+  // `input` — a getter-backed object that turns hostile after that point
+  // would turn the recovery path itself into a rejection. The wrapped
+  // ledger marks the moment a row exists; from then on every `runId`
+  // access on the input throws. The transport seam throws too, driving
+  // the catch path, which must refund from the run identity captured from
+  // the ledger's own frozen row instead of touching `input` again. A
+  // refund under the wrong key would leave the reservation live, so the
+  // zeroed usage proves the pair-scoped refund hit the row.
+  const inner = new InMemoryBudgetLedger(CAPS);
+  let armed = false;
+  const ledger: BudgetLedger = {
+    caps: () => inner.caps(),
+    reserve: (reserveInput) => {
+      const result = inner.reserve(reserveInput);
+      if (result.ok) armed = true;
+      return result;
+    },
+    commit: (runId, reservationId, actual) => inner.commit(runId, reservationId, actual),
+    refund: (runId, reservationId) => inner.refund(runId, reservationId),
+    usage: () => inner.usage(),
+    usageFor: (runId) => inner.usageFor(runId),
+    generationFor: (runId) => inner.generationFor(runId),
+    cancelRun: (runId) => inner.cancelRun(runId),
+    rows: () => inner.rows(),
+    generationRows: () => inner.generationRows(),
+    durableState: () => inner.durableState(),
+  };
+  let seamReached = false;
+  const throwing = async (): Promise<ChatRequestOutcome> => {
+    seamReached = true;
+    throw new Error("boom — internal seam failure");
+  };
+  const h = harness({ runChat: throwing, ledger });
+  const outcome = await h.gateway.call({
+    ...callInput({ token: h.token }),
+    get runId(): string {
+      if (armed) throw new Error("hostile re-read after reserve");
+      return RUN_ID;
+    },
+  });
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.equal(outcome.code, "gateway_error");
+  assert.equal(armed, true, "the reservation was recorded before the seam threw");
+  assert.equal(seamReached, true, "the transport seam was reached and threw");
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the reservation was refunded through the captured run identity");
 });
 
 test("gateway: the response-byte ceiling is operator config only — the worker cannot raise or set it", async () => {
