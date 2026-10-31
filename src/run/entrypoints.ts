@@ -595,12 +595,25 @@ function parseJsonish(raw: string): unknown {
 }
 
 /** #1073: bounded confidence concerns from the review step, serialized as
- * JSON. Absent or malformed means none render — never a garbage bullet. */
-function confidenceConcernsFromEnv(raw: string): { concerns: Array<{ file: string; line: number | null; evidence: string }> } | Record<string, never> {
+ * JSON. #1369: verifier concerns carry their closed-vocabulary `type` and
+ * `severity` tokens through with the file/line/evidence bound; an entry
+ * whose tokens are not in the verifier vocabulary degrades to untyped
+ * rendering, never a garbage bullet. Absent or malformed means none render. */
+function confidenceConcernsFromEnv(raw: string): {
+  concerns: Array<{
+    file: string;
+    line: number | null;
+    evidence: string;
+    type?: string;
+    severity?: string;
+  }>;
+} | Record<string, never> {
   if (raw.trim() === "") return {};
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return {};
+    const CONCERN_TYPES = new Set(["missed_issue", "unsupported_finding"]);
+    const CONCERN_SEVERITIES = new Set(["blocker", "major"]);
     const concerns = parsed
       .filter((entry): entry is Record<string, unknown> =>
         typeof entry === "object" && entry !== null && !Array.isArray(entry))
@@ -609,6 +622,8 @@ function confidenceConcernsFromEnv(raw: string): { concerns: Array<{ file: strin
         file: typeof entry.file === "string" ? entry.file.slice(0, 300) : "",
         line: typeof entry.line === "number" && Number.isInteger(entry.line) && entry.line >= 0 ? entry.line : null,
         evidence: typeof entry.evidence === "string" ? entry.evidence.slice(0, 400) : "",
+        ...(typeof entry.type === "string" && CONCERN_TYPES.has(entry.type) ? { type: entry.type } : {}),
+        ...(typeof entry.severity === "string" && CONCERN_SEVERITIES.has(entry.severity) ? { severity: entry.severity } : {}),
       }))
       .filter((concern) => concern.file !== "" || concern.evidence !== "");
     return concerns.length > 0 ? { concerns } : {};

@@ -2153,6 +2153,18 @@ test("#1073: the confidence-scorer family is fingerprint-conditional — disable
   const versionA = enabled.map((line) => (line.startsWith("SCORER_ACTION_VERSION=") ? "SCORER_ACTION_VERSION=v1.2.3" : line));
   const versionB = enabled.map((line) => (line.startsWith("SCORER_ACTION_VERSION=") ? "SCORER_ACTION_VERSION=v1.2.4" : line));
   assert.notEqual(computeConfigHash(versionA), computeConfigHash(versionB));
+  // #1369: the scoring-semantics rubric version rides the same enabled
+  // gate — a rubric change re-verifies even within one action release —
+  // and the disabled default emits no rubric line either, keeping the
+  // baseline hash byte-identical.
+  assert.ok(enabled.some((line) => line.startsWith("SCORER_RUBRIC_VERSION=")), "the enabled config omits SCORER_RUBRIC_VERSION");
+  assert.ok(!withDefaults.some((line) => line.startsWith("SCORER_RUBRIC_VERSION=")));
+  assert.ok(!baseline.some((line) => line.startsWith("SCORER_RUBRIC_VERSION=")));
+  // A rubric-version change over otherwise identical lines yields a new
+  // hash — rubric-change invalidation positively established.
+  const rubricA = enabled.map((line) => (line.startsWith("SCORER_RUBRIC_VERSION=") ? "SCORER_RUBRIC_VERSION=merge-readiness-verifier-v1" : line));
+  const rubricB = enabled.map((line) => (line.startsWith("SCORER_RUBRIC_VERSION=") ? "SCORER_RUBRIC_VERSION=merge-readiness-verifier-v2" : line));
+  assert.notEqual(computeConfigHash(rubricA), computeConfigHash(rubricB));
 
   // Changing the scorer's model changes the hash again.
   const otherModel = collectConfigLines({

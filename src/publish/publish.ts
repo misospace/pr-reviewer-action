@@ -155,7 +155,7 @@ export interface PublishInput {
    * trusted base-ref configuration. The publish step performs the reviewer
    * request only for `status: "request"`. */
   reviewRouting?: HumanReviewRoutingPlan;
-  /** #1073: the independent confidence scorer's result, present ONLY when
+  /** #1073: the independent confidence verifier's result, present ONLY when
    * the scorer ran (`ai-confidence-model` set). Purely advisory — it renders
    * a section and marker keys and changes nothing else. */
   confidence?: {
@@ -164,8 +164,11 @@ export interface PublishInput {
     risk: string;
     reason: string;
     model: string;
-    /** Bounded advisory concerns (scored answers only); never findings. */
-    concerns?: Array<{ file: string; line: number | null; evidence: string }>;
+    /** Bounded advisory concerns (scored answers only); never findings.
+     * #1369: `type`/`severity` are closed-vocabulary audit tokens the run
+     * step carries on the canonical concerns; optional because the
+     * standalone publish CLI's env round-trip predates them. */
+    concerns?: Array<{ file: string; line: number | null; evidence: string; type?: string; severity?: string }>;
   };
 }
 
@@ -449,16 +452,16 @@ export function renderReviewRoutingBlock(routing: HumanReviewRoutingPlan): strin
   return lines.join("\n");
 }
 
-/** #1073: labels for the confidence scorer's outcome. `disabled` never
+/** #1073: labels for the confidence verifier's outcome. `disabled` never
  * reaches this renderer (absent input = disabled = no section). */
 const CONFIDENCE_STATUS_LABELS: Record<string, string> = {
   scored: "scored",
-  unscored: "unscored — the scorer did not produce a usable score",
+  unscored: "unscored — the verifier did not produce a usable result",
 };
 
 /**
  * #1073: the compact independent-confidence section. Rendered only when the
- * scorer ran. The score/risk/status values are closed-vocabulary or
+ * verifier ran. The score/risk/status values are closed-vocabulary or
  * validated integers; the reason and the concern bullets carry
  * model-authored text, so every one takes the full untrusted-text
  * discipline (redaction, link neutralization, whitespace flattening, a
@@ -472,7 +475,7 @@ export function renderIndependentConfidenceBlock(
     risk: string;
     reason: string;
     model: string;
-    concerns?: Array<{ file: string; line: number | null; evidence: string }>;
+    concerns?: Array<{ file: string; line: number | null; evidence: string; type?: string; severity?: string }>;
   },
   linkMode: UpstreamLinkMode,
 ): string {
@@ -499,6 +502,17 @@ export function renderIndependentConfidenceBlock(
     const line = typeof concern.line === "number" && Number.isInteger(concern.line) && concern.line >= 0
       ? `:${concern.line}`
       : "";
+    // #1369: `type`/`severity` are closed-vocabulary audit tokens. They are
+    // rendered as plain words ONLY when they match the enum exactly — any
+    // other value (e.g. from the env round-trip) renders nothing, so free
+    // text can never ride the closed vocabulary into the comment.
+    const concernType = concern.type === "missed_issue" || concern.type === "unsupported_finding"
+      ? concern.type
+      : "";
+    const concernSeverity = concern.severity === "blocker" || concern.severity === "major"
+      ? concern.severity
+      : "";
+    const kind = [concernType, concernSeverity].filter((value) => value !== "").join(", ");
     // #1230: the concern evidence NEVER carries an action-owned note — only
     // the confidence REASON does — so a note-shaped span at its trailing edge
     // is always model-authored. The strip is therefore UNCONDITIONAL (unlike
@@ -514,9 +528,9 @@ export function renderIndependentConfidenceBlock(
     );
     const location = file !== "" || line !== "" ? `${file}${line}` : "";
     const body = evidence !== "" ? ` — ${evidence}` : "";
-    lines.push(">", `> - Advisory concern${location !== "" ? ` at ${location}` : ""}${body}`);
+    lines.push(">", `> - Advisory concern${kind !== "" ? ` (${kind})` : ""}${location !== "" ? ` at ${location}` : ""}${body}`);
   }
-  lines.push(">", "_Advisory only: this independent confidence grade is telemetry from a second model call — it does not change the review's verdict, findings, or approval, and its concerns are not findings._");
+  lines.push(">", "_Advisory only: this independent merge-safety verifier audits the completed review against the pull-request diff — it is telemetry from a second model call; it does not change the review's verdict, findings, or approval, and its concerns are not findings._");
   return lines.join("\n");
 }
 

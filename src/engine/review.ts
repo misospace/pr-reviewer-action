@@ -64,7 +64,7 @@ import { resolveReviewerRouting } from "../config/reviewer-routing.js";
 import { resolveHumanReviewRouting, type HumanReviewRoutingMode, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { buildConfidencePrompt, unresolvedConfidencePins } from "../confidence/prompt.js";
 import { runConfidenceScorer } from "../confidence/scorer.js";
-import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, confidenceCapNote, confidenceOutputFields, confidenceReasonWithoutCapNote, maskComposedConfidenceReason, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
+import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, CONFIDENCE_RUBRIC_VERSION, confidenceCapNote, confidenceOutputFields, confidenceReasonWithoutCapNote, maskComposedConfidenceReason, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
@@ -1914,17 +1914,20 @@ secrets: [profiles.primary.apiKey],
   // cancellation coverage for the stage.
   checkpoint();
 
-  // ── #1073: the independent post-review confidence scorer ─────────────
+  // ── #1073/#1369: the independent post-review merge-safety verifier ──
   // Advisory telemetry only. Runs once, after enforcement and the coverage
   // record are final and only when this run will actually publish a review:
-  // one bounded, tool-free model call grades how confident the finished
-  // review is. The result never alters the verdict, review_result, required
-  // checks, escalation reason, native review events, or approvals, and it
-  // never writes into any reviewRecord field the enforcement/marker
-  // pipeline reads — it flows only into its own outputs, step-summary row,
-  // published section, marker keys, and artifact. Disabled (the default)
-  // means none of that exists: no request, no artifacts, no section, no
-  // marker keys; the five confidence-* output assignments stay empty.
+  // one bounded, tool-free model call independently reads the PR diff and
+  // description and audits the finished review against the actual change —
+  // hunting for missed blocker/major defects and materially unsupported
+  // findings, and reporting its own structured concerns. The result never
+  // alters the verdict, review_result, required checks, escalation reason,
+  // native review events, or approvals, and it never writes into any
+  // reviewRecord field the enforcement/marker pipeline reads — it flows only
+  // into its own outputs, step-summary row, published section, marker keys,
+  // and artifact. Disabled (the default) means none of that exists: no
+  // request, no artifacts, no section, no marker keys; the five confidence-*
+  // output assignments stay empty.
   const confidenceResolution = resolveConfidenceProfile(env);
   for (const warning of confidenceResolution.warnings) log(`WARNING: ${warning}`);
   // The scorer's eligibility gate is now EXACTLY the `shouldPublish` decision
@@ -2089,6 +2092,10 @@ secrets: [profiles.primary.apiKey],
         confidenceSecrets,
       ),
       concerns: confidenceOutcome.result.concerns.map((concern) => ({
+        // Closed-vocabulary enum tokens (validated by the parser), not model
+        // free text — carried through unmasked, like `line`.
+        type: concern.type,
+        severity: concern.severity,
         file: maskConfidenceField(concern.file, MAX_CONFIDENCE_CONCERN_FILE_CHARS),
         line: concern.line,
         evidence: maskConfidenceField(concern.evidence, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS),
@@ -2122,7 +2129,7 @@ secrets: [profiles.primary.apiKey],
       const diagnosticNote = confidenceOutcome.diagnostic !== "" ? `: ${maskConfidenceText(confidenceOutcome.diagnostic)}` : "";
       log(`confidence scorer: unscored (${confidenceResult.cause})${diagnosticNote}`);
     } else if (confidenceResult.status === "scored") {
-      log(`confidence scorer: scored ${confidenceResult.score}/5 risk=${confidenceResult.risk} (advisory only)`);
+      log(`confidence scorer: verified ${confidenceResult.score}/5 risk=${confidenceResult.risk} (advisory only)`);
     }
   }
   const confidenceOutputs = confidenceOutputFields(confidenceResult);
@@ -2584,15 +2591,24 @@ function removeConfidenceWireArtifacts(ws: RunWorkspace): void {
  * (`not_published`, `incomplete_review`, `incomplete_proof_context`) that
  * never reach the model call.
  * Without it, `confidence-status: unscored` is unexplainable: the operator
- * could not tell "the publish step was skipped" from "the call failed". */
+ * could not tell "the publish step was skipped" from "the call failed".
+ *
+ * #1369: artifact `version` 2 adds the `rubric` field
+ * (`CONFIDENCE_RUBRIC_VERSION`). That version IS the migration marker: a
+ * version-1 artifact (no `rubric` field) is a pre-#1369 prose-quality
+ * confidence grade, and consumers must never reinterpret it as a
+ * merge-readiness verifier result — the two semantics are not comparable. */
 function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult, diagnostic?: string): void {
   ws.write("confidence-score.json", Buffer.from(`${pyJsonDumps({
-    version: 1,
+    version: 2,
+    rubric: CONFIDENCE_RUBRIC_VERSION,
     status: result.status,
     score: result.score,
     risk: result.risk,
     reason: result.reason,
     concerns: result.concerns.map((concern) => ({
+      type: concern.type,
+      severity: concern.severity,
       file: concern.file,
       line: concern.line,
       evidence: concern.evidence,
@@ -2600,6 +2616,10 @@ function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult
     model: result.model,
     cause: result.cause,
     caps: result.caps,
+    // #1369: action-owned parser notes (e.g. `concern_dropped_*` tokens) so a
+    // dropped concern — and the ceiling implication it would have carried —
+    // stays operator-visible instead of vanishing silently.
+    parser_notes: result.parserNotes,
     ...(diagnostic !== undefined && diagnostic !== "" ? { diagnostic } : {}),
   })}\n`, "utf8"));
 }

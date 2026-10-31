@@ -9,6 +9,7 @@ import type { PlatformReadAdapter } from "../src/platform/types.js";
 import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 import { startMockServer, type MockServer } from "./helpers.js";
 import {
+  CONFIDENCE_RUBRIC_VERSION,
   MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS,
   MAX_CONFIDENCE_CONCERN_FILE_CHARS,
   MAX_CONFIDENCE_REASON_CHARS,
@@ -267,7 +268,7 @@ test("#1073: scoring ON publishes an unchanged review and surfaces every confide
     score: 4,
     risk: "low",
     reason: "diff is small and fully covered",
-    concerns: [{ file: "<script>alert(1)</script>", line: 2, evidence: "see [x](https://github.com/o/r/pull/1) and <script>alert(1)</script>" }],
+    concerns: [{ type: "missed_issue", severity: "major", file: "<script>alert(1)</script>", line: 2, evidence: "see [x](https://github.com/o/r/pull/1) and <script>alert(1)</script>" }],
   });
   const server = await startMockServer(routedHandler((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -330,6 +331,13 @@ test("#1073: scoring ON publishes an unchanged review and surfaces every confide
     assert.equal(scoreArtifact.model, SCORER_MODEL);
     assert.equal(scoreArtifact.cause, "");
     assert.ok(Array.isArray(scoreArtifact.concerns) && scoreArtifact.concerns.length === 1);
+    // #1369: artifact version 2 carries the rubric version — the migration
+    // marker separating verifier results from v1 prose-quality grades — and
+    // the concern keeps its closed-vocabulary audit kind.
+    assert.equal(scoreArtifact.version, 2);
+    assert.equal(scoreArtifact.rubric, CONFIDENCE_RUBRIC_VERSION);
+    assert.equal(scoreArtifact.concerns[0].type, "missed_issue");
+    assert.equal(scoreArtifact.concerns[0].severity, "major");
     assert.ok(existsSync(join(on.runDir, "confidence-request.json")));
     assert.ok(existsSync(join(on.runDir, "confidence-response.json")));
 
@@ -400,7 +408,7 @@ test("#1073: scoring ON publishes an unchanged review and surfaces every confide
     // sanitization as the evidence: the raw markup never reaches the
     // published surface, and the concern itself still renders.
     assert.match(body, /&lt;script&gt;/, "the hostile concern file is published HTML-escaped");
-    assert.match(body, /Advisory concern at /, "the concern bullet still renders");
+    assert.match(body, /Advisory concern \(missed_issue, major\) at /, "the concern bullet still renders with its audit kind");
     assert.match(body, /alert\(1\)/, "the concern content still renders");
   } finally {
     await server.close();
@@ -548,7 +556,7 @@ test("#1140 review: a scorer answer echoing lane credentials is masked on EVERY 
       score: 4,
       risk: "low",
       reason: "primary key primary-secret-k and scorer key confidence-secret-k look fine",
-      concerns: [{ file: "deploy/primary-secret-k.sh", line: 2, evidence: "rotate confidence-secret-k now" }],
+      concerns: [{ type: "unsupported_finding", severity: "major", file: "deploy/primary-secret-k.sh", line: 2, evidence: "rotate confidence-secret-k now" }],
     })));
   }));
   try {
@@ -643,6 +651,8 @@ test("#1140 review round 9: masking a max-length answer never leaves a field pas
       risk: "low",
       reason: "q".repeat(MAX_CONFIDENCE_REASON_CHARS - 1) + "k",
       concerns: [{
+        type: "missed_issue",
+        severity: "blocker",
         file: "a".repeat(MAX_CONFIDENCE_CONCERN_FILE_CHARS - 1) + "k",
         line: 3,
         evidence: "e".repeat(MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS - 1) + "k",
@@ -1480,6 +1490,80 @@ test("#1073: a failed scorer call leaves no wire artifacts beside the fresh unsc
     assert.equal(scoreArtifact.cause, "http_429");
 
     // The review itself is untouched by the failed scorer call.
+    assert.equal(run.result.outputs.verdict, "approve");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1369: the verifier's own concern caps a 5 at 4 end-to-end and survives masking with its audit kind", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({
+      score: 5,
+      risk: "low",
+      reason: "review is thorough but I see a gap",
+      concerns: [{ type: "missed_issue", severity: "major", file: "src/gap.ts", line: 7, evidence: "unbounded join of untrusted input" }],
+    })));
+  }));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+    });
+    // The concern cap is deterministic: an independent concern can never
+    // score 5, without trusting the prompt to enforce it.
+    assert.equal(run.result.outputs.confidenceStatus, "scored");
+    assert.equal(run.result.outputs.confidenceScore, "4");
+    const artifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as {
+      version?: number; rubric?: string; caps?: string[]; concerns?: Array<Record<string, unknown>>;
+    };
+    assert.equal(artifact.version, 2);
+    assert.equal(artifact.rubric, CONFIDENCE_RUBRIC_VERSION);
+    assert.deepEqual(artifact.caps, ["verifier_concern_cap_4"]);
+    // The concern survives masking into the canonical result and the
+    // artifact with its closed-vocabulary kind and severity intact.
+    const concerns = run.result.confidenceConcerns ?? [];
+    assert.equal(concerns.length, 1);
+    assert.equal((concerns[0] as Record<string, unknown>).type, "missed_issue");
+    assert.equal((concerns[0] as Record<string, unknown>).severity, "major");
+    assert.equal(artifact.concerns?.[0]?.type, "missed_issue");
+    assert.equal(artifact.concerns?.[0]?.severity, "major");
+    assert.equal(artifact.concerns?.[0]?.file, "src/gap.ts");
+    // The review itself is untouched by the cap.
+    assert.equal(run.result.outputs.verdict, "approve");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1369: a cannot_verify answer persists an unscored artifact with the v2 rubric marker", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    // A hostile/confused pairing: cannot_verify alongside a confident 5.
+    // The parser must fail closed without reading the score.
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ cannot_verify: true, score: 5, risk: "low", reason: "looks great" })));
+  }));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+    });
+    assert.equal(scorerRequests(server), 1, "the verifier call happened");
+    assert.equal(run.result.outputs.confidenceStatus, "unscored");
+    assert.equal(run.result.outputs.confidenceScore, "");
+    assert.doesNotMatch(run.output, /^confidence-score=[0-9]/m);
+    const artifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as {
+      version?: number; rubric?: string; status?: string; cause?: string; score?: unknown;
+    };
+    assert.equal(artifact.status, "unscored");
+    assert.equal(artifact.cause, "cannot_verify");
+    assert.equal(artifact.score, null);
+    // Even an unscored result stamps the rubric marker: a reader can always
+    // tell which scoring semantics produced the artifact.
+    assert.equal(artifact.version, 2);
+    assert.equal(artifact.rubric, CONFIDENCE_RUBRIC_VERSION);
+    // The review itself is untouched.
     assert.equal(run.result.outputs.verdict, "approve");
   } finally {
     await server.close();
