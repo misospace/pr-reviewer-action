@@ -37,6 +37,9 @@ export interface PayloadProjection {
 const VERDICT_SHAPE = /^(approve|request_changes|comment|blocked)$/i;
 const REVIEW_RESULT_SHAPE = /^(issues|partial|findings|clean)$/;
 const CHECK_NAME_SHAPE = /^[A-Za-z0-9._@/-]{1,256}$/;
+/** Control characters (the C0 range plus DEL) — refused outright in
+ * identifier-validated finding fields. */
+const CONTROL_OR_NEWLINE = /[\u0000-\u001f\u007f]/;
 /** Control and format characters — ANSI escapes, bidi overrides, zero-width
  * joiners. Replaced with a space, never rendered. */
 const UNSAFE_CHARS = /[\p{Cc}\p{Cf}]/gu;
@@ -76,8 +79,6 @@ function projectFinding(raw: unknown): PayloadFinding | null {
   const message = projectUntrustedText(raw["message"]);
   return Object.freeze({ path, line, severity, category, message });
 }
-
-const CONTROL_OR_NEWLINE = /[\u0000-\u001f\u007f]/;
 
 /** Project the durable payload into the bounded view the MCP surface may
  * expose. A payload that is not a JSON object, or any field not exactly the

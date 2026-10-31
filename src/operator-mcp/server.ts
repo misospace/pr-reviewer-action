@@ -153,8 +153,11 @@ export async function dispatchMcpRequest(context: McpDispatchContext, request: M
       const response = resultResponse(rpc.id, payload);
       // Hard response-byte ceiling: a serialized response beyond the cap is
       // refused as a fixed bounded error — never truncated into a partial
-      // document, never silently clipped mid-finding.
-      if (JSON.stringify(response).length > context.maxResponseBytes) {
+      // document, never silently clipped mid-finding. Measured in UTF-8
+      // bytes (Buffer.byteLength), not code units: the redaction markers
+      // are multibyte, so a code-unit count would undercount and let an
+      // over-cap response through.
+      if (Buffer.byteLength(JSON.stringify(response), "utf8") > context.maxResponseBytes) {
         context.metrics?.request("too_large");
         return fixed(200, errorResponse(rpc.id, JsonRpcErrorCode.responseTooLarge, "response too large"));
       }
