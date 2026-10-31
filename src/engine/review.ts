@@ -43,7 +43,7 @@ import {
 } from "../context/index.js";
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
-import { classifyPr, classificationToArtifact } from "../classification/classify.js";
+import { classifyPr, classificationToArtifact, DEPENDENCY_UPDATE_KINDS } from "../classification/classify.js";
 import { resolveReviewRoute, resolveTierProfiles, resolveConfidenceProfile, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
 import { buildSpecialistCorpus } from "../specialists/corpus.js";
@@ -1077,6 +1077,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       body: String(pr.body ?? ""),
       files: safeJson(ws.read("pr-files.json")),
       diff: (ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? ""),
+      dependencyUpdate: DEPENDENCY_UPDATE_KINDS.has(classification.prKind),
       model:
         profiles.primary.baseUrl && profiles.primary.model
           ? {

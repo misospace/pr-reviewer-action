@@ -3029,7 +3029,7 @@ function isRenovateChartUpdate(
  * own kinds plus the generic dependency kind. Outside this context a title
  * word like "security" must not invent a dependency risk signal for an
  * ordinary code PR (its own lanes already cover that). */
-const DEPENDENCY_UPDATE_KINDS: ReadonlySet<string> = new Set([
+export const DEPENDENCY_UPDATE_KINDS: ReadonlySet<string> = new Set([
   "renovate_digest_only",
   "image_digest_only",
   "renovate_image_update",
