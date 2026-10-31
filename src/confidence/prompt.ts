@@ -221,14 +221,18 @@ const MINIMUM_SHAPE_PINS = {
 
 /** The smallest serializations the shipped call sites actually produce: no
  * findings renders `[]`, and `src/engine/review.ts`'s `reviewCoverage` always
- * carries its six fixed keys, so the measurement below is the smallest request
- * the ENGINE can send rather than a shorter fiction. A new coverage key widens
- * the real request past this floor — `tests-v3/confidence.test.ts` pins the
+ * carries its six fixed keys (the conditional `incomplete_reason` /
+ * `trace_repair_continuation` keys only ever ADD bytes, and a request above the
+ * floor that does not fit is refused, never sent), so the measurement below is
+ * the smallest request the ENGINE can send rather than a shorter fiction, with
+ * its fields at their longest realistic tokens (`route: "escalated"`,
+ * `required_checks: "incomplete"`). A new always-present coverage key widens the
+ * real request past this floor — `tests-v3/confidence.test.ts` pins the
  * engine-shaped case so that drift fails a test instead of quietly producing
  * enabled-but-refusing profiles. */
 const MINIMUM_SHAPE_FINDINGS = "[]";
 const MINIMUM_SHAPE_COVERAGE
-  = '{"version":1,"tool_loop_ran":false,"enforcement_harness":null,"route":"primary","partial_coverage":null,"required_checks":"incomplete"}';
+  = '{"version":1,"tool_loop_ran":false,"enforcement_harness":null,"route":"escalated","partial_coverage":null,"required_checks":"incomplete"}';
 
 /**
  * #1368 review: the smallest prompt budget that can carry a REAL verifier
