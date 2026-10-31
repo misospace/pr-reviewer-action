@@ -2231,6 +2231,71 @@ test("#1073: the confidence-scorer family is fingerprint-conditional — disable
   assert.notEqual(computeConfigHash(timeoutChanged), computeConfigHash(enabled));
 });
 
+test("#1368: the scorer's budget/capability controls are fingerprint-conditional", () => {
+  const baseline = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
+  // Disabled (the default): the new controls contribute NOTHING — upgrade
+  // safety identical to the #1073 family's own rule.
+  const disabledWithBudgets = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MAX_TOKENS: "4096",
+    AI_CONFIDENCE_PROMPT_TOKENS: "98304",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "200000",
+    AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT: "true",
+    AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT: "true",
+  });
+  assert.deepEqual(disabledWithBudgets, baseline);
+
+  // Enabled: each non-empty control is carried on a config line, so a
+  // budget or capability change re-scores instead of serving a stale cache.
+  const enabled = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_MAX_TOKENS: "4096",
+  });
+  assert.ok(enabled.includes("AI_CONFIDENCE_MAX_TOKENS=4096"));
+  assert.notEqual(computeConfigHash(enabled), computeConfigHash(baseline));
+
+  // Changing the completion budget changes the hash again.
+  const budgetChanged = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_MAX_TOKENS: "8192",
+  });
+  assert.ok(budgetChanged.includes("AI_CONFIDENCE_MAX_TOKENS=8192"));
+  assert.notEqual(computeConfigHash(budgetChanged), computeConfigHash(enabled));
+
+  // The capability assertions ride the same conditional family.
+  const capabilityChanged = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_MAX_TOKENS: "4096",
+    AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT: "true",
+    AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT: "true",
+  });
+  assert.ok(capabilityChanged.includes("AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT=true"));
+  assert.ok(capabilityChanged.includes("AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT=true"));
+  assert.notEqual(computeConfigHash(capabilityChanged), computeConfigHash(enabled));
+
+  // An UNSET control contributes nothing even while the scorer is enabled
+  // (only non-empty values join the family): an operator who never names a
+  // budget keeps the enabled-without-controls bytes.
+  const enabledWithoutBudget = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  assert.ok(!enabledWithoutBudget.some((line) => line.startsWith("AI_CONFIDENCE_MAX_TOKENS")));
+  assert.equal(computeConfigHash(enabledWithoutBudget), computeConfigHash(collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  })));
+});
+
 test("#1073: the fork override contributes to the fingerprint only while the scorer is enabled", () => {
   const baseline = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
 

@@ -40,6 +40,43 @@ export type ConfidenceConcernSeverity = (typeof CONFIDENCE_CONCERN_SEVERITIES)[n
  * apart from merge-readiness verifier results. */
 export const CONFIDENCE_RUBRIC_VERSION = "merge-readiness-verifier-v1";
 
+/**
+ * #1368: the scorer's OWN compact strict-mode JSON schema, carried on the
+ * wire only under the operator's structured-output assertion
+ * (`ai-confidence-structured-output-support`) — never the pinned verdict
+ * schema. It matches what `parseConfidenceAnswer` tolerates: every property
+ * is in `required` (OpenAI strict mode requires that) with optionality
+ * expressed via the null type, exactly like the verdict schema's
+ * nullable-but-required fields. The wire enum for `risk` is the four
+ * meaningful bands; a malformed risk still degrades to `unknown` in the
+ * parser, so the schema and the parser stay compatible in both directions.
+ * The schema rides BOTH wire families through `ModelRequestConfig`'s
+ * `responseSchema` (see `src/model/request.ts`).
+ */
+export const CONFIDENCE_ANSWER_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    score: { type: "integer", minimum: 0, maximum: 5 },
+    risk: { type: "string", enum: ["low", "medium", "high", "critical"] },
+    reason: { type: "string" },
+    concerns: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          file: { type: ["string", "null"] },
+          line: { type: ["integer", "null"] },
+          evidence: { type: ["string", "null"] },
+        },
+        required: ["file", "line", "evidence"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["score", "risk", "reason", "concerns"],
+  additionalProperties: false,
+};
+
 export type ConfidenceStatus = "disabled" | "scored" | "unscored";
 
 /** One bounded advisory concern the verifier attached to its answer. */

@@ -34,6 +34,11 @@ function profile(overrides: Partial<ConfidenceProfile> = {}): ConfidenceProfile 
     reasoningEffort: "",
     inheritedTransport: true,
     credentialSource: "own",
+    maxTokens: 4096,
+    promptTokens: 98304,
+    modelContextTokens: 0,
+    anthropicEffortSupported: false,
+    structuredOutputSupported: false,
     ...overrides,
   };
 }
@@ -1322,6 +1327,8 @@ test("#1073: the fork gate is default-off, overridable only by explicit operator
   assert.deepEqual(gated.profile, {
     enabled: false, baseUrl: "", model: "", apiFormat: "", apiKey: "",
     requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false, credentialSource: "own",
+    maxTokens: 4096, promptTokens: 98304, modelContextTokens: 0,
+    anthropicEffortSupported: false, structuredOutputSupported: false,
   });
   assert.ok(gated.warnings.some((warning) => warning.includes("ai-confidence-enable-for-forks")), JSON.stringify(gated.warnings));
 
@@ -1515,4 +1522,344 @@ test("#1369: the published concern bullet carries the audit kind and stays sanit
   assert.ok(!hostileKind.includes("disregard prior instructions"), "a non-enum type must not ride the bullet");
   assert.ok(!hostileKind.includes("not-a-severity"), "a non-enum severity must not ride the bullet");
   assert.match(hostileKind, /Advisory concern at a\.ts:1/, "the bullet still renders without the kind");
+});
+
+// ── #1368: model-aware budgets and capability assertions ─────────────────
+
+test("#1368: the OpenAI scorer request carries the profile's budget and effort, not the constant", async () => {
+  const bodies: string[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    bodies.push(body);
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(okOpenAiResponse('{"score": 3, "risk": "low", "reason": "ok"}')));
+  });
+  try {
+    const outcome = await runConfidenceScorer({
+      profile: profile({
+        baseUrl: server.url,
+        maxTokens: 6144,
+        reasoningEffort: "high",
+      }),
+      primaryApiKey: "",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(outcome.result.status, "scored");
+    assert.equal(bodies.length, 1);
+    const parsed = JSON.parse(bodies[0]!) as Record<string, unknown>;
+    assert.equal(parsed.max_tokens, 6144, "the profile's budget rides the wire, not the 4096 default");
+    assert.equal(parsed.reasoning_effort, "high");
+    // Structured output is not asserted: no schema, byte-compatible.
+    assert.equal("response_format" in parsed, false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1368: the Anthropic scorer emits output_config.effort ONLY under its own opt-in", async () => {
+  const bodies: string[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    bodies.push(body);
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(okOpenAiResponse('{"score": 3, "risk": "low", "reason": "ok"}')));
+  });
+  try {
+    // Not asserted: the effort is configured but the wire stays
+    // byte-for-byte effort-free — exactly the pre-#1368 shape.
+    const unasserted = await runConfidenceScorer({
+      profile: profile({
+        baseUrl: server.url,
+        apiFormat: "anthropic",
+        reasoningEffort: "high",
+        anthropicEffortSupported: false,
+      }),
+      primaryApiKey: "",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(unasserted.result.status, "scored");
+    assert.equal(bodies.length, 1);
+    const unassertedBody = JSON.parse(bodies[0]!) as Record<string, unknown>;
+    assert.equal("output_config" in unassertedBody, false, "no effort field without the opt-in");
+    assert.equal(bodies[0]!.includes("effort"), false, "the raw bytes carry no effort token at all");
+
+    // Asserted: output_config.effort rides the wire.
+    const asserted = await runConfidenceScorer({
+      profile: profile({
+        baseUrl: server.url,
+        apiFormat: "anthropic",
+        reasoningEffort: "high",
+        anthropicEffortSupported: true,
+      }),
+      primaryApiKey: "",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(asserted.result.status, "scored");
+    assert.equal(bodies.length, 2);
+    const assertedBody = JSON.parse(bodies[1]!) as Record<string, unknown>;
+    assert.deepEqual(assertedBody.output_config, { effort: "high" });
+    // OpenAI's field never appears on the Anthropic wire.
+    assert.equal(bodies[1]!.includes("reasoning_effort"), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1368: structured output carries the scorer's own schema, gated on both wire families", async () => {
+  const { CONFIDENCE_ANSWER_JSON_SCHEMA } = await import("../src/confidence/result.js");
+  const bodies: string[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    bodies.push(body);
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(okOpenAiResponse('{"score": 4, "risk": "low", "reason": "ok", "concerns": []}')));
+  });
+  try {
+    // OpenAI format, asserted: response_format json_schema with the scorer
+    // schema, NEVER the verdict schema.
+    const openai = await runConfidenceScorer({
+      profile: profile({ baseUrl: server.url, structuredOutputSupported: true }),
+      primaryApiKey: "",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(openai.result.status, "scored");
+    assert.equal(bodies.length, 1);
+    const openaiBody = JSON.parse(bodies[0]!) as { response_format?: Record<string, unknown> };
+    assert.deepEqual(openaiBody.response_format, {
+      type: "json_schema",
+      json_schema: { name: "confidence_review", strict: true, schema: CONFIDENCE_ANSWER_JSON_SCHEMA },
+    });
+    assert.equal(bodies[0]!.includes("pr_review"), false, "the verdict schema must not attach");
+    assert.equal(bodies[0]!.includes("verdict"), false, "the verdict schema must not attach");
+
+    // Anthropic format, asserted: output_config.format with the same inner
+    // schema — and the effort opt-in stays independent.
+    const anthropic = await runConfidenceScorer({
+      profile: profile({
+        baseUrl: server.url,
+        apiFormat: "anthropic",
+        reasoningEffort: "high",
+        anthropicEffortSupported: true,
+        structuredOutputSupported: true,
+      }),
+      primaryApiKey: "",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(anthropic.result.status, "scored");
+    assert.equal(bodies.length, 2);
+    const anthropicBody = JSON.parse(bodies[1]!) as { output_config?: Record<string, unknown> };
+    assert.deepEqual(anthropicBody.output_config, {
+      format: { type: "json_schema", schema: CONFIDENCE_ANSWER_JSON_SCHEMA },
+      effort: "high",
+    });
+    assert.equal(bodies[1]!.includes("response_format"), false);
+
+    // Unasserted on either family: request bytes unchanged from today — no
+    // response_format, no output_config, no schema anywhere.
+    bodies.length = 0;
+    for (const apiFormat of ["openai", "anthropic"] as const) {
+      const plain = await runConfidenceScorer({
+        profile: profile({ baseUrl: server.url, apiFormat, structuredOutputSupported: false }),
+        primaryApiKey: "",
+        prompt: { system: "s", user: "u" },
+        connectTimeoutSec: 5,
+        findings: [],
+        coverage: {},
+      });
+      assert.equal(plain.result.status, "scored");
+      const parsed = JSON.parse(bodies[bodies.length - 1]!) as Record<string, unknown>;
+      assert.equal("response_format" in parsed, false, apiFormat);
+      assert.equal("output_config" in parsed, false, apiFormat);
+      assert.equal(bodies[bodies.length - 1]!.includes("json_schema"), false, apiFormat);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1368: the scorer schema is strict and matches what the parser tolerates", async () => {
+  const { CONFIDENCE_ANSWER_JSON_SCHEMA } = await import("../src/confidence/result.js");
+  const schema = CONFIDENCE_ANSWER_JSON_SCHEMA as {
+    type: string;
+    properties: Record<string, unknown>;
+    required: string[];
+    additionalProperties: boolean;
+  };
+  assert.equal(schema.type, "object");
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.required, ["score", "risk", "reason", "concerns"]);
+  assert.deepEqual(schema.properties.score, { type: "integer", minimum: 0, maximum: 5 });
+  assert.deepEqual(schema.properties.risk, { type: "string", enum: ["low", "medium", "high", "critical"] });
+  const concerns = schema.properties.concerns as { type: string; items: Record<string, unknown> };
+  assert.equal(concerns.type, "array");
+  assert.deepEqual(concerns.items.required, ["file", "line", "evidence"]);
+  assert.equal(concerns.items.additionalProperties, false);
+  // Nullable-but-required where the parser tolerates null (OpenAI strict
+  // mode requires every property listed in required).
+  const concernProps = concerns.items.properties as Record<string, { type: string[] } | undefined>;
+  assert.deepEqual(concernProps.file!.type, ["string", "null"]);
+  assert.deepEqual(concernProps.line!.type, ["integer", "null"]);
+  assert.deepEqual(concernProps.evidence!.type, ["string", "null"]);
+  // A canonical answer under the schema parses through the tolerant parser.
+  const parsed = parseConfidenceAnswer(JSON.stringify({
+    score: 3, risk: "medium", reason: "ok",
+    concerns: [{ file: "a.ts", line: 1, evidence: "e" }, { file: null, line: null, evidence: null }],
+  }));
+  assert.ok(parsed.ok);
+});
+
+test("#1368: a reasoning-model response that consumed the whole 4096 budget still parses", async () => {
+  // The reason the default budget moved off 1024: a reasoning model spends
+  // its completion budget thinking. A response whose usage reports 3500
+  // completion tokens (well over the old hard-coded 1024) with the final
+  // JSON at the end must still parse into a valid scored result under the
+  // configured 4096 budget.
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      choices: [{
+        message: { role: "assistant", content: '{"score": 4, "risk": "low", "reason": "thought hard, still fine"}' },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 9000, completion_tokens: 3500, total_tokens: 12500 },
+    }));
+  });
+  try {
+    const outcome = await runConfidenceScorer({
+      profile: profile({ baseUrl: server.url, maxTokens: 4096 }),
+      primaryApiKey: "",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(outcome.result.status, "scored");
+    assert.equal(outcome.result.score, 4);
+    assert.equal(outcome.result.reason, "thought hard, still fine");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1368: the prompt budget shrinks the diff section deterministically with an explicit cut", async () => {
+  const { buildConfidencePrompt, CONFIDENCE_DEFAULT_PROMPT_TOKENS, CONFIDENCE_PROMPT_DIFF_FLOOR_BYTES } = await import("../src/confidence/prompt.js");
+  // Default budget (~96k tokens ≈ 388 KiB of bytes): a diff that fits stays
+  // untouched.
+  const fits = buildConfidencePrompt({
+    headSha: "h", baseSha: "b",
+    diff: "d".repeat(100_000),
+    prTitle: "t", prBody: "b",
+    findings: [], reviewSummary: "s", reviewResult: "clean",
+    requiredChecks: "complete", coverage: {}, secrets: [],
+  });
+  assert.ok(!fits.user.includes("[TRUNCATED:"), "a comfortably-fitting prompt is never cut");
+  // #1368 review: the budget covers the WHOLE provider request's prompt —
+  // system + user — not just the user message.
+  assert.equal(
+    Buffer.byteLength(fits.system, "utf8") + Buffer.byteLength(fits.user, "utf8") <= CONFIDENCE_DEFAULT_PROMPT_TOKENS * 4,
+    true,
+  );
+
+  // Over budget: the diff shrinks so the total fits, and the cut is stated
+  // in-band. Everything else (findings, summary, body) keeps its own caps.
+  const overBudgetTokens = 24_000; // 96_000 bytes
+  const shrunk = buildConfidencePrompt({
+    headSha: "h", baseSha: "b",
+    diff: "d".repeat(500_000),
+    prTitle: "t".repeat(500),
+    prBody: "b".repeat(500),
+    findings: [], reviewSummary: "s".repeat(500), reviewResult: "clean",
+    requiredChecks: "complete", coverage: {}, secrets: [],
+    promptTokens: overBudgetTokens,
+  });
+  const totalBytes = Buffer.byteLength(shrunk.system, "utf8") + Buffer.byteLength(shrunk.user, "utf8");
+  assert.ok(totalBytes <= overBudgetTokens * 4, `assembled prompt exceeded the budget: ${totalBytes}`);
+  assert.ok(shrunk.user.includes("[TRUNCATED: this section was cut at its byte bound"), "the cut is explicit in-band");
+  // Exactly one cut: the diff; the other sections fit their own bounds.
+  assert.equal((shrunk.user.match(/\[TRUNCATED:/g) ?? []).length, 1);
+  const diffEnvelope = shrunk.user.match(/<untrusted_review_content kind="diff">[\s\S]*?\n<\/untrusted_review_content>/)![0];
+  assert.ok(
+    Buffer.byteLength(diffEnvelope, "utf8") > CONFIDENCE_PROMPT_DIFF_FLOOR_BYTES,
+    "the diff keeps a usable floor",
+  );
+
+  // A pathologically small budget still leaves the diff its floor (fail-soft
+  // degradation, never a zero-byte prompt).
+  const starved = buildConfidencePrompt({
+    headSha: "h", baseSha: "b",
+    diff: "d".repeat(500_000),
+    prTitle: "t", prBody: "b",
+    findings: [], reviewSummary: "s", reviewResult: "clean",
+    requiredChecks: "complete", coverage: {}, secrets: [],
+    promptTokens: 100,
+  });
+  const starvedEnvelope = starved.user.match(/<untrusted_review_content kind="diff">[\s\S]*?\n<\/untrusted_review_content>/)![0];
+  assert.ok(
+    Buffer.byteLength(starvedEnvelope, "utf8") > CONFIDENCE_PROMPT_DIFF_FLOOR_BYTES,
+    "the diff never shrinks below its floor",
+  );
+});
+
+test("#1368 review: the prompt budget accounts for the system prompt, not just the user message", async () => {
+  const { buildConfidencePrompt } = await import("../src/confidence/prompt.js");
+  const base = {
+    headSha: "h", baseSha: "b",
+    prTitle: "t", prBody: "b",
+    findings: [], reviewSummary: "s", reviewResult: "clean",
+    requiredChecks: "complete", coverage: {}, secrets: [],
+  };
+  const probeDiff = "d".repeat(64_000);
+  const diffEnvelopeOf = (prompt: ReturnType<typeof buildConfidencePrompt>): string =>
+    prompt.user.match(/<untrusted_review_content kind="diff">[\s\S]*?\n<\/untrusted_review_content>/)![0];
+  // A generous budget renders the probe diff whole, so the user message's
+  // non-diff byte weight (scaffolding + smallest-shape diff envelope) can
+  // be measured exactly.
+  const probe = buildConfidencePrompt({ ...base, diff: probeDiff, promptTokens: 1_000_000 });
+  assert.ok(!probe.user.includes("[TRUNCATED:"));
+  const systemBytes = Buffer.byteLength(probe.system, "utf8");
+  assert.ok(systemBytes > 0, "the scorer has a non-empty system prompt");
+  const nonDiffUserBytes = Buffer.byteLength(probe.user, "utf8") - probeDiff.length;
+  // The budget's own accounting reserves the LARGEST-shape diff envelope
+  // (truncation note included); the difference against the whole-diff
+  // envelope above is measurable from a floor-degraded build of the same
+  // diff (cut to exactly the 4096-byte floor, newline-free content).
+  const floored = buildConfidencePrompt({ ...base, diff: probeDiff, promptTokens: 100 });
+  const largestOverheadExtra = (Buffer.byteLength(diffEnvelopeOf(floored), "utf8") - 4_096)
+    - (Buffer.byteLength(diffEnvelopeOf(probe), "utf8") - probeDiff.length);
+  assert.ok(largestOverheadExtra > 0, "the truncation-note envelope shape is strictly larger");
+
+  // A budget that user-only accounting would call roomy enough for the
+  // whole diff — but which system-inclusive accounting knows cannot fit it.
+  // The midpoint keeps the discriminator clear of both edges and of the
+  // bytes/4 rounding.
+  const budgetBytes = nonDiffUserBytes + probeDiff.length + Math.floor(largestOverheadExtra / 2);
+  const budgetTokens = Math.ceil(budgetBytes / 4);
+  const discriminated = buildConfidencePrompt({ ...base, diff: probeDiff, promptTokens: budgetTokens });
+  assert.ok(
+    discriminated.user.includes("[TRUNCATED:"),
+    "a budget that only fits when the system prompt is ignored must still shrink the diff",
+  );
+  // The same budget genuinely covers system + scaffolding + the shrunken
+  // diff: the invariant the context clamp relies on holds on the wire.
+  assert.ok(
+    Buffer.byteLength(discriminated.system, "utf8") + Buffer.byteLength(discriminated.user, "utf8")
+      <= budgetTokens * 4,
+    "system + shrunken diff + scaffolding stays within the budget accounting",
+  );
 });

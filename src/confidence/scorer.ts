@@ -22,6 +22,7 @@ import type { TokensParam } from "../model/types.js";
 import type { ConfidenceProfile } from "../routing/tiers.js";
 import {
   applyConfidenceCeilings,
+  CONFIDENCE_ANSWER_JSON_SCHEMA,
   parseConfidenceAnswer,
   scoredConfidenceResult,
   unscoredConfidenceResult,
@@ -29,9 +30,13 @@ import {
 } from "./result.js";
 import type { ConfidencePromptInputs } from "./prompt.js";
 
-/** Completion budget for the scorer's answer: a bounded JSON object, not a
- * review. Small on purpose. */
-export const CONFIDENCE_MAX_TOKENS = 1024;
+/** DEFAULT completion budget for the scorer's answer: a bounded JSON object,
+ * not a review. A reasoning model may consume the whole budget thinking and
+ * return no JSON at all — the profile's configured budget
+ * (`ai-confidence-max-tokens`, resolved into `ConfidenceProfile.maxTokens`)
+ * is the real control, and provider accounting may include reasoning tokens
+ * inside it. This constant is only the documented default. */
+export const CONFIDENCE_MAX_TOKENS = 4096;
 
 /** Hosts a keyless distinct scorer endpoint may still point at: the
  * operator's own machine. Anything else without a credential is refused. */
@@ -146,17 +151,21 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     corpus: "",
     stream: false,
     shape: "default",
-    maxTokens: CONFIDENCE_MAX_TOKENS,
+    // #1368: the profile's configured budget, not the constant above.
+    maxTokens: profile.maxTokens,
     temperature: "",
-    // #1073: response format OFF — no verdict schema attaches, the scorer's
-    // answer is its own bounded JSON contract parsed tolerantly downstream.
-    responseFormat: "off",
+    // #1073/#1368: response format OFF by default — no schema attaches, the
+    // scorer's answer is its own bounded JSON contract parsed tolerantly
+    // downstream. Under the operator's structured-output assertion the
+    // scorer's OWN compact schema rides the wire (never the verdict schema).
+    responseFormat: profile.structuredOutputSupported ? "json_schema" : "off",
+    responseSchema: CONFIDENCE_ANSWER_JSON_SCHEMA,
     tokensParam: input.tokensParam ?? "max_tokens",
     reasoningEffort: profile.reasoningEffort,
-    // No lane opt-ins exist for the scorer: no Anthropic effort/format is
-    // ever sent on its wire.
-    anthropicEffortSupported: false,
-    anthropicStructuredOutputSupported: false,
+    // #1368: the scorer's OWN capability assertions — never another lane's.
+    // Unasserted, the Anthropic wire carries no effort/format at all.
+    anthropicEffortSupported: profile.anthropicEffortSupported,
+    anthropicStructuredOutputSupported: profile.structuredOutputSupported,
   });
   const call = input.transport ?? ((chatInput: ChatRequestInput) => runChatRequestOnce(chatInput));
   let outcome: ChatRequestOutcome;

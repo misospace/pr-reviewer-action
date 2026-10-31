@@ -1939,6 +1939,20 @@ secrets: [profiles.primary.apiKey],
   // A run whose publish step is skipped still gets no privileged scorer call.
   const reviewWillPublish = publishStepRuns(env.PUBLISH_MODE);
   const confidenceProfile = confidenceResolution.profile;
+  // #1368: additive provenance for the confidence-score.json artifact — what
+  // the scorer's request was budgeted/asserted to carry. Included whenever
+  // the profile was enabled (scored and unscored paths alike); the disabled
+  // path writes no artifact at all. `reasoning_effort_sent` is what the wire
+  // actually carries, not what the config named (#998's truth-telling rule).
+  const confidenceProvenance = confidenceProfile.enabled ? {
+    max_tokens: confidenceProfile.maxTokens,
+    prompt_tokens: confidenceProfile.promptTokens,
+    model_context_tokens: confidenceProfile.modelContextTokens,
+    reasoning_effort_sent: confidenceProfile.reasoningEffort !== ""
+      && (confidenceProfile.apiFormat !== "anthropic" || confidenceProfile.anthropicEffortSupported),
+    anthropic_effort_support: confidenceProfile.anthropicEffortSupported,
+    structured_output_support: confidenceProfile.structuredOutputSupported,
+  } : undefined;
   // #1155: the proof-context pins the scorer call is anchored to. An empty
   // one means the score would grade content (or an outcome) this run could
   // not identify — strictly worse than a low-confidence score, an unanchored
@@ -1971,14 +1985,14 @@ secrets: [profiles.primary.apiKey],
     // tell "the publish step was skipped" from "the scorer call failed".
     confidenceResult = unscoredConfidenceResult("not_published");
     removeConfidenceWireArtifacts(ws);
-    writeConfidenceScoreArtifact(ws, confidenceResult);
+    writeConfidenceScoreArtifact(ws, confidenceResult, undefined, confidenceProvenance);
     log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else if (analysisEngine === MODEL_UNAVAILABLE_ENGINE || !(outputVerdict === "approve" || outputVerdict === "request_changes")) {
     // No real model review happened (a model-failure notice, or no verdict at
     // all): fail to unscored WITHOUT calling the model.
     confidenceResult = unscoredConfidenceResult("incomplete_review");
     removeConfidenceWireArtifacts(ws);
-    writeConfidenceScoreArtifact(ws, confidenceResult);
+    writeConfidenceScoreArtifact(ws, confidenceResult, undefined, confidenceProvenance);
     log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else if (unresolvedProofPins.length > 0) {
     // #1155: a required proof-context pin did not resolve. The prompt would
@@ -1989,7 +2003,7 @@ secrets: [profiles.primary.apiKey],
     // diagnostic (the cause's own machine tokens, no untrusted content).
     confidenceResult = unscoredConfidenceResult("incomplete_proof_context");
     removeConfidenceWireArtifacts(ws);
-    writeConfidenceScoreArtifact(ws, confidenceResult, `unresolved proof-context pins: ${unresolvedProofPins.join(",")}`);
+    writeConfidenceScoreArtifact(ws, confidenceResult, `unresolved proof-context pins: ${unresolvedProofPins.join(",")}`, confidenceProvenance);
     log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else {
     // #1140 review: every credential configured for this run, in ONE place.
@@ -2017,6 +2031,9 @@ secrets: [profiles.primary.apiKey],
       requiredChecks: outputRequiredChecks,
       coverage: reviewCoverage,
       secrets: confidenceSecrets,
+      // #1368: the profile's overall prompt budget bounds the assembled
+      // prompt (bytes/4 estimate) with explicit in-band truncation.
+      promptTokens: confidenceProfile.promptTokens,
     });
     let confidenceOutcome: Awaited<ReturnType<typeof runConfidenceScorer>>;
     try {
@@ -2103,7 +2120,7 @@ secrets: [profiles.primary.apiKey],
     };
     // Persist the sanitized artifacts alongside ai-output.json /
     // review-coverage.json.
-    writeConfidenceScoreArtifact(ws, confidenceResult, maskConfidenceText(confidenceOutcome.diagnostic));
+    writeConfidenceScoreArtifact(ws, confidenceResult, maskConfidenceText(confidenceOutcome.diagnostic), confidenceProvenance);
     if (confidenceOutcome.requestPayload !== null) {
       // #1140 review: raw provider/agent JSON goes to disk through
       // `redactTextDeep`, not `maskKnownSecretsDeep` — configured-value
@@ -2597,8 +2614,26 @@ function removeConfidenceWireArtifacts(ws: RunWorkspace): void {
  * (`CONFIDENCE_RUBRIC_VERSION`). That version IS the migration marker: a
  * version-1 artifact (no `rubric` field) is a pre-#1369 prose-quality
  * confidence grade, and consumers must never reinterpret it as a
- * merge-readiness verifier result — the two semantics are not comparable. */
-function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult, diagnostic?: string): void {
+ * merge-readiness verifier result — the two semantics are not comparable.
+ *
+ * #1368: `provenance` is an ADDITIVE record of the request budgets and
+ * capability assertions the enabled profile resolved; absent when disabled,
+ * and every pre-existing key stays byte-for-byte as before. */
+interface ConfidenceRequestProvenance {
+  max_tokens: number;
+  prompt_tokens: number;
+  model_context_tokens: number;
+  reasoning_effort_sent: boolean;
+  anthropic_effort_support: boolean;
+  structured_output_support: boolean;
+}
+
+function writeConfidenceScoreArtifact(
+  ws: RunWorkspace,
+  result: ConfidenceResult,
+  diagnostic?: string,
+  provenance?: ConfidenceRequestProvenance,
+): void {
   ws.write("confidence-score.json", Buffer.from(`${pyJsonDumps({
     version: 2,
     rubric: CONFIDENCE_RUBRIC_VERSION,
@@ -2621,6 +2656,7 @@ function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult
     // stays operator-visible instead of vanishing silently.
     parser_notes: result.parserNotes,
     ...(diagnostic !== undefined && diagnostic !== "" ? { diagnostic } : {}),
+    ...(provenance !== undefined ? { request: provenance } : {}),
   })}\n`, "utf8"));
 }
 

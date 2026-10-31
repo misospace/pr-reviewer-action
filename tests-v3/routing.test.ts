@@ -549,6 +549,12 @@ test("#1073: confidence profile inherits the primary lane when ai-confidence-bas
     reasoningEffort: "",
     inheritedTransport: true,
     credentialSource: "primary",
+    // #1368: the documented defaults ride every resolved profile.
+    maxTokens: 4096,
+    promptTokens: 98304,
+    modelContextTokens: 0,
+    anthropicEffortSupported: false,
+    structuredOutputSupported: false,
   });
   assert.deepEqual(resolved.warnings, []);
 });
@@ -630,6 +636,8 @@ test("#1073: confidence profile resolves timeout, effort, and disabled state", (
     enabled: false, baseUrl: "", model: "", apiFormat: "", apiKey: "",
     requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false,
     credentialSource: "own",
+    maxTokens: 4096, promptTokens: 98304, modelContextTokens: 0,
+    anthropicEffortSupported: false, structuredOutputSupported: false,
   });
   assert.deepEqual(disabled.warnings, []);
 
@@ -639,4 +647,190 @@ test("#1073: confidence profile resolves timeout, effort, and disabled state", (
   });
   assert.equal(orphan.profile.enabled, false);
   assert.deepEqual(orphan.warnings, ["confidence scorer disabled: ai-confidence-base-url set without ai-confidence-model"]);
+});
+
+test("#1368: the confidence profile resolves its token budgets and capability assertions", () => {
+  const configured = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MAX_TOKENS: " 8192 ",
+    AI_CONFIDENCE_PROMPT_TOKENS: "131072",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "200000",
+    AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT: "true",
+    AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT: "TRUE",
+  });
+  assert.equal(configured.profile.maxTokens, 8192);
+  assert.equal(configured.profile.promptTokens, 131072);
+  assert.equal(configured.profile.modelContextTokens, 200000);
+  assert.equal(configured.profile.anthropicEffortSupported, true);
+  assert.equal(configured.profile.structuredOutputSupported, true);
+  assert.deepEqual(configured.warnings, []);
+
+  // Defaults when unset: 4096 / 98304, context unknown (0), both flags off.
+  const defaults = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+  });
+  assert.equal(defaults.profile.maxTokens, 4096);
+  assert.equal(defaults.profile.promptTokens, 98304);
+  assert.equal(defaults.profile.modelContextTokens, 0);
+  assert.equal(defaults.profile.anthropicEffortSupported, false);
+  assert.equal(defaults.profile.structuredOutputSupported, false);
+  assert.deepEqual(defaults.warnings, []);
+});
+
+test("#1368: an invalid token budget falls back to its default with a warning naming the input", () => {
+  for (const [key, value] of [
+    ["AI_CONFIDENCE_MAX_TOKENS", "0"],
+    ["AI_CONFIDENCE_MAX_TOKENS", "-5"],
+    ["AI_CONFIDENCE_MAX_TOKENS", "abc"],
+    ["AI_CONFIDENCE_PROMPT_TOKENS", "1.5"],
+    ["AI_CONFIDENCE_MODEL_CONTEXT_TOKENS", "nope"],
+  ] as const) {
+    const resolved = resolveConfidenceProfile({
+      AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+      [key]: value,
+    });
+    const expected = key === "AI_CONFIDENCE_MAX_TOKENS" ? 4096
+      : key === "AI_CONFIDENCE_PROMPT_TOKENS" ? 98304
+      : 0;
+    assert.equal((resolved.profile as unknown as Record<string, unknown>)[key === "AI_CONFIDENCE_MAX_TOKENS" ? "maxTokens" : key === "AI_CONFIDENCE_PROMPT_TOKENS" ? "promptTokens" : "modelContextTokens"], expected, `${key}=${value}`);
+    assert.ok(resolved.warnings.some((message) => message.includes(key)), `${key}=${value}: ${JSON.stringify(resolved.warnings)}`);
+  }
+});
+
+test("#1368: budgets clamp deterministically against the declared model context", () => {
+  // A completion budget wider than the window is clamped to the window; the
+  // prompt then clamps too (prompt + completion must fit the window), and
+  // the declared window stays an ACTUAL bound (#1368 review).
+  const maxClamped = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MAX_TOKENS: "5000", AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "4096",
+  });
+  assert.equal(maxClamped.profile.maxTokens, 3072);
+  assert.equal(maxClamped.profile.promptTokens, 1024);
+  assert.ok(maxClamped.profile.promptTokens + maxClamped.profile.maxTokens <= 4096);
+  assert.ok(maxClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS clamped")));
+  assert.ok(maxClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS reduced")));
+  assert.ok(maxClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS clamped")));
+
+  // Prompt + completion over the window clamps the prompt, keeping room for
+  // the completion budget — floored so a tiny window never starves the
+  // prompt to zero.
+  const promptClamped = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MAX_TOKENS: "4096", AI_CONFIDENCE_PROMPT_TOKENS: "98304",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "20000",
+  });
+  assert.equal(promptClamped.profile.promptTokens, 15904);
+  assert.equal(promptClamped.profile.maxTokens, 4096);
+  assert.ok(promptClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS clamped")));
+
+  // The 1024 prompt floor never overrides the window: when the completion
+  // budget leaves less than the floor, BOTH budgets are reduced
+  // deterministically so prompt + completion fits the window exactly
+  // (#1368 review blocker 1 — the floor used to break the invariant).
+  const dualReduced = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "2048",
+  });
+  assert.equal(dualReduced.profile.maxTokens, 1024);
+  assert.equal(dualReduced.profile.promptTokens, 1024);
+  assert.ok(dualReduced.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS reduced")));
+  assert.ok(dualReduced.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS clamped")));
+
+  // Boundary: the default completion budget against a window exactly equal
+  // to it reduces the completion to window - floor, never over the window.
+  const equalWindow = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "4096",
+  });
+  assert.equal(equalWindow.profile.maxTokens, 3072);
+  assert.equal(equalWindow.profile.promptTokens, 1024);
+
+  // Boundary: the smallest window that can still fit the minimum shape
+  // (1024-token prompt + a positive completion budget).
+  const smallestFitting = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "1025",
+  });
+  assert.equal(smallestFitting.profile.enabled, true);
+  assert.equal(smallestFitting.profile.maxTokens, 1);
+  assert.equal(smallestFitting.profile.promptTokens, 1024);
+
+  // An explicitly configured completion budget below the floor is reduced
+  // the same way — the floor stays the minimum prompt shape whatever the
+  // operator configured.
+  const explicitSmall = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MAX_TOKENS: "1000", AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "1025",
+  });
+  assert.equal(explicitSmall.profile.maxTokens, 1);
+  assert.equal(explicitSmall.profile.promptTokens, 1024);
+  assert.ok(explicitSmall.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS reduced")));
+
+  // Boundary: a window that cannot fit the minimum shape fails the scorer
+  // profile closed — disabled, loudly, never an over-budget request.
+  for (const tooSmall of ["1024", "512"]) {
+    const failedClosed = resolveConfidenceProfile({
+      AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+      AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: tooSmall,
+    });
+    assert.equal(failedClosed.profile.enabled, false, `context=${tooSmall}`);
+    assert.ok(
+      failedClosed.warnings.some((message) => message.includes("confidence scorer disabled") && message.includes("ai-confidence-model-context-tokens")),
+      `context=${tooSmall}: ${JSON.stringify(failedClosed.warnings)}`,
+    );
+  }
+
+  // Fitting budgets are never touched and never warn.
+  const fits = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MAX_TOKENS: "4096", AI_CONFIDENCE_PROMPT_TOKENS: "98304",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "102400",
+  });
+  assert.equal(fits.profile.maxTokens, 4096);
+  assert.equal(fits.profile.promptTokens, 98304);
+  assert.deepEqual(fits.warnings, []);
+});
+
+test("#1368: a configured Anthropic effort without the scorer's own opt-in warns and names the input", () => {
+  const resolved = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer", AI_CONFIDENCE_REASONING_EFFORT: "high",
+  });
+  assert.equal(resolved.profile.reasoningEffort, "high");
+  assert.equal(resolved.profile.anthropicEffortSupported, false);
+  assert.equal(resolved.warnings.length, 1);
+  assert.match(resolved.warnings[0]!, /output_config\.effort/);
+  assert.match(resolved.warnings[0]!, /ai-confidence-anthropic-effort-support/);
+
+  // The opt-in silences the warning; the effort is then sent.
+  const asserted = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer", AI_CONFIDENCE_REASONING_EFFORT: "high",
+    AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT: "true",
+  });
+  assert.equal(asserted.profile.anthropicEffortSupported, true);
+  assert.deepEqual(asserted.warnings, []);
+
+  // OpenAI format needs no assertion and never warns about it.
+  const openai = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer", AI_CONFIDENCE_REASONING_EFFORT: "high",
+  });
+  assert.deepEqual(openai.warnings, []);
+
+  // Another lane's assertion is never inherited: the confidence lane has its
+  // own input only.
+  const notInherited = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer", AI_CONFIDENCE_REASONING_EFFORT: "high",
+    AI_ANTHROPIC_EFFORT_SUPPORT: "true",
+    AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "true",
+  });
+  assert.equal(notInherited.profile.anthropicEffortSupported, false);
+  assert.equal(notInherited.warnings.length, 1);
 });
