@@ -1408,35 +1408,31 @@ function pathSample(line: string): string {
   return cleaned.trim().slice(0, MAX_PATH_SAMPLE_CHARS);
 }
 
-function symlinkSample(
-  raw: string,
-  ownLine: string,
-  view: string,
-  patterns: readonly RegExp[],
-): string {
+function symlinkSample(raw: string, ownView: string, view: string, patterns: readonly RegExp[]): string {
   /** #1335: the symlink view can match a run CARRIED from a following line —
    * an exec call's argument list past the line break, or argv moved one
    * element per line — where the line being scanned alone would record an
    * excerpt that never contains the matched token (the pre-#1331 scan
    * sampled the argv line itself, because that line matched on its own).
    * The excerpt is redirected to the carried run ONLY when the scanned line
-   * cannot explain the hit itself: neither its comment-free text nor its
-   * stripped view (the first segment of the view, which `symlinkCodeView`
-   * joins with newlines) matches. Same-line recovery — a backtick, a
-   * command substitution, an argv-position quoted token on the line —
-   * therefore keeps sampling the raw line, whose excerpt already shows both
-   * the token and the construct that fired; redirecting there would drop
-   * the diff marker and leave a bare token that reads like the inert
-   * value-position form #1331 just stopped firing. The redirected excerpt
-   * obeys the same bounds and sanitization as every other sample. Firing,
-   * attribution, and the discount branches are untouched: sample text only. */
-  const [own, ...carried] = view.split("\n");
-  if (
-    carried.length > 0 &&
-    !matchesAny(own ?? "", patterns) &&
-    !matchesAny(ownLine, patterns)
-  ) {
-    for (const run of carried) {
+   * cannot explain the hit itself: `ownView` is the same code view computed
+   * over the scanned line ALONE, so it keeps that line's own recovery —
+   * backtick, command substitution, argv-position token — whose raw excerpt
+   * already shows both the token and the construct that fired, and
+   * redirecting there would drop the diff marker and leave a bare token
+   * that reads like the inert value-position form #1331 just stopped
+   * firing; and it drops the inert text the fired view drops too (quotes,
+   * comments, trusted scaffolding), so a mention the scan deliberately
+   * discounts on the opener cannot pin the sample to the inert form while
+   * the real trigger sits on a following line. The redirected excerpt obeys
+   * the same bounds and sanitization as every other sample. Firing,
+   * attribution, and the discount branches are untouched: sample text only.
+   * SEARCH: every run of the scanned line's OWN recovery appears identically
+   * inside `ownView` (same text, same joining newlines), so when `ownView`
+   * misses, any run of the full view that matches is carried text by
+   * construction. */
+  if (!matchesAny(ownView, patterns)) {
+    for (const run of view.split("\n")) {
       if (matchesAny(run, patterns)) return pathSample(run);
     }
   }
@@ -2189,7 +2185,12 @@ export function evaluatePathHandlingSignals(
               source,
               chunkFile,
               symlinkClass
-                ? symlinkSample(raw, commentFree[index] ?? "", scanLine, patterns)
+                ? symlinkSample(
+                    raw,
+                    symlinkCodeView([neutralized[index] ?? ""], 0, backtickIsCommand, substitutionIsCommand),
+                    scanLine,
+                    patterns,
+                  )
                 : pathSample(raw),
             );
             fired = true;

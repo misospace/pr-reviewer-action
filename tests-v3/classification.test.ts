@@ -2257,6 +2257,30 @@ test("#1335: a symlink hit recovered from carried argv samples the matched token
   );
   assert.deepEqual(singleFired?.samples, ["+os.readlink(user_path)"]);
 
+  // A mention on the opener that the scan itself discounts — inside a
+  // comment, or as inert quoted text the fired view strips — must not pin
+  // the sample to the inert form while the real trigger is carried from a
+  // following line.
+  const discountedOpenerCases: [string, string[]][] = [
+    ["comment mention on the opener", ['+subprocess.run(  # readlink the loop', '+\t"readlink -f x",', '+\tshell=True,', '+)']],
+    ["inert value-position mention on the opener", ['+parser.add_argument("--readlink"); subprocess.run(', '+\t"readlink -f x",', '+\tshell=True,', '+)']],
+  ];
+  for (const [label, lines] of discountedOpenerCases) {
+    const result = classifyPr({
+      prFiles: files("tool.py"),
+      diffText: selfLocationDiff("tool.py", lines),
+      linkedIssues: [],
+    });
+    const fired = result.pathHandlingProvenance.signals.find(
+      (s) => s.signal === "symlink_sensitive" && s.source === "diff",
+    );
+    assert.ok(fired, `${label}: must fire`);
+    assert.ok(
+      (fired?.samples ?? []).some((sample) => sample.includes("readlink -f x")),
+      `${label}: the sample must follow the carried trigger, got ${JSON.stringify(fired?.samples)}`,
+    );
+  }
+
   // Same-line recovery keeps the raw-line sample too: the excerpt already
   // shows the token AND the construct that fired. Redirecting these to the
   // recovered run would drop the diff marker and leave a bare token that
