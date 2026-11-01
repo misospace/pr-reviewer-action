@@ -102,6 +102,9 @@ test("unresolved cause precedence is deterministic and a planning failure is not
   // attempted").
   assert.equal(deriveUnresolvedCause({ stopReason: "max-rounds", harnessError: null, planningError: null, degraded: false }), "budget-exhausted");
   assert.equal(deriveUnresolvedCause({ stopReason: "wall-clock-exceeded", harnessError: null, planningError: null, degraded: false }), "budget-exhausted");
+  // A degraded harness that never executed a request stays tool-capability
+  // even when the loop finally stopped on a budget-shaped ceiling.
+  assert.equal(deriveUnresolvedCause({ stopReason: "max-rounds", harnessError: null, planningError: null, degraded: true }), "tool-capability");
 });
 
 test("unresolved trusted-base obligations force changes with a listed section; satisfied ones never do", () => {
@@ -413,6 +416,10 @@ test("headings and prose inside fenced code samples cannot gate extraction", () 
   // A gated heading outside the fence still gates its section afterwards.
   const gated = "## Evidence required before approval\n\n```\ncode\n```\n\nVerify the Talos support matrix.";
   assert.deepEqual(extractApprovalPrerequisites(gated), ["Verify the Talos support matrix."]);
+  // CommonMark: a ~~~ run inside an open ``` block is content and must not
+  // close the fence early and expose the sample's heading to gating.
+  const tilde = ["## Misc", "", "```", "~~~", "## Evidence required before approval", "```", "", "Verify the Talos support matrix."].join("\n");
+  assert.deepEqual(extractApprovalPrerequisites(tilde), []);
 });
 
 test("VALIDATE_REQUIRED_CHECKS=false removes must_check rows at both obligation layers", () => {

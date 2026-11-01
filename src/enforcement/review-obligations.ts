@@ -74,9 +74,13 @@ export const APPROVAL_VERIFICATION_CUE = /\b(?:verify|confirm|check|read|inspect
  * release-notes advisory was approved."). Such sentences never become
  * obligations — the reviewer has no configured capability against a person's
  * sign-off, so a heading-gated section must not turn one into a permanent
- * forcing row. */
+ * forcing row. The attributing span is bounded to three words so a
+ * preposition cannot pair with a distant role noun across a sentence; the
+ * exclusion errs toward NOT extracting (pre-#1381 behavior), never toward a
+ * permanent forcing row. Roles are detected deterministically; individual
+ * names cannot be, an accepted limitation. */
 export const EXTERNAL_CONFIRMATION_CUES = [
-  /\b(?:with|from|by)\s+(?:the\s+|our\s+|a\s+)?(?:[\w-]+\s+)*(?:team|on-?call(?:er)?|operator|owner|stakeholder|human|manager|lead)\b/i,
+  /\b(?:with|from|by)\s+(?:the\s+|our\s+|a\s+)?(?:[\w-]+\s+){0,3}(?:team|on-?call(?:er)?|operator|owner|stakeholder|human|manager|lead)\b/i,
   /\bsign[- ]?off\b/i,
 ] as const;
 /** The obligation must name something the reviewer's configured tools can
@@ -118,16 +122,22 @@ export function extractApprovalPrerequisites(standardsSection: string): string[]
     // heading stays #977 non-blocking territory. A gated heading whose own
     // title carries all three cues is also an obligation by itself.
     let approvalSection = false;
-    let inFence = false;
+    let fence: { char: string; length: number } | null = null;
     for (const line of body.split(/\r?\n/)) {
       // Fenced samples are code, not contract: a `# ... before approval`
       // comment inside an example must not gate the surrounding section, and
       // prose inside the fence is not an obligation (#252 fence discipline).
-      if (/^\s*(?:```|~~~)/.test(line)) {
-        inFence = !inFence;
+      // CommonMark closes only on the same fence character run at least as
+      // long as the opening one — a ~~~ inside a ``` block is content.
+      const fenceRun = /^\s*(`{3,}|~{3,})/.exec(line);
+      if (fence !== null) {
+        if (fenceRun !== null && fenceRun[1]![0] === fence.char && fenceRun[1]!.length >= fence.length) fence = null;
         continue;
       }
-      if (inFence) continue;
+      if (fenceRun !== null) {
+        fence = { char: fenceRun[1]![0]!, length: fenceRun[1]!.length };
+        continue;
+      }
       const heading = /^#{1,6}\s+(.*)$/.exec(line);
       if (heading !== null) {
         const title = heading[1]!.trim().slice(0, MAX_APPROVAL_PREREQUISITE_LENGTH).trim();
@@ -286,12 +296,14 @@ export function deriveUnresolvedCause(input: {
   degraded: boolean;
 }): Exclude<UnresolvedReviewObligationCause, null> {
   if (input.harnessError !== null) return "provider-failure";
-  // Any budget-shaped stop — the call ceiling, the round ceiling, or the
-  // wall clock — means evidence gathering ran out of budget before the
-  // obligation was closed (including a loop that spent its rounds on
-  // refused optional calls inside the reserved window).
-  if (input.stopReason === "tool-call-budget-exhausted" || input.stopReason === "max-rounds" || input.stopReason === "wall-clock-exceeded") return "budget-exhausted";
+  if (input.stopReason === "tool-call-budget-exhausted") return "budget-exhausted";
   if (input.degraded) return "tool-capability";
+  // Any budget-shaped stop on a loop that DID execute requests — the round
+  // ceiling or the wall clock — means evidence gathering ran out of budget
+  // before the obligation was closed (including a loop that spent its rounds
+  // on refused optional calls inside the reserved window). A degraded loop
+  // that never executed anything stays tool-capability above.
+  if (input.stopReason === "max-rounds" || input.stopReason === "wall-clock-exceeded") return "budget-exhausted";
   // A planning failure (missing corpus, missing model configuration) is not
   // a provider failure: no evidence gathering was even attempted, which is
   // the missing-source-evidence state.
