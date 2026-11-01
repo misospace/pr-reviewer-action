@@ -105,9 +105,10 @@ const RESERVE_WINDOW_TURN_NOTE =
   "[loop budget] Only {requestsLeft} tool request(s) remain and they are " +
   "reserved for required dependency evidence: spend them on upstream " +
   "provenance, the exact old-to-new upstream release delta, and security " +
-  "advisories (web_fetch / web_search) only. Optional and local-diff calls " +
-  "are now refused, not executed. If the evidence cannot be established, " +
-  "report what is missing rather than approximating it.";
+  "advisories only, through web_fetch (plus web_search when that tool is " +
+  "offered to you). Optional and local-diff calls are now refused, not " +
+  "executed. If the evidence cannot be established, report what is missing " +
+  "rather than approximating it.";
 
 /** #1379: the refusal a non-evidence call gets inside the reserve window
  * while no dependency-evidence call has been attempted yet. Model-facing:
@@ -116,8 +117,9 @@ const RESERVE_REFUSAL_NOTE =
   "Reserved dependency-evidence budget: this call was not executed and spent " +
   "none of the remaining requests. The reserved tail is for the required " +
   "upstream evidence (publisher/source provenance, the exact old-to-new " +
-  "release delta, security advisories) via web_fetch/web_search. Make one of " +
-  "those calls, or finish now and report the missing evidence as unknown / " +
+  "release delta, security advisories), reached with web_fetch (plus " +
+  "web_search when that tool is offered to you). Make one of those calls, or " +
+  "finish now and report the missing evidence as unknown / " +
   "needs verification.";
 
 /**
@@ -127,7 +129,10 @@ const RESERVE_REFUSAL_NOTE =
  * read/git tools and run_command can only confirm the diff already in the
  * corpus, and gh_api is allowlisted to the PR's own repos, not the
  * dependency's. Any executed call of one of these tools — whatever the
- * executor returned — flips the obligation state to attempted.
+ * executor returned — flips the obligation state to attempted. `web_search`
+ * is advertised only when a search endpoint is configured, so the driver
+ * notes name `web_fetch` as the always-available channel and `web_search`
+ * conditionally.
  */
 export const DEPENDENCY_EVIDENCE_TOOLS: ReadonlySet<string> = new Set([
   "web_fetch",

@@ -905,8 +905,10 @@ function requestTexts(payload: Record<string, unknown>): string {
 test("#1379: reserve injects the priority note before the first request and redirects inside the reserve window", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
-  // Budget 6, reserve 4. One executed call per round: requestsLeft is 5 at
-  // round 2, 4 at round 3 — the window opens when the tail is reached.
+  // Budget 6, reserve 4: rounds 1-2 execute outside the window (requestsLeft
+  // 5 at round 2, 4 at round 3 — the window opens when the tail is reached);
+  // round 3's read_file lands inside the window and is refused, which does
+  // not change the notes the earlier requests carried.
   const { postFn, executeFn, timeFn, payloads } = noteCapturingLoop(
     [
       openAiCall("c1", "git_status_short", "{}"),
@@ -948,6 +950,10 @@ test("#1379: reserve injects the priority note before the first request and redi
     .at(-1)!;
   assert.ok(newestNote.includes("reserved"));
   assert.ok(!newestNote.includes("turn(s) remain"));
+  // The redirect names the always-advertised evidence channel and marks
+  // web_search conditional (it is offered only with a search endpoint).
+  assert.ok(newestNote.includes("web_fetch"));
+  assert.match(newestNote, /web_search when that tool is offered/);
 });
 
 test("#1379: no reserve keeps the exact legacy note behavior (no priority or reserve notes)", async () => {
@@ -1083,6 +1089,13 @@ test("#1379: a model that never attempts evidence can never spend the reserved t
   // exhaustion with the required evidence unresolved is impossible while the
   // obligation is unattempted — the tail simply cannot be consumed.
   assert.equal(outcome.requestsRemaining, 4);
+  // Every refusal tells the model how to unlock the window: web_fetch, the
+  // always-advertised channel (no web_fetch ever executed here, so this text
+  // can only come from the refusal note), with web_search named only
+  // conditionally.
+  const transcript = JSON.stringify(conversation.toRequestPayload("openai", "m", {}));
+  assert.ok(transcript.includes("web_fetch"));
+  assert.match(transcript, /web_search when that tool is offered/);
 });
 
 test("#1379: an early evidence attempt releases the window for optional work", async () => {
