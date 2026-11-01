@@ -9,6 +9,7 @@
  * verdict policy and are themselves deterministic policy, not model input.
  */
 import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
+import { applyReviewObligationEnforcement, type ReviewObligation } from "./review-obligations.js";
 import { applyReviewThreadEnforcement, type EnforcementThread } from "./threads.js";
 import { applyHumanReviewEnforcement, type EnforcementHumanReview } from "./human-reviews.js";
 
@@ -37,7 +38,7 @@ export interface EnforcementOutcome {
  * (a no-flip overlay leaves existing provenance untouched) and retire any
  * earlier relaxation note the flip contradicts.
  */
-function forceRequestChanges(
+export function forceRequestChanges(
   artifact: ReviewArtifact,
   sectionMd: string,
   reason: string,
@@ -211,6 +212,9 @@ export interface EnforcementInputs {
   threads: readonly EnforcementThread[] | null;
   humanReviews: readonly EnforcementHumanReview[] | null;
   verdictPolicy: string;
+  /** #1381: the folded review-owned obligation rows; null when none were
+   * tracked (no must_check items and no injected trusted-base guidance). */
+  reviewObligations?: readonly ReviewObligation[] | null;
 }
 
 /**
@@ -223,7 +227,7 @@ export interface EnforcementInputs {
  */
 export function failClosedEnforcementFired(inputs: Pick<
   EnforcementInputs,
-  "evidenceBlockerEnabled" | "evidence" | "toolFailureEnabled" | "toolHarness" | "toolMinSuccessful"
+  "evidenceBlockerEnabled" | "evidence" | "toolFailureEnabled" | "toolHarness" | "toolMinSuccessful" | "reviewObligations"
 >): boolean {
   if (inputs.evidenceBlockerEnabled && inputs.evidence?.has_blocker) return true;
   if (inputs.toolFailureEnabled) {
@@ -232,6 +236,15 @@ export function failClosedEnforcementFired(inputs: Pick<
       && countSuccessfulRequests(inputs.toolHarness ?? null) < inputs.toolMinSuccessful) {
       return true;
     }
+  }
+  // #1381: an unresolved trusted_base_guidance obligation is a review-owned
+  // required check the reviewer was expected and equipped to perform but did
+  // not complete — a fail-closed forcing condition like the layers above.
+  // must_check rows never force here (REQUIRED_CHECK_VALIDATION_MODE owns
+  // their verdict semantics); they feed the anti-relaxation signal instead.
+  if ((inputs.reviewObligations ?? []).some((obligation) =>
+    obligation.status !== "satisfied" && obligation.source === "trusted_base_guidance")) {
+    return true;
   }
   return false;
 }
@@ -275,6 +288,15 @@ export function applyAllEnforcement(artifact: ReviewArtifact, inputs: Enforcemen
         forcingReasons.push(minOutcome.reason);
       }
     }
+  }
+
+  // #1381: the review-obligation gate runs with the other forcing rules and
+  // before the banner normalization, so its reason contributes to the same
+  // enforced banner instead of leaving a verdict the body contradicts.
+  const obligationGate = applyReviewObligationEnforcement(artifact, inputs.reviewObligations ?? []);
+  if (obligationGate.applied) {
+    applied += 1;
+    forcingReasons.push(obligationGate.reason);
   }
 
   const verdictBeforeThreads = artifact.verdict;

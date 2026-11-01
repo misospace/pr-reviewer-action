@@ -164,8 +164,9 @@ function noBlockingFindings(findings: ArtifactFinding[]): boolean {
   return !findings.some(isBlockingFinding);
 }
 
-function canRelaxForCiOnly(artifact: ReviewArtifact, forced: boolean): boolean {
-  return !forced
+function canRelaxForCiOnly(artifact: ReviewArtifact, forced: boolean, unresolvedReviewObligations: readonly string[] = []): boolean {
+  return unresolvedReviewObligations.length === 0
+    && !forced
     && !hasUnresolvedRequiredCheck(artifact)
     && artifact.required_checks !== "incomplete"
     && artifact.requirement_trace_incomplete !== true;
@@ -194,10 +195,10 @@ function hasUnresolvedRequiredCheck(artifact: ReviewArtifact): boolean {
  */
 export function relaxVerificationOnlyVerdict(
   artifact: ReviewArtifact,
-  options: { forced: boolean },
+  options: { forced: boolean; unresolvedReviewObligations?: readonly string[] },
 ): boolean {
   if (artifact.verdict !== "request_changes") return false;
-  if (!canRelaxForCiOnly(artifact, options.forced)) return false;
+  if (!canRelaxForCiOnly(artifact, options.forced, options.unresolvedReviewObligations)) return false;
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   if (!findings.every((finding) => isAlwaysNonBlockingCategory(finding.category))) return false;
@@ -215,10 +216,10 @@ export function relaxVerificationOnlyVerdict(
  */
 export function relaxCiOnlyVerdict(
   artifact: ReviewArtifact,
-  options: { forced: boolean },
+  options: { forced: boolean; unresolvedReviewObligations?: readonly string[] },
 ): boolean {
   if (artifact.verdict !== "request_changes") return false;
-  if (!canRelaxForCiOnly(artifact, options.forced)) return false;
+  if (!canRelaxForCiOnly(artifact, options.forced, options.unresolvedReviewObligations)) return false;
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   const allRelaxable = findings.every((finding) =>
@@ -288,10 +289,10 @@ function isUnverifiedBlockerDemotion(finding: ArtifactFinding): boolean {
  */
 export function relaxUnverifiedBlockerVerdict(
   artifact: ReviewArtifact,
-  options: { forced: boolean },
+  options: { forced: boolean; unresolvedReviewObligations?: readonly string[] },
 ): boolean {
   if (artifact.verdict !== "request_changes") return false;
-  if (!canRelaxForCiOnly(artifact, options.forced)) return false;
+  if (!canRelaxForCiOnly(artifact, options.forced, options.unresolvedReviewObligations)) return false;
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   // Unknown evidence must never certify a clean review: refuse the relaxer
@@ -479,6 +480,7 @@ function strictRequestChangesDetail(input: {
   counts: { blocking: number; total: number };
   unverifiedGrounding: boolean;
   forced: boolean;
+  obligations?: readonly string[];
 }): string {
   const parts: string[] = [];
   if (input.counts.blocking > 0) {
@@ -489,6 +491,9 @@ function strictRequestChangesDetail(input: {
   }
   if (input.forced) {
     parts.push("a fail-closed enforcement layer forced request_changes");
+  }
+  if (input.obligations && input.obligations.length > 0) {
+    parts.push(`required review evidence unresolved: ${input.obligations.join(", ")} (#1381)`);
   }
   if (parts.length === 0) {
     // No findings, no unverified, no forced — the reviewer would be a
@@ -537,12 +542,13 @@ function strictRequestChangesDetail(input: {
  */
 export function applyStrictVerdictPolicy(
   artifact: ReviewArtifact,
-  options: { modelVerdict: string; forced: boolean },
+  options: { modelVerdict: string; forced: boolean; unresolvedReviewObligations?: readonly string[] },
 ): StrictVerdictOutcome {
   const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
   const modelVerdict = options.modelVerdict;
   const counts = severityCounts(findings);
   const unverifiedGrounding = findings.some(isUnverifiedBlockingGrounding);
+  const unresolvedObligations = options.unresolvedReviewObligations ?? [];
 
   let verdict: VerdictValue;
   let overridden: boolean;
@@ -554,7 +560,7 @@ export function applyStrictVerdictPolicy(
     if (overridden) {
       appendStrictNote(
         artifact,
-        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced }),
+        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
         modelVerdict,
       );
     }
@@ -587,10 +593,28 @@ export function applyStrictVerdictPolicy(
     if (overridden) {
       appendStrictNote(
         artifact,
-        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced }),
+        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
         modelVerdict,
       );
     }
+  } else if (unresolvedObligations.length > 0 && modelVerdict === "request_changes") {
+    // #1381: the ANTI-RELAX half of the review-obligation contract. The
+    // model recommended request_changes over a required-evidence gap; the
+    // deterministic layer holds that verdict — it can never be silently
+    // flipped to approve while a review-owned obligation is unresolved, and
+    // the attribution note names the obligations so the published review
+    // shows the deterministic reason. It never fires the other way: a model
+    // approve with unresolved must_check rows stays the #750 warn-mode
+    // contract (partial marker, "Unaddressed required checks" section), and
+    // the hard-force gate owns trusted-base obligations.
+    verdict = "request_changes";
+    overridden = false;
+    source = "model";
+    appendStrictNote(
+      artifact,
+      strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
+      modelVerdict,
+    );
   } else {
     verdict = "approve";
     overridden = modelVerdict !== "approve";

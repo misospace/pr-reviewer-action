@@ -62,6 +62,9 @@ export const LOW_TOOL_REQUESTS_REMAINING = 2;
 const BUDGET_TURN_NOTE =
   "[loop budget] {requestsLeft} of {requestsTotal} tool request(s) and " +
   "{roundsLeft} of {roundsTotal} turn(s) remain.";
+export const REQUIRED_EVIDENCE_TURN_NOTE =
+  "[loop budget] {requestsLeft} tool request(s) remain; {reservedCount} request(s) are reserved for required-evidence obligations. Spend the reserved requests ONLY on evidence for those obligations (required repository/upstream compatibility, provenance, or schema checks named in the Required Review Evidence section) before any optional exploration. Stop broad exploration now: prioritize confirming or rejecting your unresolved blocker hypotheses and gathering only the evidence still needed for the verdict.";
+
 const LOW_BUDGET_TURN_NOTE =
   "[loop budget] Only {requestsLeft} tool request(s) and {roundsLeft} " +
   "turn(s) remain. Stop broad exploration now: prioritize confirming or " +
@@ -236,6 +239,11 @@ export interface LoopOutcome {
   compactionTruncate: number;
   /** #922: largest approximate conversation size seen before a turn. */
   peakConversationTokens: number;
+  /** #1381: requests advisory-reserved for required-evidence obligations —
+   * below this remaining threshold the turn note redirects all remaining
+   * spend to the Required Review Evidence obligations. It is a hint, not a
+   * hard reservation: the loop never refuses an optional call outright. */
+  requiredEvidenceRequestsHint: number;
 }
 
 /**
@@ -355,6 +363,7 @@ export interface DriveToolLoopOptions {
   nowFn?: () => number;
   /** #1199: invoked once per model turn with that turn's bounded telemetry. */
   onRound?: (round: NativeLoopRoundTelemetry) => void;
+  reserveForRequiredEvidence?: number;
 }
 
 /**
@@ -412,6 +421,7 @@ export async function driveToolLoop(
     compactionSummarize: 0,
     compactionTruncate: 0,
     peakConversationTokens: 0,
+    requiredEvidenceRequestsHint: Math.max(0, Math.min(budgets.maxToolCalls - 1, Math.floor(options.reserveForRequiredEvidence ?? 0))),
   };
   const started = timeFn();
   const telemetryStart = nowFn();
@@ -503,10 +513,13 @@ export async function driveToolLoop(
     if (outcome.rounds > 0) {
       const requestsLeft = budgets.maxToolCalls - callsExecuted;
       const roundsLeft = budgets.maxRounds - outcome.rounds;
-      const note =
-        requestsLeft <= LOW_TOOL_REQUESTS_REMAINING ? LOW_BUDGET_TURN_NOTE : BUDGET_TURN_NOTE;
+      const reservedCount = outcome.requiredEvidenceRequestsHint;
+      const note = reservedCount > 0 && requestsLeft <= reservedCount
+        ? REQUIRED_EVIDENCE_TURN_NOTE
+        : requestsLeft <= LOW_TOOL_REQUESTS_REMAINING ? LOW_BUDGET_TURN_NOTE : BUDGET_TURN_NOTE;
       conversation.addTurnNote(
         formatNote(note, {
+          reservedCount,
           requestsLeft,
           requestsTotal: budgets.maxToolCalls,
           roundsLeft,

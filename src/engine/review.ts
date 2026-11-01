@@ -78,6 +78,7 @@ import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
+import { candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { createTraceGapProbe, traceGapContinuationSummary } from "../requirements/trace-gap-probe.js";
@@ -405,6 +406,54 @@ export function createRunCancellation(request: ReviewRequest): RunCancellation {
  * artifact and the demotion note reflect every pass. Findings the first
  * pass processed are skipped inside the boundary itself, so the second
  * pass only reports newly settled findings. */
+/**
+ * Fold the run's review-owned required-evidence obligations (#1381).
+ *
+ * Rows come VERBATIM from the harness-authored candidates artifact (exactly
+ * what the model was shown), never re-derived here — identity drift between
+ * the harness and engine layers would make exact-text dispositions unmatched
+ * and permanently block. Absent candidates (fork/skipped-harness paths) fall
+ * back to must_check-only rows with harness-compatible ids. The derived
+ * unresolved cause is stamped on trusted_base_guidance rows only; must_check
+ * rows keep cause null (their lifecycle is the completeness contract).
+ */
+function resolveReviewObligations(
+  classification: Record<string, unknown>,
+  review: Record<string, unknown>,
+  ws: RunWorkspace,
+  harnessArtifactName: string,
+) {
+  const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
+  const candidateRows = candidates?.injected === true && Array.isArray(candidates.obligations)
+    ? candidates.obligations as unknown[]
+    : [];
+  const obligations = candidateRowsToObligations(candidateRows, stringList(classification.must_check));
+  const dispositions = Array.isArray(review.required_check_dispositions)
+    ? review.required_check_dispositions as Array<{ check: string; status: string; rationale?: string | null }>
+    : null;
+  const folded = foldObligationDispositions(obligations, dispositions);
+  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; executed_request_count?: unknown } | null;
+  const cause = deriveUnresolvedCause({
+    stopReason: typeof harness?.stop_reason === "string" ? harness.stop_reason : null,
+    harnessError: harness?.error != null ? String(harness.error) : null,
+    planningError: harness?.planning_error != null ? String(harness.planning_error) : null,
+    degraded: typeof harness?.executed_request_count === "number" && harness.executed_request_count === 0,
+  });
+  return folded.map((obligation) => (
+    obligation.status === "satisfied" || obligation.source !== "trusted_base_guidance"
+      ? obligation
+      : { ...obligation, cause }
+  ));
+}
+
+function persistReviewObligations(ws: RunWorkspace, obligations: ReviewObligation[], log: (line: string) => void): void {
+  if (obligations.length === 0) return;
+  ws.write("review-obligations.json", pyJsonDumps(reviewObligationsToArtifact(obligations)));
+  const ids = unresolvedReviewObligations(obligations);
+  const cause = obligations.find((item) => item.status !== "satisfied")?.cause ?? "none";
+  log(`Review obligations: ${obligations.length} total, ${ids.length} unresolved (${ids.join(", ")}), cause=${cause}`);
+}
+
 function mergeBlockerVerificationPasses(
   first: Awaited<ReturnType<typeof applyBlockerVerification>> | null,
   second: Awaited<ReturnType<typeof applyBlockerVerification>>,
@@ -1653,6 +1702,12 @@ secrets: [profiles.primary.apiKey],
     humanReviews: safeJsonArray(ws.read("human-reviews.json")) as never,
     verdictPolicy,
   };
+  // #1381: the folded review-owned obligation rows ride the enforcement
+  // inputs so the gate runs inside applyAllEnforcement (with the banner
+  // normalization) and the anti-relax signal is computed once, here.
+  const reviewObligations = resolveReviewObligations(classificationArtifact, reviewRecord, ws, enforcementHarness);
+  enforcementInputs.reviewObligations = reviewObligations;
+  persistReviewObligations(ws, reviewObligations, log);
   // #874: the ledger (read above for the #959 trace scope) feeds the trace
   // escalation, which must be visible to the verdict mapping, not just
   // recorded afterward.
@@ -1711,6 +1766,10 @@ secrets: [profiles.primary.apiKey],
       }
       blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
     }
+    const unresolvedObligations = unresolvedReviewObligations(reviewObligations);
+    // The obligation gate (#1381) ran inside applyAllEnforcement and rides
+    // failClosedEnforcementFired, so the strict mapping can never relax a
+    // verdict it forced.
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
     // #1016: the strict mapping computes the unknown-evidence forcing
@@ -1718,7 +1777,7 @@ secrets: [profiles.primary.apiKey],
     // demoted finding with `grounding_status === "unverified"` forces
     // `request_changes` with a #1016 attribution note so an approve cannot
     // silently certify a claim the verifier never checked.
-    applyStrictVerdictPolicy(reviewRecord as never, { modelVerdict, forced });
+    applyStrictVerdictPolicy(reviewRecord as never, { modelVerdict, forced, unresolvedReviewObligations: unresolvedObligations });
     // The strict mapping can derive an approve after the enforcement banner
     // was written; reconcile the markdown with the final verdict.
     reconcileEnforcedReviewMarkdown(reviewRecord as never);
@@ -1771,15 +1830,18 @@ secrets: [profiles.primary.apiKey],
     // still-open finding is a verification ask and no independent
     // deterministic gate fired. The overlays above have already run, so
     // their blocks are visible here.
+    const unresolvedObligations = unresolvedReviewObligations(reviewObligations);
+    // The obligation gate (#1381) ran inside applyAllEnforcement and rides
+    // failClosedEnforcementFired, so the relaxers below refuse when it fired.
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
-    relaxVerificationOnlyVerdict(reviewRecord as never, { forced });
-    relaxCiOnlyVerdict(reviewRecord as never, { forced });
+    relaxVerificationOnlyVerdict(reviewRecord as never, { forced, unresolvedReviewObligations: unresolvedObligations });
+    relaxCiOnlyVerdict(reviewRecord as never, { forced, unresolvedReviewObligations: unresolvedObligations });
     // #1016: relaxUnverifiedBlockerVerdict itself refuses to relax when any
     // demoted finding has `grounding_status === "unverified"` (unknown
     // evidence, not a refutation) — the verifier did not disprove the
     // claim, so a clean review cannot be certified.
-    relaxUnverifiedBlockerVerdict(reviewRecord as never, { forced });
+    relaxUnverifiedBlockerVerdict(reviewRecord as never, { forced, unresolvedReviewObligations: unresolvedObligations });
     // #977: the relaxation can flip the model's request_changes to approve
     // after the enforcement banner was written; reconcile the markdown with
     // the final verdict.

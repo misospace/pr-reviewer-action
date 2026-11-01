@@ -25,7 +25,9 @@ import type { ModelRequestConfig, TransportWirePayload } from "./types.js";
  * model can only ever name a logical id here — the deterministic resolver
  * validates every id against the trusted base-ref configuration.
  * `required_check_dispositions` (#750) carries one disposition per
- * deterministic must_check item, echoed by exact check text.
+ * deterministic must_check item, echoed by exact check text. A Required
+ * Review Evidence section also requires one disposition per listed
+ * obligation, echoed by id or exact text.
  */
 export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
   type: "json_schema",

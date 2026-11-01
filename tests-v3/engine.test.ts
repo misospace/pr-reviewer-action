@@ -186,7 +186,17 @@ test("the env adapter and engine produce identical structured results", async ()
     const adapterResult = await runReview({ env: { GITHUB_OUTPUT: "/dev/null", GITHUB_STEP_SUMMARY: "" }, inputs: { ...inputs, "ai-base-url": server.url }, runDir: f.runDir, workspace: f.root, platformAdapter: mockPlatform(), persistArtifacts: true, quiet: true });
     const engineResult = await runReviewEngine(request(server.url, engineRunDir), { workspace: f.root, runDir: engineRunDir, outputsSink: "/dev/null", stepSummaryPath: "", adapter: mockPlatform(), persistArtifacts: true, quiet: true, log: noopSink, error: noopSink, annotate: noopSink });
     for (const key of ["outputs", "route", "routeReason", "analysisEngine", "classification", "verdictPolicy"] as const) assert.deepEqual(engineResult[key], adapterResult[key], key);
-    assert.deepEqual([...engineResult.artifacts.keys()].sort(), [...adapterResult.artifacts.keys()].sort());
+    // #1381: the candidates artifact is HARNESS-authored, and the two paths
+    // legitimately differ on it — the adapter path derives fork-ness
+    // fail-closed from the PR object (no head-repo identity in this mock), so
+    // the fork gate substitutes its own tool-harness artifacts and skips the
+    // native loop. Everything else, including the ENGINE-authored
+    // review-obligations.json, must stay symmetric.
+    const engineNames = [...engineResult.artifacts.keys()].filter((name) => name !== "review-obligations-candidates.json").sort();
+    const adapterNames = [...adapterResult.artifacts.keys()].filter((name) => name !== "review-obligations-candidates.json").sort();
+    assert.deepEqual(engineNames, adapterNames);
+    const obligationsCount = (names: string[]): number => names.filter((name) => name === "review-obligations.json").length;
+    assert.equal(obligationsCount([...engineResult.artifacts.keys()]), obligationsCount([...adapterResult.artifacts.keys()]));
     for (const name of ["review-body.md", "verdict.txt", "ai-output.json"]) assert.equal(readFileSync(join(engineRunDir, name), "utf8"), readFileSync(join(f.runDir, name), "utf8"), name);
   } finally { await server.close(); f.cleanup(); }
 });
