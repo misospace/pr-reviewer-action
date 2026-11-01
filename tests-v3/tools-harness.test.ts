@@ -2680,6 +2680,64 @@ test("#1379: the trace-gap repair continuation inherits the credits and cannot s
   assert.deepEqual(trace.map((c) => c.tool), ["web_fetch", "read_file"]);
 });
 
+test("#1379: the repair continuation's reserve is clamped to the tail it is handed", async () => {
+  // The reserve's no-lockout cap is "the loop spent the whole reserve on
+  // evidence attempts". Handed a SHORTER tail than the reserve (the main loop
+  // had already spent part of it on evidence), the unclamped cap would be
+  // unreachable and the continuation could never release its window; the seam
+  // therefore clamps the reserve to the requests the continuation actually
+  // holds, so the cap stays payable inside that tail.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "image_update", version: 1 }));
+  // Budget 6, reserve 4: the main loop executes a provenance fetch (credits
+  // provenance) plus two UNATTRIBUTED fetches — three attempts of four, so
+  // the window is not released — and stops voluntarily with three requests
+  // left. The repair round is handed exactly those three.
+  const scripted = [
+    openAiCall("c1", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://unrelated.test/a"}'),
+    openAiCall("c3", "web_fetch", '{"url":"https://elsewhere.test/b"}'),
+    openAiText("done upstream-ish"),
+    validVerdict(),
+    // One round, three unattributed evidence calls: attempts reach the
+    // clamped reserve, so the window releases inside the handed tail.
+    {
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              { id: "c4", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://nowhere.test/c"}' } },
+              { id: "c5", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://neither.test/d"}' } },
+              { id: "c6", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://nobody.test/e"}' } },
+            ],
+          },
+        },
+      ],
+    },
+    validVerdict(),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_MAX_REQUESTS: "6", SYSTEM_PROMPT: "You are the reviewer." },
+    transport: async () => scripted[n++],
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  assert.equal(result.trace_repair_continuation?.tool_calls, 3, "the repair's three fetches executed");
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  // Run-wide fold across the seam: six evidence attempts, only the lexical
+  // provenance credit, and the window RELEASED — possible only because the
+  // continuation's cap was its own three-request tail.
+  assert.equal(telemetry.budget?.dependency_evidence_reserve, 4);
+  assert.equal(telemetry.budget?.dependency_evidence_attempts, 6);
+  assert.deepEqual(telemetry.budget?.dependency_evidence_credits, ["provenance"]);
+  assert.equal(telemetry.budget?.dependency_evidence_released, true);
+});
+
 test("#1379: a one-request dependency budget reserves its sole request end to end", async () => {
   // Review 5726673529's counterexample: TOOL_MAX_REQUESTS=1 is the supported
   // floor (clampedPositive), and the old min(4, maxRequests - 1) formula

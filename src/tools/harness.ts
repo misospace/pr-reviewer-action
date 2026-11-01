@@ -3008,8 +3008,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
               // handed, so the window enforcement stays on and the repair
               // cannot spend it on unrelated calls either. The main loop's
               // credits seed the continuation so an obligation the main
-              // loop already covered is never required twice.
-              priorityEvidenceReserve: outcome.priorityEvidenceReleased ? 0 : priorityEvidenceReserve,
+              // loop already covered is never required twice. The reserve is
+              // clamped to the requests the continuation actually holds (the
+              // same clamp-to-budget rule the reserve resolution applies), so
+              // its no-lockout attempts cap stays reachable and a repair round
+              // handed a short tail is never stuck refusing every call.
+              priorityEvidenceReserve: outcome.priorityEvidenceReleased
+                ? 0
+                : Math.min(priorityEvidenceReserve, outcome.requestsRemaining),
               priorityEvidenceCredits: outcome.priorityEvidenceCredits,
               // #1198: the repair round shares the ORIGINAL run's absolute
               // deadline — the allowance above is a share, never an extension.

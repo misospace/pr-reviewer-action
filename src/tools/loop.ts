@@ -238,6 +238,24 @@ const PUBLISHER_REGISTRY_HOSTS: ReadonlySet<string> = new Set([
   "artifacthub.io",
   "hub.helm.sh",
   "operatorhub.io",
+  // Ecosystem registries the same review shape reaches for (independent
+  // review of this delta: rubygems/Maven/ECR lookups credited nothing while
+  // npm/PyPI did, so those PRs burned refusals until the attempts cap).
+  "rubygems.org",
+  "repo1.maven.org",
+  "search.maven.org",
+  "mvnrepository.com",
+  "maven.google.com",
+  "packagist.org",
+  "nuget.org",
+  "pub.dev",
+  "registry.terraform.io",
+  "registry.nuget.org",
+  "public.ecr.aws",
+  "gallery.ecr.aws",
+  "us.gcr.io",
+  "eu.gcr.io",
+  "asia.gcr.io",
 ]);
 
 // Source hosts: only a bare repository root (at most two non-empty path
@@ -734,6 +752,14 @@ export async function driveToolLoop(
   // or the loop spent the whole reserve on evidence attempts. The attempts
   // cap guarantees the window always opens within the tail it reserved, and
   // a reserve of 1 keeps exactly the historical one-call release.
+  //
+  // The cap counts attempts over the WHOLE run, pre-window included (accepted
+  // residual from the independent review of this delta): a model that already
+  // burned `reserve` real upstream lookups the lexical attribution could not
+  // classify has demonstrably prioritized upstream, and refusing it the tail
+  // anyway would punish an attribution gap rather than a priority gap.
+  // Run-wide counting is also what keeps the historical reserve-1 release
+  // byte-identical.
   const evidenceReleased = (): boolean =>
     priorityReserve <= 0 ||
     trackedObligations.every((obligation) => priorityCredits.has(obligation)) ||

@@ -1467,6 +1467,25 @@ test("#1379: dependencyEvidenceObligationsForCall attributes a call from its own
     dependencyEvidenceObligationsForCall("web_search", { query: "nginx release notes changelog" }),
     ["release_delta"],
   );
+  // Ecosystem registries this repo's own dependency kinds reach for
+  // (independent review: rubygems/Maven/ECR lookups credited nothing while
+  // npm/PyPI did, so those PRs burned refusals until the attempts cap).
+  for (const url of [
+    "https://rubygems.org/gems/sidekiq",
+    "https://repo1.maven.org/maven2/com/example/lib/",
+    "https://search.maven.org/artifact/com.example/lib",
+    "https://mvnrepository.com/artifact/com.example/lib",
+    "https://maven.google.com/web/index.html",
+    "https://packagist.org/packages/vendor/pkg",
+    "https://nuget.org/packages/Newtonsoft.Json",
+    "https://pub.dev/packages/http",
+    "https://registry.terraform.io/providers/hashicorp/kubernetes/latest",
+    "https://public.ecr.aws/bitnami/redis",
+    "https://gallery.ecr.aws/nginx/nginx",
+    "https://us.gcr.io/project/image",
+  ]) {
+    assert.deepEqual(dependencyEvidenceObligationsForCall("web_fetch", { url }), ["provenance"], url);
+  }
 });
 
 test("#1379: the attempts cap releases the window even with zero credits (no lockout)", async () => {
