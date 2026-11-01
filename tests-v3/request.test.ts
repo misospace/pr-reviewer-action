@@ -405,9 +405,11 @@ test("the strict verdict schema matches the frozen v2 bash literal plus only the
   // two `required` entries on top of the frozen v2 literal. #1005 adds the
   // `review_triage_targets` logical-id selection alongside the #1003 pair.
   // #1337 adds the `dependency_coverage` accounting array alongside them.
-  // Strip every `review_triage_*` property and required entry and the
-  // #1337 array, and the pin is byte-for-byte the v2 snapshot again, so a
-  // future drift in anything else still fails here.
+  // Strip every `review_triage_*` property and required entry, the
+  // #1337 array, and — #1381 — the `unmet` disposition status (the one
+  // v3 vocabulary addition inside a v2-carried enum), and the pin is
+  // byte-for-byte the v2 snapshot again, so a future drift in anything
+  // else still fails here.
   const live = structuredClone(OPENAI_VERDICT_JSON_SCHEMA) as {
     json_schema: { schema: { properties: Record<string, unknown>; required: string[] } };
   };
@@ -416,6 +418,10 @@ test("the strict verdict schema matches the frozen v2 bash literal plus only the
     if (key.startsWith("review_triage_") || key === "dependency_coverage") delete schema.properties[key];
   }
   schema.required = schema.required.filter((name) => !name.startsWith("review_triage_") && name !== "dependency_coverage");
+  const dispositionStatus = (schema.properties.required_check_dispositions as {
+    items: { properties: { status: { enum: string[] } } };
+  }).items.properties.status;
+  dispositionStatus.enum = dispositionStatus.enum.filter((value) => value !== "unmet");
   assert.deepEqual(live, JSON.parse(V2_RF_JSON_SCHEMA_LITERAL));
 });
 
@@ -456,7 +462,9 @@ test("the strict verdict schema requires every property (OpenAI strict mode)", (
   assert.equal(dispositions.items.additionalProperties, false);
   assert.deepEqual(
     (dispositions.items.properties.status as { enum: string[] }).enum,
-    ["satisfied", "not_applicable", "unresolved"],
+    // #1381: `unmet` (a confirmed negative) joins the disposition vocabulary
+    // alongside the #750 tri-state.
+    ["satisfied", "not_applicable", "unresolved", "unmet"],
   );
 });
 

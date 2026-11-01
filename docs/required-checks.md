@@ -23,7 +23,7 @@ later review read the same sentences as acceptance criteria and requested
 changes because the named null-byte/symlink tests were absent. That
 ambiguity is what the typed contract below removes.
 
-## The three dispositions
+## The dispositions
 
 Every deterministic check receives exactly one structured disposition in
 the verdict's `required_check_dispositions` array (external/model-facing
@@ -35,6 +35,7 @@ Anthropic-compatible paths):
 | `satisfied`      | the risk/question is relevant and was adequately verified/addressed                        | optional      |
 | `not_applicable` | the reviewer established, from concrete change context, that the risk surface does not exist | **required**  |
 | `unresolved`     | the check is relevant (or applicability cannot be established) and the evidence does not resolve it | optional |
+| `unmet`          | the reviewer performed the check and confirmed the requirement is **NOT** satisfied (#1381); `failed` is accepted as a prose alias and folds to `unmet` | **required** |
 
 Identity is the **exact deterministic check text echoed back** (matched
 case- and whitespace-insensitively; any rewording is a different identity
@@ -45,8 +46,8 @@ still count it as covered.
 
 **Attributable malformed entries are preserved, never collapsed.** A
 disposition whose check identity is usable but whose answer is not — an
-unknown status prose alias (`"N/A"`), a `not_applicable` without a usable
-rationale — is kept by the parser as `{check, status: "invalid",
+unknown status prose alias (`"N/A"`), a `not_applicable` or `unmet` without a
+usable rationale — is kept by the parser as `{check, status: "invalid",
 rationale: null}` (internal-only marker, never in the wire schema; the same
 fail-conservative precedent as `requirement_coverage` normalizing unusable
 claims to `unknown`). The coverage evaluator treats it as malformed and
@@ -90,7 +91,7 @@ artifact (`tests-v3/required-checks.test.ts`, byte-identical with
 - **zero `must_check` entries** → `none` (the model cannot invent an
   obligation set);
 - **every check `satisfied` or grounded `not_applicable`** → `complete`;
-- **any check `unresolved`, missing, duplicate-dispositioned,
+- **any check `unresolved`, `unmet`, missing, duplicate-dispositioned,
   malformed-dispositioned, or an ungrounded N/A** → `incomplete`;
 - **unknown/forged check identities** are dropped, never credited;
 - **no structured dispositions at all** → the artifact records
@@ -100,7 +101,10 @@ artifact (`tests-v3/required-checks.test.ts`, byte-identical with
 `not_applicable` is a completed disposition. An absent named test does not
 force `request_changes` when the underlying risk is demonstrably absent;
 requesting changes is reserved for an actually violated or unresolved
-applicable requirement.
+applicable requirement. An `unmet` disposition is a completed-but-failed
+one: it is recorded verbatim (`reason: ok`), but it is never clean coverage
+— the check was performed and the requirement confirmed NOT satisfied — so
+it keeps coverage `incomplete` exactly like an `unresolved` check.
 
 ## `required-check-validation-mode` mapping
 
@@ -109,12 +113,36 @@ The public `required-checks` output vocabulary is unchanged
 
 - `auto` — validate when `must_check` is non-empty;
 - `warn` — append an `### Unaddressed required checks` section listing the
-  unresolved checks; never flips the verdict;
-- `fail` — additionally forces `request_changes`;
-- `metadata_only` — record only.
+  unresolved checks; the completeness pass itself never flips the verdict
+  (but see #1381 below — the review-obligation gate does, and it is not
+  governed by this mode);
+- `fail` — additionally forces `request_changes` through the completeness
+  pass itself;
+- `metadata_only` — record only (again, the completeness pass; the #1381
+  obligation gate below is independent of this mode).
 
 Structured dispositions, when present, are authoritative for this decision;
 no keyword mention can substitute for a missing or malformed disposition.
+
+## Review-owned obligations (#1381)
+
+Once represented as review-obligation rows (`src/enforcement/review-obligations.ts`),
+deterministic `must_check` items share one approval semantics with extracted
+trusted-base approval prerequisites: **any unresolved row — or an `unmet`
+row, which was resolved negatively but is still not clean coverage — forces
+`request_changes` through the enforcement overlays — a native APPROVE never
+certifies an unresolved (or failed) review-owned required check** (#1381
+review). Disposition identity follows each source's contract: `must_check`
+rows fold ONLY on the exact check text (identity parity with #750's
+completeness fold, which recognizes only the deterministic check text — an
+`obligation-<n>` echo never discharges one), while `trusted_base_guidance`
+rows fold on the obligation id or the exact text.
+`required-check-validation-mode` keeps owning the completeness markdown and
+metadata; it no longer decides whether approval may publish. The single
+operator opt-out is `VALIDATE_REQUIRED_CHECKS=false` (the public
+`validate-required-checks` input): it removes `must_check` rows from the
+obligation contract at both layers, so the model is not shown — and the
+engine does not enforce — rows the operator disabled.
 
 ## v2/v3 coexistence (until #680) — historical
 

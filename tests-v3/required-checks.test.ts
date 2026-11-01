@@ -234,3 +234,48 @@ test("#750 end-to-end: parser output with a preserved malformed duplicate folds 
   assert.equal(nullCoverage.status, "incomplete");
   assert.ok(nullCoverage.checks.every((row) => row.reason === "no-structured-dispositions"));
 });
+
+test("#1388: unmet (alias failed) is a completed-but-failed disposition recorded verbatim, never clean coverage", () => {
+  // Direct fold: an unmet row is recorded with reason ok…
+  const coverage = evaluateRequiredCheckCoverage(
+    ["check secret rotation impact"],
+    [d("check secret rotation impact", "unmet", "the secrets file is read and logged verbatim")],
+  );
+  assert.equal(coverage.checks[0]!.status, "unmet");
+  assert.equal(coverage.checks[0]!.reason, "ok");
+  // …but completeness still requires every row satisfied or not_applicable:
+  // a performed-and-failed check is not clean coverage.
+  assert.equal(coverage.status, "incomplete");
+  // The `failed` prose alias folds to `unmet` (same fold the parser applies).
+  const alias = evaluateRequiredCheckCoverage(
+    ["check secret rotation impact"],
+    [d("check secret rotation impact", "failed", "the secrets file is read and logged verbatim")],
+  );
+  assert.deepEqual(alias.checks[0]!.status, "unmet");
+  assert.equal(alias.checks[0]!.reason, "ok");
+  // An unmet row among otherwise-clean rows keeps the whole fold incomplete.
+  const mixed = evaluateRequiredCheckCoverage(
+    ["review auth flow for regression", "check secret rotation impact"],
+    [
+      d("review auth flow for regression", "satisfied", "untouched"),
+      d("check secret rotation impact", "unmet", "logging confirmed"),
+    ],
+  );
+  assert.equal(mixed.status, "incomplete");
+  // The serializer round-trips the unmet row.
+  assert.deepEqual(requiredCheckCoverageToArtifact(coverage).checks, [
+    { check: "check secret rotation impact", status: "unmet", rationale: "the secrets file is read and logged verbatim", reason: "ok" },
+  ]);
+});
+
+test("#1388: unmet without a usable rationale is malformed and the check stays unresolved", () => {
+  for (const rationale of [null, "   "]) {
+    const coverage = evaluateRequiredCheckCoverage(
+      ["check secret rotation impact"],
+      [d("check secret rotation impact", "unmet", rationale)],
+    );
+    assert.equal(coverage.status, "incomplete");
+    assert.equal(coverage.checks[0]!.reason, "malformed-disposition");
+    assert.equal(coverage.checks[0]!.status, "unresolved");
+  }
+});

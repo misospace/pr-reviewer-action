@@ -62,6 +62,19 @@ export const LOW_TOOL_REQUESTS_REMAINING = 2;
 const BUDGET_TURN_NOTE =
   "[loop budget] {requestsLeft} of {requestsTotal} tool request(s) and " +
   "{roundsLeft} of {roundsTotal} turn(s) remain.";
+export const REQUIRED_EVIDENCE_TURN_NOTE =
+  "[loop budget] {requestsLeft} tool request(s) remain; {reservedCount} request(s) are reserved for the unresolved required-evidence obligations. The reservation is now enforced: calls that target none of those obligations are refused and will not execute. Spend the reserved requests ONLY on evidence for those obligations (read the named files, fetch the named upstream compatibility matrix or document from the Required Review Evidence section) before any optional exploration.";
+
+// #1381 (review): the enforceable half of the reservation. Inside the
+// reserved window a call executes only when its argument targets overlap an
+// obligation no call has attempted yet; everything else is refused with this
+// note WITHOUT consuming the budget, so optional exploration can never spend
+// the requests held back for required evidence.
+const REQUIRED_EVIDENCE_REFUSAL_NOTE =
+  "Reserved required-evidence budget: this call targets none of the unresolved obligations from the Required Review Evidence section, " +
+  "and the remaining requests are reserved for them. It was NOT executed and did not consume budget. Spend the next calls on the " +
+  "obligation evidence itself — read the files and fetch the upstream documents the obligations name — then optional calls are allowed again.";
+
 const LOW_BUDGET_TURN_NOTE =
   "[loop budget] Only {requestsLeft} tool request(s) and {roundsLeft} " +
   "turn(s) remain. Stop broad exploration now: prioritize confirming or " +
@@ -70,6 +83,42 @@ const LOW_BUDGET_TURN_NOTE =
 
 function formatNote(template: string, values: Record<string, number>): string {
   return template.replace(/\{(\w+)\}/g, (_m, key: string) => String(values[key] ?? ""));
+}
+
+/** #1381: the lowercased argument VALUES of a tool call — the model-chosen
+ * target (paths, endpoints, URLs, queries) without the schema's own argument
+ * names, which would overlap any obligation mentioning a generic word like
+ * "path" and silently open the reserved window to everything. */
+function argumentTargetText(value: unknown): string {
+  const parts: string[] = [];
+  const walk = (item: unknown, depth: number): void => {
+    if (depth > 3) return;
+    if (typeof item === "string") {
+      parts.push(item);
+    } else if (Array.isArray(item)) {
+      for (const child of item) walk(child, depth + 1);
+    } else if (item !== null && typeof item === "object") {
+      for (const child of Object.values(item)) walk(child, depth + 1);
+    }
+  };
+  walk(value, 0);
+  return parts.join(" ").toLowerCase();
+}
+
+/** #1381: word-boundary token match over the concatenated argument values —
+ * a "matrix" obligation must not be satisfied (or an optional call admitted)
+ * by "clockmatrix.md". */
+function targetMentions(target: string, token: string): boolean {
+  let from = 0;
+  for (;;) {
+    const index = target.indexOf(token, from);
+    if (index === -1) return false;
+    const before = index === 0 ? "" : target[index - 1]!;
+    const afterIndex = index + token.length;
+    const after = afterIndex >= target.length ? "" : target[afterIndex]!;
+    if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after)) return true;
+    from = index + 1;
+  }
 }
 
 /** Hard stop conditions. The driver owns these; Conversation's token helpers
@@ -236,6 +285,13 @@ export interface LoopOutcome {
   compactionTruncate: number;
   /** #922: largest approximate conversation size seen before a turn. */
   peakConversationTokens: number;
+  /** #1381: requests reserved at the end of the budget for required-evidence
+   * obligations. Inside this window the reservation is enforced: calls that
+   * target none of the pending obligations are refused without consuming
+   * budget (see `requiredEvidenceRefusals`). */
+  requiredEvidenceRequestsHint: number;
+  /** #1381: optional calls refused by the enforced reservation window. */
+  requiredEvidenceRefusals: number;
 }
 
 /**
@@ -355,6 +411,12 @@ export interface DriveToolLoopOptions {
   nowFn?: () => number;
   /** #1199: invoked once per model turn with that turn's bounded telemetry. */
   onRound?: (round: NativeLoopRoundTelemetry) => void;
+  reserveForRequiredEvidence?: number;
+  /** #1381 (review): admission vocabulary for the reserved window — one row
+   * per shown obligation with the deterministic target tokens a tool call
+   * must overlap to execute inside the window. A row is dropped from gating
+   * once an admitted call attempted it. */
+  requiredEvidence?: ReadonlyArray<{ id: string; tokens: readonly string[] }>;
 }
 
 /**
@@ -412,7 +474,18 @@ export async function driveToolLoop(
     compactionSummarize: 0,
     compactionTruncate: 0,
     peakConversationTokens: 0,
+    requiredEvidenceRequestsHint: Math.max(0, Math.min(budgets.maxToolCalls - 1, Math.floor(options.reserveForRequiredEvidence ?? 0))),
+    requiredEvidenceRefusals: 0,
   };
+  // #1381: obligations whose evidence no admitted call has targeted yet.
+  // Inside the reserved window only calls overlapping one of these rows'
+  // vocabularies execute; an admitted overlap discharges that row's gating
+  // (the row still needs a verdict disposition to count as satisfied — the
+  // loop guarantees only the ATTEMPT, which is what the budget reservation
+  // is for).
+  const pendingEvidence: Array<{ id: string; tokens: readonly string[] }> = outcome.requiredEvidenceRequestsHint > 0
+    ? [...(options.requiredEvidence ?? [])]
+    : [];
   const started = timeFn();
   const telemetryStart = nowFn();
   let callsExecuted = 0;
@@ -460,7 +533,14 @@ export async function driveToolLoop(
   // loop condition expires naturally — never after a break.
   let broke = false;
 
-  loop: while (outcome.rounds < budgets.maxRounds) {
+  // #1388: the reservation holds back ROUNDS as well as requests. The
+  // ceiling starts at `maxRounds` and grows only through the extension below
+  // (at most `hint` extra rounds total, and only on progress), so a
+  // complying model inside the reserved window can still spend the held-back
+  // requests even when the round budget runs out first.
+  let roundCeiling = budgets.maxRounds;
+  let extensionRounds = 0;
+  loop: while (outcome.rounds < roundCeiling) {
     if (
       wallClockDeadline !== null
         ? timeFn() >= wallClockDeadline
@@ -502,15 +582,24 @@ export async function driveToolLoop(
     // turn_note, never inside the untrusted tool-result envelope.
     if (outcome.rounds > 0) {
       const requestsLeft = budgets.maxToolCalls - callsExecuted;
-      const roundsLeft = budgets.maxRounds - outcome.rounds;
-      const note =
-        requestsLeft <= LOW_TOOL_REQUESTS_REMAINING ? LOW_BUDGET_TURN_NOTE : BUDGET_TURN_NOTE;
+      // Clamped at 0: extension rounds run past `maxRounds`, and a negative
+      // count must never render in the note.
+      const roundsLeft = Math.max(0, budgets.maxRounds - outcome.rounds);
+      const reservedCount = outcome.requiredEvidenceRequestsHint;
+      // Same OR condition as the reserved window below: scarce ROUNDS open
+      // the reservation too, so the note fires the moment either half of the
+      // reservation is what is left.
+      const note = reservedCount > 0 && pendingEvidence.length > 0
+          && (requestsLeft <= reservedCount || roundsLeft <= reservedCount)
+        ? REQUIRED_EVIDENCE_TURN_NOTE
+        : requestsLeft <= LOW_TOOL_REQUESTS_REMAINING ? LOW_BUDGET_TURN_NOTE : BUDGET_TURN_NOTE;
       conversation.addTurnNote(
         formatNote(note, {
+          reservedCount,
           requestsLeft,
           requestsTotal: budgets.maxToolCalls,
           roundsLeft,
-          roundsTotal: budgets.maxRounds,
+          roundsTotal: roundCeiling,
         }),
       );
     }
@@ -590,7 +679,7 @@ export async function driveToolLoop(
     // is read-only and a round's calls are independent (the model emitted them
     // together). Results are applied in the original call order to preserve
     // the open-call contract.
-    type Disposition = { callId: string; kind: "error" | "dup" | "budget"; data: Record<string, unknown> } | { callId: string; kind: "exec"; data: number };
+    type Disposition = { callId: string; kind: "error" | "dup" | "budget" | "reserve"; data: Record<string, unknown> } | { callId: string; kind: "exec"; data: number };
     const plan: Disposition[] = [];
     const toExecute = new Map<number, { name: string; args: Record<string, unknown> }>();
     // #1199: per-round disposition counts (a tri-partition of `calls.length`:
@@ -631,6 +720,39 @@ export async function driveToolLoop(
         plan.push({ callId, kind: "budget", data: { error: BUDGET_NOTE } });
         roundRefused++;
         continue;
+      }
+      // #1381 (review); #1388: the enforced reservation pairs the reserved
+      // requests with reserved ROUNDS. A call whose target overlaps pending
+      // obligations has ATTEMPTED them whether or not the reserved window is
+      // open yet — the recommended path gathers that evidence EARLY, and the
+      // window must never re-demand (or hold shut for) evidence already
+      // gathered. Inside the window a call executes ONLY when its argument
+      // values overlap a pending obligation; everything else — optional
+      // exploration AND the fixed `run_command` argv catalog — is refused
+      // WITHOUT consuming budget (like the dedup note), so no optional call
+      // can spend the held-back requests or burn a scarce round on history
+      // archaeology. The window opens when the remaining REQUESTS drop to
+      // the reservation OR the remaining ROUNDS do (rounds remaining,
+      // counting the current one) — a round-scarce loop must spend its last
+      // rounds on the obligations, not on optional calls. The catalog gets
+      // no exemption: its `command` value participates in the same overlap
+      // check like any other argument value, so
+      // git_status_short cannot burn reserved requests against a
+      // Talos-matrix obligation, while a catalog command whose name IS the
+      // obligation evidence (a diff obligation) stays admissible. Once every
+      // obligation has been attempted the window is satisfied.
+      if (outcome.requiredEvidenceRequestsHint > 0 && pendingEvidence.length > 0) {
+        const target = argumentTargetText(args);
+        const overlaps = pendingEvidence.filter((row) => row.tokens.some((token) => targetMentions(target, token)));
+        const inWindow = budgets.maxToolCalls - callsExecuted <= outcome.requiredEvidenceRequestsHint
+          || budgets.maxRounds - (outcome.rounds - 1) <= outcome.requiredEvidenceRequestsHint;
+        if (inWindow && overlaps.length === 0) {
+          plan.push({ callId, kind: "reserve", data: { error: REQUIRED_EVIDENCE_REFUSAL_NOTE } });
+          roundRefused++;
+          outcome.requiredEvidenceRefusals++;
+          continue;
+        }
+        for (const row of overlaps) pendingEvidence.splice(pendingEvidence.indexOf(row), 1);
       }
       seenKeys.add(key);
       callsExecuted++;
@@ -699,6 +821,29 @@ export async function driveToolLoop(
     // #1199: the turn's telemetry, emitted once per model turn. A round that
     // ends on budget exhaustion still records its turn before the stop below.
     emitRound(outcome.rounds, calls.length, roundExecuted, roundRefused, roundDedup, toolElapsedSec, modelElapsedSec, turnUsage, roundFellBack);
+
+    // #1388: round-ceiling extension for the reserved window. Extension is
+    // earned ONLY at the (current) ceiling and only on progress: the round
+    // that just ended is the "immediately previous round" of the extension
+    // round it buys, so inside the window every executed call overlaps a
+    // pending obligation and removes that row from `pendingEvidence` — a
+    // progress round is self-limiting (at most the initial pending count ≤
+    // hint across the whole loop), while a hostile model emitting only
+    // refused calls executes nothing, gets ZERO extra rounds (it stops at
+    // `maxRounds` with the reserved requests intact), and can never buy
+    // extension rounds by stalling.
+    const reserved = outcome.requiredEvidenceRequestsHint;
+    if (
+      reserved > 0
+      && extensionRounds < reserved
+      && outcome.rounds >= roundCeiling
+      && pendingEvidence.length > 0
+      && callsExecuted < budgets.maxToolCalls
+      && roundExecuted > 0
+    ) {
+      roundCeiling++;
+      extensionRounds++;
+    }
 
     if (callsExecuted >= budgets.maxToolCalls) {
       outcome.stopReason = STOP_BUDGET;

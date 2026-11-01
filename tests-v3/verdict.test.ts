@@ -558,6 +558,27 @@ test("#750: unattributable junk entries are dropped; attributable malformed ones
   ]);
 });
 
+test("#1388: unmet (alias failed) normalizes to the canonical confirmed-negative status; it needs a rationale", () => {
+  const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "x",
+    required_check_dispositions: [
+      { check: "check a", status: "unmet", rationale: "performed; the requirement is not satisfied" },
+      { check: "check b", status: "failed", rationale: "alias folds to unmet" },
+      { check: "check c", status: "UNMET", rationale: "case-normalized status" },
+      { check: "check d", status: "unmet" },
+      { check: "check e", status: "unmet", rationale: "   " },
+    ],
+  })));
+  assert.deepEqual(verdict.requiredCheckDispositions, [
+    { check: "check a", status: "unmet", rationale: "performed; the requirement is not satisfied" },
+    { check: "check b", status: "unmet", rationale: "alias folds to unmet" },
+    { check: "check c", status: "unmet", rationale: "case-normalized status" },
+    { check: "check d", status: "invalid", rationale: null },
+    { check: "check e", status: "invalid", rationale: null },
+  ]);
+});
+
 test("#750: a malformed duplicate cannot collapse a valid answer into complete coverage", () => {
   const verdict = parseVerdictResponse(openaiResponse(JSON.stringify({
     verdict: "approve",

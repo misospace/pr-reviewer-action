@@ -195,7 +195,10 @@ test("#1380: dependency-update classification drives the claim pass dependency m
     const req = request(server.url, f.runDir);
     req.inputs = { ...req.inputs, "claim-falsification": "true" };
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
-    assert.equal(result.outputs.verdict, "approve");
+    // #1381: the dependency classification's must_check obligation rows are
+    // undisposed by the scripted verdict, so the obligation gate forces
+    // request_changes. This test pins claim-pass dependency mode, not the verdict.
+    assert.equal(result.outputs.verdict, "request_changes");
     const classification = JSON.parse(readFileSync(join(f.runDir, "classification.json"), "utf8")) as { pr_kind?: string };
     assert.equal(classification.pr_kind, "dependency_upgrade");
     const claimRequests = server.requests.filter((r) => r.body.includes("You extract the claims a pull request makes"));
@@ -218,6 +221,53 @@ test("#1380: the claim pre-pass gate is a pass-through outside dependency mode",
   const neverSettles: Promise<never> = new Promise(() => {});
   await claimsPrepassGate(false, neverSettles);
   // An unsettled evidence phase must not delay a non-dependency launch.
+});
+
+test("#1388: resolveReviewObligations stamps a cause on unresolved rows only — an unmet row is resolved negatively", async () => {
+  // dependency_upgrade classifies with exactly two must_check rows; the
+  // scripted verdict dispositions one `unmet` (exact text echo, grounded
+  // rationale) and leaves the other undisposed.
+  const unmetCheck = "check for breaking API changes in updated dependencies";
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ id: "c1", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({
+      verdict: "approve", review_markdown: "Looks fine.\n", smart_review_requested: false, smart_review_reason: null, findings: [], requirement_coverage: null,
+      required_check_dispositions: [{ check: unmetCheck, status: "unmet", rationale: "the dependency removed a exported symbol; breaking change confirmed" }],
+    }) }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 } }));
+  });
+  const f = fixture();
+  try {
+    const adapter: PlatformReadAdapter = {
+      ...mockPlatform(),
+      getPr: async () => ({
+        number: 7, title: "chore(deps): bump lodash from 1.2.3 to 4.5.6",
+        body: "Only one file changed. No CRDs changed and the CRD schema is unchanged.",
+        state: "open", draft: false, head: { sha: "a".repeat(40), ref: "renovate/lodash-4.x" }, base: { ref: "main" },
+        user: { login: "someone" }, changed_files: 1, additions: 2, deletions: 2,
+      }),
+      getPrDiff: async () => "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1,4 +1,4 @@\n-  \"version\": \"1.2.3\",\n-  \"lodash\": \"1.2.3\",\n+  \"version\": \"4.5.6\",\n+  \"lodash\": \"4.5.6\",\n",
+      listPrFiles: async () => ({ ok: true, data: [{ filename: "package-lock.json", status: "modified", additions: 2, deletions: 2, changes: 4 }] }),
+    };
+    const logLines: string[] = [];
+    const result = await runReviewEngine(request(server.url, f.runDir), { ...engineDeps(f.root, f.runDir, { adapter }), quiet: false, log: (line) => logLines.push(line) });
+    // Both the unmet row and the undisposed row are forcing: no model approve.
+    assert.equal(result.outputs.verdict, "request_changes");
+    const persisted = JSON.parse(readFileSync(join(f.runDir, "review-obligations.json"), "utf8")) as {
+      obligations: Array<{ id: string; source: string; text: string; status: string; cause: string | null }>;
+    };
+    assert.deepEqual(persisted.obligations.map((row) => [row.text, row.status, row.cause]), [
+      [unmetCheck, "unmet", null],
+      ["run full test suite after upgrade", "unresolved", "tool-capability"],
+    ]);
+    // The one-line log is honest about the three states and lists every
+    // not-clean id.
+    const obligationLog = logLines.find((line) => line.includes("Review obligations:"));
+    assert.ok(obligationLog);
+    assert.match(obligationLog!, /Review obligations: 2 total, 0 satisfied, 1 unmet, 1 unresolved \(obligation-1=unmet, obligation-2=unresolved\)/);
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
 });
 
 test("#1380: the claim pre-pass launches only after the evidence phase settles on a dependency update", async () => {
@@ -247,7 +297,17 @@ test("the env adapter and engine produce identical structured results", async ()
     const adapterResult = await runReview({ env: { GITHUB_OUTPUT: "/dev/null", GITHUB_STEP_SUMMARY: "" }, inputs: { ...inputs, "ai-base-url": server.url }, runDir: f.runDir, workspace: f.root, platformAdapter: mockPlatform(), persistArtifacts: true, quiet: true });
     const engineResult = await runReviewEngine(request(server.url, engineRunDir), { workspace: f.root, runDir: engineRunDir, outputsSink: "/dev/null", stepSummaryPath: "", adapter: mockPlatform(), persistArtifacts: true, quiet: true, log: noopSink, error: noopSink, annotate: noopSink });
     for (const key of ["outputs", "route", "routeReason", "analysisEngine", "classification", "verdictPolicy"] as const) assert.deepEqual(engineResult[key], adapterResult[key], key);
-    assert.deepEqual([...engineResult.artifacts.keys()].sort(), [...adapterResult.artifacts.keys()].sort());
+    // #1381: the candidates artifact is HARNESS-authored, and the two paths
+    // legitimately differ on it — the adapter path derives fork-ness
+    // fail-closed from the PR object (no head-repo identity in this mock), so
+    // the fork gate substitutes its own tool-harness artifacts and skips the
+    // native loop. Everything else, including the ENGINE-authored
+    // review-obligations.json, must stay symmetric.
+    const engineNames = [...engineResult.artifacts.keys()].filter((name) => name !== "review-obligations-candidates.json").sort();
+    const adapterNames = [...adapterResult.artifacts.keys()].filter((name) => name !== "review-obligations-candidates.json").sort();
+    assert.deepEqual(engineNames, adapterNames);
+    const obligationsCount = (names: string[]): number => names.filter((name) => name === "review-obligations.json").length;
+    assert.equal(obligationsCount([...engineResult.artifacts.keys()]), obligationsCount([...adapterResult.artifacts.keys()]));
     for (const name of ["review-body.md", "verdict.txt", "ai-output.json"]) assert.equal(readFileSync(join(engineRunDir, name), "utf8"), readFileSync(join(f.runDir, name), "utf8"), name);
   } finally { await server.close(); f.cleanup(); }
 });

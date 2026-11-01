@@ -164,22 +164,28 @@ function noBlockingFindings(findings: ArtifactFinding[]): boolean {
   return !findings.some(isBlockingFinding);
 }
 
-function canRelaxForCiOnly(artifact: ReviewArtifact, forced: boolean): boolean {
-  return !forced
+function canRelaxForCiOnly(artifact: ReviewArtifact, forced: boolean, unresolvedReviewObligations: readonly string[] = []): boolean {
+  return unresolvedReviewObligations.length === 0
+    && !forced
     && !hasUnresolvedRequiredCheck(artifact)
     && artifact.required_checks !== "incomplete"
     && artifact.requirement_trace_incomplete !== true;
 }
 
 /**
- * #770 interplay: the MODEL's own structured `unresolved` dispositions also
- * hold the relaxation gate — a review that left a required check unresolved
- * does not get relaxed to approve by category capping.
+ * #770 interplay: the MODEL's own structured `unresolved` — and `unmet`
+ * (#1381: a performed-and-failed check, a confirmed negative) — dispositions
+ * also hold the relaxation gate — a review that left a required check
+ * unresolved or failed it does not get relaxed to approve by category
+ * capping.
  */
 function hasUnresolvedRequiredCheck(artifact: ReviewArtifact): boolean {
   const rows = artifact.required_check_dispositions;
   return Array.isArray(rows)
-    && rows.some((row) => (row as { status?: unknown } | null)?.status === "unresolved");
+    && rows.some((row) => {
+      const status = (row as { status?: unknown } | null)?.status;
+      return status === "unresolved" || status === "unmet";
+    });
 }
 
 /**
@@ -194,10 +200,10 @@ function hasUnresolvedRequiredCheck(artifact: ReviewArtifact): boolean {
  */
 export function relaxVerificationOnlyVerdict(
   artifact: ReviewArtifact,
-  options: { forced: boolean },
+  options: { forced: boolean; unresolvedReviewObligations?: readonly string[] },
 ): boolean {
   if (artifact.verdict !== "request_changes") return false;
-  if (!canRelaxForCiOnly(artifact, options.forced)) return false;
+  if (!canRelaxForCiOnly(artifact, options.forced, options.unresolvedReviewObligations)) return false;
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   if (!findings.every((finding) => isAlwaysNonBlockingCategory(finding.category))) return false;
@@ -215,10 +221,10 @@ export function relaxVerificationOnlyVerdict(
  */
 export function relaxCiOnlyVerdict(
   artifact: ReviewArtifact,
-  options: { forced: boolean },
+  options: { forced: boolean; unresolvedReviewObligations?: readonly string[] },
 ): boolean {
   if (artifact.verdict !== "request_changes") return false;
-  if (!canRelaxForCiOnly(artifact, options.forced)) return false;
+  if (!canRelaxForCiOnly(artifact, options.forced, options.unresolvedReviewObligations)) return false;
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   const allRelaxable = findings.every((finding) =>
@@ -288,10 +294,10 @@ function isUnverifiedBlockerDemotion(finding: ArtifactFinding): boolean {
  */
 export function relaxUnverifiedBlockerVerdict(
   artifact: ReviewArtifact,
-  options: { forced: boolean },
+  options: { forced: boolean; unresolvedReviewObligations?: readonly string[] },
 ): boolean {
   if (artifact.verdict !== "request_changes") return false;
-  if (!canRelaxForCiOnly(artifact, options.forced)) return false;
+  if (!canRelaxForCiOnly(artifact, options.forced, options.unresolvedReviewObligations)) return false;
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   // Unknown evidence must never certify a clean review: refuse the relaxer
@@ -479,6 +485,7 @@ function strictRequestChangesDetail(input: {
   counts: { blocking: number; total: number };
   unverifiedGrounding: boolean;
   forced: boolean;
+  obligations?: readonly string[];
 }): string {
   const parts: string[] = [];
   if (input.counts.blocking > 0) {
@@ -489,6 +496,9 @@ function strictRequestChangesDetail(input: {
   }
   if (input.forced) {
     parts.push("a fail-closed enforcement layer forced request_changes");
+  }
+  if (input.obligations && input.obligations.length > 0) {
+    parts.push(`required review evidence unresolved: ${input.obligations.join(", ")} (#1381)`);
   }
   if (parts.length === 0) {
     // No findings, no unverified, no forced — the reviewer would be a
@@ -537,12 +547,13 @@ function strictRequestChangesDetail(input: {
  */
 export function applyStrictVerdictPolicy(
   artifact: ReviewArtifact,
-  options: { modelVerdict: string; forced: boolean },
+  options: { modelVerdict: string; forced: boolean; unresolvedReviewObligations?: readonly string[] },
 ): StrictVerdictOutcome {
   const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
   const modelVerdict = options.modelVerdict;
   const counts = severityCounts(findings);
   const unverifiedGrounding = findings.some(isUnverifiedBlockingGrounding);
+  const unresolvedObligations = options.unresolvedReviewObligations ?? [];
 
   let verdict: VerdictValue;
   let overridden: boolean;
@@ -554,7 +565,7 @@ export function applyStrictVerdictPolicy(
     if (overridden) {
       appendStrictNote(
         artifact,
-        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced }),
+        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
         modelVerdict,
       );
     }
@@ -587,10 +598,27 @@ export function applyStrictVerdictPolicy(
     if (overridden) {
       appendStrictNote(
         artifact,
-        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced }),
+        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
         modelVerdict,
       );
     }
+  } else if (unresolvedObligations.length > 0) {
+    // #1381: the ANTI-RELAX half of the review-obligation contract. A review-
+    // owned obligation is unresolved: this mapping never publishes approve,
+    // whichever verdict the model recommended, and the attribution note names
+    // the obligations so the published review shows the deterministic reason.
+    // In the engine composition an unresolved row already rides
+    // `failClosedEnforcementFired`, so the forced branch above owns it; this
+    // branch is the standalone guarantee for direct callers of the mapping
+    // (and holds the model's own request_changes with `overridden: false`).
+    verdict = "request_changes";
+    overridden = modelVerdict !== "request_changes";
+    source = overridden ? "enforcement" : "model";
+    appendStrictNote(
+      artifact,
+      strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
+      modelVerdict,
+    );
   } else {
     verdict = "approve";
     overridden = modelVerdict !== "approve";

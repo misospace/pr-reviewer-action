@@ -161,13 +161,15 @@ export interface NormalizedFinding {
 }
 
 /**
- * #750: the three structured dispositions a reviewer may record for a
+ * #750: the structured dispositions a reviewer may record for a
  * deterministic `must_check` item. A required check is a mandatory review
  * QUESTION, not automatically an implementation requirement: `not_applicable`
  * is a completed disposition when the reviewer can ground it in the actual
- * change context.
+ * change context, and `unmet` (#1381) is a completed-but-failed one — the
+ * reviewer performed the check and confirmed the requirement is NOT
+ * satisfied, so it is recorded but never clean coverage.
  */
-export type RequiredCheckStatus = "satisfied" | "not_applicable" | "unresolved";
+export type RequiredCheckStatus = "satisfied" | "not_applicable" | "unresolved" | "unmet";
 
 /**
  * #1003: the opt-in human-review triage answer — "does this change need a
