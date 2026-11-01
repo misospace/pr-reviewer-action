@@ -83,12 +83,19 @@ const DEPENDENCY_VERSION_PAIR_RE = new RegExp(
 const DEPENDENCY_DIGEST_PATTERNS: RegExp[] = [
   /\bsha(?:256|512)?[:=][0-9a-f]{6,}\b/i,
   /\b(?:old|previous|prior)\s+(?:digests?|checksums?)\b/i,
-  /\b(?:digests?|checksums?)\s+(?:is|are|was|were|remains?|stays?)\s+(?:present|absent|unchanged|identical|available)\s*[.!?]?\s*$/i,
-  /\bdigests?\b[^!?]{0,40}?\bno\s+longer\s+(?:present|valid|used|referenced|available|needed|matched?)\b/i,
+  /\b(?:digests?|checksums?)\s+(?:is|are|was|were|remains?|stays?)\s+(?:present|absent|missing|unchanged|identical|available)\s*[.!?]?\s*$/i,
+  /\b(?:digests?|checksums?)\b[^!?]{0,40}?\bno\s+longer\s+(?:present|valid|used|referenced|available|needed|matched?)\b/i,
 ];
 
+/** Every count-free "only <determiner?> files/manifests/lockfiles changed"
+ * form (the issue's forge-metadata phrasings: "Only file changed.", "Only
+ * this file changed.", "Only the manifests were modified.") is matched only
+ * when the verb ends the sentence/clause: a qualifier word is allowed just
+ * behind an explicit determiner, so a relative clause that merely contains
+ * files+verb ("The action only scans files changed in the diff.") stays a
+ * semantic claim. */
 const DEPENDENCY_FILE_COUNT_RE =
-  /\b(?:only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?|lockfiles?)\b[^!?]{0,40}?\b(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b[^!?]{0,40}?\bonly\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?|lockfiles?)\b|only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\s+(?:files?|manifests?|lockfiles?)\b|only\s+(?:(?:this|these|that|those|the)\s+)?(?:[\w-]+\s+)?(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|a\s+single\s+(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b)/i;
+  /\b(?:only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?|lockfiles?)\b[^!?]{0,40}?\b(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b[^!?]{0,40}?\bonly\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?|lockfiles?)\b|only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\s+(?:files?|manifests?|lockfiles?)\b|only\s+the\s+(?:[\w-]+\s+)?(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b(?=$|[.!?,;])|only\s+(?:this|these|that|those)\s+(?:[\w-]+\s+)?(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b(?=$|[.!?,;])|only\s+(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b(?=$|[.!?,;])|a\s+single\s+(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b)/i;
 
 const DEPENDENCY_AUTOMERGE_RE =
   /\b(?:auto[- ]?merg\w*\b[^.!?]*\b(?:disabl\w*|enabl\w*|configured?|by config|schedul\w*|pending|waiting|allow\w*|disallow\w*|retry|checkbox|check this box|turned? (?:on|off))|(?:rebas\w+|schedul\w+)\b[^.!?]*\b(?:rebas\w+|schedul\w+|disabl\w*|enabl\w*|pending|waiting|retry|checkbox|automat\w*|by config|configured)\b)/i;
