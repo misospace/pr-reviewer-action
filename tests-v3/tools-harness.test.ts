@@ -2700,8 +2700,8 @@ test("#1379: a one-request dependency budget reserves its sole request end to en
   assert.equal(starvedTel.budget?.dependency_evidence_reserve, 1);
   assert.equal(starvedTel.budget?.dependency_evidence_attempted, false);
   assert.equal(starvedTel.budget?.dependency_evidence_refusals, 2);
+  // Never tool-call-budget-exhausted with the obligation unattempted.
   assert.equal(starvedTel.stop_reason, "model-stopped");
-  assert.notEqual(starvedTel.stop_reason, "tool-call-budget-exhausted");
   assert.equal(starvedTel.usage?.requests_remaining_at_stop, 1, "the reserved sole request survived");
   // The first request carries the driver's priority note even at this budget.
   const starvedFirstTexts = ((starved.payloads[0]!.messages ?? []) as Array<{ content: unknown }>)
