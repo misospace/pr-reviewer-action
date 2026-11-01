@@ -348,7 +348,13 @@ async function liveRequest(argv: string[]): Promise<void> {
   // header for an empty key (http.ts) — never an invented credential.
   const apiKey = process.env[keyName] ?? "";
   const diagnosticSecrets: (string | null | undefined)[] = [...laneSecrets, apiKey];
-  // The exact production scorer call shape (src/confidence/scorer.ts:139-172).
+  // The production scorer's REQUEST SHAPE (`buildModelRequest` +
+  // `runChatRequestOnce` in src/confidence/scorer.ts), pinned to the pilot's
+  // documented defaults: one call, no retry, no effort, no structured-output
+  // schema, and the DEFAULT #1368 budgets. The pilot therefore does NOT
+  // exercise the shipped lane's budget handling — the declared-context clamps
+  // or the `prompt_over_budget` refusal — and `build-prompt` above builds at
+  // the default prompt budget for the same reason.
   const payload = buildModelRequest({
     apiFormat,
     model,

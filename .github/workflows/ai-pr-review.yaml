@@ -220,6 +220,20 @@ jobs:
           ai-confidence-model: ${{ vars.CONFIDENCE_MODEL || vars.SMART_MODEL }}
           ai-confidence-api-format: ${{ vars.CONFIDENCE_FORMAT || vars.SMART_FORMAT }}
           ai-confidence-reasoning-effort: ${{ vars.CONFIDENCE_REASONING_EFFORT }}
+          # #1368: the scorer's budgets and capability assertions are explicit
+          # and observable — never silently advertised on a wire format that
+          # drops them. The completion budget must leave room for reasoning
+          # plus the final JSON answer (provider accounting may include
+          # reasoning inside it); 4096 is the reasoning-safe default. The
+          # Anthropic effort/structured-output assertions stay per-lane and
+          # default off: an un-asserted Anthropic scorer carries no effort or
+          # output_config.format byte-for-byte, and a configured effort that
+          # the selected wire format drops is reported as NOT sent, not applied.
+          ai-confidence-max-tokens: ${{ vars.CONFIDENCE_MAX_TOKENS || '4096' }}
+          ai-confidence-prompt-tokens: ${{ vars.CONFIDENCE_PROMPT_TOKENS || '98304' }}
+          ai-confidence-model-context-tokens: ${{ vars.CONFIDENCE_CONTEXT_TOKENS }}
+          ai-confidence-anthropic-effort-support: ${{ vars.CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT || 'false' }}
+          ai-confidence-structured-output-support: ${{ vars.CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT || 'false' }}
           ai-confidence-timeout-sec: "120"
           ai-primary-reasoning-effort: ${{ vars.PRIMARY_REASONING_EFFORT }}
           ai-reasoning-effort: ${{ vars.REASONING_EFFORT }}

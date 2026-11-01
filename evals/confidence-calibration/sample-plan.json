@@ -35,7 +35,7 @@
   "ceilings": {
     "max_primary_reviews": 16,
     "max_scorer_calls": 48,
-    "max_scorer_output_tokens": 60000,
+    "max_scorer_output_tokens": 200000,
     "wall_time_budget_sec": {
       "review": 21600,
       "score": 7200
