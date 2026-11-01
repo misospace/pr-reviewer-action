@@ -61,7 +61,12 @@ const COMMENT_LINE_RE = /^(\/\/|\/\*\*?|\*(?!\/)|#(?!!)|"""|'''|--(?:\s|$)|<!--)
  * survives (#898 review). The bot footers' own automerge lines carry no
  * keyword vocabulary, so they were never claims to begin with. */
 const BOT_TEMPLATE_RE =
-  /\b(?:renovate|dependabot|greenkeeper)\b|rebase[/-]retry|rebase-check/i;
+/\b(?:renovate|dependabot|greenkeeper)\b|rebase[/-]retry|rebase-check/i;
+/** Vendor-agnostic shape half of the template drop: the rebase/retry
+* checkbox machinery, matched by wording rather than bot identity. In
+* dependency mode this half still applies (the vendor-name half does not),
+* keeping boilerplate out of the claim set without keying to a vendor. */
+const BOT_TEMPLATE_SHAPE_RE = /rebase[/-]retry|rebase-check/i;
 
 /** #1380: machine-generated dependency-metadata statements, matched by
  * vocabulary shape only (never a bot name, so any forge's automation is
@@ -575,8 +580,10 @@ function splitSentences(body: string): string[] {
 }
 
 /** PR-body claims: sentences using the assertion/quantifier vocabulary, with
- * bot-authored template text (Renovate/Dependabot footers) removed first.
- * Items resolve from every added-line diff occurrence of each backtick
+ * bot-authored template text (Renovate/Dependabot footers) removed first —
+ * by vendor name outside dependency mode, by boilerplate shape inside it
+ * (#1380: a vendor mention must never suppress a semantic claim). Items
+ * resolve from every added-line diff occurrence of each backtick
  * identifier or flag-like token the sentence names (falls back to no items
  * when none appear in the diff — the render step then tells the reviewer to
  * enumerate items themselves). */
@@ -588,7 +595,15 @@ function extractPrBodyClaims(body: string, diffText: string, dependencyUpdate = 
   const addedLines = [...walkAddedLines(diffText)];
   const claims: Claim[] = [];
   for (const sentence of splitSentences(strippedBody)) {
-    if (BOT_TEMPLATE_RE.test(sentence)) continue;
+    // #1380 review: the vendor-name alternative is NOT applied in dependency
+    // mode — a vendor name alone is not machine metadata, and vendor-keyed
+    // suppression is exactly the architecture the issue forbids. Dependency
+    // boilerplate is matched by vocabulary shape instead (BOT_TEMPLATE_SHAPE_RE
+    // plus the metadata clause filter below), so a semantic invariant that
+    // merely mentions Renovate or Dependabot keeps its claim. Non-dependency
+    // mode keeps the pre-existing full template drop unchanged.
+    if (!dependencyUpdate && BOT_TEMPLATE_RE.test(sentence)) continue;
+    if (dependencyUpdate && BOT_TEMPLATE_SHAPE_RE.test(sentence)) continue;
     const kept = dependencyUpdate ? filterDependencyMetadataSentence(sentence) : sentence;
     if (kept === null) continue;
     if (!CLAIM_KEYWORDS_RE.test(kept)) continue;

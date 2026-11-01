@@ -5,7 +5,7 @@ import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview, rawInputsFromEnv, RunReviewError } from "../src/run/review.js";
-import { runReviewEngine, createRunCancellation } from "../src/engine/review.js";
+import { runReviewEngine, createRunCancellation, claimsPrepassGate } from "../src/engine/review.js";
 import { GateLaunchError, forkGate, type ForkedGate } from "../src/gates/gates.js";
 import { runEngineAdmission, admissionStageEnv } from "../src/engine/admission.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
@@ -212,6 +212,30 @@ test("#1380: dependency-update classification drives the claim pass dependency m
     await server.close();
     f.cleanup();
   }
+});
+
+test("#1380: the claim pre-pass gate is a pass-through outside dependency mode", async () => {
+  const neverSettles: Promise<never> = new Promise(() => {});
+  await claimsPrepassGate(false, neverSettles);
+  // An unsettled evidence phase must not delay a non-dependency launch.
+});
+
+test("#1380: the claim pre-pass launches only after the evidence phase settles on a dependency update", async () => {
+  let settleEvidence!: () => void;
+  const evidencePhase = new Promise<void>((resolve) => { settleEvidence = () => resolve(); });
+  let launched = false;
+  const gate = claimsPrepassGate(true, evidencePhase).then(() => { launched = true; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(launched, false, "the pre-pass must not start while the evidence phase is still running");
+  settleEvidence();
+  await gate;
+  assert.equal(launched, true, "the pre-pass must launch once the evidence phase has settled");
+});
+
+test("#1380: an evidence-phase rejection never blocks the claim pre-pass launch", async () => {
+  const rejected: Promise<never> = Promise.reject(new Error("evidence phase failed"));
+  rejected.catch(() => {});
+  await claimsPrepassGate(true, rejected);
 });
 
 test("the env adapter and engine produce identical structured results", async () => {
