@@ -43,7 +43,7 @@ import {
 } from "../context/index.js";
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
-import { classifyPr, classificationToArtifact } from "../classification/classify.js";
+import { classifyPr, classificationToArtifact, DEPENDENCY_UPDATE_KINDS } from "../classification/classify.js";
 import { resolveReviewRoute, resolveTierProfiles, resolveConfidenceProfile, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
 import { buildSpecialistCorpus } from "../specialists/corpus.js";
@@ -432,6 +432,21 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
     await cancellation.finalize();
     cancellation.dispose();
   }
+}
+
+/** #1380 budget priority: on a dependency update the optional claim
+ * pre-pass must never compete ahead of the mandatory dependency-evidence
+ * obligations (#1379 provenance/release-delta/security work), so its launch
+ * is gated on the evidence phase settling. The evidence promise never
+ * rejects (the phase catches internally); the pass-through rejection handler
+ * keeps that fail-soft property explicit. Non-dependency PRs launch
+ * concurrently, unchanged. */
+export function claimsPrepassGate(
+  dependencyUpdate: boolean,
+  evidencePhase: Promise<unknown>,
+): Promise<void> {
+  if (!dependencyUpdate) return Promise.resolve();
+  return evidencePhase.then(() => undefined, () => undefined);
 }
 
 /** review.sh `run_review`: the pipeline body. Cancellation boundaries are the
@@ -1050,11 +1065,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   let corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
   ws.write("review-corpus.truncated.md", ws.read(corpusResult.outputName) ?? new Uint8Array(0));
 
-  // ── Claim falsification pre-pass (#785), in flight with the other gates ──
+  // ── Claim falsification pre-pass (#785) ────────────────────────────────
   // Fail-soft: any failure leaves claim-falsification.md empty and the
   // review proceeds unchanged. Deterministic scan first; the bounded model
   // pass on the primary route always runs when configured and merges on top
-  // of the scan's claims (#898).
+  // of the scan's claims (#898). Launched after the evidence phase has
+  // settled — on a dependency update the ordering is a hard budget-priority
+  // requirement (#1380), enforced by claimsPrepassGate below.
   ws.write("claim-falsification.md", new Uint8Array(0));
   let claimsPromise: Promise<void> = Promise.resolve();
   if ((env.CLAIM_FALSIFICATION ?? "false").toLowerCase() === "true") {
@@ -1072,11 +1089,22 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     const claimExtra = profiles.primary.baseUrl && profiles.primary.model
       ? extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "")
       : undefined;
-    claimsPromise = runClaimFalsificationPass({
+    // #1380 budget priority: on a dependency update the optional claim
+    // pre-pass must never start ahead of the mandatory dependency-evidence
+    // obligations (#1379 provenance/release-delta/security), which run in and
+    // after the evidence phase — so the pre-pass launches only once the
+    // evidence phase has settled. Fail-soft: that promise never rejects (the
+    // phase catches internally), and non-dependency PRs keep the concurrent
+    // launch unchanged.
+    claimsPromise = claimsPrepassGate(
+      DEPENDENCY_UPDATE_KINDS.has(classification.prKind),
+      evidencePromise,
+    ).then(() => runClaimFalsificationPass({
       title: String(pr.title ?? ""),
       body: String(pr.body ?? ""),
       files: safeJson(ws.read("pr-files.json")),
       diff: (ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? ""),
+      dependencyUpdate: DEPENDENCY_UPDATE_KINDS.has(classification.prKind),
       model:
         profiles.primary.baseUrl && profiles.primary.model
           ? {
@@ -1107,7 +1135,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
               }),
             }
           : undefined,
-    })
+    }))
       .then((result) => {
         const section =
           result.status === "ok"
