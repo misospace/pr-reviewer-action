@@ -7,6 +7,8 @@ import {
   deriveUnresolvedCause,
   extractApprovalPrerequisites,
   foldObligationDispositions,
+  mustCheckObligationsEnabled,
+  obligationAdmissionTokens,
   unresolvedReviewObligations,
   reviewObligationsToArtifact,
   REVIEWER_GATHERABLE_CUE,
@@ -62,11 +64,18 @@ test("obligation dispositions match exact text and id, require a grounded ration
     { check: "check two", status: "not_applicable", rationale: "no config in diff" },
   ]);
   assert.deepEqual(rationaled.map((item) => item.status), ["satisfied", "satisfied"]);
+  // #750-parity fold for must_check rows: a bare `satisfied` discharges
+  // (exactly like required-checks.ts, so completeness and the obligation
+  // gate never disagree on one disposition); `not_applicable` still needs a
+  // rationale. trusted_base_guidance rows require a rationale for ANY
+  // discharge, as their section preamble tells the model.
   const bare = foldObligationDispositions(obligations, [
     { check: "obligation-1", status: "satisfied" },
     { check: "check two", status: "not_applicable", rationale: "  " },
   ]);
-  assert.deepEqual(bare.map((item) => item.status), ["unresolved", "unresolved"]);
+  assert.deepEqual(bare.map((item) => item.status), ["satisfied", "unresolved"]);
+  const guidanceRows = candidateRowsToObligations([{ id: "obligation-9", source: "trusted_base_guidance", text: "Before approval, verify the matrix." }], []);
+  assert.equal(foldObligationDispositions(guidanceRows, [{ check: "obligation-9", status: "satisfied" }])[0]?.status, "unresolved");
   const dup = foldObligationDispositions(obligations, [
     { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "check one", status: "satisfied", rationale: "r" },
   ]);
@@ -97,9 +106,12 @@ test("unresolved trusted-base obligations force changes with a listed section; s
   assert.equal(applyReviewObligationEnforcement(clean, satisfied).applied, false);
   assert.equal(clean.verdict, "approve");
   assert.deepEqual(unresolvedReviewObligations(unresolved), ["obligation-1"]);
-  // must_check rows never hard-force.
+  // #1381 (review): must_check rows carry the SAME approval semantics — an
+  // unresolved review-owned row of either source never certifies APPROVE.
   const mustCheckOnly = base();
-  assert.equal(applyReviewObligationEnforcement(mustCheckOnly, candidateRowsToObligations([], ["check one"])).applied, false);
+  const mustCheckGate = applyReviewObligationEnforcement(mustCheckOnly, candidateRowsToObligations([], ["check one"]));
+  assert.equal(mustCheckGate.applied, true);
+  assert.equal(mustCheckOnly.verdict, "request_changes");
 });
 
 test("adversarial boundary: hostile obligation text cannot forge headings or close the fence (#252)", () => {
@@ -151,12 +163,13 @@ test("enforcement pipeline: unresolved guidance obligations force request_change
   assert.match(artifact.review_markdown, /Required review evidence unresolved: obligation-1/);
   assert.match(artifact.review_markdown, /## Unresolved Required Review Evidence/);
   assert.equal(artifact.verdict_source, "enforcement");
-  // must_check rows alone never fire the gate or the fail-closed signal.
+  // #1381 (review): must_check rows fire the same gate — one class of
+  // review-owned required evidence, one approval semantics.
   const mustCheckInputs: EnforcementInputs = { ...inputs, reviewObligations: candidateRowsToObligations([], ["check one"]) };
-  assert.equal(failClosedEnforcementFired(mustCheckInputs), false);
-  const mustCheckArtifact = base({ verdict: "approve" });
-  assert.equal(applyAllEnforcement(mustCheckArtifact, mustCheckInputs), 0);
-  assert.equal(mustCheckArtifact.verdict, "approve");
+  assert.equal(failClosedEnforcementFired(mustCheckInputs), true);
+  const mustCheckArtifact = base({ verdict: "approve", review_markdown: "Recommendation: Approve\nlooks fine" });
+  assert.equal(applyAllEnforcement(mustCheckArtifact, mustCheckInputs), 1);
+  assert.equal(mustCheckArtifact.verdict, "request_changes");
 });
 
 test("regression fixture (home-ops#11668 shape): budget-exhausted guidance obligation cannot publish APPROVE", () => {
@@ -262,7 +275,117 @@ test("planning section and reservation expose obligations to the tool driver", (
   assert.match(section, /# Required Review Evidence/);
   assert.equal(computeRequiredEvidenceReservation(5, 7), 3);
   assert.equal(computeRequiredEvidenceReservation(1, 1), 0);
-  assert.match(REQUIRED_EVIDENCE_TURN_NOTE, /reserved for required-evidence obligations/);
+  // #1381 (review): the note must state the reservation is ENFORCED.
+  assert.match(REQUIRED_EVIDENCE_TURN_NOTE, /reserved for the unresolved required-evidence obligations/);
+  assert.match(REQUIRED_EVIDENCE_TURN_NOTE, /refused/);
+});
+
+test("the strict mapping alone never approves unresolved obligations, whichever verdict the model recommended", () => {
+  const approve = base({ verdict: "approve" });
+  const outcome = applyStrictVerdictPolicy(approve, { modelVerdict: "approve", forced: false, unresolvedReviewObligations: ["obligation-1"] });
+  assert.equal(outcome.verdict, "request_changes");
+  assert.equal(outcome.source, "enforcement");
+  assert.match(approve.review_markdown, /obligation-1/);
+});
+
+// The ACTUAL home-ops#11668 trusted-base shape (#1381 review): the approval
+// cue lives in a section heading, the concrete asks are separate sentences
+// full of file paths and versions whose periods must not split them, and an
+// external/manual ask sits under the same heading and must stay #977
+// non-blocking.
+const REAL_TRUSTED_BASE = [
+  "# Repository Standards and Conventions",
+  "",
+  "## Change categories",
+  "Classify every pull request by what it changes.",
+  "",
+  "## Evidence required before approval",
+  "",
+  "For Kubernetes/Talos upgrades, identify every affected cluster, read its Talos installer version from `talos/<cluster>/machineconfig.yaml.j2`, and verify the proposed Kubernetes version against the published Talos support matrix.",
+  "Confirm the rollout window with the on-call operator.",
+  "",
+  "## Style",
+  "Verify commit messages follow Conventional Commits.",
+].join("\n");
+
+test("section-scoped extraction recognizes the real home-ops#11668 guidance", () => {
+  const found = extractApprovalPrerequisites(REAL_TRUSTED_BASE);
+  assert.equal(found.length, 1);
+  // Path periods (`machineconfig.yaml.j2`) do not split the sentence.
+  assert.ok(found[0]!.includes("machineconfig.yaml.j2"));
+  assert.match(found[0]!, /published Talos support matrix/);
+  // The external/manual ask under the SAME gated heading stays #977 territory.
+  assert.ok(!found.some((item) => item.includes("rollout window")));
+  // Verification prose under an UNGATED heading is not a prerequisite.
+  assert.ok(!found.some((item) => item.includes("Conventional Commits")));
+  assert.deepEqual(extractApprovalPrerequisites("## Evidence before merge\n\nVerify the support matrix."), []);
+  // Version periods inside a single-cue sentence do not split it either.
+  assert.equal(extractApprovalPrerequisites("Before approval, verify the Kubernetes version v1.37.2 against the Talos support matrix.").length, 1);
+});
+
+test("regression fixture (real home-ops#11668 wording): budget-exhausted review cannot publish APPROVE", () => {
+  // Harness side: the real two-part guidance becomes a SHOWN obligation row.
+  const corpus = REAL_TRUSTED_BASE + "\n\n# Changed Manifest Context\nplaceholder";
+  const written: Array<{ name: string; body: string }> = [];
+  buildPlanningContext(60000, {
+    readText: (name: string) => (name === "classification.json" ? JSON.stringify({ must_check: [] }) : name === "review-corpus.truncated.md" ? corpus : null),
+    env: {},
+    writeArtifact: (name: string, body: string) => written.push({ name, body }),
+  }, "review-corpus.truncated.md");
+  const artifactRow = written.find((entry) => entry.name === "review-obligations-candidates.json");
+  assert.ok(artifactRow);
+  const parsed = JSON.parse(artifactRow.body) as { injected: boolean; obligations: Array<{ id: string; source: string; text: string }> };
+  assert.equal(parsed.injected, true);
+  assert.deepEqual(parsed.obligations.map((row) => row.source), ["trusted_base_guidance"]);
+  // Engine side: the loop exhausted its budget without reading the
+  // machineconfigs or the matrix (home-ops run 41192550614), the model
+  // reports the gap but publishes… APPROVE. It must not survive.
+  const obligations = foldObligationDispositions(candidateRowsToObligations(parsed.obligations, []), null)
+    .map((obligation) => ({ ...obligation, cause: "budget-exhausted" as const }));
+  const review = base({ verdict: "approve", review_markdown: "Recommendation: Approve\nkubelet bump looks routine" });
+  const inputs: EnforcementInputs = {
+    evidenceBlockerEnabled: false,
+    toolFailureEnabled: false,
+    toolMinSuccessful: 0,
+    evidence: null,
+    toolHarness: null,
+    threads: null,
+    humanReviews: null,
+    verdictPolicy: "strict",
+    reviewObligations: obligations,
+  };
+  applyAllEnforcement(review, inputs);
+  const outcome = applyStrictVerdictPolicy(review, { modelVerdict: "approve", forced: failClosedEnforcementFired(inputs), unresolvedReviewObligations: unresolvedReviewObligations(obligations) });
+  assert.equal(outcome.verdict, "request_changes");
+  assert.match(review.review_markdown, /## Unresolved Required Review Evidence/);
+  assert.match(review.review_markdown, /obligation-1 \(trusted_base_guidance, unresolved, cause: budget-exhausted\)/);
+});
+
+test("admission vocabulary targets gatherable rows and never gates generic checklist prose", () => {
+  const tokens = obligationAdmissionTokens(REAL_TRUSTED_BASE.split("\n")[7]!);
+  assert.ok(tokens !== null);
+  for (const token of ["talos", "machineconfig", "kubernetes", "matrix", "installer"]) assert.ok(tokens.includes(token), token);
+  assert.equal(obligationAdmissionTokens("Treat this as high priority — verify correctness carefully."), null);
+});
+
+test("VALIDATE_REQUIRED_CHECKS=false removes must_check rows at both obligation layers", () => {
+  assert.equal(mustCheckObligationsEnabled(undefined), true);
+  assert.equal(mustCheckObligationsEnabled("auto"), true);
+  assert.equal(mustCheckObligationsEnabled("true"), true);
+  assert.equal(mustCheckObligationsEnabled("false"), false);
+  assert.equal(mustCheckObligationsEnabled(" FALSE "), false);
+  const corpus = "# Repository Standards and Conventions\nBefore approval, verify the Kubernetes version against the published Talos support matrix.\n\n# Changed Manifest Context\nplaceholder";
+  const written: Array<{ name: string; body: string }> = [];
+  const planning = buildPlanningContext(60000, {
+    readText: (name: string) => (name === "classification.json" ? JSON.stringify({ must_check: ["Confirm the migration path for changed schema tables."] }) : name === "review-corpus.truncated.md" ? corpus : null),
+    env: { VALIDATE_REQUIRED_CHECKS: "false" },
+    writeArtifact: (name: string, body: string) => written.push({ name, body }),
+  }, "review-corpus.truncated.md");
+  const parsed = JSON.parse(written.find((entry) => entry.name === "review-obligations-candidates.json")!.body) as { injected: boolean; obligations: Array<{ id: string; source: string }> };
+  assert.deepEqual(parsed.obligations.map((row) => [row.id, row.source]), [["obligation-1", "trusted_base_guidance"]]);
+  // The Required Review Evidence section lists no must_check row (the
+  // classifier's own projection section may still show the checklist).
+  assert.ok(!planning.text.includes("(must_check)"));
 });
 
 test("harness and engine agree on obligation identity: candidates rows flow through verbatim", () => {

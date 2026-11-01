@@ -63,7 +63,17 @@ const BUDGET_TURN_NOTE =
   "[loop budget] {requestsLeft} of {requestsTotal} tool request(s) and " +
   "{roundsLeft} of {roundsTotal} turn(s) remain.";
 export const REQUIRED_EVIDENCE_TURN_NOTE =
-  "[loop budget] {requestsLeft} tool request(s) remain; {reservedCount} request(s) are reserved for required-evidence obligations. Spend the reserved requests ONLY on evidence for those obligations (required repository/upstream compatibility, provenance, or schema checks named in the Required Review Evidence section) before any optional exploration. Stop broad exploration now: prioritize confirming or rejecting your unresolved blocker hypotheses and gathering only the evidence still needed for the verdict.";
+  "[loop budget] {requestsLeft} tool request(s) remain; {reservedCount} request(s) are reserved for the unresolved required-evidence obligations. The reservation is now enforced: calls that target none of those obligations are refused and will not execute. Spend the reserved requests ONLY on evidence for those obligations (read the named files, fetch the named upstream compatibility matrix or document from the Required Review Evidence section) before any optional exploration.";
+
+// #1381 (review): the enforceable half of the reservation. Inside the
+// reserved window a call executes only when its argument targets overlap an
+// obligation no call has attempted yet; everything else is refused with this
+// note WITHOUT consuming the budget, so optional exploration can never spend
+// the requests held back for required evidence.
+const REQUIRED_EVIDENCE_REFUSAL_NOTE =
+  "Reserved required-evidence budget: this call targets none of the unresolved obligations from the Required Review Evidence section, " +
+  "and the remaining requests are reserved for them. It was NOT executed and did not consume budget. Spend the next calls on the " +
+  "obligation evidence itself — read the files and fetch the upstream documents the obligations name — then optional calls are allowed again.";
 
 const LOW_BUDGET_TURN_NOTE =
   "[loop budget] Only {requestsLeft} tool request(s) and {roundsLeft} " +
@@ -73,6 +83,26 @@ const LOW_BUDGET_TURN_NOTE =
 
 function formatNote(template: string, values: Record<string, number>): string {
   return template.replace(/\{(\w+)\}/g, (_m, key: string) => String(values[key] ?? ""));
+}
+
+/** #1381: the lowercased argument VALUES of a tool call — the model-chosen
+ * target (paths, endpoints, URLs, queries) without the schema's own argument
+ * names, which would overlap any obligation mentioning a generic word like
+ * "path" and silently open the reserved window to everything. */
+function argumentTargetText(value: unknown): string {
+  const parts: string[] = [];
+  const walk = (item: unknown, depth: number): void => {
+    if (depth > 3) return;
+    if (typeof item === "string") {
+      parts.push(item);
+    } else if (Array.isArray(item)) {
+      for (const child of item) walk(child, depth + 1);
+    } else if (item !== null && typeof item === "object") {
+      for (const child of Object.values(item)) walk(child, depth + 1);
+    }
+  };
+  walk(value, 0);
+  return parts.join(" ").toLowerCase();
 }
 
 /** Hard stop conditions. The driver owns these; Conversation's token helpers
@@ -239,11 +269,13 @@ export interface LoopOutcome {
   compactionTruncate: number;
   /** #922: largest approximate conversation size seen before a turn. */
   peakConversationTokens: number;
-  /** #1381: requests advisory-reserved for required-evidence obligations —
-   * below this remaining threshold the turn note redirects all remaining
-   * spend to the Required Review Evidence obligations. It is a hint, not a
-   * hard reservation: the loop never refuses an optional call outright. */
+  /** #1381: requests reserved at the end of the budget for required-evidence
+   * obligations. Inside this window the reservation is enforced: calls that
+   * target none of the pending obligations are refused without consuming
+   * budget (see `requiredEvidenceRefusals`). */
   requiredEvidenceRequestsHint: number;
+  /** #1381: optional calls refused by the enforced reservation window. */
+  requiredEvidenceRefusals: number;
 }
 
 /**
@@ -364,6 +396,11 @@ export interface DriveToolLoopOptions {
   /** #1199: invoked once per model turn with that turn's bounded telemetry. */
   onRound?: (round: NativeLoopRoundTelemetry) => void;
   reserveForRequiredEvidence?: number;
+  /** #1381 (review): admission vocabulary for the reserved window — one row
+   * per shown obligation with the deterministic target tokens a tool call
+   * must overlap to execute inside the window. A row is dropped from gating
+   * once an admitted call attempted it. */
+  requiredEvidence?: ReadonlyArray<{ id: string; tokens: readonly string[] }>;
 }
 
 /**
@@ -422,7 +459,17 @@ export async function driveToolLoop(
     compactionTruncate: 0,
     peakConversationTokens: 0,
     requiredEvidenceRequestsHint: Math.max(0, Math.min(budgets.maxToolCalls - 1, Math.floor(options.reserveForRequiredEvidence ?? 0))),
+    requiredEvidenceRefusals: 0,
   };
+  // #1381: obligations whose evidence no admitted call has targeted yet.
+  // Inside the reserved window only calls overlapping one of these rows'
+  // vocabularies execute; an admitted overlap discharges that row's gating
+  // (the row still needs a verdict disposition to count as satisfied — the
+  // loop guarantees only the ATTEMPT, which is what the budget reservation
+  // is for).
+  const pendingEvidence: Array<{ id: string; tokens: readonly string[] }> = outcome.requiredEvidenceRequestsHint > 0
+    ? [...(options.requiredEvidence ?? [])]
+    : [];
   const started = timeFn();
   const telemetryStart = nowFn();
   let callsExecuted = 0;
@@ -514,7 +561,7 @@ export async function driveToolLoop(
       const requestsLeft = budgets.maxToolCalls - callsExecuted;
       const roundsLeft = budgets.maxRounds - outcome.rounds;
       const reservedCount = outcome.requiredEvidenceRequestsHint;
-      const note = reservedCount > 0 && requestsLeft <= reservedCount
+      const note = reservedCount > 0 && pendingEvidence.length > 0 && requestsLeft <= reservedCount
         ? REQUIRED_EVIDENCE_TURN_NOTE
         : requestsLeft <= LOW_TOOL_REQUESTS_REMAINING ? LOW_BUDGET_TURN_NOTE : BUDGET_TURN_NOTE;
       conversation.addTurnNote(
@@ -603,7 +650,7 @@ export async function driveToolLoop(
     // is read-only and a round's calls are independent (the model emitted them
     // together). Results are applied in the original call order to preserve
     // the open-call contract.
-    type Disposition = { callId: string; kind: "error" | "dup" | "budget"; data: Record<string, unknown> } | { callId: string; kind: "exec"; data: number };
+    type Disposition = { callId: string; kind: "error" | "dup" | "budget" | "reserve"; data: Record<string, unknown> } | { callId: string; kind: "exec"; data: number };
     const plan: Disposition[] = [];
     const toExecute = new Map<number, { name: string; args: Record<string, unknown> }>();
     // #1199: per-round disposition counts (a tri-partition of `calls.length`:
@@ -644,6 +691,25 @@ export async function driveToolLoop(
         plan.push({ callId, kind: "budget", data: { error: BUDGET_NOTE } });
         roundRefused++;
         continue;
+      }
+      // #1381 (review): the enforced reservation. Inside the reserved window
+      // a call executes only when its target overlaps an obligation no call
+      // has attempted yet; anything else is refused WITHOUT consuming budget
+      // (like the dedup note), so optional exploration cannot spend the
+      // requests held back for required evidence. Once every obligation has
+      // been attempted the window is satisfied and admission reopens.
+      if (outcome.requiredEvidenceRequestsHint > 0
+        && pendingEvidence.length > 0
+        && budgets.maxToolCalls - callsExecuted <= outcome.requiredEvidenceRequestsHint) {
+        const target = argumentTargetText(args);
+        const hit = pendingEvidence.findIndex((row) => row.tokens.some((token) => target.includes(token)));
+        if (hit === -1) {
+          plan.push({ callId, kind: "reserve", data: { error: REQUIRED_EVIDENCE_REFUSAL_NOTE } });
+          roundRefused++;
+          outcome.requiredEvidenceRefusals++;
+          continue;
+        }
+        pendingEvidence.splice(hit, 1);
       }
       seenKeys.add(key);
       callsExecuted++;

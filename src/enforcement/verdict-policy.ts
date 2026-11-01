@@ -597,19 +597,18 @@ export function applyStrictVerdictPolicy(
         modelVerdict,
       );
     }
-  } else if (unresolvedObligations.length > 0 && modelVerdict === "request_changes") {
-    // #1381: the ANTI-RELAX half of the review-obligation contract. The
-    // model recommended request_changes over a required-evidence gap; the
-    // deterministic layer holds that verdict — it can never be silently
-    // flipped to approve while a review-owned obligation is unresolved, and
-    // the attribution note names the obligations so the published review
-    // shows the deterministic reason. It never fires the other way: a model
-    // approve with unresolved must_check rows stays the #750 warn-mode
-    // contract (partial marker, "Unaddressed required checks" section), and
-    // the hard-force gate owns trusted-base obligations.
+  } else if (unresolvedObligations.length > 0) {
+    // #1381: the ANTI-RELAX half of the review-obligation contract. A review-
+    // owned obligation is unresolved: this mapping never publishes approve,
+    // whichever verdict the model recommended, and the attribution note names
+    // the obligations so the published review shows the deterministic reason.
+    // In the engine composition an unresolved row already rides
+    // `failClosedEnforcementFired`, so the forced branch above owns it; this
+    // branch is the standalone guarantee for direct callers of the mapping
+    // (and holds the model's own request_changes with `overridden: false`).
     verdict = "request_changes";
-    overridden = false;
-    source = "model";
+    overridden = modelVerdict !== "request_changes";
+    source = overridden ? "enforcement" : "model";
     appendStrictNote(
       artifact,
       strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),

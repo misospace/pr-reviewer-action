@@ -109,12 +109,28 @@ The public `required-checks` output vocabulary is unchanged
 
 - `auto` — validate when `must_check` is non-empty;
 - `warn` — append an `### Unaddressed required checks` section listing the
-  unresolved checks; never flips the verdict;
+  unresolved checks; the completeness pass itself never flips the verdict
+  (but see #1381 below — the review-obligation gate does, and it is not
+  governed by this mode);
 - `fail` — additionally forces `request_changes`;
 - `metadata_only` — record only.
 
 Structured dispositions, when present, are authoritative for this decision;
 no keyword mention can substitute for a missing or malformed disposition.
+
+## Review-owned obligations (#1381)
+
+Once represented as review-obligation rows (`src/enforcement/review-obligations.ts`),
+deterministic `must_check` items share one approval semantics with extracted
+trusted-base approval prerequisites: **any unresolved row forces
+`request_changes` through the enforcement overlays — a native APPROVE never
+certifies an unresolved review-owned required check** (#1381 review).
+`required-check-validation-mode` keeps owning the completeness markdown and
+metadata; it no longer decides whether approval may publish. The single
+operator opt-out is `VALIDATE_REQUIRED_CHECKS=false` (the public
+`validate-required-checks` input): it removes `must_check` rows from the
+obligation contract at both layers, so the model is not shown — and the
+engine does not enforce — rows the operator disabled.
 
 ## v2/v3 coexistence (until #680) — historical
 

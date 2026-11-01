@@ -878,3 +878,103 @@ test("#1199: a transport-error turn records the streamed fallback it attempted",
   assert.equal(rounds[0]!.model_sec, 0.25);
   assert.equal(rounds[0]!.streamed_fallback, true);
 });
+
+// #1381 (review): the required-evidence reservation is ENFORCED, not a note.
+const REQUIRED_EVIDENCE_OBLIGATIONS = [
+  { id: "obligation-1", tokens: ["talos", "kubernetes", "matrix", "machineconfig", "installer", "cluster"] },
+];
+
+test("reserved window refuses optional calls and admits the obligation call without losing budget", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Budget 6, reserve 3: turns 1-3 (optional) run while 4+ requests remain;
+  // the window then refuses two optional calls WITHOUT consuming budget and
+  // admits the matrix fetch, which discharges the gating. The final optional
+  // call runs because every obligation was attempted.
+  const responses = [
+    openAiCall("c1", "read_file", '{"path":"README.md"}'),
+    openAiCall("c2", "read_file", '{"path":"docs/arch.md"}'),
+    openAiCall("c3", "read_file", '{"path":"docs/history.md"}'),
+    openAiCall("c4", "read_file", '{"path":"docs/nope.md"}'),
+    openAiCall("c5", "read_file", '{"path":"docs/other.md"}'),
+    openAiCall("c6", "web_fetch", '{"url":"https://talos.dev/docs/v1.14/support-matrix"}'),
+    openAiCall("c7", "read_file", '{"path":"docs/after.md"}'),
+    openAiText("done"),
+  ];
+  const exec = responses.slice(0, -1).map((_, i) => ({ tool: i === 5 ? "web_fetch" : "read_file", status: "ok", result: { content: String(i) } }));
+  const { postFn, executeFn, timeFn } = scriptedLoop(responses, exec);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(10, 6, 120),
+    reserveForRequiredEvidence: 3,
+    requiredEvidence: REQUIRED_EVIDENCE_OBLIGATIONS,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.deepEqual(outcome.executed.map((item) => [item.tool, (item.args as { path?: string; url?: string }).path ?? (item.args as { url?: string }).url]), [
+    ["read_file", "README.md"],
+    ["read_file", "docs/arch.md"],
+    ["read_file", "docs/history.md"],
+    ["web_fetch", "https://talos.dev/docs/v1.14/support-matrix"],
+    ["read_file", "docs/after.md"],
+  ]);
+  assert.equal(outcome.requiredEvidenceRefusals, 2);
+  // Two refusals consumed nothing: 6 budget − 5 executed = 1 left.
+  assert.equal(outcome.requestsRemaining, 1);
+  const toolMessages = conversation.renderOpenAiMessages() as Array<{ role: string; content: string }>;
+  assert.ok(toolMessages.filter((m) => m.role === "tool" && m.content.includes("Reserved required-evidence budget")).length === 2);
+});
+
+test("a hostile model spending every turn on optional work cannot consume the reserved budget", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const responses = Array.from({ length: 6 }, (_, i) => openAiCall(`c${i}`, "read_file", `{"path":"misc/${i}.md"}`));
+  const exec = responses.map(() => ({ tool: "read_file", status: "ok", result: { content: "x" } }));
+  const { postFn, executeFn, timeFn } = scriptedLoop(responses, exec);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(3, 6, 120),
+    reserveForRequiredEvidence: 3,
+    requiredEvidence: REQUIRED_EVIDENCE_OBLIGATIONS,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_MAX_ROUNDS);
+  // Turns 1-3 executed before the window opened; turns 4-6 were refused and
+  // the three reserved requests survived intact for the obligation evidence.
+  assert.equal(outcome.executed.length, 3);
+  assert.equal(outcome.requiredEvidenceRefusals, 3);
+  assert.equal(outcome.requestsRemaining, 3);
+});
+
+test("schema argument names alone never satisfy the obligation admission check", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // The obligation names "path"; the refused call carries only argument-NAME
+  // overlap ("path") with unrelated values: matching over argument VALUES
+  // only keeps schema vocabulary from silently opening the reserved window.
+  const { postFn, executeFn, timeFn } = scriptedLoop(
+    [
+      openAiCall("c1", "read_file", '{"path":"misc/a.md"}'),
+      openAiCall("c2", "read_file", '{"path":"misc/b.md"}'),
+      openAiCall("c3", "read_file", '{"path":"docs/guide.md","offset":1,"limit":40}'),
+      openAiText("done"),
+    ],
+    [
+      { tool: "read_file", status: "ok", result: { content: "a" } },
+      { tool: "read_file", status: "ok", result: { content: "b" } },
+    ],
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(10, 5, 120),
+    reserveForRequiredEvidence: 3,
+    requiredEvidence: [{ id: "obligation-1", tokens: ["lockfile", "manifest", "path", "schema"] }],
+    timeFn,
+  });
+  assert.deepEqual(outcome.executed.map((item) => (item.args as { path: string }).path), ["misc/a.md", "misc/b.md"]);
+  assert.equal(outcome.requiredEvidenceRefusals, 1);
+  assert.equal(outcome.requestsRemaining, 3);
+});

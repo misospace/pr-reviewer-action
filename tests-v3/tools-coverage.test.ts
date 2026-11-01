@@ -33,6 +33,7 @@ function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
     compactionTruncate: 0,
     peakConversationTokens: 0,
     requiredEvidenceRequestsHint: 0,
+    requiredEvidenceRefusals: 0,
     ...overrides,
   };
 }

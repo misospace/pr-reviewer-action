@@ -237,13 +237,12 @@ export function failClosedEnforcementFired(inputs: Pick<
       return true;
     }
   }
-  // #1381: an unresolved trusted_base_guidance obligation is a review-owned
+  // #1381: an unresolved review-owned obligation — from EITHER source — is a
   // required check the reviewer was expected and equipped to perform but did
-  // not complete — a fail-closed forcing condition like the layers above.
-  // must_check rows never force here (REQUIRED_CHECK_VALIDATION_MODE owns
-  // their verdict semantics); they feed the anti-relaxation signal instead.
-  if ((inputs.reviewObligations ?? []).some((obligation) =>
-    obligation.status !== "satisfied" && obligation.source === "trusted_base_guidance")) {
+  // not complete, a fail-closed forcing condition like the layers above.
+  // No per-source exemption: an unresolved review-owned row must never be
+  // able to certify a native APPROVE through a weaker second class.
+  if ((inputs.reviewObligations ?? []).some((obligation) => obligation.status !== "satisfied")) {
     return true;
   }
   return false;

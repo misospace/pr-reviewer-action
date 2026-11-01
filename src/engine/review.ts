@@ -78,7 +78,7 @@ import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
-import { candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
+import { candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { createTraceGapProbe, traceGapContinuationSummary } from "../requirements/trace-gap-probe.js";
@@ -414,20 +414,25 @@ export function createRunCancellation(request: ReviewRequest): RunCancellation {
  * the harness and engine layers would make exact-text dispositions unmatched
  * and permanently block. Absent candidates (fork/skipped-harness paths) fall
  * back to must_check-only rows with harness-compatible ids. The derived
- * unresolved cause is stamped on trusted_base_guidance rows only; must_check
- * rows keep cause null (their lifecycle is the completeness contract).
+ * unresolved cause is stamped on EVERY unresolved row (#1381 acceptance: the
+ * telemetry names the obligation and its cause regardless of source).
+ * `VALIDATE_REQUIRED_CHECKS=false` removes must_check rows from the contract
+ * at both layers (harness presentation and engine enforcement), so an
+ * operator who disabled #750 validation does not get #1381 forcing instead.
  */
 function resolveReviewObligations(
   classification: Record<string, unknown>,
   review: Record<string, unknown>,
   ws: RunWorkspace,
   harnessArtifactName: string,
+  validateRequiredChecks: string | undefined,
 ) {
   const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
-  const candidateRows = candidates?.injected === true && Array.isArray(candidates.obligations)
+  const includeMustCheck = mustCheckObligationsEnabled(validateRequiredChecks);
+  const candidateRows = (candidates?.injected === true && Array.isArray(candidates.obligations)
     ? candidates.obligations as unknown[]
-    : [];
-  const obligations = candidateRowsToObligations(candidateRows, stringList(classification.must_check));
+    : []).filter((row) => includeMustCheck || (row as { source?: unknown } | null)?.source !== "must_check");
+  const obligations = candidateRowsToObligations(candidateRows, includeMustCheck ? stringList(classification.must_check) : []);
   const dispositions = Array.isArray(review.required_check_dispositions)
     ? review.required_check_dispositions as Array<{ check: string; status: string; rationale?: string | null }>
     : null;
@@ -440,9 +445,7 @@ function resolveReviewObligations(
     degraded: typeof harness?.executed_request_count === "number" && harness.executed_request_count === 0,
   });
   return folded.map((obligation) => (
-    obligation.status === "satisfied" || obligation.source !== "trusted_base_guidance"
-      ? obligation
-      : { ...obligation, cause }
+    obligation.status === "satisfied" ? obligation : { ...obligation, cause }
   ));
 }
 
@@ -1733,7 +1736,7 @@ secrets: [profiles.primary.apiKey],
   // #1381: the folded review-owned obligation rows ride the enforcement
   // inputs so the gate runs inside applyAllEnforcement (with the banner
   // normalization) and the anti-relax signal is computed once, here.
-  const reviewObligations = resolveReviewObligations(classificationArtifact, reviewRecord, ws, enforcementHarness);
+  const reviewObligations = resolveReviewObligations(classificationArtifact, reviewRecord, ws, enforcementHarness, env.VALIDATE_REQUIRED_CHECKS);
   enforcementInputs.reviewObligations = reviewObligations;
   persistReviewObligations(ws, reviewObligations, log);
   // #874: the ledger (read above for the #959 trace scope) feeds the trace

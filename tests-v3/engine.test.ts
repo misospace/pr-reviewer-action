@@ -195,7 +195,10 @@ test("#1380: dependency-update classification drives the claim pass dependency m
     const req = request(server.url, f.runDir);
     req.inputs = { ...req.inputs, "claim-falsification": "true" };
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
-    assert.equal(result.outputs.verdict, "approve");
+    // #1381: the dependency classification's must_check obligation rows are
+    // undisposed by the scripted verdict, so the obligation gate forces
+    // request_changes. This test pins claim-pass dependency mode, not the verdict.
+    assert.equal(result.outputs.verdict, "request_changes");
     const classification = JSON.parse(readFileSync(join(f.runDir, "classification.json"), "utf8")) as { pr_kind?: string };
     assert.equal(classification.pr_kind, "dependency_upgrade");
     const claimRequests = server.requests.filter((r) => r.body.includes("You extract the claims a pull request makes"));
