@@ -5,7 +5,7 @@ import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview, rawInputsFromEnv, RunReviewError } from "../src/run/review.js";
-import { runReviewEngine, createRunCancellation } from "../src/engine/review.js";
+import { runReviewEngine, createRunCancellation, claimsPrepassGate } from "../src/engine/review.js";
 import { GateLaunchError, forkGate, type ForkedGate } from "../src/gates/gates.js";
 import { runEngineAdmission, admissionStageEnv } from "../src/engine/admission.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
@@ -175,6 +175,67 @@ test("the engine writes nothing implicitly to process streams when sinks are exp
     await server.close(); f.cleanup();
   }
   assert.deepEqual(seen, [], "no implicit process-stream writes escaped the engine");
+});
+
+test("#1380: dependency-update classification drives the claim pass dependency mode end-to-end", async () => {
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const adapter: PlatformReadAdapter = {
+      ...mockPlatform(),
+      getPr: async () => ({
+        number: 7, title: "chore(deps): bump lodash from 1.2.3 to 4.5.6",
+        body: "Only one file changed. No CRDs changed and the CRD schema is unchanged.",
+        state: "open", draft: false, head: { sha: "a".repeat(40), ref: "renovate/lodash-4.x" }, base: { ref: "main" },
+        user: { login: "someone" }, changed_files: 1, additions: 2, deletions: 2,
+      }),
+      getPrDiff: async () => "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1,4 +1,4 @@\n-  \"version\": \"1.2.3\",\n-  \"lodash\": \"1.2.3\",\n+  \"version\": \"4.5.6\",\n+  \"lodash\": \"4.5.6\",\n",
+      listPrFiles: async () => ({ ok: true, data: [{ filename: "package-lock.json", status: "modified", additions: 2, deletions: 2, changes: 4 }] }),
+    };
+    const req = request(server.url, f.runDir);
+    req.inputs = { ...req.inputs, "claim-falsification": "true" };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
+    assert.equal(result.outputs.verdict, "approve");
+    const classification = JSON.parse(readFileSync(join(f.runDir, "classification.json"), "utf8")) as { pr_kind?: string };
+    assert.equal(classification.pr_kind, "dependency_upgrade");
+    const claimRequests = server.requests.filter((r) => r.body.includes("You extract the claims a pull request makes"));
+    assert.equal(claimRequests.length, 1);
+    assert.match(claimRequests[0]!.body, /Machine-generated dependency metadata/);
+    const record = JSON.parse(readFileSync(join(f.runDir, "claim-falsification.json"), "utf8")) as {
+      claims: { claim: string }[];
+      status: string;
+    };
+    const texts = record.claims.map((c) => c.claim);
+    assert.ok(texts.some((t) => t.includes("CRD schema is unchanged")), JSON.stringify(texts));
+    assert.ok(!texts.some((t) => t.includes("Only one file changed")), JSON.stringify(texts));
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
+test("#1380: the claim pre-pass gate is a pass-through outside dependency mode", async () => {
+  const neverSettles: Promise<never> = new Promise(() => {});
+  await claimsPrepassGate(false, neverSettles);
+  // An unsettled evidence phase must not delay a non-dependency launch.
+});
+
+test("#1380: the claim pre-pass launches only after the evidence phase settles on a dependency update", async () => {
+  let settleEvidence!: () => void;
+  const evidencePhase = new Promise<void>((resolve) => { settleEvidence = () => resolve(); });
+  let launched = false;
+  const gate = claimsPrepassGate(true, evidencePhase).then(() => { launched = true; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(launched, false, "the pre-pass must not start while the evidence phase is still running");
+  settleEvidence();
+  await gate;
+  assert.equal(launched, true, "the pre-pass must launch once the evidence phase has settled");
+});
+
+test("#1380: an evidence-phase rejection never blocks the claim pre-pass launch", async () => {
+  const rejected: Promise<never> = Promise.reject(new Error("evidence phase failed"));
+  rejected.catch(() => {});
+  await claimsPrepassGate(true, rejected);
 });
 
 test("the env adapter and engine produce identical structured results", async () => {

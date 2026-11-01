@@ -209,6 +209,7 @@ export function runProcess(options: RunProcessOptions): ProcessHandle {
           snapshot: [],
           killedAfterGrace: [],
           survived: [],
+          unreaped: [],
           issues: ["leader pid was never assigned; tree termination could not run"],
         };
         await sleep(Math.min(graceMs, EXIT_STREAM_DRAIN_MS));

@@ -6,24 +6,36 @@
  * any adequacy test the scan itself could compute is circular (every
  * keyword-bearing sentence is captured by construction), so one keyword hit
  * must never suppress the one pass that can read invariants the vocabulary
- * misses. A model failure never discards a deterministic result — it is
+ * misses. #1380's one exception: a dependency update whose EVERY scanned
+ * sentence the metadata filter dropped as machine-generated trivia returns
+ * status `filtered` and never spends the model call. An empty keyword scan is
+ * NOT that condition — it only proves the vocabulary missed something (#1380
+ * review: "No migration required" carries no keyword yet is a real
+ * falsification target), so any non-metadata sentence keeps the model pass.
+ * A model failure never discards a
+ * deterministic result — it is
  * recorded in the artifact's errors. Always fail-soft: an exception from
  * either half is caught and reported as an empty artifact, never thrown. */
 
-import { extractClaimsDeterministic } from "./extract.js";
+import { extractClaimsDeterministic, filterDependencyMetadataSentence, hasDependencySemanticRemainder, CLAIM_KEYWORDS_RE } from "./extract.js";
 import { runClaimFalsificationModelPass, type ClaimModelPassConfig } from "./model.js";
 import type { SpecialistRequestFn } from "../specialists/runner.js";
-import { MAX_CLAIMS, MAX_ERRORS, type ClaimsArtifact } from "./types.js";
+import { MAX_CLAIMS, MAX_ERRORS, type Claim, type ClaimsArtifact } from "./types.js";
 
 export interface ClaimFalsificationInput {
   title: string;
   body: string;
   files: unknown;
   diff: string;
-  /** When present, one bounded model pass always runs and its claims merge
-   * after the deterministic ones — the deterministic scan is evidence, never
-   * proof the PR body was fully captured (#898 review). Absent/undefined (no
-   * model config resolved) skips it entirely — deterministic-only, never an
+  dependencyUpdate?: boolean;
+  /** When present, one bounded model pass runs and its claims merge after
+   * the deterministic ones — the deterministic scan is evidence, never proof
+   * the PR body was fully captured (#898 review). On a dependency update
+   * whose every scanned sentence is machine-generated dependency metadata,
+   * the pass returns status `filtered` and the model call is never spent;
+   * any sentence the metadata filter did not drop keeps the model pass, even
+   * when the keyword scan found no candidate. Absent/undefined (no model
+   * config resolved) skips it entirely — deterministic-only, never an
    * error. */
   model?:
     | {
@@ -35,7 +47,7 @@ export interface ClaimFalsificationInput {
 
 export interface ClaimFalsificationResult {
   artifact: ClaimsArtifact;
-  status: "ok" | "empty" | "error" | "timeout";
+  status: "ok" | "empty" | "error" | "timeout" | "filtered";
   errorKind: string | null;
   error: string | null;
 }
@@ -70,9 +82,59 @@ function mergeArtifacts(primary: ClaimsArtifact, extra: ClaimsArtifact): ClaimsA
   };
 }
 
+/** #1380: drop dependency-metadata claims the bounded model pass emitted on
+ * top of a dependency-update scan; a mixed model claim keeps its semantic
+ * remainder (same clause granularity as the deterministic filter). A
+ * rewritten remainder must still carry claim vocabulary: clause splitting
+ * can rescue a metadata clause that matches no pattern on its own, and
+ * without the deterministic scan's keyword gate it would surface as a
+ * standalone trivia claim. Claims dedup by normalized text, and an artifact
+ * left claim-less reports "none" again. */
+function filterDependencyMetadataClaims(artifact: ClaimsArtifact): ClaimsArtifact {
+  let changed = false;
+  const claims: Claim[] = [];
+  const seen = new Set<string>();
+  for (const claim of artifact.claims) {
+    const kept = filterDependencyMetadataSentence(claim.claim);
+    if (kept === null || (kept !== claim.claim && !CLAIM_KEYWORDS_RE.test(kept))) {
+      changed = true;
+      continue;
+    }
+    const key = normalizeClaimText(kept);
+    if (seen.has(key)) {
+      changed = true;
+      continue;
+    }
+    seen.add(key);
+    if (kept !== claim.claim) changed = true;
+    claims.push(kept === claim.claim ? claim : { ...claim, claim: kept });
+  }
+  if (!changed) return artifact;
+  return { ...artifact, claims, method: claims.length > 0 ? artifact.method : "none" };
+}
+
 export async function runClaimFalsificationPass(input: ClaimFalsificationInput): Promise<ClaimFalsificationResult> {
   try {
-    const deterministic = extractClaimsDeterministic({ prBody: input.body, diffText: input.diff });
+    const dependencyUpdate = input.dependencyUpdate === true;
+    const deterministic = extractClaimsDeterministic({ prBody: input.body, diffText: input.diff, dependencyUpdate });
+    // #1380 review: skip only when the filter accounted for EVERY scanned
+    // sentence as deterministic metadata — an empty keyword scan says
+    // nothing about semantic assertions without keyword vocabulary ("No
+    // migration required"), which only the model pass can surface.
+    // Fail-soft: a throw here must push toward RUNNING the model (the
+    // outer catch would otherwise skip the pass with an empty error
+    // artifact).
+    if (dependencyUpdate && deterministic.claims.length === 0 && deterministic.errors.length === 0) {
+      let semanticRemainder: boolean;
+      try {
+        semanticRemainder = hasDependencySemanticRemainder({ prTitle: input.title, prBody: input.body, diffText: input.diff });
+      } catch {
+        semanticRemainder = true;
+      }
+      if (!semanticRemainder) {
+        return { artifact: deterministic, status: "filtered", errorKind: null, error: null };
+      }
+    }
     if (!input.model) {
       const status = deterministic.claims.length > 0 ? "ok" : "empty";
       return { artifact: deterministic, status, errorKind: null, error: null };
@@ -82,16 +144,28 @@ export async function runClaimFalsificationPass(input: ClaimFalsificationInput):
       body: input.body,
       files: input.files,
       diff: input.diff,
+      dependencyUpdate,
       config: input.model.config,
       requestFn: input.model.requestFn,
     });
+    const modelArtifact = dependencyUpdate ? filterDependencyMetadataClaims(fallback.artifact) : fallback.artifact;
     if (deterministic.claims.length === 0) {
-      return { artifact: fallback.artifact, status: fallback.status, errorKind: fallback.errorKind, error: fallback.error };
+      // The scan produced no claims (possibly via an error): the model
+      // artifact stands alone, but the scan's errors stay visible.
+      return {
+        artifact: {
+          ...modelArtifact,
+          errors: [...deterministic.errors, ...modelArtifact.errors].slice(0, MAX_ERRORS),
+        },
+        status: fallback.status,
+        errorKind: fallback.errorKind,
+        error: fallback.error,
+      };
     }
     // Deterministic claims exist: the model pass augments them. Whatever it
     // returns, the deterministic claims stand — a model failure is recorded
     // in the artifact, never discards the scan's result.
-    const merged = mergeArtifacts(deterministic, fallback.artifact);
+    const merged = mergeArtifacts(deterministic, modelArtifact);
     if (fallback.status !== "ok" && fallback.error) {
       merged.errors = [...merged.errors, `model fallback ${fallback.status}: ${fallback.error}`].slice(0, MAX_ERRORS);
     }

@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig, buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
+import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig, buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA, wireEffortOf } from "../src/model/request.js";
 import { resolveSpecialistProfiles, resolveTierProfiles } from "../src/routing/tiers.js";
-import type { ModelRequestConfig } from "../src/model/types.js";
+import type { ModelRequestConfig, TransportWirePayload } from "../src/model/types.js";
 
 // Frozen copy of the v2 `rf_json` bash literal (scripts/model_call.sh's
 // json_schema arm) as of the #706 wave-0 re-point. The shell file is deleted
@@ -360,6 +360,37 @@ test("#998: a hostile or malformed effort never reaches a request body", () => {
   assert.doesNotThrow(() => JSON.stringify(buildModelRequest(config()).body));
 });
 
+test("#998: the effort is read back from the family's OWN wire field", () => {
+  // OpenAI: `reasoning_effort` rides the body verbatim.
+  const openai = buildModelRequest(config({ reasoningEffort: "medium" }));
+  assert.equal(wireEffortOf(openai), "medium");
+  assert.equal(wireEffortOf(buildModelRequest(config())), "", "no effort configured, none on the wire");
+
+  // Anthropic: `output_config.effort`, only under the operator's opt-in.
+  const anthropic = buildModelRequest(config({
+    apiFormat: "anthropic",
+    reasoningEffort: "high",
+    anthropicEffortSupported: true,
+  }));
+  assert.equal(wireEffortOf(anthropic), "high");
+  assert.equal(
+    wireEffortOf(buildModelRequest(config({ apiFormat: "anthropic", reasoningEffort: "high" }))),
+    "",
+    "no opt-in, no effort on the Anthropic wire",
+  );
+
+  // The families are mutually exclusive on the wire...
+  assert.equal("output_config" in (openai.body as object), false);
+  assert.equal("reasoning_effort" in (anthropic.body as object), false);
+  // ...so the FAMILY decides which field is read: a body that (impossibly)
+  // carried both still answers with its own family's field.
+  const mixed = {
+    endpointPath: "/chat/completions",
+    body: { reasoning_effort: "low", output_config: { effort: "high" } },
+  } as unknown as TransportWirePayload;
+  assert.equal(wireEffortOf(mixed), "low");
+});
+
 test("request construction is provider-neutral: no branching on model names", () => {
   const a = buildModelRequest(config({ model: "gpt-9-mini" }));
   const b = buildModelRequest(config({ model: "qwen3-local@proxy" }));
@@ -427,4 +458,71 @@ test("the strict verdict schema requires every property (OpenAI strict mode)", (
     (dispositions.items.properties.status as { enum: string[] }).enum,
     ["satisfied", "not_applicable", "unresolved"],
   );
+});
+
+// ── #1368: responseSchema — the caller's own schema instead of the verdict ─
+
+test("#1368: an OpenAI json_schema request with responseSchema carries the caller's schema, not the verdict's", () => {
+  const scorerSchema = { type: "object", properties: { score: { type: "integer" } }, required: ["score"], additionalProperties: false };
+  const payload = buildModelRequest(config({ responseFormat: "json_schema", responseSchema: scorerSchema }));
+  const body = payload.body as unknown as Record<string, unknown>;
+  assert.deepEqual(body.response_format, {
+    type: "json_schema",
+    json_schema: { name: "confidence_review", strict: true, schema: scorerSchema },
+  });
+  // The verdict schema never leaks.
+  assert.equal(JSON.stringify(body).includes("pr_review"), false);
+  assert.equal(JSON.stringify(body).includes("review_markdown"), false);
+});
+
+test("#1368: responseSchema absent keeps the OpenAI verdict schema byte-for-byte", () => {
+  const withSchema = buildModelRequest(config({ responseFormat: "json_schema" }));
+  assert.deepEqual(
+    (withSchema.body as unknown as Record<string, unknown>).response_format,
+    OPENAI_VERDICT_JSON_SCHEMA,
+  );
+  // And json_object ignores the schema entirely.
+  const jsonObject = buildModelRequest(config({ responseFormat: "json_object", responseSchema: { type: "object" } }));
+  assert.deepEqual(
+    (jsonObject.body as unknown as Record<string, unknown>).response_format,
+    { type: "json_object" },
+  );
+});
+
+test("#1368: an Anthropic json_schema request with responseSchema carries it inside output_config.format", () => {
+  const scorerSchema = {
+    type: "object",
+    properties: { score: { type: "integer" }, risk: { type: "string" } },
+    required: ["score", "risk"],
+    additionalProperties: false,
+  };
+  const payload = buildModelRequest(config({
+    apiFormat: "anthropic",
+    responseFormat: "json_schema",
+    anthropicStructuredOutputSupported: true,
+    responseSchema: scorerSchema,
+  }));
+  const body = payload.body as unknown as Record<string, unknown>;
+  assert.deepEqual((body.output_config as Record<string, unknown>).format, {
+    type: "json_schema",
+    schema: scorerSchema,
+  });
+  assert.equal(JSON.stringify(body).includes("verdict"), false);
+  assert.equal(JSON.stringify(body).includes("response_format"), false);
+});
+
+test("#1368: an unasserted or off-format Anthropic request ignores responseSchema (byte-compatible)", () => {
+  const scorerSchema = { type: "object", properties: {}, required: [], additionalProperties: false };
+  // No structured-output opt-in: nothing is sent, schema or not.
+  assert.deepEqual(
+    buildModelRequest(config({ apiFormat: "anthropic", responseFormat: "json_schema", responseSchema: scorerSchema })),
+    buildModelRequest(config({ apiFormat: "anthropic", responseFormat: "off" })),
+  );
+  // Opt-in but responseFormat off/json_object: still nothing.
+  for (const responseFormat of ["off", "json_object"] as const) {
+    assert.deepEqual(
+      buildModelRequest(config({ apiFormat: "anthropic", responseFormat, anthropicStructuredOutputSupported: true, responseSchema: scorerSchema })),
+      buildModelRequest(config({ apiFormat: "anthropic", responseFormat: "off" })),
+    );
+  }
 });

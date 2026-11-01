@@ -26,6 +26,10 @@ export const BOOLEAN_INPUTS = new Set([
   "ai-anthropic-structured-output-support",
   "ai-smart-anthropic-structured-output-support",
   "ai-fallback-anthropic-structured-output-support",
+  // #1368: the confidence scorer's own capability assertions. Operator-only,
+  // never inherited from any other lane, and never repo-configurable.
+  "ai-confidence-anthropic-effort-support",
+  "ai-confidence-structured-output-support",
 ]);
 
 export const INTEGER_INPUTS = new Set([
@@ -44,6 +48,12 @@ export const INTEGER_INPUTS = new Set([
   "ai-fallback-connect-timeout-sec", "ci-timeout-sec", "ci-interval-sec",
   // #1073: the confidence scorer's request timeout is a positive integer.
   "ai-confidence-timeout-sec",
+  // #1368: the confidence scorer's token budgets. All positive integers;
+  // ai-confidence-model-context-tokens defaults to empty (unknown) and the
+  // others have non-empty defaults resolved by the routing layer.
+  "ai-confidence-max-tokens",
+  "ai-confidence-prompt-tokens",
+  "ai-confidence-model-context-tokens",
 ]);
 
 export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
@@ -112,6 +122,10 @@ export const POSITIVE_INTEGER_INPUTS = new Set([
   "ai-connect-timeout-sec", "ai-fallback-request-timeout-sec", "ai-fallback-connect-timeout-sec", "ci-timeout-sec",
   "ci-interval-sec",
   "ai-confidence-timeout-sec",
+  // #1368: same positive-integer rule for the scorer's token budgets.
+  "ai-confidence-max-tokens",
+  "ai-confidence-prompt-tokens",
+  "ai-confidence-model-context-tokens",
 ]);
 
 for (const id of ["repo-map-max-bytes", "pr-thread-max-bytes", "deep-review-corpus-max-bytes"]) {

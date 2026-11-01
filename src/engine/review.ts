@@ -43,7 +43,7 @@ import {
 } from "../context/index.js";
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
-import { classifyPr, classificationToArtifact } from "../classification/classify.js";
+import { classifyPr, classificationToArtifact, DEPENDENCY_UPDATE_KINDS } from "../classification/classify.js";
 import { resolveReviewRoute, resolveTierProfiles, resolveConfidenceProfile, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
 import { buildSpecialistCorpus } from "../specialists/corpus.js";
@@ -481,6 +481,21 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
     await cancellation.finalize();
     cancellation.dispose();
   }
+}
+
+/** #1380 budget priority: on a dependency update the optional claim
+ * pre-pass must never compete ahead of the mandatory dependency-evidence
+ * obligations (#1379 provenance/release-delta/security work), so its launch
+ * is gated on the evidence phase settling. The evidence promise never
+ * rejects (the phase catches internally); the pass-through rejection handler
+ * keeps that fail-soft property explicit. Non-dependency PRs launch
+ * concurrently, unchanged. */
+export function claimsPrepassGate(
+  dependencyUpdate: boolean,
+  evidencePhase: Promise<unknown>,
+): Promise<void> {
+  if (!dependencyUpdate) return Promise.resolve();
+  return evidencePhase.then(() => undefined, () => undefined);
 }
 
 /** review.sh `run_review`: the pipeline body. Cancellation boundaries are the
@@ -1099,11 +1114,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   let corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
   ws.write("review-corpus.truncated.md", ws.read(corpusResult.outputName) ?? new Uint8Array(0));
 
-  // ── Claim falsification pre-pass (#785), in flight with the other gates ──
+  // ── Claim falsification pre-pass (#785) ────────────────────────────────
   // Fail-soft: any failure leaves claim-falsification.md empty and the
   // review proceeds unchanged. Deterministic scan first; the bounded model
   // pass on the primary route always runs when configured and merges on top
-  // of the scan's claims (#898).
+  // of the scan's claims (#898). Launched after the evidence phase has
+  // settled — on a dependency update the ordering is a hard budget-priority
+  // requirement (#1380), enforced by claimsPrepassGate below.
   ws.write("claim-falsification.md", new Uint8Array(0));
   let claimsPromise: Promise<void> = Promise.resolve();
   if ((env.CLAIM_FALSIFICATION ?? "false").toLowerCase() === "true") {
@@ -1121,11 +1138,22 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     const claimExtra = profiles.primary.baseUrl && profiles.primary.model
       ? extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "")
       : undefined;
-    claimsPromise = runClaimFalsificationPass({
+    // #1380 budget priority: on a dependency update the optional claim
+    // pre-pass must never start ahead of the mandatory dependency-evidence
+    // obligations (#1379 provenance/release-delta/security), which run in and
+    // after the evidence phase — so the pre-pass launches only once the
+    // evidence phase has settled. Fail-soft: that promise never rejects (the
+    // phase catches internally), and non-dependency PRs keep the concurrent
+    // launch unchanged.
+    claimsPromise = claimsPrepassGate(
+      DEPENDENCY_UPDATE_KINDS.has(classification.prKind),
+      evidencePromise,
+    ).then(() => runClaimFalsificationPass({
       title: String(pr.title ?? ""),
       body: String(pr.body ?? ""),
       files: safeJson(ws.read("pr-files.json")),
       diff: (ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? ""),
+      dependencyUpdate: DEPENDENCY_UPDATE_KINDS.has(classification.prKind),
       model:
         profiles.primary.baseUrl && profiles.primary.model
           ? {
@@ -1156,7 +1184,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
               }),
             }
           : undefined,
-    })
+    }))
       .then((result) => {
         const section =
           result.status === "ok"
@@ -2001,6 +2029,27 @@ secrets: [profiles.primary.apiKey],
   // A run whose publish step is skipped still gets no privileged scorer call.
   const reviewWillPublish = publishStepRuns(env.PUBLISH_MODE);
   const confidenceProfile = confidenceResolution.profile;
+  // #1368: additive provenance for the confidence-score.json artifact — what
+  // the scorer's request was budgeted/asserted to carry. Included whenever
+  // the profile was enabled (scored and unscored paths alike); the disabled
+  // path writes no artifact at all.
+  //
+  // #998's truth-telling rule: `reasoning_effort_sent` is a WIRE fact, not a
+  // config fact. The scorer's outcome is the authority for it — the effort is
+  // read back from the body the transport sent — so a path that sent no
+  // request at all (the publish gates below, or the scorer's own pre-wire
+  // refusals) records false even when the configuration named an effort. A
+  // request the transport sent but the provider never answered still counts
+  // as sent: the bytes carried the effort.
+  const confidenceProvenance = (effortSent: boolean): ConfidenceRequestProvenance | undefined =>
+    confidenceProfile.enabled ? {
+      max_tokens: confidenceProfile.maxTokens,
+      prompt_tokens: confidenceProfile.promptTokens,
+      model_context_tokens: confidenceProfile.modelContextTokens,
+      reasoning_effort_sent: effortSent,
+      anthropic_effort_support: confidenceProfile.anthropicEffortSupported,
+      structured_output_support: confidenceProfile.structuredOutputSupported,
+    } : undefined;
   // #1155: the proof-context pins the scorer call is anchored to. An empty
   // one means the score would grade content (or an outcome) this run could
   // not identify — strictly worse than a low-confidence score, an unanchored
@@ -2033,14 +2082,14 @@ secrets: [profiles.primary.apiKey],
     // tell "the publish step was skipped" from "the scorer call failed".
     confidenceResult = unscoredConfidenceResult("not_published");
     removeConfidenceWireArtifacts(ws);
-    writeConfidenceScoreArtifact(ws, confidenceResult);
+    writeConfidenceScoreArtifact(ws, confidenceResult, undefined, confidenceProvenance(false));
     log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else if (analysisEngine === MODEL_UNAVAILABLE_ENGINE || !(outputVerdict === "approve" || outputVerdict === "request_changes")) {
     // No real model review happened (a model-failure notice, or no verdict at
     // all): fail to unscored WITHOUT calling the model.
     confidenceResult = unscoredConfidenceResult("incomplete_review");
     removeConfidenceWireArtifacts(ws);
-    writeConfidenceScoreArtifact(ws, confidenceResult);
+    writeConfidenceScoreArtifact(ws, confidenceResult, undefined, confidenceProvenance(false));
     log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else if (unresolvedProofPins.length > 0) {
     // #1155: a required proof-context pin did not resolve. The prompt would
@@ -2051,7 +2100,7 @@ secrets: [profiles.primary.apiKey],
     // diagnostic (the cause's own machine tokens, no untrusted content).
     confidenceResult = unscoredConfidenceResult("incomplete_proof_context");
     removeConfidenceWireArtifacts(ws);
-    writeConfidenceScoreArtifact(ws, confidenceResult, `unresolved proof-context pins: ${unresolvedProofPins.join(",")}`);
+    writeConfidenceScoreArtifact(ws, confidenceResult, `unresolved proof-context pins: ${unresolvedProofPins.join(",")}`, confidenceProvenance(false));
     log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else {
     // #1140 review: every credential configured for this run, in ONE place.
@@ -2079,6 +2128,9 @@ secrets: [profiles.primary.apiKey],
       requiredChecks: outputRequiredChecks,
       coverage: reviewCoverage,
       secrets: confidenceSecrets,
+      // #1368: the profile's overall prompt budget bounds the assembled
+      // prompt (bytes/4 estimate) with explicit in-band truncation.
+      promptTokens: confidenceProfile.promptTokens,
     });
     let confidenceOutcome: Awaited<ReturnType<typeof runConfidenceScorer>>;
     try {
@@ -2113,6 +2165,11 @@ secrets: [profiles.primary.apiKey],
         // straddling the 300-char boundary cannot leave a partial prefix in
         // the artifact or the log line. Masking AFTER truncation did.
         diagnostic: maskDiagnostic(cause instanceof Error ? cause.message : String(cause), confidenceSecrets),
+        // A crash inside the scorer leaves the dispatch state unknown: the
+        // artifact claims no effort was sent (#998: report what was SENT,
+        // never what the config named — and a claim it cannot back is not a
+        // claim).
+        wireEffort: "",
       };
     }
     // #1140 review: model-authored text (reason, concern file/evidence) is
@@ -2165,7 +2222,7 @@ secrets: [profiles.primary.apiKey],
     };
     // Persist the sanitized artifacts alongside ai-output.json /
     // review-coverage.json.
-    writeConfidenceScoreArtifact(ws, confidenceResult, maskConfidenceText(confidenceOutcome.diagnostic));
+    writeConfidenceScoreArtifact(ws, confidenceResult, maskConfidenceText(confidenceOutcome.diagnostic), confidenceProvenance(confidenceOutcome.wireEffort !== ""));
     if (confidenceOutcome.requestPayload !== null) {
       // #1140 review: raw provider/agent JSON goes to disk through
       // `redactTextDeep`, not `maskKnownSecretsDeep` — configured-value
@@ -2659,8 +2716,26 @@ function removeConfidenceWireArtifacts(ws: RunWorkspace): void {
  * (`CONFIDENCE_RUBRIC_VERSION`). That version IS the migration marker: a
  * version-1 artifact (no `rubric` field) is a pre-#1369 prose-quality
  * confidence grade, and consumers must never reinterpret it as a
- * merge-readiness verifier result — the two semantics are not comparable. */
-function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult, diagnostic?: string): void {
+ * merge-readiness verifier result — the two semantics are not comparable.
+ *
+ * #1368: `provenance` is an ADDITIVE record of the request budgets and
+ * capability assertions the enabled profile resolved; absent when disabled,
+ * and every pre-existing key stays byte-for-byte as before. */
+interface ConfidenceRequestProvenance {
+  max_tokens: number;
+  prompt_tokens: number;
+  model_context_tokens: number;
+  reasoning_effort_sent: boolean;
+  anthropic_effort_support: boolean;
+  structured_output_support: boolean;
+}
+
+function writeConfidenceScoreArtifact(
+  ws: RunWorkspace,
+  result: ConfidenceResult,
+  diagnostic?: string,
+  provenance?: ConfidenceRequestProvenance,
+): void {
   ws.write("confidence-score.json", Buffer.from(`${pyJsonDumps({
     version: 2,
     rubric: CONFIDENCE_RUBRIC_VERSION,
@@ -2683,6 +2758,7 @@ function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult
     // stays operator-visible instead of vanishing silently.
     parser_notes: result.parserNotes,
     ...(diagnostic !== undefined && diagnostic !== "" ? { diagnostic } : {}),
+    ...(provenance !== undefined ? { request: provenance } : {}),
   })}\n`, "utf8"));
 }
 
