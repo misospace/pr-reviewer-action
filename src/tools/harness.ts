@@ -62,6 +62,7 @@ import {
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import {
+  DEPENDENCY_EVIDENCE_OBLIGATIONS,
   DEPENDENCY_EVIDENCE_RESERVE,
   STOP_BUDGET,
   STOP_REQUEST_ERROR,
@@ -1604,11 +1605,17 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         ...(meta.max_conversation_tokens !== undefined ? { max_conversation_tokens: meta.max_conversation_tokens } : {}),
         // #1379: budget provenance for the dependency-evidence reserve —
         // present (0) for every loop run; the key appears in the artifact
-        // whenever the raw meta carries it. The attempt/refusal counters
-        // mirror the reserve's enforcement outcome.
+        // whenever the raw meta carries it. The per-obligation counters
+        // (blocker 5728634290) mirror the reserve's enforcement outcome:
+        // attempts/credits track what the evidence calls actually covered,
+        // released says whether the window was open at loop end.
         ...(meta.dependency_evidence_reserve !== undefined ? { dependency_evidence_reserve: meta.dependency_evidence_reserve } : {}),
         ...(meta.dependency_evidence_attempted !== undefined ? { dependency_evidence_attempted: meta.dependency_evidence_attempted } : {}),
         ...(meta.dependency_evidence_refusals !== undefined ? { dependency_evidence_refusals: meta.dependency_evidence_refusals } : {}),
+        ...(meta.dependency_evidence_required !== undefined ? { dependency_evidence_required: meta.dependency_evidence_required } : {}),
+        ...(meta.dependency_evidence_attempts !== undefined ? { dependency_evidence_attempts: meta.dependency_evidence_attempts } : {}),
+        ...(meta.dependency_evidence_released !== undefined ? { dependency_evidence_released: meta.dependency_evidence_released } : {}),
+        ...(meta.dependency_evidence_credits !== undefined ? { dependency_evidence_credits: meta.dependency_evidence_credits } : {}),
       },
       usage: {
         tool_calls_issued: result.planned_request_count ?? 0,
@@ -2078,7 +2085,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.maxRequests,
   );
   if (priorityEvidenceReserve > 0) {
-    log(`  dependency-evidence reserve: ${priorityEvidenceReserve} tool request(s)`);
+    log(
+      `  dependency-evidence reserve: ${priorityEvidenceReserve} tool request(s)` +
+        `, ${Math.min(DEPENDENCY_EVIDENCE_OBLIGATIONS.length, priorityEvidenceReserve)} obligation(s)`,
+    );
   }
   // #1198: a true whole-exchange deadline for EITHER tier, taken once here —
   // before the MCP chain and every turn — so pre-loop setup and an unclamped
@@ -2482,12 +2492,17 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // #1379: budget provenance for the dependency-evidence reserve — always
     // present (0 when the PR did not classify into a dependency-evidence
     // family); the telemetry budget block mirrors it conditionally. The
-    // enforceability counters ride alongside: whether the reserved tail was
-    // ever released by an attempted upstream-evidence call, and how many
-    // unrelated calls the driver refused while it was unattempted.
+    // enforceability counters ride alongside (blocker 5728634290): the
+    // obligations the reserve committed to, the evidence calls executed,
+    // the obligations credited from those calls' own targets, and whether
+    // the window was released at loop end.
     dependency_evidence_reserve: outcome.priorityEvidenceReserve,
     dependency_evidence_attempted: outcome.priorityEvidenceAttempted,
     dependency_evidence_refusals: outcome.priorityEvidenceRefusals,
+    dependency_evidence_required: outcome.priorityEvidenceRequired,
+    dependency_evidence_attempts: outcome.priorityEvidenceAttempts,
+    dependency_evidence_released: outcome.priorityEvidenceReleased,
+    dependency_evidence_credits: outcome.priorityEvidenceCredits,
     // #1199: per-round latency/usage records (persisted into tool_loop_telemetry
     // and consumed/nulled with the rest of this meta by buildToolLoopTelemetry).
     round_telemetry: roundTelemetry,
@@ -2985,13 +3000,17 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
               anthropicEffortSupported: anthropicEffort,
               summarizeFn,
               timeFn,
-              // #1379: the obligation state carries across the repair seam.
-              // When the main loop attempted no upstream-evidence call, its
+              // #1379 (blocker 5728634290): the per-obligation state carries
+              // across the repair seam. When the main loop released the
+              // window (every tracked obligation credited, or the attempts
+              // cap), the continuation runs unreserved; otherwise its
               // intact reserved tail IS what this continuation is being
               // handed, so the window enforcement stays on and the repair
-              // cannot spend the reserve on unrelated calls either. Once the
-              // obligation was attempted, the continuation runs unreserved.
-              priorityEvidenceReserve: outcome.priorityEvidenceAttempted ? 0 : priorityEvidenceReserve,
+              // cannot spend it on unrelated calls either. The main loop's
+              // credits seed the continuation so an obligation the main
+              // loop already covered is never required twice.
+              priorityEvidenceReserve: outcome.priorityEvidenceReleased ? 0 : priorityEvidenceReserve,
+              priorityEvidenceCredits: outcome.priorityEvidenceCredits,
               // #1198: the repair round shares the ORIGINAL run's absolute
               // deadline — the allowance above is a share, never an extension.
               wallClockDeadline: deadline,
@@ -3015,16 +3034,33 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             log(`  native_loop: trace-gap repair round failed (${maskKnownSecrets(message, harnessSecrets)}) — keeping the original verdict`);
           }
           if (repair !== null) {
-            // #1379: the obligation state is run-wide. An evidence attempt in
-            // the repair counts toward the artifact's dependency-evidence
-            // provenance, and its window refusals join the run's count, so
-            // the telemetry never claims an unattempted obligation after the
-            // continuation fetched upstream evidence.
+            // #1379 (blocker 5728634290): the obligation state is run-wide.
+            // An evidence attempt in the repair counts toward the artifact's
+            // dependency-evidence provenance, its window refusals and
+            // attempts join the run's counts, its released flag ORs in, and
+            // the credits are the union in canonical order, so the telemetry
+            // never claims outstanding obligations the continuation already
+            // covered. `required` describes the reserve the run committed to
+            // and stays unchanged.
             const reserveMeta = input.result.tool_loop_meta;
             if (reserveMeta !== null && reserveMeta !== undefined) {
               if (repair.priorityEvidenceAttempted) reserveMeta.dependency_evidence_attempted = true;
               reserveMeta.dependency_evidence_refusals =
                 Number(reserveMeta.dependency_evidence_refusals ?? 0) + repair.priorityEvidenceRefusals;
+              reserveMeta.dependency_evidence_attempts =
+                Number(reserveMeta.dependency_evidence_attempts ?? 0) + repair.priorityEvidenceAttempts;
+              if (repair.priorityEvidenceReleased) reserveMeta.dependency_evidence_released = true;
+              const runCredits = new Set<string>([
+                ...(Array.isArray(reserveMeta.dependency_evidence_credits)
+                  ? (reserveMeta.dependency_evidence_credits as unknown[]).filter(
+                      (id): id is string => typeof id === "string",
+                    )
+                  : []),
+                ...repair.priorityEvidenceCredits,
+              ]);
+              reserveMeta.dependency_evidence_credits = DEPENDENCY_EVIDENCE_OBLIGATIONS.filter(
+                (obligation) => runCredits.has(obligation),
+              );
             }
             // Fold the repair's executed calls into the harness trace so the
             // artifact shows everything the reviewer actually read. The

@@ -35,6 +35,10 @@ function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
     priorityEvidenceReserve: 0,
     priorityEvidenceAttempted: false,
     priorityEvidenceRefusals: 0,
+    priorityEvidenceRequired: 0,
+    priorityEvidenceCredits: [],
+    priorityEvidenceAttempts: 0,
+    priorityEvidenceReleased: false,
     ...overrides,
   };
 }

@@ -11,8 +11,10 @@ import {
   STOP_WALL_CLOCK,
   TOOL_LOOP_ROUNDS_CEILING,
   adaptiveLoopBudgets,
+  dependencyEvidenceObligationsForCall,
   driveToolLoop,
   extractToolCalls,
+  type DependencyEvidenceObligation,
   type DriveToolLoopOptions,
   type NativeLoopRoundTelemetry,
   type ToolTurnSignal,
@@ -1021,14 +1023,15 @@ function recordingLoop(responses: unknown[]) {
   return { postFn, executeFn, timeFn, executedCalls };
 }
 
-test("#1379: the reserve refuses optional calls inside the window until evidence is attempted", async () => {
+test("#1379: the reserve refuses optional calls inside the window until the obligations are met", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
   // Budget 6, reserve 4: rounds 1-2 execute outside the window (left 6, 5);
   // round 3 requests an optional call inside the window with no evidence
   // attempt yet — the driver refuses it and the reserved requests survive;
-  // round 4's web_fetch attempts the obligation; round 5's optional call is
-  // allowed again because the obligation state has advanced.
+  // round 4's web_fetch of release notes covers ONLY release_delta
+  // (blocker 5728634290 re-pin: one partial fetch no longer releases the
+  // window), so round 5's optional call is still refused.
   const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
     openAiCall("c1", "git_status_short", "{}"),
     openAiCall("c2", "git_diff_stat", "{}"),
@@ -1045,13 +1048,16 @@ test("#1379: the reserve refuses optional calls inside the window until evidence
     priorityEvidenceReserve: 4,
   });
   assert.equal(outcome.stopReason, STOP_MODEL_DONE);
-  // The refused read_file never reached the executor; the reserved tail was
-  // spent on the evidence call instead of optional archaeology.
-  assert.deepEqual(executedCalls.map((c) => c.tool), ["git_status_short", "git_diff_stat", "web_fetch", "git_log"]);
+  // The refused read_file and git_log never reached the executor; the
+  // reserved tail was spent on the evidence call instead of optional
+  // archaeology.
+  assert.deepEqual(executedCalls.map((c) => c.tool), ["git_status_short", "git_diff_stat", "web_fetch"]);
   assert.equal(outcome.priorityEvidenceAttempted, true);
-  assert.equal(outcome.priorityEvidenceRefusals, 1);
-  // 4 executed of 6: the refusal consumed nothing.
-  assert.equal(outcome.requestsRemaining, 2);
+  assert.equal(outcome.priorityEvidenceRefusals, 2);
+  // 3 executed of 6: the refusals consumed nothing.
+  assert.equal(outcome.requestsRemaining, 3);
+  assert.deepEqual(outcome.priorityEvidenceCredits, ["release_delta"]);
+  assert.equal(outcome.priorityEvidenceReleased, false);
   // The refusal is a model-facing error result the model can act on.
   const transcript = JSON.stringify(conversation.toRequestPayload("openai", "m", {}));
   assert.ok(transcript.includes("Reserved dependency-evidence budget"));
@@ -1085,6 +1091,12 @@ test("#1379: a model that never attempts evidence can never spend the reserved t
   assert.equal(executedCalls.length, 2);
   assert.equal(outcome.priorityEvidenceAttempted, false);
   assert.equal(outcome.priorityEvidenceRefusals, 6);
+  // Blocker 5728634290 re-pin: the per-obligation counters tell the same
+  // story — nothing credited, nothing attempted, the window never opened.
+  assert.equal(outcome.priorityEvidenceRequired, 3);
+  assert.equal(outcome.priorityEvidenceAttempts, 0);
+  assert.deepEqual(outcome.priorityEvidenceCredits, []);
+  assert.equal(outcome.priorityEvidenceReleased, false);
   // The exact failure this rule exists to prevent no longer happens: budget
   // exhaustion with the required evidence unresolved is impossible while the
   // obligation is unattempted — the tail simply cannot be consumed.
@@ -1098,11 +1110,15 @@ test("#1379: a model that never attempts evidence can never spend the reserved t
   assert.match(transcript, /web_search when that tool is offered/);
 });
 
-test("#1379: an early evidence attempt releases the window for optional work", async () => {
+test("#1379: an evidence call covering every tracked obligation releases the window; a partial one does not", async () => {
+  // Blocker 5728634290 re-pin: the early release now comes from CREDITING
+  // every tracked obligation, not from any single attempt. One call whose
+  // target spans all three obligations (publisher host + security + changelog
+  // tokens) releases the window for optional work…
   const conversation = new Conversation();
   conversation.addUser("corpus");
   const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
-    openAiCall("c1", "web_fetch", '{"url":"https://example.test/releases"}'),
+    openAiCall("c1", "web_fetch", '{"url":"https://pypi.org/security/changelog"}'),
     openAiCall("c2", "read_file", '{"path":"a.ts"}'),
     openAiCall("c3", "git_log", "{}"),
     openAiText("done"),
@@ -1115,29 +1131,65 @@ test("#1379: an early evidence attempt releases the window for optional work", a
     priorityEvidenceReserve: 4,
   });
   assert.equal(outcome.stopReason, STOP_MODEL_DONE);
-  // c3 lands inside the window (requestsLeft 4) but the obligation was
-  // attempted in round 1, so nothing is refused.
+  // c3 lands inside the window (requestsLeft 4) but every tracked obligation
+  // was credited in round 1, so nothing is refused.
   assert.deepEqual(executedCalls.map((c) => c.tool), ["web_fetch", "read_file", "git_log"]);
   assert.equal(outcome.priorityEvidenceAttempted, true);
   assert.equal(outcome.priorityEvidenceRefusals, 0);
+  assert.deepEqual(outcome.priorityEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
+  assert.equal(outcome.priorityEvidenceReleased, true);
+
+  // …while a single release-notes fetch credits ONLY release_delta: the
+  // optional call inside the window is now refused instead of riding the
+  // old one-bit release.
+  const conversation2 = new Conversation();
+  conversation2.addUser("corpus");
+  const loop2 = recordingLoop([
+    openAiCall("c1", "web_fetch", '{"url":"https://example.test/releases"}'),
+    openAiCall("c2", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c3", "git_log", "{}"),
+    openAiText("done"),
+  ]);
+  const outcome2 = await driveToolLoop(conversation2, loop2.postFn, loop2.executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    priorityEvidenceReserve: 4,
+  });
+  assert.equal(outcome2.stopReason, STOP_MODEL_DONE);
+  // c2 executes (requestsLeft 5, outside the window); c3 lands inside it and
+  // is refused: provenance and security_advisory are still outstanding.
+  assert.deepEqual(loop2.executedCalls.map((c) => c.tool), ["web_fetch", "read_file"]);
+  assert.equal(outcome2.priorityEvidenceRefusals, 1);
+  assert.deepEqual(outcome2.priorityEvidenceCredits, ["release_delta"]);
+  assert.equal(outcome2.priorityEvidenceReleased, false);
 });
 
-test("#1379: a failed evidence call still counts as an attempt (no lockout)", async () => {
+test("#1379: a failed evidence call still credits its obligation (no lockout)", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
-  // The executor refuses the fetch (e.g. host allowlist). The model has done
-  // what it can: it must not be locked out of the reserved tail forever.
+  // The executor refuses every fetch (e.g. host allowlist). Crediting is
+  // attempt-based (blocker 5728634290): each failing fetch still covers the
+  // obligations its own target named, so a model that has done what it can
+  // is never locked out of the reserved tail.
   let responseIndex = 0;
   const responses = [
-    openAiCall("c1", "web_fetch", '{"url":"https://blocked.test/releases"}'),
+    openAiCall("c1", "web_fetch", '{"url":"https://blocked.test/security/changelog"}'),
     openAiCall("c2", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c3", "web_fetch", '{"url":"https://blocked.test/homepage"}'),
+    openAiCall("c4", "git_log", "{}"),
     openAiText("done"),
   ];
+  const executedStatuses: string[] = [];
   const timeFn = () => Number.MAX_SAFE_INTEGER / 2;
   const outcome = await driveToolLoop(
     conversation,
     async () => responses[responseIndex++],
-    async (tool: string) => ({ tool, status: "error", result: { error: "host not allowed" } }),
+    async (tool: string) => {
+      executedStatuses.push(tool);
+      return { tool, status: "error", result: { error: "host not allowed" } };
+    },
     {
       apiFormat: "openai",
       model: "m",
@@ -1148,12 +1200,22 @@ test("#1379: a failed evidence call still counts as an attempt (no lockout)", as
   );
   assert.equal(outcome.priorityEvidenceAttempted, true);
   assert.equal(outcome.priorityEvidenceRefusals, 0);
-  assert.equal(outcome.executed.length, 2);
+  assert.equal(outcome.executed.length, 4);
+  // c1 credited security_advisory + release_delta and c3 credited
+  // provenance — all from ERROR-status calls — so the window released and
+  // the inside-window optional calls executed anyway.
+  assert.equal(outcome.priorityEvidenceAttempts, 2);
+  assert.deepEqual(outcome.priorityEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
+  assert.equal(outcome.priorityEvidenceReleased, true);
+  assert.deepEqual(executedStatuses, ["web_fetch", "read_file", "web_fetch", "git_log"]);
 });
 
-test("#1379: within one round, an evidence call releases later optional calls; the reverse order still refuses", async () => {
+test("#1379: within one round, an evidence call that RELEASES releases later optional calls; the reverse order still refuses", async () => {
   // Evidence FIRST in the same round: both execute (dispositions are decided
-  // in call order, so the flag flips before the optional call is judged).
+  // in call order, so the obligation state flips before the optional call is
+  // judged). Blocker 5728634290 re-pin: the fetch must cover EVERY tracked
+  // obligation — a partial fetch inside the window no longer releases the
+  // later optional call of the same round.
   const conversation = new Conversation();
   conversation.addUser("corpus");
   const responses = [
@@ -1165,7 +1227,7 @@ test("#1379: within one round, an evidence call releases later optional calls; t
           message: {
             content: null,
             tool_calls: [
-              { id: "c3", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://example.test/r"}' } },
+              { id: "c3", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://pypi.org/security/changelog"}' } },
               { id: "c4", type: "function", function: { name: "git_log", arguments: "{}" } },
             ],
           },
@@ -1185,8 +1247,9 @@ test("#1379: within one round, an evidence call releases later optional calls; t
   assert.equal(outcome.priorityEvidenceRefusals, 0);
   assert.equal(outcome.executed.length, 4);
 
-  // Optional FIRST in the same window round: it is refused, and the evidence
-  // call in the same round executes.
+  // Optional FIRST in the same window round: it is refused (the obligations
+  // are unmet at its disposition), and the evidence call in the same round
+  // executes.
   const conversation2 = new Conversation();
   conversation2.addUser("corpus");
   const responses2 = [
@@ -1199,7 +1262,7 @@ test("#1379: within one round, an evidence call releases later optional calls; t
             content: null,
             tool_calls: [
               { id: "c3", type: "function", function: { name: "git_log", arguments: "{}" } },
-              { id: "c4", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://example.test/r"}' } },
+              { id: "c4", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://pypi.org/security/changelog"}' } },
             ],
           },
         },
@@ -1223,13 +1286,15 @@ test("#1379: a reserve-refused call retried after an evidence attempt executes (
   const conversation = new Conversation();
   conversation.addUser("corpus");
   // The refusal must not poison the dedup set: the exact same optional call,
-  // retried once the obligation state advanced, runs for real rather than
-  // being answered from a note about a call that never executed.
+  // retried once the obligation state advanced (blocker 5728634290 re-pin:
+  // the fetch now has to COVER the tracked obligations, not merely be an
+  // attempt), runs for real rather than being answered from a note about a
+  // call that never executed.
   const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
     openAiCall("c1", "git_status_short", "{}"),
     openAiCall("c2", "git_diff_stat", "{}"),
     openAiCall("c3", "read_file", '{"path":"a.ts"}'),
-    openAiCall("c4", "web_fetch", '{"url":"https://example.test/releases"}'),
+    openAiCall("c4", "web_fetch", '{"url":"https://pypi.org/security/changelog"}'),
     openAiCall("c5", "read_file", '{"path":"a.ts"}'),
     openAiText("done"),
   ]);
@@ -1267,4 +1332,353 @@ test("#1379: no reserve keeps every optional call executable in the budget tail"
   assert.equal(outcome.priorityEvidenceRefusals, 0);
   assert.equal(executedCalls.length, 2);
   assert.equal(outcome.stopReason, STOP_BUDGET);
+});
+
+// ── #1379 review blocker 5728634290: per-obligation reserve state ─────────
+
+test("#1379: the reviewer's counterexample — one release-notes fetch no longer unlocks the whole reserved tail", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const executedCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  let responseIndex = 0;
+  const responses = [
+    openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c2", "git_log", "{}"),
+    openAiCall("c3", "web_fetch", '{"url":"https://upstream.test/releases/tag/v1.2.3"}'),
+    openAiCall("c4", "read_file", '{"path":"b.ts"}'),
+    openAiCall("c5", "git_grep", "{}"),
+    openAiCall("c6", "web_fetch", '{"url":"https://osv.dev/vulnerabilities/GHSA-42xa-7z9q"}'),
+    openAiCall("c7", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
+    openAiCall("c8", "git_diff_stat", "{}"),
+    openAiText("done"),
+  ];
+  // The advisories fetch FAILS (host unreachable): a failing fetch is still
+  // an attempt and still credits its obligation.
+  const executeFn = async (tool: string, args: Record<string, unknown>) => {
+    executedCalls.push({ tool, args });
+    if (typeof args.url === "string" && args.url.includes("osv.dev")) {
+      return { tool, status: "error", result: { error: "fetch failed" } };
+    }
+    return { tool, status: "ok", result: {} };
+  };
+  const outcome = await driveToolLoop(
+    conversation,
+    async () => responses[responseIndex++],
+    executeFn,
+    {
+      apiFormat: "openai",
+      model: "m",
+      // Budget 7 (one head request above the 6 the counterexample described,
+      // so the released optional call still fits before the ceiling):
+      // reserve 4, window opens after 3 executed calls.
+      budgets: { ...adaptiveLoopBudgets(4, 7, 120), maxRounds: 20 },
+      timeFn: () => Number.MAX_SAFE_INTEGER / 2,
+      priorityEvidenceReserve: 4,
+    },
+  );
+  // Two optional calls outside the window, then the release-notes fetch
+  // (credits ONLY release_delta), then the two refused local-archaeology
+  // calls, then the failing advisories fetch (credits security_advisory),
+  // then the bare repository root (credits provenance → released), then the
+  // optional call that finally executes.
+  assert.deepEqual(
+    executedCalls.map((c) => `${c.tool}${typeof c.args.path === "string" ? `:${c.args.path}` : ""}`),
+    ["read_file:a.ts", "git_log", "web_fetch", "web_fetch", "web_fetch", "git_diff_stat"],
+  );
+  // The refused calls never reached the executor.
+  assert.ok(!executedCalls.some((c) => c.args.path === "b.ts"));
+  assert.ok(!executedCalls.some((c) => c.tool === "git_grep"));
+  assert.equal(outcome.priorityEvidenceRefusals, 2);
+  // The refusals spent nothing: 6 executed of 7.
+  assert.equal(outcome.requestsRemaining, 1);
+  // Exhaustion while obligations were open is exactly what the enforcement
+  // makes unreachable: the loop ends on the model's own hand.
+  assert.notEqual(outcome.stopReason, STOP_BUDGET);
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.deepEqual(outcome.priorityEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
+  assert.equal(outcome.priorityEvidenceAttempts, 3);
+  assert.equal(outcome.priorityEvidenceReleased, true);
+});
+
+test("#1379: dependencyEvidenceObligationsForCall attributes a call from its own target", () => {
+  // Only the evidence-channel tools attribute at all.
+  assert.deepEqual(dependencyEvidenceObligationsForCall("read_file", { url: "https://pypi.org/project/x" }), []);
+  assert.deepEqual(dependencyEvidenceObligationsForCall("run_command", { query: "osv" }), []);
+  // web_fetch reads args.url, web_search reads args.query; absent/non-string
+  // targets attribute nothing.
+  assert.deepEqual(dependencyEvidenceObligationsForCall("web_fetch", {}), []);
+  assert.deepEqual(dependencyEvidenceObligationsForCall("web_fetch", { url: 42 }), []);
+  assert.deepEqual(dependencyEvidenceObligationsForCall("web_search", {}), []);
+  assert.deepEqual(dependencyEvidenceObligationsForCall("web_search", { query: "" }), []);
+  assert.deepEqual(dependencyEvidenceObligationsForCall("web_fetch", { url: "https://upstream.test/status" }), []);
+  // release_delta tokens (and the spec's deep-path pin: >2 segments on a
+  // source host is NOT a provenance root lookup).
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://upstream.test/releases/tag/v1.2.3" }),
+    ["release_delta"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://github.com/owner/repo/compare/v1...v2" }),
+    ["release_delta"],
+  );
+  // security_advisory tokens.
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://osv.dev/list?q=cve" }),
+    ["security_advisory"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://example.test/security/advisories" }),
+    ["security_advisory"],
+  );
+  // provenance via a bare source-host repository root (≤2 path segments),
+  // including a www-stripped publisher host and a keyword token.
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://github.com/owner/repo" }),
+    ["provenance"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://gitlab.com/owner" }),
+    ["provenance"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://www.npmjs.com/package/left-pad" }),
+    ["provenance"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://artifacthub.io/packages/helm/foo" }),
+    ["provenance"],
+  );
+  // A deeper path on a source host that also names a provenance TOKEN still
+  // credits provenance (the keyword list, not the path rule).
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://example.test/registry" }),
+    ["provenance"],
+  );
+  // Multi-match, projected in canonical order.
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://pypi.org/security/changelog" }),
+    ["provenance", "release_delta", "security_advisory"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_search", { query: "is there a CVE or GHSA for the helm chart bump?" }),
+    ["provenance", "security_advisory"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_search", { query: "nginx release notes changelog" }),
+    ["release_delta"],
+  );
+});
+
+test("#1379: the attempts cap releases the window even with zero credits (no lockout)", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Reserve 3, three fetches of UNATTRIBUTED hosts: nothing is credited, but
+  // the loop spent the whole reserve on evidence attempts, so the window
+  // opens within the tail it reserved and optional work executes again.
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "web_fetch", '{"url":"https://unrelated.test/a"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://elsewhere.test/b"}'),
+    openAiCall("c3", "web_fetch", '{"url":"https://nowhere.test/c"}'),
+    openAiCall("c4", "read_file", '{"path":"a.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    priorityEvidenceReserve: 3,
+  });
+  assert.equal(outcome.priorityEvidenceAttempts, 3);
+  assert.deepEqual(outcome.priorityEvidenceCredits, []);
+  assert.equal(outcome.priorityEvidenceReleased, true);
+  assert.equal(outcome.priorityEvidenceRefusals, 0);
+  assert.deepEqual(executedCalls.map((c) => c.tool), ["web_fetch", "web_fetch", "web_fetch", "read_file"]);
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+});
+
+test("#1379: the reserve commits only the obligations its tail can pay for", async () => {
+  // Reserve 2: tracked = [provenance, release_delta] — a security_advisory
+  // is never required at this reserve, and covering the two tracked
+  // obligations releases the window.
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://upstream.test/releases"}'),
+    openAiCall("c3", "read_file", '{"path":"a.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 4, 120),
+    timeFn,
+    priorityEvidenceReserve: 2,
+  });
+  assert.equal(outcome.priorityEvidenceRequired, 2);
+  assert.deepEqual(outcome.priorityEvidenceCredits, ["provenance", "release_delta"]);
+  // c3 lands inside the window (requestsLeft 2) with every tracked obligation
+  // credited — no advisories call needed.
+  assert.equal(outcome.priorityEvidenceRefusals, 0);
+  assert.equal(outcome.priorityEvidenceReleased, true);
+  assert.equal(executedCalls.length, 3);
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+
+  // Reserve 1: required 1, and ANY single evidence call releases — the
+  // historical one-call release is preserved through the attempts cap.
+  const conversation2 = new Conversation();
+  conversation2.addUser("corpus");
+  const loop2 = recordingLoop([
+    openAiCall("c1", "web_fetch", '{"url":"https://unrelated.test/a"}'),
+    openAiCall("c2", "read_file", '{"path":"a.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome2 = await driveToolLoop(conversation2, loop2.postFn, loop2.executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 3, 120),
+    timeFn,
+    priorityEvidenceReserve: 1,
+  });
+  assert.equal(outcome2.priorityEvidenceRequired, 1);
+  assert.deepEqual(outcome2.priorityEvidenceCredits, []);
+  assert.equal(outcome2.priorityEvidenceAttempts, 1);
+  assert.equal(outcome2.priorityEvidenceReleased, true);
+  assert.equal(outcome2.priorityEvidenceRefusals, 0);
+  assert.deepEqual(loop2.executedCalls.map((c) => c.tool), ["web_fetch", "read_file"]);
+});
+
+test("#1379: redundant same-obligation fetches do not open the window", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Reserve 4, two DIFFERENT release-notes URLs: the second credits nothing
+  // new, so provenance and security_advisory stay outstanding and the
+  // optional call inside the window is still refused.
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "web_fetch", '{"url":"https://upstream.test/releases/tag/v1.0.0"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://upstream.test/releases/tag/v2.0.0"}'),
+    openAiCall("c3", "read_file", '{"path":"a.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    priorityEvidenceReserve: 4,
+  });
+  assert.deepEqual(outcome.priorityEvidenceCredits, ["release_delta"]);
+  assert.equal(outcome.priorityEvidenceAttempts, 2);
+  assert.equal(outcome.priorityEvidenceReleased, false);
+  // c3 lands inside the window (requestsLeft 4) and is refused.
+  assert.equal(outcome.priorityEvidenceRefusals, 1);
+  assert.deepEqual(executedCalls.map((c) => c.tool), ["web_fetch", "web_fetch"]);
+});
+
+test("#1379: priorityEvidenceCredits seeding carries obligations across loops; partial seeds name only the outstanding", async () => {
+  // Full seed (the #1145 repair seam handing a continuation an already
+  // satisfied obligation set): no refusal at all inside the window.
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c2", "read_file", '{"path":"b.ts"}'),
+    openAiCall("c3", "read_file", '{"path":"c.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    priorityEvidenceReserve: 4,
+    priorityEvidenceCredits: ["bogus-id", "security_advisory", "release_delta", "provenance", "release_delta", 42 as unknown as string],
+  });
+  assert.equal(outcome.priorityEvidenceRefusals, 0);
+  assert.equal(outcome.priorityEvidenceReleased, true);
+  assert.deepEqual(outcome.priorityEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
+  assert.equal(executedCalls.length, 3);
+
+  // Partial seed: provenance is already covered, so the window note/refusal
+  // name ONLY the two outstanding obligations and only those calls are
+  // still required.
+  const conversation2 = new Conversation();
+  conversation2.addUser("corpus");
+  const loop2 = recordingLoop([
+    openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c2", "read_file", '{"path":"b.ts"}'),
+    openAiCall("c3", "read_file", '{"path":"c.ts"}'),
+    openAiCall("c4", "web_fetch", '{"url":"https://osv.dev/list"}'),
+    openAiCall("c5", "web_fetch", '{"url":"https://upstream.test/releases"}'),
+    openAiCall("c6", "read_file", '{"path":"d.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome2 = await driveToolLoop(conversation2, loop2.postFn, loop2.executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    priorityEvidenceReserve: 4,
+    priorityEvidenceCredits: ["provenance"],
+  });
+  // c3 lands inside the window and is refused; the refusal names the two
+  // outstanding obligations joined with "and" — and NOT the seeded
+  // provenance one.
+  assert.equal(outcome2.priorityEvidenceRefusals, 1);
+  const transcript = JSON.stringify(conversation2.toRequestPayload("openai", "m", {}));
+  assert.ok(
+    transcript.includes(
+      "still owes the exact old-to-new upstream release delta and upstream security advisories",
+    ),
+  );
+  assert.ok(!transcript.includes("owes upstream publisher/source provenance"));
+  // After the advisories + release-delta fetches the window releases and the
+  // inside-window optional call executes.
+  assert.deepEqual(
+    loop2.executedCalls.map((c) => `${c.tool}${typeof c.args.path === "string" ? `:${c.args.path}` : ""}`),
+    ["read_file:a.ts", "read_file:b.ts", "web_fetch", "web_fetch", "read_file:d.ts"],
+  );
+  assert.deepEqual(outcome2.priorityEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
+  assert.equal(outcome2.priorityEvidenceReleased, true);
+});
+
+test("#1379: the window note names the outstanding obligations and reverts to the budget note after release", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn, payloads } = noteCapturingLoop(
+    [
+      openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+      openAiCall("c2", "read_file", '{"path":"b.ts"}'),
+      openAiCall("c3", "web_fetch", '{"url":"https://pypi.org/security/changelog"}'),
+      openAiCall("c4", "read_file", '{"path":"c.ts"}'),
+      openAiText("done"),
+    ],
+    Array.from({ length: 4 }, () => ({ tool: "t", status: "ok", result: {} })),
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    priorityEvidenceReserve: 4,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  const newestNote = (payload: Record<string, unknown>): string =>
+    (payload.messages as Array<{ content: string }>)
+      .map((m) => m.content)
+      .filter((c) => typeof c === "string" && c.startsWith("[loop budget]"))
+      .at(-1)!;
+  // Round 3 opens the window with nothing credited: the note names ALL
+  // three obligation labels.
+  const windowNote = newestNote(payloads[2]!);
+  assert.ok(windowNote.includes("Only 4 tool request(s) remain"));
+  assert.ok(windowNote.includes("upstream publisher/source provenance"));
+  assert.ok(windowNote.includes("the exact old-to-new upstream release delta"));
+  assert.ok(windowNote.includes("upstream security advisories"));
+  // Round 4: the full-coverage fetch released the window, so the note falls
+  // back to the ordinary budget status.
+  const afterRelease = newestNote(payloads[3]!);
+  assert.ok(afterRelease.includes("[loop budget] 3 of 6 tool request(s)"));
+  assert.ok(!afterRelease.includes("reserved"));
 });

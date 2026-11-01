@@ -2600,10 +2600,16 @@ test("#1379: runToolHarness wires the classification-driven dependency-evidence 
   const telemetryDep = (dep.artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
   assert.equal(telemetryDep.budget?.dependency_evidence_reserve, 4);
   // The enforcement counters mirror the loop's obligation state: this scripted
-  // model stopped before the window, so nothing was attempted or refused.
+  // model stopped before the window, so nothing was attempted, credited, or
+  // refused and the window never opened. The reserve commits all three
+  // obligations (blocker 5728634290).
   assert.equal(telemetryDep.budget?.dependency_evidence_attempted, false);
   assert.equal(telemetryDep.budget?.dependency_evidence_refusals, 0);
-  assert.ok(dep.logs.some((l) => l.includes("dependency-evidence reserve: 4")));
+  assert.equal(telemetryDep.budget?.dependency_evidence_required, 3);
+  assert.equal(telemetryDep.budget?.dependency_evidence_attempts, 0);
+  assert.equal(telemetryDep.budget?.dependency_evidence_released, false);
+  assert.deepEqual(telemetryDep.budget?.dependency_evidence_credits, []);
+  assert.ok(dep.logs.some((l) => l.includes("dependency-evidence reserve: 4 tool request(s)")));
   // app_code classification: reserve 0, no priority note, no reserve in
   // the legacy path.
   const plain = await run("app_code");
@@ -2614,21 +2620,30 @@ test("#1379: runToolHarness wires the classification-driven dependency-evidence 
   assert.equal(telemetryPlain.budget?.dependency_evidence_reserve, 0);
   assert.equal(telemetryPlain.budget?.dependency_evidence_attempted, false);
   assert.equal(telemetryPlain.budget?.dependency_evidence_refusals, 0);
+  // Nothing reserved: the window is trivially open (released) with zero
+  // obligations, zero attempts, and no credits.
+  assert.equal(telemetryPlain.budget?.dependency_evidence_required, 0);
+  assert.equal(telemetryPlain.budget?.dependency_evidence_attempts, 0);
+  assert.equal(telemetryPlain.budget?.dependency_evidence_released, true);
+  assert.deepEqual(telemetryPlain.budget?.dependency_evidence_credits, []);
   assert.ok(!plain.logs.some((l) => l.includes("dependency-evidence reserve")));
 });
 
-test("#1379: the trace-gap repair continuation cannot spend the reserved dependency-evidence tail", async () => {
+test("#1379: the trace-gap repair continuation inherits the credits and cannot spend the reserved tail", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
   fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "image_update", version: 1 }));
-  // Budget 6, reserve 4: the investigation loop executes two optional reads
-  // (left 4) and stops voluntarily — the reserved tail is INTACT and the
-  // obligation unattempted. The probe then asks for a repair round, which is
-  // handed exactly those four requests; the window enforcement must carry
-  // across the seam and refuse its optional read too.
+  // Budget 6, reserve 4: the investigation loop executes one provenance
+  // fetch (internal.test is outside ALLOWED_SOURCE_HOSTS — the refused fetch
+  // still credits the obligation its target names) and one optional read
+  // outside the window (left 4), then stops voluntarily. The window is NOT
+  // released: release_delta and security_advisory stay outstanding, so its
+  // intact reserved tail — seeded with the provenance credit (blocker
+  // 5728634290) — is what the repair continuation is handed, and the window
+  // enforcement must carry across the seam and refuse its optional read too.
   const scripted = [
-    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c1", "web_fetch", '{"url":"https://internal.test/provenance"}'),
     openAiCall("c2", "read_file", '{"path":"other.ts"}'),
     openAiText("done locally"),
     validVerdict(),
@@ -2649,13 +2664,20 @@ test("#1379: the trace-gap repair continuation cannot spend the reserved depende
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
   const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
   assert.equal(telemetry.budget?.dependency_evidence_reserve, 4);
-  assert.equal(telemetry.budget?.dependency_evidence_attempted, false);
-  // 0 refusals in the main loop (its two calls were outside the window) + 1
-  // in the repair continuation, folded into the run-wide counter.
+  // The run-wide fold: attempted ORs in from the main loop, refusals sum
+  // (0 in the main loop — its two calls were outside the window — plus 1 in
+  // the continuation), attempts sum, and the credits are the union of both
+  // loops' credits in canonical order. The window never released: two of
+  // the three tracked obligations stayed uncredited across the seam.
+  assert.equal(telemetry.budget?.dependency_evidence_attempted, true);
   assert.equal(telemetry.budget?.dependency_evidence_refusals, 1);
+  assert.equal(telemetry.budget?.dependency_evidence_required, 3);
+  assert.equal(telemetry.budget?.dependency_evidence_attempts, 1);
+  assert.equal(telemetry.budget?.dependency_evidence_released, false);
+  assert.deepEqual(telemetry.budget?.dependency_evidence_credits, ["provenance"]);
   // The repair read never entered the harness trace.
   const trace = (artifact.tool_calls ?? []) as Array<{ tool: string }>;
-  assert.equal(trace.length, 2);
+  assert.deepEqual(trace.map((c) => c.tool), ["web_fetch", "read_file"]);
 });
 
 test("#1379: a one-request dependency budget reserves its sole request end to end", async () => {
@@ -2700,6 +2722,12 @@ test("#1379: a one-request dependency budget reserves its sole request end to en
   assert.equal(starvedTel.budget?.dependency_evidence_reserve, 1);
   assert.equal(starvedTel.budget?.dependency_evidence_attempted, false);
   assert.equal(starvedTel.budget?.dependency_evidence_refusals, 2);
+  // Reserve 1 commits exactly ONE obligation (provenance) — the tail can
+  // only pay for one — and with nothing attempted it stays closed.
+  assert.equal(starvedTel.budget?.dependency_evidence_required, 1);
+  assert.equal(starvedTel.budget?.dependency_evidence_attempts, 0);
+  assert.equal(starvedTel.budget?.dependency_evidence_released, false);
+  assert.deepEqual(starvedTel.budget?.dependency_evidence_credits, []);
   // Never tool-call-budget-exhausted with the obligation unattempted.
   assert.equal(starvedTel.stop_reason, "model-stopped");
   assert.equal(starvedTel.usage?.requests_remaining_at_stop, 1, "the reserved sole request survived");
@@ -2727,4 +2755,52 @@ test("#1379: a one-request dependency budget reserves its sole request end to en
   assert.equal(evidenceTel.budget?.dependency_evidence_attempted, true);
   assert.equal(evidenceTel.budget?.dependency_evidence_refusals, 1);
   assert.equal(evidenceTel.stop_reason, "tool-call-budget-exhausted");
+  // Reserve 1 keeps the historical one-call release through the attempts
+  // cap: the single evidence call (a refused fetch that would credit only
+  // release_delta, outside the tracked [provenance] prefix — so nothing is
+  // credited) hits the cap and opens the window.
+  assert.equal(evidenceTel.budget?.dependency_evidence_required, 1);
+  assert.equal(evidenceTel.budget?.dependency_evidence_attempts, 1);
+  assert.equal(evidenceTel.budget?.dependency_evidence_released, true);
+  assert.deepEqual(evidenceTel.budget?.dependency_evidence_credits, []);
+});
+
+test("#1379: a release-notes-only fetch inside the window leaves the artifact reporting the open obligations", async () => {
+  // End-to-end pin of the blocker 5728634290 semantics through the real
+  // harness executor: the scripted model spends one window request on
+  // release notes (example.test is outside ALLOWED_SOURCE_HOSTS — the
+  // refused fetch still credits release_delta from its own target), and its
+  // next optional read is REFUSED because provenance and security_advisory
+  // are still outstanding.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "image_update", version: 1 }));
+  // TOOL_MAX_REQUESTS 5 → reserve 4: the window opens once 1 request has
+  // been spent, so the fetch and the optional read both land inside it.
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://example.test/releases"}'),
+    openAiCall("c3", "read_file", '{"path":"notes.md"}'),
+    openAiText("done locally"),
+    validVerdict(),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_MAX_REQUESTS: "5", SYSTEM_PROMPT: "You are the reviewer." },
+    transport: async () => scripted[n++],
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetry.budget?.dependency_evidence_reserve, 4);
+  assert.deepEqual(telemetry.budget?.dependency_evidence_credits, ["release_delta"]);
+  assert.equal(telemetry.budget?.dependency_evidence_required, 3);
+  assert.equal(telemetry.budget?.dependency_evidence_attempts, 1);
+  assert.equal(telemetry.budget?.dependency_evidence_released, false);
+  assert.equal(telemetry.budget?.dependency_evidence_refusals, 1);
+  // The refused optional read never entered the harness trace; the refused
+  // fetch did (attempted, executor error).
+  const trace = (artifact.tool_calls ?? []) as Array<{ tool: string }>;
+  assert.deepEqual(trace.map((c) => c.tool), ["read_file", "web_fetch"]);
 });
