@@ -117,17 +117,23 @@ export async function runClaimFalsificationPass(input: ClaimFalsificationInput):
   try {
     const dependencyUpdate = input.dependencyUpdate === true;
     const deterministic = extractClaimsDeterministic({ prBody: input.body, diffText: input.diff, dependencyUpdate });
-    if (
-      dependencyUpdate &&
-      deterministic.claims.length === 0 &&
-      deterministic.errors.length === 0 &&
-      // #1380 review: skip only when the filter accounted for EVERY scanned
-      // sentence as deterministic metadata — an empty keyword scan says
-      // nothing about semantic assertions without keyword vocabulary ("No
-      // migration required"), which only the model pass can surface.
-      !hasDependencySemanticRemainder({ prBody: input.body, diffText: input.diff })
-    ) {
-      return { artifact: deterministic, status: "filtered", errorKind: null, error: null };
+    // #1380 review: skip only when the filter accounted for EVERY scanned
+    // sentence as deterministic metadata — an empty keyword scan says
+    // nothing about semantic assertions without keyword vocabulary ("No
+    // migration required"), which only the model pass can surface.
+    // Fail-soft: a throw here must push toward RUNNING the model (the
+    // outer catch would otherwise skip the pass with an empty error
+    // artifact).
+    let semanticRemainder = true;
+    if (dependencyUpdate && deterministic.claims.length === 0 && deterministic.errors.length === 0) {
+      try {
+        semanticRemainder = hasDependencySemanticRemainder({ prBody: input.body, diffText: input.diff });
+      } catch {
+        semanticRemainder = true;
+      }
+      if (!semanticRemainder) {
+        return { artifact: deterministic, status: "filtered", errorKind: null, error: null };
+      }
     }
     if (!input.model) {
       const status = deterministic.claims.length > 0 ? "ok" : "empty";

@@ -96,6 +96,14 @@ const DEPENDENCY_AUTOMERGE_RE =
 const DEPENDENCY_SEMANTIC_EXEMPT_RE =
   /\b(?:backward(?:s)?[- ]?compatib\w*|back[- ]compatib\w*|breaking[- ]changes?|(?:must|should)\s+(?:never|not))\b/i;
 
+/** Vendor-agnostic update-list/generator scaffolding lines: they assert
+ * nothing themselves (the update content follows on later lines). Anchored
+ * to the WHOLE sentence, so an updates line that actually says something
+ * ("This PR contains the following updates: every caller is migrated") is
+ * not metadata. */
+const DEPENDENCY_SCAFFOLDING_RE =
+  /^this pr (?:has been |was |been )?generated\b[^.!?]*[.!?]?\s*$|^this pr contains (?:the )?following updates?[!]?:?[.]?\s*$/i;
+
 /** Bridge/markdown decoration characters are blanked out before matching:
  * the version-pair bridges then reduce to plain whitespace runs (no class
  * overlap with the token charset, so no superlinear backtracking on hostile
@@ -122,6 +130,7 @@ export function isDependencyMetadataSentence(sentence: string): boolean {
     DEPENDENCY_VERSION_PAIR_RE.test(normalized) ||
     DEPENDENCY_FILE_COUNT_RE.test(normalized) ||
     DEPENDENCY_AUTOMERGE_RE.test(normalized) ||
+    DEPENDENCY_SCAFFOLDING_RE.test(normalized) ||
     DEPENDENCY_DIGEST_PATTERNS.some((pattern) => pattern.test(normalized))
   );
 }
@@ -149,23 +158,31 @@ export function filterDependencyMetadataSentence(sentence: string): string | nul
  * vocabulary by construction, so the deterministic scan can never cite them,
  * while the model pass exists precisely to extract them. The keyword gate is
  * circular as an adequacy test (#898): while any non-metadata sentence
- * remains, only the model can prove there is no claim. Same bounded patterns
- * and sentence material as the extractors; pure, never throws. */
+ * remains, only the model can prove there is no claim. Two fail-toward-
+ * running edges: an unterminated `<!--` swallows text the extractor never
+ * sees — unseen content is not evidence of "all metadata" — and when
+ * NOTHING is scanned (bodyless PR, code-only diff) the filter has
+ * accounted for nothing, while the model still reads the title and files.
+ * Same bounded patterns and sentence material as the extractors; pure,
+ * never throws. */
 export function hasDependencySemanticRemainder(input: { prBody: string; diffText: string }): boolean {
-  const strippedBody = (input.prBody ?? "")
-    .replace(HTML_COMMENT_RE, " ")
-    .replace(HTML_COMMENT_UNTERMINATED_RE, " ");
-  for (const sentence of splitSentences(strippedBody)) {
+  const terminated = (input.prBody ?? "").replace(HTML_COMMENT_RE, " ");
+  const swallowed = /<!--([\s\S]*)$/.exec(terminated);
+  if (swallowed && swallowed[1]!.trim() !== "") return true;
+  let scanned = 0;
+  for (const sentence of splitSentences(terminated.replace(HTML_COMMENT_UNTERMINATED_RE, " "))) {
+    scanned += 1;
     if (filterDependencyMetadataSentence(sentence) !== null) return true;
   }
   for (const hunk of collectHunks(input.diffText ?? "")) {
     for (const block of collectCommentBlocks(hunk)) {
       for (const sentence of splitSentences(block.text)) {
+        scanned += 1;
         if (filterDependencyMetadataSentence(sentence) !== null) return true;
       }
     }
   }
-  return false;
+  return scanned === 0;
 }
 
 /** HTML comments carry bot anchors (`<!-- rebase-check -->`,
