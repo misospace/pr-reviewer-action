@@ -1,0 +1,64 @@
+{
+  "plan_version": 1,
+  "created": "2026-11-01",
+  "source_issue": 1370,
+  "kind": "production-shape canary",
+  "blinded": true,
+  "blinding_note": "The verifier's inputs carry only the run's own artifacts (diff, PR title/body, findings, review summary, review_result, required checks, coverage) — never the corpus defect anchor, expectation labels, or adjudication notes. Labels live only in the plan (expectation) and the offline row enrichment (_defect) for post-run adjudication.",
+  "rubric": {
+    "id": "merge-readiness-verifier-v1",
+    "source": "src/confidence/ production modules (prompt builder, tolerant parser, deterministic ceilings) executed through the bridge live-scorer subcommand",
+    "provenance": "bundled from the checked-out source tree at run time; the bridge emits CONFIDENCE_RUBRIC_VERSION per row so the results record the exact rubric identity"
+  },
+  "production_shape": "bridge live-scorer: resolveConfidenceProfile over the plan-declared ai-confidence-* config (ambient AI_CONFIDENCE_* stripped), engine eligibility gates (publish step, approve/request_changes verdict, unresolvedConfidencePins), buildConfidencePrompt at the resolved profile.promptTokens, runConfidenceScorer itself (prompt_over_budget pre-wire refusal, resolved effort/structured-output/budget shape, one-shot transport, tolerant parse, deterministic ceilings), then the engine's credential-masking pass. No bridge-side request-shape override exists; the primary lane env (endpoint/credential inheritance) is inherited exactly as the runtime reads it.",
+  "corpus_shortfall": "The #1370 corpus asks for 3 known-defective false approvals and 3 clean approvals. The retained corpus (#1286 canonical work dir, 16 entries) contains exactly 1 known false approval (courier-46-61: primary approved a blocker-severity defect) and 1 clean correct approval (pr-reviewer-action-133-clean); the other 14 rows were primary-rejected (request_changes) and are excluded by the corpus definition — #1370 forbids substituting primary-rejected rows or re-running primaries to hit the quota. The canary therefore runs 1+1 rows and documents the shortfall.",
+  "entries": [
+    {
+      "pr_id": "courier-46-61",
+      "expectation": "known_false_approval — the retained primary approved misospace/courier#46 despite a blocker defect: observeState() (internal/controller/observer.go:37-55) declared checks 'passed' from a single observation while forge check registration is asynchronous, so a poll landing right after PR open saw a partial green set and Courier transitioned Verifying -> AwaitingReview before the complete check set existed (fixed by PR #61)."
+    },
+    {
+      "pr_id": "pr-reviewer-action-133-clean",
+      "expectation": "clean_correct_approval — the retained primary correctly approved a clean medium security-hardening change (review markdown sanitizer)."
+    }
+  ],
+  "artifacts_note": "Primary artifacts are REUSED from the #1286 canonical live run (operator passes the work dir via --artifacts-dir; the results record pin runs.json and per-row artifact digests). No primary review is re-run: #1370's cost principle. Rows whose retained head does not match the corpus-pinned head_sha are recorded unscored (retained_head_mismatch) without a call.",
+  "conditions": [
+    {
+      "id": "dogfood-inherited",
+      "backend": "live",
+      "role": "primary",
+      "purpose": "The intended advisory-dogfood shape: the verifier inherits the primary lane's endpoint AND credential (empty ai-confidence-base-url/api-key), with the reasoning controls #1368 added — effort medium plus the Anthropic effort-support assertion the endpoint demonstrated during #1286 bring-up. This is the shape the #1286 same-model arm could not test (32/32 malformed at the old hard-coded 1024-token cap, no effort control); the canary answers whether it now produces a final answer. Budgets are the documented defaults (max-tokens 4096, prompt-tokens 98304), no context declaration, structured output unasserted.",
+      "confidence_env": {
+        "AI_CONFIDENCE_MODEL": "MiniMax-M3.1-Flash",
+        "AI_CONFIDENCE_REASONING_EFFORT": "medium",
+        "AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT": "true",
+        "AI_CONFIDENCE_TIMEOUT_SEC": "120"
+      },
+      "key_env": null,
+      "secret_env_names": ["AI_API_KEY"]
+    },
+    {
+      "id": "hetero-fallback",
+      "backend": "live",
+      "role": "fallback",
+      "fallback_for": "dogfood-inherited",
+      "purpose": "Declared mechanical-completion arm: a genuinely distinct model family (GLM via the OpenAI wire — the arm that functioned in #1286) runs for an entry ONLY when the primary condition's row came back not scored, so the canary can still validate parse/ceilings/concern plumbing end to end. Endpoint and key resolve from operator env ($NAME indirection — the committed plan carries no infrastructure values).",
+      "confidence_env": {
+        "AI_CONFIDENCE_MODEL": "glm-5.3-flash",
+        "AI_CONFIDENCE_BASE_URL": "$CONFIDENCE_CANARY_HETERO_BASE_URL",
+        "AI_CONFIDENCE_API_FORMAT": "openai",
+        "AI_CONFIDENCE_TIMEOUT_SEC": "120"
+      },
+      "key_env": "CONFIDENCE_CANARY_HETERO_KEY",
+      "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_HETERO_KEY"]
+    }
+  ],
+  "ceilings": {
+    "max_verifier_calls": 8,
+    "max_output_tokens": 64000,
+    "wall_time_budget_sec": 1800,
+    "request_timeout_sec": 120
+  },
+  "verdict_policy": "strict"
+}
