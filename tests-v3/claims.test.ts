@@ -495,7 +495,13 @@ test("#1380: the dependency-metadata filter recognizes metadata vocabulary, neve
     "The old digest is no longer present.",
     "New digest sha256:abcdef0123456789 is present.",
     "The digest is unchanged.",
+    "The new digest is present.",
+    "The digest is present.",
+    "The new checksum is present.",
     "Only one file changed.",
+    "Only this file changed.",
+    "Only file changed.",
+    "Only those manifests were modified.",
     "Only one manifest changed.",
     "Only the manifests were modified.",
     "A single manifest changed.",
@@ -520,6 +526,8 @@ test("#1380: the dependency-metadata filter recognizes metadata vocabulary, neve
     "Deployments must never be scheduled during business hours.",
     "The token must never leave the credential broker.",
     "The config digest is unchanged after this change.",
+    "The new digest is present in every artifact.",
+    "Only the file watching code changed.",
     "The image digest must be present in the allowlist.",
     "Every artifact digest present in the SBOM must be signed.",
     "The secret is no longer stored in the image digest.",
@@ -548,6 +556,30 @@ test("#1380 review: the issue's manifest changed-file example is metadata, not a
     dependencyUpdate: true,
   });
   assert.equal(result.claims.length, 0, JSON.stringify(result.claims.map((c) => c.claim)));
+});
+
+test("#1380 review: standalone digest-presence and bare/demonstrative file-count forms are metadata", () => {
+  for (const sentence of [
+    "The new digest is present.",
+    "The digest is present.",
+    "The new checksum is present.",
+    "Only this file changed.",
+    "Only file changed.",
+    "Only those manifests were modified.",
+  ]) {
+    assert.equal(isDependencyMetadataSentence(sentence), true, sentence);
+    const result = extractClaimsDeterministic({ prBody: sentence, diffText: "", dependencyUpdate: true });
+    assert.equal(result.claims.length, 0, `${sentence}: ${JSON.stringify(result.claims.map((c) => c.claim))}`);
+  }
+});
+
+test("#1380 review: the bare/demonstrative file-count forms stay claims outside dependency mode", () => {
+  const result = extractClaimsDeterministic({
+    prBody: "Only this file changed. Only file changed.",
+    diffText: "",
+  });
+  const texts = result.claims.map((c) => c.claim);
+  assert.equal(texts.length, 2, JSON.stringify(texts));
 });
 
 test("#1380 review: a mixed metadata+semantic sentence keeps its semantic clause", () => {
@@ -1296,6 +1328,53 @@ test("#1380 review: a rewritten model remainder without claim vocabulary is not 
   const texts = result.artifact.claims.map((c) => c.claim);
   assert.ok(texts.some((t) => t.includes("CRD schema is unchanged")), JSON.stringify(texts));
   assert.ok(!texts.some((t) => t.includes("digest is present")), JSON.stringify(texts));
+});
+
+test("#1380 review: model-emitted standalone digest-presence and file-count claims are dropped by the post-filter", async () => {
+  const openai = {
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          claims: [
+            { claim: "The new digest is present" },
+            { claim: "only this file changed" },
+            { claim: "the plugin allows only signed images" },
+          ],
+        }),
+      },
+    }],
+  };
+  const result = await runClaimFalsificationPass({
+    title: "t",
+    body: "No CRDs changed and the CRD schema is unchanged.",
+    files: [],
+    diff: "",
+    dependencyUpdate: true,
+    model: { config: modelConfig, requestFn: stubRequestFn(openai) },
+  });
+  assert.equal(result.status, "ok");
+  const texts = result.artifact.claims.map((c) => c.claim);
+  assert.ok(texts.some((t) => t.includes("signed images")), JSON.stringify(texts));
+  assert.ok(!texts.some((t) => /digest is present|file changed/i.test(t)), JSON.stringify(texts));
+});
+
+test("#1380 review: a body of only the standalone metadata forms skips the model call", async () => {
+  let calls = 0;
+  const requestFn: SpecialistRequestFn = async () => {
+    calls += 1;
+    return { ok: true, raw: { choices: [{ message: { content: JSON.stringify({ claims: [] }) } }] } };
+  };
+  const result = await runClaimFalsificationPass({
+    title: "chore(deps): bump foo",
+    body: "Only this file changed. The new digest is present.",
+    files: [],
+    diff: "",
+    dependencyUpdate: true,
+    model: { config: modelConfig, requestFn },
+  });
+  assert.equal(calls, 0, "the issue's metadata examples must not spend a model call");
+  assert.equal(result.status, "filtered");
+  assert.equal(result.artifact.claims.length, 0);
 });
 
 test("#1380 review: the scan-error model path dedups rewritten remainders and carries scan errors", async () => {
