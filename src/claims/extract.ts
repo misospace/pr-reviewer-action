@@ -47,7 +47,7 @@ import {
   type ClaimsArtifact,
 } from "./types.js";
 
-const CLAIM_KEYWORDS_RE =
+export const CLAIM_KEYWORDS_RE =
   /\b(only|never|always|must|validat(?:es?|ion)|cross[- ]check(?:ed|s)?|fails?[- ]closed|bound to|byte[- ]identical|identical|guarantees?|ensures?|invariant|cannot|no longer|at most|exactly|every|each|all (?:consumers|callers|call sites)|parity|unchanged|backward[- ]compatible)\b/i;
 
 const COMMENT_LINE_RE = /^(\/\/|\/\*\*?|\*(?!\/)|#(?!!)|"""|'''|--(?:\s|$)|<!--)/;
@@ -61,7 +61,167 @@ const COMMENT_LINE_RE = /^(\/\/|\/\*\*?|\*(?!\/)|#(?!!)|"""|'''|--(?:\s|$)|<!--)
  * survives (#898 review). The bot footers' own automerge lines carry no
  * keyword vocabulary, so they were never claims to begin with. */
 const BOT_TEMPLATE_RE =
-  /\b(?:renovate|dependabot|greenkeeper)\b|rebase[/-]retry|rebase-check/i;
+/\b(?:renovate|dependabot|greenkeeper)\b|rebase[/-]retry|rebase-check/i;
+
+/** #1380: machine-generated dependency-metadata statements, matched by
+ * vocabulary shape only (never a bot name, so any forge's automation is
+ * covered): an exact version/tag old→new pair, digest presence/absence
+ * phrasing, changed-file/manifest counts, and automerge/branch-scheduling/
+ * rebase status boilerplate. A sentence carrying real compatibility
+ * vocabulary ("backwards compatible", "breaking changes") or a normative
+ * policy modal ("must never") is exempt — those are the semantic claims the
+ * pass exists to falsify. Static patterns over untrusted text: hostile input
+ * cannot disable or reshape them. */
+const DEPENDENCY_VERSION_TOKEN_SRC =
+  "(?:\\d+(?:\\.\\d+){2,}[\\w.+-]*|v\\d[\\w.+-]*|[\\w.+-]*[:@/]v?\\d[\\w.+-]*)";
+const DEPENDENCY_VERSION_PAIR_RE = new RegExp(
+  "(?:\\bfrom\\s+" + DEPENDENCY_VERSION_TOKEN_SRC + "\\s+to\\s+" + DEPENDENCY_VERSION_TOKEN_SRC +
+    "\\b|\\b" + DEPENDENCY_VERSION_TOKEN_SRC + "\\s*(?:→|->|—|\\bto\\b)\\s*" + DEPENDENCY_VERSION_TOKEN_SRC + "\\b)",
+  "i",
+);
+
+const DEPENDENCY_DIGEST_PATTERNS: RegExp[] = [
+  /\bsha(?:256|512)?[:=][0-9a-f]{6,}\b/i,
+  /\b(?:old|previous|prior)\s+(?:digests?|checksums?)\b/i,
+  /\b(?:digests?|checksums?)\s+(?:is|are|was|were|remains?|stays?)\s+(?:present|absent|missing|unchanged|identical|available)\s*[.!?]?\s*$/i,
+  /\b(?:digests?|checksums?)\b[^!?]{0,40}?\bno\s+longer\s+(?:present|valid|used|referenced|available|needed|matched?)\b/i,
+];
+
+/** Every count-free "only <determiner?> files/manifests/lockfiles changed"
+ * form (the issue's forge-metadata phrasings: "Only file changed.", "Only
+ * this file changed.", "Only the manifests were modified.") is matched only
+ * when the verb ends the sentence/clause: a qualifier word is allowed just
+ * behind an explicit determiner, so a relative clause that merely contains
+ * files+verb ("The action only scans files changed in the diff.") stays a
+ * semantic claim. */
+const DEPENDENCY_FILE_COUNT_RE =
+  /\b(?:only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?|lockfiles?)\b[^!?]{0,40}?\b(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b|(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b[^!?]{0,40}?\bonly\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|manifests?|lockfiles?)\b|only\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\s+(?:files?|manifests?|lockfiles?)\b|only\s+the\s+(?:[\w-]+\s+)?(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b(?=$|[.!?,;])|only\s+(?:this|these|that|those)\s+(?:[\w-]+\s+)?(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b(?=$|[.!?,;])|only\s+(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b(?=$|[.!?,;])|a\s+single\s+(?:files?|manifests?|lockfiles?)\s+(?:was|were|is|are)?\s*(?:chang\w*|modif\w*|touch\w*|updat\w*|affect\w*)\b)/i;
+
+const DEPENDENCY_AUTOMERGE_RE =
+  /\b(?:auto[- ]?merg\w*\b[^.!?]*\b(?:disabl\w*|enabl\w*|configured?|by config|schedul\w*|pending|waiting|allow\w*|disallow\w*|retry|checkbox|check this box|turned? (?:on|off))|(?:rebas\w+|schedul\w+)\b[^.!?]*\b(?:rebas\w+|schedul\w+|disabl\w*|enabl\w*|pending|waiting|retry|checkbox|automat\w*|by config|configured)\b)/i;
+
+const DEPENDENCY_SEMANTIC_EXEMPT_RE =
+  /\b(?:backward(?:s)?[- ]?compatib\w*|back[- ]compatib\w*|breaking[- ]changes?|(?:must|should)\s+(?:never|not))\b/i;
+
+/** Vendor-agnostic update-list/generator scaffolding lines: they assert
+ * nothing themselves (the update content follows on later lines). Anchored
+ * to the WHOLE sentence, so an updates line that actually says something
+ * ("This PR contains the following updates: every caller is migrated") is
+ * not metadata. */
+const DEPENDENCY_SCAFFOLDING_RE =
+  /^this pr (?:has been |was |been )?generated\b[^.!?]*[.!?]?\s*$|^this pr contains (?:the )?following updates?[!]?:?[.]?\s*$/i;
+
+/** Bridge/markdown decoration characters are blanked out before matching:
+ * the version-pair bridges then reduce to plain whitespace runs (no class
+ * overlap with the token charset, so no superlinear backtracking on hostile
+ * input), and the tested prefix is bounded. */
+const DEPENDENCY_DECORATION_RE = /[`*_]/g;
+const DEPENDENCY_MATCH_MAX_CHARS = 2000;
+
+/** #1380 review: a sentence carrying BOTH machine-generated metadata and a
+ * real semantic assertion ("Only one file changed; the CRD schema is
+ * unchanged") must keep its semantic remainder — whole-sentence dropping
+ * discarded exactly the valuable claim the pass exists to falsify. Clauses
+ * are split on sentence-internal `;` and conjunction boundaries (`and`,
+ * `but`, `while`, with or without a leading comma): a false split is benign
+ * because every half is re-tested independently and an all-semantic sentence
+ * is returned unchanged, while failing to split fails toward dropping the
+ * semantic claim. Static patterns over untrusted text, no backtracking-
+ * shaped constructs. */
+const DEPENDENCY_CLAUSE_SPLIT_RE = /;\s*|\s+(?:and|but|while)\s+/;
+
+/** #1380 review: the model pass also reads the PR title, so the semantic-
+ * remainder predicate must account for it too. A title that is NOTHING but a
+ * conventional dependency bump — a `chore(deps…)`-scoped bump/updates title,
+ * or a bare "bump/update/upgrade/pin <package> from X to Y" / "… to <version>"
+ * title — is deterministic dependency metadata, matched by vocabulary shape
+ * (never a bot name). The unanchored `to`-tail target must carry the
+ * dependency version-token shape unless the title carries an explicit
+ * `from X to Y` pair, so human titles like "Update the server to production"
+ * are not metadata. Anything beyond the bare bump shape — a parenthetical
+ * assertion like "(no CRDs changed)", a non-bump subject, a directory tail —
+ * fails the anchored whole-title match and keeps the model pass (fail toward
+ * running). `[ \t]`, never `\s`: titles are single-line and a future caller
+ * must not get cross-line matches for free. */
+const DEPENDENCY_TITLE_BUMP_RE = new RegExp(
+  "^(?:chore\\(deps[-\\w]*\\)[ \\t]*:[ \\t]*)?(?:bump|update|upgrade|pin)[ \\t]+[\\w./@-]+(?:[ \\t]+[\\w./@-]+)*" +
+    "(?:[ \\t]+from[ \\t]+[\\w.+-]+[ \\t]+to[ \\t]+[\\w.+-]+|[ \\t]+to[ \\t]+" + DEPENDENCY_VERSION_TOKEN_SRC + ")[ \\t]*[.!?]?[ \\t]*$" +
+    "|^chore\\(deps[-\\w]*\\)[ \\t]*:[ \\t]*(?:bump|update|upgrade|pin)\\b[ \\t]*[\\w./@.-]*[ \\t]*[.!?]?[ \\t]*$",
+  "i",
+);
+
+function titleIsAccountedDependencyMetadata(sentence: string): boolean {
+  return filterDependencyMetadataSentence(sentence) === null || DEPENDENCY_TITLE_BUMP_RE.test(sentence.trim());
+}
+
+export function isDependencyMetadataSentence(sentence: string): boolean {
+  if (DEPENDENCY_SEMANTIC_EXEMPT_RE.test(sentence)) return false;
+  const normalized = sentence.replace(DEPENDENCY_DECORATION_RE, " ").trim().slice(0, DEPENDENCY_MATCH_MAX_CHARS);
+  return (
+    DEPENDENCY_VERSION_PAIR_RE.test(normalized) ||
+    DEPENDENCY_FILE_COUNT_RE.test(normalized) ||
+    DEPENDENCY_AUTOMERGE_RE.test(normalized) ||
+    DEPENDENCY_SCAFFOLDING_RE.test(normalized) ||
+    DEPENDENCY_DIGEST_PATTERNS.some((pattern) => pattern.test(normalized))
+  );
+}
+
+/** Dependency mode's sentence gate: `null` drops the sentence, a string is
+ * what continues into keyword filtering (the sentence unchanged when it
+ * carries no metadata clause, otherwise its surviving semantic clauses
+ * joined). A semantic-exempt sentence is always kept whole — its normative
+ * vocabulary outranks any metadata it also mentions. */
+export function filterDependencyMetadataSentence(sentence: string): string | null {
+  if (DEPENDENCY_SEMANTIC_EXEMPT_RE.test(sentence)) return sentence;
+  const clauses = sentence.split(DEPENDENCY_CLAUSE_SPLIT_RE).map((clause) => clause.trim()).filter(Boolean);
+  if (clauses.length <= 1) return isDependencyMetadataSentence(sentence) ? null : sentence;
+  const kept = clauses.filter((clause) => !isDependencyMetadataSentence(clause));
+  if (kept.length === clauses.length) return sentence;
+  if (kept.length === 0) return null;
+  return kept.join("; ");
+}
+
+/** #1380 review: whether a dependency-mode scan saw ANY content the metadata
+ * filter did not drop as machine-generated trivia. The pass's `filtered` skip
+ * must mean "every scanned sentence IS deterministic metadata", never "the
+ * keyword scan found no candidate" — assertions like "No migration required"
+ * or "this security fix is present in the target version" carry no keyword
+ * vocabulary by construction, so the deterministic scan can never cite them,
+ * while the model pass exists precisely to extract them. The keyword gate is
+ * circular as an adequacy test (#898): while any non-metadata sentence
+ * remains, only the model can prove there is no claim. Two fail-toward-
+ * running edges: an unterminated `<!--` swallows text the extractor never
+ * sees — unseen content is not evidence of "all metadata" — and when
+ * NOTHING is scanned (bodyless PR, code-only diff) the filter has
+ * accounted for nothing, while the model still reads the title and files.
+ * The title is scanned on the same terms, EXCEPT it cannot consume the
+ * nothing-scanned edge: a bodyless PR keeps the model pass even under a
+ * bare bump title, because code-only diff content the predicate never reads
+ * is exactly the unaccounted surface the model still sees.
+ * Same bounded patterns and sentence material as the extractors; pure,
+ * never throws. */
+export function hasDependencySemanticRemainder(input: { prTitle?: string; prBody: string; diffText: string }): boolean {
+  for (const sentence of splitSentences((input.prTitle ?? "").trim())) {
+    if (!titleIsAccountedDependencyMetadata(sentence)) return true;
+  }
+  const terminated = (input.prBody ?? "").replace(HTML_COMMENT_RE, " ");
+  const swallowed = /<!--([\s\S]*)$/.exec(terminated);
+  if (swallowed && swallowed[1]!.trim() !== "") return true;
+  let scanned = 0;
+  for (const sentence of splitSentences(terminated.replace(HTML_COMMENT_UNTERMINATED_RE, " "))) {
+    scanned += 1;
+    if (filterDependencyMetadataSentence(sentence) !== null) return true;
+  }
+  for (const hunk of collectHunks(input.diffText ?? "")) {
+    for (const block of collectCommentBlocks(hunk)) {
+      for (const sentence of splitSentences(block.text)) {
+        scanned += 1;
+        if (filterDependencyMetadataSentence(sentence) !== null) return true;
+      }
+    }
+  }
+  return scanned === 0;
+}
 
 /** HTML comments carry bot anchors (`<!-- rebase-check -->`,
  * `<!--renovate-debug:...-->`) and are never claim prose. The second pattern
@@ -432,7 +592,7 @@ function resolveItems(
  * whole-sentence claim anchored at `path:symbol` (or `path:line` with no
  * enclosing symbol). The same sentence in two blocks (copy-pasted docstrings)
  * merges into one claim listing both anchors. */
-function extractDiffCommentClaims(diffText: string): Claim[] {
+function extractDiffCommentClaims(diffText: string, dependencyUpdate = false): Claim[] {
   const claims: Claim[] = [];
   const seen = new Map<string, Claim>();
   const addedLines = walkAddedLines(diffText);
@@ -449,8 +609,10 @@ function extractDiffCommentClaims(diffText: string): Claim[] {
         (line) => !(line.path === block.path && line.newLine >= block.firstNewLine && line.newLine <= block.lastNewLine),
       );
       for (const sentence of splitSentences(block.text)) {
-        if (!CLAIM_KEYWORDS_RE.test(sentence)) continue;
-        const text = clip(sentence, MAX_CLAIM_CHARS);
+        const kept = dependencyUpdate ? filterDependencyMetadataSentence(sentence) : sentence;
+        if (kept === null) continue;
+        if (!CLAIM_KEYWORDS_RE.test(kept)) continue;
+        const text = clip(kept, MAX_CLAIM_CHARS);
         const key = text.toLowerCase();
         const { items, itemsTruncated: resolvedTruncated } = resolveItems([], tokens, siblings);
         let itemsTruncated = resolvedTruncated;
@@ -495,12 +657,14 @@ function splitSentences(body: string): string[] {
 }
 
 /** PR-body claims: sentences using the assertion/quantifier vocabulary, with
- * bot-authored template text (Renovate/Dependabot footers) removed first.
- * Items resolve from every added-line diff occurrence of each backtick
+ * bot-authored template text (Renovate/Dependabot footers) removed first —
+ * by vendor name outside dependency mode, by boilerplate shape inside it
+ * (#1380: a vendor mention must never suppress a semantic claim). Items
+ * resolve from every added-line diff occurrence of each backtick
  * identifier or flag-like token the sentence names (falls back to no items
  * when none appear in the diff — the render step then tells the reviewer to
  * enumerate items themselves). */
-function extractPrBodyClaims(body: string, diffText: string): Claim[] {
+function extractPrBodyClaims(body: string, diffText: string, dependencyUpdate = false): Claim[] {
   const strippedBody = body
     .replace(HTML_COMMENT_RE, " ")
     .replace(HTML_COMMENT_UNTERMINATED_RE, " ");
@@ -508,13 +672,27 @@ function extractPrBodyClaims(body: string, diffText: string): Claim[] {
   const addedLines = [...walkAddedLines(diffText)];
   const claims: Claim[] = [];
   for (const sentence of splitSentences(strippedBody)) {
-    if (BOT_TEMPLATE_RE.test(sentence)) continue;
-    if (!CLAIM_KEYWORDS_RE.test(sentence)) continue;
-    const identifiers = [...sentence.matchAll(INLINE_CODE_RE)].map((m) => m[1]!).filter(Boolean);
-    const tokens = extractFlagTokens(sentence);
+    // #1380 review: the vendor-name alternative is NOT applied in dependency
+    // mode — a vendor name alone is not machine metadata, and vendor-keyed
+    // suppression is exactly the architecture the issue forbids. Dependency
+    // boilerplate is matched by vocabulary shape in the metadata clause
+    // filter below (its automerge/scheduling patterns already drop the
+    // rebase/retry checkbox and status lines by wording), and every surviving
+    // sentence must still carry claim vocabulary. Nothing pre-drops on the
+    // shape vocabulary itself: `rebase-check` is also a legitimate subject of
+    // a human semantic claim ("The rebase-check workflow is unchanged"), and
+    // a shape pre-filter firing before the exemptions and the keyword gate
+    // discarded exactly the claim this pass exists to falsify. Non-dependency
+    // mode keeps the pre-existing full template drop unchanged.
+    if (!dependencyUpdate && BOT_TEMPLATE_RE.test(sentence)) continue;
+    const kept = dependencyUpdate ? filterDependencyMetadataSentence(sentence) : sentence;
+    if (kept === null) continue;
+    if (!CLAIM_KEYWORDS_RE.test(kept)) continue;
+    const identifiers = [...kept.matchAll(INLINE_CODE_RE)].map((m) => m[1]!).filter(Boolean);
+    const tokens = extractFlagTokens(kept);
     const { items, itemsTruncated } = resolveItems(identifiers, tokens, addedLines);
     claims.push({
-      claim: clip(sentence, MAX_CLAIM_CHARS),
+      claim: clip(kept, MAX_CLAIM_CHARS),
       source: "pr_body",
       scope: clip(identifiers.join(", ") || "the PR's stated invariant", MAX_SCOPE_CHARS),
       items,
@@ -536,17 +714,21 @@ function extractPrBodyClaims(body: string, diffText: string): Claim[] {
  * resolved at least one concrete item before body claims with none, then the
  * diff-comment claims. Bounded to `MAX_CLAIMS`/`MAX_ITEMS_PER_CLAIM`; never
  * throws. */
-export function extractClaimsDeterministic(input: { prBody: string; diffText: string }): ClaimsArtifact {
+export function extractClaimsDeterministic(input: {
+  prBody: string;
+  diffText: string;
+  dependencyUpdate?: boolean;
+}): ClaimsArtifact {
   const errors: string[] = [];
   let commentClaims: Claim[] = [];
   let bodyClaims: Claim[] = [];
   try {
-    commentClaims = extractDiffCommentClaims(input.diffText ?? "");
+    commentClaims = extractDiffCommentClaims(input.diffText ?? "", input.dependencyUpdate === true);
   } catch (cause) {
     errors.push(`diff comment scan failed: ${cause instanceof Error ? cause.message : String(cause)}`);
   }
   try {
-    bodyClaims = extractPrBodyClaims(input.prBody ?? "", input.diffText ?? "");
+    bodyClaims = extractPrBodyClaims(input.prBody ?? "", input.diffText ?? "", input.dependencyUpdate === true);
   } catch (cause) {
     errors.push(`PR body scan failed: ${cause instanceof Error ? cause.message : String(cause)}`);
   }

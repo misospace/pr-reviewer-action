@@ -1,4 +1,4 @@
-import type { ModelRequestConfig, TransportWirePayload } from "./types.js";
+import type { AnthropicWireBody, ModelRequestConfig, OpenAiWireBody, TransportWirePayload } from "./types.js";
 
 /**
  * The strict OpenAI verdict schema. VERDICT-TURN CONTRACT (#362): this must
@@ -191,6 +191,35 @@ export function buildAnthropicOutputConfig(
 }
 
 /**
+ * #1368 review: the reasoning-effort value a BUILT wire body actually
+ * carries, or "" when it carries none. Read back from the body the transport
+ * sends rather than re-derived from the configuration that named it, so a
+ * recorded provenance can never claim an effort the wire never carried
+ * (#998's truth-telling rule: the operator is told what was SENT, never what
+ * the config named).
+ *
+ * The wire FAMILY decides the field, not the body's shape: the OpenAI family
+ * carries `reasoning_effort` and never `output_config`, the Anthropic family
+ * carries `output_config.effort` (only under the operator's effort-support
+ * assertion) and never `reasoning_effort`. Reading the family's own field is
+ * what keeps this a statement about the bytes that were sent.
+ */
+export function wireEffortOf(payload: TransportWirePayload): string {
+  const body = payload.body;
+  if (payload.endpointPath === "/messages") {
+    const outputConfig = (body as AnthropicWireBody).output_config;
+    if (outputConfig !== undefined) {
+      const effort = outputConfig.effort;
+      if (typeof effort === "string" && effort !== "") return effort;
+    }
+    return "";
+  }
+  const direct = (body as OpenAiWireBody).reasoning_effort;
+  if (typeof direct === "string" && direct !== "") return direct;
+  return "";
+}
+
+/**
  * Build the transport wire payload for a review request. Provider-neutral:
  * branches only on the configured api format, never on model names.
  *
@@ -223,10 +252,15 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
     // rides along because #1047's format was asserted (and vice versa), an
     // unset/unasserted key contributes nothing, and only a surviving key set
     // emits the object at all — never `thinking: {"type":"disabled"}` and
-    // never an invented "none" effort.
+    // never an invented "none" effort. #1368: a `responseSchema` replaces
+    // the pinned verdict schema with the caller's own (the confidence
+    // scorer's answer contract); absent keeps the verdict envelope exactly
+    // as before.
     const effort = config.anthropicEffortSupported ? config.reasoningEffort : "";
     const format = config.anthropicStructuredOutputSupported && config.responseFormat === "json_schema"
-      ? ANTHROPIC_VERDICT_OUTPUT_FORMAT
+      ? (config.responseSchema !== undefined
+          ? { type: "json_schema", schema: config.responseSchema }
+          : ANTHROPIC_VERDICT_OUTPUT_FORMAT)
       : undefined;
     const outputConfig = buildAnthropicOutputConfig(effort, format);
     if (outputConfig !== null) body.output_config = outputConfig;
@@ -245,7 +279,12 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
   if (config.responseFormat === "json_object") {
     body.response_format = { type: "json_object" };
   } else if (config.responseFormat === "json_schema") {
-    body.response_format = OPENAI_VERDICT_JSON_SCHEMA;
+    // #1368: a `responseSchema` swaps the pinned verdict schema for the
+    // caller's own inner schema (the confidence scorer's answer contract);
+    // absent keeps the verdict wrapper byte-for-byte as before.
+    body.response_format = config.responseSchema !== undefined
+      ? { type: "json_schema", json_schema: { name: "confidence_review", strict: true, schema: config.responseSchema } }
+      : OPENAI_VERDICT_JSON_SCHEMA;
   }
   if (config.stream) body.stream_options = { include_usage: true };
   // #998: the protocol-native effort field, verbatim.
