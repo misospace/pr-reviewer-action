@@ -1009,25 +1009,27 @@ test("obligation evidence gathered BEFORE the window keeps the window open after
   assert.equal(outcome.stopReason, STOP_MODEL_DONE);
 });
 
-test("fixed no-argument catalog calls are admissible inside the reserved window", async () => {
+test("catalog commands get no reserved-window exemption: optional run_command is refused without consuming budget", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
-  // run_command names a fixed argv-catalog definition (bounded enum, no
-  // free-form target); refusing it would strand the loop's cheap baseline
-  // calls. It runs and does NOT discharge the obligation; the next
-  // concretely-targeted optional call is still refused.
+  // #1388 review: run_command is NOT admissible everywhere inside the
+  // reserved window. Its `command` value participates in the same overlap
+  // check as every other argument value, so an optional catalog call
+  // (git_status_short against a Talos-matrix obligation) is refused WITHOUT
+  // consuming budget — the model cannot burn the reserved requests on
+  // cheap baseline calls before attempting the obligation.
   const { postFn, executeFn, timeFn } = scriptedLoop(
     [
       openAiCall("c1", "read_file", '{"path":"misc/a.md"}'),
       openAiCall("c2", "read_file", '{"path":"misc/b.md"}'),
       openAiCall("c3", "run_command", '{"command":"git_status_short"}'),
-      openAiCall("c4", "read_file", '{"path":"docs/nope.md"}'),
+      openAiCall("c4", "list_tree", "{}"),
+      openAiCall("c5", "read_file", '{"path":"docs/nope.md"}'),
       openAiText("done"),
     ],
     [
       { tool: "read_file", status: "ok", result: { content: "a" } },
       { tool: "read_file", status: "ok", result: { content: "b" } },
-      { tool: "run_command", status: "ok", result: { stdout: "M x" } },
     ],
   );
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
@@ -1038,9 +1040,42 @@ test("fixed no-argument catalog calls are admissible inside the reserved window"
     requiredEvidence: REQUIRED_EVIDENCE_OBLIGATIONS,
     timeFn,
   });
-  // The command NAME is not an argument value, so c3 does not discharge the
-  // obligation — it merely runs; c4 is still refused.
-  assert.deepEqual(outcome.executed.map((item) => item.tool), ["read_file", "read_file", "run_command"]);
-  assert.equal(outcome.requiredEvidenceRefusals, 1);
-  assert.equal(outcome.requestsRemaining, 2);
+  // All three in-window optional calls are refused — the catalog call, a
+  // zero-argument call (no target text at all), and a concretely-targeted
+  // one — so the reserved requests are fully preserved for the obligation
+  // evidence.
+  assert.deepEqual(outcome.executed.map((item) => item.tool), ["read_file", "read_file"]);
+  assert.equal(outcome.requiredEvidenceRefusals, 3);
+  assert.equal(outcome.requestsRemaining, 3);
+});
+
+test("a catalog command whose name is the obligation evidence stays admissible and discharges it", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Budget 5, reserve 3: the window is open from the first call, but the
+  // catalog command's name overlaps the obligation's vocabulary, so it is
+  // admitted, consumes budget, and counts as the obligation's attempt —
+  // after which the window is satisfied and optional calls run again.
+  const { postFn, executeFn, timeFn } = scriptedLoop(
+    [
+      openAiCall("c1", "run_command", '{"command":"git_diff_stat"}'),
+      openAiCall("c2", "read_file", '{"path":"misc/a.md"}'),
+      openAiText("done"),
+    ],
+    [
+      { tool: "run_command", status: "ok", result: { stdout: "M x" } },
+      { tool: "read_file", status: "ok", result: { content: "a" } },
+    ],
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(10, 5, 120),
+    reserveForRequiredEvidence: 3,
+    requiredEvidence: [{ id: "obligation-1", tokens: ["diff", "stat"] }],
+    timeFn,
+  });
+  assert.deepEqual(outcome.executed.map((item) => item.tool), ["run_command", "read_file"]);
+  assert.equal(outcome.requiredEvidenceRefusals, 0);
+  assert.equal(outcome.requestsRemaining, 3);
 });

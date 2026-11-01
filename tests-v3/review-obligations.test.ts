@@ -397,6 +397,25 @@ test("human-confirmation asks never become obligations, under a gated heading or
   ].join("\n");
   assert.deepEqual(extractApprovalPrerequisites(underHeading), []);
   assert.deepEqual(extractApprovalPrerequisites("Before approval, verify with the on-call operator that the config rollback ran."), []);
+  // #1388 review: a NAMED person is a human-confirmation attribution too —
+  // a capitalized name directly governed by with/from/by and bound to the
+  // ask by its complementizer must never become a forcing row, even though
+  // the sentence carries gatherable-looking nouns. Comma lists and
+  // appositives are the same attribution.
+  const gated = "## Evidence required before approval\n\n";
+  const asked = (ask: string): string[] | readonly string[] =>
+    extractApprovalPrerequisites(`${gated}${ask}`);
+  assert.deepEqual(asked("Confirm with Alice that the release-notes advisory was published."), []);
+  assert.deepEqual(asked("Confirm with Alice Smith whether the release-notes advisory was published."), []);
+  assert.deepEqual(asked("Confirm with Alice, Bob, and Carol that the release-notes advisory was published."), []);
+  assert.deepEqual(asked("Confirm with Alice Smith, the release manager, that the advisory was published."), []);
+  // A capitalized system reference in a gatherable ask with no person
+  // attribution and no complementizer-bound name is not laundered: the
+  // real-shaped obligation still fires.
+  assert.deepEqual(
+    asked("Verify the proposed Kubernetes version against the published Talos support matrix."),
+    ["Verify the proposed Kubernetes version against the published Talos support matrix."],
+  );
   // The reviewer-gatherable sibling under the same heading still fires.
   const both = underHeading + "\nVerify the migration document against the schema file.";
   assert.deepEqual(extractApprovalPrerequisites(both), ["Verify the migration document against the schema file."]);

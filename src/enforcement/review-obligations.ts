@@ -74,14 +74,25 @@ export const APPROVAL_VERIFICATION_CUE = /\b(?:verify|confirm|check|read|inspect
  * release-notes advisory was approved."). Such sentences never become
  * obligations — the reviewer has no configured capability against a person's
  * sign-off, so a heading-gated section must not turn one into a permanent
- * forcing row. The attributing span is bounded to three words so a
- * preposition cannot pair with a distant role noun across a sentence; the
- * exclusion errs toward NOT extracting (pre-#1381 behavior), never toward a
- * permanent forcing row. Roles are detected deterministically; individual
- * names cannot be, an accepted limitation. */
+ * forcing row. The attributing span is bounded so a preposition cannot pair
+ * with a distant noun across a sentence; the exclusion errs toward NOT
+ * extracting (pre-#1381 behavior), never toward a permanent forcing row.
+ * Roles and SIGN-OFF asks are detected deterministically; a named person is
+ * detected the same way when the ask's shape makes it unambiguous — a
+ * capitalized name (comma lists "Alice, Bob, and Carol" and appositives
+ * "Alice Smith, the release manager" included) directly governed by
+ * with/from/by and followed by the complementizer that binds the ask to that
+ * person ("confirm with Alice that the advisory was published" — #1388
+ * review). A lowercase name is not detectable without false-positiving on
+ * ordinary nouns ("verify against the changelog that ..."), and a
+ * capitalized system name ("confirm from GitHub that ...") is deliberately
+ * also excluded — both residues err toward NOT extracting (pre-#1381
+ * non-blocking behavior), never toward a permanent forcing row; they cost
+ * extraction recall only for prose that already passed every other gate. */
 export const EXTERNAL_CONFIRMATION_CUES = [
   /\b(?:with|from|by)\s+(?:the\s+|our\s+|a\s+)?(?:[\w-]+\s+){0,3}(?:team|on-?call(?:er)?|operator|owner|stakeholder|human|manager|lead)\b/i,
   /\bsign[- ]?off\b/i,
+  /\b(?:with|from|by)\s+[A-Z][\w'-]*(?:(?:\s+|,\s*)(?:and\s+)?[A-Z][\w'-']*)*(?:\s*,\s*(?:the\s+)?[\w-]+(?:\s+[\w-]+){0,2})*,?\s+(?:that|whether)\b/,
 ] as const;
 /** The obligation must name something the reviewer's configured tools can
  * gather: a repository artifact, an upstream document, or a compatibility

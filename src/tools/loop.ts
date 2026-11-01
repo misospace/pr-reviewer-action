@@ -712,20 +712,22 @@ export async function driveToolLoop(
       // overlaps pending obligations has ATTEMPTED them whether or not the
       // reserved window is open yet — the recommended path gathers that
       // evidence EARLY, and the window must never re-demand (or hold shut
-      // for) evidence already gathered. Inside the window, a call with a
-      // concrete target that overlaps nothing is refused WITHOUT consuming
-      // budget (like the dedup note), so optional exploration cannot spend
-      // the held-back requests; a call with no target text at all (the
-      // fixed no-argument catalog commands) is admissible everywhere. Once
-      // every obligation has been attempted the window is satisfied.
+      // for) evidence already gathered. Inside the window a call executes
+      // ONLY when its argument values overlap a pending obligation;
+      // everything else — optional exploration AND the fixed `run_command`
+      // argv catalog — is refused WITHOUT consuming budget (like the dedup
+      // note), so no optional call can spend the held-back requests. The
+      // catalog gets no exemption: its `command` value participates in the
+      // same overlap check like any other argument value, so
+      // git_status_short cannot burn reserved requests against a
+      // Talos-matrix obligation, while a catalog command whose name IS the
+      // obligation evidence (a diff obligation) stays admissible. Once every
+      // obligation has been attempted the window is satisfied.
       if (outcome.requiredEvidenceRequestsHint > 0 && pendingEvidence.length > 0) {
-        // run_command names a fixed argv-catalog definition (a bounded enum,
-        // never a free-form target), so it cannot consume the reservation —
-        // the same treatment as a call with no argument values at all.
-        const target = call.name === "run_command" ? "" : argumentTargetText(args);
+        const target = argumentTargetText(args);
         const overlaps = pendingEvidence.filter((row) => row.tokens.some((token) => targetMentions(target, token)));
         const inWindow = budgets.maxToolCalls - callsExecuted <= outcome.requiredEvidenceRequestsHint;
-        if (inWindow && target !== "" && overlaps.length === 0) {
+        if (inWindow && overlaps.length === 0) {
           plan.push({ callId, kind: "reserve", data: { error: REQUIRED_EVIDENCE_REFUSAL_NOTE } });
           roundRefused++;
           outcome.requiredEvidenceRefusals++;
