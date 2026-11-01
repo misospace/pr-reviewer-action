@@ -22,7 +22,7 @@
       "expectation": "clean_correct_approval — the retained primary correctly approved a clean medium security-hardening change (review markdown sanitizer)."
     }
   ],
-  "artifacts_note": "Primary artifacts are REUSED from the #1286 canonical live run (operator passes the work dir via --artifacts-dir; the results record pin runs.json and per-row artifact digests). No primary review is re-run: #1370's cost principle. Rows whose retained head does not match the corpus-pinned head_sha are recorded unscored (retained_head_mismatch) without a call.",
+  "artifacts_note": "Primary artifacts are REUSED from the #1286 canonical live run (operator passes the work dir via --artifacts-dir; the results record pin runs.json and per-row artifact digests). No primary review is re-run: #1370's cost principle. Exact head+base pinning: each row reads the retained pins from the runtime's own request record (review-request.json head_sha + base_ref) and requires BOTH to equal the corpus pins — a missing/pinless record, a head mismatch, or a base mismatch is recorded unscored (retained_pins_unreadable / retained_head_mismatch / retained_base_mismatch) with ZERO wire calls, and the verified pins ride the outgoing request.",
   "conditions": [
     {
       "id": "dogfood-inherited",

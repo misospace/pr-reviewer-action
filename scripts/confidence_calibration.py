@@ -1615,8 +1615,16 @@ def _validate_canary_plan(plan: Any, corpus: dict[str, dict[str, Any]]) -> list[
             if not (isinstance(entry, dict) and isinstance(entry.get("pr_id"), str)):
                 errors.append("every entry must be an object with pr_id")
                 continue
-            if entry["pr_id"] not in corpus:
+            corpus_entry = corpus.get(entry["pr_id"])
+            if corpus_entry is None:
                 errors.append(f"entry {entry['pr_id']} is not resolvable in the corpus")
+            else:
+                # Exact head/base pinning (#1370) starts at the plan: a row
+                # whose corpus record cannot prove both SHAs is not evidence
+                # about a PR, so it can never be a canary row.
+                for pin in ("head_sha", "base_sha"):
+                    if not str(corpus_entry.get(pin) or ""):
+                        errors.append(f"entry {entry['pr_id']} corpus record has no {pin} pin")
             if not isinstance(entry.get("expectation"), str) or not entry["expectation"]:
                 errors.append(f"entry {entry.get('pr_id')} must declare its expectation label")
 
@@ -1753,13 +1761,17 @@ def _canary_row(
     ceilings: dict[str, Any],
     work_dir: Path,
     audit_dir: Path,
+    reserve_slot: Any,
 ) -> tuple[dict[str, Any], int]:
     """Build and execute one canary row; returns (row, wire_attempts).
 
-    ``wire_attempts`` is 1 for a live call (recorded BEFORE the wire, the
-    same write-first ledger discipline as the pilot) and 0 for every
-    no-call path (unusable evidence, budget exhaustion, bridge failure
-    before dispatch).
+    ``wire_attempts`` is 1 when a spend slot was RESERVED and the bridge was
+    dispatched — the reservation happens BEFORE the wire (write-first) and
+    stays consumed whatever happens after (provider failure, parse failure,
+    bridge crash) — and 0 for every no-dispatch path (unusable evidence,
+    pin verification failure, unavailable ledger). The caller owns the
+    ``reserve_slot`` callback: it durably records one call slot against the
+    lifetime ceiling and returns False when the ledger cannot be written.
     """
     condition_id = condition["id"]
     row: dict[str, Any] = {
@@ -1772,6 +1784,7 @@ def _canary_row(
         "evidence_state": evidence_state,
         "head_sha": (corpus_entry or {}).get("head_sha", ""),
         "base_sha": (corpus_entry or {}).get("base_sha", ""),
+        "retained_pins": None,
         "primary": {"verdict_policy": verdict_policy},
         "verifier": disabled_scorer_result(),
         "profile": None,
@@ -1803,22 +1816,35 @@ def _canary_row(
         "findings_by_severity": findings_by_severity(findings),
         "required_checks": primary_artifacts["required_checks"] or "none",
     })
-    # Exact-head pin for REUSED artifacts: the retained run must be the
-    # review OF the corpus-pinned head, or the row is not evidence about
-    # that PR (#1370: exact-head/base-pinned artifacts). No call on mismatch.
-    pr_object = _read_json_soft(run_dir / "pr.json")
+    # Exact head+base pinning for REUSED artifacts (#1370): the retained run
+    # must be the review OF the corpus-pinned head AGAINST the corpus-pinned
+    # base, read from the runtime's OWN request record
+    # (`review-request.json`: `head_sha` + `base_ref` — the pins the retained
+    # review was actually produced against, not a replayed PR payload). The
+    # verifier row then carries the VERIFIED pins into its request. A missing
+    # or pinless record, or either mismatch, fails the row closed with ZERO
+    # wire calls: reused artifacts that cannot prove both pins are not
+    # evidence about that PR, whatever their diffs contain.
+    request_record = _read_json_soft(run_dir / "review-request.json")
     retained_head = ""
-    if isinstance(pr_object, dict):
-        head = pr_object.get("head")
-        if isinstance(head, dict):
-            retained_head = str(head.get("sha") or "")
-        if not retained_head:
-            retained_head = str(pr_object.get("headRefOid") or "")
-    if row["head_sha"] and retained_head and retained_head != row["head_sha"]:
+    retained_base = ""
+    if isinstance(request_record, dict):
+        retained_head = str(request_record.get("head_sha") or "")
+        retained_base = str(request_record.get("base_ref") or "")
+    row["retained_pins"] = {"head_sha": retained_head, "base_sha": retained_base}
+    if not retained_head or not retained_base:
+        row["verifier"] = unscored_row("retained_pins_unreadable", "")
+        row["diagnostic"] = "retained review-request.json is missing or pinless; head+base cannot be verified"
+        return row, 0
+    if retained_head != row["head_sha"]:
         row["verifier"] = unscored_row("retained_head_mismatch", "")
         row["diagnostic"] = f"retained head {retained_head[:12]} != corpus head {row['head_sha'][:12]}"
         return row, 0
-    for artifact_name in ("ai-output.json", "review-coverage.json", "pr.diff.truncated", "pr.json"):
+    if retained_base != row["base_sha"]:
+        row["verifier"] = unscored_row("retained_base_mismatch", "")
+        row["diagnostic"] = f"retained base {retained_base[:12]} != corpus base {row['base_sha'][:12]}"
+        return row, 0
+    for artifact_name in ("ai-output.json", "review-coverage.json", "review-request.json", "pr.diff.truncated", "pr.json"):
         artifact_path = run_dir / artifact_name
         if artifact_path.is_file():
             row["artifact_digests"][artifact_name] = f"sha256:{_sha256_file(artifact_path)[:16]}"
@@ -1833,6 +1859,7 @@ def _canary_row(
         body_text = (run_dir / "pr-body.txt").read_text(encoding="utf-8", errors="replace")
     except OSError:
         body_text = ""
+    pr_object = _read_json_soft(run_dir / "pr.json")
     title = str(pr_object.get("title") or "") if isinstance(pr_object, dict) else ""
     if not title:
         title = str((corpus_entry or {}).get("title") or run_info.get("title") or "")
@@ -1841,8 +1868,12 @@ def _canary_row(
         secret_env_names.insert(0, "AI_API_KEY")
     request = {
         "row": {
-            "head_sha": row["head_sha"],
-            "base_sha": row["base_sha"],
+            # The VERIFIED pins: after the three fail-closed gates above,
+            # retained_head/retained_base equal the corpus pins — carry the
+            # retained record's own values so the request provably grades
+            # the verified revision pair.
+            "head_sha": retained_head,
+            "base_sha": retained_base,
             "diff": diff_text,
             "pr_title": title,
             "pr_body": body_text,
@@ -1858,6 +1889,15 @@ def _canary_row(
         "confidence_key_env": condition.get("key_env") or "",
         "secret_env_names": secret_env_names,
     }
+    # Spend ceiling, not a successful-response counter: the slot is durably
+    # RESERVED before dispatch and stays consumed when the provider fails,
+    # parsing fails, or the bridge dies after dispatch — a crash after the
+    # wire must never leave a paid call unrecorded (the pilot's write-first
+    # discipline). A failed reservation dispatches NOTHING.
+    if not reserve_slot():
+        row["verifier"] = unscored_row("ledger_unavailable", "")
+        row["diagnostic"] = "spend ledger could not be written; no call was dispatched"
+        return row, 0
     row["wire_attempts"] = 1
     try:
         outcome = live_scorer_via_bridge(
@@ -1987,8 +2027,9 @@ def cmd_canary(args: argparse.Namespace) -> int:
     audit_dir = work_dir / "audit"
     out_path = Path(args.out).resolve()
 
-    # Lifetime spend ledger for the canary work dir (the pilot's mechanism,
-    # reused verbatim): unreadable fails closed, write happens BEFORE each call.
+    # Lifetime spend ledger for the canary work dir (the pilot's mechanism):
+    # unreadable fails closed, and slots are RESERVED write-first — before
+    # the wire they account for.
     spend_path = work_dir / SCORER_SPEND_FILENAME
     carried_calls = 0
     if spend_path.is_file():
@@ -2041,6 +2082,32 @@ def cmd_canary(args: argparse.Namespace) -> int:
             return f"wall_time_budget_sec={ceilings['wall_time_budget_sec']} elapsed"
         return None
 
+    ledger_failure: list[str] = []
+
+    def reserve_slot() -> bool:
+        """Durably reserve ONE verifier call slot BEFORE provider dispatch.
+
+        This is a spend ceiling, not a successful-response counter: the slot
+        stays consumed when the provider fails, parsing fails, or the bridge
+        dies after dispatch, so a crash after the wire can never leave a
+        paid call unrecorded and a later invocation can never exceed the
+        declared lifetime ceiling. A failed write dispatches nothing: the
+        in-memory counter rolls back so the ledger and the results record
+        agree, the run aborts, and zero provider calls happen.
+        """
+        nonlocal calls_made
+        calls_made += 1
+        try:
+            _write_scorer_spend(spend_path, calls_made)
+        except OSError as exc:
+            calls_made -= 1
+            ledger_failure.append(
+                f"the spend ledger could not be written ({type(exc).__name__}); "
+                "no call was dispatched and the run aborted"
+            )
+            return False
+        return True
+
     budget_exhausted = False
     abort_note = ""
     for entry in plan["entries"]:
@@ -2066,6 +2133,7 @@ def cmd_canary(args: argparse.Namespace) -> int:
                         "evidence_state": evidence_state,
                         "head_sha": (corpus_entry or {}).get("head_sha", ""),
                         "base_sha": (corpus_entry or {}).get("base_sha", ""),
+                        "retained_pins": None,
                         "primary": {}, "verifier": disabled_scorer_result(),
                         "profile": None, "rubric_version": None, "warnings": [],
                         "wire_effort": None, "usage": None, "latency_ms": None,
@@ -2074,42 +2142,27 @@ def cmd_canary(args: argparse.Namespace) -> int:
                         "_primary_findings": [], "not_run": f"fallback_for {target} scored",
                     })
                     continue
-            if budget_exhaustion() is not None:
-                budget_exhausted = True
-                abort_note = budget_exhaustion() or ""
             if budget_exhausted:
-                rows.append({
-                    "pr_id": pr_id, "kind": kind, "expectation": expectation,
-                    "source": "corpus", "condition": cid, "role": role,
-                    "evidence_state": evidence_state,
-                    "head_sha": (corpus_entry or {}).get("head_sha", ""),
-                    "base_sha": (corpus_entry or {}).get("base_sha", ""),
-                    "primary": {}, "verifier": unscored_row("budget_exhausted", ""),
-                    "profile": None, "rubric_version": None, "warnings": [],
-                    "wire_effort": None, "usage": None, "latency_ms": None,
-                    "prompt_bytes": None, "diagnostic": "", "wire_attempts": 0,
-                    "artifact_digests": {}, "_defect": (corpus_entry or {}).get("defect") or {},
-                    "_primary_findings": [],
-                })
-                continue
+                break
+            exhaustion = budget_exhaustion()
+            if exhaustion is not None:
+                budget_exhausted = True
+                abort_note = exhaustion
+                break
             row, attempts = _canary_row(
                 pr_id, kind, expectation, condition, evidence_state, corpus_entry,
                 run_info, run_dir, verdict_policy, ceilings, work_dir, audit_dir,
+                reserve_slot,
             )
-            if attempts:
-                calls_made += 1
-                ledger_total = calls_made
-                try:
-                    _write_scorer_spend(spend_path, ledger_total)
-                except OSError as exc:
-                    print(
-                        "canary aborted: the spend ledger could not be written "
-                        f"({type(exc).__name__}); no further calls were made",
-                        file=sys.stderr,
-                    )
-                    return EXIT_BUDGET_ABORT
-            scored[cid] = attempts > 0 and row["verifier"].get("status") == "scored"
             rows.append(row)
+            if row["verifier"].get("cause") == "ledger_unavailable":
+                # The slot could not be durably reserved: nothing was
+                # dispatched, nothing is counted, the run stops here.
+                budget_exhausted = True
+                abort_note = ledger_failure[0] if ledger_failure else abort_note
+                scored[cid] = False
+                break
+            scored[cid] = attempts > 0 and row["verifier"].get("status") == "scored"
             status = row["verifier"].get("status", "?")
             detail = (
                 f"score={row['verifier'].get('score')} risk={row['verifier'].get('risk')}"
@@ -2118,6 +2171,38 @@ def cmd_canary(args: argparse.Namespace) -> int:
             print(f"canary row: {pr_id} [{cid}] {status} ({detail})")
         if budget_exhausted:
             break
+
+    if budget_exhausted:
+        # No silent drops: every (entry, condition) combination this
+        # invocation owned but did not reach gets an explicit row — never
+        # silently dropped, never treated as an observation.
+        present = {(row["pr_id"], row["condition"]) for row in rows}
+        for entry in plan["entries"]:
+            for cid in selected_ids:
+                if (entry["pr_id"], cid) in present:
+                    continue
+                corpus_entry = corpus.get(entry["pr_id"])
+                run_info = run_entries.get(entry["pr_id"], {})
+                evidence_state = primary_evidence_state(
+                    run_info, _resolve_run_dir(artifacts_dir, run_info),
+                )
+                rows.append({
+                    "pr_id": entry["pr_id"],
+                    "kind": corpus_entry["_pilot_kind"] if corpus_entry else run_info.get("kind", "unknown"),
+                    "expectation": entry.get("expectation", ""),
+                    "source": "corpus", "condition": cid,
+                    "role": conditions[cid].get("role", "primary"),
+                    "evidence_state": evidence_state,
+                    "head_sha": (corpus_entry or {}).get("head_sha", ""),
+                    "base_sha": (corpus_entry or {}).get("base_sha", ""),
+                    "retained_pins": None,
+                    "primary": {}, "verifier": unscored_row("budget_exhausted", ""),
+                    "profile": None, "rubric_version": None, "warnings": [],
+                    "wire_effort": None, "usage": None, "latency_ms": None,
+                    "prompt_bytes": None, "diagnostic": "", "wire_attempts": 0,
+                    "artifact_digests": {}, "_defect": (corpus_entry or {}).get("defect") or {},
+                    "_primary_findings": [],
+                })
 
     results = {
         "plan": str(plan_path),
@@ -2151,6 +2236,12 @@ def cmd_canary(args: argparse.Namespace) -> int:
         f"{calls_made} wire calls -> {_repo_rel(str(out_path))}"
         + (" [budget_exhausted: " + abort_note + "]" if budget_exhausted else "")
     )
+    if ledger_failure:
+        # A failed reservation aborted the run: the results-so-far are
+        # written for observability, but the exit is the budget-abort code —
+        # spend that cannot be accounted for is never treated as spent room.
+        print(f"canary aborted: {ledger_failure[0]}", file=sys.stderr)
+        return EXIT_BUDGET_ABORT
     return 0
 
 

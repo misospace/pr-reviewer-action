@@ -128,7 +128,6 @@ import { buildConfidencePrompt, unresolvedConfidencePins, type ConfidencePromptI
 import { CONFIDENCE_MAX_TOKENS, runConfidenceScorer, transportCause } from "../src/confidence/scorer.js";
 import { resolveConfidenceProfile } from "../src/routing/tiers.js";
 import { buildModelRequest } from "../src/model/request.js";
-import { wireEffortOf } from "../src/model/request.js";
 import { describeTransportFailure } from "../src/transport/http.js";
 import { runChatRequestOnce } from "../src/transport/transport.js";
 import {

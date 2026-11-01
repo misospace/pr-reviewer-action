@@ -65,10 +65,22 @@ artifacts mirror the runtime's `confidence-request.json` /
 Both rows: `status=scored` (no `unscored` anywhere), `wire_effort=medium`
 (the wire carried the configured effort and the run recorded it),
 structured answers parsed on the first attempt, proof pins resolved,
-retained-head verification passed (no `retained_head_mismatch`), the
-same-model independence warning recorded on both rows (the resolver doing
+the same-model independence warning recorded on both rows (the resolver doing
 its job for the inherited shape), spend ledger 2/8 calls, ~38.5 s total
 wire time. Cost: 2 calls, 4 907 completion tokens total.
+
+**Exact head+base pinning.** The canary's driver now verifies BOTH retained
+pins before any call: it reads `review-request.json` (the runtime's own
+request record: `head_sha` + `base_ref`) and requires both to equal the
+corpus pins — a pinless record, a head mismatch, or a base mismatch is
+recorded unscored with ZERO wire calls, and the verified pins ride the
+outgoing request. The committed results above predate that gate (it landed
+in the same PR after the run, per #1392 review): both rows' base pins were
+verified manually afterwards — `review-request.json.base_ref` AND
+`pr-object.json.base.sha` equal the corpus `base_sha` for both rows
+(`bcbf215a…` courier-46-61, `3c3a93e8…` pr-reviewer-action-133-clean) — so
+the recorded observations stand unchanged under the stricter gate, and any
+future canary run enforces it in code.
 
 ## Acceptance signals
 
@@ -106,10 +118,12 @@ wire time. Cost: 2 calls, 4 907 completion tokens total.
   #1286 same-model viability finding for this endpoint/model family.
 - **Invariants:** no credential anywhere in the results, audit tree, or
   diagnostics (the persisted wire artifacts are the production
-  `redactTextDeep` copies); head-pinning anchored every call; one wire
-  attempt per row, no retries; the declared fallback did not fire; labels
-  stayed blinded (the defect anchor exists only in the offline row
-  enrichment).
+  `redactTextDeep` copies); exact head+base pins anchored every call; one
+  wire attempt per row, no retries; the declared fallback did not fire;
+  labels stayed blinded (the defect anchor exists only in the offline row
+  enrichment). The spend ceiling is a lifetime bound enforced write-first:
+  a call slot is durably reserved BEFORE dispatch and stays consumed on any
+  failure, so a crash after the wire can never leave spend unrecorded.
 
 ## Verdict: **pass** — the repaired verifier is mechanically functional and sane enough to enable for advisory dogfood
 

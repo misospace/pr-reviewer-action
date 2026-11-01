@@ -28,6 +28,7 @@ network-facing test binds 127.0.0.1; the mock path touches no socket at all.
 from __future__ import annotations
 
 import json
+import io
 import os
 import re
 import shutil
@@ -38,6 +39,7 @@ import tempfile
 import threading
 import time
 import types
+from contextlib import redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -2097,16 +2099,22 @@ def canary_corpus(tmp_path: Path) -> Path:
     return path
 
 
-def canary_runs_dir(tmp_path: Path, head_by_id: dict[str, str] | None = None) -> Path:
+def canary_runs_dir(
+    tmp_path: Path,
+    head_by_id: dict[str, str] | None = None,
+    base_by_id: dict[str, str] | None = None,
+) -> Path:
     """A minimal retained-runs dir in the pilot work-dir layout: one run dir
     per canary corpus id, each with the artifact set the canary reads
-    (ai-output.json, review-coverage.json, pr.diff, pr-body.txt, pr.json).
-    ``head_by_id`` overrides the retained pr.json head (default: match the
-    corpus pin) so the retained-head mismatch path is exercisable."""
+    (ai-output.json, review-coverage.json, review-request.json, pr.diff,
+    pr-body.txt, pr.json). ``head_by_id``/``base_by_id`` override the
+    retained review-request.json pins (defaults: match the corpus pins) so
+    the retained-pin verification paths are exercisable."""
     heads = head_by_id or {}
+    bases = base_by_id or {}
     artifacts = {
-        "canary-synth-defective": {"verdict": "approve", "sha": "a" * 40},
-        "canary-synth-clean": {"verdict": "approve", "sha": "c" * 40},
+        "canary-synth-defective": {"verdict": "approve", "sha": "a" * 40, "base": "b" * 40},
+        "canary-synth-clean": {"verdict": "approve", "sha": "c" * 40, "base": "d" * 40},
     }
     runs_dir = tmp_path / "canary-runs"
     entries = []
@@ -2119,6 +2127,12 @@ def canary_runs_dir(tmp_path: Path, head_by_id: dict[str, str] | None = None) ->
         }), encoding="utf-8")
         (run_dir / "review-coverage.json").write_text(json.dumps({
             "partial_coverage": None, "required_checks": "complete", "tool_loop_ran": False,
+        }), encoding="utf-8")
+        (run_dir / "review-request.json").write_text(json.dumps({
+            "schema_version": "1", "pr_number": "46",
+            "head_sha": heads.get(pr_id, spec["sha"]),
+            "base_ref": bases.get(pr_id, spec["base"]),
+            "is_fork_pr": "false", "platform": "github",
         }), encoding="utf-8")
         (run_dir / "pr.diff").write_text("diff --git a/f.go b/f.go\n+func observeState() {}\n", encoding="utf-8")
         (run_dir / "pr-body.txt").write_text("retained PR body", encoding="utf-8")
@@ -2182,13 +2196,21 @@ def canary_condition(condition_id: str = "dogfood-loopback", **overrides) -> dic
     return condition
 
 
-def run_canary(tmp_path: Path, plan: Path, runs_dir: Path, capsys: pytest.CaptureFixture | None = None) -> tuple[int, dict | None]:
-    out_path = tmp_path / "canary-results.json"
+def run_canary(
+    tmp_path: Path,
+    plan: Path,
+    runs_dir: Path,
+    work_dir: Path | None = None,
+    out_path: Path | None = None,
+    capsys: pytest.CaptureFixture | None = None,
+) -> tuple[int, dict | None]:
+    out_path = out_path or (tmp_path / "canary-results.json")
+    work_dir = work_dir or (tmp_path / "canary-work")
     argv = [
         "--plan", str(plan),
         "--artifacts-dir", str(runs_dir),
         "--out", str(out_path),
-        "--work-dir", str(tmp_path / "canary-work"),
+        "--work-dir", str(work_dir),
         "--corpus-real", str(canary_corpus(tmp_path)),
     ]
     rc = run_cmd("canary", argv)
@@ -2202,26 +2224,34 @@ def test_canary_committed_plan_validates() -> None:
     assert confidence_calibration._validate_canary_plan(plan, corpus) == []
 
 
-def test_canary_plan_rejects_credential_and_shape_errors(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+def test_canary_plan_rejects_credential_and_shape_errors(tmp_path: Path) -> None:
     corpus = load_corpus_entries(REPO_ROOT / "evals" / "corpus-real-prs.json")
     base = json.loads((REPO_ROOT / "evals" / "confidence-canary" / "plan.json").read_text(encoding="utf-8"))
     cases = {
-        "api_key": ("conditions", lambda plan: plan["conditions"][0]["confidence_env"].update(
-            {"AI_CONFIDENCE_API_KEY": "sk-literal"})),
-        "unknown_env_key": ("conditions", lambda plan: plan["conditions"][0]["confidence_env"].update(
-            {"AI_CONFIDENCE_NOT_A_REAL_INPUT": "x"})),
-        "distinct_url_without_key": ("conditions", lambda plan: plan["conditions"][0].update(
+        "api_key": lambda plan: plan["conditions"][0]["confidence_env"].update(
+            {"AI_CONFIDENCE_API_KEY": "sk-literal"}),
+        "unknown_env_key": lambda plan: plan["conditions"][0]["confidence_env"].update(
+            {"AI_CONFIDENCE_NOT_A_REAL_INPUT": "x"}),
+        "distinct_url_without_key": lambda plan: plan["conditions"][0].update(
             {"key_env": None, "confidence_env": {**plan["conditions"][0]["confidence_env"],
-                                                 "AI_CONFIDENCE_BASE_URL": "https://example.invalid/v1"}})),
-        "bad_rubric": ("rubric", lambda plan: plan.update({"rubric": {"id": "confidence-rubric-v1"}})),
-        "unblinded": ("blinded", lambda plan: plan.update({"blinded": False})),
+                                                 "AI_CONFIDENCE_BASE_URL": "https://example.invalid/v1"}}),
+        "bad_rubric": lambda plan: plan.update({"rubric": {"id": "confidence-rubric-v1"}}),
+        "unblinded": lambda plan: plan.update({"blinded": False}),
     }
-    for name, (_field, mutate) in cases.items():
+    for name, mutate in cases.items():
         plan = json.loads(json.dumps(base))
         mutate(plan)
         errors = confidence_calibration._validate_canary_plan(plan, corpus)
         assert errors, f"case {name} must produce plan errors"
-    captured = capsys.readouterr()  # silence
+
+
+def test_canary_plan_requires_corpus_pins() -> None:
+    """Exact head/base pinning (#1370) starts at the plan: an entry whose
+    corpus record cannot prove both SHAs is not a canary row."""
+    plan = json.loads((REPO_ROOT / "evals" / "confidence-canary" / "plan.json").read_text(encoding="utf-8"))
+    pinless = {"courier-46-61": {"_pilot_kind": "vulnerable", "head_sha": "a" * 40}}
+    errors = confidence_calibration._validate_canary_plan(plan, pinless)
+    assert any("base_sha" in error for error in errors)
 
 
 def test_bridge_live_scorer_openai_production_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2587,18 +2617,84 @@ def test_canary_driver_missing_key_env_fails_fast(tmp_path: Path, monkeypatch: p
     assert "CONFIDENCE_CANARY_TEST_KEY" in capsys.readouterr().err
 
 
-def test_canary_driver_retained_head_mismatch_scores_nothing(
+def test_canary_driver_pin_verification_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A retained run whose pr.json head does not match the corpus-pinned
-    head_sha is not evidence about that PR: unscored, zero calls."""
-    pilot = LoopbackProvider(lambda _handler: (200, {
-        "choices": [{"message": {"content": CANARY_ANSWER}}],
-        "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-    }))
+    """Exact head+base pinning (#1370): a retained run must be the review OF
+    the corpus head AGAINST the corpus base. Either mismatch fails the row
+    closed with ZERO wire calls; both matching verifies and dispatches."""
+    cases = {
+        "head_ok_base_bad": (
+            {"canary-synth-defective": "f" * 40},
+            "retained_base_mismatch",
+        ),
+        "head_bad_base_ok": (
+            None,
+            "retained_head_mismatch",
+        ),
+        "both_match": (
+            None,
+            None,
+        ),
+    }
+    for name, (base_override, expected_cause) in cases.items():
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        pilot = LoopbackProvider(lambda _handler: (200, {
+            "choices": [{"message": {"content": CANARY_ANSWER}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+        }))
+        server, base_url = serve(pilot)
+        monkeypatch.setenv("AI_API_KEY", "primary-pin")
+        monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-pin")
+        try:
+            plan = canary_plan(case_dir, [canary_condition("dogfood-loopback", **{
+                "confidence_env": {
+                    "AI_CONFIDENCE_MODEL": "loopback-model",
+                    "AI_CONFIDENCE_BASE_URL": base_url,
+                    "AI_CONFIDENCE_API_FORMAT": "openai",
+                },
+            })])
+            runs_dir = canary_runs_dir(
+                case_dir,
+                head_by_id={"canary-synth-defective": "e" * 40} if name == "head_bad_base_ok" else None,
+                base_by_id=base_override,
+            )
+            rc, results = run_canary(
+                tmp_path, plan, runs_dir,
+                work_dir=case_dir / "work", out_path=case_dir / "results.json",
+            )
+            assert rc == 0, name
+            defective = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-defective")
+            clean = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-clean")
+            if expected_cause is None:
+                # Both pins verified: the row dispatches and carries the
+                # VERIFIED pins (which equal the corpus pins).
+                assert defective["verifier"]["status"] == "scored", name
+                assert defective["retained_pins"]["head_sha"] == "a" * 40
+                assert defective["retained_pins"]["base_sha"] == "b" * 40
+                assert defective["wire_attempts"] == 1
+            else:
+                assert defective["verifier"]["status"] == "unscored", name
+                assert defective["verifier"]["cause"] == expected_cause, name
+                assert defective["wire_attempts"] == 0, name
+                assert defective["retained_pins"] is not None, name
+            # The other row's pins always match the corpus: it dispatches
+            # regardless of which pin the defective row mismatches.
+            assert clean["verifier"]["status"] == "scored", name
+        finally:
+            server.shutdown()
+
+
+def test_canary_driver_pins_unreadable_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retained run whose review-request.json is missing (or pinless)
+    cannot prove its pins: unscored, zero wire calls."""
+    pilot = LoopbackProvider(lambda _handler: (200, {"choices": []}))
     server, base_url = serve(pilot)
-    monkeypatch.setenv("AI_API_KEY", "primary-3")
-    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-3")
+    monkeypatch.setenv("AI_API_KEY", "primary-pin2")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-pin2")
     try:
         plan = canary_plan(tmp_path, [canary_condition("dogfood-loopback", **{
             "confidence_env": {
@@ -2607,15 +2703,135 @@ def test_canary_driver_retained_head_mismatch_scores_nothing(
                 "AI_CONFIDENCE_API_FORMAT": "openai",
             },
         })])
-        runs_dir = canary_runs_dir(tmp_path, head_by_id={"canary-synth-defective": "e" * 40})
+        runs_dir = canary_runs_dir(tmp_path)
+        # Strip the pin record entirely.
+        (runs_dir / "runs" / "canary-synth-defective" / "review-request.json").unlink()
         rc, results = run_canary(tmp_path, plan, runs_dir)
         assert rc == 0
         defective = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-defective")
-        clean = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-clean")
         assert defective["verifier"]["status"] == "unscored"
-        assert defective["verifier"]["cause"] == "retained_head_mismatch"
+        assert defective["verifier"]["cause"] == "retained_pins_unreadable"
         assert defective["wire_attempts"] == 0
-        assert clean["verifier"]["status"] == "scored"
-        assert len(pilot.requests) == 1
+        assert len(pilot.requests) == 1  # only the clean row dispatched
+    finally:
+        server.shutdown()
+
+
+def test_canary_driver_ledger_slot_consumed_when_bridge_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spend-ceiling regression (#1392 review): the slot is durably reserved
+    BEFORE dispatch and stays consumed when the bridge dies after the
+    reservation — a subsequent invocation sees the slot as spent and cannot
+    exceed the lifetime ceiling."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-slot")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-slot")
+    work_dir = tmp_path / "canary-work"
+    shared: dict = {}
+
+    plan = canary_plan(tmp_path, [canary_condition("dogfood-loopback", **{
+        "confidence_env": {
+            "AI_CONFIDENCE_MODEL": "loopback-model",
+            "AI_CONFIDENCE_BASE_URL": base_url,
+            "AI_CONFIDENCE_API_FORMAT": "openai",
+        },
+    })], entries=[{"pr_id": "canary-synth-defective", "expectation": "known_false_approval"}],
+        ceilings={
+            "max_verifier_calls": 1, "max_output_tokens": 64000,
+            "wall_time_budget_sec": 600, "request_timeout_sec": 30,
+        })
+    runs_dir = canary_runs_dir(tmp_path)
+    out_path = tmp_path / "canary-results.json"
+    argv = [
+        "--plan", str(plan), "--artifacts-dir", str(runs_dir),
+        "--out", str(out_path), "--work-dir", str(work_dir),
+        "--corpus-real", str(canary_corpus(tmp_path)),
+    ]
+    try:
+        # Run 1: the slot is reserved, then the bridge fails after dispatch.
+        original = confidence_calibration.live_scorer_via_bridge
+
+        def crashing_bridge(_request, _work_dir, _timeout):
+            shared["reserved_before_crash"] = json.loads(
+                (work_dir / "scorer-spend.json").read_text(encoding="utf-8")
+            )["lifetime_wire_calls"]
+            raise RuntimeError("bridge died after dispatch")
+
+        confidence_calibration.live_scorer_via_bridge = crashing_bridge
+        try:
+            rc1 = run_cmd("canary", argv)
+        finally:
+            confidence_calibration.live_scorer_via_bridge = original
+        assert rc1 == 0
+        assert shared["reserved_before_crash"] == 1, "the slot must be durable BEFORE dispatch"
+        results1 = json.loads(out_path.read_text(encoding="utf-8"))
+        row = results1["rows"][0]
+        assert row["verifier"]["status"] == "unscored"
+        assert row["verifier"]["cause"] == "bridge_live_scorer_failed"
+        assert row["wire_attempts"] == 1, "the reservation is consumed even on failure"
+        ledger = json.loads((work_dir / "scorer-spend.json").read_text(encoding="utf-8"))
+        assert ledger["lifetime_wire_calls"] == 1
+        assert len(pilot.requests) == 0  # the bridge failed before its transport
+        # Run 2: the carried slot counts — planned 1 + spent 1 > ceiling 1
+        # aborts BEFORE any dispatch.
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc2 = run_cmd("canary", argv)
+        assert rc2 == 3
+        assert "max_verifier_calls" in err.getvalue()
+        assert len(pilot.requests) == 0, "a ceiling-exceeded rerun makes zero calls"
+        ledger2 = json.loads((work_dir / "scorer-spend.json").read_text(encoding="utf-8"))
+        assert ledger2["lifetime_wire_calls"] == 1, "the abort spends nothing further"
+    finally:
+        server.shutdown()
+
+
+def test_canary_driver_ledger_write_failure_aborts_without_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reservation that cannot be durably written dispatches NOTHING and
+    aborts the run: zero provider calls, exit 3, results-so-far written."""
+    pilot = LoopbackProvider(lambda _handler: (200, {"choices": []}))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-led")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-led")
+    try:
+        plan = canary_plan(tmp_path, [canary_condition("dogfood-loopback", **{
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+            },
+        })])
+        runs_dir = canary_runs_dir(tmp_path)
+        out_path = tmp_path / "canary-results.json"
+
+        original = confidence_calibration._write_scorer_spend
+
+        def failing_write(_path, _count):
+            raise OSError("disk gone")
+
+        confidence_calibration._write_scorer_spend = failing_write
+        try:
+            argv = [
+                "--plan", str(plan), "--artifacts-dir", str(runs_dir),
+                "--out", str(out_path), "--work-dir", str(tmp_path / "canary-work"),
+                "--corpus-real", str(canary_corpus(tmp_path)),
+            ]
+            rc = run_cmd("canary", argv)
+        finally:
+            confidence_calibration._write_scorer_spend = original
+        assert rc == 3
+        assert len(pilot.requests) == 0, "zero provider calls without a durable reservation"
+        results = json.loads(out_path.read_text(encoding="utf-8"))
+        assert results["lifetime_wire_calls"] == 0
+        assert "spend ledger could not be written" in results["budget_note"]
+        assert all(row["verifier"].get("cause") in ("ledger_unavailable", "budget_exhausted")
+                   for row in results["rows"])
     finally:
         server.shutdown()
