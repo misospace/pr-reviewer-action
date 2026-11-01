@@ -88,6 +88,27 @@ test("obligation dispositions match exact text and id, require a grounded ration
     { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "check one", status: "unresolved" },
   ]);
   assert.equal(conflict[0]?.status, "unresolved");
+  // Literal duplicates fail closed (#750 `duplicate-dispositions` parity, per
+  // the #1388 review): a second answer under the SAME alias invalidates the
+  // row, so a hostile model cannot discharge a review-owned prerequisite by
+  // echoing it twice. Only the distinct id+text alias echo is one answer.
+  const dupText = foldObligationDispositions(obligations, [
+    { check: "check one", status: "satisfied", rationale: "r" }, { check: " check ONE ", status: "satisfied", rationale: "r again" },
+  ]);
+  assert.equal(dupText[0]?.status, "unresolved");
+  const dupId = foldObligationDispositions(obligations, [
+    { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "OBLIGATION-1", status: "satisfied", rationale: "r again" },
+  ]);
+  assert.equal(dupId[0]?.status, "unresolved");
+  const dupMixed = foldObligationDispositions(obligations, [
+    { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "check one", status: "satisfied", rationale: "r" }, { check: "check one", status: "satisfied", rationale: "third" },
+  ]);
+  assert.equal(dupMixed[0]?.status, "unresolved");
+  // The alias echo with agreeing statuses still discharges after the fix.
+  const aliasEcho = foldObligationDispositions(obligations, [
+    { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "check one", status: "satisfied", rationale: "r" },
+  ]);
+  assert.equal(aliasEcho[0]?.status, "satisfied");
   assert.equal(foldObligationDispositions(obligations, null)[1]?.status, "unresolved");
 });
 

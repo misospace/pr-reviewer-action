@@ -267,15 +267,24 @@ export function foldObligationDispositions(
   dispositions: ReadonlyArray<{ check: string; status: string; rationale?: string | null }> | null,
 ): ReviewObligation[] {
   return obligations.map((obligation) => {
+    const idAlias = normalized(obligation.id);
+    const textAlias = normalized(obligation.text);
     const matching = (dispositions ?? []).filter((entry) =>
-      normalized(entry.check) === normalized(obligation.text) || normalized(entry.check) === normalized(obligation.id),
+      normalized(entry.check) === textAlias || normalized(entry.check) === idAlias,
     );
     if (matching.length === 0) return { ...obligation, status: "unresolved", cause: null };
-    // The model may echo BOTH the obligation id and its exact text for one
-    // row (#1381 review): aliases are one answer — they discharge when they
-    // agree, mirroring how #750 resolves the text disposition and ignores
-    // the id alias — and only a disagreement keeps the row conservatively
-    // unresolved.
+    // A second answer for the SAME alias is a duplicate disposition and
+    // deterministically invalidates the row (#750's fail-closed
+    // `duplicate-dispositions` rule in required-checks.ts): the model cannot
+    // satisfy a review-owned prerequisite by echoing it twice. Only the
+    // one-answer alias echo — one id entry plus one text entry — folds as a
+    // single answer (#1381 review): aliases are one answer — they discharge
+    // when they agree, mirroring how #750 resolves the text disposition and
+    // ignores the id alias — and only a disagreement keeps the row
+    // conservatively unresolved.
+    const idMatches = matching.filter((entry) => normalized(entry.check) === idAlias);
+    const textMatches = matching.filter((entry) => normalized(entry.check) === textAlias);
+    if (idMatches.length > 1 || textMatches.length > 1) return { ...obligation, status: "unresolved", cause: null };
     if (new Set(matching.map((entry) => entry.status)).size > 1) return { ...obligation, status: "unresolved", cause: null };
     const status = matching[0]!.status;
     const rationale = matching
