@@ -68,6 +68,37 @@ const LOW_BUDGET_TURN_NOTE =
   "rejecting your unresolved blocker hypotheses and gathering only the " +
   "evidence still needed for the verdict.";
 
+/**
+ * #1379: deterministic tool-loop prioritization for dependency-update PRs.
+ * When the caller (the harness, keyed on the PR's classification) reserves a
+ * tail of the request budget for required dependency evidence, the driver —
+ * not the prompt fragment — owns the ordering rule: the FIRST request is
+ * preceded by a turn note stating the dependency-evidence obligations take
+ * priority over optional work, and once the reserve window is entered the
+ * regular budget note is replaced by one redirecting ALL remaining spend to
+ * those obligations. Both notes are trusted driver text (a turn_note, never
+ * inside the untrusted tool-result envelope), and both are skipped entirely
+ * when no reserve is configured, so non-dependency PRs keep the exact
+ * #701 note sequences the reliability tests pin.
+ */
+export const DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE =
+  "[loop budget] Required dependency evidence comes first: establish upstream " +
+  "provenance, inspect the exact old-to-new upstream release delta, and check " +
+  "security advisories (or record the check as not performed) BEFORE spending " +
+  "tool calls on optional archaeology, claim falsification, history greps, or " +
+  "redundant local-diff confirmation.";
+const RESERVE_WINDOW_TURN_NOTE =
+  "[loop budget] Only {requestsLeft} tool request(s) remain and they are " +
+  "reserved for required dependency evidence: spend them on upstream " +
+  "provenance, the exact old-to-new upstream release delta, and security " +
+  "advisories only — not on optional or local-diff work. If the evidence " +
+  "cannot be established, report what is missing rather than approximating it.";
+
+/** Default #1379 reserve: the budget tail the driver holds for required
+ * dependency evidence once the classification says the PR is a
+ * dependency-update shape. Bounded so it can never swallow a tiny budget. */
+export const DEPENDENCY_EVIDENCE_RESERVE = 4;
+
 function formatNote(template: string, values: Record<string, number>): string {
   return template.replace(/\{(\w+)\}/g, (_m, key: string) => String(values[key] ?? ""));
 }
@@ -236,6 +267,10 @@ export interface LoopOutcome {
   compactionTruncate: number;
   /** #922: largest approximate conversation size seen before a turn. */
   peakConversationTokens: number;
+  /** #1379: the dependency-evidence reserve the caller configured (0 when
+   * none — non-dependency PRs keep the exact legacy behavior). Echoed for
+   * budget provenance only; counts nothing about tool content. */
+  priorityEvidenceReserve: number;
 }
 
 /**
@@ -355,6 +390,15 @@ export interface DriveToolLoopOptions {
   nowFn?: () => number;
   /** #1199: invoked once per model turn with that turn's bounded telemetry. */
   onRound?: (round: NativeLoopRoundTelemetry) => void;
+  /**
+   * #1379: size of the request-budget tail reserved for required dependency
+   * evidence, set by the harness when the PR's classification is a
+   * dependency-update kind. 0/absent preserves the legacy note behavior
+   * exactly. Deterministic driver behavior: a priority note precedes the
+   * FIRST request, and once the remaining requests enter the reserve window
+   * the budget note is replaced by the dependency-evidence redirect.
+   */
+  priorityEvidenceReserve?: number;
 }
 
 /**
@@ -412,6 +456,7 @@ export async function driveToolLoop(
     compactionSummarize: 0,
     compactionTruncate: 0,
     peakConversationTokens: 0,
+    priorityEvidenceReserve: Math.max(0, options.priorityEvidenceReserve ?? 0),
   };
   const started = timeFn();
   const telemetryStart = nowFn();
@@ -500,19 +545,33 @@ export async function driveToolLoop(
     // the remaining request/round budget; near the ceiling it also redirects
     // the remaining spend to blocker hypotheses. Trusted driver text — a
     // turn_note, never inside the untrusted tool-result envelope.
-    if (outcome.rounds > 0) {
+    // #1379: when a dependency-evidence reserve is configured, the FIRST
+    // request carries the priority note (the ordering rule is driver-owned,
+    // not prompt-fragment guidance), and inside the reserve window the budget
+    // note is replaced by the dependency-evidence redirect.
+    {
+      const priorityReserve = Math.max(0, options.priorityEvidenceReserve ?? 0);
       const requestsLeft = budgets.maxToolCalls - callsExecuted;
       const roundsLeft = budgets.maxRounds - outcome.rounds;
-      const note =
-        requestsLeft <= LOW_TOOL_REQUESTS_REMAINING ? LOW_BUDGET_TURN_NOTE : BUDGET_TURN_NOTE;
-      conversation.addTurnNote(
-        formatNote(note, {
-          requestsLeft,
-          requestsTotal: budgets.maxToolCalls,
-          roundsLeft,
-          roundsTotal: budgets.maxRounds,
-        }),
-      );
+      const inReserveWindow =
+        priorityReserve > 0 && requestsLeft <= priorityReserve && outcome.rounds > 0;
+      if (outcome.rounds === 0 && priorityReserve > 0) {
+        conversation.addTurnNote(DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE);
+      } else if (outcome.rounds > 0) {
+        const note = inReserveWindow
+          ? formatNote(RESERVE_WINDOW_TURN_NOTE, { requestsLeft })
+          : requestsLeft <= LOW_TOOL_REQUESTS_REMAINING
+            ? LOW_BUDGET_TURN_NOTE
+            : BUDGET_TURN_NOTE;
+        conversation.addTurnNote(
+          formatNote(note, {
+            requestsLeft,
+            requestsTotal: budgets.maxToolCalls,
+            roundsLeft,
+            roundsTotal: budgets.maxRounds,
+          }),
+        );
+      }
     }
 
     const payload = conversation.toRequestPayload(options.apiFormat, options.model, {

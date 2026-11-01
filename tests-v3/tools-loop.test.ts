@@ -878,3 +878,123 @@ test("#1199: a transport-error turn records the streamed fallback it attempted",
   assert.equal(rounds[0]!.model_sec, 0.25);
   assert.equal(rounds[0]!.streamed_fallback, true);
 });
+
+// ── #1379: deterministic dependency-evidence budget prioritization ────────
+
+/** Scripted loop that also records every request payload the driver built,
+ * so the turn-note ordering the driver owns is observable per round. */
+function noteCapturingLoop(responses: unknown[], execResults: Record<string, unknown>[]) {
+  let responseIndex = 0;
+  let execIndex = 0;
+  const payloads: Array<Record<string, unknown>> = [];
+  const postFn = async (payload: Record<string, unknown>) => {
+    payloads.push(payload);
+    return responses[responseIndex++];
+  };
+  const executeFn = async () =>
+    execResults[execIndex++] ?? { tool: "?", status: "error", result: { error: "no scripted result" } };
+  const timeFn = () => Number.MAX_SAFE_INTEGER / 2;
+  return { postFn, executeFn, timeFn, payloads };
+}
+
+function requestTexts(payload: Record<string, unknown>): string {
+  const messages = (payload as { messages?: Array<{ content: unknown }> }).messages ?? [];
+  return messages.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+}
+
+test("#1379: reserve injects the priority note before the first request and redirects inside the reserve window", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Budget 6, reserve 4. One executed call per round: requestsLeft is 5 at
+  // round 2, 4 at round 3 — the window opens when the tail is reached.
+  const { postFn, executeFn, timeFn, payloads } = noteCapturingLoop(
+    [
+      openAiCall("c1", "git_status_short", "{}"),
+      openAiCall("c2", "git_diff_stat", "{}"),
+      openAiCall("c3", "read_file", '{"path":"a.txt"}'),
+      openAiText("done — evidence still unverified"),
+    ],
+    Array.from({ length: 3 }, () => ({ tool: "t", status: "ok", result: {} })),
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    priorityEvidenceReserve: 4,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(outcome.priorityEvidenceReserve, 4);
+  // Round 0: the priority note precedes ANY tool call — the deterministic
+  // ordering rule is driver-owned, not prompt-fragment guidance.
+  const firstRequest = requestTexts(payloads[0]!);
+  assert.ok(firstRequest.includes("dependency evidence comes first"));
+  assert.ok(!firstRequest.includes("reserved"));
+  // The round-0 request must not yet carry the regular #701 budget note
+  // either (that starts on round 2+, unchanged when no reserve is set).
+  assert.ok(!firstRequest.includes("of 6 tool request(s)"));
+  // Round 2: requestsLeft (5) is still outside the window — the regular
+  // #701 budget note runs unchanged. Turn notes are append-only, so the
+  // LAST note in the request is the one this round added.
+  const secondRequest = requestTexts(payloads[1]!);
+  assert.ok(secondRequest.includes("[loop budget] 5 of 6 tool request(s)"));
+  // Round 3: requestsLeft (4) entered the reserve window — the budget note
+  // is REPLACED by the dependency-evidence redirect.
+  const thirdRequest = requestTexts(payloads[2]!);
+  assert.ok(thirdRequest.includes("reserved") && thirdRequest.includes("dependency evidence"));
+  const newestNote = (payloads[2]!.messages as Array<{ content: string }>)
+    .map((m) => m.content)
+    .filter((c) => typeof c === "string" && c.startsWith("[loop budget]"))
+    .at(-1)!;
+  assert.ok(newestNote.includes("reserved"));
+  assert.ok(!newestNote.includes("turn(s) remain"));
+});
+
+test("#1379: no reserve keeps the exact legacy note behavior (no priority or reserve notes)", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn, payloads } = noteCapturingLoop(
+    [openAiCall("c1", "read_file", '{"path":"a.ts"}'), openAiText("done")],
+    [{ tool: "read_file", status: "ok", result: {} }],
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 24, 120),
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.equal(outcome.priorityEvidenceReserve, 0);
+  assert.ok(!requestTexts(payloads[0]!).includes("dependency evidence comes first"));
+  // Round 2 (after the first executed call) carries the regular budget note.
+  assert.ok(requestTexts(payloads[1]!).includes("[loop budget] 23 of 24 tool request(s)"));
+  assert.ok(!requestTexts(payloads[1]!).includes("dependency evidence"));
+});
+
+test("#1379: a reserve at the low-budget boundary preempts the generic low-budget note", async () => {
+  // Tiny budget (2) with reserve 1: the reserve window opens at
+  // requestsLeft <= 1, which is also the generic LOW_TOOL_REQUESTS_REMAINING
+  // threshold — the dependency redirect must win the ternary.
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn, payloads } = noteCapturingLoop(
+    [openAiCall("c1", "read_file", '{"path":"a.ts"}'), openAiText("done")],
+    [{ tool: "read_file", status: "ok", result: {} }],
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 2, 120),
+    timeFn,
+    priorityEvidenceReserve: 1,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  // Round 2 (requestsLeft 1): the newest note is the dependency redirect,
+  // not the generic "stop broad exploration" low-budget note.
+  const newestNote = (payloads[1]!.messages as Array<{ content: string }>)
+    .map((m) => m.content)
+    .filter((c) => typeof c === "string" && c.startsWith("[loop budget]"))
+    .at(-1)!;
+  assert.ok(newestNote.includes("reserved"));
+  assert.ok(!newestNote.includes("Stop broad exploration"));
+});

@@ -264,3 +264,26 @@ test("#1379: unresolved upstream-evidence obligations keep the published verdict
   // A partial approval over unresolved evidence is not published as clean.
   assert.equal(strictReviewResult("approve", [], "incomplete"), "partial");
 });
+
+test("#1379: missing release notes do not block the delta obligation — compare/changelog/commit evidence satisfies it", () => {
+  // Acceptance: "When release notes are missing, compare/changelog/commit
+  // evidence can satisfy the delta requirement." The reviewer dispositions
+  // the check itself, so the deterministic fold needs a satisfied
+  // disposition whose rationale cites the alternative upstream evidence —
+  // exactly the release-notes-absent case.
+  const deltaCheck =
+    "inspect exact old→new upstream release delta for updated image";
+  const dispositions: NormalizedRequiredCheckDisposition[] = [
+    {
+      check: deltaCheck,
+      status: "satisfied" as const,
+      rationale:
+        "upstream published no release notes for v1.106.5...v1.106.6; verified the delta via the tags/compare view and changelog history instead",
+    },
+  ];
+  const coverage = evaluateRequiredCheckCoverage([deltaCheck], dispositions);
+  assert.equal(coverage.status, "complete");
+  assert.equal(coverage.checks[0]!.status, "satisfied");
+  // Complete coverage keeps a strict approve clean (never demoted).
+  assert.equal(strictReviewResult("approve", [], "complete"), "clean");
+});

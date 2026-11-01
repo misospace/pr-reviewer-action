@@ -62,6 +62,7 @@ import {
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import {
+  DEPENDENCY_EVIDENCE_RESERVE,
   STOP_BUDGET,
   STOP_REQUEST_ERROR,
   STOP_WALL_CLOCK,
@@ -72,6 +73,7 @@ import {
   type NativeLoopRoundTelemetry,
   type ToolTurnSignal,
 } from "./loop.js";
+import { DEPENDENCY_EVIDENCE_KINDS } from "../classification/classify.js";
 import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
 import {
   COVERAGE_NOTICE_MAX_ITEMS,
@@ -1600,6 +1602,10 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         max_rounds: meta.max_rounds ?? 0,
         wall_clock_sec: meta.wall_clock_sec ?? 0.0,
         ...(meta.max_conversation_tokens !== undefined ? { max_conversation_tokens: meta.max_conversation_tokens } : {}),
+        // #1379: budget provenance for the dependency-evidence reserve —
+        // present (0) for every loop run; the key appears in the artifact
+        // whenever the raw meta carries it.
+        ...(meta.dependency_evidence_reserve !== undefined ? { dependency_evidence_reserve: meta.dependency_evidence_reserve } : {}),
       },
       usage: {
         tool_calls_issued: result.planned_request_count ?? 0,
@@ -1967,6 +1973,36 @@ export type TraceGapProbe = (
   loop: TraceGapLoopState,
 ) => TraceGapContinuation | null | Promise<TraceGapContinuation | null>;
 
+/**
+ * #1379: the dependency-evidence budget reserve the native loop should run
+ * with, resolved from the workspace's classification artifact. When the PR
+ * classified into a dependency-evidence family the loop reserves
+ * DEPENDENCY_EVIDENCE_RESERVE of its request budget for the required
+ * upstream evidence (deterministic driver notes prioritize it; see
+ * driveToolLoop). Anything else — absent/unparsable artifact, a
+ * non-dependency kind, or a budget smaller than the reserve — resolves to 0
+ * so non-dependency PRs keep the exact legacy loop behavior. Tolerant by
+ * construction: classification is advisory context here, never a gate.
+ */
+export function dependencyEvidenceReserveFromClassification(
+  readClassification: () => string | null,
+  maxRequests: number,
+): number {
+  const body = readClassification();
+  if (body === null) return 0;
+  let kind: unknown = null;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      kind = (parsed as Record<string, unknown>).pr_kind;
+    }
+  } catch {
+    return 0;
+  }
+  if (typeof kind !== "string" || !DEPENDENCY_EVIDENCE_KINDS.has(kind)) return 0;
+  return Math.min(DEPENDENCY_EVIDENCE_RESERVE, Math.max(0, maxRequests - 1));
+}
+
 export interface RunNativeLoopInput {
   repo: string;
   baseUrl: string;
@@ -2023,6 +2059,15 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     ...adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock, roundsExplicit),
     maxConversationTokens: loopContextLimits(env, limitsProfile).maxConversationTokens,
   };
+  // #1379: dependency-update PRs reserve a budget tail for required upstream
+  // evidence — the loop's driver notes then prioritize it deterministically.
+  const priorityEvidenceReserve = dependencyEvidenceReserveFromClassification(
+    () => deps.readText("classification.json"),
+    input.maxRequests,
+  );
+  if (priorityEvidenceReserve > 0) {
+    log(`  dependency-evidence reserve: ${priorityEvidenceReserve} tool request(s)`);
+  }
   // #1198: a true whole-exchange deadline for EITHER tier, taken once here —
   // before the MCP chain and every turn — so pre-loop setup and an unclamped
   // closing verdict turn can no longer push the exchange past the configured
@@ -2377,6 +2422,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       anthropicEffortSupported: anthropicEffort,
       summarizeFn,
       timeFn,
+      // #1379: deterministic dependency-evidence budget prioritization (0 for
+      // non-dependency PRs — the legacy note behavior is byte-identical).
+      priorityEvidenceReserve,
       // #1198: the whole-exchange absolute deadline taken above — the loop's
       // between-rounds check honors it instead of only elapsed loop time.
       wallClockDeadline: deadline,
@@ -2419,6 +2467,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     compaction_truncate: outcome.compactionTruncate,
     max_conversation_tokens: budgets.maxConversationTokens,
     peak_conversation_tokens: outcome.peakConversationTokens,
+    // #1379: budget provenance for the dependency-evidence reserve — always
+    // present (0 when the PR did not classify into a dependency-evidence
+    // family); the telemetry budget block mirrors it conditionally.
+    dependency_evidence_reserve: outcome.priorityEvidenceReserve,
     // #1199: per-round latency/usage records (persisted into tool_loop_telemetry
     // and consumed/nulled with the rest of this meta by buildToolLoopTelemetry).
     round_telemetry: roundTelemetry,

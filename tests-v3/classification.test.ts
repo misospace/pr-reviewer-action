@@ -3083,6 +3083,51 @@ test("#1379: a GitHub Action ref bump in a workflow classifies action_update", (
   }
 });
 
+test("#1379: Dependabot-style automation gets the same vendor-agnostic kinds and evidence obligations", () => {
+  // Acceptance: at least one fixture uses non-Renovate automation and at
+  // least one is human-authored, proving the behavior is not
+  // bot-vendor-specific. Nothing may key on "dependabot" any more than on
+  // "renovate" — the kinds fire on the diff shape alone, so the automation
+  // metadata (author login, branch, commit title) changes nothing.
+  const dependabotImage = classifyPr({
+    prFiles: [digestFile("kubernetes/apps/ai/litellm/app/deployment.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `- image: ghcr.io/berriai/litellm-database:${TAG_OLD}\n+ image: ghcr.io/berriai/litellm-database:${TAG_NEW}\n`,
+    prAuthor: "dependabot[bot]",
+    prTitle: `Bump ghcr.io/berriai/litellm-database from ${TAG_OLD} to ${TAG_NEW}`,
+    headBranch: "dependabot/docker/ghcr.io-berriai-litellm-database-1.x",
+  });
+  assert.equal(dependabotImage.prKind, "image_update");
+  assert.notEqual(dependabotImage.prKind, "renovate_image_update");
+  for (const check of IMAGE_EVIDENCE_CHECKS) {
+    assert.ok(dependabotImage.mustCheck.includes(check), check);
+  }
+  const dependabotAction = classifyPr({
+    prFiles: [digestFile(".github/workflows/ci.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/.github/workflows/ci.yaml b/.github/workflows/ci.yaml\n" +
+      "--- a/.github/workflows/ci.yaml\n" +
+      "+++ b/.github/workflows/ci.yaml\n" +
+      "@@ -10,2 +10,2 @@\n" +
+      "-        uses: actions/checkout@v3\n" +
+      "+        uses: actions/checkout@v4\n",
+    prAuthor: "dependabot[bot]",
+    prTitle: "Bump actions/checkout from 3 to 4",
+    headBranch: "dependabot/github_actions/actions/checkout-4",
+  });
+  assert.equal(dependabotAction.prKind, "action_update");
+  for (const check of DEPENDENCY_EVIDENCE_CHECKS) {
+    assert.ok(dependabotAction.mustCheck.includes(check), check);
+  }
+  // The specialist zero-selection gates stay Renovate-only: non-Renovate
+  // automation is a real dependency-update review shape, not a benign
+  // digest refresh, so specialists are not suppressed for it.
+  const selection = selectSpecialistRoles(dependabotImage);
+  assert.deepEqual(selection.selectedRoles, ["correctness"]);
+  assert.equal(selection.zeroSelectionReason, "");
+});
+
 test("#1379: a workflow diff with any other changed line does not fire action_update", () => {
   // Strict walker fail-closed: the unparsed changed line invalidates the
   // whole diff for the kind.

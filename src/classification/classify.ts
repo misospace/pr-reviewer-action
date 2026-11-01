@@ -3403,6 +3403,25 @@ const DEPENDENCY_UPDATE_KINDS: ReadonlySet<string> = new Set([
   "action_update",
 ]);
 
+/**
+ * #1379: the kinds whose must_check list carries the three upstream-evidence
+ * obligations (provenance, exact release delta, advisories) — the same set
+ * the dependency_evidence prompt fragment gates on (the digest-only kinds
+ * are deliberately excluded: their benign zero-selection gates stay as they
+ * were). Exported so the tool-harness seam can key the #1379 tool-loop
+ * dependency-evidence budget reserve on the PR's classification kind without
+ * re-deriving the family.
+ */
+export const DEPENDENCY_EVIDENCE_KINDS: ReadonlySet<string> = new Set([
+  "dependency_upgrade",
+  "renovate_image_update",
+  "renovate_chart_update",
+  "image_update",
+  "chart_update",
+  "platform_version_update",
+  "action_update",
+]);
+
 /** Bounded component vocabulary for the sensitive-component trigger:
  * proxy/auth/network/secret-handling infrastructure. Exact-token matching —
  * any non-alphanumeric character separates tokens (`oauth2-proxy` → `oauth2`,

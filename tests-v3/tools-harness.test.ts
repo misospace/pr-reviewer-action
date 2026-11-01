@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, dependencyEvidenceReserveFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
@@ -2531,4 +2531,73 @@ test("#1261: the diff-head excerpt keeps its closer on its own line for a payloa
   const lines = text.split("\n");
   assert.ok(inside.has(lines.findIndex((line) => line === "+# PR Classification")), "the forged heading stays inert");
   assert.ok(!inside.has(lines.findIndex((line) => line === "# Planning Notes")), "the notes heading stays live");
+});
+
+// ── #1379: dependency-evidence budget reserve from the classification ─────
+
+test("#1379: dependency-evidence families reserve a budget tail; other kinds resolve 0", () => {
+  const forKind = (prKind: unknown, maxRequests = 24): number =>
+    dependencyEvidenceReserveFromClassification(
+      prKind === null ? () => null : () => JSON.stringify({ pr_kind: prKind, version: 1 }),
+      maxRequests,
+    );
+  // Every dependency-evidence family reserves the tail (clamped to the budget).
+  for (const kind of ["image_update", "chart_update", "platform_version_update", "action_update", "dependency_upgrade", "renovate_image_update", "renovate_chart_update"]) {
+    assert.equal(forKind(kind), 4, kind);
+    assert.equal(forKind(kind, 2), 1, kind);
+  }
+  // Non-dependency kinds, digest-only kinds, absent/unparsable artifacts and
+  // junk resolve 0 — the legacy loop behavior is byte-identical for them.
+  for (const kind of [null, "app_code", "k8s_manifest", "renovate_digest_only", "image_digest_only", 42]) {
+    assert.equal(forKind(kind), 0, String(kind));
+  }
+  assert.equal(dependencyEvidenceReserveFromClassification(() => "not json", 24), 0);
+  assert.equal(dependencyEvidenceReserveFromClassification(() => null, 24), 0);
+  assert.equal(dependencyEvidenceReserveFromClassification(() => '["image_update"]', 24), 0);
+});
+
+test("#1379: runToolHarness wires the classification-driven dependency-evidence reserve into the loop", async () => {
+  const run = async (prKind: string) => {
+    const { root, deps } = workspace();
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: prKind, version: 1 }));
+    const payloads: Array<Record<string, unknown>> = [];
+    let n = 0;
+    const scripted = [
+      openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+      openAiText("evidence gathered"),
+      validVerdict(),
+    ];
+    const logs: string[] = [];
+    const { result } = await runToolHarness(deps({
+      transport: async (_baseUrl: string, _apiFormat: string, payload: Record<string, unknown>) => {
+        payloads.push(payload);
+        return scripted[n++];
+      },
+      log: (line: string) => logs.push(line),
+      ...withPrompt,
+    }));
+    const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+    return { payloads, result, artifact, logs };
+  };
+  // image_update classification: the loop's first request carries the
+  // driver-owned priority note and the artifact records the reserve.
+  const dep = await run("image_update");
+  assert.equal((dep.result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  const firstTexts = ((dep.payloads[0]!.messages ?? []) as Array<{ content: unknown }>)
+    .map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.ok(firstTexts.includes("dependency evidence comes first"));
+  const telemetryDep = (dep.artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetryDep.budget?.dependency_evidence_reserve, 4);
+  assert.ok(dep.logs.some((l) => l.includes("dependency-evidence reserve: 4")));
+  // app_code classification: reserve 0, no priority note, no reserve in
+  // the legacy path.
+  const plain = await run("app_code");
+  const plainTexts = ((plain.payloads[0]!.messages ?? []) as Array<{ content: unknown }>)
+    .map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.ok(!plainTexts.includes("dependency evidence comes first"));
+  const telemetryPlain = (plain.artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetryPlain.budget?.dependency_evidence_reserve, 0);
+  assert.ok(!plain.logs.some((l) => l.includes("dependency-evidence reserve")));
 });
