@@ -48,10 +48,17 @@ const TESTS_SIGNALS: readonly string[] = ["dependency_upgrade", "db_or_migration
 
 /** Correctness lane: pr_kind values AND risk-flag names. `app_code` is the
  * substantive catch-all (subject to the docs/meta-only trivial gate); a
- * P0/P1 linked issue demands treat-as-critical scrutiny. */
+ * P0/P1 linked issue demands treat-as-critical scrutiny. #1379: the
+ * vendor-agnostic dependency-update kinds are manifest-shaped, like
+ * `k8s_manifest`, and keep normal specialist scrutiny — deliberately NO
+ * zero-selection gate for them (only the Renovate benign gates stay). */
 const CORRECTNESS_SIGNALS: readonly string[] = [
   "app_code",
   "k8s_manifest",
+  "image_update",
+  "chart_update",
+  "platform_version_update",
+  "action_update",
   "linked_priority_p0",
   "linked_priority_p1",
 ];

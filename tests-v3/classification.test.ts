@@ -438,10 +438,22 @@ test("the default kind is app_code", () => {
   // The new digest kind sits between the lockfile digest kind and the
   // dependency kind, ahead of k8s_manifest (#909). Pin the documented order so
   // an accidental reorder is caught directly by this assertion. #1336 inserts
-  // the Renovate image/chart kinds after image_digest_only.
+  // the Renovate image/chart kinds after image_digest_only; #1379 inserts the
+  // vendor-agnostic kinds after their renovate_* twins (first match wins —
+  // a Renovate PR keeps its renovate_* kind).
   assert.deepEqual(
-    PR_KINDS.slice(0, 5),
-    ["renovate_digest_only", "image_digest_only", "renovate_image_update", "renovate_chart_update", "dependency_upgrade"],
+    PR_KINDS.slice(0, 9),
+    [
+      "renovate_digest_only",
+      "image_digest_only",
+      "renovate_image_update",
+      "image_update",
+      "renovate_chart_update",
+      "chart_update",
+      "dependency_upgrade",
+      "platform_version_update",
+      "action_update",
+    ],
   );
   assert.ok(RISK_FLAGS.includes("linked_security_issue"));
   assert.ok(RISK_FLAGS.includes("dependency_security_sensitive"));
@@ -2417,6 +2429,29 @@ test("artifact serializers emit the v2 snake_case schema and round-trip", () => 
 const TAG_OLD = "v1.106.5";
 const TAG_NEW = "v1.106.6";
 
+// #1379: the three deterministic upstream-evidence obligations each
+// dependency family carries in must_check (exact KIND_CHECKS text).
+const IMAGE_EVIDENCE_CHECKS = [
+  "establish upstream provenance for the updated image: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated image",
+  "check upstream security advisories for the updated image version range, or report the advisory check as not performed",
+];
+const CHART_EVIDENCE_CHECKS = [
+  "establish upstream provenance for the updated chart: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated chart",
+  "check upstream security advisories for the updated chart version range, or report the advisory check as not performed",
+];
+const DEPENDENCY_EVIDENCE_CHECKS = [
+  "establish upstream provenance for the updated dependency: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated dependency",
+  "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed",
+];
+const PLATFORM_EVIDENCE_CHECKS = [
+  "establish upstream provenance for the updated platform/runtime component: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated platform/runtime component",
+  "check upstream security advisories for the updated platform/runtime component version range, or report the advisory check as not performed",
+];
+
 test("#1336: the home-ops #11591 fixture classifies as renovate_image_update, not app_code", () => {
   // A Renovate container-image patch bumping a tag in a manifest whose
   // filename matches none of the k8s patterns — the exact shape that used to
@@ -2431,7 +2466,10 @@ test("#1336: the home-ops #11591 fixture classifies as renovate_image_update, no
   });
   assert.equal(result.prKind, "renovate_image_update");
   assert.deepEqual(result.riskFlags, []);
-  assert.deepEqual(result.mustCheck, ["verify only image tags/digests changed; repository unchanged"]);
+  assert.deepEqual(result.mustCheck, [
+    "verify only image tags/digests changed; repository unchanged",
+    ...IMAGE_EVIDENCE_CHECKS,
+  ]);
   const selection = selectSpecialistRoles(result);
   assert.deepEqual(selection.selectedRoles, []);
   assert.match(selection.zeroSelectionReason, /benign Renovate image tag\/digest refresh/);
@@ -2914,4 +2952,268 @@ test("#1336: hostile PR metadata stays data, never an instruction channel", () =
   // Renovate-authored, exactly as before the metadata boundary existed.
   const paddedAuthor = classifyPr({ ...base, prAuthor: " renovate[bot]", headBranch: "" });
   assert.notEqual(paddedAuthor.prKind, "renovate_image_update");
+});
+
+// ── Vendor-agnostic dependency-update kinds (#1379) ───────────────────────
+
+test("#1379: a human-authored image tag bump classifies image_update with the evidence obligations", () => {
+  // Same pure-diff shape as the #11591 fixture, no Renovate authorship.
+  const result = classifyPr({
+    prFiles: [digestFile("kubernetes/apps/ai/litellm/app/deployment.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `- image: ghcr.io/berriai/litellm-database:${TAG_OLD}\n+ image: ghcr.io/berriai/litellm-database:${TAG_NEW}\n`,
+  });
+  assert.equal(result.prKind, "image_update");
+  assert.deepEqual(result.riskFlags, []);
+  for (const check of IMAGE_EVIDENCE_CHECKS) {
+    assert.ok(result.mustCheck.includes(check), check);
+  }
+});
+
+test("#1379: the Renovate twin still wins on identical diffs when authored (precedence)", () => {
+  const base = {
+    prFiles: [digestFile("kubernetes/apps/ai/litellm/app/deployment.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `- image: ghcr.io/berriai/litellm-database:${TAG_OLD}\n+ image: ghcr.io/berriai/litellm-database:${TAG_NEW}\n`,
+  };
+  assert.equal(classifyPr({ ...base, prAuthor: "renovate[bot]" }).prKind, "renovate_image_update");
+  // The Renovate kind keeps the zero-selection gate; the vendor-agnostic
+  // kind does not (checked in the routing test below).
+  assert.equal(classifyPr({ ...base, prAuthor: "some-human" }).prKind, "image_update");
+});
+
+test("#1379: a human-authored chart bump classifies chart_update; the Renovate twin wins when authored", () => {
+  const base = {
+    prFiles: [digestFile("kubernetes/apps/observability/kube-prometheus-stack/helmrelease.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: "-   version: 62.7.0\n+   version: 62.8.0\n",
+  };
+  assert.equal(classifyPr(base).prKind, "chart_update");
+  for (const check of CHART_EVIDENCE_CHECKS) {
+    assert.ok(classifyPr(base).mustCheck.includes(check), check);
+  }
+  assert.equal(classifyPr({ ...base, prAuthor: "renovate[bot]" }).prKind, "renovate_chart_update");
+});
+
+test("#1379: a spec.kubernetes.version bump in KubernetesUpgrade YAML is platform_version_update (home-ops#11668 shape)", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("kubernetes/menus/sushi.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/kubernetes/menus/sushi.yaml b/kubernetes/menus/sushi.yaml\n" +
+      "--- a/kubernetes/menus/sushi.yaml\n" +
+      "+++ b/kubernetes/menus/sushi.yaml\n" +
+      "@@ -16,5 +16,5 @@\n" +
+      " spec:\n" +
+      "   kubernetes:\n" +
+      "     kubernetes:\n" +
+      "-      version: v1.37.0\n" +
+      "+      version: v1.37.2\n",
+  });
+  assert.equal(result.prKind, "platform_version_update");
+  assert.notEqual(result.prKind, "app_code");
+  assert.notEqual(result.prKind, "k8s_manifest");
+  for (const check of PLATFORM_EVIDENCE_CHECKS) {
+    assert.ok(result.mustCheck.includes(check), check);
+  }
+});
+
+test("#1379: a compound platform key path qualifies on the key alone", () => {
+  // CamelCase boundary split: `kubernetesVersion` → `kubernetes` + `version`.
+  const result = classifyPr({
+    prFiles: [digestFile("apps/node/cluster.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/apps/node/cluster.yaml b/apps/node/cluster.yaml\n" +
+      "--- a/apps/node/cluster.yaml\n" +
+      "+++ b/apps/node/cluster.yaml\n" +
+      "@@ -1,2 +1,2 @@\n" +
+      "-kubernetesVersion: v1.2.0\n" +
+      "+kubernetesVersion: v1.2.1\n",
+  });
+  assert.equal(result.prKind, "platform_version_update");
+});
+
+test("#1379: an ordinary version bump with no platform context is not platform_version_update", () => {
+  // Anti-collision: bare `version:` without platform tokens in the key path
+  // or a platform marker in the file's own region keeps the pre-existing
+  // kinds (the chart rules run earlier and win for chart-bearing files).
+  const result = classifyPr({
+    prFiles: [digestFile("apps/config.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: "- version: 1.2.2\n+ version: 1.2.3\n",
+  });
+  assert.notEqual(result.prKind, "platform_version_update");
+  assert.notEqual(result.prKind, "chart_update");
+  assert.equal(result.prKind, "app_code");
+});
+
+test("#1379: a kind: KubernetesUpgrade marker alone puts a bare version bump in platform context", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("kubernetes/menus/sushi.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/kubernetes/menus/sushi.yaml b/kubernetes/menus/sushi.yaml\n" +
+      "--- a/kubernetes/menus/sushi.yaml\n" +
+      "+++ b/kubernetes/menus/sushi.yaml\n" +
+      "@@ -10,4 +10,4 @@\n" +
+      " kind: KubernetesUpgrade\n" +
+      " spec:\n" +
+      "-  version: 1.30.0\n" +
+      "+  version: 1.30.1\n",
+  });
+  assert.equal(result.prKind, "platform_version_update");
+});
+
+test("#1379: a GitHub Action ref bump in a workflow classifies action_update", () => {
+  const result = classifyPr({
+    prFiles: [digestFile(".github/workflows/ci.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/.github/workflows/ci.yaml b/.github/workflows/ci.yaml\n" +
+      "--- a/.github/workflows/ci.yaml\n" +
+      "+++ b/.github/workflows/ci.yaml\n" +
+      "@@ -10,2 +10,2 @@\n" +
+      "-        uses: actions/checkout@v3\n" +
+      "+        uses: actions/checkout@v4\n",
+  });
+  assert.equal(result.prKind, "action_update");
+  for (const check of DEPENDENCY_EVIDENCE_CHECKS) {
+    assert.ok(result.mustCheck.includes(check), check);
+  }
+});
+
+test("#1379: a workflow diff with any other changed line does not fire action_update", () => {
+  // Strict walker fail-closed: the unparsed changed line invalidates the
+  // whole diff for the kind.
+  const result = classifyPr({
+    prFiles: [digestFile(".github/workflows/ci.yaml", 2, 2)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "-        uses: actions/checkout@v3\n" +
+      "+        uses: actions/checkout@v4\n" +
+      "-    run: make test\n" +
+      "+    run: make test-all\n",
+  });
+  assert.notEqual(result.prKind, "action_update");
+});
+
+test("#1379: a .tf module/provider version bump classifies dependency_upgrade", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("terraform/main.tf", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/terraform/main.tf b/terraform/main.tf\n" +
+      "--- a/terraform/main.tf\n" +
+      "+++ b/terraform/main.tf\n" +
+      "@@ -3,6 +3,6 @@\n" +
+      " terraform {\n" +
+      "   required_providers {\n" +
+      "     cloudflare = {\n" +
+      "-      version = \"4.0.0\"\n" +
+      "+      version = \"4.1.0\"\n",
+  });
+  assert.equal(result.prKind, "dependency_upgrade");
+  for (const check of DEPENDENCY_EVIDENCE_CHECKS) {
+    assert.ok(result.mustCheck.includes(check), check);
+  }
+});
+
+test("#1379: a .tf change without a module/provider marker does not fire dependency_upgrade", () => {
+  const result = classifyPr({
+    prFiles: [digestFile("terraform/main.tf", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/terraform/main.tf b/terraform/main.tf\n" +
+      "--- a/terraform/main.tf\n" +
+      "+++ b/terraform/main.tf\n" +
+      "@@ -1,2 +1,2 @@\n" +
+      "-variable \"count\" {\n" +
+      "+variable \"replicas\" {\n",
+  });
+  assert.notEqual(result.prKind, "dependency_upgrade");
+  assert.equal(result.prKind, "app_code");
+});
+
+test("#1379: evidence-incomplete diffs fail closed for the new kinds", () => {
+  const imageDiff = `- image: ghcr.io/o/app:${TAG_OLD}\n+ image: ghcr.io/o/app:${TAG_NEW}\n`;
+  // Truncation marker in the diff: no "only the tag changed" claim is safe.
+  const truncated = classifyPr({
+    prFiles: [digestFile("apps/app.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `…[diff truncated]\n${imageDiff}`,
+  });
+  assert.notEqual(truncated.prKind, "image_update");
+  // Authoritative file count mismatch: the file list is incomplete.
+  const shortFiles = classifyPr({
+    prFiles: [digestFile(".github/workflows/ci.yaml", 1, 1)],
+    authoritativeChangedFiles: 2,
+    diffText: "-        uses: actions/checkout@v3\n+        uses: actions/checkout@v4\n",
+  });
+  assert.notEqual(shortFiles.prKind, "action_update");
+  const platformShort = classifyPr({
+    prFiles: [digestFile("kubernetes/menus/sushi.yaml", 1, 1)],
+    authoritativeChangedFiles: 2,
+    diffText:
+      "diff --git a/kubernetes/menus/sushi.yaml b/kubernetes/menus/sushi.yaml\n" +
+      "+++ b/kubernetes/menus/sushi.yaml\n" +
+      "@@ -16,2 +16,2 @@\n" +
+      "     kubernetes:\n" +
+      "-      version: v1.37.0\n" +
+      "+      version: v1.37.2\n",
+  });
+  assert.notEqual(platformShort.prKind, "platform_version_update");
+});
+
+test("#1379: the new kinds route and keep specialist scrutiny (zero-selection gates stay Renovate-only)", () => {
+  const image = classifyPr({
+    prFiles: [digestFile("apps/app.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `- image: ghcr.io/o/app:${TAG_OLD}\n+ image: ghcr.io/o/app:${TAG_NEW}\n`,
+  });
+  assert.ok(image.routeSignals.includes("image_update"));
+  const selection = selectSpecialistRoles(image);
+  assert.deepEqual(selection.selectedRoles, ["correctness"]);
+  assert.equal(selection.zeroSelectionReason, "");
+
+  const chart = classifyPr({
+    prFiles: [digestFile("apps/chart/helmrelease.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: "- version: 1.2.3\n+ version: 1.2.4\n",
+  });
+  assert.ok(chart.routeSignals.includes("chart_update"));
+  assert.deepEqual(selectSpecialistRoles(chart).selectedRoles, ["correctness"]);
+
+  const platform = classifyPr({
+    prFiles: [digestFile("apps/node/cluster.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText:
+      "diff --git a/apps/node/cluster.yaml b/apps/node/cluster.yaml\n" +
+      "--- a/apps/node/cluster.yaml\n" +
+      "+++ b/apps/node/cluster.yaml\n" +
+      "@@ -1,2 +1,2 @@\n" +
+      "-kubernetesVersion: v1.2.0\n" +
+      "+kubernetesVersion: v1.2.1\n",
+  });
+  assert.ok(platform.routeSignals.includes("platform_version_update"));
+  assert.deepEqual(selectSpecialistRoles(platform).selectedRoles, ["correctness"]);
+
+  const action = classifyPr({
+    prFiles: [digestFile(".github/workflows/ci.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: "-        uses: actions/checkout@v3\n+        uses: actions/checkout@v4\n",
+  });
+  assert.ok(action.routeSignals.includes("action_update"));
+  assert.deepEqual(selectSpecialistRoles(action).selectedRoles, ["correctness"]);
+
+  // The Renovate benign zero-selection gates are unchanged.
+  const renovate = classifyPr({
+    prFiles: [digestFile("apps/app.yaml", 1, 1)],
+    authoritativeChangedFiles: 1,
+    diffText: `- image: ghcr.io/o/app:${TAG_OLD}\n+ image: ghcr.io/o/app:${TAG_NEW}\n`,
+    prAuthor: "renovate[bot]",
+  });
+  const renovateSelection = selectSpecialistRoles(renovate);
+  assert.deepEqual(renovateSelection.selectedRoles, []);
+  assert.match(renovateSelection.zeroSelectionReason, /benign Renovate image tag\/digest refresh/);
 });

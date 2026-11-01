@@ -18,8 +18,16 @@ export const PR_KINDS: readonly string[] = [
   "renovate_digest_only",
   "image_digest_only",
   "renovate_image_update",
+  // #1379: vendor-agnostic dependency-update kinds — the same pure-diff
+  // shapes as the #1336 Renovate twins without the forge-authorship gate,
+  // placed after their twins so first-match-wins keeps every Renovate PR on
+  // its existing kind (and its existing artifacts).
+  "image_update",
   "renovate_chart_update",
+  "chart_update",
   "dependency_upgrade",
+  "platform_version_update",
+  "action_update",
   "app_code",
   "k8s_manifest",
   "auth_changes",
@@ -2422,8 +2430,28 @@ const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   // image bump in a HelmRelease) and depend on forge-reported Renovate
   // authorship metadata — a human tag bump keeps the pre-existing kinds.
   { kind: "renovate_image_update", matches: isRenovateImageUpdate },
+  // #1379: vendor-agnostic twins of the #1336 Renovate kinds. Placed AFTER
+  // their Renovate twins (first match wins): a forge-reported Renovate PR
+  // keeps its renovate_* kind — and with it the existing must_check set and
+  // the benign zero-selection gates — while the same pure-diff shape from
+  // any other author gets the vendor-agnostic kind. Both twins and the new
+  // kinds share the identical pure-diff predicates; the ONLY difference is
+  // the authorship gate.
+  { kind: "image_update", matches: isImageUpdate },
   { kind: "renovate_chart_update", matches: isRenovateChartUpdate },
+  { kind: "chart_update", matches: isChartUpdate },
   { kind: "dependency_upgrade", matches: isDependencyUpgrade },
+  // #1379: platform/runtime version bumps embedded in YAML (regression:
+  // home-ops#11668 — three `KubernetesUpgrade` resources bumping
+  // `spec.kubernetes.version` used to fall through to k8s_manifest's generic
+  // lane). Bounded, closed-vocabulary detection; it must precede
+  // k8s_manifest (which would otherwise swallow these YAML files) and runs
+  // after the chart rules so a chart-bearing `version:` bump keeps the chart
+  // kinds.
+  { kind: "platform_version_update", matches: isPlatformVersionUpdate },
+  // #1379: GitHub Action ref bumps in workflow/composite-action YAML — the
+  // same external-dependency shape (an upstream artifact pinned by ref).
+  { kind: "action_update", matches: isActionUpdate },
   { kind: "k8s_manifest", matches: filenameMatches(K8S_PATTERNS) },
   // secret handling before auth (more specific)
   { kind: "secret_handling_changes", matches: filenameMatches(SECRET_HANDLING_PATTERNS) },
@@ -2720,13 +2748,44 @@ function evidenceIsComplete(
 }
 
 /** A dependency/manifest file changed, but NOT a k8s manifest (which happens
- * to reference versions and must classify as k8s_manifest instead). */
-function isDependencyUpgrade(files: readonly ChangedFile[], _diffText: string): boolean {
+ * to reference versions and must classify as k8s_manifest instead).
+ *
+ * #1379 adds a second, pure-diff clause for Terraform: every changed file is
+ * a `.tf` file whose own diff region carries a module/provider marker
+ * (HCL `module "…"` / `provider "…"` blocks, or a `required_providers`
+ * block) and whose changed lines are only paired `version = "…"` value
+ * changes — the provider/module pin shape. A `.tf` diff without the marker
+ * (plain resource edits) keeps the fall-through kinds; a mixed diff fails
+ * the strict walk and falls through too. Same fail-closed evidence
+ * reconciliation as the image/chart rules. */
+function isDependencyUpgrade(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
   const filenames = files.map((file) => file.filename);
   const hasDepFile = filenames.some((name) => matchesAny(name, DEPENDENCY_PATTERNS));
-  if (!hasDepFile) return false;
-  const hasK8s = filenames.some((name) => matchesAny(name, K8S_PATTERNS));
-  return !hasK8s;
+  if (hasDepFile) {
+    const hasK8s = filenames.some((name) => matchesAny(name, K8S_PATTERNS));
+    return !hasK8s;
+  }
+  // #1379: Terraform provider/module version bumps. Every changed file must
+  // be a modified `.tf` file — one resource file in the mix is a mixed PR.
+  if (files.length === 0) return false;
+  if (!files.every((file) => file.status === "modified" && /\.tf$/i.test(file.filename))) return false;
+  // The module/provider marker must be attributed per file through its own
+  // diff region (same discipline as the chart rule): a marker in one file's
+  // region says nothing about a sibling file.
+  const regions = diffFileRegions(fullDiffText, files);
+  const terraformDependency = files.every((file) => {
+    const region = regions.get(file.filename) ?? "";
+    return TERRAFORM_MODULE_MARKER_RE.test(region);
+  });
+  if (!terraformDependency) return false;
+  const walk = walkImageRefBlocks(fullDiffText, parseTerraformVersionLine, evaluateValueOnlyBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
 }
 
 // ---------------------------------------------------------------------------
@@ -2868,10 +2927,7 @@ function isRenovateImageUpdate(
   metadata: PrMetadata,
 ): boolean {
   if (!metadata.renovateAuthored) return false;
-  if (!allFilesAreImageManifests(files)) return false;
-  const walk = walkImageRefBlocks(fullDiffText, parseImageRefLine, evaluateImageRefBlock, { lenient: false });
-  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
-  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+  return isImageUpdate(files, _diffText, fullDiffText, authoritativeChangedFiles);
 }
 
 /** Helm chart version vocabulary: HelmRelease `chart:`/`version:`,
@@ -2992,23 +3048,25 @@ function diffFileRegions(fullDiffText: string, files: readonly ChangedFile[]): M
   return regions;
 }
 
-/** Every changed file is a modified YAML manifest (HelmRelease/Chart.yaml
- * shapes); the diff changes only chart/version values. */
-function isRenovateChartUpdate(
+/** The shared chart-update shape: every changed file a modified
+ * `.yaml`/`.yml`, every file chart-bearing on its own — by name or by a
+ * `kind: HelmRelease`/`helm.toolkit.fluxcd.io` marker in its OWN diff
+ * region — and a strict chart-version walk with the value the only thing
+ * that may change, plus the evidence reconciliation. The #1336 Renovate
+ * rule gates this on authorship; the #1379 vendor-agnostic rule takes it
+ * as-is. */
+function isChartUpdateShape(
   files: readonly ChangedFile[],
-  _diffText: string,
   fullDiffText: string,
   authoritativeChangedFiles: number | undefined,
-  metadata: PrMetadata,
 ): boolean {
-  if (!metadata.renovateAuthored) return false;
   if (files.length === 0) return false;
   if (!files.every((file) => file.status === "modified" && /\.ya?ml$/i.test(file.filename))) return false;
-  // Every changed file must be chart-bearing ON ITS OWN: chart-shaped by name,
-  // or carrying the HelmRelease marker in its own diff region. A marker in a
-  // sibling file's region blesses nothing, so one chart file can no longer
-  // carry an unrelated YAML `version:` change into the zero-selection gate
-  // (#1336 review).
+  // Every changed file must be chart-bearing ON ITS OWN: chart-shaped by
+  // name, or carrying the HelmRelease marker in its own diff region. A
+  // marker in a sibling file's region blesses nothing, so one chart file
+  // can no longer carry an unrelated YAML `version:` change into the
+  // zero-selection gate (#1336 review).
   const regions = diffFileRegions(fullDiffText, files);
   const chartBearing = files.every((file) => {
     if (CHART_FILE_RE.test(file.filename)) return true;
@@ -3021,20 +3079,328 @@ function isRenovateChartUpdate(
   return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
 }
 
+function isRenovateChartUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+  metadata: PrMetadata,
+): boolean {
+  if (!metadata.renovateAuthored) return false;
+  return isChartUpdateShape(files, fullDiffText, authoritativeChangedFiles);
+}
+
+// ---------------------------------------------------------------------------
+// Vendor-agnostic dependency-update kinds (#1379)
+// ---------------------------------------------------------------------------
+
+/** #1379: the pure-diff predicates of the #1336 Renovate kinds, shared with
+ * any author. Each rule below is the corresponding Renovate twin minus the
+ * `metadata.renovateAuthored` gate — identical files gate, identical strict
+ * walk, identical `evidenceIsComplete` reconciliation — so a dependency
+ * update gets the same review contract regardless of who (or what bot)
+ * authored it, and nothing keys on the string "renovate" or any bot login.
+ * The Renovate kinds keep their authorship gate ahead of these rules in
+ * KIND_RULES, so a Renovate PR still classifies as its renovate_* kind and
+ * the benign zero-selection gates stay Renovate-only. */
+
+/** #1379 image-update rule: the #1336 image predicate without the
+ * authorship gate. Fires only when every changed file is a modified
+ * image-manifest (YAML/compose/Dockerfile), every changed line is an image
+ * reference whose repository (and everything around it) is unchanged and at
+ * least one pair changed the tag or digest, and the diff carries a
+ * truncation/binary/structural marker or a line the parser rejects —
+ * fail-closed, exactly like the twins. */
+function isImageUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  if (!allFilesAreImageManifests(files)) return false;
+  const walk = walkImageRefBlocks(fullDiffText, parseImageRefLine, evaluateImageRefBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+/** #1379 chart-update rule: the #1336 chart predicate without the authorship
+ * gate (everything else preserved: every changed file a modified
+ * `.yaml`/`.yml`, every file chart-bearing on its own — by name or by a
+ * `kind: HelmRelease`/`helm.toolkit.fluxcd.io` marker in its OWN diff
+ * region — and a strict chart-version walk with the value the only thing
+ * that may change). */
+function isChartUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  if (files.length === 0) return false;
+  if (!files.every((file) => file.status === "modified" && /\.ya?ml$/i.test(file.filename))) return false;
+  const regions = diffFileRegions(fullDiffText, files);
+  const chartBearing = files.every((file) => {
+    if (CHART_FILE_RE.test(file.filename)) return true;
+    const region = regions.get(file.filename) ?? "";
+    return CHART_PR_MARKER_RE.test(region);
+  });
+  if (!chartBearing) return false;
+  const walk = walkImageRefBlocks(fullDiffText, parseChartVersionLine, evaluateChartVersionBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+// ── Platform/runtime version bumps (#1379, regression: home-ops#11668) ────
+
+/** A YAML version-value line whose key path ENDS with `version` (bare
+ * `version`, dotted `kubernetes.version`, compound `kubernetesVersion`),
+ * case-insensitive on the suffix. Groups capture indentation, the full key
+ * path, separator and quoting so the comparison holds every byte around the
+ * value fixed — a pure platform bump changes the VALUE only. */
+const PLATFORM_VERSION_LINE_RE =
+  /^(\s*)((?:[A-Za-z][A-Za-z0-9_.-]*[Vv]ersion|[Vv]ersion))(\s*:\s*)(["']?)(v?[0-9]+(?:\.[0-9]+){0,3}(?:[-+][A-Za-z0-9._-]+)?)(["']?)(\s*)$/;
+
+/** Closed platform/runtime vocabulary (#1379). A bare `version:` key alone
+ * is an ordinary app/chart bump; only a platform-named key path — or the
+ * file's own region carrying a platform marker — puts a version bump in
+ * platform/runtime context. */
+const PLATFORM_CONTEXT_TOKENS: readonly string[] = [
+  "kubernetes", "k8s", "kubelet", "talos", "containerd", "etcd",
+];
+
+/** Tokenize a key path for the platform vocabulary: dot/hyphen/underscore
+ * separators AND camelCase boundaries (`kubernetesVersion` → `kubernetes`,
+ * `version`), case-insensitive. No untrusted text is retained — the result
+ * is only ever compared against the closed token list. */
+function platformContextTokens(keyPath: string): string[] {
+  const camelSplit = keyPath.replace(/([a-z])([A-Z])/g, "$1 $2");
+  return camelSplit.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token !== "");
+}
+
+/** Platform-marker lines a file's own diff region may carry (#1379): a YAML
+ * key line naming one of the closed platform tokens (e.g. `kubernetes:`,
+ * `kubelet:`, `talos:`), or a `kind:` whose value contains `Kubernetes`
+ * (case-insensitive — e.g. `kind: KubernetesUpgrade`). Bounded, closed
+ * vocabulary; never free text from the diff. */
+const PLATFORM_REGION_KEY_RE = /^\s*[-+]?\s*(?:kubernetes|k8s|kubelet|talos|containerd|etcd)\s*:\s*(?:#.*)?$/im;
+const PLATFORM_REGION_KIND_RE = /^\s*[-+]?\s*kind\s*:\s*["']?[A-Za-z]*[Kk]ubernetes[A-Za-z]*["']?\s*$/m;
+
+interface PlatformVersionLine {
+  keyPath: string;
+  tokens: string[];
+  value: string;
+  normalized: string;
+}
+
+function parsePlatformVersionLine(content: string): PlatformVersionLine | null {
+  const match = PLATFORM_VERSION_LINE_RE.exec(content);
+  if (match === null) return null;
+  const [, indent = "", keyPath = "", separator = "", openQuote = "", value = "", closeQuote = "", trailing = ""] = match;
+  // A quoted value must be quoted consistently: a mismatched or stray quote
+  // is not a well-formed version line, so the line does not parse at all
+  // and the block fails closed (same shape as the chart rule).
+  if (openQuote !== closeQuote) return null;
+  return {
+    keyPath,
+    tokens: platformContextTokens(keyPath),
+    value,
+    // The paired-comparison form: indentation, key path, separator and
+    // quoting preserved; the value blanked, so a pair may only differ in
+    // the value.
+    normalized: `${indent}${keyPath}${separator}${openQuote}${closeQuote}${trailing}`,
+  };
+}
+
+/** A paired version-value change where both sides keep their platform
+ * context (a key rename or context loss is not a version bump — fail
+ * closed, same pairing discipline as the chart rule). */
+function evaluatePlatformVersionBlock(
+  removed: readonly PlatformVersionLine[],
+  added: readonly PlatformVersionLine[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let valueChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    if (before.normalized !== after.normalized) return null;
+    if (before.value !== after.value) valueChanged = true;
+  }
+  return valueChanged;
+}
+
+/** #1379 platform/runtime version bumps embedded in YAML. Every changed
+ * file is a modified `.yaml`/`.yml`; the changed lines are paired
+ * version-value bumps; and the bump sits in PLATFORM context — either the
+ * key path itself carries one of the closed platform tokens, or the file's
+ * own diff region carries a platform marker line (a platform YAML key, or
+ * a `kind:` naming a Kubernetes resource type). Anti-collision: the bare
+ * `version:` case qualifies ONLY through the region context, so an
+ * ordinary app/chart `version:` bump in YAML with no platform context
+ * keeps the pre-existing kinds (k8s_manifest/app_code semantics); the
+ * chart rules run earlier and win for chart-bearing files. */
+function isPlatformVersionUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  if (files.length === 0) return false;
+  if (!files.every((file) => file.status === "modified" && /\.ya?ml$/i.test(file.filename))) return false;
+  // Per-file attribution, same discipline as the chart rule: a marker in a
+  // sibling file's region blesses nothing. A file qualifies on the key
+  // path alone when ANY of its changed version lines carries a
+  // platform-named key (e.g. `kubernetes.version:`, `kubernetesVersion:`)
+  // — otherwise only through a platform marker in its own region.
+  const keyContextFiles = new Set<string>();
+  const walk = walkImageRefBlocks(fullDiffText, parsePlatformVersionLine, evaluatePlatformVersionBlock, {
+    lenient: false,
+    onLine: (parsed, file) => {
+      if (file === "" || keyContextFiles.has(file)) return;
+      if (parsed.tokens.some((token) => PLATFORM_CONTEXT_TOKENS.includes(token))) keyContextFiles.add(file);
+    },
+  });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  const regions = diffFileRegions(fullDiffText, files);
+  const filesWithContext = files.every((file) => {
+    if (keyContextFiles.has(file.filename)) return true;
+    const region = regions.get(file.filename) ?? "";
+    return PLATFORM_REGION_KEY_RE.test(region) || PLATFORM_REGION_KIND_RE.test(region);
+  });
+  if (!filesWithContext) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+// ── GitHub Action ref bumps (#1379) ───────────────────────────────────────
+
+/** A `uses:` reference line: `uses: ['"]?<owner>/<repo>@<ref>['"]?` — the
+ * owner/repo grammar mirrors the image-reference charset (closed classes,
+ * no whitespace/quotes); the ref is everything after the FIRST `@` up to
+ * the closing quote or whitespace. Groups capture indentation, key,
+ * separator, owner/repo and quoting so the comparison holds everything
+ * except the ref fixed — a pure action bump changes the REF only. */
+const ACTION_USES_LINE_RE =
+  /^(\s*(?:uses\s*:\s*))(["']?)([A-Za-z0-9][A-Za-z0-9._\/-]*\/[A-Za-z0-9][A-Za-z0-9._\/-]*)@([A-Za-z0-9._\/-]+)(["']?)(\s*)$/;
+
+interface ActionUsesLine {
+  ownerRepo: string;
+  ref: string;
+  normalized: string;
+}
+
+function parseActionUsesLine(content: string): ActionUsesLine | null {
+  const match = ACTION_USES_LINE_RE.exec(content);
+  if (match === null) return null;
+  const [, keyPart = "", openQuote = "", ownerRepo = "", ref = "", closeQuote = "", trailing = ""] = match;
+  // A quoted value must be quoted consistently (same fail-closed shape as
+  // the chart/platform rules).
+  if (openQuote !== closeQuote) return null;
+  return {
+    ownerRepo,
+    ref,
+    // Indentation, key, owner/repo and quotes preserved; the ref blanked —
+    // a pair may only differ in the ref (the update itself).
+    normalized: `${keyPart}${openQuote}${ownerRepo}@${closeQuote}${trailing}`,
+  };
+}
+
+/** Ref-only paired change: an empty→ref or ref→empty change does not parse
+ * (the ref charset requires at least one character), so a partial pin or
+ * unpin fails the strict walk rather than counting as an update. */
+function evaluateActionUsesBlock(
+  removed: readonly ActionUsesLine[],
+  added: readonly ActionUsesLine[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let refChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    if (before.normalized !== after.normalized) return null;
+    if (before.ref !== after.ref) refChanged = true;
+  }
+  return refChanged;
+}
+
+const GITHUB_WORKFLOW_PATH_RE = /^\.github\/(workflows|actions)\//i;
+
+/** #1379 GitHub Action ref bumps: every changed file is a modified workflow
+ * or composite-action YAML (`.github/workflows/`, `.github/actions/`), the
+ * changed lines are paired `uses:` ref changes, and the diff is pure and
+ * complete (strict walk + evidence reconciliation, fail-closed). */
+function isActionUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  if (files.length === 0) return false;
+  if (!files.every((file) => file.status === "modified" && GITHUB_WORKFLOW_PATH_RE.test(file.filename))) return false;
+  const walk = walkImageRefBlocks(fullDiffText, parseActionUsesLine, evaluateActionUsesBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+// ── Terraform provider/module version bumps (#1379) ───────────────────────
+
+/** HCL module/provider block markers a `.tf` file's own diff region may
+ * carry (#1379): `module "…"`, `provider "…"`, or the `required_providers`
+ * block. Closed vocabulary; never free text from the diff. */
+const TERRAFORM_MODULE_MARKER_RE = /\b(?:module|provider)\s+["']|\brequired_providers\b/;
+
+/** A Terraform `version = "…"` assignment line: optional indentation, the
+ * `version` key, `=`, a double-quoted value. Everything but the value is
+ * held fixed in the normalized form, so a pair may only differ in the
+ * version value. */
+const TERRAFORM_VERSION_LINE_RE = /^(\s*)(version)(\s*=\s*)(")([^"]*)(")(\s*)$/;
+
+interface TerraformVersionLine {
+  value: string;
+  normalized: string;
+}
+
+function parseTerraformVersionLine(content: string): TerraformVersionLine | null {
+  const match = TERRAFORM_VERSION_LINE_RE.exec(content);
+  if (match === null) return null;
+  const [, indent = "", key = "", separator = "", openQuote = "", value = "", closeQuote = "", trailing = ""] = match;
+  return { value, normalized: `${indent}${key}${separator}${openQuote}${closeQuote}${trailing}` };
+}
+
+/** Generic value-only paired-change evaluator over lines whose parsed form
+ * carries `normalized` and `value` (shared by the Terraform rule; the
+ * platform rule keeps its own to enforce context on top). */
+function evaluateValueOnlyBlock(
+  removed: readonly { normalized: string; value: string }[],
+  added: readonly { normalized: string; value: string }[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let valueChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    if (removed[index]!.normalized !== added[index]!.normalized) return null;
+    if (removed[index]!.value !== added[index]!.value) valueChanged = true;
+  }
+  return valueChanged;
+}
+
 // ---------------------------------------------------------------------------
 // Dependency-update risk signals (#1336)
 // ---------------------------------------------------------------------------
 
-/** The update types the bounded #1336 risk triggers may escalate: Renovate's
- * own kinds plus the generic dependency kind. Outside this context a title
- * word like "security" must not invent a dependency risk signal for an
- * ordinary code PR (its own lanes already cover that). */
+/** The update types the bounded #1336 risk triggers may escalate: the
+ * Renovate kinds, the #1379 vendor-agnostic update kinds, and the generic
+ * dependency kind. Outside this context a title word like "security" must
+ * not invent a dependency risk signal for an ordinary code PR (its own
+ * lanes already cover that). */
 const DEPENDENCY_UPDATE_KINDS: ReadonlySet<string> = new Set([
   "renovate_digest_only",
   "image_digest_only",
   "renovate_image_update",
   "renovate_chart_update",
   "dependency_upgrade",
+  // #1379: vendor-agnostic update kinds ride the same update context.
+  "image_update",
+  "chart_update",
+  "platform_version_update",
+  "action_update",
 ]);
 
 /** Bounded component vocabulary for the sensitive-component trigger:
@@ -3244,16 +3610,59 @@ function detectRiskFlags(
 
 /** Checklist items per risk class. Keys are pr_kind values AND the file-based
  * risk flags (which share names), so a flag like auth_changes detected on an
- * app_code PR still pulls in the auth checklist (#157). */
+ * app_code PR still pulls in the auth checklist (#157).
+ *
+ * #1379: the dependency families carry three deterministic upstream-evidence
+ * obligations — provenance, the exact old→new upstream delta, and the
+ * security-advisory check — whose unresolved coverage prevents a clean
+ * published verdict (strictReviewResult: incomplete required checks ⇒
+ * review_result "partial", never "clean"). `renovate_digest_only` and
+ * `image_digest_only` are deliberately untouched: a digest-only refresh has
+ * no upstream version range to evidence, and their benign zero-selection
+ * gates stay exactly as-is. */
+const IMAGE_EVIDENCE_CHECKS: readonly string[] = [
+  "establish upstream provenance for the updated image: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated image",
+  "check upstream security advisories for the updated image version range, or report the advisory check as not performed",
+];
+const CHART_EVIDENCE_CHECKS: readonly string[] = [
+  "establish upstream provenance for the updated chart: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated chart",
+  "check upstream security advisories for the updated chart version range, or report the advisory check as not performed",
+];
+const DEPENDENCY_EVIDENCE_CHECKS: readonly string[] = [
+  "establish upstream provenance for the updated dependency: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated dependency",
+  "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed",
+];
+const PLATFORM_EVIDENCE_CHECKS: readonly string[] = [
+  "establish upstream provenance for the updated platform/runtime component: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated platform/runtime component",
+  "check upstream security advisories for the updated platform/runtime component version range, or report the advisory check as not performed",
+];
+// #1379: an action ref bump is a dependency update of the packaged-action
+// kind — it carries the generic dependency wording (deviation noted in the
+// issue thread: the spec names no dedicated family for action_update).
+const ACTION_EVIDENCE_CHECKS = DEPENDENCY_EVIDENCE_CHECKS;
+
 const KIND_CHECKS: Readonly<Record<string, readonly string[]>> = {
   renovate_digest_only: ["verify no functional changes beyond lockfile hashes"],
   image_digest_only: ["verify only image digests changed; repository and tag unchanged"],
-  renovate_image_update: ["verify only image tags/digests changed; repository unchanged"],
-  renovate_chart_update: ["verify only chart/version values changed"],
+  // #1379: the upstream-evidence obligations. Shared text across kinds is
+  // deduplicated by buildMustCheck; each family names its own artifact
+  // ("image" / "chart" / "updated dependency" / "updated platform/runtime
+  // component") so a mixed family still carries the right obligations.
+  renovate_image_update: ["verify only image tags/digests changed; repository unchanged", ...IMAGE_EVIDENCE_CHECKS],
+  image_update: IMAGE_EVIDENCE_CHECKS,
+  renovate_chart_update: ["verify only chart/version values changed", ...CHART_EVIDENCE_CHECKS],
+  chart_update: CHART_EVIDENCE_CHECKS,
   dependency_upgrade: [
     "check for breaking API changes in updated dependencies",
     "run full test suite after upgrade",
+    ...DEPENDENCY_EVIDENCE_CHECKS,
   ],
+  platform_version_update: PLATFORM_EVIDENCE_CHECKS,
+  action_update: ACTION_EVIDENCE_CHECKS,
   k8s_manifest: [
     "validate manifest against target cluster version",
     "check for resource quota / limit changes",

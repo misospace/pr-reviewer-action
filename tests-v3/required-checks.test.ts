@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseVerdictResponse } from "../src/model/verdict.js";
 import { evaluateRequiredCheckCoverage, requiredCheckCoverageToArtifact } from "../src/enforcement/required-checks.js";
+import { strictReviewResult } from "../src/enforcement/verdict-policy.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
 
 /** OpenAI-shaped response wrapper, mirroring tests-v3/verdict.test.ts. */
@@ -233,4 +234,33 @@ test("#750 end-to-end: parser output with a preserved malformed duplicate folds 
   assert.equal(nullCoverage.structured, false);
   assert.equal(nullCoverage.status, "incomplete");
   assert.ok(nullCoverage.checks.every((row) => row.reason === "no-structured-dispositions"));
+});
+
+test("#1379: unresolved upstream-evidence obligations keep the published verdict out of clean", () => {
+  const evidenceChecks = [
+    "establish upstream provenance for the updated image: publisher and canonical source repository",
+    "inspect the exact old→new upstream release delta for the updated image",
+    "check upstream security advisories for the updated image version range, or report the advisory check as not performed",
+  ];
+
+  // With no dispositions at all, the evidence obligations stay unresolved.
+  const incomplete = evaluateRequiredCheckCoverage(evidenceChecks, null);
+  assert.equal(incomplete.status, "incomplete");
+  assert.equal(incomplete.checks.every((row) => row.status === "unresolved"), true);
+  assert.deepEqual(
+    incomplete.checks.map((row) => row.check),
+    evidenceChecks,
+  );
+
+  // With every obligation satisfied, coverage is complete.
+  const dispositions: NormalizedRequiredCheckDisposition[] = evidenceChecks.map((check) => ({
+    check,
+    status: "satisfied" as const,
+    rationale: "verified against the upstream release feed",
+  }));
+  const complete = evaluateRequiredCheckCoverage(evidenceChecks, dispositions);
+  assert.equal(complete.status, "complete");
+
+  // A partial approval over unresolved evidence is not published as clean.
+  assert.equal(strictReviewResult("approve", [], "incomplete"), "partial");
 });
