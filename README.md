@@ -80,7 +80,7 @@ Role overrides share the profile transport and are ignored with a warning for `D
 
 ### Independent confidence scorer (opt-in)
 
-Set `ai-confidence-model` and the review runs one extra, bounded model call that grades the finished review 0–5 with a risk band. Default off: without the model the scorer costs nothing and nothing confidence-related appears anywhere.
+Set `ai-confidence-model` and the review runs one extra, bounded model call. It independently verifies whether the change is safe to merge, and reports a merge-readiness score from 0 to 5 with a risk band. Default off: without the model the scorer costs nothing and nothing confidence-related appears anywhere.
 
 | Input | Purpose |
 |---|---|
@@ -101,7 +101,7 @@ Set `ai-confidence-model` and the review runs one extra, bounded model call that
 
 **Cost ceilings:** exactly one extra model call per published review — bounded (`ai-confidence-max-tokens` completion, default 4096; `ai-confidence-prompt-tokens` prompt, default ~96k; no tools, no corpus), one wire attempt, no retries. The call is capped by `ai-confidence-timeout-sec` (default 120s). Any failure — timeout, HTTP 429/5xx, malformed answer, or a prompt that does not fit the declared budgets — degrades to `confidence-status: unscored`. The review itself is unchanged — same verdict, findings, required checks, and approval — but the published body gains the additive advisory `Independent confidence` section and the review marker gains the confidence keys.
 
-**What a score means:** advisory confidence in *this review* (how well it covered and supported its own conclusions) — not a probability the code is correct, and no verdict or approval authority. The score never changes the verdict, findings, or required checks. Deterministic caps outrank the model: a blocker finding caps the score at 2, a major finding or partial review coverage at 3.
+**What a score means:** an independent merge-safety verification of *the change*, not a self-assessment of how well the review covered its own conclusions. The verifier reads the PR description and the diff itself. It asks whether the change is safe to merge, from the evidence the review carries. The score answers that question, and it is not a probability that the code is correct. `cannot_verify` fails closed to `unscored`: when the supplied evidence is too incomplete to verify, the verifier declines instead of guessing a score. The score never changes the verdict, the findings, the required checks, or publication. Deterministic caps outrank the model. A blocker finding caps the score at 2. A major finding or incomplete review coverage caps it at 3. A concern the verifier itself raises caps it at 4.
 
 **Independence:** the scorer resolving to the same endpoint and model that wrote the review is correlated self-grading, not independent evidence — the action warns about it. Point `ai-confidence-base-url` at a different backend for a genuine second opinion.
 
