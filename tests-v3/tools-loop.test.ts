@@ -948,17 +948,18 @@ test("a hostile model spending every turn on optional work cannot consume the re
   assert.equal(outcome.requestsRemaining, 3);
 });
 
-test("schema argument names alone never satisfy the obligation admission check", async () => {
+test("schema argument names and non-boundary substrings never satisfy the obligation admission check", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
-  // The obligation names "path"; the refused call carries only argument-NAME
-  // overlap ("path") with unrelated values: matching over argument VALUES
-  // only keeps schema vocabulary from silently opening the reserved window.
+  // The obligation names "lockfile". c3 carries only argument-NAME overlap
+  // with a generic word, and c4 contains "lockfile" only INSIDE
+  // "clockfile.md" — neither may pass the word-boundary admission match.
   const { postFn, executeFn, timeFn } = scriptedLoop(
     [
       openAiCall("c1", "read_file", '{"path":"misc/a.md"}'),
       openAiCall("c2", "read_file", '{"path":"misc/b.md"}'),
       openAiCall("c3", "read_file", '{"path":"docs/guide.md","offset":1,"limit":40}'),
+      openAiCall("c4", "read_file", '{"path":"docs/clockfile.md"}'),
       openAiText("done"),
     ],
     [
@@ -971,10 +972,75 @@ test("schema argument names alone never satisfy the obligation admission check",
     model: "m",
     budgets: adaptiveLoopBudgets(10, 5, 120),
     reserveForRequiredEvidence: 3,
-    requiredEvidence: [{ id: "obligation-1", tokens: ["lockfile", "manifest", "path", "schema"] }],
+    requiredEvidence: [{ id: "obligation-1", tokens: ["lockfile", "manifest", "schema"] }],
     timeFn,
   });
   assert.deepEqual(outcome.executed.map((item) => (item.args as { path: string }).path), ["misc/a.md", "misc/b.md"]);
-  assert.equal(outcome.requiredEvidenceRefusals, 1);
+  assert.equal(outcome.requiredEvidenceRefusals, 2);
   assert.equal(outcome.requestsRemaining, 3);
+});
+
+test("obligation evidence gathered BEFORE the window keeps the window open afterwards", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // The recommended path: the model resolves the obligation EARLY (turn 1),
+  // then explores. The window must not re-demand evidence already attempted
+  // — every later optional call executes and nothing is refused.
+  const responses = [
+    openAiCall("c1", "web_fetch", '{"url":"https://talos.dev/docs/v1.14/support-matrix"}'),
+    openAiCall("c2", "read_file", '{"path":"docs/a.md"}'),
+    openAiCall("c3", "read_file", '{"path":"docs/b.md"}'),
+    openAiCall("c4", "read_file", '{"path":"docs/c.md"}'),
+    openAiCall("c5", "read_file", '{"path":"docs/d.md"}'),
+    openAiText("done"),
+  ];
+  const exec = responses.slice(0, -1).map(() => ({ tool: "read_file", status: "ok", result: { content: "x" } }));
+  const { postFn, executeFn, timeFn } = scriptedLoop(responses, exec);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(10, 6, 120),
+    reserveForRequiredEvidence: 3,
+    requiredEvidence: REQUIRED_EVIDENCE_OBLIGATIONS,
+    timeFn,
+  });
+  assert.equal(outcome.requiredEvidenceRefusals, 0);
+  assert.equal(outcome.executed.length, 5);
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+});
+
+test("fixed no-argument catalog calls are admissible inside the reserved window", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // run_command names a fixed argv-catalog definition (bounded enum, no
+  // free-form target); refusing it would strand the loop's cheap baseline
+  // calls. It runs and does NOT discharge the obligation; the next
+  // concretely-targeted optional call is still refused.
+  const { postFn, executeFn, timeFn } = scriptedLoop(
+    [
+      openAiCall("c1", "read_file", '{"path":"misc/a.md"}'),
+      openAiCall("c2", "read_file", '{"path":"misc/b.md"}'),
+      openAiCall("c3", "run_command", '{"command":"git_status_short"}'),
+      openAiCall("c4", "read_file", '{"path":"docs/nope.md"}'),
+      openAiText("done"),
+    ],
+    [
+      { tool: "read_file", status: "ok", result: { content: "a" } },
+      { tool: "read_file", status: "ok", result: { content: "b" } },
+      { tool: "run_command", status: "ok", result: { stdout: "M x" } },
+    ],
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(10, 5, 120),
+    reserveForRequiredEvidence: 3,
+    requiredEvidence: REQUIRED_EVIDENCE_OBLIGATIONS,
+    timeFn,
+  });
+  // The command NAME is not an argument value, so c3 does not discharge the
+  // obligation — it merely runs; c4 is still refused.
+  assert.deepEqual(outcome.executed.map((item) => item.tool), ["read_file", "read_file", "run_command"]);
+  assert.equal(outcome.requiredEvidenceRefusals, 1);
+  assert.equal(outcome.requestsRemaining, 2);
 });

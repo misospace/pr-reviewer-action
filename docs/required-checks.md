@@ -112,8 +112,10 @@ The public `required-checks` output vocabulary is unchanged
   unresolved checks; the completeness pass itself never flips the verdict
   (but see #1381 below — the review-obligation gate does, and it is not
   governed by this mode);
-- `fail` — additionally forces `request_changes`;
-- `metadata_only` — record only.
+- `fail` — additionally forces `request_changes` through the completeness
+  pass itself;
+- `metadata_only` — record only (again, the completeness pass; the #1381
+  obligation gate below is independent of this mode).
 
 Structured dispositions, when present, are authoritative for this decision;
 no keyword mention can substitute for a missing or malformed disposition.

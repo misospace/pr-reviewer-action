@@ -105,6 +105,22 @@ function argumentTargetText(value: unknown): string {
   return parts.join(" ").toLowerCase();
 }
 
+/** #1381: word-boundary token match over the concatenated argument values —
+ * a "matrix" obligation must not be satisfied (or an optional call admitted)
+ * by "clockmatrix.md". */
+function targetMentions(target: string, token: string): boolean {
+  let from = 0;
+  for (;;) {
+    const index = target.indexOf(token, from);
+    if (index === -1) return false;
+    const before = index === 0 ? "" : target[index - 1]!;
+    const afterIndex = index + token.length;
+    const after = afterIndex >= target.length ? "" : target[afterIndex]!;
+    if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after)) return true;
+    from = index + 1;
+  }
+}
+
 /** Hard stop conditions. The driver owns these; Conversation's token helpers
  * are advisory (see src/model/conversation.ts). */
 export interface LoopBudgets {
@@ -692,24 +708,30 @@ export async function driveToolLoop(
         roundRefused++;
         continue;
       }
-      // #1381 (review): the enforced reservation. Inside the reserved window
-      // a call executes only when its target overlaps an obligation no call
-      // has attempted yet; anything else is refused WITHOUT consuming budget
-      // (like the dedup note), so optional exploration cannot spend the
-      // requests held back for required evidence. Once every obligation has
-      // been attempted the window is satisfied and admission reopens.
-      if (outcome.requiredEvidenceRequestsHint > 0
-        && pendingEvidence.length > 0
-        && budgets.maxToolCalls - callsExecuted <= outcome.requiredEvidenceRequestsHint) {
-        const target = argumentTargetText(args);
-        const hit = pendingEvidence.findIndex((row) => row.tokens.some((token) => target.includes(token)));
-        if (hit === -1) {
+      // #1381 (review): the enforced reservation. A call whose target
+      // overlaps pending obligations has ATTEMPTED them whether or not the
+      // reserved window is open yet — the recommended path gathers that
+      // evidence EARLY, and the window must never re-demand (or hold shut
+      // for) evidence already gathered. Inside the window, a call with a
+      // concrete target that overlaps nothing is refused WITHOUT consuming
+      // budget (like the dedup note), so optional exploration cannot spend
+      // the held-back requests; a call with no target text at all (the
+      // fixed no-argument catalog commands) is admissible everywhere. Once
+      // every obligation has been attempted the window is satisfied.
+      if (outcome.requiredEvidenceRequestsHint > 0 && pendingEvidence.length > 0) {
+        // run_command names a fixed argv-catalog definition (a bounded enum,
+        // never a free-form target), so it cannot consume the reservation —
+        // the same treatment as a call with no argument values at all.
+        const target = call.name === "run_command" ? "" : argumentTargetText(args);
+        const overlaps = pendingEvidence.filter((row) => row.tokens.some((token) => targetMentions(target, token)));
+        const inWindow = budgets.maxToolCalls - callsExecuted <= outcome.requiredEvidenceRequestsHint;
+        if (inWindow && target !== "" && overlaps.length === 0) {
           plan.push({ callId, kind: "reserve", data: { error: REQUIRED_EVIDENCE_REFUSAL_NOTE } });
           roundRefused++;
           outcome.requiredEvidenceRefusals++;
           continue;
         }
-        pendingEvidence.splice(hit, 1);
+        for (const row of overlaps) pendingEvidence.splice(pendingEvidence.indexOf(row), 1);
       }
       seenKeys.add(key);
       callsExecuted++;

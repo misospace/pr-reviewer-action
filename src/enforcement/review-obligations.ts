@@ -68,6 +68,17 @@ export const APPROVAL_GATING_CUES = [
   /blocking prerequisite/i,
 ] as const;
 export const APPROVAL_VERIFICATION_CUE = /\b(?:verify|confirm|check|read|inspect|validate)\b/i;
+/** #1381 (review): a human-confirmation attribution makes the sentence a #977
+ * external/manual ask even when it carries verification verbs and
+ * gatherable-looking nouns ("Confirm with the security team that the
+ * release-notes advisory was approved."). Such sentences never become
+ * obligations — the reviewer has no configured capability against a person's
+ * sign-off, so a heading-gated section must not turn one into a permanent
+ * forcing row. */
+export const EXTERNAL_CONFIRMATION_CUES = [
+  /\b(?:with|from|by)\s+(?:the\s+|our\s+|a\s+)?(?:[\w-]+\s+)*(?:team|on-?call(?:er)?|operator|owner|stakeholder|human|manager|lead)\b/i,
+  /\bsign[- ]?off\b/i,
+] as const;
 /** The obligation must name something the reviewer's configured tools can
  * gather: a repository artifact, an upstream document, or a compatibility
  * surface — not a human/operational confirmation (#977 stays non-blocking). */
@@ -107,12 +118,24 @@ export function extractApprovalPrerequisites(standardsSection: string): string[]
     // heading stays #977 non-blocking territory. A gated heading whose own
     // title carries all three cues is also an obligation by itself.
     let approvalSection = false;
+    let inFence = false;
     for (const line of body.split(/\r?\n/)) {
+      // Fenced samples are code, not contract: a `# ... before approval`
+      // comment inside an example must not gate the surrounding section, and
+      // prose inside the fence is not an obligation (#252 fence discipline).
+      if (/^\s*(?:```|~~~)/.test(line)) {
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence) continue;
       const heading = /^#{1,6}\s+(.*)$/.exec(line);
       if (heading !== null) {
         const title = heading[1]!.trim().slice(0, MAX_APPROVAL_PREREQUISITE_LENGTH).trim();
         approvalSection = title !== "" && APPROVAL_GATING_CUES.some((cue) => cue.test(title));
-        if (approvalSection && APPROVAL_VERIFICATION_CUE.test(title) && REVIEWER_GATHERABLE_CUE.test(title)) {
+        if (approvalSection
+          && APPROVAL_VERIFICATION_CUE.test(title)
+          && REVIEWER_GATHERABLE_CUE.test(title)
+          && !EXTERNAL_CONFIRMATION_CUES.some((cue) => cue.test(title))) {
           if (push(title)) return found;
         }
         continue;
@@ -122,6 +145,7 @@ export function extractApprovalPrerequisites(standardsSection: string): string[]
         if (!sentence) continue;
         if (!APPROVAL_VERIFICATION_CUE.test(sentence)) continue;
         if (!REVIEWER_GATHERABLE_CUE.test(sentence)) continue;
+        if (EXTERNAL_CONFIRMATION_CUES.some((cue) => cue.test(sentence))) continue;
         if (!approvalSection && !APPROVAL_GATING_CUES.some((cue) => cue.test(sentence))) continue;
         if (push(sentence)) return found;
       }
@@ -132,18 +156,36 @@ export function extractApprovalPrerequisites(standardsSection: string): string[]
   }
 }
 
+/** Closed-class words that appear in ordinary prose and in ordinary tool-call
+ * targets alike; keeping them out of the vocabulary stops the admission check
+ * from admitting every remaining call. */
+const ADMISSION_STOP_TOKENS: ReadonlySet<string> = new Set([
+  "from", "into", "onto", "over", "under", "before", "after", "above", "below",
+  "within", "without", "against", "between", "across", "around", "about",
+  "during", "with", "than", "then", "that", "this", "these", "those", "each",
+  "every", "both", "same", "such", "only", "also", "used", "using", "makes",
+  "make", "made", "will", "must", "should", "could", "their", "them", "they",
+  "there", "here", "when", "where", "which", "what",
+]);
+
 /** #1381 (review): the enforceable half of the budget reservation. Inside
  * the reserved request window the tool loop admits a call only when its
- * target overlaps the vocabulary of an obligation that no call has attempted
- * yet. This is one row's deterministic admission vocabulary: lowercased word
- * tokens (4+ chars) of its text. `null` when the row names no reviewer-
- * gatherable surface at all — generic checklist prose like "verify
- * correctness carefully" cannot be targeted by any specific call, so it must
- * never gate admission (it still forces the verdict while unresolved). */
+ * target word-boundary-overlaps the vocabulary of an obligation that no call
+ * has attempted yet. This is one row's deterministic admission vocabulary:
+ * lowercased word tokens (4+ chars) of its text minus closed-class
+ * stopwords. It is a budget-steering HEURISTIC, not a security boundary —
+ * an eager model can name-drop a token — but refusing the plainly unrelated
+ * call is exactly what stops the loop spending the held-back requests on
+ * history archaeology. `null` when the row names no reviewer-gatherable
+ * surface at all — generic checklist prose like "verify correctness
+ * carefully" cannot be targeted by any specific call, so it must never gate
+ * admission (it still forces the verdict while unresolved). */
 export function obligationAdmissionTokens(text: string): string[] | null {
   if (!REVIEWER_GATHERABLE_CUE.test(text)) return null;
   const tokens = new Set<string>();
-  for (const token of text.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []) tokens.add(token);
+  for (const token of text.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []) {
+    if (!ADMISSION_STOP_TOKENS.has(token)) tokens.add(token);
+  }
   return tokens.size > 0 ? [...tokens] : null;
 }
 
@@ -207,9 +249,17 @@ export function foldObligationDispositions(
     const matching = (dispositions ?? []).filter((entry) =>
       normalized(entry.check) === normalized(obligation.text) || normalized(entry.check) === normalized(obligation.id),
     );
-    if (matching.length !== 1) return { ...obligation, status: "unresolved", cause: null };
+    if (matching.length === 0) return { ...obligation, status: "unresolved", cause: null };
+    // The model may echo BOTH the obligation id and its exact text for one
+    // row (#1381 review): aliases are one answer — they discharge when they
+    // agree, mirroring how #750 resolves the text disposition and ignores
+    // the id alias — and only a disagreement keeps the row conservatively
+    // unresolved.
+    if (new Set(matching.map((entry) => entry.status)).size > 1) return { ...obligation, status: "unresolved", cause: null };
     const status = matching[0]!.status;
-    const rationale = typeof matching[0]!.rationale === "string" ? matching[0]!.rationale!.trim() : "";
+    const rationale = matching
+      .map((entry) => (typeof entry.rationale === "string" ? entry.rationale!.trim() : ""))
+      .sort((a, b) => b.length - a.length)[0] ?? "";
     // Presence-and-shape rule (the #750 baseline): the deterministic layer
     // never judges whether a rationale is semantically grounded. The shape
     // follows each source's model-facing contract: must_check rows fold with
@@ -236,7 +286,11 @@ export function deriveUnresolvedCause(input: {
   degraded: boolean;
 }): Exclude<UnresolvedReviewObligationCause, null> {
   if (input.harnessError !== null) return "provider-failure";
-  if (input.stopReason === "tool-call-budget-exhausted") return "budget-exhausted";
+  // Any budget-shaped stop — the call ceiling, the round ceiling, or the
+  // wall clock — means evidence gathering ran out of budget before the
+  // obligation was closed (including a loop that spent its rounds on
+  // refused optional calls inside the reserved window).
+  if (input.stopReason === "tool-call-budget-exhausted" || input.stopReason === "max-rounds" || input.stopReason === "wall-clock-exceeded") return "budget-exhausted";
   if (input.degraded) return "tool-capability";
   // A planning failure (missing corpus, missing model configuration) is not
   // a provider failure: no evidence gathering was even attempted, which is

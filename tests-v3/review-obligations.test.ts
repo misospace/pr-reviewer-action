@@ -76,10 +76,18 @@ test("obligation dispositions match exact text and id, require a grounded ration
   assert.deepEqual(bare.map((item) => item.status), ["satisfied", "unresolved"]);
   const guidanceRows = candidateRowsToObligations([{ id: "obligation-9", source: "trusted_base_guidance", text: "Before approval, verify the matrix." }], []);
   assert.equal(foldObligationDispositions(guidanceRows, [{ check: "obligation-9", status: "satisfied" }])[0]?.status, "unresolved");
+  // Echoing BOTH aliases (id and exact text) for one row is one answer when
+  // they agree; only a disagreement keeps the row conservatively unresolved
+  // (#1381 review: the completeness fold ignores the id alias, so the two
+  // folds must not disagree on the same disposition set).
   const dup = foldObligationDispositions(obligations, [
     { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "check one", status: "satisfied", rationale: "r" },
   ]);
-  assert.equal(dup[0]?.status, "unresolved");
+  assert.equal(dup[0]?.status, "satisfied");
+  const conflict = foldObligationDispositions(obligations, [
+    { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "check one", status: "unresolved" },
+  ]);
+  assert.equal(conflict[0]?.status, "unresolved");
   assert.equal(foldObligationDispositions(obligations, null)[1]?.status, "unresolved");
 });
 
@@ -89,6 +97,11 @@ test("unresolved cause precedence is deterministic and a planning failure is not
   assert.equal(deriveUnresolvedCause({ stopReason: null, harnessError: null, planningError: null, degraded: true }), "tool-capability");
   assert.equal(deriveUnresolvedCause({ stopReason: null, harnessError: null, planningError: "Missing review-corpus.truncated.md", degraded: false }), "missing-source-evidence");
   assert.equal(deriveUnresolvedCause({ stopReason: null, harnessError: null, planningError: null, degraded: false }), "missing-source-evidence");
+  // Round/wall-clock ceilings are budget-shaped stops too (a reserved-window
+  // stall ends on max-rounds with the budget held back, not on "never
+  // attempted").
+  assert.equal(deriveUnresolvedCause({ stopReason: "max-rounds", harnessError: null, planningError: null, degraded: false }), "budget-exhausted");
+  assert.equal(deriveUnresolvedCause({ stopReason: "wall-clock-exceeded", harnessError: null, planningError: null, degraded: false }), "budget-exhausted");
 });
 
 test("unresolved trusted-base obligations force changes with a listed section; satisfied ones never do", () => {
@@ -365,7 +378,41 @@ test("admission vocabulary targets gatherable rows and never gates generic check
   const tokens = obligationAdmissionTokens(REAL_TRUSTED_BASE.split("\n")[7]!);
   assert.ok(tokens !== null);
   for (const token of ["talos", "machineconfig", "kubernetes", "matrix", "installer"]) assert.ok(tokens.includes(token), token);
+  // Closed-class words appear in every tool-call target; admitting on them
+  // would open the reserved window to everything.
+  for (const stop of ["from", "every", "before", "their"]) assert.ok(!tokens.includes(stop), stop);
   assert.equal(obligationAdmissionTokens("Treat this as high priority — verify correctness carefully."), null);
+});
+
+test("human-confirmation asks never become obligations, under a gated heading or in one sentence (#977)", () => {
+  // The gatherable-looking nouns are present; the human attribution must win.
+  const underHeading = [
+    "## Evidence required before approval",
+    "",
+    "Confirm with the security team that the release-notes advisory was approved.",
+    "Get sign-off from the platform owner on the migration document.",
+  ].join("\n");
+  assert.deepEqual(extractApprovalPrerequisites(underHeading), []);
+  assert.deepEqual(extractApprovalPrerequisites("Before approval, verify with the on-call operator that the config rollback ran."), []);
+  // The reviewer-gatherable sibling under the same heading still fires.
+  const both = underHeading + "\nVerify the migration document against the schema file.";
+  assert.deepEqual(extractApprovalPrerequisites(both), ["Verify the migration document against the schema file."]);
+});
+
+test("headings and prose inside fenced code samples cannot gate extraction", () => {
+  const standards = [
+    "## Misc",
+    "",
+    "```markdown",
+    "## Evidence required before approval",
+    "```",
+    "",
+    "Verify the proposed Kubernetes version against the published Talos support matrix.",
+  ].join("\n");
+  assert.deepEqual(extractApprovalPrerequisites(standards), []);
+  // A gated heading outside the fence still gates its section afterwards.
+  const gated = "## Evidence required before approval\n\n```\ncode\n```\n\nVerify the Talos support matrix.";
+  assert.deepEqual(extractApprovalPrerequisites(gated), ["Verify the Talos support matrix."]);
 });
 
 test("VALIDATE_REQUIRED_CHECKS=false removes must_check rows at both obligation layers", () => {
