@@ -2607,3 +2607,44 @@ test("#1379: runToolHarness wires the classification-driven dependency-evidence 
   assert.equal(telemetryPlain.budget?.dependency_evidence_refusals, 0);
   assert.ok(!plain.logs.some((l) => l.includes("dependency-evidence reserve")));
 });
+
+test("#1379: the trace-gap repair continuation cannot spend the reserved dependency-evidence tail", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "image_update", version: 1 }));
+  // Budget 6, reserve 4: the investigation loop executes two optional reads
+  // (left 4) and stops voluntarily — the reserved tail is INTACT and the
+  // obligation unattempted. The probe then asks for a repair round, which is
+  // handed exactly those four requests; the window enforcement must carry
+  // across the seam and refuse its optional read too.
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "read_file", '{"path":"other.ts"}'),
+    openAiText("done locally"),
+    validVerdict(),
+    openAiCall("c3", "read_file", '{"path":"notes.md"}'),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_MAX_REQUESTS: "6", SYSTEM_PROMPT: "You are the reviewer." },
+    transport: async () => scripted[n++],
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  // The repair ran, issued one call, executed nothing (refused), and produced
+  // no new evidence — so no refresh turn was spent on it.
+  assert.equal(result.trace_repair_continuation?.outcome, "skipped_no_evidence");
+  assert.equal(result.trace_repair_continuation?.tool_calls, 0);
+  assert.equal(n, 5);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetry.budget?.dependency_evidence_reserve, 4);
+  assert.equal(telemetry.budget?.dependency_evidence_attempted, false);
+  // 0 refusals in the main loop (its two calls were outside the window) + 1
+  // in the repair continuation, folded into the run-wide counter.
+  assert.equal(telemetry.budget?.dependency_evidence_refusals, 1);
+  // The repair read never entered the harness trace.
+  const trace = (artifact.tool_calls ?? []) as Array<{ tool: string }>;
+  assert.equal(trace.length, 2);
+});

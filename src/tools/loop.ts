@@ -714,8 +714,9 @@ export async function driveToolLoop(
     const plan: Disposition[] = [];
     const toExecute = new Map<number, { name: string; args: Record<string, unknown> }>();
     // #1199: per-round disposition counts (a tri-partition of `calls.length`:
-    // executed + refused + deduplicated === requested). Refusals cover both the
-    // invalid-argument error and the over-budget note.
+    // executed + refused + deduplicated === requested). Refusals cover the
+    // invalid-argument error, the over-budget note, and the #1379
+    // reserve-window refusal.
     let roundExecuted = 0;
     let roundRefused = 0;
     let roundDedup = 0;

@@ -1206,6 +1206,33 @@ test("#1379: within one round, an evidence call releases later optional calls; t
   assert.deepEqual(loop2.executedCalls.map((c) => c.tool), ["git_status_short", "git_diff_stat", "web_fetch"]);
 });
 
+test("#1379: a reserve-refused call retried after an evidence attempt executes (never deduped)", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // The refusal must not poison the dedup set: the exact same optional call,
+  // retried once the obligation state advanced, runs for real rather than
+  // being answered from a note about a call that never executed.
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "git_status_short", "{}"),
+    openAiCall("c2", "git_diff_stat", "{}"),
+    openAiCall("c3", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c4", "web_fetch", '{"url":"https://example.test/releases"}'),
+    openAiCall("c5", "read_file", '{"path":"a.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    priorityEvidenceReserve: 4,
+  });
+  assert.deepEqual(executedCalls.map((c) => c.tool), ["git_status_short", "git_diff_stat", "web_fetch", "read_file"]);
+  assert.equal(outcome.priorityEvidenceRefusals, 1);
+  const transcript = JSON.stringify(conversation.toRequestPayload("openai", "m", {}));
+  assert.ok(!transcript.includes("Duplicate request"));
+});
+
 test("#1379: no reserve keeps every optional call executable in the budget tail", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");

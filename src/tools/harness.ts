@@ -2976,6 +2976,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
               anthropicEffortSupported: anthropicEffort,
               summarizeFn,
               timeFn,
+              // #1379: the obligation state carries across the repair seam.
+              // When the main loop attempted no upstream-evidence call, its
+              // intact reserved tail IS what this continuation is being
+              // handed, so the window enforcement stays on and the repair
+              // cannot spend the reserve on unrelated calls either. Once the
+              // obligation was attempted, the continuation runs unreserved.
+              priorityEvidenceReserve: outcome.priorityEvidenceAttempted ? 0 : priorityEvidenceReserve,
               // #1198: the repair round shares the ORIGINAL run's absolute
               // deadline — the allowance above is a share, never an extension.
               wallClockDeadline: deadline,
@@ -2999,6 +3006,17 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             log(`  native_loop: trace-gap repair round failed (${maskKnownSecrets(message, harnessSecrets)}) — keeping the original verdict`);
           }
           if (repair !== null) {
+            // #1379: the obligation state is run-wide. An evidence attempt in
+            // the repair counts toward the artifact's dependency-evidence
+            // provenance, and its window refusals join the run's count, so
+            // the telemetry never claims an unattempted obligation after the
+            // continuation fetched upstream evidence.
+            const reserveMeta = input.result.tool_loop_meta;
+            if (reserveMeta !== null && reserveMeta !== undefined) {
+              if (repair.priorityEvidenceAttempted) reserveMeta.dependency_evidence_attempted = true;
+              reserveMeta.dependency_evidence_refusals =
+                Number(reserveMeta.dependency_evidence_refusals ?? 0) + repair.priorityEvidenceRefusals;
+            }
             // Fold the repair's executed calls into the harness trace so the
             // artifact shows everything the reviewer actually read. The
             // loop-level fields (`rounds`, `stop_reason`, `budget_exhausted`,
