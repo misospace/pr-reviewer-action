@@ -173,14 +173,19 @@ function canRelaxForCiOnly(artifact: ReviewArtifact, forced: boolean, unresolved
 }
 
 /**
- * #770 interplay: the MODEL's own structured `unresolved` dispositions also
- * hold the relaxation gate — a review that left a required check unresolved
- * does not get relaxed to approve by category capping.
+ * #770 interplay: the MODEL's own structured `unresolved` — and `unmet`
+ * (#1381: a performed-and-failed check, a confirmed negative) — dispositions
+ * also hold the relaxation gate — a review that left a required check
+ * unresolved or failed it does not get relaxed to approve by category
+ * capping.
  */
 function hasUnresolvedRequiredCheck(artifact: ReviewArtifact): boolean {
   const rows = artifact.required_check_dispositions;
   return Array.isArray(rows)
-    && rows.some((row) => (row as { status?: unknown } | null)?.status === "unresolved");
+    && rows.some((row) => {
+      const status = (row as { status?: unknown } | null)?.status;
+      return status === "unresolved" || status === "unmet";
+    });
 }
 
 /**

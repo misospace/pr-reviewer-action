@@ -15,6 +15,7 @@ import {
   type ReviewObligation,
 } from "../src/enforcement/review-obligations.js";
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../src/enforcement/enforce.js";
+import { evaluateRequiredCheckCoverage } from "../src/enforcement/required-checks.js";
 import { applyStrictVerdictPolicy, relaxVerificationOnlyVerdict } from "../src/enforcement/verdict-policy.js";
 import { buildPlanningContext, computeRequiredEvidenceReservation, requiredEvidenceSection } from "../src/tools/harness.js";
 import { REQUIRED_EVIDENCE_TURN_NOTE } from "../src/tools/loop.js";
@@ -57,34 +58,45 @@ test("obligation dispositions match exact text and id, require a grounded ration
     { id: "obligation-1", source: "must_check", text: "check one" },
     { id: "obligation-2", source: "must_check", text: "check two" },
   ], []);
-  // A rationale-free satisfied disposition does NOT discharge (#1381
-  // presence-and-shape rule, mirroring required-checks.ts).
-  const rationaled = foldObligationDispositions(obligations, [
+  // #1388: must_check rows fold ONLY on the exact check text — an
+  // obligation-<n> echo is ignored entirely (neither a duplicate nor an
+  // answer), for identity parity with #750's completeness fold.
+  const idOnly = foldObligationDispositions(obligations, [
     { check: " OBLIGATION-1 ", status: "satisfied", rationale: "matrix read at head" },
-    { check: "check two", status: "not_applicable", rationale: "no config in diff" },
+    { check: "obligation-2", status: "not_applicable", rationale: "no config in diff" },
+  ]);
+  assert.deepEqual(idOnly.map((item) => item.status), ["unresolved", "unresolved"]);
+  // Exact-text echoes discharge: a rationale-free satisfied disposition
+  // DOES discharge a must_check row (#750 parity — a bare `satisfied` is
+  // enough for the deterministic checklist), while `not_applicable` still
+  // needs a rationale.
+  const rationaled = foldObligationDispositions(obligations, [
+    { check: "check one", status: "satisfied" },
+    { check: " check two ", status: "not_applicable", rationale: "no config in diff" },
   ]);
   assert.deepEqual(rationaled.map((item) => item.status), ["satisfied", "satisfied"]);
-  // #750-parity fold for must_check rows: a bare `satisfied` discharges
-  // (exactly like required-checks.ts, so completeness and the obligation
-  // gate never disagree on one disposition); `not_applicable` still needs a
-  // rationale. trusted_base_guidance rows require a rationale for ANY
-  // discharge, as their section preamble tells the model.
+  // A malformed echo (ungrounded not_applicable) never discharges.
   const bare = foldObligationDispositions(obligations, [
-    { check: "obligation-1", status: "satisfied" },
+    { check: "check one", status: "satisfied" },
     { check: "check two", status: "not_applicable", rationale: "  " },
   ]);
   assert.deepEqual(bare.map((item) => item.status), ["satisfied", "unresolved"]);
   const guidanceRows = candidateRowsToObligations([{ id: "obligation-9", source: "trusted_base_guidance", text: "Before approval, verify the matrix." }], []);
+  // The id alias is trusted-base-only: an id echo without the required
+  // rationale still cannot discharge.
   assert.equal(foldObligationDispositions(guidanceRows, [{ check: "obligation-9", status: "satisfied" }])[0]?.status, "unresolved");
-  // Echoing BOTH aliases (id and exact text) for one row is one answer when
-  // they agree; only a disagreement keeps the row conservatively unresolved
-  // (#1381 review: the completeness fold ignores the id alias, so the two
-  // folds must not disagree on the same disposition set).
-  const dup = foldObligationDispositions(obligations, [
+  // Echoing BOTH aliases (id and exact text) for one trusted-base row is one
+  // answer when they agree; only a disagreement keeps the row conservatively
+  // unresolved (#1388: there is no #750 fold for guidance rows, so the id
+  // alias stays a valid identity there).
+  const guidancePair = candidateRowsToObligations([
+    { id: "obligation-1", source: "trusted_base_guidance", text: "check one" },
+  ], []);
+  const dup = foldObligationDispositions(guidancePair, [
     { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "check one", status: "satisfied", rationale: "r" },
   ]);
   assert.equal(dup[0]?.status, "satisfied");
-  const conflict = foldObligationDispositions(obligations, [
+  const conflict = foldObligationDispositions(guidancePair, [
     { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "check one", status: "unresolved" },
   ]);
   assert.equal(conflict[0]?.status, "unresolved");
@@ -92,24 +104,98 @@ test("obligation dispositions match exact text and id, require a grounded ration
   // the #1388 review): a second answer under the SAME alias invalidates the
   // row, so a hostile model cannot discharge a review-owned prerequisite by
   // echoing it twice. Only the distinct id+text alias echo is one answer.
-  const dupText = foldObligationDispositions(obligations, [
+  const dupText = foldObligationDispositions(guidancePair, [
     { check: "check one", status: "satisfied", rationale: "r" }, { check: " check ONE ", status: "satisfied", rationale: "r again" },
   ]);
   assert.equal(dupText[0]?.status, "unresolved");
-  const dupId = foldObligationDispositions(obligations, [
+  const dupId = foldObligationDispositions(guidancePair, [
     { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "OBLIGATION-1", status: "satisfied", rationale: "r again" },
   ]);
   assert.equal(dupId[0]?.status, "unresolved");
-  const dupMixed = foldObligationDispositions(obligations, [
+  const dupMixed = foldObligationDispositions(guidancePair, [
     { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "check one", status: "satisfied", rationale: "r" }, { check: "check one", status: "satisfied", rationale: "third" },
   ]);
   assert.equal(dupMixed[0]?.status, "unresolved");
   // The alias echo with agreeing statuses still discharges after the fix.
-  const aliasEcho = foldObligationDispositions(obligations, [
+  const aliasEcho = foldObligationDispositions(guidancePair, [
     { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "check one", status: "satisfied", rationale: "r" },
   ]);
   assert.equal(aliasEcho[0]?.status, "satisfied");
   assert.equal(foldObligationDispositions(obligations, null)[1]?.status, "unresolved");
+});
+
+test("#1388: an unmet disposition is a confirmed negative — folded with a rationale, conservatively unresolved without one", () => {
+  for (const source of ["must_check", "trusted_base_guidance"] as const) {
+    const rows = candidateRowsToObligations([{ id: "obligation-1", source, text: "check one" }], []);
+    // `unmet` WITH a usable rationale folds to a negatively-resolved row.
+    const unmet = foldObligationDispositions(rows, [
+      { check: "check one", status: "unmet", rationale: "the named test is absent and the risk surface exists" },
+    ]);
+    assert.deepEqual(unmet.map((item) => [item.status, item.cause]), [["unmet", null]]);
+    // Without a usable rationale the answer is unusable: stays unresolved.
+    const ungrounded = foldObligationDispositions(rows, [{ check: "check one", status: "unmet", rationale: "   " }]);
+    assert.deepEqual(ungrounded.map((item) => item.status), ["unresolved"]);
+  }
+  // trusted-base rows: the id alias folds `unmet` too.
+  const guidance = candidateRowsToObligations([{ id: "obligation-7", source: "trusted_base_guidance", text: "Before approval, verify the matrix." }], []);
+  const byId = foldObligationDispositions(guidance, [{ check: "obligation-7", status: "unmet", rationale: "matrix read; version unsupported" }]);
+  assert.equal(byId[0]?.status, "unmet");
+});
+
+test("#1388: a satisfied+unmet disagreement on one alias stays conservatively unresolved", () => {
+  const rows = candidateRowsToObligations([{ id: "obligation-1", source: "trusted_base_guidance", text: "check one" }], []);
+  const conflict = foldObligationDispositions(rows, [
+    { check: "check one", status: "satisfied", rationale: "r" },
+    { check: "check one", status: "unmet", rationale: "contradiction" },
+  ]);
+  assert.equal(conflict[0]?.status, "unresolved");
+});
+
+test("#1388: an unmet obligation is forcing — a model approve cannot survive, and it renders without a cause clause", () => {
+  const rows = [{ id: "obligation-1", source: "trusted_base_guidance", text: "Before approval, verify the Kubernetes version against the published Talos support matrix." }];
+  const obligations = foldObligationDispositions(
+    candidateRowsToObligations(rows, []),
+    [{ check: "obligation-1", status: "unmet", rationale: "matrix read; Kubernetes 1.37.2 is not in the supported range" }],
+  );
+  assert.deepEqual(obligations.map((item) => item.status), ["unmet"]);
+  // The hard-force gate fires on the unmet row and renders its status
+  // WITHOUT a cause clause (it was resolved — negatively).
+  const artifact = base({ verdict: "approve" });
+  const enforced = applyReviewObligationEnforcement(artifact, obligations);
+  assert.equal(enforced.applied, true);
+  assert.equal(artifact.verdict, "request_changes");
+  assert.match(artifact.review_markdown, /obligation-1 \(trusted_base_guidance, unmet\):/);
+  assert.ok(!artifact.review_markdown.includes("cause:"));
+  // The strict mapping counts the unmet row as an unresolved obligation: a
+  // model approve cannot survive.
+  const outcome = applyStrictVerdictPolicy(base({ verdict: "approve" }), {
+    modelVerdict: "approve",
+    forced: false,
+    unresolvedReviewObligations: unresolvedReviewObligations(obligations),
+  });
+  assert.equal(outcome.verdict, "request_changes");
+  assert.equal(outcome.source, "enforcement");
+});
+
+test("#1388: a must_check obligation is NOT discharged by an id echo, and the #750 completeness fold agrees", () => {
+  const check = "review path traversal vulnerabilities";
+  const rows = candidateRowsToObligations([{ id: "obligation-1", source: "must_check", text: check }], []);
+  const idEcho = [{ check: "obligation-1", status: "satisfied" as const }];
+  // The obligation fold ignores the id echo entirely.
+  assert.deepEqual(foldObligationDispositions(rows, idEcho).map((item) => item.status), ["unresolved"]);
+  // #750 parity on the SAME disposition array: the completeness fold never
+  // credits the id echo either (it is a dropped unknown identity), so the
+  // two folds agree that the check is unresolved.
+  const coverage = evaluateRequiredCheckCoverage([check], idEcho as never);
+  assert.equal(coverage.status, "incomplete");
+  assert.deepEqual(coverage.checks.map((row) => row.status), ["unresolved"]);
+  assert.deepEqual(coverage.droppedUnknown, ["obligation-1"]);
+  // The exact-text echo discharges BOTH folds identically.
+  const textEcho = [{ check, status: "satisfied" as const }];
+  assert.deepEqual(foldObligationDispositions(rows, textEcho).map((item) => item.status), ["satisfied"]);
+  const textCoverage = evaluateRequiredCheckCoverage([check], textEcho as never);
+  assert.equal(textCoverage.status, "complete");
+  assert.deepEqual(textCoverage.checks.map((row) => row.status), ["satisfied"]);
 });
 
 test("unresolved cause precedence is deterministic and a planning failure is not a provider failure", () => {

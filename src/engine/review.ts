@@ -414,8 +414,11 @@ export function createRunCancellation(request: ReviewRequest): RunCancellation {
  * the harness and engine layers would make exact-text dispositions unmatched
  * and permanently block. Absent candidates (fork/skipped-harness paths) fall
  * back to must_check-only rows with harness-compatible ids. The derived
- * unresolved cause is stamped on EVERY unresolved row (#1381 acceptance: the
- * telemetry names the obligation and its cause regardless of source).
+ * unresolved cause is stamped ONLY on rows whose folded status is
+ * `unresolved` (#1381: an `unmet` row was resolved negatively — the check
+ * was performed and failed — so it carries no evidence-gathering cause; a
+ * `satisfied` row carries none either). The telemetry names every
+ * not-clean row regardless of which side of that line it fell on.
  * `VALIDATE_REQUIRED_CHECKS=false` removes must_check rows from the contract
  * at both layers (harness presentation and engine enforcement), so an
  * operator who disabled #750 validation does not get #1381 forcing instead.
@@ -444,17 +447,22 @@ function resolveReviewObligations(
     planningError: harness?.planning_error != null ? String(harness.planning_error) : null,
     degraded: typeof harness?.executed_request_count === "number" && harness.executed_request_count === 0,
   });
+  // Only an `unresolved` row carries the evidence-gathering cause; a
+  // `satisfied` row was resolved positively and an `unmet` row negatively.
   return folded.map((obligation) => (
-    obligation.status === "satisfied" ? obligation : { ...obligation, cause }
+    obligation.status === "unresolved" ? { ...obligation, cause } : obligation
   ));
 }
 
 function persistReviewObligations(ws: RunWorkspace, obligations: ReviewObligation[], log: (line: string) => void): void {
   if (obligations.length === 0) return;
   ws.write("review-obligations.json", pyJsonDumps(reviewObligationsToArtifact(obligations)));
-  const ids = unresolvedReviewObligations(obligations);
-  const cause = obligations.find((item) => item.status !== "satisfied")?.cause ?? "none";
-  log(`Review obligations: ${obligations.length} total, ${ids.length} unresolved (${ids.join(", ")}), cause=${cause}`);
+  const unmet = obligations.filter((item) => item.status === "unmet").map((item) => `${item.id}=unmet`);
+  const unresolved = obligations.filter((item) => item.status === "unresolved").map((item) => `${item.id}=unresolved`);
+  const satisfied = obligations.filter((item) => item.status === "satisfied").length;
+  const notClean = [...unmet, ...unresolved];
+  const detail = notClean.length > 0 ? ` (${notClean.join(", ")})` : "";
+  log(`Review obligations: ${obligations.length} total, ${satisfied} satisfied, ${unmet.length} unmet, ${unresolved.length} unresolved${detail}`);
 }
 
 function mergeBlockerVerificationPasses(

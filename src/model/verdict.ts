@@ -54,7 +54,18 @@ const MAX_REQUIRED_CHECKS = 50;
 const MAX_REQUIRED_CHECK_CHARS = 400;
 const MAX_RATIONALE_CHARS = 500;
 
-const REQUIRED_CHECK_STATUSES = new Set<string>(["satisfied", "not_applicable", "unresolved"]);
+// #750 + #1381: bounded required-check dispositions. `unmet` is a
+// confirmed negative — the check was performed and the requirement is NOT
+// satisfied — and `failed` is accepted as a prose alias folding to it (the
+// thread-disposition alias pattern). Both always need a grounded rationale,
+// exactly like `not_applicable`.
+const REQUIRED_CHECK_STATUS_ALIASES: Readonly<Record<string, RequiredCheckStatus>> = Object.freeze({
+  satisfied: "satisfied",
+  not_applicable: "not_applicable",
+  unresolved: "unresolved",
+  unmet: "unmet",
+  failed: "unmet",
+});
 const THREAD_DISPOSITION_ALIASES: Readonly<Record<string, NormalizedThreadDisposition["disposition"]>> = Object.freeze({
   fixed: "fixed",
   resolved: "fixed",
@@ -89,11 +100,12 @@ const MAX_HUMAN_REVIEW_EVIDENCE_CHARS = 1000;
  * Entries are preserved, never silently collapsed. An entry that cannot be
  * attributed to any check identity (non-object, non-string/empty/oversized
  * check text) is dropped; an attributable but malformed one — unknown
- * status prose alias, `not_applicable` without a usable rationale — is
- * preserved as `{check, status: "invalid", rationale: null}` so the
- * deterministic coverage evaluation invalidates the check (the same
- * fail-conservative precedent as requirement_coverage normalizing unusable
- * claims to `unknown`). Dropping a malformed duplicate must never turn a
+ * status prose alias, `not_applicable` or `unmet` (alias `failed`, which
+ * folds to `unmet`) without a usable rationale — is preserved as
+ * `{check, status: "invalid", rationale: null}` so the deterministic
+ * coverage evaluation invalidates the check (the same fail-conservative
+ * precedent as requirement_coverage normalizing unusable claims to
+ * `unknown`). Dropping a malformed duplicate must never turn a
  * valid+malformed double answer into a single valid disposition.
  */
 function normalizeRequiredCheckDispositions(
@@ -112,7 +124,8 @@ function normalizeRequiredCheckDispositions(
     if (check === "" || check.length > MAX_REQUIRED_CHECK_CHARS) continue;
 
     const rawStatus = typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
-    if (!REQUIRED_CHECK_STATUSES.has(rawStatus)) {
+    const status = REQUIRED_CHECK_STATUS_ALIASES[rawStatus];
+    if (status === undefined) {
       dispositions.push({ check, status: "invalid", rationale: null });
       if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
       continue;
@@ -122,13 +135,13 @@ function normalizeRequiredCheckDispositions(
     if (typeof item.rationale === "string") {
       rationale = item.rationale.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_RATIONALE_CHARS) || null;
     }
-    if (rawStatus === "not_applicable" && rationale === null) {
+    if ((status === "not_applicable" || status === "unmet") && rationale === null) {
       dispositions.push({ check, status: "invalid", rationale: null });
       if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
       continue;
     }
 
-    dispositions.push({ check, status: rawStatus as RequiredCheckStatus, rationale });
+    dispositions.push({ check, status, rationale });
     if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
   }
   return { present: true, dispositions };

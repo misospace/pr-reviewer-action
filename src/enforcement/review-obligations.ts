@@ -269,27 +269,42 @@ export function foldObligationDispositions(
   return obligations.map((obligation) => {
     const idAlias = normalized(obligation.id);
     const textAlias = normalized(obligation.text);
-    const matching = (dispositions ?? []).filter((entry) =>
-      normalized(entry.check) === textAlias || normalized(entry.check) === idAlias,
-    );
-    if (matching.length === 0) return { ...obligation, status: "unresolved", cause: null };
-    // A second answer for the SAME alias is a duplicate disposition and
-    // deterministically invalidates the row (#750's fail-closed
-    // `duplicate-dispositions` rule in required-checks.ts): the model cannot
-    // satisfy a review-owned prerequisite by echoing it twice. Only the
-    // one-answer alias echo — one id entry plus one text entry — folds as a
-    // single answer (#1381 review): aliases are one answer — they discharge
-    // when they agree, mirroring how #750 resolves the text disposition and
-    // ignores the id alias — and only a disagreement keeps the row
-    // conservatively unresolved.
-    const idMatches = matching.filter((entry) => normalized(entry.check) === idAlias);
-    const textMatches = matching.filter((entry) => normalized(entry.check) === textAlias);
+    // Alias-echo rules (#1388): `must_check` rows fold ONLY on the exact
+    // check text — the `obligation-<n>` id alias is ignored entirely
+    // (neither a duplicate nor an answer) for identity parity with #750's
+    // completeness fold, which recognizes only the deterministic check
+    // text; an id-echoed must_check disposition must not discharge the
+    // obligation while #750 still reports the check unresolved.
+    // `trusted_base_guidance` rows keep the id+text alias pair — there is
+    // no #750 fold to disagree with. One id entry plus one text entry folds
+    // as a single answer when the statuses agree; a second answer for the
+    // SAME alias is a duplicate disposition and deterministically
+    // invalidates the row (#750's fail-closed `duplicate-dispositions` rule
+    // in required-checks.ts): the model cannot satisfy a review-owned
+    // prerequisite by echoing it twice, and only a disagreement keeps the
+    // row conservatively unresolved.
+    const pool = obligation.source === "must_check"
+      ? (dispositions ?? []).filter((entry) => normalized(entry.check) === textAlias)
+      : (dispositions ?? []).filter((entry) =>
+          normalized(entry.check) === textAlias || normalized(entry.check) === idAlias,
+        );
+    if (pool.length === 0) return { ...obligation, status: "unresolved", cause: null };
+    const idMatches = pool.filter((entry) => normalized(entry.check) === idAlias);
+    const textMatches = pool.filter((entry) => normalized(entry.check) === textAlias);
     if (idMatches.length > 1 || textMatches.length > 1) return { ...obligation, status: "unresolved", cause: null };
-    if (new Set(matching.map((entry) => entry.status)).size > 1) return { ...obligation, status: "unresolved", cause: null };
-    const status = matching[0]!.status;
-    const rationale = matching
+    if (new Set(pool.map((entry) => entry.status)).size > 1) return { ...obligation, status: "unresolved", cause: null };
+    const status = pool[0]!.status;
+    const rationale = pool
       .map((entry) => (typeof entry.rationale === "string" ? entry.rationale!.trim() : ""))
       .sort((a, b) => b.length - a.length)[0] ?? "";
+    // A confirmed negative (#1381): `unmet` with a usable rationale resolves
+    // the row negatively — the check was performed and the requirement is
+    // NOT satisfied — so the row is `unmet`, not clean coverage, and the
+    // hard-force gate still fires; without a usable rationale the answer is
+    // unusable and the row stays conservatively unresolved.
+    if (status === "unmet") {
+      return rationale !== "" ? { ...obligation, status: "unmet", cause: null } : { ...obligation, status: "unresolved", cause: null };
+    }
     // Presence-and-shape rule (the #750 baseline): the deterministic layer
     // never judges whether a rationale is semantically grounded. The shape
     // follows each source's model-facing contract: must_check rows fold with
@@ -359,8 +374,11 @@ export function applyReviewObligationEnforcement(
   if (unresolved.length === 0) {
     return { applied: false, reason };
   }
+  // Only an `unresolved` row carries an evidence-gathering cause; an `unmet`
+  // row was resolved negatively (the check was performed and failed), so it
+  // renders the status alone.
   const rows = unresolved.map((obligation) =>
-    `- ${obligation.id} (${obligation.source}, ${obligation.status}, cause: ${obligation.cause ?? "unknown"}): ${obligation.text}`,
+    `- ${obligation.id} (${obligation.source}, ${obligation.status}${obligation.status === "unresolved" ? `, cause: ${obligation.cause ?? "unknown"}` : ""}): ${obligation.text}`,
   ).join("\n");
   const delimiter = fenceDelimiterFor(rows);
   return forceRequestChanges(artifact, `\n\n## Unresolved Required Review Evidence\n${delimiter}text\n${rows}\n${delimiter}\n\n_${reviewObligationAttribution(ids)}._`, reason);

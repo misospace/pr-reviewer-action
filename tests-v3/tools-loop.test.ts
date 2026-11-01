@@ -1079,3 +1079,130 @@ test("a catalog command whose name is the obligation evidence stays admissible a
   assert.equal(outcome.requiredEvidenceRefusals, 0);
   assert.equal(outcome.requestsRemaining, 3);
 });
+
+// #1388: the reservation pairs reserved REQUESTS with reserved ROUNDS.
+test("a complying model stuck on the round ceiling gets extension rounds and spends the reserved requests", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // maxRounds 4 (2×2), budget 8, reserve 2. Rounds 1-2 run optional calls
+  // while the window is closed; round 3's optional call is refused by the
+  // ROUNDS half of the window; round 4 is the last round the old loop had —
+  // it executes the matrix call (progress, one obligation discharged) and
+  // the extension buys round 5, where the model spends a reserved request on
+  // the remaining obligation and the window discharges (pendingEvidence 0).
+  const { postFn, executeFn, timeFn } = scriptedLoop(
+    [
+      openAiCall("c1", "read_file", '{"path":"misc/a.md"}'),
+      openAiCall("c2", "read_file", '{"path":"misc/b.md"}'),
+      openAiCall("c3", "read_file", '{"path":"docs/nope.md"}'),
+      openAiCall("c4", "web_fetch", '{"url":"https://talos.dev/docs/v1.14/support-matrix"}'),
+      openAiCall("c5", "read_file", '{"path":"docs/lockfile.md"}'),
+    ],
+    [
+      { tool: "read_file", status: "ok", result: { content: "a" } },
+      { tool: "read_file", status: "ok", result: { content: "b" } },
+      { tool: "web_fetch", status: "ok", result: { content: "matrix" } },
+      { tool: "read_file", status: "ok", result: { content: "lock" } },
+    ],
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(2, 8, 120),
+    reserveForRequiredEvidence: 2,
+    requiredEvidence: [
+      { id: "obligation-1", tokens: ["matrix"] },
+      { id: "obligation-2", tokens: ["lockfile"] },
+    ],
+    timeFn,
+  });
+  // Without the extension the loop stops on max-rounds at 4 with the
+  // lockfile request still reserved; with it, round 5 runs.
+  assert.equal(outcome.rounds, 5);
+  assert.equal(outcome.stopReason, STOP_MAX_ROUNDS);
+  assert.deepEqual(outcome.executed.map((item) => (item.args as { path?: string; url?: string }).path ?? (item.args as { url?: string }).url), [
+    "misc/a.md",
+    "misc/b.md",
+    "https://talos.dev/docs/v1.14/support-matrix",
+    "docs/lockfile.md",
+  ]);
+  assert.equal(outcome.requiredEvidenceRefusals, 1);
+  assert.equal(outcome.requestsRemaining, 4);
+});
+
+test("a hostile model emitting only refused calls inside the window stops at maxRounds with zero extension", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // maxRounds 2 (1×2) and reserve 3: the ROUNDS half of the window is open
+  // from the first call, so every optional call is refused. No round ever
+  // executes anything, so no ceiling extension is ever earned — the loop
+  // stops exactly at maxRounds with every reserved request intact.
+  const responses = Array.from({ length: 2 }, (_, i) => openAiCall(`c${i}`, "read_file", `{"path":"misc/${i}.md"}`));
+  const { postFn, executeFn, timeFn } = scriptedLoop(responses, []);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(1, 6, 120),
+    reserveForRequiredEvidence: 3,
+    requiredEvidence: REQUIRED_EVIDENCE_OBLIGATIONS,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_MAX_ROUNDS);
+  assert.equal(outcome.rounds, 2);
+  assert.equal(outcome.executed.length, 0);
+  assert.equal(outcome.requiredEvidenceRefusals, 2);
+  assert.equal(outcome.requestsRemaining, 6);
+});
+
+test("round-ceiling extension is hard-bounded at the reservation hint", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // maxRounds 4 (2×2), budget 12, reserve 3 (hint 3) against FOUR
+  // obligations. The model keeps making progress (each round executes one
+  // obligation-overlapping call while a later obligation stays pending), so
+  // extension rounds keep being earned — but never more than `hint` TOTAL:
+  // the loop stops at exactly maxRounds + hint (4 + 3 = 7), never round 8.
+  const { postFn, executeFn, timeFn } = scriptedLoop(
+    [
+      openAiCall("c1", "read_file", '{"path":"misc/a.md"}'),
+      openAiCall("c2", "read_file", '{"path":"misc/b.md"}'),
+      openAiCall("c3", "read_file", '{"path":"docs/nope.md"}'),
+      openAiCall("c4", "web_fetch", '{"url":"https://talos.dev/docs/v1.14/support-matrix"}'),
+      openAiCall("c5", "read_file", '{"path":"docs/lockfile.md"}'),
+      openAiCall("c6", "read_file", '{"path":"docs/manifest.yaml"}'),
+      openAiCall("c7", "read_file", '{"path":"docs/changelog.md"}'),
+    ],
+    [
+      { tool: "read_file", status: "ok", result: { content: "a" } },
+      { tool: "web_fetch", status: "ok", result: { content: "matrix" } },
+      { tool: "read_file", status: "ok", result: { content: "lock" } },
+      { tool: "read_file", status: "ok", result: { content: "manifest" } },
+      { tool: "read_file", status: "ok", result: { content: "changelog" } },
+    ],
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(2, 12, 120),
+    reserveForRequiredEvidence: 3,
+    requiredEvidence: [
+      { id: "obligation-1", tokens: ["matrix"] },
+      { id: "obligation-2", tokens: ["lockfile"] },
+      { id: "obligation-3", tokens: ["manifest"] },
+      { id: "obligation-4", tokens: ["changelog"] },
+    ],
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_MAX_ROUNDS);
+  assert.equal(outcome.rounds, 7);
+  assert.ok(outcome.rounds <= 4 + 3, "extension never exceeds the hint");
+  assert.deepEqual(outcome.executed.map((item) => (item.args as { path?: string; url?: string }).path ?? (item.args as { url?: string }).url), [
+    "misc/a.md",
+    "https://talos.dev/docs/v1.14/support-matrix",
+    "docs/lockfile.md",
+    "docs/manifest.yaml",
+    "docs/changelog.md",
+  ]);
+  assert.equal(outcome.requiredEvidenceRefusals, 2);
+  assert.equal(outcome.requestsRemaining, 7);
+});

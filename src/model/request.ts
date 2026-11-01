@@ -107,14 +107,15 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
         // Identity is the EXACT deterministic check text echoed back; the
         // parser/coverage layers validate it against the supplied list, so
         // the model cannot invent, omit, duplicate, or reword mandatory
-        // checks. `not_applicable` must carry a grounded rationale.
+        // checks. `not_applicable` and `unmet` (#1381: a confirmed negative)
+        // must each carry a grounded rationale.
         required_check_dispositions: {
           type: ["array", "null"],
           items: {
             type: "object",
             properties: {
               check: { type: "string" },
-              status: { type: "string", enum: ["satisfied", "not_applicable", "unresolved"] },
+              status: { type: "string", enum: ["satisfied", "not_applicable", "unresolved", "unmet"] },
               rationale: { type: ["string", "null"] },
             },
             required: ["check", "status", "rationale"],
