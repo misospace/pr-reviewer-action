@@ -126,15 +126,22 @@ const DEPENDENCY_CLAUSE_SPLIT_RE = /;\s*|\s+(?:and|but|while)\s+/;
 /** #1380 review: the model pass also reads the PR title, so the semantic-
  * remainder predicate must account for it too. A title that is NOTHING but a
  * conventional dependency bump — a `chore(deps…)`-scoped bump/updates title,
- * or a bare "bump/update/upgrade/pin <pkg> [from X] to Y" title — is
- * deterministic dependency metadata, matched by vocabulary shape (never a
- * bot name). Anything beyond the bare bump shape (a parenthetical assertion
- * like "(no CRDs changed)", a non-bump subject, a directory tail) fails the
- * anchored whole-title match and keeps the model pass — fail toward running.
- * Anchored `$` keeps a bump verb from swallowing a sentence that continues
- * ("Update the README to describe the new flags" is not metadata). */
-const DEPENDENCY_TITLE_BUMP_RE =
-  /^(?:chore(?:\([^)]*\))?\s*:\s*)?(?:bump|update|upgrade|pin)\s+[\w./@-]+(?:\s+[\w./@-]+)*(?:\s+(?:from\s+[\w.+-]+\s+)?to\s+[\w.+-]+)\s*[.!?]?\s*$|^chore(?:\([^)]*\))?\s*:\s*(?:bump|update|upgrade|pin)\b\s*[\w./@.-]*\s*[.!?]?\s*$/i;
+ * or a bare "bump/update/upgrade/pin <package> from X to Y" / "… to <version>"
+ * title — is deterministic dependency metadata, matched by vocabulary shape
+ * (never a bot name). The unanchored `to`-tail target must carry the
+ * dependency version-token shape unless the title carries an explicit
+ * `from X to Y` pair, so human titles like "Update the server to production"
+ * are not metadata. Anything beyond the bare bump shape — a parenthetical
+ * assertion like "(no CRDs changed)", a non-bump subject, a directory tail —
+ * fails the anchored whole-title match and keeps the model pass (fail toward
+ * running). `[ \t]`, never `\s`: titles are single-line and a future caller
+ * must not get cross-line matches for free. */
+const DEPENDENCY_TITLE_BUMP_RE = new RegExp(
+  "^(?:chore\\(deps[-\\w]*\\)[ \\t]*:[ \\t]*)?(?:bump|update|upgrade|pin)[ \\t]+[\\w./@-]+(?:[ \\t]+[\\w./@-]+)*" +
+    "(?:[ \\t]+from[ \\t]+[\\w.+-]+[ \\t]+to[ \\t]+[\\w.+-]+|[ \\t]+to[ \\t]+" + DEPENDENCY_VERSION_TOKEN_SRC + ")[ \\t]*[.!?]?[ \\t]*$" +
+    "|^chore\\(deps[-\\w]*\\)[ \\t]*:[ \\t]*(?:bump|update|upgrade|pin)\\b[ \\t]*[\\w./@.-]*[ \\t]*[.!?]?[ \\t]*$",
+  "i",
+);
 
 function titleIsAccountedDependencyMetadata(sentence: string): boolean {
   return filterDependencyMetadataSentence(sentence) === null || DEPENDENCY_TITLE_BUMP_RE.test(sentence.trim());
@@ -180,22 +187,20 @@ export function filterDependencyMetadataSentence(sentence: string): string | nul
  * sees — unseen content is not evidence of "all metadata" — and when
  * NOTHING is scanned (bodyless PR, code-only diff) the filter has
  * accounted for nothing, while the model still reads the title and files.
- * The title is scanned on the same terms: a bare conventional dependency
- * bump title ("chore(deps): bump foo", "Bump actions/checkout from 3 to 4")
- * is deterministic metadata and can be accounted for, while any title shape
- * beyond the bare bump — a parenthetical assertion, a non-bump subject — is
- * unaccounted content the model still reads.
+ * The title is scanned on the same terms, EXCEPT it cannot consume the
+ * nothing-scanned edge: a bodyless PR keeps the model pass even under a
+ * bare bump title, because code-only diff content the predicate never reads
+ * is exactly the unaccounted surface the model still sees.
  * Same bounded patterns and sentence material as the extractors; pure,
  * never throws. */
 export function hasDependencySemanticRemainder(input: { prTitle?: string; prBody: string; diffText: string }): boolean {
-  let scanned = 0;
   for (const sentence of splitSentences((input.prTitle ?? "").trim())) {
-    scanned += 1;
     if (!titleIsAccountedDependencyMetadata(sentence)) return true;
   }
   const terminated = (input.prBody ?? "").replace(HTML_COMMENT_RE, " ");
   const swallowed = /<!--([\s\S]*)$/.exec(terminated);
   if (swallowed && swallowed[1]!.trim() !== "") return true;
+  let scanned = 0;
   for (const sentence of splitSentences(terminated.replace(HTML_COMMENT_UNTERMINATED_RE, " "))) {
     scanned += 1;
     if (filterDependencyMetadataSentence(sentence) !== null) return true;

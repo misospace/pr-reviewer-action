@@ -1146,7 +1146,25 @@ assert.equal(hasDependencySemanticRemainder({ prTitle: "chore(deps): bump foo", 
 assert.equal(hasDependencySemanticRemainder({ prTitle: "Bump actions/checkout from 3 to 4", prBody: dependencyMetadataBody, diffText: "" }), false);
 assert.equal(hasDependencySemanticRemainder({ prTitle: "Update dependency foo to v4", prBody: dependencyMetadataBody, diffText: "" }), false);
 assert.equal(hasDependencySemanticRemainder({ prTitle: "Update the README to describe the new flags", prBody: dependencyMetadataBody, diffText: "" }), true);
+assert.equal(hasDependencySemanticRemainder({ prTitle: "Update the server to production", prBody: dependencyMetadataBody, diffText: "" }), true);
 assert.equal(hasDependencySemanticRemainder({ prTitle: "", prBody: dependencyMetadataBody, diffText: "" }), false);
+});
+test("#1380 review: the nothing-scanned edge is not consumed by an accounted bump title", async () => {
+let calls = 0;
+const requestFn: SpecialistRequestFn = async () => {
+calls += 1;
+return { ok: true, raw: { choices: [{ message: { content: JSON.stringify({ claims: [] }) } }] } };
+};
+const result = await runClaimFalsificationPass({
+title: "chore(deps): bump foo",
+body: "",
+files: [],
+diff: ["diff --git a/main.ts b/main.ts", "@@ -1,1 +1,1 @@", "-const a = 1;", "+const a = 2;"].join("\n"),
+dependencyUpdate: true,
+model: { config: modelConfig, requestFn },
+});
+assert.equal(calls, 1, "a bodyless PR keeps the model pass even under a bare bump title");
+assert.notEqual(result.status, "filtered");
 });
 test("#1380 review: a semantic title keeps the model pass on a metadata-only body", async () => {
 let calls = 0;
