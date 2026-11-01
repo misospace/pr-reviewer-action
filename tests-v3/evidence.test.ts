@@ -13,7 +13,7 @@ import {
   severityRank,
   type ProviderSpec,
 } from "../src/evidence/index.js";
-import { runProcess } from "../src/runtime/index.js";
+import { runProcess, processCanExecute } from "../src/runtime/index.js";
 
 const ambientBase: NodeJS.ProcessEnv = {
   PATH: process.env.PATH ?? "",
@@ -165,19 +165,19 @@ test("provider timeout terminates the whole tree, exit_code stays null", async (
   assert.ok(entry.duration_sec.value >= 1 && entry.duration_sec.value < 20, `duration ${entry.duration_sec.value}`);
 
   // The backgrounded grandchild must be gone too (v2 killed only the leader).
-  for (let i = 0; i < 100; i++) {
+  // Two load-tolerance points (#1377): the pid-file wait must survive a cold
+  // shell boot under CPU starvation, and "gone" is "cannot execute" — a
+  // killed-but-unreaped zombie (the shape a non-reaping container PID 1
+  // leaves) answers kill(pid, 0) forever but is terminated.
+  const deadline = Date.now() + 30_000;
+  for (;;) {
     const raw = readPidFile(gcPidFile);
     if (raw !== null) {
       const pid = Number.parseInt(raw, 10);
-      let alive = true;
-      try {
-        process.kill(pid, 0);
-      } catch {
-        alive = false;
-      }
-      assert.equal(alive, false, "grandchild must not survive the provider timeout");
+      assert.equal(processCanExecute(pid), false, "grandchild must not survive the provider timeout");
       return;
     }
+    if (Date.now() >= deadline) break;
     await new Promise((resolve) => {
       setTimeout(resolve, 50);
     });
