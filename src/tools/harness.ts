@@ -1604,8 +1604,11 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         ...(meta.max_conversation_tokens !== undefined ? { max_conversation_tokens: meta.max_conversation_tokens } : {}),
         // #1379: budget provenance for the dependency-evidence reserve —
         // present (0) for every loop run; the key appears in the artifact
-        // whenever the raw meta carries it.
+        // whenever the raw meta carries it. The attempt/refusal counters
+        // mirror the reserve's enforcement outcome.
         ...(meta.dependency_evidence_reserve !== undefined ? { dependency_evidence_reserve: meta.dependency_evidence_reserve } : {}),
+        ...(meta.dependency_evidence_attempted !== undefined ? { dependency_evidence_attempted: meta.dependency_evidence_attempted } : {}),
+        ...(meta.dependency_evidence_refusals !== undefined ? { dependency_evidence_refusals: meta.dependency_evidence_refusals } : {}),
       },
       usage: {
         tool_calls_issued: result.planned_request_count ?? 0,
@@ -2469,8 +2472,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     peak_conversation_tokens: outcome.peakConversationTokens,
     // #1379: budget provenance for the dependency-evidence reserve — always
     // present (0 when the PR did not classify into a dependency-evidence
-    // family); the telemetry budget block mirrors it conditionally.
+    // family); the telemetry budget block mirrors it conditionally. The
+    // enforceability counters ride alongside: whether the reserved tail was
+    // ever released by an attempted upstream-evidence call, and how many
+    // unrelated calls the driver refused while it was unattempted.
     dependency_evidence_reserve: outcome.priorityEvidenceReserve,
+    dependency_evidence_attempted: outcome.priorityEvidenceAttempted,
+    dependency_evidence_refusals: outcome.priorityEvidenceRefusals,
     // #1199: per-round latency/usage records (persisted into tool_loop_telemetry
     // and consumed/nulled with the rest of this meta by buildToolLoopTelemetry).
     round_telemetry: roundTelemetry,

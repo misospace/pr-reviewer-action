@@ -998,3 +998,233 @@ test("#1379: a reserve at the low-budget boundary preempts the generic low-budge
   assert.ok(newestNote.includes("reserved"));
   assert.ok(!newestNote.includes("Stop broad exploration"));
 });
+
+// ── #1379 review blocker: the reserve is ENFORCED, not just announced ──────
+
+/** Loop whose executor records every (tool, args) it was actually given, so
+ * refusals are observable as the calls the executor never saw. */
+function recordingLoop(responses: unknown[]) {
+  let responseIndex = 0;
+  const executedCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  const postFn = async () => responses[responseIndex++];
+  const executeFn = async (tool: string, args: Record<string, unknown>) => {
+    executedCalls.push({ tool, args });
+    return { tool, status: "ok", result: {} };
+  };
+  const timeFn = () => Number.MAX_SAFE_INTEGER / 2;
+  return { postFn, executeFn, timeFn, executedCalls };
+}
+
+test("#1379: the reserve refuses optional calls inside the window until evidence is attempted", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Budget 6, reserve 4: rounds 1-2 execute outside the window (left 6, 5);
+  // round 3 requests an optional call inside the window with no evidence
+  // attempt yet — the driver refuses it and the reserved requests survive;
+  // round 4's web_fetch attempts the obligation; round 5's optional call is
+  // allowed again because the obligation state has advanced.
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "git_status_short", "{}"),
+    openAiCall("c2", "git_diff_stat", "{}"),
+    openAiCall("c3", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c4", "web_fetch", '{"url":"https://example.test/releases"}'),
+    openAiCall("c5", "git_log", "{}"),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    priorityEvidenceReserve: 4,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  // The refused read_file never reached the executor; the reserved tail was
+  // spent on the evidence call instead of optional archaeology.
+  assert.deepEqual(executedCalls.map((c) => c.tool), ["git_status_short", "git_diff_stat", "web_fetch", "git_log"]);
+  assert.equal(outcome.priorityEvidenceAttempted, true);
+  assert.equal(outcome.priorityEvidenceRefusals, 1);
+  // 4 executed of 6: the refusal consumed nothing.
+  assert.equal(outcome.requestsRemaining, 2);
+  // The refusal is a model-facing error result the model can act on.
+  const transcript = JSON.stringify(conversation.toRequestPayload("openai", "m", {}));
+  assert.ok(transcript.includes("Reserved dependency-evidence budget"));
+});
+
+test("#1379: a model that never attempts evidence can never spend the reserved tail", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Budget 6, reserve 4, one optional call per round. Once the window opens
+  // every call is refused without executing or spending, so the loop runs
+  // out of ROUNDS, not of the request budget: the reserve is fully intact.
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c2", "read_file", '{"path":"b.ts"}'),
+    openAiCall("c3", "git_log", "{}"),
+    openAiCall("c4", "git_blame", "{}"),
+    openAiCall("c5", "git_grep", "{}"),
+    openAiCall("c6", "find_files", "{}"),
+    openAiCall("c7", "list_tree", "{}"),
+    openAiCall("c8", "read_file", '{"path":"c.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    priorityEvidenceReserve: 4,
+  });
+  assert.equal(outcome.stopReason, STOP_MAX_ROUNDS);
+  assert.equal(executedCalls.length, 2);
+  assert.equal(outcome.priorityEvidenceAttempted, false);
+  assert.equal(outcome.priorityEvidenceRefusals, 6);
+  // The exact failure this rule exists to prevent no longer happens: budget
+  // exhaustion with the required evidence unresolved is impossible while the
+  // obligation is unattempted — the tail simply cannot be consumed.
+  assert.equal(outcome.requestsRemaining, 4);
+});
+
+test("#1379: an early evidence attempt releases the window for optional work", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "web_fetch", '{"url":"https://example.test/releases"}'),
+    openAiCall("c2", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c3", "git_log", "{}"),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn,
+    priorityEvidenceReserve: 4,
+  });
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  // c3 lands inside the window (requestsLeft 4) but the obligation was
+  // attempted in round 1, so nothing is refused.
+  assert.deepEqual(executedCalls.map((c) => c.tool), ["web_fetch", "read_file", "git_log"]);
+  assert.equal(outcome.priorityEvidenceAttempted, true);
+  assert.equal(outcome.priorityEvidenceRefusals, 0);
+});
+
+test("#1379: a failed evidence call still counts as an attempt (no lockout)", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // The executor refuses the fetch (e.g. host allowlist). The model has done
+  // what it can: it must not be locked out of the reserved tail forever.
+  let responseIndex = 0;
+  const responses = [
+    openAiCall("c1", "web_fetch", '{"url":"https://blocked.test/releases"}'),
+    openAiCall("c2", "read_file", '{"path":"a.ts"}'),
+    openAiText("done"),
+  ];
+  const timeFn = () => Number.MAX_SAFE_INTEGER / 2;
+  const outcome = await driveToolLoop(
+    conversation,
+    async () => responses[responseIndex++],
+    async (tool: string) => ({ tool, status: "error", result: { error: "host not allowed" } }),
+    {
+      apiFormat: "openai",
+      model: "m",
+      budgets: adaptiveLoopBudgets(4, 6, 120),
+      timeFn,
+      priorityEvidenceReserve: 4,
+    },
+  );
+  assert.equal(outcome.priorityEvidenceAttempted, true);
+  assert.equal(outcome.priorityEvidenceRefusals, 0);
+  assert.equal(outcome.executed.length, 2);
+});
+
+test("#1379: within one round, an evidence call releases later optional calls; the reverse order still refuses", async () => {
+  // Evidence FIRST in the same round: both execute (dispositions are decided
+  // in call order, so the flag flips before the optional call is judged).
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const responses = [
+    openAiCall("c1", "git_status_short", "{}"),
+    openAiCall("c2", "git_diff_stat", "{}"),
+    {
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              { id: "c3", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://example.test/r"}' } },
+              { id: "c4", type: "function", function: { name: "git_log", arguments: "{}" } },
+            ],
+          },
+        },
+      ],
+    },
+    openAiText("done"),
+  ];
+  const { postFn, executeFn } = recordingLoop(responses);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn: () => Number.MAX_SAFE_INTEGER / 2,
+    priorityEvidenceReserve: 4,
+  });
+  assert.equal(outcome.priorityEvidenceRefusals, 0);
+  assert.equal(outcome.executed.length, 4);
+
+  // Optional FIRST in the same window round: it is refused, and the evidence
+  // call in the same round executes.
+  const conversation2 = new Conversation();
+  conversation2.addUser("corpus");
+  const responses2 = [
+    openAiCall("c1", "git_status_short", "{}"),
+    openAiCall("c2", "git_diff_stat", "{}"),
+    {
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              { id: "c3", type: "function", function: { name: "git_log", arguments: "{}" } },
+              { id: "c4", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://example.test/r"}' } },
+            ],
+          },
+        },
+      ],
+    },
+    openAiText("done"),
+  ];
+  const loop2 = recordingLoop(responses2);
+  const outcome2 = await driveToolLoop(conversation2, loop2.postFn, loop2.executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 6, 120),
+    timeFn: () => Number.MAX_SAFE_INTEGER / 2,
+    priorityEvidenceReserve: 4,
+  });
+  assert.equal(outcome2.priorityEvidenceRefusals, 1);
+  assert.deepEqual(loop2.executedCalls.map((c) => c.tool), ["git_status_short", "git_diff_stat", "web_fetch"]);
+});
+
+test("#1379: no reserve keeps every optional call executable in the budget tail", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Same shape as the lockout test but with reserve 0: the legacy loop
+  // executes everything to the last request, refusal-free.
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c2", "read_file", '{"path":"b.ts"}'),
+    openAiCall("c3", "git_log", "{}"),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 2, 120),
+    timeFn,
+  });
+  assert.equal(outcome.priorityEvidenceReserve, 0);
+  assert.equal(outcome.priorityEvidenceRefusals, 0);
+  assert.equal(executedCalls.length, 2);
+  assert.equal(outcome.stopReason, STOP_BUDGET);
+});

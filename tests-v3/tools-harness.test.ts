@@ -2590,6 +2590,10 @@ test("#1379: runToolHarness wires the classification-driven dependency-evidence 
   assert.ok(firstTexts.includes("dependency evidence comes first"));
   const telemetryDep = (dep.artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
   assert.equal(telemetryDep.budget?.dependency_evidence_reserve, 4);
+  // The enforcement counters mirror the loop's obligation state: this scripted
+  // model stopped before the window, so nothing was attempted or refused.
+  assert.equal(telemetryDep.budget?.dependency_evidence_attempted, false);
+  assert.equal(telemetryDep.budget?.dependency_evidence_refusals, 0);
   assert.ok(dep.logs.some((l) => l.includes("dependency-evidence reserve: 4")));
   // app_code classification: reserve 0, no priority note, no reserve in
   // the legacy path.
@@ -2599,5 +2603,7 @@ test("#1379: runToolHarness wires the classification-driven dependency-evidence 
   assert.ok(!plainTexts.includes("dependency evidence comes first"));
   const telemetryPlain = (plain.artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
   assert.equal(telemetryPlain.budget?.dependency_evidence_reserve, 0);
+  assert.equal(telemetryPlain.budget?.dependency_evidence_attempted, false);
+  assert.equal(telemetryPlain.budget?.dependency_evidence_refusals, 0);
   assert.ok(!plain.logs.some((l) => l.includes("dependency-evidence reserve")));
 });

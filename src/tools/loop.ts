@@ -72,14 +72,28 @@ const LOW_BUDGET_TURN_NOTE =
  * #1379: deterministic tool-loop prioritization for dependency-update PRs.
  * When the caller (the harness, keyed on the PR's classification) reserves a
  * tail of the request budget for required dependency evidence, the driver —
- * not the prompt fragment — owns the ordering rule: the FIRST request is
- * preceded by a turn note stating the dependency-evidence obligations take
- * priority over optional work, and once the reserve window is entered the
- * regular budget note is replaced by one redirecting ALL remaining spend to
- * those obligations. Both notes are trusted driver text (a turn_note, never
- * inside the untrusted tool-result envelope), and both are skipped entirely
- * when no reserve is configured, so non-dependency PRs keep the exact
- * #701 note sequences the reliability tests pin.
+ * not the prompt fragment — owns the ordering rule:
+ *
+ * - the FIRST request is preceded by a turn note stating the dependency-
+ *   evidence obligations take priority over optional work;
+ * - once the reserve window is entered the regular budget note is replaced
+ *   by one redirecting ALL remaining spend to those obligations;
+ * - and the window is ENFORCED, not just announced: until the loop has seen
+ *   at least one attempt at a dependency-evidence tool call (see
+ *   DEPENDENCY_EVIDENCE_TOOLS), any other tool call requested inside the
+ *   window is REFUSED with a synthetic error and spends none of the reserved
+ *   requests. The obligation state is the attempted flag — the driver cannot
+ *   know whether one fetch established provenance versus advisories, but it
+ *   deterministically prevents the reserved tail from being consumed by
+ *   unrelated calls while no upstream evidence has been attempted at all.
+ *   An attempted call counts whatever the executor's status was: a refused
+ *   host or failed fetch is still an attempt, so a model in an
+ *   evidence-unreachable configuration is never locked out of finishing.
+ *
+ * Notes are trusted driver text (a turn_note, never inside the untrusted
+ * tool-result envelope), and the whole mechanism is skipped entirely when no
+ * reserve is configured, so non-dependency PRs keep the exact #701 note
+ * sequences and call dispositions the reliability tests pin.
  */
 export const DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE =
   "[loop budget] Required dependency evidence comes first: establish upstream " +
@@ -91,8 +105,34 @@ const RESERVE_WINDOW_TURN_NOTE =
   "[loop budget] Only {requestsLeft} tool request(s) remain and they are " +
   "reserved for required dependency evidence: spend them on upstream " +
   "provenance, the exact old-to-new upstream release delta, and security " +
-  "advisories only — not on optional or local-diff work. If the evidence " +
-  "cannot be established, report what is missing rather than approximating it.";
+  "advisories (web_fetch / web_search) only. Optional and local-diff calls " +
+  "are now refused, not executed. If the evidence cannot be established, " +
+  "report what is missing rather than approximating it.";
+
+/** #1379: the refusal a non-evidence call gets inside the reserve window
+ * while no dependency-evidence call has been attempted yet. Model-facing:
+ * explains the refusal and the two ways forward in one breath. */
+const RESERVE_REFUSAL_NOTE =
+  "Reserved dependency-evidence budget: this call was not executed and spent " +
+  "none of the remaining requests. The reserved tail is for the required " +
+  "upstream evidence (publisher/source provenance, the exact old-to-new " +
+  "release delta, security advisories) via web_fetch/web_search. Make one of " +
+  "those calls, or finish now and report the missing evidence as unknown / " +
+  "needs verification.";
+
+/**
+ * #1379: the tool calls that count as an ATTEMPT at the required upstream
+ * dependency evidence. These are the only channels that can reach an
+ * arbitrary upstream (provenance, release delta, advisories): the local
+ * read/git tools and run_command can only confirm the diff already in the
+ * corpus, and gh_api is allowlisted to the PR's own repos, not the
+ * dependency's. Any executed call of one of these tools — whatever the
+ * executor returned — flips the obligation state to attempted.
+ */
+export const DEPENDENCY_EVIDENCE_TOOLS: ReadonlySet<string> = new Set([
+  "web_fetch",
+  "web_search",
+]);
 
 /** Default #1379 reserve: the budget tail the driver holds for required
  * dependency evidence once the classification says the PR is a
@@ -269,8 +309,18 @@ export interface LoopOutcome {
   peakConversationTokens: number;
   /** #1379: the dependency-evidence reserve the caller configured (0 when
    * none — non-dependency PRs keep the exact legacy behavior). Echoed for
-   * budget provenance only; counts nothing about tool content. */
+   * budget provenance; counts nothing about tool content. */
   priorityEvidenceReserve: number;
+  /** #1379: true once the loop has executed at least one dependency-evidence
+   * tool call (see DEPENDENCY_EVIDENCE_TOOLS), whatever its executor status.
+   * The reserve-window enforcement refuses unrelated calls while this is
+   * false; it is the driver's deterministic obligation state. Meaningful
+   * regardless of reserve configuration (the executor never refuses a call
+   * when no reserve is set). */
+  priorityEvidenceAttempted: boolean;
+  /** #1379: how many tool calls the reserve-window rule refused while the
+   * obligation was unattempted. These refusals consumed no request budget. */
+  priorityEvidenceRefusals: number;
 }
 
 /**
@@ -393,10 +443,12 @@ export interface DriveToolLoopOptions {
   /**
    * #1379: size of the request-budget tail reserved for required dependency
    * evidence, set by the harness when the PR's classification is a
-   * dependency-update kind. 0/absent preserves the legacy note behavior
-   * exactly. Deterministic driver behavior: a priority note precedes the
-   * FIRST request, and once the remaining requests enter the reserve window
-   * the budget note is replaced by the dependency-evidence redirect.
+   * dependency-update kind. 0/absent preserves the legacy behavior exactly.
+   * Deterministic driver enforcement: a priority note precedes the FIRST
+   * request; once the remaining requests enter the reserve window the budget
+   * note is replaced by the dependency-evidence redirect AND any non-evidence
+   * tool call is refused (executing nothing and spending no reserved
+   * request) until at least one DEPENDENCY_EVIDENCE_TOOLS call has run.
    */
   priorityEvidenceReserve?: number;
 }
@@ -457,7 +509,16 @@ export async function driveToolLoop(
     compactionTruncate: 0,
     peakConversationTokens: 0,
     priorityEvidenceReserve: Math.max(0, options.priorityEvidenceReserve ?? 0),
+    priorityEvidenceAttempted: false,
+    priorityEvidenceRefusals: 0,
   };
+  // #1379: hoisted reserve size; 0 disables the whole mechanism (notes and
+  // enforcement alike) so non-dependency PRs keep the legacy loop behavior.
+  const priorityReserve = outcome.priorityEvidenceReserve;
+  // #1379 obligation state: set when any disposition plans to execute a
+  // dependency-evidence tool call (an executor error still counts as an
+  // attempt — see DEPENDENCY_EVIDENCE_TOOLS).
+  let priorityEvidenceAttempted = false;
   const started = timeFn();
   const telemetryStart = nowFn();
   let callsExecuted = 0;
@@ -548,9 +609,9 @@ export async function driveToolLoop(
     // #1379: when a dependency-evidence reserve is configured, the FIRST
     // request carries the priority note (the ordering rule is driver-owned,
     // not prompt-fragment guidance), and inside the reserve window the budget
-    // note is replaced by the dependency-evidence redirect.
+    // note is replaced by the dependency-evidence redirect (the window's call
+    // refusals are enforced in the disposition pass below).
     {
-      const priorityReserve = Math.max(0, options.priorityEvidenceReserve ?? 0);
       const requestsLeft = budgets.maxToolCalls - callsExecuted;
       const roundsLeft = budgets.maxRounds - outcome.rounds;
       const inReserveWindow =
@@ -649,7 +710,7 @@ export async function driveToolLoop(
     // is read-only and a round's calls are independent (the model emitted them
     // together). Results are applied in the original call order to preserve
     // the open-call contract.
-    type Disposition = { callId: string; kind: "error" | "dup" | "budget"; data: Record<string, unknown> } | { callId: string; kind: "exec"; data: number };
+    type Disposition = { callId: string; kind: "error" | "dup" | "budget" | "reserve"; data: Record<string, unknown> } | { callId: string; kind: "exec"; data: number };
     const plan: Disposition[] = [];
     const toExecute = new Map<number, { name: string; args: Record<string, unknown> }>();
     // #1199: per-round disposition counts (a tri-partition of `calls.length`:
@@ -691,8 +752,27 @@ export async function driveToolLoop(
         roundRefused++;
         continue;
       }
+      // #1379: the enforceable reserve. Inside the reserve window, while no
+      // dependency-evidence call has been attempted, a non-evidence call is
+      // refused outright: it executes nothing, is NOT added to the dedup set
+      // (a retry after an evidence call must not be answered from a stale
+      // duplicate note), and spends none of the reserved requests. Once an
+      // evidence call has run — whatever the executor returned — the window
+      // behaves like the ordinary budget tail.
+      if (
+        priorityReserve > 0 &&
+        !priorityEvidenceAttempted &&
+        budgets.maxToolCalls - callsExecuted <= priorityReserve &&
+        !DEPENDENCY_EVIDENCE_TOOLS.has(call.name)
+      ) {
+        plan.push({ callId, kind: "reserve", data: { error: RESERVE_REFUSAL_NOTE } });
+        roundRefused++;
+        outcome.priorityEvidenceRefusals++;
+        continue;
+      }
       seenKeys.add(key);
       callsExecuted++;
+      if (DEPENDENCY_EVIDENCE_TOOLS.has(call.name)) priorityEvidenceAttempted = true;
       toExecute.set(idx, { name: call.name, args: args as Record<string, unknown> });
       plan.push({ callId, kind: "exec", data: idx });
       roundExecuted++;
@@ -770,6 +850,7 @@ export async function driveToolLoop(
   }
 
   outcome.degraded = outcome.toolCallsIssued === 0;
+  outcome.priorityEvidenceAttempted = priorityEvidenceAttempted;
   // #702: close out the telemetry on every exit path.
   outcome.requestsRemaining = Math.max(0, budgets.maxToolCalls - callsExecuted);
   outcome.elapsedSec = timeFn() - started;
