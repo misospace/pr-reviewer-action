@@ -142,6 +142,21 @@ export function processCanExecute(pid: number): boolean {
   return processLiveness(pid) === "running";
 }
 
+/**
+ * Whether `pid` still names a process record — ALIVE or a killed-but-unreaped
+ * zombie. A pid that no liveness source can describe (a vanished pid, or one
+ * `/proc` cannot read and the signal probe cannot confirm) is NOT present.
+ *
+ * The counterpart of {@link processCanExecute}: "can it still execute" answers
+ * the worker's FATE, while "is it still there" answers whether anything can
+ * still be signalled or swept on its behalf. A zombie is present — its pid is
+ * not released until it is reaped, so it can never have been recycled — but
+ * it cannot execute, and its process group may still hold live members.
+ */
+export function processPresent(pid: number): boolean {
+  return processLiveness(pid) !== "gone";
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);

@@ -4,7 +4,12 @@
  * no_result, stale_result), first-terminal-wins idempotence, pre-abort
  * refusal, and post-restart reconciliation — end-to-end against a real
  * child process (`tests-v3/fixtures/executor-worker.mjs`), with the
- * runtime seams injected where isolation is needed. */
+ * runtime seams injected where isolation is needed.
+ *
+ * The worker-liveness probe (#1383) is exercised through the DEFAULT
+ * probe — the one the executor ships — against a real unreaped zombie:
+ * liveness means "can this pid still execute", not "does it answer
+ * `kill(pid, 0)`". */
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -133,6 +138,24 @@ function pidAliveNow(pid: number): boolean {
   }
 }
 
+/**
+ * Wait until the pid stops answering the raw signal probe — the pid is
+ * really gone from the process table.
+ *
+ * A bounded poll, never a single sample: the executor confirms a worker's
+ * death as soon as it can no longer EXECUTE (#1383), and the OS releases the
+ * pid only afterwards (the controller reaps the zombie a moment later), so
+ * a single sample right after a confirmed cancellation races the reap.
+ */
+async function waitForProcessGone(pid: number, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!pidAliveNow(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return !pidAliveNow(pid);
+}
+
 /** A detached sleeper that must survive a cancellation it is not part of. */
 function spawnSurvivor(): { pid: number; stop: () => void } {
   const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"], {
@@ -155,6 +178,194 @@ function spawnSurvivor(): { pid: number; stop: () => void } {
 
 function cleanup(fixture: Fixture): void {
   rmSync(fixture.root, { recursive: true, force: true });
+}
+
+// ── the zombie fixture (#1383) ──────────────────────────────────────────
+
+/** `/proc/<pid>/stat` field 3 (`state`), parsed AFTER the last `)` — the
+ * `comm` field may contain spaces AND parentheses, so splitting the whole
+ * line mis-counts every field behind it. "" when unreadable. */
+function procState(pid: number): string {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return "";
+    return stat.slice(close + 1).trim().split(/\s+/)[0] ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** `/proc/<pid>/stat` field 22 (`starttime`) — the PROCESS IDENTITY the
+ * executor records next to a pid. "" when unprovable. */
+function procStartTime(pid: number): string {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return "";
+    // The remainder starts at field 3 (`state`), so field 22 is its 20th
+    // element.
+    return stat.slice(close + 1).trim().split(/\s+/)[19] ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Whether this platform can describe a pid at all. The zombie-vs-alive
+ * distinction is Linux-only by design: elsewhere the executor's probe
+ * falls back to the raw signal probe. */
+const hasProc = (() => procState(process.pid).length > 0)();
+
+const NO_PROC_SKIP_REASON =
+  "no /proc on this platform: the zombie-vs-alive distinction is Linux-only by design (the executor's default probe falls back to the raw signal probe elsewhere, and every other fixture in this file still runs)";
+
+/** Launch-side readiness ceiling: generous, because a cold `bash` boot
+ * plus a pid-file write can exceed a tight ceiling on a loaded runner
+ * with no product fault (#1377). The waits poll for success and return
+ * the moment the state appears, so the ceiling costs nothing when
+ * healthy and fails, naming what never happened, when it truly does not. */
+const ZOMBIE_WAIT_MS = 30_000;
+
+/**
+ * The boundary token itself, not a benign stand-in (#252): a real
+ * unreaped zombie. `bash` backgrounds a short `sleep` and then blocks in
+ * its own foreground command — bash does not reap background jobs while a
+ * foreground command holds it, so the exited child stays a ZOMBIE. The
+ * holder must stay ALIVE for the whole assertion window: once bash is
+ * gone the zombie is reaped (or re-parented to an init that may reap it)
+ * and the boundary token vanishes.
+ */
+function zombieHolderScript(pidFile: string): string[] {
+  return ["-c", `sleep 0.2 & echo $! > ${JSON.stringify(pidFile)}; sleep 60`];
+}
+
+/** Poll `/proc` until the pid is a confirmed zombie, or fail with the last
+ * observed state so a host that reaps too fast is explicit, not silent. */
+async function awaitZombie(pid: number, label: string): Promise<void> {
+  const deadline = Date.now() + ZOMBIE_WAIT_MS;
+  let state = "";
+  while (Date.now() < deadline) {
+    state = procState(pid);
+    if (state === "Z") return;
+    if (state === "") {
+      throw new Error(`${label}: pid ${pid} vanished before it could be observed as a zombie`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`${label}: pid ${pid} never reached zombie state (last observed state '${state}')`);
+}
+
+interface ZombieFixture {
+  /** The pid of the unreaped zombie — the boundary token itself. */
+  readonly zombiePid: number;
+  /** The zombie's PROCESS IDENTITY (its start time), exactly as the
+   * executor records it next to a pid. */
+  readonly pidIdentity: string;
+  /** Kill the holder (which takes the zombie with it) and clean up. */
+  readonly stop: () => void;
+}
+
+/** The zombie fixture needs `bash`: a host without it cannot produce the
+ * boundary token, so the zombie tests SKIP rather than fail. */
+const BASH_MISSING_SKIP_REASON = "bash is required for the zombie fixture";
+
+/** Spawn the zombie fixture: a bash holder that backgrounds a short
+ * `sleep` and then blocks, so the exited child stays an unreaped zombie
+ * for as long as the holder lives. `null` when `bash` cannot be launched
+ * (the caller skips). */
+async function spawnZombie(): Promise<ZombieFixture | null> {
+  const dir = mkdtempSync(path.join(tmpdir(), "executor-local-zombie-"));
+  const pidFile = path.join(dir, "zombie.pid");
+  // DETACHED: the holder leads its OWN process group, so the fixture can
+  // never signal the test runner's process group — the group kill below
+  // reaches the holder and its descendants only.
+  const holder = spawn("bash", zombieHolderScript(pidFile), { detached: true, stdio: "ignore" });
+  const failures: Error[] = [];
+  holder.on("error", (error) => {
+    failures.push(error);
+  });
+  const stop = (): void => {
+    const holderPid = holder.pid;
+    if (holderPid !== undefined) {
+      // The holder's foreground `sleep 60` belongs to the holder's group:
+      // a leader-only kill would orphan it and leave it running for a
+      // minute after the test. The group kill takes the whole fixture
+      // down; the leader kill is only the fallback for a group that is
+      // already gone.
+      try {
+        process.kill(-holderPid, "SIGKILL");
+      } catch {
+        try {
+          process.kill(holderPid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+    }
+    holder.unref();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  try {
+    const deadline = Date.now() + ZOMBIE_WAIT_MS;
+    let written = false;
+    while (Date.now() < deadline) {
+      const failure = failures[0];
+      if (failure !== undefined) {
+        const code = (failure as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") {
+          // No `bash` on this host: the boundary token cannot be produced.
+          stop();
+          return null;
+        }
+        throw new Error(`the zombie holder could not be launched: ${failure.message}`);
+      }
+      try {
+        if (readFileSync(pidFile, "utf8").trim().length > 0) {
+          written = true;
+          break;
+        }
+      } catch {
+        // not written yet
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    if (!written) {
+      throw new Error(`the zombie holder never wrote its pid file: ${pidFile}`);
+    }
+    const zombiePid = Number.parseInt(readFileSync(pidFile, "utf8"), 10);
+    await awaitZombie(zombiePid, "executor-local zombie");
+    return { zombiePid, pidIdentity: procStartTime(zombiePid), stop };
+  } catch (error) {
+    stop();
+    throw error;
+  }
+}
+
+/** The #252 discipline: the boundary token is fed to the boundary itself.
+ * The pid must really be an unreaped zombie AND the raw signal probe must
+ * really keep answering for it — without the latter, a probe that merely
+ * wrapped `kill(pid, 0)` would pass every assertion that follows. */
+function assertZombieBoundary(zombie: ZombieFixture): void {
+  assert.equal(procState(zombie.zombiePid), "Z", "fixture precondition: an unreaped zombie");
+  assert.doesNotThrow(
+    () => process.kill(zombie.zombiePid, 0),
+    "zombie precondition: the raw signal probe keeps answering for a pid that cannot execute",
+  );
+  assert.notEqual(zombie.pidIdentity, "", "the zombie's process identity is provable");
+}
+
+/** The recovery record a restarted controller would find: the zombie's pid
+ * with its process identity next to it, recorded as still running. */
+function zombieRecoveryRecord(fixture: Fixture, zombie: ZombieFixture): Record<string, unknown> {
+  return {
+    runId: fixture.request.runId,
+    jobId: fixture.request.jobId,
+    attempt: fixture.request.attempt,
+    pid: zombie.zombiePid,
+    pidIdentity: zombie.pidIdentity,
+    startedAtMs: 1,
+    state: "running",
+  };
 }
 
 // ── happy path ──────────────────────────────────────────────────────────
@@ -836,6 +1047,68 @@ test("reconcile: a live pid reports running; a dead (or unassigned) pid without 
   }
 });
 
+test("reconcile: a zombie worker is orphaned, never running", async (t) => {
+  // A killed-but-unreaped zombie keeps answering `kill(pid, 0)` forever
+  // under a PID 1 that never reaps orphans, so the RAW signal probe read
+  // a terminated worker as `running` forever. The default probe asks
+  // whether the pid can still EXECUTE — it cannot — so the orphan is
+  // settled, never retried against a worker that is already gone.
+  if (!hasProc) {
+    t.skip(NO_PROC_SKIP_REASON);
+    return;
+  }
+  const fixture = makeRequest();
+  const zombie = await spawnZombie();
+  if (zombie === null) {
+    t.skip(BASH_MISSING_SKIP_REASON);
+    return;
+  }
+  try {
+    assertZombieBoundary(zombie);
+    writeStateFile(fixture.request, zombieRecoveryRecord(fixture, zombie));
+    const outcome = await executor("ok").reconcile(fixture.request);
+    assert.notEqual(outcome.kind, "running", "a worker that cannot execute is not running");
+    assert.ok(outcome.kind === "settled");
+    assert.equal(outcome.result.status, "failed");
+    assert.equal(outcome.result.failureCategory, "orphaned");
+  } finally {
+    zombie.stop();
+    cleanup(fixture);
+  }
+});
+
+test("reconcile: a live worker is still running under the default probe", async () => {
+  // The counterpart of the zombie case: the default probe reads `/proc`,
+  // so a live worker must still read as alive. A `/proc` read that fails
+  // must never turn a running worker into an orphan.
+  const fixture = makeRequest();
+  const survivor = spawnSurvivor();
+  try {
+    assert.equal(pidAliveNow(survivor.pid), true, "the survivor is a live process");
+    if (hasProc) {
+      const state = procState(survivor.pid);
+      assert.notEqual(state, "", "the survivor is a real process");
+      assert.notEqual(state, "Z", "the survivor is not a zombie");
+    }
+    writeStateFile(fixture.request, {
+      runId: fixture.request.runId,
+      jobId: fixture.request.jobId,
+      attempt: fixture.request.attempt,
+      pid: survivor.pid,
+      startedAtMs: 1,
+      state: "running",
+    });
+    assert.deepEqual(
+      await executor("ok").reconcile(fixture.request),
+      { kind: "running" },
+      "the default probe must still report a live worker as running",
+    );
+  } finally {
+    survivor.stop();
+    cleanup(fixture);
+  }
+});
+
 // ── correlation-keyed cancellation ───────────────────────────────────────
 
 test("cancel: a live in-memory run is cancelled through the handle's own termination", async () => {
@@ -869,7 +1142,12 @@ test("cancel: a recovered run is terminated by its correlation identity", async 
     // A SECOND executor instance over the same run directory.
     const outcome = await executor("sleep-long").cancel(fixture.request);
     assert.deepEqual(outcome, { kind: "terminated" });
-    assert.equal(pidAliveNow(pid), false, "the worker process is really gone");
+    // The executor confirms the death as soon as the worker can no longer
+    // EXECUTE (#1383), which is BEFORE the OS releases the pid — the
+    // controller reaps the zombie a moment later. The raw signal probe
+    // therefore still answers at this instant, so "the pid really left the
+    // process table" is a bounded poll, never a single sample.
+    assert.equal(await waitForProcessGone(pid), true, "the worker process is really gone");
 
     // The executor that still holds the handle settles the run it lost:
     // the worker died to a signal it did not choose.
@@ -944,6 +1222,7 @@ test("cancel: cancelling twice reports terminated both times and terminates once
     let terminations = 0;
     const recovered = executor("ok", {
       pidAlive: () => alive,
+      pidPresent: () => alive,
       pidIdentity: async () => "identity-token",
       terminate: async () => {
         terminations += 1;
@@ -1203,6 +1482,144 @@ test("cancel: a recorded pid whose process identity still matches is terminated"
     assert.equal(terminatedPid, survivor.pid, "the proven worker was the one terminated");
   } finally {
     survivor.stop();
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a recovered zombie worker is reported terminated, never worker-not-terminated", async (t) => {
+  // A killed-but-unreaped zombie keeps answering `kill(pid, 0)` forever
+  // under a PID 1 that never reaps orphans, so the RAW signal probe could
+  // never confirm the death: the recovered cancellation reported
+  // `worker-not-terminated` for good. The default probe asks whether the
+  // pid can still EXECUTE — a zombie cannot — so the worker is gone and
+  // the cancellation is confirmed.
+  if (!hasProc) {
+    t.skip(NO_PROC_SKIP_REASON);
+    return;
+  }
+  const fixture = makeRequest();
+  const zombie = await spawnZombie();
+  if (zombie === null) {
+    t.skip(BASH_MISSING_SKIP_REASON);
+    return;
+  }
+  try {
+    assertZombieBoundary(zombie);
+    writeStateFile(fixture.request, zombieRecoveryRecord(fixture, zombie));
+    const outcome = await executor("ok").cancel(fixture.request);
+    assert.deepEqual(
+      outcome,
+      { kind: "terminated" },
+      "a worker that cannot execute is gone: the cancellation is confirmed, not failed",
+    );
+  } finally {
+    zombie.stop();
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a recovered zombie leader is still swept, and the cancellation is confirmed", async (t) => {
+  // A killed-but-unreaped zombie cannot execute, but it is still PRESENT:
+  // it owns its PROCESS GROUP, and the group's members (the worker's
+  // orphaned descendants) can outlive it. Only the tree termination's
+  // group kill removes them, so the recovered cancellation must sweep the
+  // tree even though the leader itself is already gone — skipping the
+  // sweep would report `terminated` and LEAK the group.
+  if (!hasProc) {
+    t.skip(NO_PROC_SKIP_REASON);
+    return;
+  }
+  const fixture = makeRequest();
+  const zombie = await spawnZombie();
+  if (zombie === null) {
+    t.skip(BASH_MISSING_SKIP_REASON);
+    return;
+  }
+  const signalled: number[] = [];
+  try {
+    assertZombieBoundary(zombie);
+    writeStateFile(fixture.request, zombieRecoveryRecord(fixture, zombie));
+    const outcome = await executor("ok", {
+      terminate: async (pid: number) => {
+        signalled.push(pid);
+        return true;
+      },
+    }).cancel(fixture.request);
+    assert.deepEqual(outcome, { kind: "terminated" });
+    assert.deepEqual(
+      signalled,
+      [zombie.zombiePid],
+      "a present leader is swept even when it can no longer execute: the group kill is the point",
+    );
+  } finally {
+    zombie.stop();
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a recovered zombie leader with an unproven process identity is never signalled", async (t) => {
+  // The identity proof gates EVERY signal — including for a leader that
+  // cannot execute any more. A pid whose recorded identity does not match
+  // the live process is not provably this run's worker, so nothing is
+  // signalled and the cancellation fails closed.
+  if (!hasProc) {
+    t.skip(NO_PROC_SKIP_REASON);
+    return;
+  }
+  const fixture = makeRequest();
+  const zombie = await spawnZombie();
+  if (zombie === null) {
+    t.skip(BASH_MISSING_SKIP_REASON);
+    return;
+  }
+  const signalled: number[] = [];
+  try {
+    assertZombieBoundary(zombie);
+    writeStateFile(fixture.request, zombieRecoveryRecord(fixture, zombie));
+    const outcome = await executor("ok", {
+      pidIdentity: async () => "a-different-token",
+      terminate: async (pid: number) => {
+        signalled.push(pid);
+        return true;
+      },
+    }).cancel(fixture.request);
+    assert.deepEqual(outcome, { kind: "failed", reason: "worker-not-terminated" });
+    assert.deepEqual(signalled, [], "an unproven pid is never signalled, zombie or not");
+  } finally {
+    zombie.stop();
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a recovered worker that is gone entirely is terminated without signalling", async () => {
+  // Nothing is PRESENT at all: the pid names no process, so there is
+  // nothing running to terminate and nothing that could be signalled — the
+  // cancellation short-circuits to `terminated`. The identity seam is
+  // constant here, so the short-circuit cannot be an identity mismatch in
+  // disguise. The pid is above the kernel's maximum (`pid_max` tops out at
+  // 2^22), so it can never name a live process.
+  const fixture = makeRequest();
+  const signalled: number[] = [];
+  try {
+    writeStateFile(fixture.request, {
+      runId: fixture.request.runId,
+      jobId: fixture.request.jobId,
+      attempt: fixture.request.attempt,
+      pid: 2_147_483_647,
+      pidIdentity: "identity-token",
+      startedAtMs: 1,
+      state: "running",
+    });
+    const outcome = await executor("ok", {
+      pidIdentity: async () => "identity-token",
+      terminate: async (pid: number) => {
+        signalled.push(pid);
+        return true;
+      },
+    }).cancel(fixture.request);
+    assert.deepEqual(outcome, { kind: "terminated" });
+    assert.deepEqual(signalled, [], "nothing present means nothing to terminate, nothing to signal");
+  } finally {
     cleanup(fixture);
   }
 });
