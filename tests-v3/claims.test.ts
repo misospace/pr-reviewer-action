@@ -615,6 +615,25 @@ test("#1380 review: vendor-name drop is unchanged outside dependency mode", () =
   assert.equal(result.claims.length, 0, JSON.stringify(result.claims.map((c) => c.claim)));
 });
 
+test("#1380 review: dependency mode keeps a semantic claim whose SUBJECT is the rebase-check workflow", () => {
+  const result = extractClaimsDeterministic({
+    prBody: "The rebase-check workflow is unchanged.",
+    diffText: "",
+    dependencyUpdate: true,
+  });
+  assert.equal(result.claims.length, 1, JSON.stringify(result.claims.map((c) => c.claim)));
+  assert.match(result.claims[0]!.claim, /rebase-check workflow is unchanged/);
+});
+
+test("#1380 review: the rebase/retry checkbox boilerplate line still yields no claim in dependency mode", () => {
+  const result = extractClaimsDeterministic({
+    prBody: " - [ ] <!-- rebase-check --> If you want to rebase/retry this PR, check this box.",
+    diffText: "",
+    dependencyUpdate: true,
+  });
+  assert.equal(result.claims.length, 0, JSON.stringify(result.claims.map((c) => c.claim)));
+});
+
 test("#1380 review: dependency mode still drops vendor boilerplate by shape, never by name", () => {
   const result = extractClaimsDeterministic({
     prBody: [
@@ -991,6 +1010,50 @@ test("#1380: dependency mode with only metadata claims skips the model call enti
   assert.equal(result.error, null);
   assert.equal(result.artifact.claims.length, 0);
   assert.equal(result.artifact.method, "none");
+});
+
+test("#1380 review: a keyword-less semantic assertion in a dependency body keeps the model pass", async () => {
+  let calls = 0;
+  const requestFn: SpecialistRequestFn = async () => {
+    calls += 1;
+    return { ok: true, raw: { choices: [{ message: { content: JSON.stringify({ claims: [{ claim: "No migration required" }] }) } }] } };
+  };
+  const result = await runClaimFalsificationPass({
+    title: "chore(deps): bump foo",
+    body: "Version changed from 1.2.3 to 4.5.6. No migration required.",
+    files: [],
+    diff: "",
+    dependencyUpdate: true,
+    model: { config: modelConfig, requestFn },
+  });
+  assert.equal(calls, 1, "an empty keyword scan is not proof no semantic claim exists");
+  assert.equal(result.status, "ok");
+  assert.ok(result.artifact.claims.some((c) => c.claim.includes("No migration required")), JSON.stringify(result.artifact.claims));
+});
+
+test("#1380 review: a keyword-less assertion in an added diff comment keeps the model pass", async () => {
+  let calls = 0;
+  const requestFn: SpecialistRequestFn = async () => {
+    calls += 1;
+    return { ok: true, raw: { choices: [{ message: { content: JSON.stringify({ claims: [{ claim: "This security fix is present in the target version" }] }) } }] } };
+  };
+  const diffText = [
+    "diff --git a/values.yaml b/values.yaml",
+    "@@ -1,1 +1,2 @@",
+    "+ runtime: image:1.2.3",
+    "+# This security fix is present in the target version.",
+  ].join("\n");
+  const result = await runClaimFalsificationPass({
+    title: "chore(deps): bump image",
+    body: "Only one file changed.",
+    files: [],
+    diff: diffText,
+    dependencyUpdate: true,
+    model: { config: modelConfig, requestFn },
+  });
+  assert.equal(calls, 1, "a non-metadata comment sentence must not be skipped by an empty keyword scan");
+  assert.notEqual(result.status, "filtered");
+  assert.ok(result.artifact.claims.some((c) => c.claim.includes("security fix is present")), JSON.stringify(result.artifact.claims));
 });
 
 test("#1380: dependency mode with a semantic claim runs the model pass and keeps the claim", async () => {

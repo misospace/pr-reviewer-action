@@ -62,11 +62,6 @@ const COMMENT_LINE_RE = /^(\/\/|\/\*\*?|\*(?!\/)|#(?!!)|"""|'''|--(?:\s|$)|<!--)
  * keyword vocabulary, so they were never claims to begin with. */
 const BOT_TEMPLATE_RE =
 /\b(?:renovate|dependabot|greenkeeper)\b|rebase[/-]retry|rebase-check/i;
-/** Vendor-agnostic shape half of the template drop: the rebase/retry
-* checkbox machinery, matched by wording rather than bot identity. In
-* dependency mode this half still applies (the vendor-name half does not),
-* keeping boilerplate out of the claim set without keying to a vendor. */
-const BOT_TEMPLATE_SHAPE_RE = /rebase[/-]retry|rebase-check/i;
 
 /** #1380: machine-generated dependency-metadata statements, matched by
  * vocabulary shape only (never a bot name, so any forge's automation is
@@ -144,6 +139,33 @@ export function filterDependencyMetadataSentence(sentence: string): string | nul
   if (kept.length === clauses.length) return sentence;
   if (kept.length === 0) return null;
   return kept.join("; ");
+}
+
+/** #1380 review: whether a dependency-mode scan saw ANY content the metadata
+ * filter did not drop as machine-generated trivia. The pass's `filtered` skip
+ * must mean "every scanned sentence IS deterministic metadata", never "the
+ * keyword scan found no candidate" — assertions like "No migration required"
+ * or "this security fix is present in the target version" carry no keyword
+ * vocabulary by construction, so the deterministic scan can never cite them,
+ * while the model pass exists precisely to extract them. The keyword gate is
+ * circular as an adequacy test (#898): while any non-metadata sentence
+ * remains, only the model can prove there is no claim. Same bounded patterns
+ * and sentence material as the extractors; pure, never throws. */
+export function hasDependencySemanticRemainder(input: { prBody: string; diffText: string }): boolean {
+  const strippedBody = (input.prBody ?? "")
+    .replace(HTML_COMMENT_RE, " ")
+    .replace(HTML_COMMENT_UNTERMINATED_RE, " ");
+  for (const sentence of splitSentences(strippedBody)) {
+    if (filterDependencyMetadataSentence(sentence) !== null) return true;
+  }
+  for (const hunk of collectHunks(input.diffText ?? "")) {
+    for (const block of collectCommentBlocks(hunk)) {
+      for (const sentence of splitSentences(block.text)) {
+        if (filterDependencyMetadataSentence(sentence) !== null) return true;
+      }
+    }
+  }
+  return false;
 }
 
 /** HTML comments carry bot anchors (`<!-- rebase-check -->`,
@@ -598,12 +620,16 @@ function extractPrBodyClaims(body: string, diffText: string, dependencyUpdate = 
     // #1380 review: the vendor-name alternative is NOT applied in dependency
     // mode — a vendor name alone is not machine metadata, and vendor-keyed
     // suppression is exactly the architecture the issue forbids. Dependency
-    // boilerplate is matched by vocabulary shape instead (BOT_TEMPLATE_SHAPE_RE
-    // plus the metadata clause filter below), so a semantic invariant that
-    // merely mentions Renovate or Dependabot keeps its claim. Non-dependency
+    // boilerplate is matched by vocabulary shape in the metadata clause
+    // filter below (its automerge/scheduling patterns already drop the
+    // rebase/retry checkbox and status lines by wording), and every surviving
+    // sentence must still carry claim vocabulary. Nothing pre-drops on the
+    // shape vocabulary itself: `rebase-check` is also a legitimate subject of
+    // a human semantic claim ("The rebase-check workflow is unchanged"), and
+    // a shape pre-filter firing before the exemptions and the keyword gate
+    // discarded exactly the claim this pass exists to falsify. Non-dependency
     // mode keeps the pre-existing full template drop unchanged.
     if (!dependencyUpdate && BOT_TEMPLATE_RE.test(sentence)) continue;
-    if (dependencyUpdate && BOT_TEMPLATE_SHAPE_RE.test(sentence)) continue;
     const kept = dependencyUpdate ? filterDependencyMetadataSentence(sentence) : sentence;
     if (kept === null) continue;
     if (!CLAIM_KEYWORDS_RE.test(kept)) continue;

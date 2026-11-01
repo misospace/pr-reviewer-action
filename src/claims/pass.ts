@@ -6,14 +6,18 @@
  * any adequacy test the scan itself could compute is circular (every
  * keyword-bearing sentence is captured by construction), so one keyword hit
  * must never suppress the one pass that can read invariants the vocabulary
- * misses. #1380's one exception: a dependency update whose filtered scan left
- * no candidate claims returns status `filtered` and never spends the model
- * call on deterministic trivia. A model failure never discards a
+ * misses. #1380's one exception: a dependency update whose EVERY scanned
+ * sentence the metadata filter dropped as machine-generated trivia returns
+ * status `filtered` and never spends the model call. An empty keyword scan is
+ * NOT that condition — it only proves the vocabulary missed something (#1380
+ * review: "No migration required" carries no keyword yet is a real
+ * falsification target), so any non-metadata sentence keeps the model pass.
+ * A model failure never discards a
  * deterministic result — it is
  * recorded in the artifact's errors. Always fail-soft: an exception from
  * either half is caught and reported as an empty artifact, never thrown. */
 
-import { extractClaimsDeterministic, filterDependencyMetadataSentence, CLAIM_KEYWORDS_RE } from "./extract.js";
+import { extractClaimsDeterministic, filterDependencyMetadataSentence, hasDependencySemanticRemainder, CLAIM_KEYWORDS_RE } from "./extract.js";
 import { runClaimFalsificationModelPass, type ClaimModelPassConfig } from "./model.js";
 import type { SpecialistRequestFn } from "../specialists/runner.js";
 import { MAX_CLAIMS, MAX_ERRORS, type Claim, type ClaimsArtifact } from "./types.js";
@@ -27,10 +31,12 @@ export interface ClaimFalsificationInput {
   /** When present, one bounded model pass runs and its claims merge after
    * the deterministic ones — the deterministic scan is evidence, never proof
    * the PR body was fully captured (#898 review). On a dependency update
-   * whose filtered scan left no candidate claims, the pass returns status
-   * `filtered` and the model call is never spent; when semantic claims
-   * remain, the model pass still runs. Absent/undefined (no model config
-   * resolved) skips it entirely — deterministic-only, never an error. */
+   * whose every scanned sentence is machine-generated dependency metadata,
+   * the pass returns status `filtered` and the model call is never spent;
+   * any sentence the metadata filter did not drop keeps the model pass, even
+   * when the keyword scan found no candidate. Absent/undefined (no model
+   * config resolved) skips it entirely — deterministic-only, never an
+   * error. */
   model?:
     | {
         config: ClaimModelPassConfig;
@@ -111,7 +117,16 @@ export async function runClaimFalsificationPass(input: ClaimFalsificationInput):
   try {
     const dependencyUpdate = input.dependencyUpdate === true;
     const deterministic = extractClaimsDeterministic({ prBody: input.body, diffText: input.diff, dependencyUpdate });
-    if (dependencyUpdate && deterministic.claims.length === 0 && deterministic.errors.length === 0) {
+    if (
+      dependencyUpdate &&
+      deterministic.claims.length === 0 &&
+      deterministic.errors.length === 0 &&
+      // #1380 review: skip only when the filter accounted for EVERY scanned
+      // sentence as deterministic metadata — an empty keyword scan says
+      // nothing about semantic assertions without keyword vocabulary ("No
+      // migration required"), which only the model pass can surface.
+      !hasDependencySemanticRemainder({ prBody: input.body, diffText: input.diff })
+    ) {
       return { artifact: deterministic, status: "filtered", errorKind: null, error: null };
     }
     if (!input.model) {
