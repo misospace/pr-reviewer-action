@@ -124,10 +124,10 @@ export async function runClaimFalsificationPass(input: ClaimFalsificationInput):
     // Fail-soft: a throw here must push toward RUNNING the model (the
     // outer catch would otherwise skip the pass with an empty error
     // artifact).
-    let semanticRemainder = true;
     if (dependencyUpdate && deterministic.claims.length === 0 && deterministic.errors.length === 0) {
+      let semanticRemainder: boolean;
       try {
-        semanticRemainder = hasDependencySemanticRemainder({ prBody: input.body, diffText: input.diff });
+        semanticRemainder = hasDependencySemanticRemainder({ prTitle: input.title, prBody: input.body, diffText: input.diff });
       } catch {
         semanticRemainder = true;
       }

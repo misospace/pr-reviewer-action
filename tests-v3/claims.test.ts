@@ -1131,6 +1131,40 @@ diffText: ["diff --git a/x.yaml b/x.yaml", "@@ -0,0 +1,1 @@", "+# No migration r
 true,
 );
 });
+test("#1380 review: the title is scanned by the semantic-remainder predicate", () => {
+assert.equal(
+hasDependencySemanticRemainder({ prTitle: "Bump foo (no CRDs changed)", prBody: dependencyMetadataBody, diffText: "" }),
+true,
+"a semantic title assertion cannot be lost to a metadata-only body",
+);
+assert.equal(
+hasDependencySemanticRemainder({ prTitle: "chore(deps): bump foo to 1.2.4 (no CRDs changed)", prBody: dependencyMetadataBody, diffText: "" }),
+true,
+"the parenthetical tail fails the bare-bump whole-title shape",
+);
+assert.equal(hasDependencySemanticRemainder({ prTitle: "chore(deps): bump foo", prBody: dependencyMetadataBody, diffText: "" }), false);
+assert.equal(hasDependencySemanticRemainder({ prTitle: "Bump actions/checkout from 3 to 4", prBody: dependencyMetadataBody, diffText: "" }), false);
+assert.equal(hasDependencySemanticRemainder({ prTitle: "Update dependency foo to v4", prBody: dependencyMetadataBody, diffText: "" }), false);
+assert.equal(hasDependencySemanticRemainder({ prTitle: "Update the README to describe the new flags", prBody: dependencyMetadataBody, diffText: "" }), true);
+assert.equal(hasDependencySemanticRemainder({ prTitle: "", prBody: dependencyMetadataBody, diffText: "" }), false);
+});
+test("#1380 review: a semantic title keeps the model pass on a metadata-only body", async () => {
+let calls = 0;
+const requestFn: SpecialistRequestFn = async () => {
+calls += 1;
+return { ok: true, raw: { choices: [{ message: { content: JSON.stringify({ claims: [] }) } }] } };
+};
+const result = await runClaimFalsificationPass({
+title: "chore(deps): bump foo (no CRDs changed)",
+body: dependencyMetadataBody,
+files: [],
+diff: "",
+dependencyUpdate: true,
+model: { config: modelConfig, requestFn },
+});
+assert.equal(calls, 1, "a title the filter cannot account for must keep the model pass");
+assert.notEqual(result.status, "filtered");
+});
 test("#1380 review: model claim about the rebase-check workflow survives the dependency post-filter", async () => {
 const openai = { choices: [{ message: { content: JSON.stringify({ claims: [{ claim: "The rebase-check workflow is unchanged" }] }) } }] };
 const result = await runClaimFalsificationPass({
