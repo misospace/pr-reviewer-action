@@ -212,6 +212,18 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   "AI_CONFIDENCE_API_FORMAT",
   "AI_CONFIDENCE_REASONING_EFFORT",
   "AI_CONFIDENCE_TIMEOUT_SEC",
+  // #1368: the scorer's token budgets and capability assertions are
+  // non-secret config that changes the request bytes, so they contribute
+  // exactly like the rest of the family: only while the scorer is enabled
+  // (`AI_CONFIDENCE_MODEL` non-empty), and only when non-empty. The boolean
+  // assertions' contract default is "false" (non-empty and stable), so they
+  // add no upgrade churn and never touch the ANTHROPIC_EFFORT_SUPPORT_KEYS
+  // sweep above — the confidence-family gate below owns them.
+  "AI_CONFIDENCE_MAX_TOKENS",
+  "AI_CONFIDENCE_PROMPT_TOKENS",
+  "AI_CONFIDENCE_MODEL_CONTEXT_TOKENS",
+  "AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT",
+  "AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT",
   "AI_CONFIDENCE_API_KEY",
   "AI_CONFIDENCE_ENABLE_FOR_FORKS",
 ]);

@@ -40,6 +40,87 @@ export type ConfidenceConcernSeverity = (typeof CONFIDENCE_CONCERN_SEVERITIES)[n
  * apart from merge-readiness verifier results. */
 export const CONFIDENCE_RUBRIC_VERSION = "merge-readiness-verifier-v1";
 
+// Output bounds the parser applies. Declared above the wire schema because
+// the schema mirrors two of them (`maxItems`, and the entry shape the bounds
+// exist to protect) — one source for both, so neither can drift.
+export const MAX_CONFIDENCE_REASON_CHARS = 600;
+export const MAX_CONFIDENCE_CONCERNS = 8;
+export const MAX_CONFIDENCE_CONCERN_FILE_CHARS = 300;
+export const MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS = 400;
+
+/**
+ * #1368: the scorer's OWN compact strict-mode JSON schema, carried on the
+ * wire only under the operator's structured-output assertion
+ * (`ai-confidence-structured-output-support`) — never the pinned verdict
+ * schema. It is the #1369 VERIFIER contract, not the pre-#1369 prose-grader
+ * shape: every concern entry must carry the closed-vocabulary `type` and
+ * `severity` the parser requires, and the fail-closed `cannot_verify` answer
+ * has its own valid branch (`cannot_verify: true` with a null `score` and
+ * `risk`, which the parser fails closed before it ever reads the score).
+ *
+ * Like the verdict schema, every property is in `required` (OpenAI strict
+ * mode requires that) with optionality expressed via the null type, and
+ * `additionalProperties: false` everywhere. The schema and
+ * `parseConfidenceAnswer` are compatible in both directions: every answer the
+ * parser KEEPS is schema-admissible — a kept concern always carries a
+ * validated type/severity pair and a non-empty `file` and `evidence`, which is
+ * why both strings are `minLength: 1` (JSON Schema does not enforce
+ * "non-empty" through `type` alone, and an entry the parser would drop must
+ * not be schema-admissible in the first place) — and every answer the schema
+ * admits either parses or fails CLOSED. Two residuals are deliberate: a
+ * whitespace-only `file`/`evidence` stays schema-admissible (a whitespace
+ * constraint needs `pattern`, whose endpoint support the operator caveat in
+ * `contracts/action-v3.yml` already covers), and the parser trims it away and
+ * records `concern_dropped_missing_field`, so it is never silently lost; and
+ * strict mode cannot express the `score`/`cannot_verify` correlation, so a null
+ * `score` with `cannot_verify: false` is admissible and the parser fails the
+ * whole answer closed as `malformed_score` — never a defaulted 0 or 5.
+ * `maxItems` mirrors `MAX_CONFIDENCE_CONCERNS`, and the parser notes
+ * `concerns_truncated_<N>` if an answer over the bound still arrives. The wire
+ * enum for `risk` is the four meaningful bands (plus null); a malformed risk
+ * still degrades to `unknown` in the parser. The schema rides BOTH wire
+ * families through `ModelRequestConfig`'s `responseSchema` (see
+ * `src/model/request.ts`).
+ */
+export const CONFIDENCE_ANSWER_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    /** #1369 fail-closed uncertainty answer: `true` (with `score`/`risk`
+     * null) when the supplied evidence is too truncated or incomplete to
+     * verify the change. Never promoted to a score. */
+    cannot_verify: {
+      type: "boolean",
+      description: "true when the supplied evidence is too truncated or incomplete to verify the change; then score and risk are null, concerns is empty, and reason says why",
+    },
+    score: {
+      type: ["integer", "null"],
+      minimum: 0,
+      maximum: 5,
+      description: "Merge readiness 0-5; null ONLY together with cannot_verify true",
+    },
+    risk: { type: ["string", "null"], enum: ["low", "medium", "high", "critical", null] },
+    reason: { type: "string" },
+    concerns: {
+      type: "array",
+      maxItems: MAX_CONFIDENCE_CONCERNS,
+      items: {
+        type: "object",
+        properties: {
+          type: { type: "string", enum: [...CONFIDENCE_CONCERN_TYPES] },
+          severity: { type: "string", enum: [...CONFIDENCE_CONCERN_SEVERITIES] },
+          file: { type: "string", minLength: 1, description: "Path the concern is grounded in; never empty" },
+          line: { type: ["integer", "null"], minimum: 0, description: "1-based line the concern is grounded on; null when you cannot pin one" },
+          evidence: { type: "string", minLength: 1, description: "Short supporting quote from the supplied diff or description; never empty" },
+        },
+        required: ["type", "severity", "file", "line", "evidence"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["cannot_verify", "score", "risk", "reason", "concerns"],
+  additionalProperties: false,
+};
+
 export type ConfidenceStatus = "disabled" | "scored" | "unscored";
 
 /** One bounded advisory concern the verifier attached to its answer. */
@@ -136,11 +217,6 @@ export function scoredConfidenceResult(input: {
 }
 
 // ── Bounded answer parsing ───────────────────────────────────────────────
-
-export const MAX_CONFIDENCE_REASON_CHARS = 600;
-export const MAX_CONFIDENCE_CONCERNS = 8;
-export const MAX_CONFIDENCE_CONCERN_FILE_CHARS = 300;
-export const MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS = 400;
 
 /**
  * Re-apply a documented field bound AFTER credential masking/redaction
@@ -460,6 +536,11 @@ export function parseConfidenceAnswer(raw: string): ConfidenceParseOutcome {
   const reason = stripRevealedCapNoteTails(reasonHead);
   const concerns: ConfidenceConcern[] = [];
   if (Array.isArray(parsed.concerns)) {
+    // An answer over the bound loses its TAIL, and a lost entry could have
+    // carried the concern cap — so the truncation is recorded, never silent.
+    // (The wire schema mirrors this bound with `maxItems`, so this fires only
+    // for a provider that ignored the schema.)
+    if (parsed.concerns.length > MAX_CONFIDENCE_CONCERNS) notes.push(`concerns_truncated_${MAX_CONFIDENCE_CONCERNS}`);
     for (const entry of parsed.concerns.slice(0, MAX_CONFIDENCE_CONCERNS)) {
       const { concern, note } = parseConcern(entry);
       if (concern !== null) concerns.push(concern);
