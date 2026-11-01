@@ -141,7 +141,9 @@ export const DEPENDENCY_EVIDENCE_TOOLS: ReadonlySet<string> = new Set([
 
 /** Default #1379 reserve: the budget tail the driver holds for required
  * dependency evidence once the classification says the PR is a
- * dependency-update shape. Bounded so it can never swallow a tiny budget. */
+ * dependency-update shape. The harness clamps it to the budget: budgets of
+ * two or more keep one unreserved head request, and the minimum budget of
+ * one reserves its sole request (see dependencyEvidenceReserveFromClassification). */
 export const DEPENDENCY_EVIDENCE_RESERVE = 4;
 
 function formatNote(template: string, values: Record<string, number>): string {

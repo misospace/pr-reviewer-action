@@ -1981,11 +1981,16 @@ export type TraceGapProbe = (
  * with, resolved from the workspace's classification artifact. When the PR
  * classified into a dependency-evidence family the loop reserves
  * DEPENDENCY_EVIDENCE_RESERVE of its request budget for the required
- * upstream evidence (deterministic driver notes prioritize it; see
- * driveToolLoop). Anything else — absent/unparsable artifact, a
- * non-dependency kind, or a budget smaller than the reserve — resolves to 0
- * so non-dependency PRs keep the exact legacy loop behavior. Tolerant by
- * construction: classification is advisory context here, never a gate.
+ * upstream evidence (deterministic driver notes prioritize it and enforce
+ * the window in driveToolLoop). Budgets of two or more keep one unreserved
+ * head request; the minimum valid budget of one reserves its SOLE request —
+ * the unattempted-evidence exhaustion this reserve exists to prevent must be
+ * unreachable for every supported budget, and a one-request run's only
+ * request is exactly the tail to protect. Anything else — absent/unparsable
+ * artifact, a non-dependency kind, or a degenerate non-positive budget
+ * (nothing to reserve) — resolves to 0 so non-dependency PRs keep the exact
+ * legacy loop behavior. Tolerant by construction: classification is advisory
+ * context here, never a gate.
  */
 export function dependencyEvidenceReserveFromClassification(
   readClassification: () => string | null,
@@ -2003,7 +2008,11 @@ export function dependencyEvidenceReserveFromClassification(
     return 0;
   }
   if (typeof kind !== "string" || !DEPENDENCY_EVIDENCE_KINDS.has(kind)) return 0;
-  return Math.min(DEPENDENCY_EVIDENCE_RESERVE, Math.max(0, maxRequests - 1));
+  if (maxRequests < 1) return 0;
+  // Floor of 1: a one-request budget reserves its sole request (the whole
+  // budget is the tail), so no supported budget ever resolves the reserve
+  // to 0 while the PR carries the dependency-evidence obligation.
+  return Math.min(DEPENDENCY_EVIDENCE_RESERVE, Math.max(1, maxRequests - 1));
 }
 
 export interface RunNativeLoopInput {

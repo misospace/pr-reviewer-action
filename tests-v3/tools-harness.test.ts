@@ -2545,11 +2545,20 @@ test("#1379: dependency-evidence families reserve a budget tail; other kinds res
   for (const kind of ["image_update", "chart_update", "platform_version_update", "action_update", "dependency_upgrade", "renovate_image_update", "renovate_chart_update"]) {
     assert.equal(forKind(kind), 4, kind);
     assert.equal(forKind(kind, 2), 1, kind);
+    // The supported MINIMUM budget (clampedPositive floors TOOL_MAX_REQUESTS
+    // at 1) reserves its sole request: no supported budget resolves the
+    // reserve to 0 while the dependency obligation is carried (review
+    // 5726673529's one-request counterexample).
+    assert.equal(forKind(kind, 1), 1, kind);
+    // Degenerate non-positive budget: nothing to reserve, the legacy loop
+    // refuses every call on the ordinary budget check anyway.
+    assert.equal(forKind(kind, 0), 0, kind);
   }
   // Non-dependency kinds, digest-only kinds, absent/unparsable artifacts and
   // junk resolve 0 — the legacy loop behavior is byte-identical for them.
   for (const kind of [null, "app_code", "k8s_manifest", "renovate_digest_only", "image_digest_only", 42]) {
     assert.equal(forKind(kind), 0, String(kind));
+    assert.equal(forKind(kind, 1), 0, String(kind));
   }
   assert.equal(dependencyEvidenceReserveFromClassification(() => "not json", 24), 0);
   assert.equal(dependencyEvidenceReserveFromClassification(() => null, 24), 0);
@@ -2647,4 +2656,75 @@ test("#1379: the trace-gap repair continuation cannot spend the reserved depende
   // The repair read never entered the harness trace.
   const trace = (artifact.tool_calls ?? []) as Array<{ tool: string }>;
   assert.equal(trace.length, 2);
+});
+
+test("#1379: a one-request dependency budget reserves its sole request end to end", async () => {
+  // Review 5726673529's counterexample: TOOL_MAX_REQUESTS=1 is the supported
+  // floor (clampedPositive), and the old min(4, maxRequests - 1) formula
+  // resolved the reserve to 0 there — an optional call could spend the only
+  // request and stop with tool-call-budget-exhausted while dependency
+  // evidence was unattempted. The reserve now floors at 1, so the window is
+  // active on the FIRST disposition of a one-request run.
+  const run = async (scripted: unknown[]) => {
+    const { root, deps } = workspace();
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "image_update", version: 1 }));
+    const payloads: Array<Record<string, unknown>> = [];
+    let n = 0;
+    const { result } = await runToolHarness(deps({
+      env: { TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "You are the reviewer." },
+      transport: async (_baseUrl: string, _apiFormat: string, payload: Record<string, unknown>) => {
+        payloads.push(payload);
+        return scripted[n++];
+      },
+    }));
+    const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+    return { payloads, result, artifact };
+  };
+  type LoopTelemetry = { budget?: Record<string, unknown>; usage?: Record<string, unknown>; stop_reason?: string };
+
+  // A model that only requests optional work can never spend the sole
+  // request: every call is refused without executing, the loop stops on the
+  // model's own hand, and the tail is byte-for-byte intact.
+  const starved = await run([
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "git_log", "{}"),
+    openAiText("done locally"),
+    validVerdict(),
+  ]);
+  assert.equal((starved.result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  const starvedTrace = (starved.artifact.tool_calls ?? []) as Array<{ tool: string }>;
+  assert.equal(starvedTrace.length, 0, "the refused optional calls never reached the executor");
+  const starvedTel = (starved.artifact.tool_loop_telemetry ?? {}) as LoopTelemetry;
+  assert.equal(starvedTel.budget?.dependency_evidence_reserve, 1);
+  assert.equal(starvedTel.budget?.dependency_evidence_attempted, false);
+  assert.equal(starvedTel.budget?.dependency_evidence_refusals, 2);
+  assert.equal(starvedTel.stop_reason, "model-stopped");
+  assert.notEqual(starvedTel.stop_reason, "tool-call-budget-exhausted");
+  assert.equal(starvedTel.usage?.requests_remaining_at_stop, 1, "the reserved sole request survived");
+  // The first request carries the driver's priority note even at this budget.
+  const starvedFirstTexts = ((starved.payloads[0]!.messages ?? []) as Array<{ content: unknown }>)
+    .map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.ok(starvedFirstTexts.includes("dependency evidence comes first"));
+
+  // The model can always unlock the window: an evidence call executes for
+  // real and spends the sole request whatever the executor returned
+  // (example.test is outside ALLOWED_SOURCE_HOSTS — a refused fetch is still
+  // an attempt, so an evidence-unreachable model is never locked out). The
+  // loop then stops on the ordinary post-round budget check, exactly like
+  // the legacy tail: exhaustion with the obligation ATTEMPTED is allowed;
+  // exhaustion with it unattempted is what the reserve makes unreachable.
+  const evidence = await run([
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://example.test/releases"}'),
+    validVerdict(),
+  ]);
+  const evidenceTrace = (evidence.artifact.tool_calls ?? []) as Array<{ tool: string }>;
+  assert.deepEqual(evidenceTrace.map((c) => c.tool), ["web_fetch"]);
+  const evidenceTel = (evidence.artifact.tool_loop_telemetry ?? {}) as LoopTelemetry;
+  assert.equal(evidenceTel.budget?.dependency_evidence_reserve, 1);
+  assert.equal(evidenceTel.budget?.dependency_evidence_attempted, true);
+  assert.equal(evidenceTel.budget?.dependency_evidence_refusals, 1);
+  assert.equal(evidenceTel.stop_reason, "tool-call-budget-exhausted");
 });
