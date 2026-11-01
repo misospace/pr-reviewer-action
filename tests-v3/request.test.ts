@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig, buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
+import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig, buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA, wireEffortOf } from "../src/model/request.js";
 import { resolveSpecialistProfiles, resolveTierProfiles } from "../src/routing/tiers.js";
-import type { ModelRequestConfig } from "../src/model/types.js";
+import type { ModelRequestConfig, TransportWirePayload } from "../src/model/types.js";
 
 // Frozen copy of the v2 `rf_json` bash literal (scripts/model_call.sh's
 // json_schema arm) as of the #706 wave-0 re-point. The shell file is deleted
@@ -358,6 +358,37 @@ test("#998: a hostile or malformed effort never reaches a request body", () => {
   // The whole body is still valid JSON — a dropped value can never corrupt
   // the request bytes.
   assert.doesNotThrow(() => JSON.stringify(buildModelRequest(config()).body));
+});
+
+test("#998: the effort is read back from the family's OWN wire field", () => {
+  // OpenAI: `reasoning_effort` rides the body verbatim.
+  const openai = buildModelRequest(config({ reasoningEffort: "medium" }));
+  assert.equal(wireEffortOf(openai), "medium");
+  assert.equal(wireEffortOf(buildModelRequest(config())), "", "no effort configured, none on the wire");
+
+  // Anthropic: `output_config.effort`, only under the operator's opt-in.
+  const anthropic = buildModelRequest(config({
+    apiFormat: "anthropic",
+    reasoningEffort: "high",
+    anthropicEffortSupported: true,
+  }));
+  assert.equal(wireEffortOf(anthropic), "high");
+  assert.equal(
+    wireEffortOf(buildModelRequest(config({ apiFormat: "anthropic", reasoningEffort: "high" }))),
+    "",
+    "no opt-in, no effort on the Anthropic wire",
+  );
+
+  // The families are mutually exclusive on the wire...
+  assert.equal("output_config" in (openai.body as object), false);
+  assert.equal("reasoning_effort" in (anthropic.body as object), false);
+  // ...so the FAMILY decides which field is read: a body that (impossibly)
+  // carried both still answers with its own family's field.
+  const mixed = {
+    endpointPath: "/chat/completions",
+    body: { reasoning_effort: "low", output_config: { effort: "high" } },
+  } as unknown as TransportWirePayload;
+  assert.equal(wireEffortOf(mixed), "low");
 });
 
 test("request construction is provider-neutral: no branching on model names", () => {

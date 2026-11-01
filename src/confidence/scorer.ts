@@ -19,8 +19,9 @@
 import type { ChatRequestInput, ChatRequestOutcome } from "../transport/transport.js";
 import { runChatRequestOnce } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
+import type { TransportFailureKind } from "../transport/http.js";
 import { maskDiagnostic } from "../context/redact.js";
-import { buildModelRequest } from "../model/request.js";
+import { buildModelRequest, wireEffortOf } from "../model/request.js";
 import type { TokensParam } from "../model/types.js";
 import type { ConfidenceProfile } from "../routing/tiers.js";
 import {
@@ -100,6 +101,13 @@ export interface ConfidenceScorerOutcome {
   /** Bounded, secret-redacted transport-failure detail for the persisted
    * artifact; "" when the call succeeded (or never happened). */
   diagnostic: string;
+  /** The reasoning effort on the request this run SENT, read back from the
+   * built body rather than re-derived from the profile; "" when the run sent
+   * no request at all (a pre-wire refusal, or a transport that failed before
+   * a request existed) or when the sent request carried no effort field.
+   * #998's truth-telling rule: the run persists what was SENT, never what
+   * the configuration named. */
+  wireEffort: string;
 }
 
 /**
@@ -119,7 +127,7 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     input.primaryApiKey,
   ];
   if (!profile.enabled) {
-    return { result: disabledResult(), requestPayload: null, rawResponse: null, diagnostic: "" };
+    return { result: disabledResult(), requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "" };
   }
   // Credential isolation, asserted at call time (the resolver already
   // guarantees both, but this boundary fails closed rather than trusting
@@ -136,13 +144,13 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   if (profile.apiKey === "" && !profile.inheritedTransport && !isLoopbackUrl(profile.baseUrl)) {
     return {
       result: unscoredConfidenceResult("missing_credential"),
-      requestPayload: null, rawResponse: null, diagnostic: "",
+      requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",
     };
   }
   if (!profile.inheritedTransport && profile.credentialSource === "primary") {
     return {
       result: unscoredConfidenceResult("credential_isolation"),
-      requestPayload: null, rawResponse: null, diagnostic: "",
+      requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",
     };
   }
   // #1368 review: the declared prompt budget is an ACTUAL bound. The prompt
@@ -160,7 +168,7 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   if (promptBytes > profile.promptTokens * 4) {
     return {
       result: unscoredConfidenceResult("prompt_over_budget"),
-      requestPayload: null, rawResponse: null, diagnostic: "",
+      requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",
     };
   }
   const payload = buildModelRequest({
@@ -188,6 +196,9 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     anthropicEffortSupported: profile.anthropicEffortSupported,
     anthropicStructuredOutputSupported: profile.structuredOutputSupported,
   });
+  // #998: the effort this dispatch carries, read back from the body the
+  // transport sends — never re-derived from the profile.
+  const wireEffort = wireEffortOf(payload);
   const call = input.transport ?? ((chatInput: ChatRequestInput) => runChatRequestOnce(chatInput));
   let outcome: ChatRequestOutcome;
   try {
@@ -206,10 +217,15 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     // degrades to unscored, never fails the review. `maskDiagnostic` masks on
     // the FULL untruncated message before capping it, so a configured secret
     // straddling the 300-char boundary cannot leave a partial prefix behind.
+    //
+    // #998: a THROWN transport never produced a request — the endpoint URL
+    // never resolved, the headers never merged — so nothing was sent and the
+    // run reports no effort, whatever the body would have carried.
     return {
       result: unscoredConfidenceResult("transport_error", profile.model),
       requestPayload: null, rawResponse: null,
       diagnostic: maskDiagnostic(cause instanceof Error ? cause.message : String(cause), diagnosticSecrets),
+      wireEffort: "",
     };
   }
   if (outcome.status !== "ok") {
@@ -220,6 +236,7 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
       ),
       requestPayload: null, rawResponse: null,
       diagnostic: describeTransportFailure(outcome.failure, { secrets: diagnosticSecrets }),
+      wireEffort: failureReachedProvider(outcome.failure.kind) ? wireEffort : "",
     };
   }
   const parsed = parseConfidenceAnswer(outcome.response.content);
@@ -228,6 +245,7 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
       result: unscoredConfidenceResult(parsed.cause, profile.model),
       requestPayload: payload.body, rawResponse: outcome.raw,
       diagnostic: "",
+      wireEffort,
     };
   }
   const ceilings = applyConfidenceCeilings(parsed.answer, {
@@ -247,7 +265,28 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     requestPayload: payload.body,
     rawResponse: outcome.raw,
     diagnostic: "",
+    wireEffort,
   };
+}
+
+/**
+ * #998: whether a typed transport failure can have carried the dispatched
+ * request to the provider — the only question the effort-sent provenance
+ * turns on.
+ *
+ * - `connect_timeout` never opened a connection, so no request was
+ *   transmitted at all;
+ * - `cancelled` can fire before the body was written;
+ * - `http_status` and `response_too_large` are the provider's OWN answer, so
+ *   the request demonstrably arrived;
+ * - `request_timeout` is a written request whose answer was lost;
+ * - `network` is the transport's catch-all socket kind, and it also covers a
+ *   provider answer that was not JSON — so it cannot mean "never reached the
+ *   provider", and it keeps the dispatched effort (the conservative
+ *   direction for a spend-provenance field).
+ */
+function failureReachedProvider(kind: TransportFailureKind): boolean {
+  return kind !== "connect_timeout" && kind !== "cancelled";
 }
 
 function disabledResult(): ConfidenceResult {

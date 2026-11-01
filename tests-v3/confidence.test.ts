@@ -1636,6 +1636,127 @@ test("#1368: the Anthropic scorer emits output_config.effort ONLY under its own 
   }
 });
 
+test("#998: the scorer reports only the effort a DISPATCHED request actually carried", async () => {
+  const bodies: string[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    bodies.push(body);
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(okOpenAiResponse('{"score": 2, "risk": "high", "reason": "thin evidence"}')));
+  });
+  try {
+    // A dispatched request carries the configured effort: the report says so.
+    const sent = await runConfidenceScorer({
+      profile: profile({ baseUrl: server.url, reasoningEffort: "medium" }),
+      primaryApiKey: "",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(sent.result.status, "scored");
+    assert.equal(sent.wireEffort, "medium");
+    assert.equal(bodies.length, 1);
+
+    // No effort configured: the wire carried none, and the report says so.
+    const bare = await runConfidenceScorer({
+      profile: profile({ baseUrl: server.url }),
+      primaryApiKey: "",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(bare.result.status, "scored");
+    assert.equal(bare.wireEffort, "", "a body with no effort field reports no effort");
+
+    // Anthropic without the operator's opt-in: the effort stays off the wire,
+    // so the report stays empty even though the configuration named one.
+    const unasserted = await runConfidenceScorer({
+      profile: profile({
+        baseUrl: server.url,
+        apiFormat: "anthropic",
+        reasoningEffort: "high",
+        anthropicEffortSupported: false,
+      }),
+      primaryApiKey: "",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(unasserted.wireEffort, "", "no opt-in, no effort on the wire");
+
+    // A pre-wire refusal dispatched NOTHING: the configuration named an
+    // effort, but none was sent, so none is reported.
+    const refused = await runConfidenceScorer({
+      profile: profile({ baseUrl: server.url, reasoningEffort: "medium", promptTokens: 10 }),
+      primaryApiKey: "",
+      prompt: { system: "s".repeat(100), user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(refused.result.cause, "prompt_over_budget");
+    assert.equal(refused.requestPayload, null);
+    assert.equal(refused.wireEffort, "", "a refused request sent no effort");
+    assert.equal(bodies.length, 3, "the refused request never reached the wire");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#998: a request that never left the process reports no effort, a sent one reports its own", async () => {
+  const effortProfile = profile({ reasoningEffort: "medium" });
+
+  // A THROWN transport never produced a request (the endpoint URL never
+  // resolved), so nothing was sent.
+  const thrown = await runConfidenceScorer({
+    profile: effortProfile,
+    primaryApiKey: "",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async () => { throw new Error("endpoint url never resolved"); },
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(thrown.result.cause, "transport_error");
+  assert.equal(thrown.wireEffort, "", "a transport that threw sent no request");
+
+  // A connection that never opened: the request was never transmitted.
+  const connectTimeout = await runConfidenceScorer({
+    profile: effortProfile,
+    primaryApiKey: "",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async () => ({
+      status: "failure" as const,
+      failure: new TransportFailure("connect_timeout", "model connect timed out"),
+    }),
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(connectTimeout.result.cause, "timeout");
+  assert.equal(connectTimeout.wireEffort, "", "a request that never connected was never sent");
+
+  // The provider's OWN answer proves the request arrived: it carried the
+  // effort, and the artifact must say so.
+  const answered = await runConfidenceScorer({
+    profile: effortProfile,
+    primaryApiKey: "",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async () => ({
+      status: "failure" as const,
+      failure: new TransportFailure("http_status", "rate limited", { status: 429, body: "slow down" }),
+    }),
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(answered.result.cause, "http_429");
+  assert.equal(answered.wireEffort, "medium", "a request the provider answered carried the effort");
+});
+
 test("#1368: structured output carries the scorer's own schema, gated on both wire families", async () => {
   const { CONFIDENCE_ANSWER_JSON_SCHEMA } = await import("../src/confidence/result.js");
   const bodies: string[] = [];

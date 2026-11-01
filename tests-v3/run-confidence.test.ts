@@ -1381,7 +1381,11 @@ test("#1073: a run that ends unscored clears stale confidence artifacts too", as
   try {
     const incomplete = await runConfidenceRun(
       failing,
-      { "ai-confidence-model": SCORER_MODEL },
+      {
+        "ai-confidence-model": SCORER_MODEL,
+        // #998: a configured effort the scorer never got to send.
+        "ai-confidence-reasoning-effort": "medium",
+      },
       "",
       false,
       { seed: Object.fromEntries(names.map((name) => [name, STALE])) },
@@ -1398,6 +1402,13 @@ test("#1073: a run that ends unscored clears stale confidence artifacts too", as
     assert.equal(incompleteArtifact.cause, "incomplete_review");
     assert.equal(incompleteArtifact.score, null);
     assert.notEqual(incompleteArtifact.reason, "from an earlier run");
+    // #998: the run never called the scorer, so it sent no effort — whatever
+    // the configuration named.
+    assert.equal(
+      (incompleteArtifact.request as Record<string, unknown>).reasoning_effort_sent,
+      false,
+      "a run that never called the scorer sent no effort",
+    );
     // `unscored` still records that the scorer ran and produced nothing —
     // status without a score. It is the *disabled* run that has no marker key.
     assert.match(incomplete.result.marker, /"confidence_status":"unscored"/);
@@ -1643,6 +1654,72 @@ test("#1368: the confidence-score.json artifact carries additive request provena
     }
   } finally {
     await server.close();
+  }
+});
+
+test("#998: the artifact claims an effort was sent only when a request carrying it reached the wire", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] })));
+  }));
+  try {
+    // The scorer's own pre-wire refusal: the configured effort never left the
+    // process, so the artifact must not claim that it did. The effort was
+    // NAMED by the configuration — that is not what this field reports.
+    const refused = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-reasoning-effort": "medium",
+      "ai-confidence-prompt-tokens": "3000",
+    }, "body ".padEnd(20_000, "x"));
+    assert.equal(refused.result.outputs.confidenceStatus, "unscored");
+    assert.equal(scorerRequests(server), 0, "an over-budget prompt must never reach the wire");
+    const refusedArtifact = JSON.parse(readFileSync(join(refused.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(refusedArtifact.cause, "prompt_over_budget");
+    assert.equal(
+      (refusedArtifact.request as Record<string, unknown>).reasoning_effort_sent,
+      false,
+      "a request that never went out cannot have sent an effort",
+    );
+
+    // The contrast: the same lane WITH a request that did go out reports the
+    // effort that rode the wire.
+    const sent = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+      "ai-confidence-reasoning-effort": "medium",
+    });
+    assert.equal(sent.result.outputs.confidenceStatus, "scored");
+    const sentArtifact = JSON.parse(readFileSync(join(sent.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal((sentArtifact.request as Record<string, unknown>).reasoning_effort_sent, true);
+  } finally {
+    await server.close();
+  }
+
+  // No verdict at all (`incomplete_review`) is covered by the #1073 stale-
+  // artifact test above, which already pays for that scenario.
+
+  // An unresolved proof-context pin: the scorer never ran either.
+  const pinned = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] })));
+  }));
+  try {
+    const unpinned = await runConfidenceRun(pinned, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": pinned.url,
+      "ai-confidence-reasoning-effort": "medium",
+    }, "", false, { omitBaseSha: true });
+    assert.equal(scorerRequests(pinned), 0, "the scorer must not grade an unanchored prompt");
+    const unpinnedArtifact = JSON.parse(readFileSync(join(unpinned.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(unpinnedArtifact.cause, "incomplete_proof_context");
+    assert.equal(
+      (unpinnedArtifact.request as Record<string, unknown>).reasoning_effort_sent,
+      false,
+      "a run that never called the scorer sent no effort",
+    );
+  } finally {
+    await pinned.close();
   }
 });
 

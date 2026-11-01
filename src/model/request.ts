@@ -1,4 +1,4 @@
-import type { ModelRequestConfig, TransportWirePayload } from "./types.js";
+import type { AnthropicWireBody, ModelRequestConfig, OpenAiWireBody, TransportWirePayload } from "./types.js";
 
 /**
  * The strict OpenAI verdict schema. VERDICT-TURN CONTRACT (#362): this must
@@ -188,6 +188,35 @@ export function buildAnthropicOutputConfig(
   const normalizedEffort = effort.trim();
   setOutputConfigKey("effort", normalizedEffort === "" ? null : normalizedEffort);
   return Object.keys(config).length > 0 ? config : null;
+}
+
+/**
+ * #1368 review: the reasoning-effort value a BUILT wire body actually
+ * carries, or "" when it carries none. Read back from the body the transport
+ * sends rather than re-derived from the configuration that named it, so a
+ * recorded provenance can never claim an effort the wire never carried
+ * (#998's truth-telling rule: the operator is told what was SENT, never what
+ * the config named).
+ *
+ * The wire FAMILY decides the field, not the body's shape: the OpenAI family
+ * carries `reasoning_effort` and never `output_config`, the Anthropic family
+ * carries `output_config.effort` (only under the operator's effort-support
+ * assertion) and never `reasoning_effort`. Reading the family's own field is
+ * what keeps this a statement about the bytes that were sent.
+ */
+export function wireEffortOf(payload: TransportWirePayload): string {
+  const body = payload.body;
+  if (payload.endpointPath === "/messages") {
+    const outputConfig = (body as AnthropicWireBody).output_config;
+    if (outputConfig !== undefined) {
+      const effort = outputConfig.effort;
+      if (typeof effort === "string" && effort !== "") return effort;
+    }
+    return "";
+  }
+  const direct = (body as OpenAiWireBody).reasoning_effort;
+  if (typeof direct === "string" && direct !== "") return direct;
+  return "";
 }
 
 /**
