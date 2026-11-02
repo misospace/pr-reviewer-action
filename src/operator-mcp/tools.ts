@@ -71,7 +71,7 @@ export const MCP_TOOLS: readonly McpToolDescriptor[] = Object.freeze([
   {
     name: "get_review_policy",
     description:
-      "Read the effective review-policy identity and provenance that applied to a repository, or to one review by run_id. Returns config fingerprints and the opaque trusted-source reference — never repository content.",
+      "Read review-policy identity and provenance: by run_id, the HISTORICAL policy fingerprint that applied to that review; by platform/repository, the repository's CURRENT adoption record. Returns config fingerprints and the opaque trusted-source reference — never repository content.",
     inputSchema: {
       type: "object",
       properties: {
