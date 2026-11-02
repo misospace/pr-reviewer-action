@@ -231,8 +231,9 @@ CI and never affects a review verdict.
   Run it against an OpenAI-compatible endpoint:
 
   ```bash
+  export JUDGE_BASE_URL="https://judge.internal/v1"   # may carry a credential
   python3 scripts/run_judge_calibration.py \
-      --judge-model "$JUDGE_MODEL" --base-url "$JUDGE_BASE_URL" \
+      --judge-model "$JUDGE_MODEL" \
       --output judge-calibration-report.json
   ```
 
@@ -242,6 +243,35 @@ CI and never affects a review verdict.
   and an argument they do not know. A refusal names the option only. It never
   echoes an argument value, because a mistyped value may carry a secret.
 
+  The report records `base_url` with any URL userinfo redacted (`https://***@host`)
+  and binds the full endpoint with `base_url_sha256`, the SHA-256 of the
+  normalized full URL — an operator URL can carry a credential in its
+  userinfo, and reports are shared (#1414).
+
+  A credential rides exactly one channel, and that channel is always an HTTP
+  auth header: `JUDGE_API_KEY` becomes `Authorization: Bearer …`, while a
+  credential in the endpoint URL's userinfo is moved into
+  `Authorization: Basic …` before the request. It never rides in the request
+  URL — Python's urllib keeps a URL userinfo inside the request's `Host`
+  value, so it would reach the outbound request and every proxy log (#1414).
+  Supplying both channels at once is refused before any request is sent.
+
+  The endpoint URL may carry a credential, but never on the command line:
+  every other process on the host can read an argument list. A `--base-url`
+  that carries a URL userinfo — or an `@` its authority cannot claim — is
+  refused, in every form the flag can take. Put such an endpoint in
+  `JUDGE_BASE_URL` in the environment, as the example above does. The runner
+  reads the environment when the command line carries no endpoint, and the
+  command-line value wins when both are set.
+
+  The endpoint URL is itself refused when it is not an absolute http(s) URL,
+  carries a query or a fragment (the transport appends the completion path to
+  the base path), hides the credential behind an encoded `@` (urllib
+  unquotes the authority into the request's `Host` value, so an encoded
+  userinfo would ride the request just the same), or carries an `@` outside
+  its authority (a password with an unencoded `/` ends the authority early,
+  so the userinfo lands in the request path).
+
 - **`scripts/live_judge_score.py`** — scores blinded live A/B outputs
   (`--baseline` / `--treatment`, each `{"arm", "reps", "scenarios": [{"scenario",
   "runs": [{"rep", "response"}]}]}`) with the same frozen judge and reports, per
@@ -249,11 +279,15 @@ CI and never affects a review verdict.
   negative-control false-positive rate. Two fail-closed guards: it refuses to
   score unless the arms are structurally comparable (each declares its
   `arm` role; identical scenario set; no duplicate scenario or rep ids; identical
-  rep ids/counts per scenario), and it requires a `--calibration-artifact`
-  (a `run_judge_calibration.py` report) proving 100% agreement with the *same*
-  judge identity — prompt version, model, settings, and calibration corpus
-  content hash — as this run. An unusable judge verdict is fail-closed and
-  counted as a miss, never a pass.
+   rep ids/counts per scenario), and it requires a `--calibration-artifact`
+   (a `run_judge_calibration.py` report) proving 100% agreement with the *same*
+   judge identity — prompt version, model, settings, calibration corpus
+   content hash, and judge endpoint (bound via the artifact's `base_url_sha256`
+   digest of the full normalized URL, never the redacted display string, so two
+   credentials on one host never compare equal) — as this run. An unusable
+   judge verdict is fail-closed and counted as a miss, never a pass. It reads
+   the endpoint the same way as the calibration runner: a `--base-url` that
+   carries no credential, or `JUDGE_BASE_URL` from the environment.
 
 Model/endpoint caveats found while validating: reasoning judges need a generous
 completion budget (reasoning tokens count against it — a 1024-token budget
