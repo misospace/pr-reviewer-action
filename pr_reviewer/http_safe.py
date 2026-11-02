@@ -126,6 +126,35 @@ def redact_url_userinfo(url: object) -> str:
     )
 
 
+def redact_echo_value(value: object) -> str:
+    """#1418: Render any untrusted artifact field value for echoing in a
+    diagnostic message. Generalizes the #1414 rule to every echoed field, not
+    just endpoint URLs: the message must still identify the field, but no
+    echoed value may carry a credential.
+
+    Scalars that cannot structurally hold text (bool/int/float/None) keep
+    their ``repr``. Strings go through :func:`redact_url_userinfo` (fail-closed
+    there: verifiable userinfo is masked, unverifiable payloads over-redact to
+    ``***``) and keep ``repr``-style quoting, which also neutralizes control
+    characters a hostile value could use to forge terminal/log lines. Any other
+    value (dict/list and other containers) stringifies to an opaque blob that
+    can hide a credential URL at any depth, so it is replaced by a bare type
+    marker instead of being recursively scanned; the diagnostic's own field
+    name stays the identifying information. Assumes JSON-decoded data (native
+    types only): a ``str`` subclass with a custom ``__repr__`` is outside the
+    trust model."""
+    if value is None or isinstance(value, (bool, int, float)):
+        try:
+            return repr(value)
+        except ValueError:
+            # CPython refuses int->str beyond ~4300 digits (3.11+); a hostile
+            # artifact must not turn the fail-closed diagnostic into a crash.
+            return f"<{type(value).__name__}>"
+    if isinstance(value, str):
+        return repr(redact_url_userinfo(value))
+    return f"<{type(value).__name__}>"
+
+
 def normalize_base_url(url: object) -> str:
     """Normalize an API endpoint for identity comparison: strip surrounding
     whitespace and trailing slashes only. A ``/v1`` path segment stays

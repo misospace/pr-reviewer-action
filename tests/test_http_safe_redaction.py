@@ -22,6 +22,7 @@ from pr_reviewer.http_safe import (  # noqa: E402
     base_url_identity_digest,
     carries_url_credential,
     normalize_base_url,
+    redact_echo_value,
     redact_url_userinfo,
     resolve_endpoint,
     select_base_url,
@@ -339,3 +340,91 @@ def test_select_base_url_treats_an_empty_command_line_value_as_an_error() -> Non
 
 def test_select_base_url_without_any_value_is_empty() -> None:
     assert select_base_url((), None) == ""
+
+
+# --- redact_echo_value (#1418) ------------------------------------------------
+#
+# Adversarial-boundary convention (#252): the echoed value is the boundary
+# token itself — a credential URL planted in an arbitrary artifact field.
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # Scalars cannot hold text: byte-identical repr keeps diagnostics useful.
+        (3, "3"),
+        (62, "62"),
+        (0.9, "0.9"),
+        (1.0, "1.0"),
+        (True, "True"),
+        (False, "False"),
+        (None, "None"),
+        # A benign string keeps its repr form, exactly as the raw !r echo did.
+        ("gpt-4o", "'gpt-4o'"),
+        ("", "''"),
+        ("https://host/v1", "'https://host/v1'"),
+    ],
+)
+def test_redact_echo_value_keeps_benign_values(value: object, expected: str) -> None:
+    assert redact_echo_value(value) == expected
+
+
+def test_redact_echo_value_redacts_the_boundary_token_itself() -> None:
+    out = redact_echo_value("https://user:pass@host/v1")
+    assert "pass" not in out and "user" not in out
+    assert out == "'https://***@host/v1'"
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        # String payloads that fail closed inside redact_url_userinfo.
+        '["https://admin:hunter2@evil/v1"]',
+        '{"u": "https://admin:hunter2@evil/v1"}',
+        "prefix https://admin:hunter2@evil/v1",
+        "https://host/https://admin:hunter2@evil/v1",
+    ],
+)
+def test_redact_echo_value_string_payloads_never_leak(malformed: str) -> None:
+    out = redact_echo_value(malformed)
+    assert "hunter2" not in out and "admin" not in out
+
+
+@pytest.mark.parametrize(
+    ("container", "marker"),
+    [
+        ({"url": "https://admin:hunter2@evil/v1"}, "<dict>"),
+        (["https://admin:hunter2@evil/v1"], "<list>"),
+        (("https://admin:hunter2@evil/v1",), "<tuple>"),
+        # nested: no leaf scan is attempted, the marker alone is echoed.
+        ({"a": [{"b": ("https://admin:hunter2@evil/v1",)}]}, "<dict>"),
+    ],
+)
+def test_redact_echo_value_containers_fail_closed(container: object, marker: str) -> None:
+    out = redact_echo_value(container)
+    assert out == marker
+    assert "hunter2" not in out and "evil" not in out
+
+
+def test_redact_echo_value_unknown_type_fails_closed() -> None:
+    class Weird:
+        def __repr__(self) -> str:
+            return "https://admin:hunter2@evil/v1"
+
+    out = redact_echo_value(Weird())
+    assert out == "<Weird>"
+    assert "hunter2" not in out
+
+
+def test_redact_echo_value_huge_int_does_not_raise() -> None:
+    # CPython 3.11+ raises ValueError repr-ing ints past the digit limit; a
+    # hostile artifact must not turn the fail-closed diagnostic into a crash.
+    assert redact_echo_value(10**5000) == "<int>"
+
+
+def test_redact_echo_value_neutralizes_control_characters() -> None:
+    # repr quoting escapes ANSI escapes so a hostile value cannot forge
+    # terminal/log lines through the echo.
+    out = redact_echo_value("\x1b[31mERROR\x1b[0m trusted-looking line")
+    assert "\x1b" not in out
+    assert out.startswith("'\\x1b[31m")
