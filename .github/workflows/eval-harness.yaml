@@ -110,9 +110,12 @@ jobs:
           # (word-splitting inside an unquoted array element).
           IFS=' ' read -ra MODES_ARR <<<"$MODES"
 
+          # Credentials are NOT passed as arguments: the harness reads
+          # AI_API_KEY and GITHUB_TOKEN from the step's env block (#1410), so
+          # no secret ever lands in this process's argv or in the echoed
+          # command below.
           CMD=(python scripts/eval_harness.py --corpus "$CORPUS" --modes "${MODES_ARR[@]}" \
-               --model "${AI_MODEL}" --base-url "${AI_BASE_URL}" --api-key "${AI_API_KEY}" \
-               --github-token "${GITHUB_TOKEN}")
+               --model "${AI_MODEL}" --base-url "${AI_BASE_URL}")
           if [ -n "$MAX_PRS" ]; then
             CMD+=(--max-prs "$MAX_PRS")
           fi

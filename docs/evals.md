@@ -32,6 +32,11 @@ python scripts/eval_harness.py \
     --output eval-report/eval-report.json
 ```
 
+The harness reads the model API key from `AI_API_KEY` and the forge token
+from `GITHUB_TOKEN` or `GH_TOKEN`. Both values stay in the environment.
+The harness refuses `--api-key` and `--github-token` arguments (#1410).
+A secret in an argument list is visible to every other process on the host.
+
 The `--modes` flag accepts one or more modes (space-separated on the shell
 line, repeated `--modes x --modes y` works too). The default is
 `tools_off native_loop`.
