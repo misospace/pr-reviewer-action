@@ -108,6 +108,22 @@ SCORER_MAX_TOKENS = 4096
 # what production actually resolves.
 SCORER_PROMPT_TOKENS = 98304
 
+# The characters JavaScript's ``String.prototype.trim`` removes: the
+# ECMAScript WhiteSpace set (TAB, VT, FF, SP, NBSP, ZWNBSP and the Unicode
+# Space_Separators) plus the LineTerminator set (LF, CR, LS, PS). Python's
+# ``str.strip()`` is NOT that set — it also removes the C0 separators
+# ``\x1c``-\x1f`` and ``\x85`` (which JavaScript keeps) and it keeps
+# ``\ufeff`` (which JavaScript removes). Trimming the JavaScript set exactly
+# keeps this projection's parse identical to production's
+# ``positiveIntFrom``, so a declaration production REJECTS is rejected here
+# too (#1387). Python's set would ACCEPT a value production rejects, which
+# under-projects the completion budget and under-binds the declared spend
+# ceiling.
+JS_TRIM_CHARS = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
 
 def _declared_budget(confidence_env: Any, key: str, fallback: int) -> tuple[int, bool]:
     """Resolve ONE declared budget the way production's resolver treats a
@@ -119,7 +135,7 @@ def _declared_budget(confidence_env: Any, key: str, fallback: int) -> tuple[int,
     declaration projects at *fallback*, the same fallback the resolver
     resolves. Returns ``(tokens, declared)``.
     """
-    raw = str((confidence_env or {}).get(key, "")).strip()
+    raw = str((confidence_env or {}).get(key, "")).strip(JS_TRIM_CHARS)
     # [0-9], not \\d: JS /^\d+$/ is ASCII-only, and Python's \\d would
     # accept Unicode decimal digits the resolver's regex rejects.
     if re.fullmatch(r"[0-9]+", raw):
@@ -155,16 +171,31 @@ def project_spend_budget(conditions: list[dict[str, Any]]) -> dict[str, Any]:
     PROMPT dimension is RECORDED only — this projection introduces no new
     spend policy, and the hard ceilings stay on output tokens alone.
 
-    Each dimension takes the MAX over conditions — a conservative ceiling:
-    production's context-window clamps (#1368) can only LOWER a resolved
-    budget, never raise it above the declared/default value. The aggregate
-    basis is ``declared`` when ANY condition declared that dimension.
+    The record states the DECLARED budgets, before production's resolver
+    shapes them, and the two dimensions differ in what production can do to
+    them:
+
+    - COMPLETION: production's context-window clamps (#1368) can only LOWER a
+      resolved completion budget, never raise it, so the aggregate MAX below
+      is an upper bound of what one call can spend. The ceiling is safe.
+    - PROMPT: production RAISES a prompt budget that sits below the scorer's
+      prompt floor, so the recorded prompt value states the CONFIGURED
+      budget, not an upper bound of the resolved one.
+
+    Each dimension takes the MAX over conditions. Each basis names where
+    that dimension's VALUE came from: ``declared`` when a declaration is the
+    value itself, else ``documented-default``. The aggregate basis names
+    where the aggregate value came from — ``declared`` when a condition's
+    DECLARED value IS the aggregate maximum, ``documented-default`` when
+    the maximum is a documented default no declaration reached. The
+    per-condition entries carry each condition's own basis, so a reader can
+    still see which conditions declared a budget at all.
     """
     per_condition: list[dict[str, Any]] = []
     projected_completion = 0
     projected_prompt = 0
-    any_completion_declared = False
-    any_prompt_declared = False
+    completion_max_is_declared = False
+    prompt_max_is_declared = False
     for condition in conditions:
         completion, completion_declared = _declared_completion_budget(
             condition.get("confidence_env")
@@ -177,18 +208,30 @@ def project_spend_budget(conditions: list[dict[str, Any]]) -> dict[str, Any]:
             "prompt_tokens_per_call": prompt,
             "prompt_basis": "declared" if prompt_declared else "documented-default",
         })
-        projected_completion = max(projected_completion, completion)
-        projected_prompt = max(projected_prompt, prompt)
-        any_completion_declared = any_completion_declared or completion_declared
-        any_prompt_declared = any_prompt_declared or prompt_declared
+        # The aggregate basis follows the VALUE: the condition that HOLDS the
+        # maximum names where the aggregate came from. A declaration is the
+        # aggregate maximum only when that declared number is the maximum —
+        # a smaller declaration never makes a documented default look
+        # declared. A tie keeps "declared" when a declaration produced the
+        # shared maximum.
+        if completion > projected_completion:
+            projected_completion = completion
+            completion_max_is_declared = completion_declared
+        elif completion == projected_completion and completion_declared:
+            completion_max_is_declared = True
+        if prompt > projected_prompt:
+            projected_prompt = prompt
+            prompt_max_is_declared = prompt_declared
+        elif prompt == projected_prompt and prompt_declared:
+            prompt_max_is_declared = True
     if not per_condition:
         projected_completion = SCORER_MAX_TOKENS
         projected_prompt = SCORER_PROMPT_TOKENS
     return {
         "completion_tokens_per_call": projected_completion,
-        "completion_basis": "declared" if any_completion_declared else "documented-default",
+        "completion_basis": "declared" if completion_max_is_declared else "documented-default",
         "prompt_tokens_per_call": projected_prompt,
-        "prompt_basis": "declared" if any_prompt_declared else "documented-default",
+        "prompt_basis": "declared" if prompt_max_is_declared else "documented-default",
         "per_condition": per_condition,
     }
 
@@ -1200,7 +1243,9 @@ def cmd_score(args: argparse.Namespace) -> int:
     # live-request sends; the record states BOTH dimensions (completion and
     # prompt) per condition and in aggregate. The ceiling below spends only
     # the COMPLETION dimension — the PROMPT dimension is recorded, never
-    # spent against.
+    # spent against. The pilot's live-request path carries no prompt budget
+    # of its own, so the recorded prompt dimension states the CONFIGURED
+    # budget, not an enforced bound.
     projected_budget = project_spend_budget(
         [all_conditions[cid] for cid in selected if all_conditions[cid]["backend"] == "live"]
     )
@@ -2200,7 +2245,10 @@ def cmd_canary(args: argparse.Namespace) -> int:
     # as production's resolver would take them, the single-source documented
     # defaults otherwise — and record which budgets the projection used. The
     # ceiling below spends only the COMPLETION dimension; the PROMPT dimension
-    # is recorded, never spent against.
+    # is recorded, never spent against. The projection covers EVERY condition
+    # in the plan, not only the selected ones: the pre-flight ceiling is the
+    # worst case over the whole plan, so a condition that will not run still
+    # bounds it.
     projected_budget = project_spend_budget(list(conditions.values()))
     declared_max_tokens = projected_budget["completion_tokens_per_call"]
     # Conservative projection: every selected condition may fire for every

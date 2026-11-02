@@ -1101,13 +1101,21 @@ def test_project_spend_budget_follows_configured_budgets() -> None:
     ]
     # An undeclared condition projects at the documented default, and the
     # conservative ceiling is the MAX over conditions (production's window
-    # clamps can only lower a resolved budget, never raise it).
+    # clamps can only lower a resolved budget, never raise it). The aggregate
+    # basis names where the aggregate VALUE came from: here the maximum is
+    # the documented default, so the aggregate is "documented-default" even
+    # though one condition declared a smaller budget. The per-condition
+    # entries still show which condition declared what.
     mixed = confidence_calibration.project_spend_budget([declared, unset])
     assert mixed["completion_tokens_per_call"] == confidence_calibration.SCORER_MAX_TOKENS
-    assert mixed["completion_basis"] == "declared"
+    assert mixed["completion_basis"] == "documented-default"
     assert [entry["completion_basis"] for entry in mixed["per_condition"]] == [
         "declared", "documented-default",
     ]
+    # A declaration that IS the maximum makes the aggregate "declared".
+    mixed_big = confidence_calibration.project_spend_budget([larger, unset])
+    assert mixed_big["completion_tokens_per_call"] == 8192
+    assert mixed_big["completion_basis"] == "declared"
     empty = confidence_calibration.project_spend_budget([])
     assert empty["completion_tokens_per_call"] == confidence_calibration.SCORER_MAX_TOKENS
     assert empty["completion_basis"] == "documented-default"
@@ -1122,6 +1130,39 @@ def test_project_spend_budget_follows_configured_budgets() -> None:
         {"AI_CONFIDENCE_MAX_TOKENS": " 2048 "}
     )
     assert (tokens, is_declared) == (2048, True)
+
+
+def test_declared_budget_trims_the_javascript_whitespace_set() -> None:
+    # #1387: the parse mirrors production's positiveIntFrom, and that
+    # function trims with JavaScript's String.prototype.trim. Python's
+    # str.strip() is a DIFFERENT set: it also removes the C0 separators
+    # "\x1c"-\x1f" and "\x85" (which JavaScript keeps) and it keeps the BOM
+    # "\ufeff" (which JavaScript removes). A declaration production REJECTS
+    # must be rejected here too, or the projection under-projects the
+    # completion budget and under-binds the declared spend ceiling. The
+    # boundary characters are fed to the parser itself (#252).
+    rejected = ["\x1c2048", "\x1d2048", "\x1e2048", "\x1f2048", "\x852048"]
+    for value in rejected:
+        tokens, is_declared = confidence_calibration._declared_completion_budget(
+            {"AI_CONFIDENCE_MAX_TOKENS": value}
+        )
+        assert (tokens, is_declared) == (confidence_calibration.SCORER_MAX_TOKENS, False), repr(value)
+        tokens, is_declared = confidence_calibration._declared_prompt_budget(
+            {"AI_CONFIDENCE_PROMPT_TOKENS": value}
+        )
+        assert (tokens, is_declared) == (confidence_calibration.SCORER_PROMPT_TOKENS, False), repr(value)
+    # The characters JavaScript DOES trim: the BOM, the NBSP, the Unicode
+    # space separators and the line terminators all leave a usable number.
+    accepted = ["\ufeff2048", "\u00a02048\u00a0", "\u30002048", "\u20092048\u2009", "\t\n2048\r"]
+    for value in accepted:
+        tokens, is_declared = confidence_calibration._declared_completion_budget(
+            {"AI_CONFIDENCE_MAX_TOKENS": value}
+        )
+        assert (tokens, is_declared) == (2048, True), repr(value)
+        tokens, is_declared = confidence_calibration._declared_prompt_budget(
+            {"AI_CONFIDENCE_PROMPT_TOKENS": value.replace("2048", "32768")}
+        )
+        assert (tokens, is_declared) == (32768, True), repr(value)
 
 
 def test_project_spend_budget_records_the_prompt_dimension() -> None:
