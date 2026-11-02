@@ -2264,6 +2264,34 @@ test("#1428: a URL-credentialed distinct endpoint reaches the transport with HTT
   }
 });
 
+test("#1428 review: a transport failure echoing the exact Basic header value masks whole", async () => {
+  // The lane's diagnostic mask set must carry not only the decoded URL
+  // credential but the exact `Authorization: Basic …` value the wire sends —
+  // one shared builder, so it cannot drift from the header bytes a provider
+  // could echo back into a persisted diagnostic or artifact.
+  const decoded = "scorer-user:scorer-pass";
+  const headerValue = `Basic ${Buffer.from(decoded, "utf8").toString("base64")}`;
+  const outcome = await runConfidenceScorer({
+    profile: profile({
+      apiKey: "",
+      inheritedTransport: false,
+      baseUrl: "https://scorer-user:scorer-pass@scorer.example/v1",
+      credentialSource: "own",
+    }),
+    primaryApiKey: "",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async (): Promise<never> => { throw new Error(`upstream rejected ${headerValue} (${decoded})`); },
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(outcome.result.status, "unscored");
+  assert.ok(outcome.diagnostic !== "", "the failure is still surfaced");
+  assert.ok(!outcome.diagnostic.includes(headerValue), `exact Basic header value survived in the diagnostic: ${outcome.diagnostic}`);
+  assert.ok(!outcome.diagnostic.includes(decoded), `decoded URL credential survived in the diagnostic: ${outcome.diagnostic}`);
+  assert.ok(!JSON.stringify(outcome).includes(headerValue), "exact Basic header value survived anywhere in the outcome");
+});
+
 test("#1428: a hostile endpoint URL shape fails closed at the scorer's credential boundary", async () => {
   // The boundary trusts no upstream wiring: a URL whose credential cannot
   // be attributed is NOT accepted as credentialed — a non-loopback distinct

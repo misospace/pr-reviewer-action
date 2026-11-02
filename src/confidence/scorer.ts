@@ -20,6 +20,7 @@ import type { ChatRequestInput, ChatRequestOutcome } from "../transport/transpor
 import { runChatRequestOnce } from "../transport/transport.js";
 import { describeTransportFailure, endpointUrlCredentialOrEmpty } from "../transport/http.js";
 import type { TransportFailureKind } from "../transport/http.js";
+import { basicAuthorizationHeaderValue } from "../transport/headers.js";
 import { maskDiagnostic } from "../context/redact.js";
 import { buildModelRequest, wireEffortOf } from "../model/request.js";
 import type { TokensParam } from "../model/types.js";
@@ -134,7 +135,15 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   const diagnosticSecrets: readonly (string | null | undefined)[] = [
     ...(input.laneSecrets ?? []),
     profile.apiKey,
-    endpointUrlCredentialOrEmpty(profile.baseUrl),
+    // #1428 review: when the endpoint URL carries the credential, the wire
+    // sends `Authorization: Basic <base64>` (one shared builder, so this list
+    // can never drift from the header bytes); a provider echo of the exact
+    // header value must mask before any diagnostic or artifact is produced.
+    ...(
+      endpointUrlCredentialOrEmpty(profile.baseUrl)
+        ? [endpointUrlCredentialOrEmpty(profile.baseUrl), basicAuthorizationHeaderValue(endpointUrlCredentialOrEmpty(profile.baseUrl))]
+        : []
+    ),
     input.primaryApiKey,
   ];
   if (!profile.enabled) {
