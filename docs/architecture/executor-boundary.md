@@ -55,13 +55,14 @@ forms included (the decoding runs to a fixed point), the path as written
 parsed path while the envelope persists the raw value), a token split
 across separators (base64's own `/`), an `@` outside the authority (the
 #1419 class the Python lane refuses), and a malformed percent-escape. The
-path as written is located the way the URL parser locates the authority,
-not by searching for `//`: the parser accepts `http:host/path` and
-`http:/host/path` alike and reads a backslash as a path separator, so
-those spellings are judged too — otherwise the dot-segment normalization
-would hide the token from the parsed path while the raw path came back
-empty. (The parser also ends the authority at `?` and `#`; both are
-refused upstream, before the path screen runs.)
+path as written is located the way the URL parser locates the authority.
+The screen does not search the value for `//`. The parser accepts
+`http:host/path` and `http:/host/path` alike, and it reads a backslash as
+a path separator. The screen judges those spellings too. Otherwise the
+dot-segment normalization hides the token from the parsed path, and the
+raw path comes back empty. The parser also ends the authority at `?` and
+`#`. The screen refuses a value with either of them before it reads the
+path.
 The controller refuses at STARTUP a configured endpoint that could never pass:
 every envelope for that platform would otherwise fail later with an
 opaque builder error.
