@@ -765,3 +765,20 @@ then `score ... --condition heterogeneous --merge` (one live condition per
 sweep fits the 48-call ceiling with repeats) then `report`. Quality metrics
 render per condition, never pooled. Full runbook and the current dated
 result table: `evals/reports/confidence-calibration/README.md`.
+
+## Merge-safety verifier production-shape canary (#1370)
+
+One-shot acceptance check (2026-11-01) that the REPAIRED verifier (#1368
+budgets/reasoning controls, #1369 independent verifier semantics) works
+through its actual production request path before advisory dogfood. The
+driver's `canary` subcommand reuses RETAINED primary artifacts (no primary
+re-runs), resolves the declared `ai-confidence-*` config through the
+production profile resolver, and dispatches `runConfidenceScorer` via the
+bridge's `live-scorer` subcommand — no request-shape override exists, so
+effort, budgets, structured output, and timeouts are whatever the declared
+config resolves to. Verdict: **pass for advisory dogfood** (2/2 rows scored
+on the declared inherited MiniMax arm; the #1286 same-model 32/32
+`malformed_answer` viability failure is resolved by the #1368 shape; n=2,
+no gate-calibration claim, #1075 stays blocked). Plan, results, and the
+owning report: `evals/confidence-canary/plan.json`,
+`evals/reports/confidence-canary/README.md`.
