@@ -286,9 +286,9 @@ def _write_artifact(path: Path, *, model: str = "m",
     payload = {
         "judge_prompt_version": semantic_judge.JUDGE_PROMPT_VERSION,
         "judge_model": model,
-        # Mirrors what scripts/run_judge_calibration.py records (#1414): the
-        # display form is userinfo-redacted, the full-endpoint identity lives
-        # in the digest.
+        # Mirrors what scripts/run_judge_calibration.py records (#1414,
+        # #1424): the display form is userinfo-redacted, the endpoint
+        # identity lives in the credential-free digest.
         "base_url": http_safe.redact_url_userinfo(base_url),
         "base_url_sha256": http_safe.base_url_identity_digest(base_url),
         "total": total,
@@ -511,10 +511,22 @@ def test_calibration_accepts_trailing_slash_base_url(tmp_path: Path) -> None:
 
 
 def test_calibration_rejects_degenerate_base_url(tmp_path: Path) -> None:
-    # "/" (and "//") both normalize to the empty string: they must not
-    # compare equal. A live endpoint that normalizes to empty is rejected
-    # outright, so the degenerate endpoint can no longer slip through.
-    art = _write_artifact(tmp_path / "c.json", model="m", base_url="/")
+    # A live endpoint that normalizes to empty ("/") is rejected outright,
+    # before any digest comparison: the degenerate endpoint can no longer
+    # slip through. (#1424: the artifact side can no longer record such a
+    # value at all — the runner digests only resolved, credential-free
+    # endpoints — so the malformed artifact is constructed inline.)
+    art = tmp_path / "c.json"
+    art.write_text(json.dumps({
+        "judge_prompt_version": semantic_judge.JUDGE_PROMPT_VERSION,
+        "judge_model": "m",
+        "base_url": "/",
+        "base_url_sha256": "0" * 64,
+        "total": 62,
+        "passed": 62,
+        "agreement_rate": 1.0,
+        "judge_config": semantic_judge.judge_config_identity("m", CORPUS_PATH),
+    }))
     _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH, "/")
     assert any("empty after normalization" in e for e in errors)
 
@@ -528,33 +540,38 @@ def test_calibration_rejects_missing_base_url(tmp_path: Path) -> None:
     assert any("base_url" in e for e in errors)
 
 
-# ── userinfo redaction (#1414): never a credential in errors, full-value
-#    identity via the digest ──────────────────────────────────────────────
+# ── userinfo redaction (#1414): never a credential in errors; endpoint
+#    identity via the credential-free digest (#1424) ────────────────────────
 
 USERINFO_URL = "https://judge-operator:hunter2@judge.internal.example/v1"
 
 
-def test_calibration_accepts_userinfo_base_url_via_full_digest(tmp_path: Path) -> None:
+def test_calibration_accepts_userinfo_base_url(tmp_path: Path) -> None:
     art = _write_artifact(tmp_path / "c.json", model="m", base_url=USERINFO_URL)
     _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH, USERINFO_URL)
     assert errors == []
     # The artifact on disk carries no userinfo credential, only the redacted
-    # display form plus the full-value digest.
+    # display form plus the credential-free endpoint digest (#1424).
     serialized = art.read_text(encoding="utf-8")
     assert "hunter2" not in serialized and "judge-operator" not in serialized
     assert "***@judge.internal.example/v1" in serialized
 
 
-def test_calibration_rejects_credential_difference_despite_same_host(
+def test_calibration_accepts_credential_rotation_on_same_endpoint(
     tmp_path: Path,
 ) -> None:
-    # "The comparison uses the full value, not the redacted one": dropping or
-    # changing the userinfo must NOT compare equal to the recorded endpoint.
+    # #1424 flips the #1414 rule: the artifact binds the credential-free
+    # endpoint identity, so dropping or rotating the userinfo compares
+    # equal — the credential cannot be inverted from the recorded digest,
+    # and rotating it must not invalidate the artifact.
     art = _write_artifact(tmp_path / "c.json", model="m", base_url=USERINFO_URL)
     _, errors = ljs._load_verified_calibration(
         art, "m", CORPUS_PATH, "https://judge.internal.example/v1"
     )
-    assert any("does not match" in e for e in errors)
+    assert errors == []
+    rotated = "https://judge-operator:newpw@judge.internal.example/v1"
+    _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH, rotated)
+    assert errors == []
 
 
 def test_calibration_mismatch_error_redacts_userinfo(tmp_path: Path) -> None:
@@ -643,6 +660,15 @@ def test_calibration_rejects_legacy_artifact_without_digest(tmp_path: Path) -> N
     art.write_text(json.dumps(payload))
     _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH, "http://x")
     assert any("base_url_sha256" in e for e in errors)
+
+
+def test_calibration_reports_unresolvable_live_endpoint(tmp_path: Path) -> None:
+    """#1424: a live endpoint that cannot be resolved into a credential-free
+    endpoint identity fails closed as an error — never a raise, and never a
+    digest over the raw value."""
+    art = _write_artifact(tmp_path / "c.json", model="m")
+    _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH, "not-a-url")
+    assert any("could not be resolved" in e for e in errors)
 
 
 def test_main_refuses_a_credential_bearing_endpoint_with_another_key(

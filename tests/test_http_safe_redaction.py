@@ -148,14 +148,82 @@ def test_normalize_base_url(raw: object, expected: str) -> None:
     assert normalize_base_url(raw) == expected
 
 
-def test_base_url_identity_digest_is_full_value_identity() -> None:
-    full = "https://user:pass@host/v1"
-    digest = base_url_identity_digest(full)
-    assert digest == hashlib.sha256(full.encode("utf-8")).hexdigest()
-    # trailing slash normalizes equal; a different userinfo does NOT.
+def test_base_url_identity_digest_is_credential_free_identity() -> None:
+    """#1424: the recorded endpoint identity never depends on the credential.
+    The digest binds the credential-free request target the transport
+    resolves; the userinfo is stripped before hashing."""
+    userinfo_url = "https://user:pass@host/v1"
+    digest = base_url_identity_digest(userinfo_url)
+    assert digest == base_url_identity_digest("https://host/v1")
+    assert digest == hashlib.sha256(b"https://host/v1").hexdigest()
+    # Trailing slash still normalizes equal.
     assert base_url_identity_digest("https://user:pass@host/v1/") == digest
-    assert base_url_identity_digest("https://host/v1") != digest
-    assert base_url_identity_digest("https://other:pw@host/v1") != digest
+    # A different endpoint (host or path) is still a different identity.
+    assert base_url_identity_digest("https://otherhost/v1") != digest
+    assert base_url_identity_digest("https://host/v2") != digest
+
+
+def test_base_url_identity_digest_resists_offline_password_oracle() -> None:
+    """#1424 acceptance: a shared calibration artifact must not let a reader
+    test candidate endpoint passwords offline. This test fails when the
+    recorded endpoint identity depends on the credential in a way a reader
+    can invert: an attacker guessing a credential computes an unkeyed
+    SHA-256 over the candidate-bearing URL and compares it with the recorded
+    digest — no such guess may ever match, including the true credential."""
+    userinfo_url = "https://judge-operator:hunter2@judge.internal.example/v1"
+    recorded = base_url_identity_digest(userinfo_url)
+    candidates = [
+        "password123",
+        "correct horse battery staple",
+        "hunter3",
+        "s3cr3t!",
+    ]
+    for candidate in candidates:
+        candidate_url = f"https://judge-operator:{candidate}@judge.internal.example/v1"
+        # The offline guess (unkeyed SHA-256 over the candidate-bearing URL)
+        # never equals the recorded digest.
+        assert hashlib.sha256(candidate_url.encode("utf-8")).hexdigest() != recorded
+        # Every credential on the SAME endpoint compares equal instead
+        # (#1424 rotation rule): the recorded identity binds the endpoint.
+        assert base_url_identity_digest(candidate_url) == recorded
+    # The true credential-bearing URL is equally uninvertible: the recorded
+    # digest is the digest of the credential-free endpoint only.
+    assert (
+        hashlib.sha256(userinfo_url.encode("utf-8")).hexdigest() != recorded
+    )
+
+
+def test_base_url_identity_digest_fails_closed_on_unresolvable_values() -> None:
+    """A value that cannot be resolved into a credential-free endpoint has
+    no endpoint identity: fail closed instead of digesting the raw value
+    (which would re-introduce the #1424 oracle). Adversarial boundary
+    (#252): the hostile shapes themselves, not only benign inputs — each of
+    these carries (or hides) a credential where no check can attribute it."""
+    with pytest.raises(UnsafeEndpointUrl):
+        base_url_identity_digest("u")
+    with pytest.raises(UnsafeEndpointUrl):
+        base_url_identity_digest("not-a-url")
+    # A secret riding the query or the fragment would land in the request
+    # line; the resolution refuses it, so the digest must too.
+    with pytest.raises(UnsafeEndpointUrl):
+        base_url_identity_digest("https://host/v1?token=hunter2")
+    with pytest.raises(UnsafeEndpointUrl):
+        base_url_identity_digest("https://host/v1#hunter2")
+    # An '@' outside the authority (a password with an unencoded '/' ends
+    # the authority early) is a credential the resolution cannot attribute.
+    with pytest.raises(UnsafeEndpointUrl):
+        base_url_identity_digest("https://host/a@b/v1")
+    # An ENCODED '@' with no literal '@' in the authority hides the userinfo
+    # from the split (urllib unquotes the authority into the request's Host
+    # value, so the credential would still ride the request): refused.
+    with pytest.raises(UnsafeEndpointUrl):
+        base_url_identity_digest("https://judge%40host/v1")
+    # An encoded '@' INSIDE a real userinfo decodes into the Authorization
+    # credential, not the request target: accepted, and the recorded
+    # identity is still the credential-free endpoint.
+    assert base_url_identity_digest(
+        "https://user%40x:hunter2@host/v1"
+    ) == base_url_identity_digest("https://host/v1")
 
 
 # ── endpoint resolution: the credential never rides in a request URL ────────
