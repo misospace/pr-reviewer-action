@@ -52,6 +52,20 @@ const BUDGET_NOTE =
   "Tool-call budget exhausted: this call was not executed. " +
   "Finish the analysis with the evidence you already have.";
 
+/** #1379 review blocker 5728634290: human-readable label for one obligation,
+ * used by the reserve window/refusal notes to name what is still outstanding. */
+const DEPENDENCY_EVIDENCE_OBLIGATION_LABELS: Record<DependencyEvidenceObligation, string> = {
+  provenance: "upstream publisher/source provenance",
+  release_delta: "the exact old-to-new upstream release delta",
+  security_advisory: "upstream security advisories",
+};
+
+function formatOutstandingObligations(outstanding: readonly DependencyEvidenceObligation[]): string {
+  const labels = outstanding.map((obligation) => DEPENDENCY_EVIDENCE_OBLIGATION_LABELS[obligation]);
+  if (labels.length <= 1) return labels[0] ?? "";
+  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+}
+
 // #701 exhaustion awareness: every loop turn after the first carries the
 // remaining request/round budget, so the model plans against real headroom
 // instead of discovering the ceiling via a refused call. Once few requests
@@ -75,13 +89,333 @@ const REQUIRED_EVIDENCE_REFUSAL_NOTE =
   "and the remaining requests are reserved for them. It was NOT executed and did not consume budget. Spend the next calls on the " +
   "obligation evidence itself — read the files and fetch the upstream documents the obligations name — then optional calls are allowed again.";
 
+/** #1396: the FIRST-request priority note when the outstanding obligations are
+ * review-owned prose rows — the generic counterpart of
+ * DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE, chosen by the same single note
+ * selection pass. Trusted driver text; names no untrusted content. */
+export const REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE =
+  "[loop budget] Required review evidence comes first: resolve every outstanding obligation from the " +
+  "Required Review Evidence section with tools BEFORE spending calls on optional exploration " +
+  "(local-diff confirmation, history greps, redundant local reads).";
+
 const LOW_BUDGET_TURN_NOTE =
   "[loop budget] Only {requestsLeft} tool request(s) and {roundsLeft} " +
   "turn(s) remain. Stop broad exploration now: prioritize confirming or " +
   "rejecting your unresolved blocker hypotheses and gathering only the " +
   "evidence still needed for the verdict.";
 
-function formatNote(template: string, values: Record<string, number>): string {
+/**
+ * #1379: deterministic tool-loop prioritization for dependency-update PRs.
+ * When the caller (the harness, keyed on the PR's classification) reserves a
+ * tail of the request budget for required dependency evidence, the driver —
+ * not the prompt fragment — owns the ordering rule:
+ *
+ * - the FIRST request is preceded by a turn note stating the dependency-
+ *   evidence obligations take priority over optional work;
+ * - once the reserve window is entered (and until it is released) the
+ *   regular budget note is replaced by one redirecting ALL remaining spend
+ *   to the obligations still OUTSTANDING, named in the note itself;
+ * - and the window is ENFORCED, not just announced: until every tracked
+ *   obligation is covered by an executed dependency-evidence call — each
+ *   call attributed to its obligations from its own target via
+ *   dependencyEvidenceObligationsForCall (review blocker 5728634290: ONE
+ *   release-notes fetch must not unlock local archaeology while provenance
+ *   and security advisories are still unchecked) — or until the loop has
+ *   spent the whole reserve on evidence attempts INSIDE the enforced window
+ *   (the no-lockout cap counts gated attempts only; evidence calls spent
+ *   before the window opened drain the run-wide telemetry counter, never
+ *   the cap), any other tool call
+ *   requested inside the window is REFUSED with a synthetic error and
+ *   spends none of the reserved requests. Crediting and the attempts cap
+ *   are executor-status-agnostic: a refused host or failed fetch still
+ *   counts, and the cap guarantees the window always opens within the tail
+ *   it reserved, so a model in an evidence-unreachable configuration is
+ *   never locked out of finishing.
+ *
+ * Notes are trusted driver text (a turn_note, never inside the untrusted
+ * tool-result envelope), and the whole mechanism is skipped entirely when no
+ * reserve is configured, so non-dependency PRs keep the exact #701 note
+ * sequences and call dispositions the reliability tests pin.
+ */
+export const DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE =
+  "[loop budget] Required dependency evidence comes first: establish upstream " +
+  "provenance, inspect the exact old-to-new upstream release delta, and check " +
+  "security advisories (or record the check as not performed) BEFORE spending " +
+  "tool calls on optional archaeology, claim falsification, history greps, or " +
+  "redundant local-diff confirmation.";
+// #1379 review blocker 5728634290: the window note names the obligations
+// still OUTSTANDING ({outstanding}), not the full fixed trio — a model that
+// already covered provenance is redirected at what it still owes.
+const RESERVE_WINDOW_TURN_NOTE =
+  "[loop budget] Only {requestsLeft} tool request(s) remain and they are " +
+  "reserved for the required dependency evidence still outstanding: " +
+  "{outstanding}, reached through web_fetch (plus web_search when that tool " +
+  "is offered to you). Optional and local-diff calls are now refused, not " +
+  "executed. If the evidence cannot be established, report what is missing " +
+  "rather than approximating it.";
+
+// #1396: the window can open on the ROUNDS half alone (#1388) — rendering the
+// requests-scarce wording then would misstate what is scarce. Same selection
+// pass, honest counts.
+const RESERVE_WINDOW_ROUNDS_TURN_NOTE =
+  "[loop budget] Only {roundsLeft} loop turn(s) remain and they are " +
+  "reserved for the required dependency evidence still outstanding: " +
+  "{outstanding}, reached through web_fetch (plus web_search when that tool " +
+  "is offered to you). Optional and local-diff calls are now refused, not " +
+  "executed. If the evidence cannot be established, report what is missing " +
+  "rather than approximating it.";
+
+// #1396: when a unified run ALSO has unresolved prose obligation rows gating
+// the same window, the dependency-worded note/refusal must not imply the
+// dependency debt is the ONLY way out — a call targeting a Required Review
+// Evidence row executes too.
+const MIXED_WINDOW_CLAUSE = " The reservation also covers the unresolved rows of the Required Review Evidence section — a call that targets one of those executes as well.";
+
+/** #1379: the refusal a non-evidence call gets inside the reserve window
+ * while not every tracked obligation is covered (and the attempts cap has
+ * not been reached). Model-facing: explains the refusal, names what is
+ * still owed, and the two ways forward in one breath. */
+const RESERVE_REFUSAL_NOTE =
+  "Reserved dependency-evidence budget: this call was not executed and spent " +
+  "none of the remaining requests. The reserved tail still owes " +
+  "{outstanding}, reached with web_fetch (plus web_search when that tool is " +
+  "offered to you). Make one of those calls, or finish now and report the " +
+  "missing evidence as unknown / needs verification.";
+
+/**
+ * #1379: the tool calls that are the CHANNEL for the required upstream
+ * dependency evidence. These are the only tools that can reach an arbitrary
+ * upstream (provenance, release delta, advisories): the local read/git tools
+ * and run_command can only confirm the diff already in the corpus, and
+ * gh_api is allowlisted to the PR's own repos, not the dependency's.
+ * `web_search` is advertised only when a search endpoint is configured, so
+ * the driver notes name `web_fetch` as the always-available channel and
+ * `web_search` conditionally. Since review blocker 5728634290 these tools
+ * only identify the CHANNEL — the obligation state is tracked PER OBLIGATION
+ * via dependencyEvidenceObligationsForCall, so one executed call no longer
+ * releases the whole reserved window.
+ */
+export const DEPENDENCY_EVIDENCE_TOOLS: ReadonlySet<string> = new Set([
+  "web_fetch",
+  "web_search",
+]);
+
+/** #1379 review blocker 5728634290: the required upstream evidence
+ * obligations the reserve window tracks individually. Canonical order is
+ * load-bearing: the tracked set is the prefix the reserve can pay for, and
+ * credits/outstanding lists are always projected in this order. */
+export type DependencyEvidenceObligation = "provenance" | "release_delta" | "security_advisory";
+
+export const DEPENDENCY_EVIDENCE_OBLIGATIONS: readonly DependencyEvidenceObligation[] = [
+  "provenance",
+  "release_delta",
+  "security_advisory",
+];
+
+const SECURITY_ADVISORY_TOKENS: readonly string[] = [
+  "advisor",
+  "ghsa",
+  "cve",
+  "osv",
+  "vulnerab",
+  "security",
+  "exploit",
+  "bulletin",
+];
+
+const RELEASE_DELTA_TOKENS: readonly string[] = [
+  "release",
+  "changelog",
+  "changes",
+  "changeset",
+  "compare",
+  "diff",
+  "commits",
+  "commit",
+  "tag",
+  "news",
+  "history",
+  "migration",
+  "upgrade",
+  "notes",
+];
+
+const PROVENANCE_TOKENS: readonly string[] = [
+  "registry",
+  "repositor",
+  "package",
+  "artifact",
+  "provenance",
+  "sbom",
+  "publisher",
+  "vendor",
+  "maintainer",
+  "homepage",
+  "readme",
+  "chart",
+  "helm",
+  "mirror",
+];
+
+// Exact publisher/registry hosts: fetching one of these IS a provenance
+// lookup regardless of path. Dots are kept in the tokenization so hosts
+// survive as single tokens.
+const PUBLISHER_REGISTRY_HOSTS: ReadonlySet<string> = new Set([
+  "hub.docker.com",
+  "docker.io",
+  "index.docker.io",
+  "ghcr.io",
+  "quay.io",
+  "gcr.io",
+  "mcr.microsoft.com",
+  "registry.k8s.io",
+  "k8s.gcr.io",
+  "pypi.org",
+  "pypi.python.org",
+  "www.npmjs.com",
+  "npmjs.com",
+  "registry.npmjs.org",
+  "crates.io",
+  "pkg.go.dev",
+  "artifacthub.io",
+  "hub.helm.sh",
+  "operatorhub.io",
+  // Ecosystem registries the same review shape reaches for (independent
+  // review of this delta: rubygems/Maven/ECR lookups credited nothing while
+  // npm/PyPI did, so those PRs burned refusals until the attempts cap).
+  "rubygems.org",
+  "repo1.maven.org",
+  "search.maven.org",
+  "mvnrepository.com",
+  "maven.google.com",
+  "packagist.org",
+  "nuget.org",
+  "pub.dev",
+  "registry.terraform.io",
+  "registry.nuget.org",
+  "public.ecr.aws",
+  "gallery.ecr.aws",
+  "us.gcr.io",
+  "eu.gcr.io",
+  "asia.gcr.io",
+]);
+
+// Source hosts: only the host's canonical repository URL counts as a
+// provenance lookup — owner/repo on github.com/gitlab.com/bitbucket.org,
+// org/project/_git/repo on dev.azure.com. A shallower path identifies no
+// repository (a profile/user page, a bare host, an Azure organization or
+// project), and a deeper path is doing something else (release pages,
+// advisories, files) — review blocker 5738958165: a profile URL must not
+// credit provenance and release the obligation window without an
+// owner/repository lookup ever having been attempted.
+const SOURCE_CODE_HOSTS: ReadonlySet<string> = new Set([
+  "github.com",
+  "gitlab.com",
+  "bitbucket.org",
+  "dev.azure.com",
+]);
+
+/**
+ * #1379 review blocker 5728634290: deterministic, conservative attribution
+ * of one dependency-evidence call to the obligations its own target (the
+ * `web_fetch` URL or the `web_search` query) says it is serving. Bounded and
+ * lexical — never throws, never touches the network. Only names in
+ * DEPENDENCY_EVIDENCE_TOOLS attribute (any other tool → `[]`); an absent or
+ * non-string target attributes nothing. A call can cover several
+ * obligations; matches are returned deduped in canonical
+ * DEPENDENCY_EVIDENCE_OBLIGATIONS order (possibly empty — an unattributed
+ * evidence call executed inside the enforced window still counts toward the
+ * no-lockout attempts cap, just credits nothing; pre-window it counts only
+ * toward the run-wide attempts telemetry).
+ */
+export function dependencyEvidenceObligationsForCall(
+  name: string,
+  args: Record<string, unknown>,
+): DependencyEvidenceObligation[] {
+  if (!DEPENDENCY_EVIDENCE_TOOLS.has(name)) return [];
+  const target = name === "web_fetch" ? args.url : args.query;
+  if (typeof target !== "string" || target === "") return [];
+  const lower = target.toLowerCase();
+  const tokens = lower.split(/[^a-z0-9.]+/).filter((token) => token !== "");
+  const matched = new Set<DependencyEvidenceObligation>();
+  for (const token of tokens) {
+    if (SECURITY_ADVISORY_TOKENS.some((keyword) => token.includes(keyword))) matched.add("security_advisory");
+    if (RELEASE_DELTA_TOKENS.some((keyword) => token.includes(keyword))) matched.add("release_delta");
+    if (PROVENANCE_TOKENS.some((keyword) => token.includes(keyword))) matched.add("provenance");
+  }
+  const hostToken = tokens.find((token) => token.includes("."));
+  if (hostToken !== undefined) {
+    const host = hostToken.replace(/^www\./, "");
+    if (PUBLISHER_REGISTRY_HOSTS.has(host)) {
+      matched.add("provenance");
+    } else if (SOURCE_CODE_HOSTS.has(host)) {
+      const afterHost = lower.slice(lower.indexOf(hostToken) + hostToken.length);
+      const path = afterHost.split(/[?#]/, 1)[0] ?? "";
+      const segments = path.split("/").filter((segment) => segment !== "");
+      if (host === "dev.azure.com") {
+        // Azure DevOps' canonical repository URL is org/project/_git/repo;
+        // org or org/project name an organization/project, not a repository.
+        if (segments.length === 4 && segments[2] === "_git") matched.add("provenance");
+      } else if (segments.length === 2) {
+        matched.add("provenance");
+      }
+    }
+  }
+  return DEPENDENCY_EVIDENCE_OBLIGATIONS.filter((obligation) => matched.has(obligation));
+}
+
+/**
+ * #1396: the obligation a deterministic dependency-evidence `must_check`
+ * checklist text names (the DEPENDENCY_EVIDENCE_CHECKS family templates), or
+ * null for any other check. The harness uses it to map a shown obligation row
+ * onto its dependency-evidence SHAPE vocabulary: a real provenance or
+ * advisories fetch does not repeat the check's prose words, so gating it on
+ * prose tokens would refuse the very call that discharges the obligation
+ * (#1396's cross-starvation). Lexical, total, never throws.
+ */
+export function dependencyObligationForCheckText(text: string): DependencyEvidenceObligation | null {
+  const lower = text.toLowerCase();
+  if (/establish upstream provenance/.test(lower)) return "provenance";
+  if (/release delta/.test(lower)) return "release_delta";
+  if (/security advisories/.test(lower)) return "security_advisory";
+  return null;
+}
+
+/**
+ * #1396: ONE obligation row of the unified enforced window, produced once by
+ * the harness. Exactly one vocabulary is meaningful per row:
+ * - `obligation` set (dependency-evidence shape row): admission is the
+ *   call's own URL/query shape crediting that obligation; `tokens` is empty.
+ * - `obligation` absent (prose row): admission is word-boundary overlap of
+ *   the call's argument VALUES with `tokens` (#1381).
+ */
+export interface RequiredEvidenceRow {
+  id: string;
+  tokens: readonly string[];
+  obligation?: DependencyEvidenceObligation;
+}
+
+/** #1396: whether one call attempts (would discharge) one pending row. */
+function rowAdmittedByCall(
+  row: RequiredEvidenceRow,
+  name: string,
+  args: Record<string, unknown>,
+): boolean {
+  if (row.obligation !== undefined) {
+    return dependencyEvidenceObligationsForCall(name, args).includes(row.obligation);
+  }
+  const target = argumentTargetText(args);
+  return row.tokens.some((token) => targetMentions(target, token));
+}
+
+/** Default #1379 reserve: the budget tail the driver holds for required
+ * dependency evidence once the classification says the PR is a
+ * dependency-update shape. The harness clamps it to the budget: budgets of
+ * two or more keep one unreserved head request, and the minimum budget of
+ * one reserves its sole request (see dependencyEvidenceReserveFromClassification). */
+export const DEPENDENCY_EVIDENCE_RESERVE = 4;
+
+function formatNote(template: string, values: Record<string, string | number>): string {
   return template.replace(/\{(\w+)\}/g, (_m, key: string) => String(values[key] ?? ""));
 }
 
@@ -285,13 +619,50 @@ export interface LoopOutcome {
   compactionTruncate: number;
   /** #922: largest approximate conversation size seen before a turn. */
   peakConversationTokens: number;
-  /** #1381: requests reserved at the end of the budget for required-evidence
-   * obligations. Inside this window the reservation is enforced: calls that
-   * target none of the pending obligations are refused without consuming
-   * budget (see `requiredEvidenceRefusals`). */
+  /** #1381; #1396: requests reserved at the end of the budget for the ONE
+   * enforced obligation window (review-owned obligation rows plus, for a
+   * dependency-update PR, the dependency-evidence shape rows). Inside this
+   * window the reservation is enforced: calls that target none of the
+   * pending rows are refused without consuming budget (see
+   * `requiredEvidenceRefusals`). */
   requiredEvidenceRequestsHint: number;
-  /** #1381: optional calls refused by the enforced reservation window. */
+  /** #1381; #1396: calls refused by the one enforced obligation window, over
+   * every row kind. There is exactly one refusal counter — no mechanism
+   * keeps a second one beside it. */
   requiredEvidenceRefusals: number;
+  /** #1396 (from #1379 blocker 5728634290): the number of obligation rows
+   * the window tracks (prose rows plus dependency-evidence shape rows).
+   * 0 when no reservation is configured. */
+  requiredEvidenceRequired: number;
+  /** #1396 (from #1379 blocker 5728634290): row ids discharged by an
+   * admitted executed call — prose rows by argument-target token overlap,
+   * dependency-evidence rows by the call's own URL/query shape — plus the
+   * ids seeded through `requiredEvidenceCredits`, in row order. */
+  requiredEvidenceCredits: string[];
+  /** #1396 (from #1379 blocker 5728634290): executed upstream
+   * evidence-channel calls (see DEPENDENCY_EVIDENCE_TOOLS) over the whole
+   * run, whatever their target or executor status — run-wide across the
+   * #1145 repair seam: a continuation seeded by `requiredEvidenceAttemptsPrior`
+   * reports the prior loop's attempts too. TELEMETRY ONLY: the no-lockout
+   * cap below is driven by `requiredEvidenceWindowAttempts` instead, so
+   * pre-window evidence spending can never deactivate the reserved window
+   * before it starts gating (#1396 review blocker).
+   * */
+  requiredEvidenceAttempts: number;
+  /** #1396 (review blocker): executed upstream evidence-channel calls made
+   * INSIDE the enforced obligation window (the window check ran and the
+   * call was in-window). This is the counter the no-lockout cap drives
+   * from: dependency-evidence shape rows release their gating once it
+   * reaches the cap (the reserve, or the original threshold threaded
+   * across the seam), even if nothing was credited. Pre-window evidence
+   * attempts count only toward `requiredEvidenceAttempts` — the window's
+   * no-lockout allowance is the reserved tail's patience, not the run's
+   * total evidence spend. */
+  requiredEvidenceWindowAttempts: number;
+  /** #1396 (from #1379 blocker 5728634290): whether the enforced window was
+   * released at loop end — reserve 0 (always open), or every tracked row
+   * discharged or cap-released. */
+  requiredEvidenceReleased: boolean;
 }
 
 /**
@@ -412,11 +783,57 @@ export interface DriveToolLoopOptions {
   /** #1199: invoked once per model turn with that turn's bounded telemetry. */
   onRound?: (round: NativeLoopRoundTelemetry) => void;
   reserveForRequiredEvidence?: number;
-  /** #1381 (review): admission vocabulary for the reserved window — one row
-   * per shown obligation with the deterministic target tokens a tool call
-   * must overlap to execute inside the window. A row is dropped from gating
-   * once an admitted call attempted it. */
-  requiredEvidence?: ReadonlyArray<{ id: string; tokens: readonly string[] }>;
+  /** #1381 (review); #1396: the ONE admission-row set for the enforced
+   * reservation — one row per outstanding obligation, produced once by the
+   * harness. A row carries one of two admission vocabularies:
+   * - `tokens`: #1381's deterministic prose vocabulary — the call's argument
+   *   VALUES must word-boundary-overlap one token to execute inside the
+   *   window (review-owned `must_check` / `trusted_base_guidance` rows);
+   * - `obligation`: #1379's dependency-evidence shape vocabulary — the call
+   *   is admitted when it is an upstream evidence-channel call whose own
+   *   URL/query shape credits that obligation
+   *   (`dependencyEvidenceObligationsForCall`), so a real provenance or
+   *   advisories fetch is admissible against its own row instead of having
+   *   to repeat the obligation's prose.
+   * A row drops out of gating once an admitted call attempted it. */
+  requiredEvidence?: ReadonlyArray<RequiredEvidenceRow>;
+  /**
+   * #1379 (blocker 5728634290); #1396: row ids already discharged by an
+   * earlier loop over the SAME conversation — the #1145 trace-gap repair
+   * seam carries the main loop's obligation state into the continuation
+   * so it cannot re-open obligations the main loop already closed. Unknown
+   * or non-string ids are ignored, and seeds that match no tracked row are
+   * dropped.
+   */
+  requiredEvidenceCredits?: ReadonlyArray<string>;
+  /**
+   * #1396 (review): evidence-channel attempts already recorded by an earlier
+   * loop over the SAME conversation — the #1145 repair seam threads the main
+   * loop's RUN-WIDE count so the continuation's `requiredEvidenceAttempts`
+   * telemetry reports the run total (the harness fold is REPLACE, never
+   * add). This counter no longer drives the no-lockout cap — see
+   * `requiredEvidenceWindowAttemptsPrior`. Unset (every main loop) starts
+   * the count at zero.
+   */
+  requiredEvidenceAttemptsPrior?: number;
+  /**
+   * #1396 (review blocker): in-window evidence-channel attempts already
+   * recorded by an earlier loop over the SAME conversation — the #1145
+   * repair seam threads the main loop's WINDOW-scoped count so the
+   * no-lockout cap stays RUN-WIDE WITHOUT counting pre-window spending:
+   * the continuation's shape rows release gating once prior + own
+   * in-window attempts reach the cap, never from a reset zero count, and
+   * never because the main loop burned evidence calls before its window
+   * opened. Unset (every main loop) starts the count at zero.
+   */
+  requiredEvidenceWindowAttemptsPrior?: number;
+  /**
+   * #1396 (review): the attempts-cap threshold, overriding the loop's own
+   * (possibly tail-clamped) reserve. The repair seam passes the ORIGINAL
+   * unclamped run reserve so the cap cannot shrink across the seam; unset
+   * keeps the reserve as the threshold (the main-loop and unit-test shape).
+   */
+  requiredEvidenceAttemptsCap?: number;
 }
 
 /**
@@ -474,18 +891,80 @@ export async function driveToolLoop(
     compactionSummarize: 0,
     compactionTruncate: 0,
     peakConversationTokens: 0,
-    requiredEvidenceRequestsHint: Math.max(0, Math.min(budgets.maxToolCalls - 1, Math.floor(options.reserveForRequiredEvidence ?? 0))),
+    requiredEvidenceRequestsHint: Math.max(0, Math.min(budgets.maxToolCalls, Math.floor(options.reserveForRequiredEvidence ?? 0))),
     requiredEvidenceRefusals: 0,
+    requiredEvidenceRequired: 0,
+    requiredEvidenceCredits: [],
+    requiredEvidenceAttempts: 0,
+    requiredEvidenceWindowAttempts: 0,
+    requiredEvidenceReleased: false,
   };
-  // #1381: obligations whose evidence no admitted call has targeted yet.
-  // Inside the reserved window only calls overlapping one of these rows'
-  // vocabularies execute; an admitted overlap discharges that row's gating
-  // (the row still needs a verdict disposition to count as satisfied — the
-  // loop guarantees only the ATTEMPT, which is what the budget reservation
-  // is for).
-  const pendingEvidence: Array<{ id: string; tokens: readonly string[] }> = outcome.requiredEvidenceRequestsHint > 0
+  // #1396: hoisted unified reserve; 0 disables the whole mechanism (notes and
+  // enforcement alike) so a loop with nothing reserved keeps byte-identical
+  // legacy behavior. Clamped to the FULL request budget: a one-request run
+  // reserves its sole request (the whole budget is the tail — #1379's
+  // supported-floor rule), and a prose reservation sized by the harness
+  // never exceeds half the budget anyway.
+  const reserve = outcome.requiredEvidenceRequestsHint;
+  // #1381; #1396: the ONE tracked row set — produced once by the harness,
+  // prose obligation rows and dependency-evidence shape rows alike. A row is
+  // discharged when an admitted executed call targets it (prose: argument-
+  // target token overlap; shape: the call's own URL/query), attempt-based
+  // and executor-status-agnostic (the row still needs a verdict disposition
+  // to count as SATISFIED — the window guarantees only the ATTEMPT).
+  const pendingRows: RequiredEvidenceRow[] = reserve > 0
     ? [...(options.requiredEvidence ?? [])]
     : [];
+  // Rows already discharged by an earlier loop over the SAME conversation
+  // (the #1145 repair seam seeds them here) start closed; a seed that names
+  // no tracked row is dropped.
+  const discharged = new Set<string>();
+  if (Array.isArray(options.requiredEvidenceCredits)) {
+    for (const id of options.requiredEvidenceCredits) {
+      if (typeof id !== "string") continue;
+      if (pendingRows.some((row) => row.id === id)) discharged.add(id);
+    }
+  }
+  // Attempted upstream evidence-channel calls over the WHOLE RUN, pre-window
+  // included. An executor error still counts as an attempt — see
+  // DEPENDENCY_EVIDENCE_TOOLS. #1396 (review): the count is run-wide across
+  // the #1145 repair seam — a continuation starts from the prior loop's
+  // attempts instead of a reset zero. TELEMETRY ONLY: this counter no longer
+  // drives the no-lockout cap (that is `windowEvidenceAttempts` below), so
+  // evidence calls the model spent BEFORE the reserved window — possibly on
+  // obligations it already discharged, possibly on none — can never
+  // deactivate the window before the tail is even scarce.
+  let evidenceAttempts = Math.max(0, Math.floor(options.requiredEvidenceAttemptsPrior ?? 0));
+  // The no-lockout counter: evidence-channel attempts made INSIDE the
+  // enforced window only (see the window block below). The cap exists to
+  // bound the reserved tail's patience — after `attemptsCap` gated evidence
+  // attempts without a discharge, shape rows release so the window can never
+  // lock the model out of its own tail. Attempts outside the window spent
+  // freely-chosen budget and are irrelevant to that patience.
+  let windowEvidenceAttempts = Math.max(0, Math.floor(options.requiredEvidenceWindowAttemptsPrior ?? 0));
+  // The cap threshold: the loop's own reserve, unless the caller threads the
+  // ORIGINAL run-wide reserve across the repair seam (the clamped reserve a
+  // short-tailed continuation holds is a budget share, never a fresh cap).
+  const attemptsCap = Math.max(0, Math.floor(options.requiredEvidenceAttemptsCap ?? reserve));
+  // A row gates while it is undischargeD AND — for dependency-evidence
+  // shape rows — the no-lockout attempts cap has not fired: the cap
+  // guarantees the window always opens within the tail it reserved, and a
+  // reserve of 1 keeps exactly the historical one-call release. Prose rows
+  // never take the cap: their overlap vocabulary IS the obligation text,
+  // and a refusal consumes nothing, so prose gating can never starve a run
+  // (#1388 semantics kept exact).
+  const rowActive = (row: RequiredEvidenceRow): boolean =>
+    !discharged.has(row.id)
+    && !(row.obligation !== undefined && windowEvidenceAttempts >= attemptsCap);
+  const hasActiveRow = (): boolean => pendingRows.some((row) => rowActive(row));
+  const anyActiveShapeRow = (): boolean =>
+    pendingRows.some((row) => row.obligation !== undefined && rowActive(row));
+  const anyActiveProseRow = (): boolean =>
+    pendingRows.some((row) => row.obligation === undefined && rowActive(row));
+  const outstandingShapeObligations = (): DependencyEvidenceObligation[] =>
+    pendingRows
+      .filter((row) => row.obligation !== undefined && rowActive(row))
+      .map((row) => row.obligation as DependencyEvidenceObligation);
   const started = timeFn();
   const telemetryStart = nowFn();
   let callsExecuted = 0;
@@ -580,28 +1059,60 @@ export async function driveToolLoop(
     // the remaining request/round budget; near the ceiling it also redirects
     // the remaining spend to blocker hypotheses. Trusted driver text — a
     // turn_note, never inside the untrusted tool-result envelope.
-    if (outcome.rounds > 0) {
+    // #1379; #1396: ONE budget-note selection pass over the unified
+    // obligation window. The FIRST request of a reserved run carries the
+    // priority note (the ordering rule is driver-owned, not prompt-fragment
+    // guidance), and inside the window the regular budget note is replaced
+    // by exactly ONE redirect naming the outstanding obligations — a scarce
+    // round never carries two budget notes, which is what two side-by-side
+    // reservations produced (#1396). The window's call refusals are enforced
+    // in the disposition pass below.
+    {
       const requestsLeft = budgets.maxToolCalls - callsExecuted;
       // Clamped at 0: extension rounds run past `maxRounds`, and a negative
       // count must never render in the note.
       const roundsLeft = Math.max(0, budgets.maxRounds - outcome.rounds);
-      const reservedCount = outcome.requiredEvidenceRequestsHint;
-      // Same OR condition as the reserved window below: scarce ROUNDS open
-      // the reservation too, so the note fires the moment either half of the
-      // reservation is what is left.
-      const note = reservedCount > 0 && pendingEvidence.length > 0
-          && (requestsLeft <= reservedCount || roundsLeft <= reservedCount)
-        ? REQUIRED_EVIDENCE_TURN_NOTE
-        : requestsLeft <= LOW_TOOL_REQUESTS_REMAINING ? LOW_BUDGET_TURN_NOTE : BUDGET_TURN_NOTE;
-      conversation.addTurnNote(
-        formatNote(note, {
-          reservedCount,
-          requestsLeft,
-          requestsTotal: budgets.maxToolCalls,
-          roundsLeft,
-          roundsTotal: roundCeiling,
-        }),
-      );
+      // Same OR condition as the enforced window below: scarce ROUNDS open
+      // the reservation too, so the note fires the moment either half of
+      // the reservation is what is left.
+      const inObligationWindow =
+        reserve > 0
+        && hasActiveRow()
+        && (requestsLeft <= reserve || roundsLeft <= reserve);
+      if (outcome.rounds === 0) {
+        if (reserve > 0 && hasActiveRow()) {
+          conversation.addTurnNote(anyActiveShapeRow()
+            ? DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE
+            : REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE);
+        }
+      } else {
+        // #1396: one pass, one note. With a shape row active the redirect
+        // names the outstanding dependency evidence — on the side that is
+        // actually scarce (requests, else rounds) — and grows the mixed-run
+        // clause when prose rows gate the same window.
+        const shapeNoteActive = anyActiveShapeRow();
+        const mixedClause = shapeNoteActive && anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "";
+        const note = inObligationWindow
+          ? shapeNoteActive
+            ? formatNote(requestsLeft <= reserve ? RESERVE_WINDOW_TURN_NOTE : RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
+                requestsLeft,
+                roundsLeft,
+                outstanding: formatOutstandingObligations(outstandingShapeObligations()),
+              }) + mixedClause
+            : REQUIRED_EVIDENCE_TURN_NOTE
+          : requestsLeft <= LOW_TOOL_REQUESTS_REMAINING
+            ? LOW_BUDGET_TURN_NOTE
+            : BUDGET_TURN_NOTE;
+        conversation.addTurnNote(
+          formatNote(note, {
+            reservedCount: reserve,
+            requestsLeft,
+            requestsTotal: budgets.maxToolCalls,
+            roundsLeft,
+            roundsTotal: roundCeiling,
+          }),
+        );
+      }
     }
 
     const payload = conversation.toRequestPayload(options.apiFormat, options.model, {
@@ -683,11 +1194,16 @@ export async function driveToolLoop(
     const plan: Disposition[] = [];
     const toExecute = new Map<number, { name: string; args: Record<string, unknown> }>();
     // #1199: per-round disposition counts (a tri-partition of `calls.length`:
-    // executed + refused + deduplicated === requested). Refusals cover both the
-    // invalid-argument error and the over-budget note.
+    // executed + refused + deduplicated === requested). Refusals cover the
+    // invalid-argument error, the over-budget note, and the #1379
+    // reserve-window refusal.
     let roundExecuted = 0;
     let roundRefused = 0;
     let roundDedup = 0;
+    // #1396: rows this round's admitted calls discharged — the ONLY progress
+    // that can earn a round-ceiling extension below (an evidence fetch that
+    // executes but credits nothing must not buy extension rounds).
+    let rowsDischargedThisRound = 0;
     for (let idx = 0; idx < calls.length; idx++) {
       const call = calls[idx]!;
       const callId = call.id;
@@ -721,41 +1237,72 @@ export async function driveToolLoop(
         roundRefused++;
         continue;
       }
-      // #1381 (review); #1388: the enforced reservation pairs the reserved
-      // requests with reserved ROUNDS. A call whose target overlaps pending
-      // obligations has ATTEMPTED them whether or not the reserved window is
-      // open yet — the recommended path gathers that evidence EARLY, and the
-      // window must never re-demand (or hold shut for) evidence already
-      // gathered. Inside the window a call executes ONLY when its argument
-      // values overlap a pending obligation; everything else — optional
-      // exploration AND the fixed `run_command` argv catalog — is refused
-      // WITHOUT consuming budget (like the dedup note), so no optional call
-      // can spend the held-back requests or burn a scarce round on history
-      // archaeology. The window opens when the remaining REQUESTS drop to
-      // the reservation OR the remaining ROUNDS do (rounds remaining,
-      // counting the current one) — a round-scarce loop must spend its last
-      // rounds on the obligations, not on optional calls. The catalog gets
-      // no exemption: its `command` value participates in the same overlap
-      // check like any other argument value, so
-      // git_status_short cannot burn reserved requests against a
-      // Talos-matrix obligation, while a catalog command whose name IS the
-      // obligation evidence (a diff obligation) stays admissible. Once every
-      // obligation has been attempted the window is satisfied.
-      if (outcome.requiredEvidenceRequestsHint > 0 && pendingEvidence.length > 0) {
-        const target = argumentTargetText(args);
-        const overlaps = pendingEvidence.filter((row) => row.tokens.some((token) => targetMentions(target, token)));
-        const inWindow = budgets.maxToolCalls - callsExecuted <= outcome.requiredEvidenceRequestsHint
-          || budgets.maxRounds - (outcome.rounds - 1) <= outcome.requiredEvidenceRequestsHint;
-        if (inWindow && overlaps.length === 0) {
-          plan.push({ callId, kind: "reserve", data: { error: REQUIRED_EVIDENCE_REFUSAL_NOTE } });
+      // #1381 (review); #1388; #1396: the ONE enforced obligation window over
+      // every row kind. A call that targets a pending row has ATTEMPTED
+      // (discharged) it whether or not the window is open yet — the
+      // recommended path gathers that evidence EARLY, and the window must
+      // never re-demand (or hold shut for) evidence already gathered.
+      // Admission vocabulary is per row: prose rows gate on argument-VALUE
+      // overlap (the `run_command` catalog gets no exemption — a catalog
+      // command whose name IS the obligation evidence stays admissible);
+      // dependency-evidence shape rows gate on the call's own URL/query.
+      // Inside the window a call executes ONLY when it targets an active
+      // row, or it is an upstream evidence-channel call while a shape row is
+      // active — #1379's no-lockout escape hatch: an evidence fetch counts
+      // toward the attempts cap even when lexical attribution gives it
+      // nothing, so a model genuinely looking upstream is never refused its
+      // way down the reserved tail (the cross-starvation #1396 was filed
+      // for: each side-by-side reservation blocking the other's hatch).
+      // Everything else is refused WITHOUT consuming budget (like the dedup
+      // note) and is NOT added to the dedup set (a retry after the window
+      // releases runs for real). The window opens when the remaining
+      // REQUESTS drop to the reservation OR the remaining ROUNDS do (rounds
+      // remaining, counting the current one).
+      let countsTowardAttemptsCap = false;
+      if (reserve > 0 && hasActiveRow()) {
+        const targets = pendingRows.filter(
+          (row) => !discharged.has(row.id) && rowAdmittedByCall(row, call.name, args as Record<string, unknown>),
+        );
+        const inWindow = budgets.maxToolCalls - callsExecuted <= reserve
+          || budgets.maxRounds - (outcome.rounds - 1) <= reserve;
+        // #1396 (review blocker): an evidence call ADMITTED while the window
+        // is actually gating (in-window) is what spends the reserved tail's
+        // no-lockout patience; a call executed before the window opened
+        // spent freely-chosen budget and must not count toward the cap.
+        if (inWindow) countsTowardAttemptsCap = true;
+        if (inWindow && targets.length === 0 && !(DEPENDENCY_EVIDENCE_TOOLS.has(call.name) && anyActiveShapeRow())) {
+          plan.push({
+            callId,
+            kind: "reserve",
+            data: {
+              error: anyActiveShapeRow()
+                ? formatNote(RESERVE_REFUSAL_NOTE, {
+                    outstanding: formatOutstandingObligations(outstandingShapeObligations()),
+                  }) + (anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
+                : REQUIRED_EVIDENCE_REFUSAL_NOTE,
+            },
+          });
           roundRefused++;
           outcome.requiredEvidenceRefusals++;
           continue;
         }
-        for (const row of overlaps) pendingEvidence.splice(pendingEvidence.indexOf(row), 1);
+        for (const row of targets) {
+          discharged.add(row.id);
+          rowsDischargedThisRound++;
+        }
       }
       seenKeys.add(key);
       callsExecuted++;
+      if (DEPENDENCY_EVIDENCE_TOOLS.has(call.name)) {
+        // Attempts count for ANY executed-planned evidence-channel call —
+        // window, target, and executor status irrelevant (a refused host or
+        // failed fetch still counts). Discharge rides `targets` above, so a
+        // redundant call whose every match is already credited opens
+        // nothing. The no-lockout cap counter counts only the IN-WINDOW
+        // subset (see `windowEvidenceAttempts` above).
+        evidenceAttempts++;
+        if (countsTowardAttemptsCap) windowEvidenceAttempts++;
+      }
       toExecute.set(idx, { name: call.name, args: args as Record<string, unknown> });
       plan.push({ callId, kind: "exec", data: idx });
       roundExecuted++;
@@ -822,24 +1369,23 @@ export async function driveToolLoop(
     // ends on budget exhaustion still records its turn before the stop below.
     emitRound(outcome.rounds, calls.length, roundExecuted, roundRefused, roundDedup, toolElapsedSec, modelElapsedSec, turnUsage, roundFellBack);
 
-    // #1388: round-ceiling extension for the reserved window. Extension is
-    // earned ONLY at the (current) ceiling and only on progress: the round
-    // that just ended is the "immediately previous round" of the extension
-    // round it buys, so inside the window every executed call overlaps a
-    // pending obligation and removes that row from `pendingEvidence` — a
-    // progress round is self-limiting (at most the initial pending count ≤
-    // hint across the whole loop), while a hostile model emitting only
-    // refused calls executes nothing, gets ZERO extra rounds (it stops at
-    // `maxRounds` with the reserved requests intact), and can never buy
-    // extension rounds by stalling.
-    const reserved = outcome.requiredEvidenceRequestsHint;
+    // #1388; #1396: round-ceiling extension for the reserved window.
+    // Extension is earned ONLY at the (current) ceiling and only on
+    // progress — a row DISCHARGE: the round that just ended is the
+    // "immediately previous round" of the extension round it buys, and
+    // inside the window every admitted call removes a row, so a progress
+    // round is self-limiting (at most the initial tracked-row count across
+    // the whole loop). A hostile model emitting only refused calls executes
+    // nothing and gets ZERO extra rounds (it stops at `maxRounds` with the
+    // reserved requests intact), and since #1396 an evidence fetch that
+    // executes but discharges nothing cannot buy extension rounds either.
     if (
-      reserved > 0
-      && extensionRounds < reserved
+      reserve > 0
+      && extensionRounds < reserve
       && outcome.rounds >= roundCeiling
-      && pendingEvidence.length > 0
+      && hasActiveRow()
       && callsExecuted < budgets.maxToolCalls
-      && roundExecuted > 0
+      && rowsDischargedThisRound > 0
     ) {
       roundCeiling++;
       extensionRounds++;
@@ -856,6 +1402,16 @@ export async function driveToolLoop(
   }
 
   outcome.degraded = outcome.toolCallsIssued === 0;
+  // #1379 (blocker 5728634290); #1396: the obligation state is written once
+  // here so every exit path (transport-error stop, no-tool-call stop,
+  // budget, rounds, wall clock) reports exactly what the loop ended with.
+  outcome.requiredEvidenceRequired = pendingRows.length;
+  outcome.requiredEvidenceCredits = pendingRows
+    .filter((row) => discharged.has(row.id))
+    .map((row) => row.id);
+  outcome.requiredEvidenceAttempts = evidenceAttempts;
+  outcome.requiredEvidenceWindowAttempts = windowEvidenceAttempts;
+  outcome.requiredEvidenceReleased = reserve <= 0 || !hasActiveRow();
   // #702: close out the telemetry on every exit path.
   outcome.requestsRemaining = Math.max(0, budgets.maxToolCalls - callsExecuted);
   outcome.elapsedSec = timeFn() - started;

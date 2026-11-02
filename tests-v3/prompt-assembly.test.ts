@@ -33,6 +33,8 @@ const PLACEHOLDERS = [
   "IMAGE_DIGEST_GUIDANCE", "RELEASE_NOTES_GUIDANCE", "VERBOSITY_GUIDANCE",
   // #1337: dependency-upgrade coverage accounting guidance.
   "COVERAGE_ACCOUNTING_GUIDANCE",
+  // #1379: upstream-evidence obligations for dependency-update kinds.
+  "DEPENDENCY_EVIDENCE_GUIDANCE",
 ];
 
 function withWorkspace(files: Record<string, string>, body: (dir: string) => void): void {
@@ -326,4 +328,48 @@ test("#1336: the new Renovate kinds pick up version-bump/image-digest/release-no
       }
     });
   }
+});
+
+test("#1379: the vendor-agnostic dependency kinds pick up the dependency-evidence guidance", () => {
+  const cases: { prKind: string; included: string[]; excluded: string[] }[] = [
+    // All dependency-update kinds — the Renovate twins and the vendor-
+    // agnostic ones — carry the upstream-evidence obligations.
+    { prKind: "dependency_upgrade", included: ["dependency_evidence", "version_bump", "release_notes"], excluded: ["image_digest"] },
+    { prKind: "renovate_image_update", included: ["dependency_evidence"], excluded: [] },
+    { prKind: "renovate_chart_update", included: ["dependency_evidence"], excluded: [] },
+    { prKind: "image_update", included: ["dependency_evidence", "version_bump", "release_notes"], excluded: ["image_digest"] },
+    { prKind: "chart_update", included: ["dependency_evidence", "version_bump", "release_notes"], excluded: ["image_digest"] },
+    { prKind: "platform_version_update", included: ["dependency_evidence", "version_bump", "release_notes"], excluded: ["image_digest"] },
+    { prKind: "action_update", included: ["dependency_evidence", "version_bump", "release_notes"], excluded: ["image_digest"] },
+    // Non-dependency kinds stay out.
+    { prKind: "app_code", included: [], excluded: ["dependency_evidence", "version_bump", "release_notes"] },
+    { prKind: "k8s_manifest", included: [], excluded: ["dependency_evidence"] },
+    { prKind: "renovate_digest_only", included: [], excluded: ["dependency_evidence"] },
+    { prKind: "image_digest_only", included: [], excluded: ["dependency_evidence"] },
+  ];
+  for (const { prKind, included, excluded } of cases) {
+    withWorkspace({ "classification.json": `{"pr_kind":"${prKind}"}` }, (dir) => {
+      const ws = workspaceAt(dir);
+      const state = applySystemPromptFragments(resolveSystemPrompt({}, ws), { reviewVerbosity: "normal" }, ws);
+      for (const name of included) {
+        assert.equal(state.systemPrompt.includes(BUNDLED_PROMPT_ASSETS.fragments[name]!.trimEnd()), true, `${prKind} should include ${name}`);
+      }
+      for (const name of excluded) {
+        assert.equal(state.systemPrompt.includes(BUNDLED_PROMPT_ASSETS.fragments[name]!.trimEnd()), false, `${prKind} should exclude ${name}`);
+      }
+    });
+  }
+});
+
+test("#1379: the dependency-evidence fragment carries the tool-budget ordering rule", () => {
+  // The assembled dependency prompt must state the budget priority: the
+  // required upstream evidence comes BEFORE optional tool spending, and a
+  // budget exhaustion is reported as unknown/needs verification — never a
+  // clean approval from local-diff facts alone.
+  withWorkspace({ "classification.json": `{"pr_kind":"image_update"}` }, (dir) => {
+    const ws = workspaceAt(dir);
+    const state = applySystemPromptFragments(resolveSystemPrompt({}, ws), { reviewVerbosity: "normal" }, ws);
+    assert.equal(state.systemPrompt.includes("before spending remaining tool calls"), true);
+    assert.equal(state.systemPrompt.includes("never publish a clean approval based only on local-diff facts"), true);
+  });
 });
