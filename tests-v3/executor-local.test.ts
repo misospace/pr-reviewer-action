@@ -1110,11 +1110,21 @@ test("validateExecutionRequest refuses a credential riding the forge API path (#
   // so the encoded forms are spelled out here — a test that encodes the
   // attack with a no-op encoder re-tests the plain case and encodes the
   // same blind spot as the code.
-  const hexEscaped = [...token]
-    .map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, "0")}`)
-    .join("");
-  const twiceEscaped = hexEscaped.replaceAll("%", "%25");
-  const thriceEscaped = twiceEscaped.replaceAll("%", "%25");
+  //
+  // Level `n` escapes every character `n` times, so level 1 spells `%` plus
+  // the character's hex, level 2 spells `%25` plus the hex, and level 3
+  // spells `%2525` plus the hex. Each level is built directly instead of
+  // escaping an already-escaped form with `replaceAll("%", "%25")`: that
+  // replacement double-escapes in the source sense and is exactly the sink
+  // CodeQL flags as a double-escaping hazard, and a test must not model the
+  // hazard it is screening for.
+  const escapedAtLevel = (level: number): string =>
+    [...token]
+      .map((char) => `%${"25".repeat(level - 1)}${char.charCodeAt(0).toString(16).padStart(2, "0")}`)
+      .join("");
+  const hexEscaped = escapedAtLevel(1);
+  const twiceEscaped = escapedAtLevel(2);
+  const thriceEscaped = escapedAtLevel(3);
 
   // #1429's class, refused instead of warned about: a gateway token in the
   // endpoint's PATH is credential material, and this coordinate is persisted
@@ -1151,7 +1161,7 @@ test("validateExecutionRequest refuses a credential riding the forge API path (#
     () =>
       validateExecutionRequest({
         ...valid,
-        forgeApiUrl: `https://forge.example/${thriceEscaped.replaceAll("%", "%25")}/v1`,
+        forgeApiUrl: `https://forge.example/${escapedAtLevel(4)}/v1`,
       }),
     /must not contain a credential-shaped path segment/,
   );
