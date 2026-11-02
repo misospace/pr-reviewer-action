@@ -82,6 +82,10 @@ export interface CorpusWorkspace {
    * so existing fixtures need no update: an absent field behaves like
    * `null`. */
   dependencyCoverageMd?: Uint8Array | null;
+  /** #1426: the re-review scope section (empty unless the run knows a prior
+   * reviewed head). Optional so existing fixtures need no update: an absent
+   * field behaves like `null`. */
+  reReviewScopeMd?: Uint8Array | null;
   linkedSourcesMd: Uint8Array | null;
   repoImpactTruncatedMd: Uint8Array | null;
   repoHistoryTruncatedMd: Uint8Array | null;
@@ -426,6 +430,13 @@ export function buildReviewCorpus(
     // Exact-head external-check context stays ahead of the bulky diff so a
     // body-budget truncation cannot hide the independently gated status.
     pushSection("# CI Check Results", bytes(ws.ciChecksContent));
+  }
+  // #1426: the re-review scope framing rides ahead of the file list and diff
+  // so body-budget truncation can never drop the two-scope statement (full
+  // PR authoritative, prior-head delta advisory). Empty unless the run knows
+  // a prior reviewed head — no section boundary for anything else.
+  if (nonEmpty(ws.reReviewScopeMd)) {
+    pushSection(undefined, bytes(ws.reReviewScopeMd!));
   }
   pushSection("# PR Files", filesContent, "json");
   pushSection(

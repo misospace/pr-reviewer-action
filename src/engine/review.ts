@@ -35,6 +35,7 @@ import { RunWorkspace } from "../run/workspace.js";
 import { trustFramingOverhead } from "../context/repo-map.js";
 import { generateRepoMap, renderRepoMapJson, renderRepoMapMarkdown } from "../context/repo-map.js";
 import { buildDependencyCoverageContext } from "../context/dependency-coverage.js";
+import { buildReReviewScopeMd, computeReReviewDelta } from "../context/rereview-scope.js";
 import { renderDependencyCoverageBlock } from "../model/dependency-coverage.js";
 import {
   buildLinkedIssueContext,
@@ -226,6 +227,11 @@ const NO_GATE_OUTCOME = (gate: GateName): GateOutcome => ({
 
 /** Scratch file the CI gate child writes its step outputs to. */
 const CI_GATE_OUTPUT_FILE = "ci-gate-outputs.txt";
+
+/** #1426: the commit-sha shape a prior reviewed head must prove before it
+ * becomes a delta identity (the same rule the #975 carried pointer applies
+ * to marker head_sha — untrusted comment content until shape-checked). */
+const SHA_SHAPE = /^[0-9a-f]{7,64}$/i;
 
 /** #978: the annotation is a workflow-command line, so untrusted provider
  * body text must not be able to break out of it — a newline would emit a
@@ -875,6 +881,26 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   ws.write("pr-files.json", filesProjection(rawFilesList, totalChangedFiles));
   ws.write("pr-files.truncated.json", truncateClean(Buffer.from(filesProjection(rawFilesList, totalChangedFiles)), budgets.primary.maxFiles, "…[file list truncated]"));
   ws.write("pr-body.txt", String(pr.body ?? ""));
+
+  // ── Re-review scope section (#1426) ──────────────────────────────────
+  // Two scopes, stated explicitly: the authoritative current PR
+  // (base→head) the verdict and summary describe, and the prior-head delta
+  // (previous-reviewed-head→current-head) that only prioritizes inspection.
+  // Written unconditionally — possibly empty — so a reused run directory
+  // never carries a previous run's section (the specialist-reset pattern
+  // above). The delta probe is fail-soft: a shallow checkout that no longer
+  // holds the force-pushed-away prior head still gets the identities-only
+  // section, never a guessed delta.
+  ws.write("re-review-scope.md", new Uint8Array(0));
+  const priorReviewedHead = typeof pre.prior_head_sha === "string" ? pre.prior_head_sha : "";
+  if (SHA_SHAPE.test(priorReviewedHead) && priorReviewedHead.toLowerCase() !== headSha.toLowerCase()) {
+    const delta = await computeReReviewDelta(workspace, priorReviewedHead, headSha);
+    const section = buildReReviewScopeMd(delta, { priorHeadSha: priorReviewedHead, headSha, baseSha: pre.base_sha });
+    if (section !== "") {
+      ws.write("re-review-scope.md", section);
+      log(`Re-review scope recorded: prior reviewed head ${priorReviewedHead.toLowerCase()} → current head ${headSha.toLowerCase()}`);
+    }
+  }
 
   // #885: the corpus note that this PR edits its own (base-ref-resolved)
   // standards file — its changes appear only in the diff under review, never
