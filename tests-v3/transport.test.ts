@@ -344,14 +344,27 @@ test("#1428: the diagnostic redaction of a credential-bearing endpoint URL is st
   assert.equal(endpointUrlCredentialOrEmpty("https://host/pa@ss/v1"), "");
 });
 
-test("#1428: the response-side known-secret list carries the URL credential", () => {
+test("#1428: the response-side known-secret list carries the URL credential and the exact Basic header value", () => {
   // A provider error body can quote the request's Authorization value back —
   // #1428 puts the decoded URL credential on that same list, so the echo
-  // masks like every other configured credential.
-  const secrets = callKnownSecrets("sk-key", { "x-gateway": "gw-token" }, "u:p");
-  assert.ok(secrets.includes("u:p"), "the URL credential must join the response-side mask set");
+  // masks like every other configured credential. The list also carries the
+  // exact `Basic <base64>` header value the wire sent (shared builder, so the
+  // mask list cannot drift from the header): an echo of the literal header
+  // value masks whole.
+  const credential = "u:p";
+  const expectedBasic = `Basic ${Buffer.from(credential, "utf8").toString("base64")}`;
+  const secrets = callKnownSecrets("sk-key", { "x-gateway": "gw-token" }, credential);
+  assert.ok(secrets.includes(credential), "the URL credential must join the response-side mask set");
+  assert.ok(secrets.includes(expectedBasic), "the exact Basic header value must join the response-side mask set");
   assert.ok(maskKnownSecrets(`rejected credential u:p for sk-key`, secrets).includes(KNOWN_SECRET_REDACTED));
   assert.ok(!maskKnownSecrets(`rejected credential u:p for sk-key`, secrets).includes("u:p"));
+  // The wire value the transport actually sends is the masked one, byte for
+  // byte: a response echoing `Authorization: Basic <base64>` fully masks.
+  const echoed = `request rejected: Authorization: ${expectedBasic} is invalid`;
+  const masked = maskKnownSecrets(echoed, secrets);
+  assert.ok(masked.includes(KNOWN_SECRET_REDACTED));
+  assert.ok(!masked.includes(expectedBasic), "the echoed Basic header value must not survive masking");
+  assert.ok(!masked.includes("u:p"), "the decoded credential must not survive masking");
   // An absent or unattributable credential contributes nothing and never throws.
   assert.ok(callKnownSecrets("sk-key", undefined, "").includes("sk-key"));
   assert.ok(callKnownSecrets("sk-key", undefined, undefined).includes("sk-key"));

@@ -3,7 +3,7 @@ import https from "node:https";
 import { URL } from "node:url";
 import type { ApiFormat } from "../model/types.js";
 import { maskKnownSecrets, redactText } from "../context/redact.js";
-import { applyExtraHeaders } from "./headers.js";
+import { applyExtraHeaders, basicAuthorizationHeaderValue } from "./headers.js";
 
 /**
  * Typed HTTP transport for model calls (#677). Replaces the v2 curl/jq wire
@@ -402,7 +402,9 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
     // Only the credential channel changes: the Anthropic framing headers are
     // not a credential channel, so an Anthropic endpoint keeps
     // `anthropic-version` and the streamed Accept header here too.
-    headers["Authorization"] = `Basic ${Buffer.from(urlCredential, "utf8").toString("base64")}`;
+    // The value comes from the shared builder so `callKnownSecrets` masks
+    // exactly these bytes (see its doc comment) — the two sites cannot drift.
+    headers["Authorization"] = basicAuthorizationHeaderValue(urlCredential);
     if (input.apiFormat === "anthropic") {
       headers["anthropic-version"] = input.anthropicVersion;
       if (input.stream) headers["Accept"] = "text/event-stream";

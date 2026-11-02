@@ -37,6 +37,15 @@ import { createHash } from "node:crypto";
  * instead of at every response surface (see its doc comment).
  */
 
+/** #1428: the exact value the wire puts in the `Authorization` header when the
+ * endpoint URL carries the credential. One builder, used by `runHttpRequest`
+ * and by `callKnownSecrets`, so the response-side mask list can never drift
+ * from the header bytes a provider could echo back into persisted
+ * diagnostics. */
+export function basicAuthorizationHeaderValue(urlCredential: string): string {
+  return `Basic ${Buffer.from(urlCredential, "utf8").toString("base64")}`;
+}
+
 /** Transport-critical headers the action owns; case-insensitive match.
  * Beyond the issue's named six, this covers every header whose override
  * would silently corrupt the request rather than merely restyle it:
@@ -241,13 +250,22 @@ export function callKnownSecrets(
   /** #1428: the credential the endpoint URL carries in its userinfo, already
    * extracted fail-closed (`endpointUrlCredentialOrEmpty`) — a provider error
    * body can quote the request's Authorization value straight back, so the
-   * decoded URL credential masks on the response side like every other
-   * configured credential. */
+   * decoded URL credential AND the exact `Basic <base64>` header value the
+   * wire sent (`basicAuthorizationHeaderValue`) both mask on the response
+   * side like every other configured credential. */
   urlCredential?: string,
 ): readonly (string | null | undefined)[] {
   // The URL credential joins the list only when present, so every existing
-  // two-argument call keeps its exact pinned shape.
-  return [apiKey, ...Object.values(extraHeaders ?? {}), ...(urlCredential ? [urlCredential] : [])];
+  // two-argument call keeps its exact pinned shape. The encoded header value
+  // rides with it: masking only the decoded userinfo would still let a
+  // provider echo of the literal `Basic <base64>` Authorization value (the
+  // bytes on the wire) leak the credential's encoded form into persisted
+  // diagnostics.
+  return [
+    apiKey,
+    ...Object.values(extraHeaders ?? {}),
+    ...(urlCredential ? [urlCredential, basicAuthorizationHeaderValue(urlCredential)] : []),
+  ];
 }
 
 /** Ephemeral correlation/session/trace headers: their values legitimately
