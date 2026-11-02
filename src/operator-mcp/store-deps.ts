@@ -199,7 +199,17 @@ export function buildStoreBackedMcpDeps(input: StoreBackedMcpInput): ControllerM
         if (job.jobId !== cursor.jobId) continue;
         passed = true;
       }
-      if (scanned >= MAX_MCP_LIST_JOBS_SCANNED) break;
+      if (scanned >= MAX_MCP_LIST_JOBS_SCANNED) {
+        // Job-scan ceiling reached with this matching record UNscanned: the
+        // page ends here but repository history is not exhausted. Hand back
+        // a resumable cursor at the first unscanned job so later findings
+        // stay reachable — the per-call ceiling is preserved, not widened,
+        // and the next call resumes exactly here (offset 0: every scanned
+        // job above was fully considered, so nothing is skipped or
+        // duplicated across the boundary).
+        nextCursor = encodeCursor(job.jobId, 0);
+        break;
+      }
       scanned += 1;
       const publication = await getPublication(job.jobId);
       if (publication === null) continue;
