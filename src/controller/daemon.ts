@@ -89,6 +89,7 @@ import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
 import { dispatchCanonicalEvent, type GenerationLedger } from "../ingress/dispatch.js";
 import type { MirrorCache } from "../acquisition/index.js";
 import {
+  EXECUTION_ORPHANED_CATEGORY,
   validateExecutionRequest,
   validateExecutionResult,
   type ExecutionProfiles,
@@ -1503,15 +1504,19 @@ async function cancelRecoveredWorker(
  * pid 1, the controller's own pid) fails closed and signals nothing.
  *
  * The sweep is best-effort and NEVER changes the settle decision: the
- * orphaned proof belongs to `reconcile`, and a failed sweep means nothing
- * was signalled — the record still settles whatever the sweep answered.
+ * orphaned proof belongs to `reconcile`, and a failed sweep means the
+ * death was not confirmed — the group may already have been signalled, so
+ * the record still settles whatever the sweep answered.
  *
  * The sweep cannot race a live worker owned by another controller
  * instance: a worker that can still execute answers `running` from
  * `reconcile` and takes the adoption path instead, so by the time a
- * record reconciles to `orphaned` there is provably no live worker for
- * this correlation identity anywhere — the sweep signals only the dead
- * worker's process group. */
+ * record reconciles to `orphaned`, the backend that owns the recorded
+ * attempt has proven its worker cannot execute — the sweep signals only
+ * that dead worker's process group. What the sweep cannot fix is a run
+ * whose recorded pid is absent (the pre-spawn window) or unprovable (no
+ * identity token, or a mismatch): those fail closed and signal nothing,
+ * so their groups can still leak. */
 async function settleRecoveredWorker(
   controller: ReviewQueueController,
   jobId: string,
@@ -1519,7 +1524,7 @@ async function settleRecoveredWorker(
   executors: readonly Executor[],
   request: ExecutionRequest,
 ): Promise<void> {
-  if (answer.outcome.failureCategory === "orphaned") {
+  if (answer.outcome.failureCategory === EXECUTION_ORPHANED_CATEGORY) {
     try {
       await cancelRecoveredWorker(executors, request);
     } catch {

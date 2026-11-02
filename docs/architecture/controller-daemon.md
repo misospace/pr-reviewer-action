@@ -88,15 +88,18 @@ a forge-specific CLI.
   members can outlive it, and only the tree termination's group kill
   removes them. The sweep is best-effort and never changes the settle
   decision — the orphaned proof belongs to `reconcile`, and a failed
-  sweep means nothing was signalled. The daemon never signals anything
-  itself, so the executor's guards keep holding (pid 1 and the
-  controller's own pid are refused outright, a pid that names no process
-  short-circuits without a signal, and every signal sits behind the
-  process-identity proof). The sweep cannot race another controller
-  instance: a worker that can still execute — wherever it runs — answers
-  `running` and takes the adoption path, so an orphaned settle proves
-  there is no live worker for the identity anywhere, and the sweep
-  signals only the dead worker's process group.
+  sweep means the death was not confirmed (the group may already have
+  been signalled). The daemon never signals anything itself, so the
+  executor's guards keep holding (pid 1 and the controller's own pid are
+  refused outright, a pid that names no process short-circuits without a
+  signal, and every signal sits behind the process-identity proof). The
+  sweep cannot race another controller instance: a worker that can still
+  execute answers `running` and takes the adoption path, so an orphaned
+  settle proves the worker the recorded attempt ran cannot execute, and
+  the sweep signals only that dead worker's process group. What the
+  sweep cannot fix is a run whose recorded pid is absent (the pre-spawn
+  window) or unprovable (no identity token, or a mismatch): those fail
+  closed and signal nothing, so their groups can still leak.
 - **A record with no readable envelope is safe to requeue.** The
   executor writes the request envelope before it launches the worker. A
   missing envelope therefore proves that no worker ever started, and the

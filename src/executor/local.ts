@@ -73,6 +73,7 @@ import type { ProcessHandle, ProcessResult, RunProcessOptions } from "../runtime
 import { processCanExecute, processPresent, terminateProcessTreeByPid } from "../runtime/process-tree.js";
 import type { LocalExecutorSpec } from "../config/instance-config.js";
 import {
+  EXECUTION_ORPHANED_CATEGORY,
   validateExecutionRequest,
   ExecutionRequestError,
   type ExecutionCancelOutcome,
@@ -671,7 +672,7 @@ export class LocalExecutor implements Executor {
     if (pid > 0 && this.deps.pidAlive(pid)) return RECONCILE_RUNNING;
     return this.settledOutcome(validated, {
       status: "failed",
-      failureCategory: "orphaned",
+      failureCategory: EXECUTION_ORPHANED_CATEGORY,
       failureMessage: `the recorded worker (pid ${pid}) is gone with no terminal state`,
     });
   }

@@ -1320,7 +1320,17 @@ test("an adopted worker that settles orphaned is swept before the recovery seam 
   assert.equal(adopted!.state, "running", "the adopted record stays active");
 
   // The worker then dies without a terminal state: the next tick's
-  // re-reconcile sweeps the dead leader's group before it settles.
+  // re-reconcile sweeps the dead leader's group before it settles. The
+  // snapshot probe proves the order — at cancel time the record had not
+  // settled yet.
+  let settledBeforeSweep = false;
+  const realCancel = secondFake.cancel.bind(secondFake);
+  secondFake.cancel = async () => {
+    settledBeforeSweep ||= durableQueueRecords(h.dirs.durableStateDir).some(
+      (entry) => entry.job.jobId === request.jobId && entry.state === "failed",
+    );
+    return realCancel();
+  };
   secondFake.reconcileOutcome = settledOutcomeFor(request, {
     status: "failed",
     failureCategory: "orphaned",
@@ -1328,6 +1338,101 @@ test("an adopted worker that settles orphaned is swept before the recovery seam 
     resultArtifactPath: "",
   });
   await waitFor(() => secondFake.cancelCalls > 0);
+  await waitFor(() =>
+    durableQueueRecords(h.dirs.durableStateDir).some(
+      (entry) => entry.job.jobId === request.jobId && entry.state === "failed",
+    ),
+  );
+  assert.equal(settledBeforeSweep, false, "the sweep ran before the record settled");
+  assert.equal(secondFake.started.length, 0, "the orphaned review was never rerun");
+});
+
+test("an orphaned recovered worker settles even when its sweep throws", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const request = h.fake.started[0]!;
+
+  // The sweep is best-effort in the strongest sense: a cancellation seam
+  // that REJECTS must not take the settle down with it — the orphaned
+  // proof belongs to `reconcile`, and the record must never stay active
+  // forever because the sweep blew up.
+  h.daemon.abandon();
+  const orphaned = settledOutcomeFor(request, {
+    status: "failed",
+    failureCategory: "orphaned",
+    resultHeadSha: "",
+    resultArtifactPath: "",
+  });
+
+  const secondFake = new FakeExecution(true);
+  secondFake.reconcileOutcome = orphaned;
+  secondFake.cancel = async () => {
+    throw new Error("the cancellation seam exploded");
+  };
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: secondFake,
+    options: { maxAttempts: 1 },
+  });
+  t.after(() => {
+    h.fake.dispose();
+    secondFake.dispose();
+    h2.daemon.abandon();
+    cleanup(h);
+  });
+
+  await waitFor(() =>
+    durableQueueRecords(h.dirs.durableStateDir).some(
+      (entry) => entry.job.jobId === request.jobId && entry.state === "failed",
+    ),
+  );
+  assert.equal(secondFake.started.length, 0, "the orphaned review was never rerun");
+});
+
+test("a graceful stop sweeps an adopted worker that reconciles to an orphaned settle", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const request = h.fake.started[0]!;
+
+  // The drain pass is the third settle site: the graceful stop's bounded
+  // window settles an adopted worker that reconciles to an orphaned
+  // settle, and the compensating sweep runs through the same helper. The
+  // hour-long tick interval keeps every tick out of the way, so the drain
+  // pass is the only re-reconcile after adoption — the site is exercised
+  // deterministically.
+  h.daemon.abandon();
+  const orphaned = settledOutcomeFor(request, {
+    status: "failed",
+    failureCategory: "orphaned",
+    resultHeadSha: "",
+    resultArtifactPath: "",
+  });
+
+  const secondFake = new FakeExecution(true);
+  secondFake.reconcileOutcome = { kind: "running" };
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: secondFake,
+    options: { tickIntervalMs: 3_600_000, drainMs: 200, maxAttempts: 1 },
+  });
+  t.after(() => {
+    h.fake.dispose();
+    secondFake.dispose();
+    cleanup(h);
+  });
+  await waitFor(() => secondFake.reconcileCalls > 0);
+
+  secondFake.reconcileOutcome = orphaned;
+  await h2.daemon.stop();
+  assert.equal(secondFake.cancelCalls > 0, true, "the drain's orphaned settle swept first");
   await waitFor(() =>
     durableQueueRecords(h.dirs.durableStateDir).some(
       (entry) => entry.job.jobId === request.jobId && entry.state === "failed",
