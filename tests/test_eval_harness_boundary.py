@@ -1065,6 +1065,37 @@ class TestCredentialedEndpointRedaction:
         # endpoint.
         assert _read_snapshot(repo_path)["AI_BASE_URL"] == CREDENTIALED_BASE_URL
 
+    def test_failure_message_redacts_before_truncating_long_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        # The recorded stderr is capped at 500 characters. Place the URL so
+        # the cut lands exactly at the "@": truncating first leaves
+        # "https://user:pass" without its host, a shape the redactor does not
+        # recognize, so the credential would survive into the report.
+        at = CREDENTIALED_BASE_URL.index("@")
+        stderr_line = "x" * (500 - at) + CREDENTIALED_BASE_URL
+        script = _write_fake_script(
+            tmp_path / "fake_lane.sh", deep=False,
+            write_output=False,
+            stderr_line=stderr_line,
+            exit_code=1,
+        )
+        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL)
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, config,
+            deep_review=False, review_script=script,
+        )
+
+        assert run.error is not None
+        assert "hunter2" not in run.error
+        assert "lane-operator" not in run.error
+        assert REDACTED_BASE_URL in run.error
+        # Only the recording is redacted: the run still contacted the full
+        # endpoint.
+        assert _read_snapshot(repo_path)["AI_BASE_URL"] == CREDENTIALED_BASE_URL
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

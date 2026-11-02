@@ -2193,9 +2193,12 @@ def run_review_for_pr(
                 # #1417: the runtime logs the endpoint it called, so the
                 # captured stderr can carry the endpoint credential. The
                 # recorded message is redacted; the child's own output is not.
+                # Redaction runs on the FULL stderr before truncation: a
+                # truncation that cuts inside a URL can leave "https://user:pass"
+                # without its "@host", a shape the redactor does not recognize.
                 run.error = (
                     f"Review failed (exit {result.returncode}): "
-                    f"{redact_urls_in_text(result.stderr[:500])}"
+                    f"{redact_urls_in_text(result.stderr)[:500]}"
                 )
 
     except subprocess.TimeoutExpired:
