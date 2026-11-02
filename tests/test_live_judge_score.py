@@ -651,12 +651,22 @@ def test_a_value_for_a_known_option_is_not_echoed(
 def test_an_abbreviated_flag_cannot_relax_the_full_corpus_guard(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # "--a" must not resolve to --allow-subset-scenarios. The prefix would
-    # silently relax the fail-closed full-corpus guard.
-    code = ljs.main(_run_argv(tmp_path, ["--a"]))
-    err = capsys.readouterr().err
-    assert code == 2
-    assert _SECRET not in err
+    # "--a" and "--al" must not resolve to --allow-subset-scenarios. The
+    # prefix would silently relax the fail-closed full-corpus guard.
+    for prefix in ("--a", "--al"):
+        code = ljs.main(_run_argv(tmp_path, [prefix]))
+        err = capsys.readouterr().err
+        assert code == 2
+        assert _SECRET not in err
+
+
+def test_the_parser_knows_no_credential_option() -> None:
+    # The parser must not know the option, so the refusal is the only way in.
+    _args, extras = ljs.build_parser().parse_known_args([
+        "--baseline", "b.json", "--treatment", "t.json",
+        "--calibration-artifact", "c.json", "--api-key", _SECRET,
+    ])
+    assert "--api-key" in extras
 
 
 def test_the_exact_subset_flag_still_parses() -> None:

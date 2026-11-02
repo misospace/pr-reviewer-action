@@ -442,3 +442,9 @@ def test_a_value_for_a_known_option_is_not_echoed(
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
     assert _SECRET not in err
+
+
+def test_the_parser_knows_no_credential_option() -> None:
+    # The parser must not know the option, so the refusal is the only way in.
+    _args, extras = runner.build_parser().parse_known_args(["--api-key", _SECRET])
+    assert "--api-key" in extras
