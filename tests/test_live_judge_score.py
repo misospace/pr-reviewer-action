@@ -352,6 +352,11 @@ def test_verified_calibration_rejects_imperfect_calibration(tmp_path: Path) -> N
     art = _write_artifact(tmp_path / "c.json", model="m", agreement=0.9, passed=56)
     _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH, "http://x")
     assert any("100% agreement" in e for e in errors)
+    # benign scalar values stay rendered so the diagnostic is still useful
+    detail = next(e for e in errors if "100% agreement" in e)
+    assert "passed=56" in detail
+    assert "total=62" in detail
+    assert "agreement_rate=0.9" in detail
 
 
 def test_verified_calibration_rejects_unreadable_artifact(tmp_path: Path) -> None:
@@ -599,6 +604,36 @@ def test_calibration_malformed_base_url_errors_redact_credentials(
         # display form by design (diagnostics still identify the endpoint).
         for secret in ("hunter2", "judge-operator"):
             assert secret not in joined
+
+
+def test_calibration_agreement_error_redacts_credential_bearing_fields(
+    tmp_path: Path,
+) -> None:
+    # #1418 (adversarial-boundary, #252): the agreement diagnostic echoes the
+    # artifact's passed/total/agreement_rate. A credential URL planted in any
+    # echoed field — string, container, or stringified payload — must never
+    # reach the error list, and the diagnostic must still fire and name the
+    # fields.
+    hostile_cases: list[tuple[str, object]] = [
+        ("passed", USERINFO_URL),
+        ("total", USERINFO_URL),
+        ("agreement_rate", USERINFO_URL),
+        ("passed", {"url": USERINFO_URL}),
+        ("agreement_rate", [USERINFO_URL]),
+        ("total", json.dumps({"t": USERINFO_URL})),
+        ("agreement_rate", f"see {USERINFO_URL}"),
+        ("agreement_rate", f"https://relay.internal/{USERINFO_URL}"),
+    ]
+    for field, hostile in hostile_cases:
+        art = _write_artifact(tmp_path / "c.json", model="m")
+        payload = json.loads(art.read_text(encoding="utf-8"))
+        payload[field] = hostile
+        art.write_text(json.dumps(payload))
+        _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH, "http://x")
+        joined = "\n".join(errors)
+        assert any("did not record 100% agreement" in e for e in errors), field
+        for secret in ("hunter2", "judge-operator"):
+            assert secret not in joined, f"{secret} leaked via {field}"
 
 
 def test_calibration_rejects_legacy_artifact_without_digest(tmp_path: Path) -> None:

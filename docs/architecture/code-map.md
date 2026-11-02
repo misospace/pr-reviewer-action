@@ -37,6 +37,8 @@ Not part of the action. `scripts/eval_harness.py` (drives `node dist/index.js ru
 
 - **`scripts/forge_cli.py`** — the CLI adapter over the configured forge capability (`pr_reviewer/forge.py`): every forge API read/write in the operational tooling (release convergence, the manual release, the harvest branch push) goes through it, so the token rides only the `Authorization` header and redirects stay refused.
 
+Every forge API read and write in the Python tooling goes through `pr_reviewer/forge.py` — the configured forge capability: the credential rides only the `Authorization` header, redirects are refused, and a configured base URL that uses plaintext HTTP for a host that is not loopback is refused before any byte goes out. The weekly eval summary's #472 tracking comment (`scripts/eval_weekly_summary.py`) is written through that capability (#1407); no Python script under `scripts/` hand-rolls a forge request.
+
 ### v3 TypeScript runtime (`src/`)
 
 The v3 runtime is a set of faithful ports of the retired v2 boundaries.
