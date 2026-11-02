@@ -353,7 +353,8 @@ class TestForgeClientAttachesAuthorizationOnlyToValidatedOrigin:
                 base_url=f"http://127.0.0.1:{server.server_port}",
                 token=SECRET,
             )
-            assert client.get("/repos/test/repo") == {"ok": True}
+            payload = client.get("/repos/test/repo")
+            assert payload == {"ok": True}
             assert seen["auth"] == f"Bearer {SECRET}"
         finally:
             server.shutdown()
