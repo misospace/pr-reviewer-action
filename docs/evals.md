@@ -452,7 +452,13 @@ environment variable named by `api_key_env`: keys are never stored in the
 plan or report. Dry-run validates and prints a redacted plan without needing
 credentials or contacting an endpoint. The report records resolved lane
 identity and redacted profile provenance under `metadata.lane`; existing
-`mode_summary` keys do not change. For lane runs, the harness clears ambient
+`mode_summary` keys do not change. A profile base URL is recorded with any
+URL userinfo redacted (`https://***@host/v1`). An operator endpoint can carry
+a credential in its userinfo, and reports are shared artifacts (#1417). The
+run still contacts the full endpoint. The redaction covers every recorded
+copy of the endpoint: the lane projection under `metadata.lane`, the model
+string in each run record, and the failure message of a run that errored. It
+also covers the dry-run plan print. For lane runs, the harness clears ambient
 `AI_SPECIALIST_*` variables so shell exports cannot leak between lanes, and
 each run receives its own private artifact directory.
 

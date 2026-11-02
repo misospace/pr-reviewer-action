@@ -3,9 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from pr_reviewer.http_safe import redact_url_userinfo  # noqa: E402
 
 LANE_PLAN_VERSION = 1
 SUPPORTED_KINDS = ("primary_only", "same_model_specialists", "heterogeneous_specialists")
@@ -17,6 +24,10 @@ SPECIALIST_ENV_KEYS = (
     "AI_SPECIALIST_SECURITY_MODEL", "AI_SPECIALIST_TESTS_MODEL",
 )
 LANE_ID_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
+# Report-facing URL fields of the lane projection. An operator endpoint can
+# carry a credential in its userinfo, and the projection is recorded in shared
+# eval reports (#1417), so every URL in it is redacted before it is written.
+LANE_URL_FIELDS = frozenset({"base_url", "url", "endpoint"})
 
 
 class LaneConfigError(ValueError):
@@ -161,7 +172,37 @@ def select_lane(plan: LanePlan, lane_id: str | None) -> Lane:
 
 
 def _profile_public(profile: Profile, name: str) -> dict[str, str]:
-    return {"profile": name, "model": profile.model, "base_url": profile.base_url, "api_format": profile.api_format}
+    # #1417: the public projection is display/report state, so the profile's
+    # base URL is recorded with any userinfo redacted. The run itself still
+    # uses the full endpoint (ResolvedLane.base_url).
+    return {
+        "profile": name,
+        "model": profile.model,
+        "base_url": redact_url_userinfo(profile.base_url),
+        "api_format": profile.api_format,
+    }
+
+
+def lane_report_projection(public: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the report-facing lane projection with every URL's userinfo
+    redacted (#1417).
+
+    The harness records this mapping in the eval report, and a report is a
+    shared artifact: an operator endpoint can carry a credential in its
+    userinfo (``https://user:pass@host``). Redaction happens here, at the
+    report boundary, so no URL reaches the written report even if the
+    projection gains a new URL field later.
+    """
+    def _redact(value: Any, key: str | None) -> Any:
+        if isinstance(value, Mapping):
+            return {k: _redact(v, k) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_redact(item, key) for item in value]
+        if isinstance(value, str) and key in LANE_URL_FIELDS:
+            return redact_url_userinfo(value)
+        return value
+
+    return _redact(public, None)
 
 
 def resolve_lane(plan: LanePlan, lane: Lane, environ: Mapping[str, str]) -> ResolvedLane:

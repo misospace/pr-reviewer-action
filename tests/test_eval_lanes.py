@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -14,6 +15,10 @@ import eval_lanes
 import eval_harness
 
 SECRET = "SUPER-SECRET-CANARY-9f3a"
+# #1417: an operator endpoint can carry a credential in its userinfo; the
+# credential must never reach a recorded report, but the run still uses it.
+LANE_BASE_URL = "https://lane-operator:hunter2@models.example/v1"
+REDACTED_BASE_URL = "https://***@models.example/v1"
 
 
 def plan_data() -> dict:
@@ -35,6 +40,13 @@ def write_plan(tmp_path: Path, data: dict | None = None) -> Path:
     path = tmp_path / "lanes.json"
     path.write_text(json.dumps(data if data is not None else plan_data()), encoding="utf-8")
     return path
+
+
+def credentialed_plan_data() -> dict:
+    """Plan whose primary profile endpoint carries a credential in its userinfo."""
+    data = plan_data()
+    data["profiles"]["primary"]["base_url"] = LANE_BASE_URL
+    return data
 
 
 def load_one(tmp_path: Path, kind: str) -> tuple[eval_lanes.LanePlan, eval_lanes.Lane]:
@@ -193,3 +205,121 @@ def test_legacy_model_defaults_preserved(tmp_path: Path, monkeypatch: pytest.Mon
     ])
     assert eval_harness.main() == 0
     assert "Model: explicit-model" in capsys.readouterr().err
+
+
+def run_lane_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[int, Path, list[dict]]:
+    """Drive the harness over a lane whose endpoint carries a credential.
+
+    The stubbed run records the model_config it was handed, so the test can
+    prove the run still contacts the full endpoint while the written report
+    records only the redacted projection.
+    """
+    plan_path = write_plan(tmp_path, credentialed_plan_data())
+    corpus_path = tmp_path / "corpus.json"
+    corpus_path.write_text(json.dumps({"benchmark_corpus": [{
+        "number": 1, "repo_full_name": "test/repo",
+        "url": "https://github.com/test/repo/pull/1", "known_findings": [],
+    }]}), encoding="utf-8")
+    report_path = tmp_path / "report.json"
+    monkeypatch.setenv("PRIMARY_KEY", "lane-secret")
+    seen_configs: list[dict] = []
+
+    def fake_run_review_for_pr(pr, mode, work_dir, model_config, **kwargs):
+        seen_configs.append(model_config)
+        return eval_harness.ReviewRun(
+            mode=mode, pr_number=pr["number"], repo_full_name=pr["repo_full_name"],
+            error=None,
+        )
+
+    monkeypatch.setattr("eval_harness.run_review_for_pr", fake_run_review_for_pr)
+    monkeypatch.setattr(sys, "argv", [
+        "eval_harness.py", "--corpus", str(corpus_path), "--lanes-file", str(plan_path),
+        "--lane", "primary", "--modes", "tools_off", "--runs-per-mode", "1",
+        "--output", str(report_path),
+    ])
+    exit_code = eval_harness.main()
+    return exit_code, report_path, seen_configs
+
+
+def test_lane_public_projection_redacts_base_url_userinfo(tmp_path: Path) -> None:
+    plan = eval_lanes.load_lane_plan(write_plan(tmp_path, credentialed_plan_data()))
+    lane = eval_lanes.select_lane(plan, "primary")
+    resolved = eval_lanes.resolve_lane(plan, lane, {"PRIMARY_KEY": "lane-secret"})
+
+    # The projection is report/display state, so the endpoint credential must
+    # not survive into any of its serialized forms.
+    for output in (
+        json.dumps(resolved.public),
+        json.dumps(eval_lanes.lane_plan_public_summary(plan)),
+        eval_lanes.format_lane(plan, lane),
+    ):
+        assert "hunter2" not in output
+        assert "lane-operator" not in output
+    assert resolved.public["primary"]["base_url"] == REDACTED_BASE_URL
+    assert REDACTED_BASE_URL in json.dumps(resolved.public)
+
+    # Only the recording is redacted: the run still uses the full endpoint.
+    assert resolved.base_url == LANE_BASE_URL
+
+
+def test_harness_report_metadata_never_records_base_url_userinfo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    exit_code, report_path, _ = run_lane_harness(tmp_path, monkeypatch)
+    assert exit_code == 0
+
+    report_text = report_path.read_text(encoding="utf-8")
+    # The report is a shared artifact: the endpoint credential must not be in it.
+    assert "hunter2" not in report_text
+    assert "lane-operator" not in report_text
+
+    report = json.loads(report_text)
+    assert report["metadata"]["lane"]["primary"]["base_url"] == REDACTED_BASE_URL
+
+
+def test_lane_run_still_uses_the_full_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    exit_code, _report_path, seen_configs = run_lane_harness(tmp_path, monkeypatch)
+    assert exit_code == 0
+    assert seen_configs, "the harness never ran a review"
+    # Redaction applies to the recorded projection only; the run env still
+    # carries the full endpoint (model_config["base_url"] -> AI_BASE_URL).
+    assert seen_configs[0]["base_url"] == LANE_BASE_URL
+
+
+def test_redact_url_userinfo_helper_redacts_userinfo_only() -> None:
+    assert eval_lanes.redact_url_userinfo("https://u:p@host/v1") == "https://***@host/v1"
+    assert eval_lanes.redact_url_userinfo("https://host/v1") == "https://host/v1"
+
+
+def test_lane_report_projection_redacts_urls_at_any_depth() -> None:
+    """#1417: the lane report projection is the last boundary before an
+    operator endpoint reaches a shared eval report.
+
+    Every URL field must be redacted wherever it appears — top level, under
+    a nested mapping, or inside a list — and the caller's mapping must not
+    be mutated in place (the run's own state keeps the full endpoint).
+    """
+    public = {
+        "base_url": LANE_BASE_URL,
+        "nested": {"base_url": LANE_BASE_URL},
+        "lanes": [{"base_url": LANE_BASE_URL}],
+        "url": LANE_BASE_URL,
+        "endpoint": LANE_BASE_URL,
+        "model": "some-model",
+    }
+    before = copy.deepcopy(public)
+
+    projection = eval_lanes.lane_report_projection(public)
+
+    # The input is untouched: redaction happens on a copy.
+    assert public == before
+
+    serialized = json.dumps(projection)
+    assert "hunter2" not in serialized
+    assert "lane-operator" not in serialized
+
+    assert projection["base_url"] == REDACTED_BASE_URL
+    assert projection["nested"]["base_url"] == REDACTED_BASE_URL
+    assert projection["lanes"][0]["base_url"] == REDACTED_BASE_URL
+    assert projection["url"] == REDACTED_BASE_URL
+    assert projection["endpoint"] == REDACTED_BASE_URL
+    # A non-URL field survives byte-identical.
+    assert projection["model"] == "some-model"

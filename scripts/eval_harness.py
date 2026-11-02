@@ -38,6 +38,7 @@ for _p in (str(ROOT), str(SCRIPT_DIR)):
 
 import eval_lanes
 
+from pr_reviewer.http_safe import redact_urls_in_text
 from pr_reviewer.semantic_eval import (
     SemanticCorpus,
     SemanticResult,
@@ -1532,7 +1533,11 @@ def populate_review_output(run: ReviewRun, repo_path: Path) -> None:
         except OSError:
             model_text = ""
         if model_text:
-            run.model_used = model_text
+            # #1417: the engine string embeds the endpoint
+            # ("model@https://user:pass@host/v1 (openai)"), and the run's
+            # record reaches the shared report. Only the recorded copy is
+            # redacted; the run itself used the full endpoint.
+            run.model_used = redact_urls_in_text(model_text)
 
         marker = model_text.lower()
         tier = "primary"
@@ -2185,7 +2190,13 @@ def run_review_for_pr(
                             if isinstance(lead, dict)
                         ]
             else:
-                run.error = f"Review failed (exit {result.returncode}): {result.stderr[:500]}"
+                # #1417: the runtime logs the endpoint it called, so the
+                # captured stderr can carry the endpoint credential. The
+                # recorded message is redacted; the child's own output is not.
+                run.error = (
+                    f"Review failed (exit {result.returncode}): "
+                    f"{redact_urls_in_text(result.stderr[:500])}"
+                )
 
     except subprocess.TimeoutExpired:
         run.wall_clock_sec = time.monotonic() - start
@@ -3319,7 +3330,10 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
     if args.dry_run:
         return 0
     if lane_resolved is not None:
-        report["metadata"]["lane"] = dict(lane_resolved.public)
+        # #1417: the report is shared, so the recorded lane projection never
+        # carries a profile base URL's userinfo. The run itself still used the
+        # full endpoint (model_config["base_url"] -> AI_BASE_URL).
+        report["metadata"]["lane"] = eval_lanes.lane_report_projection(lane_resolved.public)
 
     # #840: surface timeout counts per mode prominently.
     timeout_lines = [
@@ -3515,7 +3529,9 @@ def main() -> int:
     # Generate report
     report = generate_report(results, corpus, equivalent_paths=args.equivalent_paths)
     if lane_resolved is not None:
-        report["metadata"]["lane"] = dict(lane_resolved.public)
+        # #1417: redacted at the report boundary; the run used the full
+        # endpoint via AI_BASE_URL.
+        report["metadata"]["lane"] = eval_lanes.lane_report_projection(lane_resolved.public)
     report["metadata"]["corpus_source"] = str(args.corpus)
     report["metadata"]["claim_falsification"] = claim_falsification
     report["metadata"]["requirement_trace"] = args.requirement_trace == "true"
