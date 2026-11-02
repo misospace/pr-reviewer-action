@@ -335,3 +335,110 @@ def test_main_rejects_invalid_corpus(tmp_path: Path) -> None:
     assert runner.main(
         ["--corpus", str(bad), "--judge-model", "m", "--base-url", "http://x"]
     ) == 2
+
+
+# ── credential-free argv (#1413) ────────────────────────────────────────────
+
+_SECRET = "sk-secret-value"
+
+
+def _no_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the judge transport unreachable: a refusal must precede it."""
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("the judge transport must not be reached")
+
+    monkeypatch.setattr(runner, "_openai_judge_call", _boom)
+
+
+def _run_argv(extra: list[str]) -> list[str]:
+    """An otherwise valid run, plus the argument under test."""
+    return [
+        "--corpus", str(CORPUS_PATH),
+        "--judge-model", "m", "--base-url", "http://x",
+        *extra,
+    ]
+
+
+def test_api_key_argument_is_refused_without_echo(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = runner.main(_run_argv(["--api-key", _SECRET]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_api_key_equals_form_is_refused_without_echo(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = runner.main(_run_argv([f"--api-key={_SECRET}"]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_api_key_abbreviation_is_refused_without_echo(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = runner.main(_run_argv(["--api-k", _SECRET]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_unknown_argument_is_refused_without_echo(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = runner.main(_run_argv(["--mystery-flag", _SECRET]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "unrecognized argument" in err
+
+
+def test_judge_key_comes_from_the_environment(
+    corpus: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JUDGE_API_KEY", "env-key-value")
+    recorded: list[str] = []
+
+    def _fake_judge_call(
+        judge_model: str, base_url: str, api_key: str, timeout_sec: int
+    ):
+        recorded.append(api_key)
+        return _judge_from(corpus)
+
+    monkeypatch.setattr(runner, "_openai_judge_call", _fake_judge_call)
+    assert runner.main(_run_argv([])) == 0
+    assert recorded == ["env-key-value"]
+
+
+def test_credential_refusal_comes_before_the_parser(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The refusal runs before argparse, so no parser message can quote a value.
+    code = runner.main(["--api-key", _SECRET])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_a_value_for_a_known_option_is_not_echoed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # argparse quotes the value of an option in its own error message. The
+    # parser of this script must not, so a mistyped secret stays out of the log.
+    with pytest.raises(SystemExit) as excinfo:
+        runner.main(_run_argv(["--timeout", _SECRET]))
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert _SECRET not in err

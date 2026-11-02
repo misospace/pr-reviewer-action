@@ -231,7 +231,11 @@ CI and never affects a review verdict.
       --output judge-calibration-report.json
   ```
 
-  The judge key is read from `JUDGE_API_KEY`; never pass it on argv.
+  The judge key is read from `JUDGE_API_KEY` and must never be passed on argv.
+  Both `scripts/run_judge_calibration.py` and `scripts/live_judge_score.py` read
+  the judge key from the environment only. Both refuse a credential argument
+  and an argument they do not know. A refusal names the option only. It never
+  echoes an argument value, because a mistyped value may carry a secret.
 
 - **`scripts/live_judge_score.py`** — scores blinded live A/B outputs
   (`--baseline` / `--treatment`, each `{"arm", "reps", "scenarios": [{"scenario",
