@@ -577,6 +577,57 @@ class TestTokenNeverLeaks:
         assert out == ""
         assert "42" not in err
 
+    def test_a_numeric_token_reflected_as_a_branch_pr_number_is_refused(
+        self, cli, stub, monkeypatch
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "42")
+        stub.set_state(open_prs={"bot/x": 42})
+        code, out, err = run(
+            cli, "pr-number-for-branch", "--repo", "o/r", "--branch", "bot/x"
+        )
+        assert code == 2
+        assert out == ""
+        assert "42" not in err
+
+    def test_a_numeric_token_reflected_as_a_created_pr_number_is_refused(
+        self, cli, stub, monkeypatch
+    ):
+        # The create response's number is forge-supplied like the reads':
+        # the stub hands out 900, so here the hostile forge returns the
+        # numeric token itself as the created pull request's number.
+        monkeypatch.setenv("GITHUB_TOKEN", "900")
+        code, out, err = run(
+            cli,
+            "pr-create",
+            "--repo",
+            "o/r",
+            "--head",
+            "bot/x",
+            "--base",
+            "main",
+            "--title",
+            "t",
+            "--body",
+            "b",
+        )
+        assert code == 2
+        assert out == ""
+        assert "900" not in err
+
+    def test_values_still_print_when_no_credential_is_configured(self, cli, stub, monkeypatch):
+        # The gate compares with the configured credential: with none
+        # configured there is nothing to reflect, and printed reads work.
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        sha = "a" * 40
+        stub.set_state(tag_refs={"v1.2.3": sha}, labels={"42": ["bug"]})
+        code, out, err = run(cli, "tag-ref-sha", "--repo", "o/r", "--tag", "v1.2.3")
+        assert code == 0
+        assert out == f"{sha}\n"
+        code, out, err = run(cli, "issue-labels", "--repo", "o/r", "--number", "42")
+        assert code == 0
+        assert out == "bug\n"
+
     def test_a_legitimate_tag_sha_still_prints_when_the_token_is_hex(self, cli, stub, monkeypatch):
         # The gate refuses the credential, not every hex value: a SHA that
         # is not the token prints normally even when the token is hex.
