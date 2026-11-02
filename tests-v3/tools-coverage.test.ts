@@ -37,6 +37,7 @@ function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
     requiredEvidenceRequired: 0,
     requiredEvidenceCredits: [],
     requiredEvidenceAttempts: 0,
+    requiredEvidenceWindowAttempts: 0,
     requiredEvidenceReleased: false,
     ...overrides,
   };

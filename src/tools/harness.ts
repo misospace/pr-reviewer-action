@@ -3083,13 +3083,20 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
                 : Math.min(input.reserveForRequiredEvidence ?? 0, outcome.requestsRemaining),
               ...(input.requiredEvidence !== undefined ? { requiredEvidence: input.requiredEvidence } : {}),
               requiredEvidenceCredits: outcome.requiredEvidenceCredits,
-              // #1396 (review): the attempts cap is RUN-WIDE across the seam.
-              // The continuation starts from the main loop's evidence-attempt
-              // count (no reset to zero) and the cap threshold stays the
-              // ORIGINAL unclamped reserve, so the seam can never re-impose
-              // gating the run already outspent nor re-open a cap the main
-              // loop already consumed most of.
+              // #1396 (review): the RUN-WIDE evidence-attempt count threads
+              // across the seam so the continuation's telemetry reports the
+              // run total (the fold below is REPLACE, never add).
               requiredEvidenceAttemptsPrior: outcome.requiredEvidenceAttempts,
+              // #1396 (review blocker): the no-lockout attempts cap is
+              // WINDOW-scoped and RUN-WIDE across the seam. The continuation
+              // starts from the main loop's IN-WINDOW attempt count (no
+              // reset to zero) and the cap threshold stays the ORIGINAL
+              // unclamped reserve, so the seam can never re-impose gating a
+              // run already outspent inside its window nor re-open a cap the
+              // main loop already consumed most of — while evidence calls
+              // spent BEFORE the main loop's window opened drain neither the
+              // main window's nor the continuation's no-lockout allowance.
+              requiredEvidenceWindowAttemptsPrior: outcome.requiredEvidenceWindowAttempts,
               requiredEvidenceAttemptsCap: Math.max(0, Math.floor(input.reserveForRequiredEvidence ?? 0)),
               // #1198: the repair round shares the ORIGINAL run's absolute
               // deadline — the allowance above is a share, never an extension.

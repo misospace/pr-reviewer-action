@@ -1835,30 +1835,41 @@ test("#1379: dependencyEvidenceObligationsForCall attributes a call from its own
 test("#1379: the attempts cap releases the window even with zero credits (no lockout)", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");
-  // Reserve 3, three fetches of UNATTRIBUTED hosts: nothing is credited, but
-  // the loop spent the whole reserve on evidence attempts, so the window
-  // opens within the tail it reserved and optional work executes again.
+  // Reserve 3, three fetches of UNATTRIBUTED hosts INSIDE the enforced
+  // window (budget 4 reserves 3, so the window gates from the second
+  // disposition on): nothing is credited, but the loop spent the whole
+  // reserve on gated evidence attempts, so the cap fires and optional work
+  // would execute again. The no-lockout counter counts IN-WINDOW attempts
+  // only — see the pre-window counterexample pin below.
   const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
-    openAiCall("c1", "web_fetch", '{"url":"https://unrelated.test/a"}'),
-    openAiCall("c2", "web_fetch", '{"url":"https://elsewhere.test/b"}'),
-    openAiCall("c3", "web_fetch", '{"url":"https://nowhere.test/c"}'),
-    openAiCall("c4", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://unrelated.test/a"}'),
+    openAiCall("c3", "web_fetch", '{"url":"https://elsewhere.test/b"}'),
+    openAiCall("c4", "web_fetch", '{"url":"https://nowhere.test/c"}'),
     openAiText("done"),
   ]);
   const outcome = await driveToolLoop(conversation, postFn, executeFn, {
     apiFormat: "openai",
     model: "m",
-    budgets: adaptiveLoopBudgets(4, 6, 120),
+    // maxToolCalls 4 with reserve 3: the window gates from the second
+    // disposition on, so c1 is the only pre-window call and c2-c4 are the
+    // three gated attempts the cap counts.
+    budgets: adaptiveLoopBudgets(4, 4, 120),
     timeFn,
     reserveForRequiredEvidence: 3,
     requiredEvidence: depRows(3),
   });
   assert.equal(outcome.requiredEvidenceAttempts, 3);
+  assert.equal(outcome.requiredEvidenceWindowAttempts, 3);
   assert.deepEqual(outcome.requiredEvidenceCredits, []);
   assert.equal(outcome.requiredEvidenceReleased, true);
   assert.equal(outcome.requiredEvidenceRefusals, 0);
-  assert.deepEqual(executedCalls.map((c) => c.tool), ["web_fetch", "web_fetch", "web_fetch", "read_file"]);
-  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
+  assert.deepEqual(executedCalls.map((c) => c.tool), ["read_file", "web_fetch", "web_fetch", "web_fetch"]);
+  // The third gated attempt fired the cap exactly as the request budget ran
+  // out: the window released with zero credits, which is the no-lockout
+  // guarantee under the in-window counter.
+  assert.equal(outcome.stopReason, STOP_BUDGET);
+  assert.equal(outcome.requestsRemaining, 0);
 });
 
 test("#1379: the reserve commits only the obligations its tail can pay for", async () => {
@@ -1890,19 +1901,34 @@ test("#1379: the reserve commits only the obligations its tail can pay for", asy
   assert.equal(executedCalls.length, 3);
   assert.equal(outcome.stopReason, STOP_MODEL_DONE);
 
-  // Reserve 1: required 1, and ANY single evidence call releases — the
-  // historical one-call release is preserved through the attempts cap.
+  // Reserve 1: required 1, and ANY single IN-WINDOW evidence call releases —
+  // the historical one-call release is preserved through the attempts cap.
+  // The two-round budget puts round 2 inside the window (rounds remaining
+  // drop to the reserve), so the unattributed fetch spends the one gated
+  // attempt, the cap fires, and the optional read executes again.
   const conversation2 = new Conversation();
   conversation2.addUser("corpus");
   const loop2 = recordingLoop([
-    openAiCall("c1", "web_fetch", '{"url":"https://unrelated.test/a"}'),
-    openAiCall("c2", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c1", "read_file", '{"path":"pre.ts"}'),
+    {
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              { id: "c2", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://unrelated.test/a"}' } },
+              { id: "c3", type: "function", function: { name: "read_file", arguments: '{"path":"a.ts"}' } },
+            ],
+          },
+        },
+      ],
+    },
     openAiText("done"),
   ]);
   const outcome2 = await driveToolLoop(conversation2, loop2.postFn, loop2.executeFn, {
     apiFormat: "openai",
     model: "m",
-    budgets: adaptiveLoopBudgets(4, 3, 120),
+    budgets: adaptiveLoopBudgets(1, 3, 120),
     timeFn,
     reserveForRequiredEvidence: 1,
     requiredEvidence: depRows(1),
@@ -1910,9 +1936,10 @@ test("#1379: the reserve commits only the obligations its tail can pay for", asy
   assert.equal(outcome2.requiredEvidenceRequired, 1);
   assert.deepEqual(outcome2.requiredEvidenceCredits, []);
   assert.equal(outcome2.requiredEvidenceAttempts, 1);
+  assert.equal(outcome2.requiredEvidenceWindowAttempts, 1);
   assert.equal(outcome2.requiredEvidenceReleased, true);
   assert.equal(outcome2.requiredEvidenceRefusals, 0);
-  assert.deepEqual(loop2.executedCalls.map((c) => c.tool), ["web_fetch", "read_file"]);
+  assert.deepEqual(loop2.executedCalls.map((c) => c.tool), ["read_file", "web_fetch", "read_file"]);
 });
 
 test("#1379: redundant same-obligation fetches do not open the window", async () => {
@@ -2035,11 +2062,13 @@ test("#1396: the repair seam's attempts cap is run-wide — a continuation never
     timeFn,
     // The seam's clamp: the continuation holds all 3 of its requests inside
     // the reserved tail (run reserve 4, clamped to the 3 handed) — but the
-    // CAP stays the original run-wide 4, and the attempt count starts at the
-    // main loop's 3.
+    // CAP stays the original run-wide 4, and the IN-WINDOW attempt count
+    // starts at the main loop's 3 (its window already spent 3 gated
+    // attempts; its pre-window spend, if any, drains nothing).
     reserveForRequiredEvidence: 3,
     requiredEvidence: depRows(3),
     requiredEvidenceAttemptsPrior: 3,
+    requiredEvidenceWindowAttemptsPrior: 3,
     requiredEvidenceAttemptsCap: 4,
   });
   // c1 (optional, in-window) is refused while the run-wide cap has attempts
@@ -2051,10 +2080,11 @@ test("#1396: the repair seam's attempts cap is run-wide — a continuation never
     ["web_fetch", "read_file"],
   );
   assert.equal(outcome.requiredEvidenceAttempts, 4);
+  assert.equal(outcome.requiredEvidenceWindowAttempts, 4);
   assert.equal(outcome.requiredEvidenceReleased, true);
   assert.deepEqual(outcome.requiredEvidenceCredits, []);
-  // And the reverse guard: the same continuation WITHOUT the run-wide
-  // threading (the pre-fix shape — reset count, clamped cap) keeps its own
+  // And the reverse guard: the same continuation WITHOUT the seam threading
+  // (the pre-fix shape — reset count, clamped cap) keeps its own
   // full gated reserve, so the optional read stays refused and only the
   // evidence call executes.
   const conversation2 = new Conversation();
@@ -2079,7 +2109,60 @@ test("#1396: the repair seam's attempts cap is run-wide — a continuation never
     ["web_fetch"],
   );
   assert.equal(outcome2.requiredEvidenceAttempts, 1);
+  assert.equal(outcome2.requiredEvidenceWindowAttempts, 1);
   assert.equal(outcome2.requiredEvidenceReleased, false);
+});
+
+test("#1396 review blocker: pre-window evidence spend cannot deactivate the reserved window", async () => {
+  // The filed counterexample, budget 8 / reserve 4: spend the first four
+  // requests on repeated release-note/unattributed fetches BEFORE the
+  // reserved tail. Under the pre-fix run-wide cap those four attempts alone
+  // reached the cap, every remaining shape row deactivated before the tail
+  // was scarce, and the reserved window did not gate at all — the tail then
+  // went to optional calls while provenance and security stayed unattempted.
+  // The no-lockout counter now counts only IN-WINDOW attempts, so the window
+  // still gates the tail: the optional read is refused, the reserved
+  // requests go to the outstanding evidence, and the cap still fires for a
+  // model that spends the whole reserve on gated attempts without a
+  // discharge.
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "web_fetch", '{"url":"https://upstream.test/releases/tag/v1.0.0"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://upstream.test/releases/tag/v2.0.0"}'),
+    openAiCall("c3", "web_fetch", '{"url":"https://unrelated.test/a"}'),
+    openAiCall("c4", "web_fetch", '{"url":"https://unrelated.test/b"}'),
+    openAiCall("c5", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c6", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
+    openAiCall("c7", "web_fetch", '{"url":"https://example.test/security/advisories"}'),
+    openAiCall("c8", "read_file", '{"path":"b.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: { ...adaptiveLoopBudgets(4, 8, 120), maxRounds: 20 },
+    timeFn,
+    reserveForRequiredEvidence: 4,
+    requiredEvidence: depRows(4),
+  });
+  // The four pre-window fetches execute freely (the window is not enforcing
+  // yet) and count toward the run-wide telemetry only.
+  assert.equal(outcome.requiredEvidenceAttempts, 6);
+  assert.equal(outcome.requiredEvidenceWindowAttempts, 2);
+  // c5 (optional, first in-window call) is REFUSED: provenance and
+  // security_advisory are outstanding and the gated patience is untouched.
+  assert.equal(outcome.requiredEvidenceRefusals, 1);
+  // The tail then pays for the outstanding evidence; once every row is
+  // discharged the window opens and the optional read executes.
+  assert.deepEqual(
+    executedCalls.map((c) => `${c.tool}${typeof c.args.path === "string" ? `:${c.args.path}` : ""}`),
+    ["web_fetch", "web_fetch", "web_fetch", "web_fetch", "web_fetch", "web_fetch", "read_file:b.ts"],
+  );
+  assert.deepEqual(outcome.requiredEvidenceCredits, ["provenance", "release_delta", "security_advisory"]);
+  assert.equal(outcome.requiredEvidenceReleased, true);
+  assert.equal(outcome.requestsRemaining, 1);
+  assert.equal(outcome.stopReason, STOP_MODEL_DONE);
 });
 
 test("#1379: the window note names the outstanding obligations and reverts to the budget note after release", async () => {

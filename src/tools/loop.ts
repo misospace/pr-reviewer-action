@@ -121,7 +121,10 @@ const LOW_BUDGET_TURN_NOTE =
  *   dependencyEvidenceObligationsForCall (review blocker 5728634290: ONE
  *   release-notes fetch must not unlock local archaeology while provenance
  *   and security advisories are still unchecked) — or until the loop has
- *   spent the whole reserve on evidence attempts, any other tool call
+ *   spent the whole reserve on evidence attempts INSIDE the enforced window
+ *   (the no-lockout cap counts gated attempts only; evidence calls spent
+ *   before the window opened drain the run-wide telemetry counter, never
+ *   the cap), any other tool call
  *   requested inside the window is REFUSED with a synthetic error and
  *   spends none of the reserved requests. Crediting and the attempts cap
  *   are executor-status-agnostic: a refused host or failed fetch still
@@ -316,7 +319,9 @@ const SOURCE_CODE_HOSTS: ReadonlySet<string> = new Set([
  * non-string target attributes nothing. A call can cover several
  * obligations; matches are returned deduped in canonical
  * DEPENDENCY_EVIDENCE_OBLIGATIONS order (possibly empty — an unattributed
- * evidence call still counts toward the attempts cap, just credits nothing).
+ * evidence call executed inside the enforced window still counts toward the
+ * no-lockout attempts cap, just credits nothing; pre-window it counts only
+ * toward the run-wide attempts telemetry).
  */
 export function dependencyEvidenceObligationsForCall(
   name: string,
@@ -627,11 +632,22 @@ export interface LoopOutcome {
    * evidence-channel calls (see DEPENDENCY_EVIDENCE_TOOLS) over the whole
    * run, whatever their target or executor status — run-wide across the
    * #1145 repair seam: a continuation seeded by `requiredEvidenceAttemptsPrior`
-   * reports the prior loop's attempts too. The no-lockout cap:
-   * dependency-evidence shape rows release their gating once this reaches
-   * the cap (the reserve, or the run-wide threshold threaded across the
-   * seam), even if nothing was credited. */
+   * reports the prior loop's attempts too. TELEMETRY ONLY: the no-lockout
+   * cap below is driven by `requiredEvidenceWindowAttempts` instead, so
+   * pre-window evidence spending can never deactivate the reserved window
+   * before it starts gating (#1396 review blocker).
+   * */
   requiredEvidenceAttempts: number;
+  /** #1396 (review blocker): executed upstream evidence-channel calls made
+   * INSIDE the enforced obligation window (the window check ran and the
+   * call was in-window). This is the counter the no-lockout cap drives
+   * from: dependency-evidence shape rows release their gating once it
+   * reaches the cap (the reserve, or the original threshold threaded
+   * across the seam), even if nothing was credited. Pre-window evidence
+   * attempts count only toward `requiredEvidenceAttempts` — the window's
+   * no-lockout allowance is the reserved tail's patience, not the run's
+   * total evidence spend. */
+  requiredEvidenceWindowAttempts: number;
   /** #1396 (from #1379 blocker 5728634290): whether the enforced window was
    * released at loop end — reserve 0 (always open), or every tracked row
    * discharged or cap-released. */
@@ -782,12 +798,24 @@ export interface DriveToolLoopOptions {
   /**
    * #1396 (review): evidence-channel attempts already recorded by an earlier
    * loop over the SAME conversation — the #1145 repair seam threads the main
-   * loop's count so the no-lockout attempts cap stays RUN-WIDE: the
-   * continuation's shape rows release gating once prior + own attempts reach
-   * the cap, never from a reset zero count. Unset (every main loop) starts
+   * loop's RUN-WIDE count so the continuation's `requiredEvidenceAttempts`
+   * telemetry reports the run total (the harness fold is REPLACE, never
+   * add). This counter no longer drives the no-lockout cap — see
+   * `requiredEvidenceWindowAttemptsPrior`. Unset (every main loop) starts
    * the count at zero.
    */
   requiredEvidenceAttemptsPrior?: number;
+  /**
+   * #1396 (review blocker): in-window evidence-channel attempts already
+   * recorded by an earlier loop over the SAME conversation — the #1145
+   * repair seam threads the main loop's WINDOW-scoped count so the
+   * no-lockout cap stays RUN-WIDE WITHOUT counting pre-window spending:
+   * the continuation's shape rows release gating once prior + own
+   * in-window attempts reach the cap, never from a reset zero count, and
+   * never because the main loop burned evidence calls before its window
+   * opened. Unset (every main loop) starts the count at zero.
+   */
+  requiredEvidenceWindowAttemptsPrior?: number;
   /**
    * #1396 (review): the attempts-cap threshold, overriding the loop's own
    * (possibly tail-clamped) reserve. The repair seam passes the ORIGINAL
@@ -857,6 +885,7 @@ export async function driveToolLoop(
     requiredEvidenceRequired: 0,
     requiredEvidenceCredits: [],
     requiredEvidenceAttempts: 0,
+    requiredEvidenceWindowAttempts: 0,
     requiredEvidenceReleased: false,
   };
   // #1396: hoisted unified reserve; 0 disables the whole mechanism (notes and
@@ -886,14 +915,22 @@ export async function driveToolLoop(
     }
   }
   // Attempted upstream evidence-channel calls over the WHOLE RUN, pre-window
-  // included (the accepted #1379 residual: a model that already burned
-  // `reserve` real upstream lookups the lexical attribution could not
-  // classify has demonstrably prioritized upstream). An executor error still
-  // counts as an attempt — see DEPENDENCY_EVIDENCE_TOOLS. #1396 (review):
-  // the count is run-wide across the #1145 repair seam — a continuation
-  // starts from the prior loop's attempts instead of a reset zero, so the
-  // cap below can never re-impose gating the run already outspent.
+  // included. An executor error still counts as an attempt — see
+  // DEPENDENCY_EVIDENCE_TOOLS. #1396 (review): the count is run-wide across
+  // the #1145 repair seam — a continuation starts from the prior loop's
+  // attempts instead of a reset zero. TELEMETRY ONLY: this counter no longer
+  // drives the no-lockout cap (that is `windowEvidenceAttempts` below), so
+  // evidence calls the model spent BEFORE the reserved window — possibly on
+  // obligations it already discharged, possibly on none — can never
+  // deactivate the window before the tail is even scarce.
   let evidenceAttempts = Math.max(0, Math.floor(options.requiredEvidenceAttemptsPrior ?? 0));
+  // The no-lockout counter: evidence-channel attempts made INSIDE the
+  // enforced window only (see the window block below). The cap exists to
+  // bound the reserved tail's patience — after `attemptsCap` gated evidence
+  // attempts without a discharge, shape rows release so the window can never
+  // lock the model out of its own tail. Attempts outside the window spent
+  // freely-chosen budget and are irrelevant to that patience.
+  let windowEvidenceAttempts = Math.max(0, Math.floor(options.requiredEvidenceWindowAttemptsPrior ?? 0));
   // The cap threshold: the loop's own reserve, unless the caller threads the
   // ORIGINAL run-wide reserve across the repair seam (the clamped reserve a
   // short-tailed continuation holds is a budget share, never a fresh cap).
@@ -907,7 +944,7 @@ export async function driveToolLoop(
   // (#1388 semantics kept exact).
   const rowActive = (row: RequiredEvidenceRow): boolean =>
     !discharged.has(row.id)
-    && !(row.obligation !== undefined && evidenceAttempts >= attemptsCap);
+    && !(row.obligation !== undefined && windowEvidenceAttempts >= attemptsCap);
   const hasActiveRow = (): boolean => pendingRows.some((row) => rowActive(row));
   const anyActiveShapeRow = (): boolean =>
     pendingRows.some((row) => row.obligation !== undefined && rowActive(row));
@@ -1210,12 +1247,18 @@ export async function driveToolLoop(
       // releases runs for real). The window opens when the remaining
       // REQUESTS drop to the reservation OR the remaining ROUNDS do (rounds
       // remaining, counting the current one).
+      let countsTowardAttemptsCap = false;
       if (reserve > 0 && hasActiveRow()) {
         const targets = pendingRows.filter(
           (row) => !discharged.has(row.id) && rowAdmittedByCall(row, call.name, args as Record<string, unknown>),
         );
         const inWindow = budgets.maxToolCalls - callsExecuted <= reserve
           || budgets.maxRounds - (outcome.rounds - 1) <= reserve;
+        // #1396 (review blocker): an evidence call ADMITTED while the window
+        // is actually gating (in-window) is what spends the reserved tail's
+        // no-lockout patience; a call executed before the window opened
+        // spent freely-chosen budget and must not count toward the cap.
+        if (inWindow) countsTowardAttemptsCap = true;
         if (inWindow && targets.length === 0 && !(DEPENDENCY_EVIDENCE_TOOLS.has(call.name) && anyActiveShapeRow())) {
           plan.push({
             callId,
@@ -1244,8 +1287,10 @@ export async function driveToolLoop(
         // window, target, and executor status irrelevant (a refused host or
         // failed fetch still counts). Discharge rides `targets` above, so a
         // redundant call whose every match is already credited opens
-        // nothing.
+        // nothing. The no-lockout cap counter counts only the IN-WINDOW
+        // subset (see `windowEvidenceAttempts` above).
         evidenceAttempts++;
+        if (countsTowardAttemptsCap) windowEvidenceAttempts++;
       }
       toExecute.set(idx, { name: call.name, args: args as Record<string, unknown> });
       plan.push({ callId, kind: "exec", data: idx });
@@ -1354,6 +1399,7 @@ export async function driveToolLoop(
     .filter((row) => discharged.has(row.id))
     .map((row) => row.id);
   outcome.requiredEvidenceAttempts = evidenceAttempts;
+  outcome.requiredEvidenceWindowAttempts = windowEvidenceAttempts;
   outcome.requiredEvidenceReleased = reserve <= 0 || !hasActiveRow();
   // #702: close out the telemetry on every exit path.
   outcome.requestsRemaining = Math.max(0, budgets.maxToolCalls - callsExecuted);

@@ -2841,9 +2841,10 @@ test("#1379: the repair continuation's reserve is clamped to the tail it is hand
   // Run-wide fold across the seam: six evidence attempts (3 in the main
   // loop, 3 in the continuation — the seeded count makes the continuation's
   // outcome the run-wide total), only the lexical provenance credit, and the
-  // window RELEASED: the run-wide attempts cap fired on the continuation's
-  // first fetch (3 prior + 1 = the original reserve of 4) and once released
-  // the remaining handed tail spends freely.
+  // window RELEASED: the no-lockout cap counts IN-WINDOW attempts only, so
+  // the main loop's two pre-window fetches drain nothing — the cap fires on
+  // the continuation's third fetch (1 in-window prior + 3 = the original
+  // reserve of 4) and once released the remaining handed tail spends freely.
   assert.equal(telemetry.budget?.required_evidence_requests_hint, 4);
   assert.equal(telemetry.budget?.required_evidence_attempts, 6);
   assert.deepEqual(telemetry.budget?.required_evidence_credits, ["provenance"]);
