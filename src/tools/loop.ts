@@ -300,9 +300,14 @@ const PUBLISHER_REGISTRY_HOSTS: ReadonlySet<string> = new Set([
   "asia.gcr.io",
 ]);
 
-// Source hosts: only a bare repository root (at most two non-empty path
-// segments, e.g. github.com/owner/repo) counts as a provenance lookup; a
-// deeper path is doing something else (release pages, advisories, files).
+// Source hosts: only the host's canonical repository URL counts as a
+// provenance lookup — owner/repo on github.com/gitlab.com/bitbucket.org,
+// org/project/_git/repo on dev.azure.com. A shallower path identifies no
+// repository (a profile/user page, a bare host, an Azure organization or
+// project), and a deeper path is doing something else (release pages,
+// advisories, files) — review blocker 5738958165: a profile URL must not
+// credit provenance and release the obligation window without an
+// owner/repository lookup ever having been attempted.
 const SOURCE_CODE_HOSTS: ReadonlySet<string> = new Set([
   "github.com",
   "gitlab.com",
@@ -346,8 +351,14 @@ export function dependencyEvidenceObligationsForCall(
     } else if (SOURCE_CODE_HOSTS.has(host)) {
       const afterHost = lower.slice(lower.indexOf(hostToken) + hostToken.length);
       const path = afterHost.split(/[?#]/, 1)[0] ?? "";
-      const segments = path.split("/").filter((segment) => segment !== "").length;
-      if (segments <= 2) matched.add("provenance");
+      const segments = path.split("/").filter((segment) => segment !== "");
+      if (host === "dev.azure.com") {
+        // Azure DevOps' canonical repository URL is org/project/_git/repo;
+        // org or org/project name an organization/project, not a repository.
+        if (segments.length === 4 && segments[2] === "_git") matched.add("provenance");
+      } else if (segments.length === 2) {
+        matched.add("provenance");
+      }
     }
   }
   return DEPENDENCY_EVIDENCE_OBLIGATIONS.filter((obligation) => matched.has(obligation));

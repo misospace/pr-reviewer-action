@@ -1755,8 +1755,8 @@ test("#1379: dependencyEvidenceObligationsForCall attributes a call from its own
   assert.deepEqual(dependencyEvidenceObligationsForCall("web_search", {}), []);
   assert.deepEqual(dependencyEvidenceObligationsForCall("web_search", { query: "" }), []);
   assert.deepEqual(dependencyEvidenceObligationsForCall("web_fetch", { url: "https://upstream.test/status" }), []);
-  // release_delta tokens (and the spec's deep-path pin: >2 segments on a
-  // source host is NOT a provenance root lookup).
+  // release_delta tokens (and the deep-path pin: a compare page on a source
+  // host is a delta lookup, not a provenance root lookup).
   assert.deepEqual(
     dependencyEvidenceObligationsForCall("web_fetch", { url: "https://upstream.test/releases/tag/v1.2.3" }),
     ["release_delta"],
@@ -1774,15 +1774,41 @@ test("#1379: dependencyEvidenceObligationsForCall attributes a call from its own
     dependencyEvidenceObligationsForCall("web_fetch", { url: "https://example.test/security/advisories" }),
     ["security_advisory"],
   );
-  // provenance via a bare source-host repository root (≤2 path segments),
-  // including a www-stripped publisher host and a keyword token.
+  // provenance via the source host's CANONICAL repository shape: exactly
+  // owner/repo on github.com/gitlab.com/bitbucket.org, org/project/_git/repo
+  // on dev.azure.com. Trailing slashes and query strings still map to the
+  // same repository.
   assert.deepEqual(
     dependencyEvidenceObligationsForCall("web_fetch", { url: "https://github.com/owner/repo" }),
     ["provenance"],
   );
   assert.deepEqual(
-    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://gitlab.com/owner" }),
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://gitlab.com/owner/repo/" }),
     ["provenance"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://github.com/owner/repo?tab=readme" }),
+    ["provenance"],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://dev.azure.com/org/project/_git/repo" }),
+    ["provenance"],
+  );
+  // Negative regression (review blocker 5738958165): a profile/user page, a
+  // bare source host, and an Azure org/project identify NO repository, so
+  // none of them credits provenance — the obligation window cannot release
+  // without an owner/repository lookup having been attempted.
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://gitlab.com/owner" }),
+    [],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://github.com" }),
+    [],
+  );
+  assert.deepEqual(
+    dependencyEvidenceObligationsForCall("web_fetch", { url: "https://dev.azure.com/org/project" }),
+    [],
   );
   assert.deepEqual(
     dependencyEvidenceObligationsForCall("web_fetch", { url: "https://www.npmjs.com/package/left-pad" }),
