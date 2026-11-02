@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { isLowConfidence, reviewerRequestedEscalation } from "../src/routing/escalation.js";
 import { CONFIDENCE_MINIMUM_PROMPT_TOKENS } from "../src/confidence/prompt.js";
+import { CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS } from "../src/confidence/scorer.js";
 import { anthropicEffortInactiveWarning, anthropicEffortSupported, anthropicEffortSupportInput, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, anthropicStructuredOutputSupportInput, effectiveWireEffort, effectiveWireResponseFormat, laneAnthropicEffortSupported, laneAnthropicStructuredOutputSupported, normalizeReasoningEffort, resolveConfidenceProfile, resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierReasoningEffort, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
 
 const longReview = "The change is reviewed carefully and the behavior appears correct. No concerns identified in the touched paths.";
@@ -550,9 +551,10 @@ test("#1073: confidence profile inherits the primary lane when ai-confidence-bas
     reasoningEffort: "",
     inheritedTransport: true,
     credentialSource: "primary",
-    // #1368: the documented defaults ride every resolved profile.
-    maxTokens: 4096,
-    promptTokens: 98304,
+    // #1368: the documented defaults ride every resolved profile (#1387:
+    // the resolver's defaults ARE the scorer module's exported constants).
+    maxTokens: CONFIDENCE_MAX_TOKENS,
+    promptTokens: CONFIDENCE_PROMPT_TOKENS,
     modelContextTokens: 0,
     anthropicEffortSupported: false,
     structuredOutputSupported: false,
