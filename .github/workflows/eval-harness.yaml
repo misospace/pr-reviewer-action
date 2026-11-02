@@ -55,6 +55,11 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
+  # The weekly sweep posts the #472 tracking comment
+  # (scripts/eval_weekly_summary.py). A comment on an issue needs
+  # `issues: write`; without it the forge refuses the write and the
+  # summary never reaches the tracker (#1407).
+  issues: write
 
 jobs:
   run-eval-harness:

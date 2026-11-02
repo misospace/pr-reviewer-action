@@ -28,6 +28,12 @@ produce byte-identical output.
 The #711 all-runs-error behavior is preserved: when zero harness runs
 completed, the summary is still written (and the #472 comment posted) and
 the process then exits 1, so the evidence stays visible on a red run.
+
+The #472 tracking comment is written through ``pr_reviewer.forge`` — the
+configured forge capability — so the credential rides only the
+``Authorization`` header, redirects are refused, and a plaintext-HTTP base
+URL for a host that is not loopback is refused before any byte goes out
+(#1407). This script hand-rolls no forge request of its own.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -46,11 +53,37 @@ for _p in (str(ROOT), str(SCRIPT_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from pr_reviewer.http_safe import OPENER_NO_REDIRECT  # noqa: E402
+from pr_reviewer.forge import ForgeClient, ForgeError  # noqa: E402
 
 # Below this capability pass rate a mode is flagged with a warning emoji
 # (matches the runbook's "a pass rate below 0.95 should block the release").
 PASS_RATE_GREEN_THRESHOLD = 0.95
+
+# Per-request budget for the tracking comment. The comment is best-effort,
+# so it must not hold the scheduled sweep for long.
+TRACKING_COMMENT_TIMEOUT_SEC = 15
+
+# ``GITHUB_REPOSITORY`` is an owner/name pair. The shape is checked
+# strictly so a value carrying a query, a fragment, or a traversal segment
+# can never reshape the request path the capability builds. The character
+# class alone would match the dot segments ``.`` and ``..``, so
+# :func:`_is_repo_slug` rejects them explicitly: ``owner/..`` is not a
+# repository, it is path traversal into a different API path.
+REPO_PATTERN = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+
+def _is_repo_slug(value: str) -> bool:
+    """True only for an ``owner/name`` pair with no dot-only segment.
+
+    ``.`` and ``..`` are legal matches for the shape regex but resolve to
+    traversal segments in the request path, so they are refused here.
+    Mixed segments such as ``a..b`` are ordinary repository names and
+    stay accepted.
+    """
+    if not REPO_PATTERN.match(value):
+        return False
+    return all(segment not in {".", ".."} for segment in value.split("/"))
+
 
 
 def count_completed_runs(report: dict[str, Any]) -> int:
@@ -224,43 +257,63 @@ def _post_tracking_comment(body: str, issue_number: int) -> None:
     """Best-effort post of the summary to the tracking issue.
 
     The issue number comes from the caller's ``--post-issue`` argument
-    (the workflow passes the #472 tracking issue explicitly). Never
-    raises: a tracker outage must not fail the whole job just for the
-    comment (the step summary itself is the primary surface).
-    """
-    from urllib.request import Request
+    (the workflow passes the #472 tracking issue explicitly). The write
+    goes through ``pr_reviewer.forge.ForgeClient`` — the configured forge
+    capability — so the credential rides only the ``Authorization``
+    header, redirects are refused, and a configured base URL that uses
+    plaintext HTTP for a host that is not loopback is refused before any
+    byte goes out (#1407).
 
-    token = os.environ.get("GITHUB_TOKEN", "")
+    Never raises: a tracker outage must not fail the whole job just for
+    the comment (the step summary itself is the primary surface).
+    """
+    # The capability resolves the credential itself (GITHUB_TOKEN, then
+    # GH_TOKEN); this check only decides whether to skip the comment.
+    token = os.environ.get("GITHUB_TOKEN", "") or os.environ.get("GH_TOKEN", "")
     gh_repo = os.environ.get("GITHUB_REPOSITORY", "")
     if not token or not gh_repo:
         print(
-            "GITHUB_TOKEN/GITHUB_REPOSITORY unavailable; skipping the "
+            "GITHUB_TOKEN/GH_TOKEN and GITHUB_REPOSITORY unavailable; "
+            "skipping the tracking-issue comment.",
+            file=sys.stderr,
+        )
+        return
+    if not _is_repo_slug(gh_repo):
+        print(
+            "GITHUB_REPOSITORY is not an owner/name pair; skipping the "
             "tracking-issue comment.",
             file=sys.stderr,
         )
         return
-    # Read GitHub API base URL at call time (can be overridden via GITHUB_API_URL env for testing)
-    github_api_base = os.environ.get("GITHUB_API_URL", "https://api.github.com")
-    summary_url = (
-        f"{github_api_base}/repos/{gh_repo}/issues/{issue_number}/comments"
-    )
-    payload = json.dumps({"body": body}).encode("utf-8")
-    req = Request(
-        summary_url,
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
     try:
-        OPENER_NO_REDIRECT.open(req, timeout=15).read()
-        print(f"Posted regression summary to {summary_url}.")
+        client = ForgeClient(timeout_sec=TRACKING_COMMENT_TIMEOUT_SEC)
+    except ForgeError as exc:
+        # An unusable base URL is refused here, before any byte goes out.
+        print(f"Failed to post the summary comment: {exc}", file=sys.stderr)
+        return
+    path = f"/repos/{gh_repo}/issues/{issue_number}/comments"
+    try:
+        client.post(path, {"body": body})
+    except ForgeError as exc:
+        # The capability's error strings are fixed and credential-free. The
+        # write did not complete cleanly: either the request failed, or the
+        # forge answered with a body the capability could not decode. The
+        # comment may exist in the second case, so the message reports what
+        # is known rather than claiming the comment is gone.
+        print(
+            f"The summary comment did not post cleanly: {exc}",
+            file=sys.stderr,
+        )
+        return
     except Exception as exc:  # noqa: BLE001 - best-effort by contract
-        print(f"Failed to post summary to {summary_url}: {exc}", file=sys.stderr)
+        # Name the exception type only: raw exception text can carry
+        # attacker-controlled bytes from a hostile forge into the log.
+        print(
+            f"The summary comment did not post cleanly: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return
+    print(f"Posted the regression summary to issue #{issue_number}.")
 
 
 def main(argv: list[str] | None = None) -> int:
