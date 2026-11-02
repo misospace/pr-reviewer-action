@@ -128,6 +128,7 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/architecture/repo-acquisition-workspaces.md`](docs/architecture/repo-acquisition-workspaces.md) — #732 repository acquisition: bare mirror cache, incremental bounded fetch over canonical PR head refs, isolated exact-head workspaces, credential/hook/symlink boundaries
 - [`docs/architecture/self-hosted-github-app-ingress.md`](docs/architecture/self-hosted-github-app-ingress.md) — #729 post-v3 self-hosted GitHub App ingress: App JWT / installation-token lifecycle, cache keying, publication idempotency
 - [`docs/architecture/credential-broker.md`](docs/architecture/credential-broker.md) — #735 credential broker and per-review secret scoping: opaque references in durable state, run-scoped worker allowlists, late all-or-nothing resolution, result-channel run binding, redaction
+- [`docs/review-bundle.md`](docs/review-bundle.md) — #1425 `review-bundle/v1` machine-readable review contract: lifecycle states, exact-head freshness, stable finding IDs, bounded/redacted by construction
 - [`docs/evals.md`](docs/evals.md) — eval harness runbook, merge-safety scoring, semantic judge, deep-review A/B
 - [`docs/release-notes.md`](docs/release-notes.md) — house style and process for turning release-please output into published release notes
 - `README.md` — action inputs/outputs, usage recipes, troubleshooting, versioning policy, security notes
