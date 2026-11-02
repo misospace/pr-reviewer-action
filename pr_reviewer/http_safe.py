@@ -306,6 +306,15 @@ def resolve_endpoint(url: object) -> Endpoint:
     userinfo lands in the path), or has an authority that cannot be
     attributed raises :class:`UnsafeEndpointUrl` instead of being used as a
     request target.
+
+    Documented bound (#1429): a credential can also ride in the endpoint
+    URL's *path* — some gateway providers hand out URLs like
+    ``https://host/<token>/v1``. A path segment cannot be reliably
+    distinguished from a legitimate path part, so this resolver neither
+    refuses nor strips one: the request target keeps the path, and a caller
+    that records the resolved URL shares it verbatim. Use
+    :func:`endpoint_path_may_carry_credential` for the advisory warning a
+    recording caller should emit first.
     """
     if not isinstance(url, str):
         raise UnsafeEndpointUrl("endpoint URL must be a string")
@@ -352,6 +361,62 @@ def _unsplit(parts: urllib.parse.SplitResult, netloc: str) -> str:
     return urllib.parse.urlunsplit(
         (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
     )
+
+
+# #1429: the advisory threshold for a credential-shaped path segment. A
+# gateway token is an opaque string; legitimate API base-path segments
+# (``v1``, ``chat``, ``completions``) are short and usually dictionary words.
+# The length floor keeps false warnings rare; it also means a SHORT secret
+# shaped segment is not detected — this check is advisory, never a proof that
+# a path is credential-free.
+_PATH_CREDENTIAL_MIN_SEGMENT = 20
+
+# Unreserved URL characters only: a segment made of nothing else is opaque
+# blob material. Spaces, slashes-in-segment, and punctuation-heavy segments
+# are path prose, not tokens.
+_PATH_CREDENTIAL_SEGMENT = re.compile(r"[A-Za-z0-9._~\-]+\Z")
+
+
+def endpoint_path_may_carry_credential(url: object) -> bool:
+    """#1429: advisory check for a credential-shaped segment in the endpoint
+    path.
+
+    Some gateway providers hand out endpoint URLs that carry the credential
+    in the path (``https://host/<token>/v1``). A path segment cannot be
+    reliably distinguished from a legitimate path part, so
+    :func:`resolve_endpoint` neither refuses nor strips one, and a caller
+    that records the endpoint — a shared report's ``base_url`` field, and
+    the ``base_url_sha256`` identity digest that covers it — shares such a
+    secret verbatim and leaves it testable offline exactly like the userinfo
+    digest #1424 removed. This check exists so a recording caller can WARN
+    before it records: refusing a path segment would break a legitimate
+    endpoint whose authentication genuinely rides the path, and redacting
+    one would corrupt the request target.
+
+    The heuristic is deliberately narrow: a segment of at least
+    ``_PATH_CREDENTIAL_MIN_SEGMENT`` opaque (unreserved-set) characters,
+    checked over the percent-decoded path too, because urllib does not
+    decode the path on its own. True is a *suspicion*, not a verification:
+    a short secret-shaped segment goes unwarned, and a long but legitimate
+    segment draws a false warning a human operator can disregard. A value
+    that cannot be parsed returns False — :func:`resolve_endpoint` is the
+    fail-closed authority on usability; this helper only shapes a warning.
+    """
+    if not isinstance(url, str):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        return False
+    for segment in (
+        parts.path.split("/") + urllib.parse.unquote(parts.path).split("/")
+    ):
+        if (
+            len(segment) >= _PATH_CREDENTIAL_MIN_SEGMENT
+            and _PATH_CREDENTIAL_SEGMENT.match(segment)
+        ):
+            return True
+    return False
 
 
 class ConflictingCredentialChannels(ValueError):

@@ -417,6 +417,53 @@ def test_main_rejects_missing_judge_args(tmp_path: Path) -> None:
     assert runner.main(["--corpus", str(CORPUS_PATH)]) == 2
 
 
+def test_main_warns_when_the_endpoint_path_may_carry_a_credential(
+    corpus: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1429: a credential can ride in the endpoint path, and a path segment
+    cannot be verified as credential-free, so the runner warns before the
+    shared report is written — without echoing the URL."""
+    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "JUDGE_BASE_URL",
+        "https://judge.internal.example/7f3a9c1e55b20d84aa613c9f02bb71d6/v1",
+    )
+    monkeypatch.setattr(
+        runner, "_openai_judge_call", lambda *_args, **_kwargs: _judge_from(corpus)
+    )
+    output = tmp_path / "report.json"
+    assert runner.main([
+        "--corpus", str(CORPUS_PATH), "--judge-model", "m", "--output", str(output)
+    ]) == 0
+    err = capsys.readouterr().err
+    assert "Warning: the judge endpoint path carries a segment" in err
+    assert "7f3a9c1e55b20d84aa613c9f02bb71d6" not in err
+    assert "judge.internal.example" not in err
+    # The recording itself is unchanged: the resolved endpoint (path kept) is
+    # recorded verbatim and bound by the digest.
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["base_url"] == (
+        "https://judge.internal.example/7f3a9c1e55b20d84aa613c9f02bb71d6/v1"
+    )
+    assert report["base_url_sha256"] == base_url_identity_digest(
+        "https://judge.internal.example/7f3a9c1e55b20d84aa613c9f02bb71d6/v1"
+    )
+
+
+def test_main_does_not_warn_on_an_ordinary_endpoint_path(
+    corpus: dict, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
+    monkeypatch.setenv("JUDGE_BASE_URL", "https://judge.internal.example/v1")
+    monkeypatch.setattr(
+        runner, "_openai_judge_call", lambda *_args, **_kwargs: _judge_from(corpus)
+    )
+    assert runner.main(["--corpus", str(CORPUS_PATH), "--judge-model", "m"]) == 0
+    assert "Warning" not in capsys.readouterr().err
+
+
 def test_main_rejects_invalid_corpus(tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({"version": 1, "scenarios": []}), encoding="utf-8")

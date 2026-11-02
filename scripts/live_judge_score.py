@@ -455,7 +455,12 @@ def _load_verified_calibration(
     recorded digest."""
     try:
         artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # #1429: a calibration artifact is a shared file; a binary one (a
+        # stray image, an overwritten report) must fail closed with the same
+        # clean refusal as any other unreadable artifact, not crash with a
+        # bare UnicodeDecodeError traceback. The decode error's own text
+        # names the offending byte, never an artifact field value.
         return None, [f"cannot read calibration artifact {artifact_path}: {exc}"]
     errors: list[str] = []
     if not isinstance(artifact, dict):
