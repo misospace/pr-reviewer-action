@@ -546,7 +546,6 @@ test("gateway: a concurrent replay with a mismatched reservation identity is ref
   assert.deepEqual(h.ledger.usage(), { requestCount: 1, tokens: 5, costMicros: 39 });
 });
 test("gateway: a concurrent replay shares the owner's FAILURE without settling the reservation itself (#1397)", async () => {
-  const time = clock();
   const calls: ChatRequestInput[] = [];
   let releaseTransport!: (outcome: ChatRequestOutcome) => void;
   const transportGate = new Promise<ChatRequestOutcome>((resolve) => {
@@ -597,7 +596,6 @@ test("gateway: different reservation ids of the same run account independently â
   assert.equal(h.ledger.rows().length, 2);
 });
 test("gateway: another run reusing the same reservation id while one is in flight dispatches independently (#1361 x #1397)", async () => {
-  const time = clock();
   const calls: ChatRequestInput[] = [];
   let releaseTransport!: (outcome: ChatRequestOutcome) => void;
   const transportGate = new Promise<ChatRequestOutcome>((resolve) => {
