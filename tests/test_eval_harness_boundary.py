@@ -191,7 +191,17 @@ def _write_fake_script(
     malformed_aggregate: bool = False,
     pr_number: int = PR_NUMBER,
     record_head: bool = False,
+    analysis_engine: str = ANALYSIS_ENGINE,
+    stderr_line: str = "",
+    exit_code: int = 0,
 ) -> Path:
+    """Write the fake orchestrator script.
+
+    `analysis_engine`, `stderr_line` and `exit_code` parameterize the
+    child's observable outcome (the engine marker it records, what it
+    writes to stderr, and its exit status); their defaults reproduce the
+    original behavior exactly.
+    """
     if write_output:
         body_template = OUTPUT_BODY
         block = MALFORMED_DEEP_BLOCK if malformed_aggregate else DEEP_BLOCK
@@ -204,13 +214,19 @@ def _write_fake_script(
         body = (
             body_template
             .replace("__AI_OUTPUT__", ai_output)
-            .replace("__ANALYSIS_ENGINE__", ANALYSIS_ENGINE)
+            .replace("__ANALYSIS_ENGINE__", analysis_engine)
             .replace("__AI_RESPONSE__", AI_RESPONSE_PAYLOAD)
             .replace("__TOOL_HARNESS__", TOOL_HARNESS_PAYLOAD)
             .replace("__DEEP_BLOCK__", deep_block)
         )
     else:
         body = NO_OUTPUT_BODY
+    if stderr_line:
+        body += "cat >&2 <<'STDERR'\n" + stderr_line + "\nSTDERR\n"
+    if exit_code:
+        # The body runs before the template's trailing `exit 0`, so this
+        # short-circuits it: the child fails the way a real one does.
+        body += f"exit {exit_code}\n"
     script = (
         FAKE_SCRIPT_TEMPLATE
         .replace("__EXPECT_REPO__", REPO)
@@ -981,6 +997,141 @@ class TestLaneEnvironmentBoundary:
         snap = _read_snapshot(repo_path)
         assert snap["DEEP_REVIEW"] == "true"
         assert all(snap[key] in (None, "") for key in ("AI_SPECIALIST_MODEL", "AI_SPECIALIST_BASE_URL", "AI_SPECIALIST_API_FORMAT", "AI_SPECIALIST_API_KEY", "AI_SPECIALIST_SECURITY_MODEL"))
+
+
+# #1417: an operator endpoint can carry a credential in its userinfo
+# ("https://user:pass@host"). The request carries no credential in its URL:
+# the credential moves into the provider's HTTP authentication header, and
+# nothing the run records may carry it into a shared eval report.
+CREDENTIALED_BASE_URL = "https://lane-operator:hunter2@models.example/v1"
+CREDENTIAL_FREE_BASE_URL = "https://models.example/v1"
+URL_CREDENTIAL = "lane-operator:hunter2"
+REDACTED_BASE_URL = "https://***@models.example/v1"
+CREDENTIALED_ANALYSIS_ENGINE = f"gpt-4@{CREDENTIALED_BASE_URL} (openai)"
+CREDENTIALED_STDERR_LINE = f"primary model failed at {CREDENTIALED_BASE_URL}"
+
+
+class TestCredentialedEndpointRedaction:
+    """The request URL carries no credential, and the recorded run state never
+    carries one either.
+
+    The engine marker the runtime records and the stderr the harness
+    captures on failure both embed the endpoint; the run's own copy is
+    redacted, while the child receives a credential-free request URL and the
+    credential in the auth header.
+    """
+
+    def test_model_used_redacts_the_endpoint_credential(self, tmp_path: Path) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = _write_fake_script(
+            tmp_path / "fake_lane.sh", deep=False,
+            analysis_engine=CREDENTIALED_ANALYSIS_ENGINE,
+        )
+        # No separate API key: the endpoint URL carries the credential, so
+        # the run has exactly one credential channel.
+        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL, api_key="")
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, config,
+            deep_review=False, review_script=script,
+        )
+
+        assert run.error is None
+        # The engine marker reaches the report, so it must be redacted.
+        assert run.model_used
+        assert "hunter2" not in run.model_used
+        assert "lane-operator" not in run.model_used
+        assert REDACTED_BASE_URL in run.model_used
+        # The request itself carries no credential in its URL: the credential
+        # rides the provider's auth header instead.
+        snap = _read_snapshot(repo_path)
+        assert snap["AI_BASE_URL"] == CREDENTIAL_FREE_BASE_URL
+        assert snap["AI_API_KEY"] == URL_CREDENTIAL
+
+    def test_failure_message_redacts_the_endpoint_credential(self, tmp_path: Path) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = _write_fake_script(
+            tmp_path / "fake_lane.sh", deep=False,
+            write_output=False,
+            stderr_line=CREDENTIALED_STDERR_LINE,
+            exit_code=1,
+        )
+        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL, api_key="")
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, config,
+            deep_review=False, review_script=script,
+        )
+
+        # A failing child: the harness records the captured stderr, which
+        # carries the endpoint the runtime called.
+        assert run.error is not None
+        assert "exit 1" in run.error
+        assert "hunter2" not in run.error
+        assert "lane-operator" not in run.error
+        assert REDACTED_BASE_URL in run.error
+        # The request itself carries no credential in its URL.
+        snap = _read_snapshot(repo_path)
+        assert snap["AI_BASE_URL"] == CREDENTIAL_FREE_BASE_URL
+        assert snap["AI_API_KEY"] == URL_CREDENTIAL
+
+    def test_failure_message_redacts_before_truncating_long_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        repo_path = _work_dir_with_repo(tmp_path)
+        # The recorded stderr is capped at 500 characters. Place the URL so
+        # the cut lands exactly at the "@": truncating first leaves
+        # "https://user:pass" without its host, a shape the redactor does not
+        # recognize, so the credential would survive into the report.
+        at = CREDENTIALED_BASE_URL.index("@")
+        stderr_line = "x" * (500 - at) + CREDENTIALED_BASE_URL
+        script = _write_fake_script(
+            tmp_path / "fake_lane.sh", deep=False,
+            write_output=False,
+            stderr_line=stderr_line,
+            exit_code=1,
+        )
+        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL, api_key="")
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, config,
+            deep_review=False, review_script=script,
+        )
+
+        assert run.error is not None
+        assert "hunter2" not in run.error
+        assert "lane-operator" not in run.error
+        assert REDACTED_BASE_URL in run.error
+        # The request itself carries no credential in its URL.
+        snap = _read_snapshot(repo_path)
+        assert snap["AI_BASE_URL"] == CREDENTIAL_FREE_BASE_URL
+        assert snap["AI_API_KEY"] == URL_CREDENTIAL
+
+    def test_credentialed_endpoint_and_separate_api_key_are_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """One request carries one credential.
+
+        A credential in the endpoint URL and a separate API key are two
+        channels for one request, so the run is refused before the child is
+        started — and the refusal never echoes either value.
+        """
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = _write_fake_script(tmp_path / "fake_lane.sh", deep=False)
+        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL)
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, config,
+            deep_review=False, review_script=script,
+        )
+
+        assert run.error is not None
+        assert "one request carries one credential" in run.error
+        assert "hunter2" not in run.error
+        assert "lane-operator" not in run.error
+        assert "dummy-key" not in run.error
+        # The child never ran: no request was sent at all.
+        assert not (repo_path / "env-snapshot.json").exists()
 
 
 if __name__ == "__main__":

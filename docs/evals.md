@@ -510,12 +510,31 @@ reports are the diffable artifacts, as elsewhere in this eval workflow.
 `same_model_specialists` enables deep review without overrides, so specialists
 inherit the primary model; `heterogeneous_specialists` enables deep review
 and projects the shared specialist profile and optional role models into the
-`AI_SPECIALIST_*` environment contract. Credentials are read only from the
-environment variable named by `api_key_env`: keys are never stored in the
-plan or report. Dry-run validates and prints a redacted plan without needing
+`AI_SPECIALIST_*` environment contract. Credentials come from the
+environment variable named by `api_key_env`, or from a credential carried in a
+profile base URL's userinfo: a key is never stored in the plan or the report.
+Dry-run validates and prints a redacted plan without needing
 credentials or contacting an endpoint. The report records resolved lane
 identity and redacted profile provenance under `metadata.lane`; existing
-`mode_summary` keys do not change. For lane runs, the harness clears ambient
+`mode_summary` keys do not change. A profile base URL is recorded with any
+URL userinfo redacted (`https://***@host/v1`). An operator endpoint can carry
+a credential in its userinfo, and reports are shared artifacts (#1417). The
+redaction covers every recorded copy of the endpoint: the lane projection
+under `metadata.lane`, the model string in each run record, and the failure
+message of a run that errored. It also covers the dry-run plan print.
+
+A credential never rides in a request URL. When a profile base URL carries a
+credential in its userinfo, the harness resolves it before the request: the
+request target keeps the endpoint's identity (scheme, host, port, path) and
+loses the userinfo, and the credential moves into the provider's HTTP
+authentication header — `AI_API_KEY` for the primary model,
+`AI_SPECIALIST_API_KEY` for the specialist profile. The lane therefore still
+contacts the intended endpoint, and the request URL carries no credential.
+The profile's credential environment variable stays the declared credential
+channel: a URL credential is used only when that variable carries nothing,
+because one request carries one credential, and supplying both is refused
+before any request is sent. The refusal names the environment variable and
+never echoes a value. For lane runs, the harness clears ambient
 `AI_SPECIALIST_*` variables so shell exports cannot leak between lanes, and
 each run receives its own private artifact directory.
 
