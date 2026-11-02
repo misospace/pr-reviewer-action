@@ -22,6 +22,7 @@ import {
   evaluateWorkerSecretAdmission,
   EXECUTION_ID_RE,
   JOB_NAME_PREFIX,
+  SCOPE_MATCH_ERROR_ID,
   kubernetesCredentialSecretName,
   kubernetesJobName,
   LABEL_JOB_HASH,
@@ -156,6 +157,57 @@ test("the pinned expressions carry the executor's own invariants (no drift)", ()
   assert.ok(jobText.includes("runAsUser == 65532") && jobText.includes("runAsGroup == 65532"));
   assert.ok(jobText.includes(LABEL_JOB_HASH) && jobText.includes(LABEL_RUN_HASH));
   assert.ok(jobText.includes(`'${CREDENTIAL_SECRET_NAME_PREFIX}'`));
+});
+
+/** The free identifiers a pinned expression may use. The real
+ * `admissionregistration.k8s.io/v1` CEL context offers exactly
+ * `object`/`oldObject`/`request`/`params`/`namespaceObject`/`authorizer`
+ * plus `variables.<name>`; the rest are this module's own lambda
+ * iterators, and `in`/`true`/`false` are operators/keywords. Anything
+ * else (a bare `podSpec`, a `parameters` handle) would not type-check on
+ * a real cluster, and the policy would be silently never-admitted — the
+ * fail-open this lint exists to prevent. */
+const ALLOWED_CEL_ROOTS = new Set([
+  "object", "oldObject", "request", "params", "variables", "namespaceObject", "authorizer",
+  "c", "v", "e", "f", "k", "u",
+  "in", "true", "false",
+]);
+
+function freeIdentifiers(expression: string): string[] {
+  const stripped = expression.replaceAll(/'(?:[^'\\]|\\.)*'/g, "''");
+  const found = new Set<string>();
+  for (const match of stripped.matchAll(/(^|[^.\w$])([A-Za-z_][A-Za-z0-9_]*)/g)) {
+    const rest = stripped.slice((match.index ?? 0) + match[0].length);
+    if (/^\s*\(/.test(rest)) continue; // a function or macro call, not a free identifier
+    found.add(match[2]!);
+  }
+  return [...found];
+}
+
+test("the pinned CEL text only uses identifiers the real admission CEL context provides", () => {
+  const expressions = [
+    ...WORKER_JOB_VARIABLES.map((v) => v.expression),
+    ...WORKER_JOB_VALIDATIONS.map((v) => v.expression),
+    ...WORKER_SECRET_VALIDATIONS.map((v) => v.expression),
+    WORKER_JOB_MATCH_CONDITION_EXPRESSION,
+    WORKER_SECRET_MATCH_CONDITION_EXPRESSION,
+  ];
+  assert.ok(expressions.length > 15);
+  for (const expression of expressions) {
+    for (const identifier of freeIdentifiers(expression)) {
+      assert.ok(
+        ALLOWED_CEL_ROOTS.has(identifier),
+        `free identifier '${identifier}' is not in the admission CEL context: ${expression}`,
+      );
+    }
+  }
+  // Positive guards for the exact handles that were once wrong:
+  // parameters were always `params`, and spec variables are reachable
+  // only as `variables.<name>`.
+  const joined = expressions.join("\n");
+  assert.ok(joined.includes("params.data.workerServiceAccount"));
+  assert.ok(joined.includes("variables.podSpec"));
+  assert.ok(joined.includes("variables.containers"));
 });
 
 test("the credential-Secret CEL derivation matches the executor's derivations", () => {
@@ -356,11 +408,21 @@ test("rejects host-namespace escapes", () => {
   }
 });
 
-test("rejects a hostPath volume", () => {
-  const escape = mutate(normalJobObject(), (o) => {
-    (((o.spec as any).template.spec as any).volumes.push({ name: "docker-sock", hostPath: { path: "/run/docker.sock" } }));
-  });
-  assert.ok(idsOf(evaluateWorkerJobAdmission(escape, reviewContext())).includes("noHostPathVolumes"));
+test("rejects non-PVC volume types (hostPath, secret, projected)", () => {
+  const vectors: Record<string, unknown>[] = [
+    { name: "docker-sock", hostPath: { path: "/run/docker.sock" } },
+    { name: "stolen", secret: { secretName: "some-other-run" } },
+    { name: "sa-token", projected: { sources: [{ serviceAccountToken: { audience: "x", expirationSeconds: 60 } }] } },
+  ];
+  for (const volume of vectors) {
+    const escape = mutate(normalJobObject(), (o) => {
+      ((o.spec as any).template.spec as any).volumes.push(volume);
+    });
+    assert.ok(
+      idsOf(evaluateWorkerJobAdmission(escape, reviewContext())).includes("pvcVolumesOnly"),
+      `${String(volume.name)} volume type must be rejected`,
+    );
+  }
 });
 
 test("rejects added capabilities", () => {
@@ -419,6 +481,38 @@ test("rejects a worker Job whose credential env references a foreign Secret", ()
     env.push({ name: "PR_REVIEWER_CREDENTIAL_STOLEN", valueFrom: { secretKeyRef: { name: "some-other-run", key: "key" } } });
   });
   assert.ok(idsOf(evaluateWorkerJobAdmission(escape, reviewContext())).includes("credentialSecretBinding"));
+});
+
+test("rejects a foreign Secret smuggled in through envFrom", () => {
+  const escape = mutate(normalJobObject(), (o) => {
+    const container = ((o.spec as any).template.spec as any).containers[0];
+    container.envFrom = [{ secretRef: { name: kubernetesCredentialSecretName("a-foreign-run") } }];
+  });
+  assert.ok(idsOf(evaluateWorkerJobAdmission(escape, reviewContext())).includes("credentialSecretBinding"));
+});
+
+test("rejects init and ephemeral containers (the one-worker contract)", () => {
+  const withInit = mutate(normalJobObject(), (o) => {
+    ((o.spec as any).template.spec as any).initContainers = [{
+      name: "setup",
+      image: "alpine:3",
+      securityContext: { privileged: true },
+    }];
+  });
+  assert.ok(idsOf(evaluateWorkerJobAdmission(withInit, reviewContext())).includes("oneWorkerContainer"));
+  const withEphemeral = mutate(normalJobObject(), (o) => {
+    ((o.spec as any).template.spec as any).ephemeralContainers = [{ name: "debugger", image: "alpine:3" }];
+  });
+  assert.ok(idsOf(evaluateWorkerJobAdmission(withEphemeral, reviewContext())).includes("oneWorkerContainer"));
+});
+
+test("an errored scope match REJECTS (fail closed), it never silently skips", () => {
+  // failurePolicy: Fail + a match condition that cannot evaluate (no
+  // metadata at all) and no hook is true: the API contract rejects the
+  // request; the evaluator models the same, not "out of scope".
+  const malformed = { apiVersion: "batch/v1", kind: "Job", spec: { template: { spec: {} } } };
+  const violations = evaluateWorkerJobAdmission(malformed, reviewContext({ username: "system:serviceaccount:reporting:reporter" }));
+  assert.deepEqual(violations.map((v) => v.id), [SCOPE_MATCH_ERROR_ID]);
 });
 
 // ── AC5: the credential Secret shape ─────────────────────────────────────

@@ -49,19 +49,19 @@ module rule ids:
 
 | Rule id | Invariant |
 |---|---|
-| `oneWorkerContainer` | Exactly one container, named `worker`. |
+| `oneWorkerContainer` | Exactly one container named `worker`, and no `initContainers` or `ephemeralContainers`. |
 | `workerServiceAccount` | The pod service account equals the `workerServiceAccount` parameter exactly. |
 | `noServiceAccountToken` | `automountServiceAccountToken` is explicitly `false`. |
 | `workerImageRepository` | Every image equals the `allowedImageRepository` prefix, or continues it with `:` or `@`. |
 | `noPrivilegedContainers` | No container is privileged or allows privilege escalation. |
 | `noHostNamespaces` | `hostNetwork`, `hostPID`, and `hostIPC` are unset or false. |
-| `noHostPathVolumes` | No volume uses `hostPath`. |
+| `pvcVolumesOnly` | Every volume is a `persistentVolumeClaim`: no `hostPath`, no `secret`, no `projected`, no other type. |
 | `fixedPodSecurityContext` | `runAsNonRoot`, uid/gid 65532, `RuntimeDefault` seccomp. |
 | `fixedContainerSecurityContext` | `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `drop: [ALL]` with no `add`, `RuntimeDefault` seccomp. |
 | `boundedLifetime` | `activeDeadlineSeconds` is set and greater than 0. |
 | `noRetries` | `backoffLimit: 0` and `restartPolicy: Never`. |
-| `identityLabels` | `pr-reviewer.io/job-hash` and `pr-reviewer.io/run-hash` on the Job and the pod template. |
-| `credentialSecretBinding` | Every credential `secretKeyRef` names this run's derived Secret: `prv-cred-` plus the first 24 characters of the run-hash label. |
+| `identityLabels` | `app.kubernetes.io/managed-by: pr-reviewer-action` plus `pr-reviewer.io/job-hash` and `pr-reviewer.io/run-hash` on the Job and the pod template. |
+| `credentialSecretBinding` | Every credential reference in `env` and `envFrom` names this run's derived Secret: `prv-cred-` plus the first 24 characters of the run-hash label. |
 
 The Secret policy (`pr-reviewer-worker-secret`) enforces:
 
@@ -69,7 +69,7 @@ The Secret policy (`pr-reviewer-worker-secret`) enforces:
 |---|---|
 | `credentialSecretName` | The name matches `^prv-cred-[0-9a-f]{24}$`. |
 | `credentialSecretType` | The type is `Opaque`. |
-| `credentialIdentityLabels` | The identity labels are present. |
+| `credentialIdentityLabels` | The three identity labels are present, with `app.kubernetes.io/managed-by` set to `pr-reviewer-action`. |
 | `credentialKeys` | `data` is non-empty, and every `data` and `stringData` key matches `^[a-z][a-z0-9-]{0,63}$`. |
 | `credentialSecretNameBinding` | A labeled Secret is named for exactly the run its `pr-reviewer.io/run-hash` label carries. |
 
@@ -116,8 +116,13 @@ files to the constants exported from `src/executor/admission-policy.ts`,
 and those constants are built from `kubernetes.ts`'s own invariants
 (`WORKER_RUN_AS_ID`, the identity labels, the credential name grammar). A
 constant that changes in code fails the policy's own test instead of
-drifting silently. The same test runs representative escape manifests and
-normal `buildReviewJobManifest` output through the reference evaluator in
-the module. The evaluator mirrors CEL semantics: a missing field that a
-rule needs counts as a violation, and an error in the match conditions
-counts as out of scope.
+drifting silently. A structural lint over the same text allows only the
+identifiers the real `admissionregistration.k8s.io/v1` CEL context
+provides (`object`, `request`, `params`, `variables.<name>`), because
+text that never type-checks is a policy that never executes. The same
+test runs representative escape manifests and normal
+`buildReviewJobManifest` output through the reference evaluator in the
+module. The evaluator mirrors the CEL semantics of the API contract: a
+missing field that a rule needs counts as a violation, and a match
+condition that errors with no hook true rejects the write
+(`failurePolicy: Fail`), never silently skips it.
