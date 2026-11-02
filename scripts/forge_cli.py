@@ -20,8 +20,10 @@ inherits the capability's guarantees unchanged:
 The adapter itself never spawns a subprocess, never accepts a token as an
 argument, and never prints one. It prints only values it validated itself --
 a validated identifier or an integer count -- never a string the forge
-returned: a hostile forge must not be able to reflect the credential into a
-job log through the adapter's stdout.
+returned verbatim: a hostile forge must not be able to reflect the credential
+into a job log through the adapter's stdout. The one forge-supplied string
+that can reach stdout (a label name) is checked against the configured
+credential first and refused when it carries it.
 
 Exit codes, shared by every command:
 
@@ -98,6 +100,18 @@ def _valid_label(name: str) -> bool:
     return all(ch >= " " and ch != "\x7f" for ch in name)
 
 
+def _valid_repo(value: str) -> bool:
+    """True for a usable ``owner/name`` repository.
+
+    Both segments use the allowed characters, and neither is ``.`` or
+    ``..``: a traversal segment would address a path outside the
+    ``/repos/OWNER/NAME/...`` endpoint shape the caller asked for.
+    """
+    if not REPO_RE.match(value):
+        return False
+    return all(segment not in (".", "..") for segment in value.split("/"))
+
+
 def _valid_ref(value: str) -> bool:
     """True for a usable ref name.
 
@@ -166,6 +180,12 @@ def cmd_issue_labels(client: ForgeClient, args: argparse.Namespace) -> int:
         # split into two names and could answer a comparison the caller
         # makes. An unusable name fails the read closed instead.
         if not isinstance(name, str) or not _valid_label(name):
+            raise CliError(ERR_UNUSABLE_PAYLOAD)
+        # A label name is forge-supplied data. Before it reaches stdout it
+        # is checked against the configured credential: a hostile forge
+        # that echoes the bearer token back as a label must not see it
+        # land in a job log. The read fails closed instead.
+        if client.token and client.token in name:
             raise CliError(ERR_UNUSABLE_PAYLOAD)
         print(name)
     return EXIT_OK
@@ -288,7 +308,10 @@ def cmd_tag_ref_sha(client: ForgeClient, args: argparse.Namespace) -> int:
     if not isinstance(obj, dict):
         raise CliError(ERR_UNUSABLE_PAYLOAD)
     sha = obj.get("sha")
-    if not isinstance(sha, str) or not sha:
+    # The SHA is the only forge-supplied string this command prints, so it
+    # is validated to the commit-ish shape before it goes out: a value the
+    # adapter proved is 40- or 64-hex cannot also carry the credential.
+    if not isinstance(sha, str) or not SHA_RE.match(sha):
         raise CliError(ERR_UNUSABLE_PAYLOAD)
     print(sha)
     return EXIT_OK
@@ -304,7 +327,9 @@ def cmd_commit_parent_sha(client: ForgeClient, args: argparse.Namespace) -> int:
     if not parents:
         return EXIT_OK
     sha = _require_dict(parents[0]).get("sha")
-    if not isinstance(sha, str) or not sha:
+    # Same commit-ish validation as the tag ref: only a proved SHA is
+    # printed, never an arbitrary forge-supplied string.
+    if not isinstance(sha, str) or not SHA_RE.match(sha):
         raise CliError(ERR_UNUSABLE_PAYLOAD)
     print(sha)
     return EXIT_OK
@@ -406,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _validate(args: argparse.Namespace) -> None:
     """Reject every malformed input before a request goes out."""
-    if not REPO_RE.match(args.repo):
+    if not _valid_repo(args.repo):
         raise _invalid("--repo")
     number = getattr(args, "number", None)
     if number is not None:

@@ -400,6 +400,12 @@ class TestTagRefSha:
         assert code == 1
         assert out == ""
 
+    def test_a_non_hex_forged_sha_fails_closed(self, cli, stub):
+        stub.set_state(tag_refs={"v1.2.3": "not-a-sha"})
+        code, out, err = run(cli, "tag-ref-sha", "--repo", "o/r", "--tag", "v1.2.3")
+        assert code == 2
+        assert out == ""
+
 
 class TestCommitParentSha:
     def test_reads_the_first_parent(self, cli, stub):
@@ -489,6 +495,41 @@ class TestTokenNeverLeaks:
         assert SECRET not in out, "a rejected credential must not be echoed"
         assert SECRET not in err, "a rejected credential must not be echoed"
 
+    def test_a_hostile_label_cannot_reflect_the_token_into_the_output(self, cli, stub):
+        # A hostile forge answers a *successful* label read with the
+        # credential itself as the label name. The read fails closed
+        # instead of printing a forge-controlled string that carries it.
+        stub.set_state(labels={"42": [SECRET]})
+        code, out, err = run(cli, "issue-labels", "--repo", "o/r", "--number", "42")
+        assert code == 2
+        assert out == ""
+        assert SECRET not in err
+
+    def test_labels_before_a_hostile_one_are_not_reprinted_after_failure(self, cli, stub):
+        stub.set_state(labels={"42": ["bug", SECRET]})
+        code, out, err = run(cli, "issue-labels", "--repo", "o/r", "--number", "42")
+        assert code == 2
+        assert out == "bug\n"
+        assert SECRET not in out
+        assert SECRET not in err
+
+    def test_a_hostile_tag_sha_cannot_reflect_the_token_into_the_output(self, cli, stub):
+        # The printed SHA is validated to the commit-ish shape first, so a
+        # forge-controlled string carrying the credential is unusable.
+        stub.set_state(tag_refs={"v1.2.3": SECRET})
+        code, out, err = run(cli, "tag-ref-sha", "--repo", "o/r", "--tag", "v1.2.3")
+        assert code == 2
+        assert out == ""
+        assert SECRET not in err
+
+    def test_a_hostile_parent_sha_cannot_reflect_the_token_into_the_output(self, cli, stub):
+        sha = "7" * 40
+        stub.set_state(commit_parents={sha: SECRET})
+        code, out, err = run(cli, "commit-parent-sha", "--repo", "o/r", "--sha", sha)
+        assert code == 2
+        assert out == ""
+        assert SECRET not in err
+
 
 # ---------------------------------------------------------------------------
 # Input validation (fail closed, before any request)
@@ -501,6 +542,11 @@ class TestInputValidation:
         [
             ("issue-labels", "--repo", "o/r/extra", "--number", "42"),
             ("issue-labels", "--repo", "no-slash", "--number", "42"),
+            ("issue-labels", "--repo", "./r", "--number", "42"),
+            ("issue-labels", "--repo", "../r", "--number", "42"),
+            ("issue-labels", "--repo", "o/.", "--number", "42"),
+            ("issue-labels", "--repo", "o/..", "--number", "42"),
+            ("issue-labels", "--repo", "./..", "--number", "42"),
             ("issue-labels", "--repo", "o/r", "--number", "0"),
             ("issue-labels", "--repo", "o/r", "--number", "-1"),
             ("issue-labels", "--repo", "o/r", "--number", "abc"),
