@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { classifyPr, PR_KINDS, RISK_FLAGS } from "../src/classification/classify.js";
+import { dependencyObligationForCheckText } from "../src/tools/loop.js";
 import {
   classificationFromArtifact,
   selectSpecialistRoles,
@@ -2451,6 +2452,20 @@ const PLATFORM_EVIDENCE_CHECKS = [
   "inspect the exact old→new upstream release delta for the updated platform/runtime component",
   "check upstream security advisories for the updated platform/runtime component version range, or report the advisory check as not performed",
 ];
+
+// #1396 coupling rail: the harness maps shown dependency must_check rows onto
+// their URL/query SHAPE vocabulary with dependencyObligationForCheckText, so
+// every obligation template across EVERY dependency family must map. A
+// reworded template that stops matching would silently restore the prose
+// gating this unification removed (the cross-starvation defect).
+test("#1396: every dependency-family evidence check text maps to its obligation row vocabulary", () => {
+  for (const checks of [IMAGE_EVIDENCE_CHECKS, CHART_EVIDENCE_CHECKS, DEPENDENCY_EVIDENCE_CHECKS, PLATFORM_EVIDENCE_CHECKS]) {
+    assert.deepEqual(
+      checks.map((text) => dependencyObligationForCheckText(text)),
+      ["provenance", "release_delta", "security_advisory"],
+    );
+  }
+});
 
 test("#1336: the home-ops #11591 fixture classifies as renovate_image_update, not app_code", () => {
   // A Renovate container-image patch bumping a tag in a manifest whose

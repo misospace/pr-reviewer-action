@@ -2112,6 +2112,9 @@ test("#1396: a provenance fetch is admitted against its shape row while prose ro
     .filter((m) => m.role === "tool" && m.content.includes("Reserved dependency-evidence budget"));
   assert.equal(refusalMessages.length, 1);
   assert.ok(refusalMessages[0]!.content.includes("upstream publisher/source provenance"));
+  // The mixed-run clause: the prose guidance row gates the SAME window, and
+  // the refusal says so instead of pointing only at the dependency debt.
+  assert.ok(refusalMessages[0]!.content.includes("Required Review Evidence"));
   // Credits follow ROW ORDER and hold only the discharged shape rows; the
   // prose row stays gating (it discharges on its own vocabulary, pinned by
   // the #1381 prose tests), so the window is NOT yet released.
@@ -2193,4 +2196,37 @@ test("#1396: a hostile model cannot spend the reserved tail while either family 
   assert.equal(outcome.requiredEvidenceAttempts, 0);
   assert.equal(outcome.requiredEvidenceReleased, false);
   assert.equal(outcome.rounds, 6);
+});
+
+test("#1396: a window opened by scarce ROUNDS renders the rounds wording, not the requests wording", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Requests are plentiful (24, reserve 4); the SIX-ROUND ceiling is what
+  // enters the window at round 3 — the note must name turns, not pretend
+  // 22 requests are scarce.
+  const { postFn, executeFn, timeFn, payloads } = noteCapturingLoop(
+    [
+      openAiCall("c1", "read_file", '{"path":"docs/a.md"}'),
+      openAiCall("c2", "read_file", '{"path":"docs/b.md"}'),
+      openAiCall("c3", "read_file", '{"path":"docs/optional.md"}'),
+      openAiText("done"),
+    ],
+    Array.from({ length: 2 }, () => ({ tool: "read_file", status: "ok", result: {} })),
+  );
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(3, 24, 120),
+    reserveForRequiredEvidence: 4,
+    requiredEvidence: depRows(4),
+    timeFn,
+  });
+  assert.equal(outcome.requiredEvidenceRefusals, 1);
+  const newestNote = ((payloads[2]!.messages ?? []) as Array<{ content: string }>)
+    .map((m) => m.content)
+    .filter((c) => typeof c === "string" && c.startsWith("[loop budget]"))
+    .at(-1)!;
+  assert.ok(newestNote.includes("Only 4 loop turn(s) remain"));
+  assert.ok(newestNote.includes("upstream publisher/source provenance"));
+  assert.ok(!newestNote.includes("tool request(s) remain"));
 });

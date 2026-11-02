@@ -151,6 +151,23 @@ const RESERVE_WINDOW_TURN_NOTE =
   "executed. If the evidence cannot be established, report what is missing " +
   "rather than approximating it.";
 
+// #1396: the window can open on the ROUNDS half alone (#1388) — rendering the
+// requests-scarce wording then would misstate what is scarce. Same selection
+// pass, honest counts.
+const RESERVE_WINDOW_ROUNDS_TURN_NOTE =
+  "[loop budget] Only {roundsLeft} loop turn(s) remain and they are " +
+  "reserved for the required dependency evidence still outstanding: " +
+  "{outstanding}, reached through web_fetch (plus web_search when that tool " +
+  "is offered to you). Optional and local-diff calls are now refused, not " +
+  "executed. If the evidence cannot be established, report what is missing " +
+  "rather than approximating it.";
+
+// #1396: when a unified run ALSO has unresolved prose obligation rows gating
+// the same window, the dependency-worded note/refusal must not imply the
+// dependency debt is the ONLY way out — a call targeting a Required Review
+// Evidence row executes too.
+const MIXED_WINDOW_CLAUSE = " The reservation also covers the unresolved rows of the Required Review Evidence section — a call that targets one of those executes as well.";
+
 /** #1379: the refusal a non-evidence call gets inside the reserve window
  * while not every tracked obligation is covered (and the attempts cap has
  * not been reached). Model-facing: explains the refusal, names what is
@@ -868,6 +885,8 @@ export async function driveToolLoop(
   const hasActiveRow = (): boolean => pendingRows.some((row) => rowActive(row));
   const anyActiveShapeRow = (): boolean =>
     pendingRows.some((row) => row.obligation !== undefined && rowActive(row));
+  const anyActiveProseRow = (): boolean =>
+    pendingRows.some((row) => row.obligation === undefined && rowActive(row));
   const outstandingShapeObligations = (): DependencyEvidenceObligation[] =>
     pendingRows
       .filter((row) => row.obligation !== undefined && rowActive(row))
@@ -993,12 +1012,19 @@ export async function driveToolLoop(
             : REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE);
         }
       } else {
+        // #1396: one pass, one note. With a shape row active the redirect
+        // names the outstanding dependency evidence — on the side that is
+        // actually scarce (requests, else rounds) — and grows the mixed-run
+        // clause when prose rows gate the same window.
+        const shapeNoteActive = anyActiveShapeRow();
+        const mixedClause = shapeNoteActive && anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "";
         const note = inObligationWindow
-          ? anyActiveShapeRow()
-            ? formatNote(RESERVE_WINDOW_TURN_NOTE, {
+          ? shapeNoteActive
+            ? formatNote(requestsLeft <= reserve ? RESERVE_WINDOW_TURN_NOTE : RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
                 requestsLeft,
+                roundsLeft,
                 outstanding: formatOutstandingObligations(outstandingShapeObligations()),
-              })
+              }) + mixedClause
             : REQUIRED_EVIDENCE_TURN_NOTE
           : requestsLeft <= LOW_TOOL_REQUESTS_REMAINING
             ? LOW_BUDGET_TURN_NOTE
@@ -1172,7 +1198,7 @@ export async function driveToolLoop(
               error: anyActiveShapeRow()
                 ? formatNote(RESERVE_REFUSAL_NOTE, {
                     outstanding: formatOutstandingObligations(outstandingShapeObligations()),
-                  })
+                  }) + (anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
                 : REQUIRED_EVIDENCE_REFUSAL_NOTE,
             },
           });
