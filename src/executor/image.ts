@@ -50,7 +50,10 @@ export type ExecutionEnvelope = ExecutionRequest;
  *   the envelope file. The forge API base URL is envelope data too: the
  *   request carries it as the non-secret `forgeApiUrl` coordinate (#1433)
  *   so the image can construct its forge adapter with no ambient
- *   endpoint — it is never a third coordination variable.
+ *   endpoint — it is never a third coordination variable. The envelope
+ *   validator refuses a credential riding that coordinate (userinfo,
+ *   query, fragment, credential-shaped path segment), so the image can
+ *   build its adapter base from the value as it stands.
  */
 export interface WorkerImageContract {
   readonly contractVersion: 1;

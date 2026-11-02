@@ -900,7 +900,11 @@ export async function startControllerDaemon(
   // The forge API bases ride EVERY request envelope this daemon composes
   // (#1433): refuse a configured endpoint that could never pass envelope
   // validation at startup, instead of failing every job of that platform
-  // later with an opaque builder rejection.
+  // later with an opaque builder rejection. EVERY configured integration is
+  // screened, not only the one the served platform resolves to: an
+  // endpoint nobody composes today is still an endpoint the operator
+  // configured, and a credential-shaped path in it is refused the same
+  // way — fail closed on the configuration, not on its current use.
   for (const forge of options.instance.forges) {
     const problem = forgeApiUrlProblem(forge.endpoint);
     if (problem !== "") {

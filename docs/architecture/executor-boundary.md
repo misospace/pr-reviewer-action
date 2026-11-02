@@ -34,7 +34,7 @@ receives only:
 |---|---|
 | `jobId` / `runId` / `attempt` | immutable job identity; `runId` is the **correlation identity** every result must echo back |
 | `kind` / `platform` / `repoFullName` / `prNumber` / `headSha` / `baseSha` | the review identity, carried verbatim from the `ReviewJob` |
-| `forgeApiUrl` | the non-secret forge API base URL (#1433): the instance config's forge-integration endpoint for `platform`, so a containerized worker can construct its forge adapter with no ambient environment. `""` = platform default (GitHub only); a `forgejo` request without one is refused by the validator. Never credential material — secrets travel only on the #735 broker path |
+| `forgeApiUrl` | the non-secret forge API base URL (#1433): the instance config's forge-integration endpoint for `platform`, so a containerized worker can construct its forge adapter with no ambient environment. `""` = platform default (GitHub only); a `forgejo` request without one is refused by the validator. Never credential material — secrets travel only on the #735 broker path; the validator refuses a credential riding the URL, path included |
 | `deadlineAtMs` | epoch-ms deadline; `0` = none |
 | `workspace` | the `WorkspaceInfo` the #732 acquisition layer produced (isolated exact-head worktree; the executor owns its `close()`) |
 | `profiles` | `executor`/`model`/`evidence` profile **names** — approved by the operator's instance config; repository config selects names only |
@@ -44,6 +44,37 @@ receives only:
 **Stdout is never the result protocol.** The worker writes its structured
 result JSON to the file at `resultPath`; captured stdout/stderr are
 diagnostics only, byte-capped by the runtime primitives.
+
+**The forge API base coordinate is credential-free by contract.**
+`forgeApiUrl` is persisted verbatim in every execution envelope, so any
+credential riding the URL — userinfo, a query, a fragment, or a
+credential-shaped path segment (`https://host/<token>/v1`) — would be
+persisted with it. `forgeApiUrlProblem` refuses those: the percent-encoded
+forms included (the decoding runs to a fixed point), the path as written
+(the URL parser's dot-segment normalization would hide a token from the
+parsed path while the envelope persists the raw value), a token split
+across separators (base64's own `/`), an `@` outside the authority (the
+#1419 class the Python lane refuses), and a malformed percent-escape. The
+controller refuses at STARTUP a configured endpoint that could never pass:
+every envelope for that platform would otherwise fail later with an
+opaque builder error.
+
+The Python lane only *warns* about a path-embedded credential, because a
+path segment cannot be reliably told apart from a legitimate path part and
+a legitimate endpoint's authentication can genuinely ride it. This field's
+contract is stronger — the value may never carry credential material — so
+the same suspicion refuses. A forge deployment whose authentication
+genuinely rides its path has no credential-free base to put here; it must
+carry that secret on the #735 broker path instead.
+
+The screen is a shape screen, not a proof: it refuses a run of 20+ token
+characters (the same floor the #1429 advisory check uses) and cannot tell
+a token from prose. The run is measured with the path's separators
+ignored, so a legitimate base path is refused once its token characters
+total 20 or more — the deployment must shorten or alias its base path;
+there is no secret to move. The hostname is not screened: a long DNS label
+is ordinary operator naming, and a per-key subdomain gateway is a rarer
+channel than a path token.
 
 **No raw infrastructure crosses the boundary.** There is no field anywhere
 in `ExecutionRequest` for a command, image, PodSpec, container args, or

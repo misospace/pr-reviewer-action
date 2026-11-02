@@ -1101,6 +1101,200 @@ test("validateExecutionRequest enforces the forge API base coordinate (#1433)", 
   );
 });
 
+test("validateExecutionRequest refuses a credential riding the forge API path (#1433)", () => {
+  const { request } = makeRequest();
+  const valid = JSON.parse(JSON.stringify(request));
+  const token = "7f3a9c1e55b20d84aa613c9f02bb71d6";
+  // #252: the boundary token itself, in every encoding an operator could
+  // configure. `encodeURIComponent` leaves an alphanumeric token untouched,
+  // so the encoded forms are spelled out here — a test that encodes the
+  // attack with a no-op encoder re-tests the plain case and encodes the
+  // same blind spot as the code.
+  const hexEscaped = [...token]
+    .map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, "0")}`)
+    .join("");
+  const twiceEscaped = hexEscaped.replaceAll("%", "%25");
+  const thriceEscaped = twiceEscaped.replaceAll("%", "%25");
+
+  // #1429's class, refused instead of warned about: a gateway token in the
+  // endpoint's PATH is credential material, and this coordinate is persisted
+  // verbatim in every execution envelope. The refusal must name the problem
+  // without echoing the secret.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${token}/v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // Percent-encoded token: the same secret, encoded.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${hexEscaped}/v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // Partially encoded: the raw segment is not token-shaped, the decoded one
+  // is — so the raw path alone must not be what is judged.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/7f3a%39c1e55b20d84aa613c9f02bb71d6/v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // Double encoded: the token only appears after two decoding rounds.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${twiceEscaped}/v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // Triple encoded: the token only appears after three decoding rounds.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${thriceEscaped}/v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // Quadruple encoded: the decoding runs to a fixed point, so no depth of
+  // encoding buys a pass.
+  assert.throws(
+    () =>
+      validateExecutionRequest({
+        ...valid,
+        forgeApiUrl: `https://forge.example/${thriceEscaped.replaceAll("%", "%25")}/v1`,
+      }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // An encoded separator cannot hide the token from the decoded path.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${token}%2Fv1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // A token split across a real separator arrives as two sub-floor
+  // segments (base64's own `/`): neither half is credential-shaped, so the
+  // joined pair must be judged too.
+  assert.throws(
+    () =>
+      validateExecutionRequest({
+        ...valid,
+        forgeApiUrl: `https://forge.example/${"A".repeat(19)}/${"A".repeat(19)}/v1`,
+      }),
+    /must not contain a credential-shaped path segment/,
+  );
+  assert.throws(
+    () =>
+      validateExecutionRequest({
+        ...valid,
+        forgeApiUrl: `https://forge.example/${"A".repeat(19)}%2F${"A".repeat(19)}/v1`,
+      }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // Dot segments are removed by the URL parser, so the parsed path no
+  // longer shows the token — but the envelope persists the value as
+  // written. The path AS WRITTEN must be judged.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${token}/..` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${token}/../v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/v1/../${token}` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // A token split across separators into sub-floor pieces (base64's own
+  // `/`, or a hex token broken into chunks): the pieces are joined, so the
+  // split cannot smuggle the token past the floor.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/7f3a9c1e5/5b20d84aa/613c9f02bb71d6/v1" }),
+    /must not contain a credential-shaped path segment/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/7f3a9c1e5%2F5b20d84aa%2F613c9f02bb71d6/v1" }),
+    /must not contain a credential-shaped path segment/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/7f3a9c1e/55b20d84/aa613c9f/02bb71d6/v1" }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // A base64 token broken into its own quads.
+  assert.throws(
+    () =>
+      validateExecutionRequest({
+        ...valid,
+        forgeApiUrl: "https://forge.example/QUJDREVGRUZHSElKTEVOU1BRUlNUVVZXWFla/v1",
+      }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // A credential sharing its segment with one punctuation character is
+  // still a run of token characters.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${token}!/v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${token};v=1/v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // An `@` outside the authority is the #1419 class the Python lane
+  // refuses: a password carrying an unencoded `/` ends the authority
+  // early, so the userinfo lands in the path.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${token}@x/v1` }),
+    /credential outside its authority/,
+  );
+  // A percent-encoded query is the same channel the plain query is refused
+  // for: the encoded form must be refused too.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/%3Faccess_token%3Dghp_SECRET" }),
+    /percent-encoded query/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/%23ghp_SECRET" }),
+    /percent-encoded query/,
+  );
+  // A malformed escape cannot be decoded, so the path cannot be proven
+  // credential-free: refuse rather than guess.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/%zz/api" }),
+    /malformed percent-encoding/,
+  );
+  // The refusal must not echo the secret it refused.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${token}/v1` }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!err.message.includes(token));
+      return true;
+    },
+  );
+
+  // A legitimate base path is prose, not token material: it stays legal.
+  assert.equal(
+    validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/api/v1" }).forgeApiUrl,
+    "https://forge.example/api/v1",
+  );
+  assert.equal(
+    validateExecutionRequest({ ...valid, forgeApiUrl: "https://ghe.example/api/v3" }).forgeApiUrl,
+    "https://ghe.example/api/v3",
+  );
+  assert.equal(
+    validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/gitlab/api/v4" }).forgeApiUrl,
+    "https://forge.example/gitlab/api/v4",
+  );
+  // One character under the credential-shaped floor stays legal too — the
+  // floor is the same one #1429 uses.
+  assert.equal(
+    validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/${"a".repeat(19)}` }).forgeApiUrl,
+    `https://forge.example/${"a".repeat(19)}`,
+  );
+  // Known false positives, pinned on purpose: PROSE of 20+ token
+  // characters is refused too — in one segment or across separators —
+  // because a shape screen cannot tell it from a token and this field may
+  // never carry credential material. A deployment with such a base path
+  // must shorten or alias it.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/tenants/acme-corporation-instance/v1" }),
+    /must not contain a credential-shaped path segment/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/organizations/members" }),
+    /must not contain a credential-shaped path segment/,
+  );
+});
+
 test("validateExecutionResult enforces the per-status sentinel discipline", () => {
   const base = {
     status: "completed",

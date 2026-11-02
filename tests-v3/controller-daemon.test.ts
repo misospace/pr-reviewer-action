@@ -540,6 +540,54 @@ test("a forge integration endpoint that could never pass envelope validation ref
   );
 });
 
+test("a forge integration endpoint whose path carries a token refuses daemon startup (#1433)", async () => {
+  // #252: the hostile value itself — a gateway credential riding the
+  // configured endpoint's path. The envelope persists that coordinate
+  // verbatim, so the refusal must be a startup error naming the
+  // integration, not a per-job builder rejection for every review.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              {
+                name: "fj",
+                kind: "forgejo",
+                endpoint: "https://forge.example/7f3a9c1e55b20d84aa613c9f02bb71d6/v1",
+                credential: "fj-token",
+              },
+            ],
+          } as InstanceConfig,
+        },
+      }),
+    /forge integration 'fj' endpoint must not contain a credential-shaped path segment/,
+  );
+  // The same credential, percent-encoded: the startup refusal must not be
+  // a plain-text-only screen.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              {
+                name: "fj",
+                kind: "forgejo",
+                endpoint:
+                  "https://forge.example/%37%66%33%61%39%63%31%65%35%35%62%32%30%64%38%34%61%61%36%31%33%63%39%66%30%32%62%62%37%31%64%36/v1",
+                credential: "fj-token",
+              },
+            ],
+          } as InstanceConfig,
+        },
+      }),
+    /forge integration 'fj' endpoint must not contain a credential-shaped path segment/,
+  );
+});
+
 test("an adoption policy the repository did not satisfy never schedules", async (t) => {
   const h = await start({
     options: {

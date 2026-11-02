@@ -118,7 +118,12 @@ export interface ExecutionRequest {
    * consumers must treat "" as ABSENT and apply the default explicitly —
    * `??` never fires on an empty string, and the platform seams refuse an
    * empty base. A `forgejo` request without one is REFUSED at validation,
-   * never at adapter construction inside the worker. */
+   * never at adapter construction inside the worker.
+   *
+   * "Non-secret" is a hard contract, not a convention: the value is
+   * persisted verbatim in every envelope, so a credential riding the URL
+   * (userinfo, query, fragment, or a credential-shaped path segment) is
+   * REFUSED by `forgeApiUrlProblem`, not warned about. */
   readonly forgeApiUrl: string;
   readonly repoFullName: string;
   /** 1-based PR/MR number. */
@@ -397,20 +402,145 @@ function lexicallyInsideProblem(child: string, dir: string, path: string): strin
   return "";
 }
 
+/** The credential-shaped run floor (#1433): an opaque gateway token is a
+ * long blob, while a legitimate API base-path segment (`api`, `v1`,
+ * `completions`) is short prose. The floor keeps false refusals rare; it
+ * also means a SHORT secret-shaped run is not detected — this is a shape
+ * screen, not a proof that a path is credential-free.
+ *
+ * It is the SAME 20-character floor the #1429 advisory path check uses in
+ * the Python lane (`pr_reviewer/http_safe.py`). The shape below is a
+ * superset of that lane's (base64's `+` and `=`), and this boundary
+ * additionally judges the path as written, judges a RUN inside a segment
+ * (not only a whole segment), joins the path across its separators, and
+ * refuses a malformed encoding — so the two lanes share the floor, not
+ * the whole rule. */
+const MIN_CREDENTIAL_SHAPED_PATH_RUN = 20;
+
+/** The characters an opaque token is made of: the URL unreserved set plus
+ * the base64 alphabet's `+` and `=`. No real token alphabet (hex, base64,
+ * base64url, JWT) reaches beyond them; a run built from anything else is
+ * path prose, not token material. */
+const TOKEN_RUN_RE = /[A-Za-z0-9._~+=-]+/g;
+
+/** A percent-escape the URL cannot decode: the path's meaning is
+ * uncertain, so it cannot be proven credential-free. */
+const MALFORMED_ESCAPE_RE = /%(?![0-9A-Fa-f]{2})/;
+
+/** Percent-decode a path TOLERANTLY: a valid escape is decoded, an
+ * invalid one is left as written, so a decoded form never throws and the
+ * decoding can run to a fixed point. Byte-wise decoding is enough here —
+ * the screen judges character shape, not text. */
+function decodePathTolerant(path: string): string {
+  return path.replace(/%([0-9A-Fa-f]{2})/g, (_match, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16)),
+  );
+}
+
+/** The path AS WRITTEN in the value, before the URL parser's
+ * normalization: the parser removes dot segments, so a credential can hide
+ * in a path that `url.pathname` no longer shows — while the envelope
+ * persists the raw value verbatim. The raw path is therefore judged too. */
+function rawPathOf(value: string): string {
+  const authorityStart = value.indexOf("//");
+  if (authorityStart < 0) return "";
+  const pathStart = value.indexOf("/", authorityStart + 2);
+  return pathStart < 0 ? "" : value.slice(pathStart);
+}
+
+/** The token-character RUNS of one path form: a run, not a whole
+ * segment, so a credential sharing its segment with one punctuation
+ * character (`token!junk`, `token;v=1`) is still a run of token
+ * characters. The separators are removed, so a token split across a
+ * separator (base64's own `/`) is judged as ONE run. */
+function tokenRunsIn(path: string): string[] {
+  return path.replaceAll("/", "").match(TOKEN_RUN_RE) ?? [];
+}
+
+/** Path-credential problem of a URL's path, or "" when the path carries no
+ * credential material.
+ *
+ * A credential can ride the endpoint's PATH: gateway providers hand out
+ * URLs like `https://host/<token>/v1`. There the Python lane (#1429) only
+ * WARNS, because a path segment cannot be reliably told apart from a
+ * legitimate path part and a legitimate endpoint's authentication can
+ * genuinely ride it. This field's contract is stronger — `forgeApiUrl` may
+ * never carry credential material, and it is persisted verbatim in every
+ * execution envelope — so the same suspicion REFUSES here.
+ *
+ * The boundary refuses a path that
+ *
+ * - carries a credential-shaped run: at least
+ *   `MIN_CREDENTIAL_SHAPED_PATH_RUN` token characters, judged over the
+ *   path as written, over the parsed path, and over every
+ *   percent-decoding round of each, so an encoded token cannot slip
+ *   through; or
+ * - smuggles a query, fragment, whitespace, or control character through
+ *   percent-encoding (the plain forms are already refused above); or
+ * - carries an `@` outside its authority (the #1419 class the Python lane
+ *   refuses: a password carrying an unencoded `/` ends the authority
+ *   early, so the userinfo lands in the path); or
+ * - carries a malformed percent-escape, which cannot be decoded and
+ *   therefore cannot be proven credential-free.
+ *
+ * The channels this covers are the URL's userinfo, query, fragment, and
+ * path. The hostname is not screened: a long DNS label is ordinary
+ * operator naming, and a per-key subdomain gateway is a rarer channel
+ * than a path token.
+ *
+ * The screen is a shape screen, not a proof: it cannot tell a token from
+ * prose, and this field's contract leaves no room for the doubt. A
+ * legitimate base path whose token run reaches the floor is refused too —
+ * such a deployment must shorten or alias its base path; there is no
+ * secret to move. */
+function forgeApiUrlPathProblem(url: URL, rawPath: string): string {
+  const paths = [rawPath, url.pathname];
+  for (const path of paths) {
+    if (MALFORMED_ESCAPE_RE.test(path)) {
+      return "must not contain a malformed percent-encoding in its path";
+    }
+  }
+  for (const path of paths) {
+    let current = path;
+    // The decoding runs to a fixed point: a decode round either shrinks
+    // the path or changes nothing, and the path is byte-capped, so the
+    // loop terminates.
+    for (;;) {
+      if (current.includes("@")) {
+        return "must not carry a credential outside its authority (an '@' in the path)";
+      }
+      if (/[?#\s]/.test(current) || hasControlCharacters(current)) {
+        return "must not contain a percent-encoded query, fragment, whitespace, or control character in its path";
+      }
+      for (const run of tokenRunsIn(current)) {
+        if (run.length >= MIN_CREDENTIAL_SHAPED_PATH_RUN) {
+          return "must not contain a credential-shaped path segment";
+        }
+      }
+      const decoded = decodePathTolerant(current);
+      if (decoded === current) break;
+      current = decoded;
+    }
+  }
+  return "";
+}
+
 /** Envelope hygiene problem of a present forge API base URL value, or ""
  * when it is a valid coordinate: absolute http(s), a hostname, bounded
  * length, and NO credential material — including no query and no fragment,
- * where a `?access_token=`-style secret hides from plain scheme checks.
+ * where a `?access_token=`-style secret hides from plain scheme checks,
+ * and no credential-shaped path segment, where a `<token>` in the path
+ * hides from every other check (#1429's class, refused here).
  *
  * This is `validateExecutionRequest`'s own check, exported so operator
  * wiring can refuse a configured endpoint at STARTUP instead of refusing
  * every request the builder composes with it. The same hygiene the config
  * layer applies to endpoints (`instance-config`'s `endpointAt`, plus the
- * stricter query/fragment/whitespace discipline this envelope adds for the
- * #1429 path-embedded-credential class) and that `platform/urls`'s
- * `parsePlatformBaseUrl` applies worker-side — keep them in sync; this one
- * is deliberately one-way stricter than both, so anything accepted here is
- * accepted by every consumer of the coordinate. */
+ * stricter query/fragment/whitespace/path discipline this envelope adds)
+ * and that `platform/urls`'s `parsePlatformBaseUrl` applies worker-side —
+ * keep them in sync; this one is deliberately one-way stricter than both,
+ * so anything accepted here is accepted by every consumer of the
+ * coordinate. */
 export function forgeApiUrlProblem(value: string): string {
   if (Buffer.byteLength(value, "utf8") > MAX_EXECUTION_FORGE_API_URL_BYTES) {
     return `must be at most ${MAX_EXECUTION_FORGE_API_URL_BYTES} bytes`;
@@ -433,7 +563,7 @@ export function forgeApiUrlProblem(value: string): string {
   if (url.hostname === "") {
     return "must include a hostname";
   }
-  return "";
+  return forgeApiUrlPathProblem(url, rawPathOf(value));
 }
 
 /** Fail-closed check of the non-secret forge API base coordinate (#1433).
