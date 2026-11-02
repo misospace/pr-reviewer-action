@@ -1004,8 +1004,9 @@ export async function startControllerDaemon(
     // validation, never at adapter construction inside the worker. The
     // startup screening above proved each kind appears at most once, so
     // this kind match is the ONE integration of the job's platform — never
-    // the first of several — and it is the integration the single-platform
-    // entrypoint composes into the forge capability serving the job.
+    // the first of several. Tying it to the installation whose capability
+    // actually serves the job is the single-platform entrypoint's job
+    // (#738): it composes one capability from that one integration.
     resolveForgeApiUrl: async (job) =>
       options.instance.forges.find((entry) => entry.kind === job.platform)?.endpoint ?? "",
     credentialRefs: (job, runId) => options.credentialRefs(job, runId),

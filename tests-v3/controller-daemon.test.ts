@@ -546,37 +546,57 @@ test("two forge integrations of the same kind refuse daemon startup (#1433)", as
   // stamp the first installation's API base into every job of that
   // platform, even when the other integration serves the job — so the
   // ambiguous mapping must be a startup refusal, never a guess.
-  await assert.rejects(
-    () =>
-      start({
-        options: {
-          instance: {
-            ...instanceConfig(),
-            forges: [
-              { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
-              { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
-            ],
-          } as InstanceConfig,
-        },
-      }),
-    /forge integrations 'fj-primary' and 'fj-secondary' share kind 'forgejo'/,
-  );
-  // The same ambiguity on the GitHub side refuses too.
-  await assert.rejects(
-    () =>
-      start({
-        options: {
-          instance: {
-            ...instanceConfig(),
-            forges: [
-              { name: "gh-app-a", kind: "github", endpoint: "https://ghe-a.example/api/v3", credential: "gh-a" },
-              { name: "gh-app-b", kind: "github", endpoint: "https://ghe-b.example/api/v3", credential: "gh-b" },
-            ],
-          } as InstanceConfig,
-        },
-      }),
-    /forge integrations 'gh-app-a' and 'gh-app-b' share kind 'github'/,
-  );
+  //
+  // The Forgejo pair refuses on this GitHub-serving harness on purpose:
+  // the refusal judges the configuration, not the platform served today.
+  const dirs = {
+    durableStateDir: mkdtempSync(join(tmpdir(), "prv-daemon-state-")),
+    runsRoot: mkdtempSync(join(tmpdir(), "prv-daemon-runs-")),
+    workspaceCacheRoot: mkdtempSync(join(tmpdir(), "prv-daemon-cache-")),
+  };
+  try {
+    const refusal = await start({
+      dirs,
+      options: {
+        instance: {
+          ...instanceConfig(),
+          forges: [
+            { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "cred-alpha" },
+            { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "cred-beta" },
+          ],
+        } as InstanceConfig,
+      },
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    assert.ok(refusal instanceof TypeError, `expected a TypeError refusal, got ${String(refusal)}`);
+    assert.match(refusal.message, /forge integrations 'fj-primary' and 'fj-secondary' share kind 'forgejo'/);
+    // #252: the refusal names the configuration and echoes nothing else —
+    // no configured endpoint and no credential reference reaches the log.
+    for (const material of ["forge-a.example", "forge-b.example", "/api/v1", "cred-alpha", "cred-beta"]) {
+      assert.ok(!refusal.message.includes(material), `refusal must not echo '${material}': ${refusal.message}`);
+    }
+    // The same ambiguity on the GitHub side refuses too.
+    await assert.rejects(
+      () =>
+        start({
+          dirs,
+          options: {
+            instance: {
+              ...instanceConfig(),
+              forges: [
+                { name: "gh-app-a", kind: "github", endpoint: "https://ghe-a.example/api/v3", credential: "gh-a" },
+                { name: "gh-app-b", kind: "github", endpoint: "https://ghe-b.example/api/v3", credential: "gh-b" },
+              ],
+            } as InstanceConfig,
+          },
+        }),
+      /forge integrations 'gh-app-a' and 'gh-app-b' share kind 'github'/,
+    );
+  } finally {
+    for (const dir of Object.values(dirs)) rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a forge integration endpoint that could never pass envelope validation refuses daemon startup (#1433)", async () => {
