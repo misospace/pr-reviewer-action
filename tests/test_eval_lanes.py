@@ -15,9 +15,12 @@ import eval_lanes
 import eval_harness
 
 SECRET = "SUPER-SECRET-CANARY-9f3a"
-# #1417: an operator endpoint can carry a credential in its userinfo; the
-# credential must never reach a recorded report, but the run still uses it.
+# #1417: an operator endpoint can carry a credential in its userinfo. The
+# credential must never reach a recorded report, and it must never ride in
+# the request URL either: it travels in the provider's auth header instead.
 LANE_BASE_URL = "https://lane-operator:hunter2@models.example/v1"
+LANE_REQUEST_URL = "https://models.example/v1"
+LANE_CREDENTIAL = "lane-operator:hunter2"
 REDACTED_BASE_URL = "https://***@models.example/v1"
 
 
@@ -211,8 +214,9 @@ def run_lane_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[i
     """Drive the harness over a lane whose endpoint carries a credential.
 
     The stubbed run records the model_config it was handed, so the test can
-    prove the run still contacts the full endpoint while the written report
-    records only the redacted projection.
+    prove the run contacts the credential-free endpoint and carries the
+    credential in the auth-header channel, while the written report records
+    only the redacted projection.
     """
     plan_path = write_plan(tmp_path, credentialed_plan_data())
     corpus_path = tmp_path / "corpus.json"
@@ -221,7 +225,10 @@ def run_lane_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[i
         "url": "https://github.com/test/repo/pull/1", "known_findings": [],
     }]}), encoding="utf-8")
     report_path = tmp_path / "report.json"
-    monkeypatch.setenv("PRIMARY_KEY", "lane-secret")
+    # The endpoint URL carries the credential, so the profile's credential
+    # environment variable must carry none: one request carries one
+    # credential.
+    monkeypatch.delenv("PRIMARY_KEY", raising=False)
     seen_configs: list[dict] = []
 
     def fake_run_review_for_pr(pr, mode, work_dir, model_config, **kwargs):
@@ -244,7 +251,7 @@ def run_lane_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[i
 def test_lane_public_projection_redacts_base_url_userinfo(tmp_path: Path) -> None:
     plan = eval_lanes.load_lane_plan(write_plan(tmp_path, credentialed_plan_data()))
     lane = eval_lanes.select_lane(plan, "primary")
-    resolved = eval_lanes.resolve_lane(plan, lane, {"PRIMARY_KEY": "lane-secret"})
+    resolved = eval_lanes.resolve_lane(plan, lane, {})
 
     # The projection is report/display state, so the endpoint credential must
     # not survive into any of its serialized forms.
@@ -258,8 +265,69 @@ def test_lane_public_projection_redacts_base_url_userinfo(tmp_path: Path) -> Non
     assert resolved.public["primary"]["base_url"] == REDACTED_BASE_URL
     assert REDACTED_BASE_URL in json.dumps(resolved.public)
 
-    # Only the recording is redacted: the run still uses the full endpoint.
-    assert resolved.base_url == LANE_BASE_URL
+    # The request target carries no credential: the credential rides the
+    # provider's auth header, and the endpoint's identity is unchanged.
+    assert resolved.base_url == LANE_REQUEST_URL
+    assert resolved.api_key == LANE_CREDENTIAL
+
+
+def test_lane_resolves_the_url_credential_into_the_credential_channel(
+    tmp_path: Path,
+) -> None:
+    """#1417: a profile endpoint may carry the credential in its userinfo.
+
+    The credential moves into the credential channel (the provider's auth
+    header) and the request target keeps the endpoint's identity.
+    """
+    plan = eval_lanes.load_lane_plan(write_plan(tmp_path, credentialed_plan_data()))
+    lane = eval_lanes.select_lane(plan, "primary")
+
+    resolved = eval_lanes.resolve_lane(plan, lane, {})
+
+    assert resolved.base_url == LANE_REQUEST_URL
+    assert resolved.api_key == LANE_CREDENTIAL
+    # The resolved lane's own repr must not echo the credential.
+    assert "hunter2" not in repr(resolved)
+    assert "lane-operator" not in repr(resolved)
+
+
+def test_lane_refuses_two_credential_channels(tmp_path: Path) -> None:
+    """One request carries one credential.
+
+    A credential in the endpoint URL and a credential in the profile's
+    environment variable are two channels for one request, so the lane is
+    refused before any run — and the refusal names the environment variable
+    without echoing either value.
+    """
+    plan = eval_lanes.load_lane_plan(write_plan(tmp_path, credentialed_plan_data()))
+    lane = eval_lanes.select_lane(plan, "primary")
+
+    with pytest.raises(eval_lanes.LaneConfigError) as error:
+        eval_lanes.resolve_lane(plan, lane, {"PRIMARY_KEY": SECRET})
+
+    message = str(error.value)
+    assert "PRIMARY_KEY" in message
+    assert "hunter2" not in message
+    assert "lane-operator" not in message
+    assert SECRET not in message
+
+
+def test_specialist_env_carries_the_credential_in_the_key_channel(
+    tmp_path: Path,
+) -> None:
+    """The specialist profile's endpoint is resolved the same way."""
+    data = plan_data()
+    data["lanes"] = [next(item for item in data["lanes"] if item["kind"] == "heterogeneous_specialists")]
+    data["profiles"]["specialist"]["base_url"] = LANE_BASE_URL
+    plan = eval_lanes.load_lane_plan(write_plan(tmp_path, data))
+    lane = eval_lanes.select_lane(plan, "hetero")
+
+    resolved = eval_lanes.resolve_lane(plan, lane, {"PRIMARY_KEY": SECRET})
+
+    assert resolved.specialist_env["AI_SPECIALIST_BASE_URL"] == LANE_REQUEST_URL
+    assert resolved.specialist_env["AI_SPECIALIST_API_KEY"] == LANE_CREDENTIAL
+    # The credential rides the key channel only; the request URL carries none.
+    assert "hunter2" not in resolved.specialist_env["AI_SPECIALIST_BASE_URL"]
 
 
 def test_harness_report_metadata_never_records_base_url_userinfo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -275,13 +343,14 @@ def test_harness_report_metadata_never_records_base_url_userinfo(tmp_path: Path,
     assert report["metadata"]["lane"]["primary"]["base_url"] == REDACTED_BASE_URL
 
 
-def test_lane_run_still_uses_the_full_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_lane_run_uses_the_credential_free_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     exit_code, _report_path, seen_configs = run_lane_harness(tmp_path, monkeypatch)
     assert exit_code == 0
     assert seen_configs, "the harness never ran a review"
-    # Redaction applies to the recorded projection only; the run env still
-    # carries the full endpoint (model_config["base_url"] -> AI_BASE_URL).
-    assert seen_configs[0]["base_url"] == LANE_BASE_URL
+    # The request URL carries no credential; the credential rides the
+    # provider's auth header (model_config["api_key"] -> AI_API_KEY).
+    assert seen_configs[0]["base_url"] == LANE_REQUEST_URL
+    assert seen_configs[0]["api_key"] == LANE_CREDENTIAL
 
 
 def test_redact_url_userinfo_helper_redacts_userinfo_only() -> None:

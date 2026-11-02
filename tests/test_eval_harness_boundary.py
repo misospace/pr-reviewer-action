@@ -1000,20 +1000,25 @@ class TestLaneEnvironmentBoundary:
 
 
 # #1417: an operator endpoint can carry a credential in its userinfo
-# ("https://user:pass@host"). The run still contacts the full endpoint, but
-# nothing the run records may carry the credential into a shared eval report.
+# ("https://user:pass@host"). The request carries no credential in its URL:
+# the credential moves into the provider's HTTP authentication header, and
+# nothing the run records may carry it into a shared eval report.
 CREDENTIALED_BASE_URL = "https://lane-operator:hunter2@models.example/v1"
+CREDENTIAL_FREE_BASE_URL = "https://models.example/v1"
+URL_CREDENTIAL = "lane-operator:hunter2"
 REDACTED_BASE_URL = "https://***@models.example/v1"
 CREDENTIALED_ANALYSIS_ENGINE = f"gpt-4@{CREDENTIALED_BASE_URL} (openai)"
 CREDENTIALED_STDERR_LINE = f"primary model failed at {CREDENTIALED_BASE_URL}"
 
 
 class TestCredentialedEndpointRedaction:
-    """The recorded run state must never carry the endpoint credential.
+    """The request URL carries no credential, and the recorded run state never
+    carries one either.
 
     The engine marker the runtime records and the stderr the harness
     captures on failure both embed the endpoint; the run's own copy is
-    redacted, while the child still receives the full endpoint.
+    redacted, while the child receives a credential-free request URL and the
+    credential in the auth header.
     """
 
     def test_model_used_redacts_the_endpoint_credential(self, tmp_path: Path) -> None:
@@ -1022,7 +1027,9 @@ class TestCredentialedEndpointRedaction:
             tmp_path / "fake_lane.sh", deep=False,
             analysis_engine=CREDENTIALED_ANALYSIS_ENGINE,
         )
-        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL)
+        # No separate API key: the endpoint URL carries the credential, so
+        # the run has exactly one credential channel.
+        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL, api_key="")
 
         run = run_review_for_pr(
             PR_ENTRY, "native_loop", tmp_path, config,
@@ -1035,9 +1042,11 @@ class TestCredentialedEndpointRedaction:
         assert "hunter2" not in run.model_used
         assert "lane-operator" not in run.model_used
         assert REDACTED_BASE_URL in run.model_used
-        # Only the recording is redacted: the run still contacted the full
-        # endpoint.
-        assert _read_snapshot(repo_path)["AI_BASE_URL"] == CREDENTIALED_BASE_URL
+        # The request itself carries no credential in its URL: the credential
+        # rides the provider's auth header instead.
+        snap = _read_snapshot(repo_path)
+        assert snap["AI_BASE_URL"] == CREDENTIAL_FREE_BASE_URL
+        assert snap["AI_API_KEY"] == URL_CREDENTIAL
 
     def test_failure_message_redacts_the_endpoint_credential(self, tmp_path: Path) -> None:
         repo_path = _work_dir_with_repo(tmp_path)
@@ -1047,7 +1056,7 @@ class TestCredentialedEndpointRedaction:
             stderr_line=CREDENTIALED_STDERR_LINE,
             exit_code=1,
         )
-        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL)
+        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL, api_key="")
 
         run = run_review_for_pr(
             PR_ENTRY, "native_loop", tmp_path, config,
@@ -1061,9 +1070,10 @@ class TestCredentialedEndpointRedaction:
         assert "hunter2" not in run.error
         assert "lane-operator" not in run.error
         assert REDACTED_BASE_URL in run.error
-        # Only the recording is redacted: the run still contacted the full
-        # endpoint.
-        assert _read_snapshot(repo_path)["AI_BASE_URL"] == CREDENTIALED_BASE_URL
+        # The request itself carries no credential in its URL.
+        snap = _read_snapshot(repo_path)
+        assert snap["AI_BASE_URL"] == CREDENTIAL_FREE_BASE_URL
+        assert snap["AI_API_KEY"] == URL_CREDENTIAL
 
     def test_failure_message_redacts_before_truncating_long_prefix(
         self, tmp_path: Path
@@ -1081,7 +1091,7 @@ class TestCredentialedEndpointRedaction:
             stderr_line=stderr_line,
             exit_code=1,
         )
-        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL)
+        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL, api_key="")
 
         run = run_review_for_pr(
             PR_ENTRY, "native_loop", tmp_path, config,
@@ -1092,9 +1102,36 @@ class TestCredentialedEndpointRedaction:
         assert "hunter2" not in run.error
         assert "lane-operator" not in run.error
         assert REDACTED_BASE_URL in run.error
-        # Only the recording is redacted: the run still contacted the full
-        # endpoint.
-        assert _read_snapshot(repo_path)["AI_BASE_URL"] == CREDENTIALED_BASE_URL
+        # The request itself carries no credential in its URL.
+        snap = _read_snapshot(repo_path)
+        assert snap["AI_BASE_URL"] == CREDENTIAL_FREE_BASE_URL
+        assert snap["AI_API_KEY"] == URL_CREDENTIAL
+
+    def test_credentialed_endpoint_and_separate_api_key_are_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """One request carries one credential.
+
+        A credential in the endpoint URL and a separate API key are two
+        channels for one request, so the run is refused before the child is
+        started — and the refusal never echoes either value.
+        """
+        repo_path = _work_dir_with_repo(tmp_path)
+        script = _write_fake_script(tmp_path / "fake_lane.sh", deep=False)
+        config = dict(MODEL_CONFIG, base_url=CREDENTIALED_BASE_URL)
+
+        run = run_review_for_pr(
+            PR_ENTRY, "native_loop", tmp_path, config,
+            deep_review=False, review_script=script,
+        )
+
+        assert run.error is not None
+        assert "one request carries one credential" in run.error
+        assert "hunter2" not in run.error
+        assert "lane-operator" not in run.error
+        assert "dummy-key" not in run.error
+        # The child never ran: no request was sent at all.
+        assert not (repo_path / "env-snapshot.json").exists()
 
 
 if __name__ == "__main__":

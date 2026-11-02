@@ -38,7 +38,11 @@ for _p in (str(ROOT), str(SCRIPT_DIR)):
 
 import eval_lanes
 
-from pr_reviewer.http_safe import redact_urls_in_text
+from pr_reviewer.http_safe import (
+    carries_url_credential,
+    redact_urls_in_text,
+    resolve_credential_channel,
+)
 from pr_reviewer.semantic_eval import (
     SemanticCorpus,
     SemanticResult,
@@ -1536,7 +1540,7 @@ def populate_review_output(run: ReviewRun, repo_path: Path) -> None:
             # #1417: the engine string embeds the endpoint
             # ("model@https://user:pass@host/v1 (openai)"), and the run's
             # record reaches the shared report. Only the recorded copy is
-            # redacted; the run itself used the full endpoint.
+            # redacted; the request itself carries no credential in its URL.
             run.model_used = redact_urls_in_text(model_text)
 
         marker = model_text.lower()
@@ -2065,9 +2069,19 @@ def run_review_for_pr(
             env["GH_TOKEN"] = forge_token
         env["REPO"] = pr_entry["repo_full_name"]
         env["PR_NUMBER"] = str(pr_number)
-        env["AI_BASE_URL"] = model_config.get("base_url", "")
+        # #1417: a credential never rides in a request URL. An endpoint URL
+        # that carries a credential in its userinfo is resolved here into the
+        # credential-free request target plus the credential that travels in
+        # the provider's HTTP authentication header. An endpoint that carries
+        # no credential is handed over unchanged, so nothing else about the
+        # harness's endpoint handling moves.
+        base_url = model_config.get("base_url", "")
+        api_key = model_config.get("api_key", "")
+        if carries_url_credential(base_url):
+            base_url, api_key = resolve_credential_channel(base_url, api_key)
+        env["AI_BASE_URL"] = base_url
         env["AI_MODEL"] = model_config.get("model", "")
-        env["AI_API_KEY"] = model_config.get("api_key", "")
+        env["AI_API_KEY"] = api_key
         # #757 A/B arm override: replace-mode prompt substitution, verbatim
         # (config.sh applies no bundled default and no fragment substitution
         # in replace mode), so both arms run the same corpus through the same
@@ -3396,8 +3410,9 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
         return 0
     if lane_resolved is not None:
         # #1417: the report is shared, so the recorded lane projection never
-        # carries a profile base URL's userinfo. The run itself still used the
-        # full endpoint (model_config["base_url"] -> AI_BASE_URL).
+        # carries a profile base URL's userinfo. The run itself contacted the
+        # credential-free endpoint (model_config["base_url"] -> AI_BASE_URL)
+        # and carried the credential in the auth header.
         report["metadata"]["lane"] = eval_lanes.lane_report_projection(lane_resolved.public)
 
     # #840: surface timeout counts per mode prominently.
@@ -3596,8 +3611,8 @@ def main() -> int:
     # Generate report
     report = generate_report(results, corpus, equivalent_paths=args.equivalent_paths)
     if lane_resolved is not None:
-        # #1417: redacted at the report boundary; the run used the full
-        # endpoint via AI_BASE_URL.
+        # #1417: redacted at the report boundary; the run contacted the
+        # credential-free endpoint via AI_BASE_URL.
         report["metadata"]["lane"] = eval_lanes.lane_report_projection(lane_resolved.public)
     report["metadata"]["corpus_source"] = str(args.corpus)
     report["metadata"]["claim_falsification"] = claim_falsification
