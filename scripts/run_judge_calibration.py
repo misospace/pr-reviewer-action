@@ -41,6 +41,16 @@ from pr_reviewer.credential_argv import (  # noqa: E402
     credential_argument_refusal,
     refusal_for_unrecognized_arguments,
 )
+from pr_reviewer.http_safe import (  # noqa: E402
+    BaseUrlArgumentAction,
+    CredentialInProcessArguments,
+    Endpoint,
+    UnsafeEndpointUrl,
+    base_url_identity_digest,
+    redact_url_userinfo,
+    resolve_endpoint,
+    select_base_url,
+)
 
 DEFAULT_CORPUS = _REPO_ROOT / "evals" / "judge-calibration-corpus.json"
 DEFAULT_MAX_TOKENS = 4096
@@ -195,7 +205,13 @@ def run_calibration(
     report = {
         "judge_prompt_version": semantic_judge.JUDGE_PROMPT_VERSION,
         "judge_model": judge_model,
-        "base_url": base_url,
+        # #1414: the report is written to disk and shared, and an operator
+        # endpoint can carry a credential in its userinfo — record the
+        # redacted display form, plus a SHA-256 of the full normalized URL so
+        # a live run can still bind the exact endpoint identity (the digest,
+        # not the redacted string, is what live scoring compares).
+        "base_url": redact_url_userinfo(base_url),
+        "base_url_sha256": base_url_identity_digest(base_url),
         "total": total,
         "passed": len(passed_rows),
         "agreement_rate": round(len(passed_rows) / total, 4) if total else 0.0,
@@ -219,10 +235,14 @@ def _row_is_transport(corpus: dict, row: dict) -> bool:
 
 
 def _openai_judge_call(
-    judge_model: str, base_url: str, api_key: str, timeout_sec: int
+    judge_model: str, endpoint: Endpoint, api_key: str, timeout_sec: int
 ) -> JudgeCall:
     """Production transport: build a single-turn OpenAI chat payload for the
-    judge messages and return the assistant text."""
+    judge messages and return the assistant text.
+
+    ``endpoint`` is already resolved: its URL is credential-free and any
+    credential the endpoint URL carried travels in the ``Authorization``
+    header instead of in the request URL (#1414)."""
     from pr_reviewer.judge_http import chat_completion
 
     def _call(messages: list[dict], attempt: int) -> str:
@@ -244,7 +264,10 @@ def _openai_judge_call(
             "temperature": _attempt_temperature(attempt),
             "response_format": {"type": "json_object"},
         }
-        response = chat_completion(base_url, payload, api_key, timeout_sec)
+        response = chat_completion(
+            endpoint.url, payload, api_key, timeout_sec,
+            basic_credential=endpoint.credential,
+        )
         return _extract_text(response)
 
     return _call
@@ -287,7 +310,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument("--judge-model", default=os.environ.get("JUDGE_MODEL"))
-    parser.add_argument("--base-url", default=os.environ.get("JUDGE_BASE_URL"))
+    # default=None, not the environment value: main() has to tell a
+    # command-line value from the environment one, because a credential may
+    # never ride in the process argument list (#1414). The action records
+    # every occurrence, not only the effective one.
+    parser.add_argument("--base-url", default=None, action=BaseUrlArgumentAction)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--timeout", type=int, default=120)
     return parser
@@ -322,12 +349,38 @@ def main(argv: Optional[list[str]] = None) -> int:
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 2
+    # The endpoint comes from the environment when the command line carries
+    # none: a credential in an argument list is readable by every other
+    # process on the host, so a credential-bearing URL is accepted from
+    # JUDGE_BASE_URL only (#1414).
+    try:
+        base_url = select_base_url(
+            getattr(args, "base_url_values", ()), os.environ.get("JUDGE_BASE_URL")
+        )
+    except CredentialInProcessArguments as exc:
+        # The message never echoes the value: it can carry a secret.
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     if not args.corpus.exists():
         print(f"Error: corpus file not found: {args.corpus}", file=sys.stderr)
         return 2
-    if not args.judge_model or not args.base_url:
+    if not args.judge_model or not base_url:
         print("Error: --judge-model and --base-url (or JUDGE_MODEL/JUDGE_BASE_URL) "
               + "are required", file=sys.stderr)
+        return 2
+
+    try:
+        endpoint = resolve_endpoint(base_url)
+    except UnsafeEndpointUrl as error:
+        # The message never echoes the value: an endpoint URL can carry a
+        # credential in its userinfo.
+        print(f"Error: {error}", file=sys.stderr)
+        return 2
+    judge_api_key = _judge_api_key()
+    if endpoint.credential and judge_api_key:
+        print("Error: the judge endpoint URL carries a credential and an API key "
+              "was also supplied; use exactly one credential channel",
+              file=sys.stderr)
         return 2
 
     try:
@@ -342,12 +395,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"  - {error}", file=sys.stderr)
         return 2
 
-    judge_api_key = _judge_api_key()
     judge_call = _openai_judge_call(
-        args.judge_model, args.base_url, judge_api_key, args.timeout
+        args.judge_model, endpoint, judge_api_key, args.timeout
     )
     report = run_calibration(
-        corpus, judge_call, args.judge_model, args.base_url,
+        corpus, judge_call, args.judge_model, base_url,
         corpus_path=args.corpus,
     )
 

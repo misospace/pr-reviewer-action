@@ -17,7 +17,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import pytest  # noqa: E402
 
-from pr_reviewer import semantic_judge  # noqa: E402
+from pr_reviewer import http_safe, semantic_judge  # noqa: E402
 from scripts import live_judge_score as ljs  # noqa: E402
 
 CORPUS_PATH = _REPO_ROOT / "evals" / "judge-calibration-corpus.json"
@@ -286,7 +286,11 @@ def _write_artifact(path: Path, *, model: str = "m",
     payload = {
         "judge_prompt_version": semantic_judge.JUDGE_PROMPT_VERSION,
         "judge_model": model,
-        "base_url": base_url,
+        # Mirrors what scripts/run_judge_calibration.py records (#1414): the
+        # display form is userinfo-redacted, the full-endpoint identity lives
+        # in the digest.
+        "base_url": http_safe.redact_url_userinfo(base_url),
+        "base_url_sha256": http_safe.base_url_identity_digest(base_url),
         "total": total,
         "passed": total if passed is None else passed,
         "agreement_rate": agreement,
@@ -519,6 +523,143 @@ def test_calibration_rejects_missing_base_url(tmp_path: Path) -> None:
     assert any("base_url" in e for e in errors)
 
 
+# ── userinfo redaction (#1414): never a credential in errors, full-value
+#    identity via the digest ──────────────────────────────────────────────
+
+USERINFO_URL = "https://judge-operator:hunter2@judge.internal.example/v1"
+
+
+def test_calibration_accepts_userinfo_base_url_via_full_digest(tmp_path: Path) -> None:
+    art = _write_artifact(tmp_path / "c.json", model="m", base_url=USERINFO_URL)
+    _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH, USERINFO_URL)
+    assert errors == []
+    # The artifact on disk carries no userinfo credential, only the redacted
+    # display form plus the full-value digest.
+    serialized = art.read_text(encoding="utf-8")
+    assert "hunter2" not in serialized and "judge-operator" not in serialized
+    assert "***@judge.internal.example/v1" in serialized
+
+
+def test_calibration_rejects_credential_difference_despite_same_host(
+    tmp_path: Path,
+) -> None:
+    # "The comparison uses the full value, not the redacted one": dropping or
+    # changing the userinfo must NOT compare equal to the recorded endpoint.
+    art = _write_artifact(tmp_path / "c.json", model="m", base_url=USERINFO_URL)
+    _, errors = ljs._load_verified_calibration(
+        art, "m", CORPUS_PATH, "https://judge.internal.example/v1"
+    )
+    assert any("does not match" in e for e in errors)
+
+
+def test_calibration_mismatch_error_redacts_userinfo(tmp_path: Path) -> None:
+    art = _write_artifact(tmp_path / "c.json", model="m", base_url=USERINFO_URL)
+    _, errors = ljs._load_verified_calibration(
+        art, "m", CORPUS_PATH, "https://other-operator:t0psecret@other.internal/v1"
+    )
+    joined = "\n".join(errors)
+    assert any("does not match" in e for e in errors)
+    for secret in ("hunter2", "judge-operator", "t0psecret", "other-operator"):
+        assert secret not in joined
+    assert "***@judge.internal.example/v1" in joined
+    assert "***@other.internal/v1" in joined
+
+
+def test_calibration_malformed_base_url_errors_redact_credentials(
+    tmp_path: Path,
+) -> None:
+    # A malformed artifact can carry the boundary token in a value the error
+    # paths echo: a non-string JSON value ("missing or not a string") and a
+    # stringified payload that passes the string check but parses as no
+    # authority at all ("does not match"). Neither may leak into the error
+    # message (#1414). The live endpoint deliberately mismatches the recorded
+    # digest so both diagnostics fire.
+    malformed_values: list[object] = [
+        [USERINFO_URL],
+        {"url": USERINFO_URL},
+        USERINFO_URL.split("@"),
+        json.dumps([USERINFO_URL]),
+        json.dumps({"base_url": USERINFO_URL}),
+        f"see {USERINFO_URL}",
+        f"https://relay.internal/{USERINFO_URL}",
+        USERINFO_URL.replace("://", ":/"),
+    ]
+    for malformed in malformed_values:
+        art = _write_artifact(tmp_path / "c.json", model="m")
+        payload = json.loads(art.read_text(encoding="utf-8"))
+        payload["base_url"] = malformed
+        art.write_text(json.dumps(payload))
+        _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH, "http://y")
+        joined = "\n".join(errors)
+        if isinstance(malformed, str):
+            assert any("does not match" in e for e in errors)
+        else:
+            assert any("not a string" in e for e in errors)
+        # The userinfo is the credential; the host stays in the redacted
+        # display form by design (diagnostics still identify the endpoint).
+        for secret in ("hunter2", "judge-operator"):
+            assert secret not in joined
+
+
+def test_calibration_rejects_legacy_artifact_without_digest(tmp_path: Path) -> None:
+    art = _write_artifact(tmp_path / "c.json", model="m")
+    payload = json.loads(art.read_text(encoding="utf-8"))
+    del payload["base_url_sha256"]  # artifact written before #1414
+    art.write_text(json.dumps(payload))
+    _, errors = ljs._load_verified_calibration(art, "m", CORPUS_PATH, "http://x")
+    assert any("base_url_sha256" in e for e in errors)
+
+
+def test_main_refuses_a_credential_bearing_endpoint_with_another_key(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """#1414: a credential must ride exactly one channel. Two channels (a URL
+    userinfo and an API key) cannot share one Authorization header, so the
+    run is refused before any request — and the diagnostic never echoes the
+    credential. The credential-bearing URL comes from the environment: a
+    credential never rides in the process argument list."""
+    monkeypatch.setenv(
+        "JUDGE_BASE_URL", "http://judge-operator:hunter2@127.0.0.1:1/v1"
+    )
+    monkeypatch.setenv("JUDGE_API_KEY", "judge-test-credential")
+    base = tmp_path / "b.json"
+    treat = tmp_path / "t.json"
+    base.write_text(json.dumps(_arm_doc("baseline", [{"scenario": 6545, "runs": [_run(1)]}])))
+    treat.write_text(json.dumps(_arm_doc("treatment", [{"scenario": 6545, "runs": [_run(1)]}])))
+    art = _write_artifact(tmp_path / "calib.json", model="m")
+    code = ljs.main([
+        "--baseline", str(base), "--treatment", str(treat),
+        "--calibration-artifact", str(art),
+        "--judge-model", "m",
+    ])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "one credential channel" in err
+    assert "hunter2" not in err
+    assert "judge-operator" not in err
+
+
+def test_main_refuses_an_encoded_credential_endpoint(tmp_path: Path, capsys) -> None:
+    """#1414: an encoded '@' hides the credential from the authority split
+    while urllib unquotes the authority into the request's Host value — the
+    endpoint is refused, with a credential-free diagnostic."""
+    base = tmp_path / "b.json"
+    treat = tmp_path / "t.json"
+    base.write_text(json.dumps(_arm_doc("baseline", [{"scenario": 6545, "runs": [_run(1)]}])))
+    treat.write_text(json.dumps(_arm_doc("treatment", [{"scenario": 6545, "runs": [_run(1)]}])))
+    art = _write_artifact(tmp_path / "calib.json", model="m")
+    code = ljs.main([
+        "--baseline", str(base), "--treatment", str(treat),
+        "--calibration-artifact", str(art),
+        "--judge-model", "m",
+        "--base-url", "http://judge-operator%3Ahunter2%40127.0.0.1/v1",
+    ])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "hunter2" not in err
+    assert "judge-operator" not in err
+
+
 def test_main_refuses_both_arms_omitting_same_scenario(tmp_path: Path) -> None:
     expected = _frozen_scenario_numbers()
     base_path = tmp_path / "b.json"
@@ -676,4 +817,107 @@ def test_the_exact_subset_flag_still_parses() -> None:
     ])
     assert args.allow_subset_scenarios is True
     assert extras == []
+
+
+def test_main_refuses_a_credential_bearing_base_url_from_the_command_line(
+    tmp_path: Path, capsys
+) -> None:
+    """#1414: a credential in an argument list is readable by every other
+    process on the host, so a credential-bearing base URL is accepted from
+    JUDGE_BASE_URL only. The refusal never echoes the credential."""
+    base = tmp_path / "b.json"
+    treat = tmp_path / "t.json"
+    base.write_text(json.dumps(_arm_doc("baseline", [{"scenario": 6545, "runs": [_run(1)]}])))
+    treat.write_text(json.dumps(_arm_doc("treatment", [{"scenario": 6545, "runs": [_run(1)]}])))
+    art = _write_artifact(tmp_path / "calib.json", model="m")
+    code = ljs.main([
+        "--baseline", str(base), "--treatment", str(treat),
+        "--calibration-artifact", str(art),
+        "--judge-model", "m",
+        "--base-url", "http://judge-operator:hunter2@127.0.0.1:1/v1",
+    ])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "must not carry a credential" in err
+    assert "hunter2" not in err
+    assert "judge-operator" not in err
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        # the '--flag=value' form.
+        ["--base-url=http://judge-operator:hunter2@127.0.0.1:1/v1"],
+        # an argparse abbreviation of the flag. '--base' alone is ambiguous
+        # here (it also matches --baseline), and argparse refuses it by
+        # itself without echoing any value.
+        ["--base-u", "http://judge-operator:hunter2@127.0.0.1:1/v1"],
+        # an earlier occurrence: a later one does not remove it from the
+        # process argument list.
+        [
+            "--base-url", "http://judge-operator:hunter2@127.0.0.1:1/v1",
+            "--base-url", "http://127.0.0.1:1/v1",
+        ],
+        # an '@' the authority cannot claim: the credential position is
+        # unverifiable, so the value is refused too.
+        ["--base-url", "http://judge-operator:hunter2/pass@127.0.0.1:1/v1"],
+    ],
+)
+def test_main_refuses_every_credential_bearing_command_line_form(
+    arguments: list[str], tmp_path: Path, capsys
+) -> None:
+    """#1414: the refusal covers every way a credential can reach the argument
+    list — the ``--flag=value`` form, an argparse abbreviation, an earlier
+    occurrence of a repeated flag, and an '@' the authority cannot claim."""
+    base = tmp_path / "b.json"
+    treat = tmp_path / "t.json"
+    base.write_text(json.dumps(_arm_doc("baseline", [{"scenario": 6545, "runs": [_run(1)]}])))
+    treat.write_text(json.dumps(_arm_doc("treatment", [{"scenario": 6545, "runs": [_run(1)]}])))
+    art = _write_artifact(tmp_path / "calib.json", model="m")
+    code = ljs.main([
+        "--baseline", str(base), "--treatment", str(treat),
+        "--calibration-artifact", str(art),
+        "--judge-model", "m",
+        *arguments,
+    ])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "must not carry a credential" in err
+    assert "hunter2" not in err
+    assert "judge-operator" not in err
+
+
+def test_main_takes_a_credential_bearing_base_url_from_the_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1414: the environment is the channel that may carry the credential.
+    The runner uses that endpoint and splits the credential out of the URL,
+    so the request target carries no secret."""
+    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
+    url = "http://judge-operator:hunter2@127.0.0.1:1/v1"
+    monkeypatch.setenv("JUDGE_BASE_URL", url)
+    base = tmp_path / "b.json"
+    treat = tmp_path / "t.json"
+    base.write_text(json.dumps(_full_corpus_arm("baseline")))
+    treat.write_text(json.dumps(_full_corpus_arm("treatment")))
+    art = _write_artifact(tmp_path / "calib.json", model="m", base_url=url)
+    captured: dict = {}
+
+    class _Stop(BaseException):
+        """Stop the run right after the transport is built."""
+
+    def _fake_call(judge_model, endpoint, api_key, timeout_sec):
+        captured["url"] = endpoint.url
+        captured["credential"] = endpoint.credential
+        raise _Stop()
+
+    monkeypatch.setattr(ljs, "_openai_judge_call", _fake_call)
+    with pytest.raises(_Stop):
+        ljs.main([
+            "--baseline", str(base), "--treatment", str(treat),
+            "--calibration-artifact", str(art),
+            "--judge-model", "m",
+        ])
+    assert captured["url"] == "http://127.0.0.1:1/v1"
+    assert captured["credential"] == "judge-operator:hunter2"
 
