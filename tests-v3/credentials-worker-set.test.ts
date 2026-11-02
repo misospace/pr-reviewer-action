@@ -357,6 +357,7 @@ test("worker-set: no secrets in durable payload — plan and executor request st
     attempt: 1,
     kind: "review" as const,
     platform: "github" as const,
+    forgeApiUrl: "https://api.github.com",
     repoFullName: "owner/repo-a",
     prNumber: 7,
     headSha: "a".repeat(40),

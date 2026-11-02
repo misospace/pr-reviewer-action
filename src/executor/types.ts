@@ -42,6 +42,13 @@ export const EXECUTION_CREDENTIAL_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
  * rejected). */
 export const EXECUTION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
+/** Largest byte length the non-secret forge API base URL may carry in a
+ * request envelope. Mirrors instance-config's `MAX_ENDPOINT_BYTES` (and
+ * platform/urls' consumer expectations) so the envelope can never be wider
+ * than the config layer that produces the endpoint — keep the three in
+ * sync; drift fails closed here, never open. */
+const MAX_EXECUTION_FORGE_API_URL_BYTES = 2_048;
+
 /** Path-field bound: the longest absolute path a request or result may
  * name. */
 const MAX_PATH_CHARS = 4_096;
@@ -103,6 +110,16 @@ export interface ExecutionRequest {
   readonly attempt: number;
   readonly kind: ReviewJobKind;
   readonly platform: "github" | "forgejo";
+  /** The non-secret forge API base URL coordinate (like `platform`, never
+   * credential material — secrets travel only on the #735 broker path).
+   * A containerized worker has no ambient forge environment, so the
+   * endpoint must ride the envelope (#1433). "" means "platform default"
+   * and is legal only where a default exists (GitHub: `api.github.com`);
+   * consumers must treat "" as ABSENT and apply the default explicitly —
+   * `??` never fires on an empty string, and the platform seams refuse an
+   * empty base. A `forgejo` request without one is REFUSED at validation,
+   * never at adapter construction inside the worker. */
+  readonly forgeApiUrl: string;
   readonly repoFullName: string;
   /** 1-based PR/MR number. */
   readonly prNumber: number;
@@ -380,6 +397,67 @@ function lexicallyInsideProblem(child: string, dir: string, path: string): strin
   return "";
 }
 
+/** Envelope hygiene problem of a present forge API base URL value, or ""
+ * when it is a valid coordinate: absolute http(s), a hostname, bounded
+ * length, and NO credential material — including no query and no fragment,
+ * where a `?access_token=`-style secret hides from plain scheme checks.
+ *
+ * This is `validateExecutionRequest`'s own check, exported so operator
+ * wiring can refuse a configured endpoint at STARTUP instead of refusing
+ * every request the builder composes with it. The same hygiene the config
+ * layer applies to endpoints (`instance-config`'s `endpointAt`, plus the
+ * stricter query/fragment/whitespace discipline this envelope adds for the
+ * #1429 path-embedded-credential class) and that `platform/urls`'s
+ * `parsePlatformBaseUrl` applies worker-side — keep them in sync; this one
+ * is deliberately one-way stricter than both, so anything accepted here is
+ * accepted by every consumer of the coordinate. */
+export function forgeApiUrlProblem(value: string): string {
+  if (Buffer.byteLength(value, "utf8") > MAX_EXECUTION_FORGE_API_URL_BYTES) {
+    return `must be at most ${MAX_EXECUTION_FORGE_API_URL_BYTES} bytes`;
+  }
+  if (hasControlCharacters(value) || /\s|\?|#/.test(value)) {
+    return "must not contain whitespace, control characters, a query, or a fragment";
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return "must be an absolute URL";
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return `must use http or https (got '${url.protocol}')`;
+  }
+  if (url.username !== "" || url.password !== "") {
+    return "must not embed credentials";
+  }
+  if (url.hostname === "") {
+    return "must include a hostname";
+  }
+  return "";
+}
+
+/** Fail-closed check of the non-secret forge API base coordinate (#1433).
+ *
+ * Absent ("") is legal ONLY where the platform itself carries a default
+ * endpoint (GitHub's `api.github.com`); a Forgejo request without one can
+ * never construct its adapter, so the envelope refuses it at validation.
+ * A present value must satisfy `forgeApiUrlProblem` above. */
+function requireForgeApiUrl(platform: "github" | "forgejo", value: string): void {
+  const path = "execution request.forgeApiUrl";
+  if (value === "") {
+    if (platform === "forgejo") {
+      throw new ExecutionRequestError(
+        `${path} must be non-empty for forgejo (no default forge endpoint exists to fall back to)`,
+      );
+    }
+    return;
+  }
+  const problem = forgeApiUrlProblem(value);
+  if (problem !== "") {
+    throw new ExecutionRequestError(`${path} ${problem}`);
+  }
+}
+
 function validateWorkspaceShape(value: unknown, path: string): WorkspaceInfo {
   if (!isPlainObject(value)) {
     throw new ExecutionRequestError(`${path} must be a mapping`);
@@ -433,9 +511,9 @@ function validateCredentialRef(value: unknown, path: string): ExecutionCredentia
 }
 
 const REQUEST_KEYS = [
-  "jobId", "runId", "attempt", "kind", "platform", "repoFullName", "prNumber",
-  "headSha", "baseSha", "deadlineAtMs", "workspace", "profiles", "credentials",
-  "runDir", "requestPath", "resultPath",
+  "jobId", "runId", "attempt", "kind", "platform", "forgeApiUrl", "repoFullName",
+  "prNumber", "headSha", "baseSha", "deadlineAtMs", "workspace", "profiles",
+  "credentials", "runDir", "requestPath", "resultPath",
 ] as const;
 
 /** Fail-closed validation of an execution request — the ONE definition of
@@ -446,8 +524,11 @@ const REQUEST_KEYS = [
  * Strict and structural: unknown top-level (and nested) fields are
  * REJECTED, every required field must be present with the right type and
  * sentinel discipline, the correlation fields (`runId`, `jobId`) must match
- * `EXECUTION_ID_RE`, and the envelope paths must be absolute, bounded,
- * control-free, and lexically inside `runDir`. Returns a deep-frozen copy —
+ * `EXECUTION_ID_RE`, the envelope paths must be absolute, bounded,
+ * control-free, and lexically inside `runDir`, and the non-secret forge API
+ * base (`forgeApiUrl`) must be a credential-free http(s) endpoint wherever
+ * it is present — and must be present for `forgejo`, which has no default
+ * to fall back to (#1433). Returns a deep-frozen copy —
  * never the caller's own object — so a request cannot be mutated after it
  * was validated. Throws `ExecutionRequestError` on any problem. */
 export function validateExecutionRequest(value: unknown): ExecutionRequest {
@@ -484,6 +565,7 @@ export function validateExecutionRequest(value: unknown): ExecutionRequest {
     attempt: requireInteger(value, "attempt", "execution request", 1),
     kind,
     platform,
+    forgeApiUrl: requireString(value, "forgeApiUrl", "execution request"),
     repoFullName: requireString(value, "repoFullName", "execution request", { nonEmpty: true }),
     prNumber: requireInteger(value, "prNumber", "execution request", 1),
     headSha: requireString(value, "headSha", "execution request"),
@@ -499,6 +581,7 @@ export function validateExecutionRequest(value: unknown): ExecutionRequest {
   requireStrictPath(request.runDir, "execution request.runDir");
   requireStrictPath(request.requestPath, "execution request.requestPath");
   requireStrictPath(request.resultPath, "execution request.resultPath");
+  requireForgeApiUrl(platform, request.forgeApiUrl);
   for (const childPath of [request.requestPath, request.resultPath]) {
     const problem = lexicallyInsideProblem(childPath, request.runDir, "execution request envelope path");
     if (problem !== "") throw new ExecutionRequestError(problem);

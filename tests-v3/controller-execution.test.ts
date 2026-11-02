@@ -92,6 +92,7 @@ interface BuilderHarness {
 
 function setup(overrides: {
   credentialRefs?: (job: ReviewJob, runId: string) => Promise<readonly CredentialRef[]>;
+  resolveForgeApiUrl?: (job: ReviewJob) => Promise<string>;
   runsRoot?: string;
 } = {}): BuilderHarness {
   const ws = fakeWorkspace();
@@ -108,6 +109,9 @@ function setup(overrides: {
       profileCalls.push(job);
       return Object.freeze({ executor: "default", model: "local-fast", evidence: "" === "" ? "strict" : "strict" });
     },
+    resolveForgeApiUrl:
+      overrides.resolveForgeApiUrl ??
+      (async (job) => (job.platform === "github" ? "https://api.github.com" : "https://forge.example")),
     credentialRefs:
       overrides.credentialRefs ??
       (async (job, runId) => {
@@ -154,6 +158,7 @@ test("build composes the execution request from the dispatched record", async ()
   assert.equal(request.attempt, 3);
   assert.equal(request.kind, "review");
   assert.equal(request.platform, "github");
+  assert.equal(request.forgeApiUrl, "https://api.github.com");
   assert.equal(request.repoFullName, "owner/repo");
   assert.equal(request.prNumber, 7);
   assert.equal(request.headSha, HEAD);
@@ -210,6 +215,35 @@ test("a credential reference violating the executor grammar is a builder rejecti
       ] as unknown as readonly CredentialRef[]),
   });
   await assert.rejects(() => h.builder.build(makeRecord("job-1")), Error);
+});
+
+// ── forge API base coordinate (#1433) ───────────────────────────────────
+
+test("build stamps the forge API base of the job's platform into the envelope", async () => {
+  const h = setup();
+  const github = await h.builder.build(makeRecord("job-gh"));
+  assert.equal(github.forgeApiUrl, "https://api.github.com");
+  const forgejoRecord = {
+    ...makeRecord("job-fj"),
+    job: makeJob("job-fj", { platform: "forgejo" }),
+  };
+  const forgejo = await h.builder.build(forgejoRecord);
+  assert.equal(forgejo.forgeApiUrl, "https://forge.example");
+});
+
+test("a forgejo job with no configured forge endpoint refuses at composition, not at adapter construction", async () => {
+  // Fail closed where the worker could never recover: Forgejo has no
+  // default API base, so an empty resolution is a builder rejection and
+  // the launch never happens.
+  const h = setup({ resolveForgeApiUrl: async () => "" });
+  const forgejoRecord = {
+    ...makeRecord("job-fj"),
+    job: makeJob("job-fj", { platform: "forgejo" }),
+  };
+  await assert.rejects(() => h.builder.build(forgejoRecord), /forgeApiUrl/);
+  // GitHub keeps its default: "" remains legal for that platform.
+  const github = await h.builder.build(makeRecord("job-gh"));
+  assert.equal(github.forgeApiUrl, "");
 });
 
 // ── executor selector ───────────────────────────────────────────────────

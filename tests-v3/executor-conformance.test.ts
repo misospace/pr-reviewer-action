@@ -46,6 +46,7 @@ function makeRequest(overrides: Partial<ExecutionRequest> = {}): Fixture {
     attempt: 1,
     kind: "review",
     platform: "github",
+    forgeApiUrl: "https://api.github.com",
     repoFullName: "owner/repo",
     prNumber: 7,
     headSha: HEAD,

@@ -34,6 +34,7 @@ receives only:
 |---|---|
 | `jobId` / `runId` / `attempt` | immutable job identity; `runId` is the **correlation identity** every result must echo back |
 | `kind` / `platform` / `repoFullName` / `prNumber` / `headSha` / `baseSha` | the review identity, carried verbatim from the `ReviewJob` |
+| `forgeApiUrl` | the non-secret forge API base URL (#1433): the instance config's forge-integration endpoint for `platform`, so a containerized worker can construct its forge adapter with no ambient environment. `""` = platform default (GitHub only); a `forgejo` request without one is refused by the validator. Never credential material — secrets travel only on the #735 broker path |
 | `deadlineAtMs` | epoch-ms deadline; `0` = none |
 | `workspace` | the `WorkspaceInfo` the #732 acquisition layer produced (isolated exact-head worktree; the executor owns its `close()`) |
 | `profiles` | `executor`/`model`/`evidence` profile **names** — approved by the operator's instance config; repository config selects names only |

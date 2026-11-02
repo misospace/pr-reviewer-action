@@ -495,6 +495,51 @@ test("startup fails closed when durable state cannot be proven usable", async ()
   }
 });
 
+test("the daemon stamps the instance forge endpoint into every execution envelope (#1433)", async (t) => {
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "gh", kind: "github", endpoint: "https://ghe.example/api/v3", credential: "gh-app-credential" },
+        ],
+      } as InstanceConfig,
+    },
+  });
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  assert.equal(h.fake.started[0]!.forgeApiUrl, "https://ghe.example/api/v3");
+});
+
+test("a forge integration endpoint that could never pass envelope validation refuses daemon startup (#1433)", async () => {
+  // #252: the hostile value itself — a token riding the configured
+  // endpoint's query. The refusal must be a startup error naming the
+  // integration, not a per-job builder rejection for every review.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              {
+                name: "fj",
+                kind: "forgejo",
+                endpoint: "https://forge.example?access_token=ghp_SECRET",
+                credential: "fj-token",
+              },
+            ],
+          } as InstanceConfig,
+        },
+      }),
+    /forge integration 'fj' endpoint must not contain whitespace, control characters, a query, or a fragment/,
+  );
+});
+
 test("an adoption policy the repository did not satisfy never schedules", async (t) => {
   const h = await start({
     options: {

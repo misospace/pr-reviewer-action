@@ -47,7 +47,10 @@ export type ExecutionEnvelope = ExecutionRequest;
  *   require any environment beyond the two coordination variables
  *   (`requestVar`/`resultVar`) plus generic PATH/HOME/TMPDIR-style keys.
  *   Request/job/repo-derived data reaches the image exclusively inside
- *   the envelope file.
+ *   the envelope file. The forge API base URL is envelope data too: the
+ *   request carries it as the non-secret `forgeApiUrl` coordinate (#1433)
+ *   so the image can construct its forge adapter with no ambient
+ *   endpoint — it is never a third coordination variable.
  */
 export interface WorkerImageContract {
   readonly contractVersion: 1;

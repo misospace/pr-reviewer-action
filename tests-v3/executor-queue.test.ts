@@ -76,6 +76,7 @@ function makeRequest(jobId: string, attempt: number): ExecutionRequest {
     attempt,
     kind: "review",
     platform: "github",
+    forgeApiUrl: "https://api.github.com",
     repoFullName: "owner/repo",
     prNumber: 7,
     headSha: HEAD_SHA,

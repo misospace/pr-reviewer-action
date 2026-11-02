@@ -54,6 +54,7 @@ function makeRequest(overrides: Partial<ExecutionRequest> = {}): Fixture {
     attempt: 1,
     kind: "review",
     platform: "github",
+    forgeApiUrl: "https://api.github.com",
     repoFullName: "owner/repo",
     prNumber: 7,
     headSha: HEAD,
@@ -1035,6 +1036,68 @@ test("validateExecutionRequest rejects unknown fields and sentinel violations", 
   assert.throws(
     () => validateExecutionRequest({ ...valid, resultPath: `${valid.runDir}/../escape/result.json` }),
     /must not contain '\.\.' path segments/,
+  );
+});
+
+test("validateExecutionRequest enforces the forge API base coordinate (#1433)", () => {
+  const { request } = makeRequest();
+  const valid = JSON.parse(JSON.stringify(request));
+
+  // "" is the platform-default sentinel and legal ONLY for GitHub; Forgejo
+  // has no default, so its request must carry the endpoint or be refused.
+  assert.equal(validateExecutionRequest({ ...valid, forgeApiUrl: "" }).forgeApiUrl, "");
+  const forgejo = { ...valid, platform: "forgejo", forgeApiUrl: "https://forge.example" };
+  assert.equal(validateExecutionRequest(forgejo).forgeApiUrl, "https://forge.example");
+  // A path-prefixed API base (GHE-style `/api/v3`, reverse-proxied hosts)
+  // is part of the coordinate, not a hostile surface.
+  assert.equal(
+    validateExecutionRequest({ ...valid, forgeApiUrl: "https://ghe.example/api/v3" }).forgeApiUrl,
+    "https://ghe.example/api/v3",
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...forgejo, forgeApiUrl: "" }),
+    /forgeApiUrl must be non-empty for forgejo/,
+  );
+
+  // #252: feed the boundary tokens themselves — credential material must
+  // never ride the durable request envelope, in any position.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://user:ghp_SECRET@github.example" }),
+    /must not embed credentials/,
+  );
+  // Percent-encoded userinfo still parses as userinfo: the `@` delimits it
+  // before any decoding, so this is refused too, not smuggled through.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://%61:ghp_SECRET@github.example" }),
+    /must not embed credentials/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://github.example?access_token=ghp_SECRET" }),
+    /query/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://github.example#ghp_SECRET" }),
+    /fragment/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://github.example\u0007/api" }),
+    /control characters/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "https://github.exam ple/api" }),
+    /whitespace/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "ftp://github.example" }),
+    /http or https/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: "github.example" }),
+    /absolute URL/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://github.example/${"x".repeat(2048)}` }),
+    /at most 2048 bytes/,
   );
 });
 

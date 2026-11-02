@@ -90,6 +90,7 @@ import { dispatchCanonicalEvent, type GenerationLedger } from "../ingress/dispat
 import type { MirrorCache } from "../acquisition/index.js";
 import {
   EXECUTION_ORPHANED_CATEGORY,
+  forgeApiUrlProblem,
   validateExecutionRequest,
   validateExecutionResult,
   type ExecutionProfiles,
@@ -896,6 +897,18 @@ export async function startControllerDaemon(
   if (typeof options.resolveProfiles !== "function" || typeof options.credentialRefs !== "function") {
     throw new TypeError("ControllerDaemonOptions.resolveProfiles and credentialRefs are required");
   }
+  // The forge API bases ride EVERY request envelope this daemon composes
+  // (#1433): refuse a configured endpoint that could never pass envelope
+  // validation at startup, instead of failing every job of that platform
+  // later with an opaque builder rejection.
+  for (const forge of options.instance.forges) {
+    const problem = forgeApiUrlProblem(forge.endpoint);
+    if (problem !== "") {
+      throw new TypeError(
+        `instance forge integration '${forge.name}' endpoint ${problem}: every execution envelope for that platform would be refused`,
+      );
+    }
+  }
   const durableStateDir = options.durableStateDir;
   if (typeof durableStateDir !== "string" || durableStateDir === "" || durableStateDir.includes("\u0000")) {
     throw new TypeError("ControllerDaemonOptions.durableStateDir must be a non-empty path");
@@ -959,6 +972,16 @@ export async function startControllerDaemon(
     runsRoot: options.runsRoot,
     mirrorFor: (job) => options.forge.mirrorFor(job),
     resolveProfiles: (job) => options.resolveProfiles(job),
+    // The non-secret forge API base travels in the envelope (#1433): the
+    // instance config's forge integration for the job's platform. GitHub
+    // without an explicit integration entry stays "" (its adapter defaults
+    // to api.github.com); Forgejo without one refuses at request
+    // validation, never at adapter construction inside the worker. A
+    // single-platform instance (what the controller entrypoint accepts,
+    // #738) makes this first kind-matched endpoint exactly the one the
+    // entrypoint composes into the forge capability.
+    resolveForgeApiUrl: async (job) =>
+      options.instance.forges.find((entry) => entry.kind === job.platform)?.endpoint ?? "",
     credentialRefs: (job, runId) => options.credentialRefs(job, runId),
     ...(options.createWorkspace !== undefined ? { createWorkspace: options.createWorkspace } : {}),
   });
