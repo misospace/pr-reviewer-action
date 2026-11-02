@@ -1,6 +1,7 @@
 import type { EnvLike } from "../tools/budget.js";
 import { REASONING_EFFORT_PATTERN } from "../config/load-config.js";
 import { CONFIDENCE_MINIMUM_PROMPT_TOKENS } from "../confidence/prompt.js";
+import { CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS } from "../confidence/scorer.js";
 
 /**
  * Review routing and tier bindings, ported from scripts/sections/classification.sh
@@ -611,7 +612,7 @@ function disabledConfidenceProfile(): ConfidenceProfile {
     enabled: false, baseUrl: "", model: "", apiFormat: "", apiKey: "",
     requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false,
     credentialSource: "own",
-    maxTokens: 4096, promptTokens: 98304, modelContextTokens: 0,
+    maxTokens: CONFIDENCE_MAX_TOKENS, promptTokens: CONFIDENCE_PROMPT_TOKENS, modelContextTokens: 0,
     anthropicEffortSupported: false, structuredOutputSupported: false,
   };
 }
@@ -725,8 +726,8 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   // #1368: the scorer's own budgets and capability assertions. Every value
   // is resolved here — defaults, validation warnings, and the deterministic
   // context clamps — so the profile is the single source the scorer reads.
-  const maxTokensDefault = 4096;
-  const promptTokensDefault = 98304;
+  const maxTokensDefault = CONFIDENCE_MAX_TOKENS;
+  const promptTokensDefault = CONFIDENCE_PROMPT_TOKENS;
   // #1368 review: the smallest prompt budget the context clamp ever leaves —
   // the floor that keeps a tiny window from starving the prompt to zero, and
   // the minimum shape a declared window must be able to fit (floor prompt +

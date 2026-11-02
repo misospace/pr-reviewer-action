@@ -87,12 +87,67 @@ DEFAULT_CORPUS_REAL = REPO_ROOT / "evals" / "corpus-real-prs.json"
 DEFAULT_CORPUS_HUMAN = REPO_ROOT / "evals" / "corpus-human-findings.json"
 BRIDGE_LAUNCHER = REPO_ROOT / "scripts" / "confidence_bridge.mjs"
 
-# The scorer's single bounded completion budget (mirrors
-# ``src/confidence/scorer.ts`` CONFIDENCE_MAX_TOKENS — the budget
-# projection below spends it, the live request sends the production
-# import through the bridge; pinned equal by
-# ``tests/test_confidence_calibration.py::test_scorer_max_tokens_matches_production``).
+# The scorer's documented DEFAULT completion budget, used as the projection
+# fallback when a run declares no ``ai-confidence-max-tokens``. #1387 made
+# this default single-sourced in production: ``src/routing/tiers.ts`` resolves
+# its profile defaults (and the disabled profile) from
+# ``src/confidence/scorer.ts`` CONFIDENCE_MAX_TOKENS — the constant named
+# below — so this fallback mirrors what production actually resolves, and
+# ``tests/test_confidence_calibration.py::test_scorer_max_tokens_matches_production``
+# pins both the value and the resolver's use of that single source.
 SCORER_MAX_TOKENS = 4096
+
+
+def _declared_completion_budget(confidence_env: Any) -> tuple[int, bool]:
+    """Resolve ONE condition's projected per-call completion budget the way
+    production's resolver treats a declared value (#1387).
+
+    ``positiveIntFrom`` (``src/routing/tiers.ts``) accepts only a
+    positive-integer string within JavaScript's safe-integer range and
+    otherwise keeps the documented default — so an unusable or absent
+    declaration projects at SCORER_MAX_TOKENS, the same fallback the
+    resolver resolves. Returns ``(tokens, declared)``.
+    """
+    raw = str((confidence_env or {}).get("AI_CONFIDENCE_MAX_TOKENS", "")).strip()
+    if re.fullmatch(r"\d+", raw):
+        value = int(raw)
+        if 1 <= value <= 2**53 - 1:
+            return value, True
+    return SCORER_MAX_TOKENS, False
+
+
+def project_spend_budget(conditions: list[dict[str, Any]]) -> dict[str, Any]:
+    """The per-call completion budget the spend projection must use, plus a
+    record of WHICH budgets it projected against (#1387).
+
+    A run's declared ``ai-confidence-max-tokens`` is what the live request
+    actually spends: the bridge resolves declared ``ai-confidence-*`` config
+    through production's ``resolveConfidenceProfile``, whose defaults now
+    come from the same single source this module's fallback mirrors. The
+    projection takes the MAX over conditions — a conservative ceiling:
+    production's context-window clamps (#1368) can only LOWER a resolved
+    budget, never raise it above the declared/default value.
+    """
+    per_condition: list[dict[str, Any]] = []
+    projected = 0
+    any_declared = False
+    for condition in conditions:
+        tokens, declared = _declared_completion_budget(condition.get("confidence_env"))
+        per_condition.append({
+            "id": str(condition.get("id", "")),
+            "completion_tokens_per_call": tokens,
+            "basis": "declared" if declared else "documented-default",
+        })
+        projected = max(projected, tokens)
+        any_declared = any_declared or declared
+    if not per_condition:
+        projected = SCORER_MAX_TOKENS
+    return {
+        "completion_tokens_per_call": projected,
+        "basis": "declared" if any_declared else "documented-default",
+        "per_condition": per_condition,
+    }
+
 
 # The per-pilot lifetime scorer-spend ledger, stored in the RUNS DIR (the
 # pilot instance): the scorer's call ceiling is a lifetime bound for that
@@ -1095,6 +1150,14 @@ def cmd_score(args: argparse.Namespace) -> int:
     # The running lifetime total persisted in the runs dir's spend ledger:
     # monotone, never below the carried spend.
     ledger_total = ledger_calls
+    # #1387: project against the budgets the run actually resolves. A pilot
+    # live condition declares no ai-confidence-* config, so every live arm
+    # projects at the single-source documented default the bridge's
+    # live-request sends; the record states which budgets were projected.
+    projected_budget = project_spend_budget(
+        [all_conditions[cid] for cid in selected if all_conditions[cid]["backend"] == "live"]
+    )
+    projected_tokens = projected_budget["completion_tokens_per_call"]
     if carried_calls + planned_calls > ceilings["max_scorer_calls"]:
         print(
             f"score aborted: {carried_calls} already-spent wire attempts plus {planned_calls} "
@@ -1105,10 +1168,10 @@ def cmd_score(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_BUDGET_ABORT
-    if (carried_calls + planned_calls) * SCORER_MAX_TOKENS > ceilings["max_scorer_output_tokens"]:
+    if (carried_calls + planned_calls) * projected_tokens > ceilings["max_scorer_output_tokens"]:
         print(
             f"score aborted: {carried_calls} already-spent wire attempts plus {planned_calls} "
-            f"planned live calls at {SCORER_MAX_TOKENS} "
+            f"planned live calls at {projected_tokens} "
             f"completion tokens exceed ceilings.max_scorer_output_tokens="
             f"{ceilings['max_scorer_output_tokens']}; no call was made",
             file=sys.stderr,
@@ -1119,7 +1182,7 @@ def cmd_score(args: argparse.Namespace) -> int:
         """Progressive triggers checked before each scored call."""
         if calls_made >= ceilings["max_scorer_calls"]:
             return f"max_scorer_calls={ceilings['max_scorer_calls']} reached"
-        if calls_made * SCORER_MAX_TOKENS >= ceilings["max_scorer_output_tokens"]:
+        if calls_made * projected_tokens >= ceilings["max_scorer_output_tokens"]:
             return f"max_scorer_output_tokens={ceilings['max_scorer_output_tokens']} reached"
         if time.monotonic() - phase_start >= ceilings["wall_time_budget_sec"]["score"]:
             return f"wall_time_budget_sec.score={ceilings['wall_time_budget_sec']['score']} elapsed"
@@ -1461,6 +1524,7 @@ def cmd_score(args: argparse.Namespace) -> int:
         "budget_note": abort_note,
         "carried_wire_calls": carried_calls,
         "lifetime_wire_calls": calls_made,
+        "projected_budget": projected_budget,
         "wall_time_sec_by_condition": {cid: round(sec, 3) for cid, sec in wall_by_condition.items()},
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -2084,10 +2148,12 @@ def cmd_canary(args: argparse.Namespace) -> int:
         carried_calls = counter
 
     verdict_policy = plan.get("verdict_policy", "strict")
-    declared_max_tokens = max(
-        int(condition["confidence_env"].get("AI_CONFIDENCE_MAX_TOKENS") or SCORER_MAX_TOKENS)
-        for condition in conditions.values()
-    )
+    # #1387: project against the budgets the run actually resolves — each
+    # condition's declared ai-confidence-max-tokens as production's resolver
+    # would take it, the single-source documented default otherwise — and
+    # record which budgets the projection used.
+    projected_budget = project_spend_budget(list(conditions.values()))
+    declared_max_tokens = projected_budget["completion_tokens_per_call"]
     # Conservative projection: every selected condition may fire for every
     # entry (a fallback triggers only on a not-scored primary row, but the
     # ceiling must bound the worst case BEFORE any spend).
@@ -2263,6 +2329,7 @@ def cmd_canary(args: argparse.Namespace) -> int:
             for condition in plan["conditions"]
         ],
         "ceilings": ceilings,
+        "projected_budget": projected_budget,
         "rows": rows,
         "budget_exhausted": budget_exhausted,
         "budget_note": abort_note,

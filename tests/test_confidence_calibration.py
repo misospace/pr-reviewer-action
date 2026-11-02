@@ -774,6 +774,19 @@ def test_live_backend_scores_exactly_one_call_per_row(tmp_path: Path, monkeypatc
             "pilot-synth-unscored": 4,
         }
         assert all(row["usage"] == {"prompt_tokens": 100, "completion_tokens": 20} for row in scored_rows)
+        # #1387: the results state the budgets the spend projection used.
+        # A pilot live condition declares no ai-confidence-* config, so
+        # every live arm projects at the single-source documented default
+        # the bridge's live-request actually sends.
+        assert results["projected_budget"] == {
+            "completion_tokens_per_call": confidence_calibration.SCORER_MAX_TOKENS,
+            "basis": "documented-default",
+            "per_condition": [{
+                "id": "same-model",
+                "completion_tokens_per_call": confidence_calibration.SCORER_MAX_TOKENS,
+                "basis": "documented-default",
+            }],
+        }
         assert len(pilot.requests) == 5  # EXACTLY one request per row, no retries
         for request in pilot.requests:
             assert request["auth"] == f"Bearer {secret}"
@@ -1020,13 +1033,116 @@ def test_live_path_delegates_to_production_transport(tmp_path: Path) -> None:
 
 
 def test_scorer_max_tokens_matches_production() -> None:
-    # The token-budget projection uses the driver's SCORER_MAX_TOKENS while
-    # the live-request itself sends production's CONFIDENCE_MAX_TOKENS;
-    # if they drift, the declared spend ceiling stops bounding real spend.
-    scorer_source = (Path(__file__).resolve().parent.parent / "src" / "confidence" / "scorer.ts").read_text(encoding="utf-8")
+    # The token-budget projection falls back to the driver's
+    # SCORER_MAX_TOKENS while the live-request itself sends production's
+    # CONFIDENCE_MAX_TOKENS; if they drift, the declared spend ceiling
+    # stops bounding real spend (#1286/#1368). #1387: production's
+    # EFFECTIVE default is what ``resolveConfidenceProfile`` resolves, and
+    # that resolver must read the pinned constant — not a repeated literal
+    # that can silently move on its own. Pin the whole chain: the exported
+    # constant's value, AND the resolver's use of it for the enabled
+    # defaults and the disabled profile.
+    repo_root = Path(__file__).resolve().parent.parent
+    scorer_source = (repo_root / "src" / "confidence" / "scorer.ts").read_text(encoding="utf-8")
     match = re.search(r"export const CONFIDENCE_MAX_TOKENS = (\d+);", scorer_source)
     assert match is not None, "production CONFIDENCE_MAX_TOKENS not found"
     assert confidence_calibration.SCORER_MAX_TOKENS == int(match.group(1))
+    prompt_match = re.search(r"export const CONFIDENCE_PROMPT_TOKENS = (\d+);", scorer_source)
+    assert prompt_match is not None, "production CONFIDENCE_PROMPT_TOKENS not found"
+    tiers_source = (repo_root / "src" / "routing" / "tiers.ts").read_text(encoding="utf-8")
+    # The resolver imports the constants it resolves, and no budget literal
+    # survives in it: the enabled defaults and the disabled profile both
+    # reference the single source.
+    assert re.search(
+        r'import \{ CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS \} from "\.\./confidence/scorer\.js";',
+        tiers_source,
+    ), "the resolver does not import the scorer budget constants"
+    assert "const maxTokensDefault = CONFIDENCE_MAX_TOKENS;" in tiers_source
+    assert "const promptTokensDefault = CONFIDENCE_PROMPT_TOKENS;" in tiers_source
+    assert "maxTokens: CONFIDENCE_MAX_TOKENS, promptTokens: CONFIDENCE_PROMPT_TOKENS" in tiers_source
+    for pattern in (r"maxTokensDefault = \d", r"promptTokensDefault = \d", r"maxTokens: \d+, promptTokens: \d+"):
+        assert re.search(pattern, tiers_source) is None, (
+            f"tiers.ts carries a repeated budget literal ({pattern}); the defaults must come from CONFIDENCE_MAX_TOKENS/CONFIDENCE_PROMPT_TOKENS"
+        )
+
+
+def test_project_spend_budget_follows_configured_budgets() -> None:
+    # #1387: the projection projects against the run's configured budgets
+    # when they are known, and records which budgets it projected against.
+    declared = {"id": "small", "confidence_env": {"AI_CONFIDENCE_MAX_TOKENS": "2048"}}
+    larger = {"id": "big", "confidence_env": {"AI_CONFIDENCE_MAX_TOKENS": "8192"}}
+    unset = {"id": "unset"}
+    record = confidence_calibration.project_spend_budget([declared, larger])
+    assert record["completion_tokens_per_call"] == 8192
+    assert record["basis"] == "declared"
+    assert record["per_condition"] == [
+        {"id": "small", "completion_tokens_per_call": 2048, "basis": "declared"},
+        {"id": "big", "completion_tokens_per_call": 8192, "basis": "declared"},
+    ]
+    # An undeclared condition projects at the documented default, and the
+    # conservative ceiling is the MAX over conditions (production's window
+    # clamps can only lower a resolved budget, never raise it).
+    mixed = confidence_calibration.project_spend_budget([declared, unset])
+    assert mixed["completion_tokens_per_call"] == confidence_calibration.SCORER_MAX_TOKENS
+    assert mixed["basis"] == "declared"
+    assert [entry["basis"] for entry in mixed["per_condition"]] == ["declared", "documented-default"]
+    empty = confidence_calibration.project_spend_budget([])
+    assert empty["completion_tokens_per_call"] == confidence_calibration.SCORER_MAX_TOKENS
+    assert empty["basis"] == "documented-default"
+    # An unusable declaration resolves like production's positiveIntFrom
+    # does — the default, never a crash and never the unusable value.
+    for bad in ("wide", "0", "-5", "1.5", "", "  "):
+        tokens, is_declared = confidence_calibration._declared_completion_budget(
+            {"AI_CONFIDENCE_MAX_TOKENS": bad}
+        )
+        assert (tokens, is_declared) == (confidence_calibration.SCORER_MAX_TOKENS, False), repr(bad)
+    tokens, is_declared = confidence_calibration._declared_completion_budget(
+        {"AI_CONFIDENCE_MAX_TOKENS": " 2048 "}
+    )
+    assert (tokens, is_declared) == (2048, True)
+
+
+def test_canary_projects_and_records_declared_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # #1387: a canary condition's declared ai-confidence-max-tokens drives
+    # the pre-flight token projection AND is recorded in the results. The
+    # ceilings below fit the declared 2048/call but NOT the 4096 default
+    # (2 entries x 2048 = 4096 fits; 2 x 4096 = 8192 would not), so the
+    # run completing is itself the proof the projection followed the
+    # configuration instead of pinning the documented default.
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-1387")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-1387")
+    try:
+        plan = canary_plan(tmp_path, [canary_condition("dogfood-loopback", **{
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+                "AI_CONFIDENCE_TIMEOUT_SEC": "20",
+                "AI_CONFIDENCE_MAX_TOKENS": "2048",
+            },
+        })], ceilings={
+            "max_verifier_calls": 8, "max_output_tokens": 4096,
+            "wall_time_budget_sec": 600, "request_timeout_sec": 30,
+        })
+        rc, results = run_canary(tmp_path, plan, canary_runs_dir(tmp_path))
+        assert rc == 0
+        assert results is not None
+        assert results["projected_budget"] == {
+            "completion_tokens_per_call": 2048,
+            "basis": "declared",
+            "per_condition": [{
+                "id": "dogfood-loopback", "completion_tokens_per_call": 2048, "basis": "declared",
+            }],
+        }
+        scored = [row for row in results["rows"] if row["verifier"]["status"] == "scored"]
+        assert len(scored) == 2
+    finally:
+        server.shutdown()
 
 
 def test_live_request_subprocess_kill_degrades_to_transport_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2495,6 +2611,10 @@ def test_canary_driver_end_to_end_loopback(tmp_path: Path, monkeypatch: pytest.M
         assert results["production_shape"].startswith("bridge live-scorer")
         assert results["artifacts_runs_digest"].startswith("sha256:")
         assert results["lifetime_wire_calls"] == 2
+        # #1387: nothing declared → the projection states it used the
+        # single-source documented default.
+        assert results["projected_budget"]["completion_tokens_per_call"] == confidence_calibration.SCORER_MAX_TOKENS
+        assert results["projected_budget"]["basis"] == "documented-default"
         scored = [row for row in results["rows"] if row["verifier"]["status"] == "scored"]
         assert len(scored) == 2
         assert all(row["verifier"]["score"] == 3 for row in scored)
