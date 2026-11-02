@@ -139,8 +139,11 @@ partitioning before ledgers can be merged).
   validated base64url keyset-plus-offset record (job id + finding offset).
   A cursor that does not decode, names an unknown job, or carries a
   negative offset yields an EMPTY page — a pagination boundary can never
-  widen into an unfiltered read. The reference adapter scans at most 500
-  queue jobs per call.
+   widen into an unfiltered read. The reference adapter scans at most 500
+   queue jobs per call; when it stops at that ceiling with unscanned jobs
+   remaining, the page carries a continuation cursor at the first unscanned
+   job so later findings stay reachable instead of pagination silently
+   reporting its end.
 - No total-count field: a cross-PR count is unbounded work the endpoint
   refuses to do speculatively.
 
