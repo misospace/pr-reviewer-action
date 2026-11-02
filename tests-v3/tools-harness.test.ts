@@ -2627,6 +2627,51 @@ test("#1379: runToolHarness wires the classification-driven dependency-evidence 
   assert.ok(!plain.logs.some((l) => l.includes("dependency-evidence reserve")));
 });
 
+test("#1396: VALIDATE_REQUIRED_CHECKS=false takes the dependency-evidence reserve out of the obligation contract", async () => {
+  // Same dependency classification and script as the wiring test above, but
+  // with the single operator opt-out: the loop reserves nothing, tracks no
+  // shape rows, shows no priority note, and the optional read executes. The
+  // opt-out governs the ONE obligation contract — it cannot half-enable the
+  // unified window's dependency half (review finding: shape rows were added
+  // from the classification regardless of the opt-out).
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "image_update", version: 1 }));
+  const payloads: Array<Record<string, unknown>> = [];
+  let n = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_MAX_REQUESTS: "6", VALIDATE_REQUIRED_CHECKS: "false", SYSTEM_PROMPT: "You are the reviewer." },
+    transport: async (_baseUrl: string, _apiFormat: string, payload: Record<string, unknown>) => {
+      payloads.push(payload);
+      return scripted[n++];
+    },
+    log: (line: string) => logs.push(line),
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  const firstTexts = ((payloads[0]!.messages ?? []) as Array<{ content: unknown }>)
+    .map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.ok(!firstTexts.includes("dependency evidence comes first"));
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetry.budget?.required_evidence_requests_hint, 0);
+  assert.equal(telemetry.budget?.required_evidence_required, 0);
+  assert.equal(telemetry.budget?.required_evidence_refusals, 0);
+  assert.equal(telemetry.budget?.required_evidence_attempts, 0);
+  assert.equal(telemetry.budget?.required_evidence_released, true);
+  assert.deepEqual(telemetry.budget?.required_evidence_credits, []);
+  assert.ok(!logs.some((l) => l.includes("dependency-evidence reserve")));
+  // The optional read was never refused.
+  const trace = (artifact.tool_calls ?? []) as Array<{ tool: string }>;
+  assert.deepEqual(trace.map((c) => c.tool), ["read_file"]);
+});
+
 test("#1396: the harness emits ONE row set — dependency must_check rows ride the shape vocabulary, and the reserve is the max, never the sum", async () => {
   // A dependency-update PR carrying BOTH reservation sources: the shown
   // obligation rows are the three dependency-evidence must_check items plus
@@ -2744,12 +2789,13 @@ test("#1379: the trace-gap repair continuation inherits the credits and cannot s
 });
 
 test("#1379: the repair continuation's reserve is clamped to the tail it is handed", async () => {
-  // The reserve's no-lockout cap is "the loop spent the whole reserve on
-  // evidence attempts". Handed a SHORTER tail than the reserve (the main loop
-  // had already spent part of it on evidence), the unclamped cap would be
-  // unreachable and the continuation could never release its window; the seam
+  // The reserve's no-lockout cap is RUN-WIDE ("the run spent the whole
+  // reserve on evidence attempts"). Handed a SHORTER tail than the reserve
+  // (the main loop had already spent part of it), the unclamped reserve
+  // would be unreachable as the window-opening budget share; the seam
   // therefore clamps the reserve to the requests the continuation actually
-  // holds, so the cap stays payable inside that tail.
+  // holds, while the attempts cap stays the ORIGINAL run-wide reserve
+  // (#1396 review) and the attempt count carries across the seam.
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
@@ -2792,9 +2838,12 @@ test("#1379: the repair continuation's reserve is clamped to the tail it is hand
   assert.equal(result.trace_repair_continuation?.tool_calls, 3, "the repair's three fetches executed");
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
   const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
-  // Run-wide fold across the seam: six evidence attempts, only the lexical
-  // provenance credit, and the window RELEASED — possible only because the
-  // continuation's cap was its own three-request tail.
+  // Run-wide fold across the seam: six evidence attempts (3 in the main
+  // loop, 3 in the continuation — the seeded count makes the continuation's
+  // outcome the run-wide total), only the lexical provenance credit, and the
+  // window RELEASED: the run-wide attempts cap fired on the continuation's
+  // first fetch (3 prior + 1 = the original reserve of 4) and once released
+  // the remaining handed tail spends freely.
   assert.equal(telemetry.budget?.required_evidence_requests_hint, 4);
   assert.equal(telemetry.budget?.required_evidence_attempts, 6);
   assert.deepEqual(telemetry.budget?.required_evidence_credits, ["provenance"]);

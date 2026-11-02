@@ -3083,6 +3083,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
                 : Math.min(input.reserveForRequiredEvidence ?? 0, outcome.requestsRemaining),
               ...(input.requiredEvidence !== undefined ? { requiredEvidence: input.requiredEvidence } : {}),
               requiredEvidenceCredits: outcome.requiredEvidenceCredits,
+              // #1396 (review): the attempts cap is RUN-WIDE across the seam.
+              // The continuation starts from the main loop's evidence-attempt
+              // count (no reset to zero) and the cap threshold stays the
+              // ORIGINAL unclamped reserve, so the seam can never re-impose
+              // gating the run already outspent nor re-open a cap the main
+              // loop already consumed most of.
+              requiredEvidenceAttemptsPrior: outcome.requiredEvidenceAttempts,
+              requiredEvidenceAttemptsCap: Math.max(0, Math.floor(input.reserveForRequiredEvidence ?? 0)),
               // #1198: the repair round shares the ORIGINAL run's absolute
               // deadline — the allowance above is a share, never an extension.
               wallClockDeadline: deadline,
@@ -3108,18 +3116,21 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           if (repair !== null) {
             // #1379 (blocker 5728634290); #1396: the obligation state is
             // run-wide. An evidence-channel attempt in the repair counts
-            // toward the run's provenance, its window refusals and attempts
-            // join the run's counts, its released flag ORs in, and the
-            // credits are the union in row order, so the telemetry never
-            // claims outstanding obligations the continuation already
-            // covered. `required` describes the rows the run committed to
-            // and stays unchanged.
+            // toward the run's provenance; its window refusals join the
+            // run's counts, its released flag ORs in, and the credits are
+            // the union in row order, so the telemetry never claims
+            // outstanding obligations the continuation already covered.
+            // `required` describes the rows the run committed to and stays
+            // unchanged; `attempts` rides the seeded run-wide counter.
             const evidenceMeta = input.result.tool_loop_meta;
             if (evidenceMeta !== null && evidenceMeta !== undefined) {
               evidenceMeta.required_evidence_refusals =
                 Number(evidenceMeta.required_evidence_refusals ?? 0) + repair.requiredEvidenceRefusals;
-              evidenceMeta.required_evidence_attempts =
-                Number(evidenceMeta.required_evidence_attempts ?? 0) + repair.requiredEvidenceAttempts;
+              // #1396 (review): the continuation's attempts counter is seeded
+              // with the main loop's (the cap is run-wide), so its outcome
+              // already reports the RUN-WIDE total — REPLACE, never add, or
+              // the seeded prior would double-count here.
+              evidenceMeta.required_evidence_attempts = repair.requiredEvidenceAttempts;
               if (repair.requiredEvidenceReleased) evidenceMeta.required_evidence_released = true;
               const runCredits = new Set<string>([
                 ...(Array.isArray(evidenceMeta.required_evidence_credits)
@@ -3520,10 +3531,18 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // provenance or advisories fetch does not repeat the check's prose words,
   // so prose-token gating would refuse the very call that discharges its
   // row. One row set, produced once here, serves the whole enforced window.
-  const dependencyReserve = dependencyEvidenceReserveFromClassification(
-    () => deps.readText("classification.json"),
-    maxRequests.budget,
-  );
+  // #1396 (review): the dependency reserve is part of the ONE obligation
+  // contract, so the single operator opt-out governs it too —
+  // VALIDATE_REQUIRED_CHECKS=false resolves it to 0 (no shape rows, no
+  // reserved tail, no refusals), exactly like it removes the must_check rows
+  // the shape rows can stand in for; the opt-out cannot half-enable the
+  // unified window.
+  const dependencyReserve = mustCheckObligationsEnabled(deps.env.VALIDATE_REQUIRED_CHECKS)
+    ? dependencyEvidenceReserveFromClassification(
+        () => deps.readText("classification.json"),
+        maxRequests.budget,
+      )
+    : 0;
   // The canonical prefix the reserved dependency tail can pay for
   // (#1379): reserve 1 requires provenance, 2 adds the release delta, 3+
   // all three. Obligations beyond the prefix gate nothing.

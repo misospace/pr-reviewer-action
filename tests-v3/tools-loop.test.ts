@@ -2012,6 +2012,76 @@ test("#1379: requiredEvidenceCredits seeding carries obligations across loops; p
   assert.equal(outcome2.requiredEvidenceReleased, true);
 });
 
+test("#1396: the repair seam's attempts cap is run-wide — a continuation never re-gates from a reset zero count", async () => {
+  // The #1145 seam threads the main loop's evidence-attempt count and the
+  // ORIGINAL unclamped reserve as the cap: the run already spent 3 of its 4
+  // reserved attempts, so the continuation holds ONE gated attempt, and once
+  // it is spent the window releases RUN-WIDE and the handed tail spends
+  // freely. A continuation that reset the count (the pre-fix seam) would
+  // re-gate for its own full clamped reserve, refusing the optional read
+  // after the cap had already fired run-wide.
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  const { postFn, executeFn, timeFn, executedCalls } = recordingLoop([
+    openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://unrelated.test/a"}'),
+    openAiCall("c3", "read_file", '{"path":"b.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(6, 3, 120),
+    timeFn,
+    // The seam's clamp: the continuation holds all 3 of its requests inside
+    // the reserved tail (run reserve 4, clamped to the 3 handed) — but the
+    // CAP stays the original run-wide 4, and the attempt count starts at the
+    // main loop's 3.
+    reserveForRequiredEvidence: 3,
+    requiredEvidence: depRows(3),
+    requiredEvidenceAttemptsPrior: 3,
+    requiredEvidenceAttemptsCap: 4,
+  });
+  // c1 (optional, in-window) is refused while the run-wide cap has attempts
+  // left; c2 spends that one gated attempt; the cap then fires (4 >= 4),
+  // releases every shape row, and c3 executes.
+  assert.equal(outcome.requiredEvidenceRefusals, 1);
+  assert.deepEqual(
+    executedCalls.map((c) => c.tool),
+    ["web_fetch", "read_file"],
+  );
+  assert.equal(outcome.requiredEvidenceAttempts, 4);
+  assert.equal(outcome.requiredEvidenceReleased, true);
+  assert.deepEqual(outcome.requiredEvidenceCredits, []);
+  // And the reverse guard: the same continuation WITHOUT the run-wide
+  // threading (the pre-fix shape — reset count, clamped cap) keeps its own
+  // full gated reserve, so the optional read stays refused and only the
+  // evidence call executes.
+  const conversation2 = new Conversation();
+  conversation2.addUser("corpus");
+  const loop2 = recordingLoop([
+    openAiCall("c1", "read_file", '{"path":"a.ts"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://unrelated.test/a"}'),
+    openAiCall("c3", "read_file", '{"path":"b.ts"}'),
+    openAiText("done"),
+  ]);
+  const outcome2 = await driveToolLoop(conversation2, loop2.postFn, loop2.executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(6, 3, 120),
+    timeFn,
+    reserveForRequiredEvidence: 3,
+    requiredEvidence: depRows(3),
+  });
+  assert.equal(outcome2.requiredEvidenceRefusals, 2);
+  assert.deepEqual(
+    loop2.executedCalls.map((c) => c.tool),
+    ["web_fetch"],
+  );
+  assert.equal(outcome2.requiredEvidenceAttempts, 1);
+  assert.equal(outcome2.requiredEvidenceReleased, false);
+});
+
 test("#1379: the window note names the outstanding obligations and reverts to the budget note after release", async () => {
   const conversation = new Conversation();
   conversation.addUser("corpus");

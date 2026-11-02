@@ -625,9 +625,12 @@ export interface LoopOutcome {
   requiredEvidenceCredits: string[];
   /** #1396 (from #1379 blocker 5728634290): executed upstream
    * evidence-channel calls (see DEPENDENCY_EVIDENCE_TOOLS) over the whole
-   * run, whatever their target or executor status. The no-lockout cap:
+   * run, whatever their target or executor status — run-wide across the
+   * #1145 repair seam: a continuation seeded by `requiredEvidenceAttemptsPrior`
+   * reports the prior loop's attempts too. The no-lockout cap:
    * dependency-evidence shape rows release their gating once this reaches
-   * the reserve, even if nothing was credited. */
+   * the cap (the reserve, or the run-wide threshold threaded across the
+   * seam), even if nothing was credited. */
   requiredEvidenceAttempts: number;
   /** #1396 (from #1379 blocker 5728634290): whether the enforced window was
    * released at loop end — reserve 0 (always open), or every tracked row
@@ -776,6 +779,22 @@ export interface DriveToolLoopOptions {
    * dropped.
    */
   requiredEvidenceCredits?: ReadonlyArray<string>;
+  /**
+   * #1396 (review): evidence-channel attempts already recorded by an earlier
+   * loop over the SAME conversation — the #1145 repair seam threads the main
+   * loop's count so the no-lockout attempts cap stays RUN-WIDE: the
+   * continuation's shape rows release gating once prior + own attempts reach
+   * the cap, never from a reset zero count. Unset (every main loop) starts
+   * the count at zero.
+   */
+  requiredEvidenceAttemptsPrior?: number;
+  /**
+   * #1396 (review): the attempts-cap threshold, overriding the loop's own
+   * (possibly tail-clamped) reserve. The repair seam passes the ORIGINAL
+   * unclamped run reserve so the cap cannot shrink across the seam; unset
+   * keeps the reserve as the threshold (the main-loop and unit-test shape).
+   */
+  requiredEvidenceAttemptsCap?: number;
 }
 
 /**
@@ -866,12 +885,19 @@ export async function driveToolLoop(
       if (pendingRows.some((row) => row.id === id)) discharged.add(id);
     }
   }
-  // Attempted upstream evidence-channel calls over the WHOLE run, pre-window
+  // Attempted upstream evidence-channel calls over the WHOLE RUN, pre-window
   // included (the accepted #1379 residual: a model that already burned
   // `reserve` real upstream lookups the lexical attribution could not
   // classify has demonstrably prioritized upstream). An executor error still
-  // counts as an attempt — see DEPENDENCY_EVIDENCE_TOOLS.
-  let evidenceAttempts = 0;
+  // counts as an attempt — see DEPENDENCY_EVIDENCE_TOOLS. #1396 (review):
+  // the count is run-wide across the #1145 repair seam — a continuation
+  // starts from the prior loop's attempts instead of a reset zero, so the
+  // cap below can never re-impose gating the run already outspent.
+  let evidenceAttempts = Math.max(0, Math.floor(options.requiredEvidenceAttemptsPrior ?? 0));
+  // The cap threshold: the loop's own reserve, unless the caller threads the
+  // ORIGINAL run-wide reserve across the repair seam (the clamped reserve a
+  // short-tailed continuation holds is a budget share, never a fresh cap).
+  const attemptsCap = Math.max(0, Math.floor(options.requiredEvidenceAttemptsCap ?? reserve));
   // A row gates while it is undischargeD AND — for dependency-evidence
   // shape rows — the no-lockout attempts cap has not fired: the cap
   // guarantees the window always opens within the tail it reserved, and a
@@ -881,7 +907,7 @@ export async function driveToolLoop(
   // (#1388 semantics kept exact).
   const rowActive = (row: RequiredEvidenceRow): boolean =>
     !discharged.has(row.id)
-    && !(row.obligation !== undefined && evidenceAttempts >= reserve);
+    && !(row.obligation !== undefined && evidenceAttempts >= attemptsCap);
   const hasActiveRow = (): boolean => pendingRows.some((row) => rowActive(row));
   const anyActiveShapeRow = (): boolean =>
     pendingRows.some((row) => row.obligation !== undefined && rowActive(row));
