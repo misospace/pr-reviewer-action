@@ -7,11 +7,14 @@ import {
   GATEWAY_REFUSAL_CODES,
   validateBudgetLimits,
   type BudgetLedger,
+  type GatewayBudgetLimits,
+  type GatewayPerRequestBudget,
   type GatewayProfileEndpoint,
   type ModelGateway,
 } from "../src/gateway/types.js";
 import { InMemorySecretVault } from "../src/credentials/vault.js";
 import type { VaultEntry } from "../src/credentials/vault.js";
+import type { CredentialBroker } from "../src/credentials/types.js";
 import { runChatRequest } from "../src/transport/transport.js";
 import { TransportFailure } from "../src/transport/http.js";
 import type { ChatRequestInput, ChatRequestOutcome } from "../src/transport/transport.js";
@@ -105,18 +108,23 @@ function harness(overrides: {
   vaultEntries?: VaultEntry[];
   runChat?: (input: ChatRequestInput) => Promise<ChatRequestOutcome>;
   ledger?: BudgetLedger | undefined;
+  caps?: GatewayBudgetLimits | undefined;
+  perRequestBudget?: GatewayPerRequestBudget | undefined;
+  broker?: CredentialBroker | undefined;
 } = {}): Harness {
   const time = clock();
-  const ledger = overrides.ledger ?? new InMemoryBudgetLedger(CAPS, { now: time.now });
+  const caps = overrides.caps ?? CAPS;
+  const perRequestBudget = overrides.perRequestBudget ?? PER_REQUEST;
+  const ledger = overrides.ledger ?? new InMemoryBudgetLedger(caps, { now: time.now });
   const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now });
   const profiles = overrides.profiles ?? { [PROFILE]: overrides.profile ?? PRICED_PROFILE };
   const calls: ChatRequestInput[] = [];
   const gateway = createModelGateway({
-    caps: CAPS,
-    perRequestBudget: PER_REQUEST,
+    caps,
+    perRequestBudget,
     ledger,
     capability,
-    broker: new InMemorySecretVault(overrides.vaultEntries ?? [vaultEntry(KEY_MATERIAL)], { now: time.now }),
+    broker: overrides.broker ?? new InMemorySecretVault(overrides.vaultEntries ?? [vaultEntry(KEY_MATERIAL)], { now: time.now }),
     modelCredentialRef: "model-primary",
     profiles,
     now: time.now,
@@ -128,7 +136,7 @@ function harness(overrides: {
     calls,
     clock: time,
     capability,
-    token: capability.mint({ runId: RUN_ID, modelProfile: PROFILE, generation: ledger.generationFor(RUN_ID), limits: CAPS }).token,
+    token: capability.mint({ runId: RUN_ID, modelProfile: PROFILE, generation: ledger.generationFor(RUN_ID), limits: caps }).token,
   };
 }
 
@@ -438,6 +446,184 @@ test("gateway: a replayed settled reservation id refuses and never re-calls the 
   }
   assert.equal(h.calls.length, 1, "the provider was called exactly once");
   assert.deepEqual(h.ledger.usage(), totals, "the accounting did not move");
+});
+test("gateway: a concurrent replay of the same reservation joins the in-flight call — one dispatch, one broker resolve, one commit (#1397)", async () => {
+  // The #1397 reproduction shape: two concurrent `call`s with the SAME
+  // `(runId, reservationId)` while the row is still reserved. The
+  // broker and transport are both deferred so the owner is provably
+  // mid-flight before the replay is issued, and the caps leave room for
+  // exactly ONE request — the replay must never become a second one.
+  const caps = validateBudgetLimits({ maxRequests: 1, maxTokens: 100, maxCostMicros: 0 });
+  const time = clock();
+  const ledger = new InMemoryBudgetLedger(caps, { now: time.now });
+  const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now });
+  const token = capability
+    .mint({ runId: RUN_ID, modelProfile: PROFILE, generation: ledger.generationFor(RUN_ID), limits: caps })
+    .token;
+  let brokerResolves = 0;
+  let releaseBroker!: () => void;
+  const brokerGate = new Promise<void>((resolve) => {
+    releaseBroker = resolve;
+  });
+  const broker: CredentialBroker = {
+    resolve: async () => {
+      brokerResolves += 1;
+      await brokerGate;
+      return { ok: true as const, material: { value: KEY_MATERIAL, expiresAtMs: 0 } };
+    },
+    revoke: () => false,
+    describe: () => ["model-primary"],
+  };
+  const calls: ChatRequestInput[] = [];
+  let releaseTransport!: (outcome: ChatRequestOutcome) => void;
+  const transportGate = new Promise<ChatRequestOutcome>((resolve) => {
+    releaseTransport = resolve;
+  });
+  const runChat = async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    calls.push(input);
+    return transportGate;
+  };
+  const gateway = createModelGateway({
+    caps,
+    perRequestBudget: { maxTokens: 100, maxCostMicros: 0 },
+    ledger,
+    capability,
+    broker,
+    modelCredentialRef: "model-primary",
+    profiles: { [PROFILE]: { ...PRICED_PROFILE, pricing: undefined } },
+    now: time.now,
+    runChat,
+  });
+  const input = callInput({ token });
+  const first = gateway.call(input);
+  const second = gateway.call(input);
+  releaseBroker();
+  releaseTransport({ status: "ok", response: okResponse(), raw: okResponse() });
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(calls.length, 1, "at most one provider dispatch occurred");
+  assert.equal(brokerResolves, 1, "the broker resolved exactly once — the joiner never re-resolved the credential");
+  assert.ok(a.ok, JSON.stringify(a));
+  assert.ok(b.ok, JSON.stringify(b));
+  assert.strictEqual(a, b, "the duplicate caller shared the owner's in-flight outcome");
+  assert.deepEqual(ledger.usage(), { requestCount: 1, tokens: 5, costMicros: 0 }, "only one call was charged");
+  const rows = ledger.rows();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.state, "committed", "the owner's reservation was committed once");
+  assert.equal(rows[0]?.actualRequestCount, 1);
+});
+test("gateway: a concurrent replay with a mismatched reservation identity is refused, never joins (#1397)", async () => {
+  const calls: ChatRequestInput[] = [];
+  let releaseTransport!: (outcome: ChatRequestOutcome) => void;
+  const transportGate = new Promise<ChatRequestOutcome>((resolve) => {
+    releaseTransport = resolve;
+  });
+  const runChat = async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    calls.push(input);
+    return transportGate;
+  };
+  const h = harness({
+    runChat,
+    profiles: { [PROFILE]: PRICED_PROFILE, escalated: { ...PRICED_PROFILE, baseUrl: "https://other.example.invalid" } },
+  });
+  const escalatedToken = h.capability
+    .mint({ runId: RUN_ID, modelProfile: "escalated", generation: h.ledger.generationFor(RUN_ID), limits: CAPS })
+    .token;
+  const owner = h.gateway.call(callInput({ token: h.token }));
+  const replay = await h.gateway.call(
+    callInput({ token: escalatedToken, modelProfile: "escalated", usageId: "run-765:9", reservationId: "run-765:1" }),
+  );
+  assert.equal(replay.ok, false);
+  if (!replay.ok) {
+    assert.equal(replay.code, "reservation_mismatch", "the ledger's identity check stands between the replay and the join gate");
+    assert.equal(replay.usage, null);
+  }
+  assert.equal(calls.length, 1, "the mismatched replay dispatched nothing");
+  assert.equal(h.ledger.rows()[0]?.modelProfile, PROFILE, "the owner's row kept its own identity");
+  assert.equal(h.ledger.rows()[0]?.state, "reserved");
+  releaseTransport({ status: "ok", response: okResponse(), raw: okResponse() });
+  const ownerOutcome = await owner;
+  assert.ok(ownerOutcome.ok, JSON.stringify(ownerOutcome));
+  assert.deepEqual(h.ledger.usage(), { requestCount: 1, tokens: 5, costMicros: 39 });
+});
+test("gateway: a concurrent replay shares the owner's FAILURE without settling the reservation itself (#1397)", async () => {
+  const time = clock();
+  const calls: ChatRequestInput[] = [];
+  let releaseTransport!: (outcome: ChatRequestOutcome) => void;
+  const transportGate = new Promise<ChatRequestOutcome>((resolve) => {
+    releaseTransport = resolve;
+  });
+  const runChat = async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    calls.push(input);
+    return transportGate;
+  };
+  const h = harness({ runChat });
+  const input = callInput({ token: h.token });
+  const first = h.gateway.call(input);
+  const second = h.gateway.call(input);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(calls.length, 1, "the replay did not dispatch a second provider call");
+  const row = h.ledger.rows()[0];
+  assert.equal(row?.state, "reserved", "the joiner's arrival did not settle the owner's reservation mid-flight");
+  releaseTransport({
+    status: "failure",
+    failure: new TransportFailure("http_status", "upstream returned 503", { status: 503 }),
+  });
+  const a = await first;
+  const b = await second;
+  assert.equal(calls.length, 1);
+  assert.equal(a.ok, false);
+  assert.equal(b.ok, false);
+  assert.strictEqual(a, b, "the joiner received the owner's transport-failure outcome");
+  if (!a.ok) {
+    assert.equal(a.code, "transport_failure");
+    assert.equal(a.transportFailure?.kind, "http_status");
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the owner's refund stands, applied once");
+  assert.equal(h.ledger.rows()[0]?.state, "refunded");
+  assert.equal(h.ledger.rows().length, 1, "the failure path created no second row");
+});
+test("gateway: different reservation ids of the same run account independently — no cross-call joining (#1397)", async () => {
+  const h = harness({ profile: { ...PRICED_PROFILE, pricing: undefined } });
+  const [a, b] = await Promise.all([
+    h.gateway.call(callInput({ token: h.token, reservationId: "run-765:r1", usageId: "run-765:1" })),
+    h.gateway.call(callInput({ token: h.token, reservationId: "run-765:r2", usageId: "run-765:2" })),
+  ]);
+  assert.ok(a.ok, JSON.stringify(a));
+  assert.ok(b.ok, JSON.stringify(b));
+  assert.notStrictEqual(a, b, "distinct reservations are distinct calls");
+  assert.equal(h.calls.length, 2, "each reservation dispatched its own provider call");
+  assert.deepEqual(h.ledger.usage(), { requestCount: 2, tokens: 10, costMicros: 0 });
+  assert.equal(h.ledger.rows().length, 2);
+});
+test("gateway: another run reusing the same reservation id while one is in flight dispatches independently (#1361 x #1397)", async () => {
+  const time = clock();
+  const calls: ChatRequestInput[] = [];
+  let releaseTransport!: (outcome: ChatRequestOutcome) => void;
+  const transportGate = new Promise<ChatRequestOutcome>((resolve) => {
+    releaseTransport = resolve;
+  });
+  const runChat = async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    calls.push(input);
+    return transportGate;
+  };
+  const h = harness({ runChat, profile: { ...PRICED_PROFILE, pricing: undefined } });
+  const otherRun = "run-765-b";
+  const otherToken = h.capability
+    .mint({ runId: otherRun, modelProfile: PROFILE, generation: h.ledger.generationFor(otherRun), limits: CAPS })
+    .token;
+  const owner = h.gateway.call(callInput({ token: h.token }));
+  const foreign = h.gateway.call(callInput({ token: otherToken, runId: otherRun, usageId: "run-765-b:1", reservationId: "run-765:1" }));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(calls.length, 2, "the other run's identical reservation id dispatched its OWN provider call");
+  releaseTransport({ status: "ok", response: okResponse(), raw: okResponse() });
+  const [a, b] = await Promise.all([owner, foreign]);
+  assert.ok(a.ok, JSON.stringify(a));
+  assert.ok(b.ok, JSON.stringify(b));
+  assert.notStrictEqual(a, b, "cross-run callers never share an in-flight outcome");
+  assert.deepEqual(h.ledger.usageFor(RUN_ID), { requestCount: 1, tokens: 5, costMicros: 0 });
+  assert.deepEqual(h.ledger.usageFor(otherRun), { requestCount: 1, tokens: 5, costMicros: 0 });
 });
 
 test("gateway: restart/retry — a re-seeded ledger replays idempotently and keeps the caps binding", async () => {
