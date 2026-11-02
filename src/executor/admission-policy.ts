@@ -51,11 +51,11 @@
  *
  * Error semantics mirrored from the API contract (failurePolicy: Fail):
  * a validation that ERRORS (a field a rule needs is missing or the wrong
- * type) is a violation; a matchCondition that ERRORS — with none of the
- * hooks evaluating false — REJECTS the request (it is NOT treated as a
- * scope miss), and the parameter handle is `params`, reachable from
- * matchConditions too, while `spec.variables` are reachable only from
- * `validations` (as `variables.<name>`).
+ * type) is a violation; a matchCondition that ERRORS — with no hook
+ * evaluating true — REJECTS the request (it is NOT treated as a scope
+ * miss), and the parameter handle is `params`, reachable from
+ * matchConditions too (Kubernetes >= v1.30), while `spec.variables` are
+ * reachable only from `validations` (as `variables.<name>`).
  */
 
 import {
@@ -536,6 +536,11 @@ export function evaluateWorkerJobAdmission(
     },
     credentialSecretBinding: () => {
       const labels = labelsOf(object);
+      // CEL evaluates `substring` lazily (only for an entry that carries
+      // a Secret ref); the evaluator derives eagerly, so an unusable
+      // run-hash label fails this rule even with no refs at all. The
+      // stricter direction, and the identity-label rule rejects that
+      // object anyway.
       const expected = derivedSecretName(labels);
       const refAllowed = (name: unknown): boolean =>
         expected === null || name === expected;

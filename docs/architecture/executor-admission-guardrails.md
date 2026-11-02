@@ -86,7 +86,9 @@ invariants only, so a controller upgrade never deadlocks against it.
 ## Deployment
 
 Helm does not ship these manifests (#738 is open). A cluster admin applies
-them with kubectl, once per cluster:
+them with kubectl, once per cluster, on Kubernetes v1.30 or later (the
+scope match conditions read `params`, which that release made available
+to match conditions):
 
 1. Label the worker namespace (the instance-config `kubernetes.namespace`)
    with `pr-reviewer.io/admission=enforce`. The bindings select namespaces
