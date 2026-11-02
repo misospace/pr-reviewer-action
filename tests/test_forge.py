@@ -434,6 +434,31 @@ class TestForgeErrorDoesNotEchoSecrets:
                 client.get("/repos/test/repo")
             assert SECRET not in str(info.value), "token must not appear in error string"
             assert "404" in str(info.value), "fixed status code IS reported"
+            assert info.value.status == 404, (
+                "the status rides on the error so a caller can tell 'absent' "
+                "from 'broken' without parsing the message"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_transport_failure_carries_no_status(self):
+        # Nothing was answered, so there is no status to report: a caller
+        # must not mistake an unreachable forge for an absent resource.
+        client = forge.ForgeClient(base_url="http://127.0.0.1:1")
+        with pytest.raises(forge.ForgeError) as info:
+            client.get("/repos/test/repo")
+        assert info.value.status is None
+
+    def test_an_unusable_payload_carries_no_status(self):
+        server = self._make_server(b"not-json", 200)
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            with pytest.raises(forge.ForgeError) as info:
+                client.get("/repos/test/repo")
+            assert info.value.status is None
         finally:
             server.shutdown()
             server.server_close()
@@ -523,6 +548,130 @@ class TestGetPagesStopsAtShortPage:
         finally:
             server.shutdown()
             server.server_close()
+
+
+# ---------------------------------------------------------------------------
+# DELETE (label removal)
+# ---------------------------------------------------------------------------
+
+
+class TestForgeClientDelete:
+    """``delete`` mirrors ``get`` exactly: the same validated base URL, the
+    same no-redirect opener, the token only in the ``Authorization``
+    header, and a fixed credential-free error string. A 404 is an ordinary
+    :class:`ForgeError` -- the caller decides whether "already gone" is a
+    failure or the expected outcome (removing a label that is not there).
+    """
+
+    def _server(
+        self, status: int = 200, body: bytes = b"", location: str = ""
+    ) -> tuple[HTTPServer, dict]:
+        seen: dict = {"auth": None, "method": None, "path": None, "body": b""}
+
+        class Handler(BaseHTTPRequestHandler):
+            def handle_one_request(self):
+                self.raw_requestline = self.rfile.readline()
+                if not self.raw_requestline:
+                    return
+                if not self.parse_request():
+                    return
+                seen["auth"] = self.headers.get("Authorization")
+                seen["method"] = self.command
+                seen["path"] = self.path
+                content_length = int(self.headers.get("Content-Length") or 0)
+                if content_length:
+                    seen["body"] = self.rfile.read(content_length)
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                if location:
+                    self.send_header("Location", location)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
+
+            def log_message(self, *_args):  # noqa: ANN001
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server, seen
+
+    def test_delete_sends_the_delete_method_with_the_token_in_the_header(self):
+        SECRET = "the-secret-value"
+        server, seen = self._server()
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+                token=SECRET,
+            )
+            client.delete("/repos/test/repo/issues/1/labels/bug")
+            assert seen["method"] == "DELETE"
+            assert seen["path"] == "/repos/test/repo/issues/1/labels/bug"
+            assert seen["auth"] == f"Bearer {SECRET}"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_delete_never_puts_the_token_in_the_url_or_the_body(self):
+        SECRET = "the-secret-value"
+        server, seen = self._server()
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+                token=SECRET,
+            )
+            client.delete("/repos/test/repo/issues/1/labels/bug")
+            assert SECRET not in seen["path"]
+            assert SECRET not in seen["body"].decode("utf-8", errors="replace")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_delete_returns_the_parsed_payload(self):
+        server, _seen = self._server(body=json.dumps({"ok": True}).encode("utf-8"))
+        try:
+            client = forge.ForgeClient(base_url=f"http://127.0.0.1:{server.server_port}")
+            assert client.delete("/repos/test/repo/issues/1/labels/bug") == {"ok": True}
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_delete_refuses_a_redirect(self):
+        server, _seen = self._server(
+            status=302, location="http://127.0.0.1:1/elsewhere"
+        )
+        try:
+            client = forge.ForgeClient(base_url=f"http://127.0.0.1:{server.server_port}")
+            with pytest.raises(forge.ForgeError, match="[Rr]edirect"):
+                client.delete("/repos/test/repo/issues/1/labels/bug")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_delete_404_is_a_credential_free_error(self):
+        SECRET = "leaked-on-404"
+        body = json.dumps({"message": f"token {SECRET} invalid"}).encode("utf-8")
+        server, _seen = self._server(status=404, body=body)
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+                token=SECRET,
+            )
+            with pytest.raises(forge.ForgeError) as info:
+                client.delete("/repos/test/repo/issues/1/labels/bug")
+            assert SECRET not in str(info.value), "token must not appear in error string"
+            assert "404" in str(info.value), "fixed status code IS reported"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_delete_still_validates_the_path(self):
+        client = forge.ForgeClient()
+        with pytest.raises(forge.ForgeError, match="invalid path"):
+            client.delete("https://evil.example.com/x")
+        with pytest.raises(forge.ForgeError, match="invalid path"):
+            client.delete("/repos/x\r\nHost: evil")
 
 
 # ---------------------------------------------------------------------------

@@ -93,6 +93,15 @@ jobs:
           name: release-dist
           path: dist
 
+      # scripts/forge_cli.py -- the adapter over the configured forge
+      # capability -- reads and writes the forge API with a pinned
+      # interpreter, so the release steps below never depend on whatever
+      # python3 the runner image happens to ship.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+
       - name: Normalize release metadata
         id: release
         env:
@@ -136,8 +145,8 @@ jobs:
           PRERELEASE: ${{ steps.release.outputs.prerelease }}
         run: |
           set -euo pipefail
-          if EXISTING_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null); then
-            PARENT=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$EXISTING_SHA" --jq '.parents[0].sha // ""')
+          if EXISTING_SHA=$(python3 scripts/forge_cli.py tag-ref-sha --repo "$GITHUB_REPOSITORY" --tag "$TAG" 2>/dev/null); then
+            PARENT=$(python3 scripts/forge_cli.py commit-parent-sha --repo "$GITHUB_REPOSITORY" --sha "$EXISTING_SHA")
             if [ "$EXISTING_SHA" != "$SHA" ] && [ "$PARENT" != "$SHA" ]; then
               echo "Tag $TAG already points to $EXISTING_SHA"
               exit 1
@@ -154,10 +163,10 @@ jobs:
           PRERELEASE: ${{ steps.release.outputs.prerelease }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if python3 scripts/forge_cli.py release-exists --repo "$GITHUB_REPOSITORY" --tag "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists"
           else
             EXTRA_ARGS=()
             [ "$PRERELEASE" = "true" ] && EXTRA_ARGS+=(--prerelease)
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes "${EXTRA_ARGS[@]}"
+            python3 scripts/forge_cli.py release-create --repo "$GITHUB_REPOSITORY" --tag "$TAG" --title "$TAG" --generate-notes "${EXTRA_ARGS[@]}"
           fi

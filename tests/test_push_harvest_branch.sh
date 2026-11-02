@@ -35,14 +35,22 @@ set -euo pipefail
 # newer (concurrent) run's content. A further scenario asserts an
 # unreachable remote fails the merge step outright, as opposed to a
 # genuinely missing branch on a reachable remote, which must still proceed.
+#
+# The forge API calls (does a PR for the branch exist? create one if not)
+# go through the real CLI adapter (scripts/forge_cli.py) against a local
+# stub HTTP server (tests/_lib/forge_stub_server.py): the stub records
+# every request, so the assertions below check the exact calls the script
+# made. `gh` stays on PATH only for `gh auth setup-git` -- git-transport
+# credential plumbing, not a forge API read or write -- and any other `gh`
+# invocation fails the suite.
 
-# Prerequisite, checked before any scenario runs (#1143): the merge step
-# and the simulated harvest append below both shell out to python3.
-# Without this gate a host with no Python interpreter dies mid-suite at
-# the first invocation with exit 127, which reads like a harvest/merge
-# regression rather than a missing test prerequisite. Fail fast with an
-# actionable message instead; never shim python3 or downgrade to a
-# passing skip.
+# Prerequisite, checked before any scenario runs (#1143): the merge step,
+# the simulated harvest append and the forge CLI adapter all shell out to
+# python3. Without this gate a host with no Python interpreter dies
+# mid-suite at the first invocation with exit 127, which reads like a
+# harvest/merge regression rather than a missing test prerequisite. Fail
+# fast with an actionable message instead; never shim python3 or downgrade
+# to a passing skip.
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required to run this suite (merge step + simulated harvest append)" >&2
   exit 1
@@ -52,6 +60,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PUSH_SCRIPT="$ROOT_DIR/scripts/push_harvest_branch.sh"
 MERGE_SCRIPT="$ROOT_DIR/scripts/merge_bot_branch_corpus.py"
+STUB="$ROOT_DIR/tests/_lib/forge_stub_server.py"
 BRANCH="bot/harvest-human-findings"
 
 PASS=0
@@ -60,14 +69,78 @@ FAIL=0
 source "$SCRIPT_DIR/_lib/assert.sh"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+STUB_PID=""
+cleanup() {
+  if [ -n "$STUB_PID" ]; then
+    kill "$STUB_PID" 2>/dev/null || true
+    wait "$STUB_PID" 2>/dev/null || true
+  fi
+  rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
 
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false
+export GITHUB_REPOSITORY=o/r
+# An ambient GITHUB_TOKEN that must NOT win: `gh` resolved GH_TOKEN first,
+# and the script pins both names to the same credential so the adapter and
+# the git credential helper can never authenticate as different principals.
+export GITHUB_TOKEN=stale-ambient-token
+export GITHUB_TOKEN=dummy-test-token
 
-# A fake `gh` ahead of the real one on PATH: `gh auth setup-git` and
-# `gh pr create` are no-ops (recorded to a log so the test can assert on
-# them); `gh pr view` succeeds only when TEST_PR_EXISTS=1, so the second
-# run below exercises the "already open -> just update" branch too.
+# The forge stub: its answers live in a state file it re-reads on every
+# request, and every request it served is recorded in a log file.
+STATE="$TMPDIR/state.json"
+LOG="$TMPDIR/forge-requests.log"
+: > "$LOG"
+python3 "$STUB" serve --state "$STATE" --log "$LOG" --port-file "$TMPDIR/port" >"$TMPDIR/stub.out" 2>&1 &
+STUB_PID=$!
+for _ in $(seq 1 100); do [ -s "$TMPDIR/port" ] && break; sleep 0.1; done
+[ -s "$TMPDIR/port" ] || { echo "the forge stub did not start" >&2; exit 1; }
+export GITHUB_API_URL="http://127.0.0.1:$(cat "$TMPDIR/port")"
+
+# stub_state <json>: the stub's answers for the next scenario.
+stub_state() {
+  python3 - "$STATE" "$1" <<'PY'
+import json
+import sys
+
+path, overrides = sys.argv[1], sys.argv[2]
+state = {
+    "commit_pulls": {},
+    "labels": {},
+    "releases": [],
+    "open_prs": {},
+    "tag_refs": {},
+    "commit_parents": {},
+    "fail_paths": [],
+    "reflect_token": False,
+    "next_pr_number": 900,
+}
+state.update(json.loads(overrides))
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(state, handle, indent=2)
+PY
+}
+
+# requests: every forge request the script made, as "METHOD PATH BODY".
+requests() { python3 "$STUB" dump --log "$LOG"; }
+# auth_headers: the Authorization header of every recorded request.
+auth_headers() {
+  python3 - "$LOG" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        if line.strip():
+            print(json.loads(line)["headers"].get("authorization", ""))
+PY
+}
+
+# A `gh` ahead of the real one on PATH: `gh auth setup-git` is a no-op
+# (recorded to a log so the test can assert on it). Any other invocation
+# is a regression -- the forge API calls belong to the forge capability --
+# so it fails loudly instead of quietly working.
 mkdir -p "$TMPDIR/bin"
 GH_CALL_LOG="$TMPDIR/gh-calls.log"
 : > "$GH_CALL_LOG"
@@ -78,13 +151,8 @@ case "\$1 \$2" in
   "auth setup-git")
     exit 0
     ;;
-  "pr view")
-    [[ "\${TEST_PR_EXISTS:-0}" == "1" ]] && exit 0 || exit 1
-    ;;
-  "pr create")
-    exit 0
-    ;;
 esac
+echo "unexpected gh invocation: \$*" >&2
 exit 1
 EOF
 chmod +x "$TMPDIR/bin/gh"
@@ -178,8 +246,8 @@ seed_bot_branch_invalid_corpus_json() {
 }
 
 seed_bot_branch_malformed_schema() {
-  # $1: bare remote path. Pushes a commit onto $BRANCH whose corpus file is
-  # valid JSON but the wrong shape (real_pr_corpus.vulnerable is not a
+  # $1: bare remote path. Pushes a commit onto $BRANCH whose corpus file
+  # is valid JSON but the wrong shape (real_pr_corpus.vulnerable is not a
   # list) -- #801 fourth follow-up: a known-existing corpus with the wrong
   # schema must be a hard failure too, not just outright-unparseable JSON.
   local remote="$1" seed="$TMPDIR/seed-bot-badschema-$RANDOM"
@@ -198,8 +266,8 @@ seed_bot_branch_malformed_schema() {
 }
 
 seed_bot_branch_empty_object_corpus() {
-  # $1: bare remote path. Pushes a commit onto $BRANCH whose corpus file is
-  # valid JSON, present, and readable -- just `{}`, missing real_pr_corpus
+  # $1: bare remote path. Pushes a commit onto $BRANCH whose corpus file
+  # is valid JSON, present, and readable -- just `{}`, missing real_pr_corpus
   # entirely. Same data-loss path as the wrong type: without hard-failing
   # here, this would be treated as "nothing to merge" and the branch's
   # existing (if any) entries would be silently replaced.
@@ -339,7 +407,9 @@ run_merge_script "$CLONE1"
 check "merge step succeeds (nothing to merge)" "$MERGE_RC" "0"
 check "captured sha for an absent branch is empty" "$MERGE_SHA" ""
 
+stub_state "{}"
 : > "$GH_CALL_LOG"
+: > "$LOG"
 set +e
 run_push_script "$CLONE1" '{"real_pr_corpus": {"vulnerable": [{"id": "new-1"}], "clean": []}}' "$MERGE_SHA"
 RC=$?
@@ -347,8 +417,12 @@ set -e
 check "first run exits 0" "$RC" "0"
 REMOTE_LOG="$(git --git-dir="$REMOTE1" log --oneline "$BRANCH" 2>&1)"
 check_contains "remote bot branch now has the new commit" "$REMOTE_LOG" "harvest human findings"
-GH_CALLS="$(cat "$GH_CALL_LOG")"
-check_contains "gh pr create was invoked (no existing PR)" "$GH_CALLS" "pr create"
+FORGE_CALLS="$(requests)"
+check_contains "the open pull request was looked up" "$FORGE_CALLS" "GET /repos/o/r/pulls"
+check_contains "a pull request was created (no existing PR)" "$FORGE_CALLS" "POST /repos/o/r/pulls"
+check "the forge CLI binary was not used for the API" "$(cat "$GH_CALL_LOG")" "auth setup-git"
+check "the adapter authenticates with GH_TOKEN, the credential the git helper uses" \
+  "$(auth_headers | sort -u | tr '\n' ' ')" "Bearer dummy-test-token "
 
 echo ""
 echo "=== second run: bot branch already exists on the remote (the bug's exact repro) ==="
@@ -366,9 +440,11 @@ check "merge step succeeds" "$MERGE_RC" "0"
 check "captured a real sha for the existing branch" "$([ -n "$MERGE_SHA" ] && echo yes || echo no)" "yes"
 append_harvested_entry "$CLONE2" "new-2"
 
+stub_state "{\"open_prs\": {\"$BRANCH\": 7}}"
 : > "$GH_CALL_LOG"
+: > "$LOG"
 set +e
-TEST_PR_EXISTS=1 run_push_script_no_overwrite "$CLONE2" "$MERGE_SHA"
+run_push_script_no_overwrite "$CLONE2" "$MERGE_SHA"
 RC=$?
 set -e
 check "second run (existing bot branch) exits 0, not rejected as stale" "$RC" "0"
@@ -378,9 +454,9 @@ check_not_contains "the prior harvest commit was superseded" "$(git --git-dir="$
 REMOTE_CORPUS2="$(git --git-dir="$REMOTE2" show "$BRANCH":evals/corpus-human-findings.json)"
 check_contains "remote corpus still has the PRIOR (carried-forward) entry" "$REMOTE_CORPUS2" '"id": "prior"'
 check_contains "remote corpus has the newly harvested entry too" "$REMOTE_CORPUS2" '"id": "new-2"'
-GH_CALLS2="$(cat "$GH_CALL_LOG")"
-check_contains "gh pr view was checked" "$GH_CALLS2" "pr view"
-check_not_contains "gh pr create was NOT invoked (PR already open)" "$GH_CALLS2" "pr create"
+FORGE_CALLS2="$(requests)"
+check_contains "the open pull request was looked up" "$FORGE_CALLS2" "GET /repos/o/r/pulls"
+check_not_contains "no pull request was created (PR already open)" "$FORGE_CALLS2" "POST /repos/o/r/pulls"
 
 echo ""
 echo "=== merged-to-main case: bot-branch entry already landed on main -> no duplicate ==="
@@ -394,7 +470,9 @@ run_merge_script "$CLONE4"
 check "merge step succeeds" "$MERGE_RC" "0"
 append_harvested_entry "$CLONE4" "new-4"
 
+stub_state "{}"
 : > "$GH_CALL_LOG"
+: > "$LOG"
 set +e
 run_push_script_no_overwrite "$CLONE4" "$MERGE_SHA"
 RC=$?
@@ -428,6 +506,7 @@ push_concurrent_update "$REMOTE6" '{"real_pr_corpus": {"vulnerable": [{"id": "s2
 # never refreshed by re-fetching.
 append_harvested_entry "$CLONE6" "new-6"
 : > "$GH_CALL_LOG"
+: > "$LOG"
 set +e
 run_push_script_no_overwrite "$CLONE6" "$S1_SHA"
 RC=$?
@@ -524,6 +603,7 @@ make_bare_remote_with_main "$REMOTE3"
 CLONE3="$TMPDIR/clone3"
 fresh_single_branch_clone "$REMOTE3" "$CLONE3"
 : > "$GH_CALL_LOG"
+: > "$LOG"
 set +e
 (
   cd "$CLONE3"
@@ -536,6 +616,7 @@ RC=$?
 set -e
 check "unchanged corpus exits 0" "$RC" "0"
 check "gh was never invoked" "$(cat "$GH_CALL_LOG")" ""
+check "the forge was never called either" "$(requests)" ""
 
 echo ""
 echo "=== EXPECTED_BOT_SHA omitted entirely is a hard failure (never silently empty) ==="
