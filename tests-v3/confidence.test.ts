@@ -2195,3 +2195,35 @@ test("#1368 review: the prompt budget accounts for the system prompt, not just t
     "system + shrunken diff + scaffolding stays within the budget accounting",
   );
 });
+
+// ── #1428: the one-credential rule in the confidence lane ─────────────────
+test("#1428: a URL credential and a separate key disable the scorer instead of sending a refused request", () => {
+  const resolved = resolveConfidenceProfile({
+    AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_BASE_URL: "https://u:p@scorer.example/v1",
+    AI_CONFIDENCE_API_KEY: "sk-scorer",
+  });
+  assert.equal(resolved.profile.enabled, false);
+  assert.ok(resolved.warnings.some((w) => w.includes("one request carries one credential")));
+});
+
+test("#1428: a URL credential alone is a valid confidence credential channel", () => {
+  const resolved = resolveConfidenceProfile({
+    AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_BASE_URL: "https://u:p@scorer.example/v1",
+  });
+  assert.equal(resolved.profile.enabled, true);
+  assert.equal(resolved.profile.apiKey, "");
+  assert.deepEqual(resolved.warnings, []);
+});
+
+test("#1428: a fail-closed hostile endpoint URL shape disables the scorer, never throws", () => {
+  // The lane's contract is never-fatal: a URL the transport would refuse
+  // turns the lane off with the reason named, and the review still runs.
+  const resolved = resolveConfidenceProfile({
+    AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_BASE_URL: "https://scorer.example/pa@ss/v1",
+  });
+  assert.equal(resolved.profile.enabled, false);
+  assert.ok(resolved.warnings.some((w) => w.includes("cannot be used as a request target")));
+});

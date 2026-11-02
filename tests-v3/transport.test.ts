@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import {
   runHttpRequest,
   resolveEndpoint,
+  resolveEndpointChannel,
+  endpointUrlCredential,
+  assertSingleCredentialChannel,
+  CREDENTIAL_CHANNEL_CONFLICT_MESSAGE,
   TransportFailure,
   classifySocketError,
   describeTransportFailure,
@@ -185,6 +189,140 @@ test("the api key rides only the auth headers — never the URL, body, or failur
   if (refused.status !== "failure") return;
   assert.equal(refused.failure.kind, "network");
   assert.ok(!refused.failure.message.includes(key), "the network-failure message must not carry the key");
+});
+
+test("#1428: a credential from the endpoint URL's userinfo travels as HTTP Basic and nowhere else", async () => {
+  // The URL userinfo is the credential channel RFC 7617 assigns to HTTP
+  // Basic. The request target, the Host header, the request line, and the
+  // body must all be credential-free; the credential rides only the
+  // Authorization header.
+  const credential = "lane-operator:hunter2";
+  const expectedBasic = `Basic ${Buffer.from(credential, "utf8").toString("base64")}`;
+  for (const apiFormat of ["openai", "anthropic"] as const) {
+    const seenTargets: string[] = [];
+    const server = await startMockServer((req, body, res) => {
+      seenTargets.push(`${req.method} ${req.url}`);
+      if (apiFormat === "anthropic") {
+        sseResponse([
+          'data: {"type":"message_start","message":{"id":"m1","model":"m","usage":{"input_tokens":1,"output_tokens":0}}}',
+          'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}',
+          'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+          'data: {"type":"message_stop"}',
+        ])(req, body, res);
+        return;
+      }
+      res.statusCode = 200;
+      res.end('{"id":"1","choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}');
+    });
+    try {
+      const credentialedBase = server.url.replace("http://", `http://${credential}@`);
+      const outcome = await runChatRequest({
+        baseUrl: credentialedBase,
+        apiFormat,
+        payload: apiFormat === "openai"
+          ? payload({ model: "m", stream: false })
+          : ({ endpointPath: "/messages", body: { model: "m", stream: true, max_tokens: 8 } } as unknown as TransportWirePayload),
+        apiKey: "",
+        anthropicVersion: "2023-06-01",
+        requestTimeoutSec: 5,
+        connectTimeoutSec: 5,
+      });
+      assert.equal(outcome.status, "ok");
+      const captured = server.requests.at(-1)!;
+      // The credential rides exactly one header, and it is the Basic one.
+      assert.equal(captured.headers.authorization, expectedBasic);
+      // The URL channel replaces the separate-key channels, never joins them.
+      assert.equal(captured.headers["x-api-key"], undefined, "the URL credential must not also ride x-api-key");
+      // Request line: the userinfo never reaches the request target...
+      assert.deepEqual(seenTargets, [`POST ${apiFormat === "anthropic" ? "/messages" : "/chat/completions"}`]);
+      // ...nor the Host header...
+      assert.equal(captured.headers.host, server.url.replace("http://", ""));
+      // ...nor any other header (even the Basic header carries only the
+      // base64 form, never the raw credential), nor the body.
+      const base64 = expectedBasic.slice("Basic ".length);
+      const echoed = captured.rawHeaders.filter(
+        (value) => value.includes(credential)
+          || (value.includes(base64) && value !== expectedBasic),
+      );
+      assert.deepEqual(echoed, [], "the credential must ride only the Authorization header");
+      assert.ok(!captured.body.includes(credential), "the wire body must not carry the credential");
+      assert.ok(!captured.body.includes(base64), "the wire body must not carry the encoded credential either");
+      // Only the credential channel changes: the Anthropic framing headers
+      // ride a URL-credentialed request exactly like a keyed one.
+      if (apiFormat === "anthropic") {
+        assert.equal(captured.headers["anthropic-version"], "2023-06-01");
+        assert.equal(captured.headers.accept, "text/event-stream");
+      }
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+test("#1428: an endpoint URL credential and a separate API key are refused before any request", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.end("{}");
+  });
+  try {
+    const credentialedBase = server.url.replace("http://", "http://lane-operator:hunter2@");
+    let caught: unknown = null;
+    try {
+      await runHttpRequest({
+        baseUrl: credentialedBase,
+        apiFormat: "openai",
+        bodyText: "{}",
+        apiKey: "sk-separate-key",
+        anthropicVersion: "2023-06-01",
+        requestTimeoutSec: 5,
+        connectTimeoutSec: 5,
+        stream: false,
+      });
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(caught instanceof Error);
+    assert.equal(caught.message, CREDENTIAL_CHANNEL_CONFLICT_MESSAGE);
+    assert.ok(!caught.message.includes("hunter2"), "the refusal must not echo the credential");
+    assert.equal(server.requests.length, 0, "the refusal must happen before any request");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1428: endpoint userinfo resolves fail-closed, and credential-free endpoints are untouched", () => {
+  // The decoded userinfo is the credential, whatever characters it carries —
+  // decoded one escape at a time, exactly like the reference resolver's
+  // `urllib.parse.unquote` (a valid escape is its byte, an invalid escape
+  // sequence stays literal, invalid UTF-8 replaces).
+  assert.equal(endpointUrlCredential("https://user:pa%2Fss@host/v1"), "user:pa/ss");
+  assert.equal(endpointUrlCredential("https://user:p%2Fss%FF@host/v1"), "user:p/ss\uFFFD");
+  // A non-BMP character sharing a segment with an escape survives intact.
+  assert.equal(endpointUrlCredential("https://user:%F0%9F%94%92p%41@host/v1"), "user:🔒pA");
+  assert.equal(endpointUrlCredential("https://token@host"), "token");
+  assert.equal(endpointUrlCredential("https://user%40x:pass@host/v1"), "user@x:pass");
+  // An empty userinfo carries no credential.
+  assert.equal(endpointUrlCredential("https://@host/v1"), "");
+  assert.equal(endpointUrlCredential("https://host/v1"), "");
+  // Fail-closed shapes, mirrored from the shared resolver (#1414/#1419).
+  assert.throws(() => endpointUrlCredential("https://user:pa/ss@host/v1"), /credential outside its authority/);
+  assert.throws(() => endpointUrlCredential("https://host/pa@ss/v1"), /credential outside its authority/);
+  assert.throws(() => endpointUrlCredential("https://host/pa%40ss%zz/v1"), /credential outside its authority/);
+  assert.throws(() => endpointUrlCredential("https://host%40x/v1"), /encoded credential/);
+  assert.throws(() => endpointUrlCredential("https://@/v1"), /unparseable credential/);
+  // Reference parity: with the credential attributed to the authority, an
+  // `@` further along the path is path data, not an ambiguous credential.
+  assert.equal(endpointUrlCredential("https://u:p@host/pa@ss/v1"), "u:p");
+  // A credential-free endpoint resolves byte-for-byte as before #1428.
+  assert.equal(resolveEndpoint("https://host/v1", "openai").toString(), "https://host/v1/chat/completions");
+  // The resolved request target loses only the userinfo; identity is kept.
+  const resolved = resolveEndpointChannel("https://user:pass@host:8443/v1", "openai");
+  assert.equal(resolved.url.toString(), "https://host:8443/v1/chat/completions");
+  assert.equal(resolved.urlCredential, "user:pass");
+  // The one-credential assertion itself.
+  assert.throws(() => assertSingleCredentialChannel("user:pass", "sk-key"), /one request carries one credential/);
+  assert.doesNotThrow(() => assertSingleCredentialChannel("user:pass", ""));
+  assert.doesNotThrow(() => assertSingleCredentialChannel("", "sk-key"));
 });
 
 test("#1037: configured extra-header VALUES are credentials too — only the wire headers, never the URL, body, or a secret-aware failure detail", async () => {

@@ -2,7 +2,7 @@ import { maskKnownSecrets, redactText } from "../context/redact.js";
 import { pyCodepointSlice } from "../platform/py.js";
 import type { ApiFormat, NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { SpecialistDiscardedWireAttempt, SpecialistRequestFn, SpecialistTransportOutcome } from "../specialists/runner.js";
-import { describeTransportFailure, resolveEndpoint, TransportFailure } from "../transport/http.js";
+import { assertSingleCredentialChannel, describeTransportFailure, endpointUrlCredential, resolveEndpoint, TransportFailure } from "../transport/http.js";
 import { applyExtraHeaders } from "../transport/headers.js";
 import { runChatRequest, type ChatRequestInput, type ChatRequestOutcome } from "../transport/transport.js";
 import { classifyTerminalProviderFailure, sharedTerminalLaneLatch, type TerminalLaneLatch, type TerminalProviderReason } from "../transport/terminal.js";
@@ -241,6 +241,10 @@ const wire = {
     // persisted failure shape is unchanged.
     try {
       resolveEndpoint(config.baseUrl, format);
+      // #1428: the credential-channel conflict is one of the transport's own
+      // fences, pre-flighted here like the endpoint join so a refused call is
+      // still not a provider attempt.
+      assertSingleCredentialChannel(endpointUrlCredential(config.baseUrl), config.apiKey);
       if (config.extraHeaders !== undefined) applyExtraHeaders({}, config.extraHeaders);
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : String(error);

@@ -534,3 +534,53 @@ test("#1368: an unasserted or off-format Anthropic request ignores responseSchem
     );
   }
 });
+
+// ── #1428: the one-credential rule at profile resolution ─────────────────
+test("#1428: an endpoint URL credential and a separate API key are refused at tier resolution", () => {
+  // Both channels on one lane: refused before any request could be made.
+  assert.throws(
+    () => resolveTierProfiles({ AI_BASE_URL: "https://user:pass@host/v1", AI_MODEL: "m", AI_API_KEY: "sk-key" }),
+    /AI_BASE_URL carries a credential in its userinfo and AI_API_KEY carries a separate model credential/,
+  );
+  // Lane overrides name their own keys in the refusal.
+  assert.throws(
+    () => resolveTierProfiles({
+      AI_BASE_URL: "https://host/v1", AI_MODEL: "m", AI_API_KEY: "sk-key",
+      AI_SMART_MODEL: "s", AI_SMART_BASE_URL: "https://u:p@host/v1", AI_SMART_API_KEY: "sk-smart",
+    }),
+    /AI_SMART_BASE_URL carries a credential in its userinfo and AI_SMART_API_KEY carries a separate model credential/,
+  );
+  // A URL credential alone is a valid single channel: resolution succeeds.
+  const urlCredentialed = resolveTierProfiles({ AI_BASE_URL: "https://user:pass@host/v1", AI_MODEL: "m" });
+  assert.equal(urlCredentialed.primary.baseUrl, "https://user:pass@host/v1");
+  assert.equal(urlCredentialed.primary.apiKey, "");
+  // A separate key alone is unchanged (the bearer path).
+  const keyed = resolveTierProfiles({ AI_BASE_URL: "https://host/v1", AI_MODEL: "m", AI_API_KEY: "sk-key" });
+  assert.equal(keyed.primary.apiKey, "sk-key");
+});
+
+test("#1428: the specialist lane refuses two credential channels at profile resolution", () => {
+  assert.throws(
+    () => resolveSpecialistProfiles({
+      AI_BASE_URL: "https://host/v1", AI_MODEL: "m",
+      AI_SPECIALIST_MODEL: "s", AI_SPECIALIST_BASE_URL: "https://u:p@host/v1", AI_SPECIALIST_API_KEY: "sk-s",
+    }),
+    /AI_SPECIALIST_BASE_URL carries a credential in its userinfo and AI_SPECIALIST_API_KEY carries a separate model credential/,
+  );
+  // An inherited endpoint's URL credential plus a separately configured
+  // specialist key is still two channels for one request.
+  assert.throws(
+    () => resolveSpecialistProfiles({
+      AI_BASE_URL: "https://u:p@host/v1", AI_MODEL: "m",
+      AI_SPECIALIST_MODEL: "s", AI_SPECIALIST_API_KEY: "sk-s",
+    }),
+    /AI_BASE_URL carries a credential in its userinfo and AI_SPECIALIST_API_KEY carries a separate model credential/,
+  );
+  // A specialist profile on a URL-credentialed endpoint with no separate key
+  // resolves fine — the transport sends that credential as Basic.
+  const resolved = resolveSpecialistProfiles({
+    AI_BASE_URL: "https://u:p@host/v1", AI_MODEL: "m", AI_SPECIALIST_MODEL: "s",
+  });
+  assert.equal(resolved.transport.baseUrl, "https://u:p@host/v1");
+  assert.equal(resolved.transport.apiKey, "");
+});
