@@ -123,7 +123,7 @@ import { boundedFailureMessage, readWorkerResultFile } from "./result-file.js";
 import { ensureContained, writeFileNoFollow } from "./paths.js";
 
 /** The worker container's fixed name. */
-const WORKER_CONTAINER_NAME = "worker";
+export const WORKER_CONTAINER_NAME = "worker";
 
 /** The pod's termination grace period (seconds): the window the worker
  * has to observe engine cancellation before hard termination. */
@@ -137,9 +137,14 @@ export const WORKER_RUN_AS_ID = 65532;
 /** Pod labels. Values are sha256 hex prefixes — raw job/run ids can
  * exceed Kubernetes label-value bounds and must never carry repository
  * data anyway. */
-const LABEL_MANAGED_BY = "app.kubernetes.io/managed-by";
-const LABEL_JOB_HASH = "pr-reviewer.io/job-hash";
-const LABEL_RUN_HASH = "pr-reviewer.io/run-hash";
+export const LABEL_MANAGED_BY = "app.kubernetes.io/managed-by";
+export const LABEL_JOB_HASH = "pr-reviewer.io/job-hash";
+export const LABEL_RUN_HASH = "pr-reviewer.io/run-hash";
+
+/** The identity value every object this executor creates carries under
+ * `LABEL_MANAGED_BY` — the NetworkPolicy selector value and the identity
+ * the #1423 admission guardrails match on. */
+export const WORKER_IDENTITY_VALUE = "pr-reviewer-action";
 
 /** The worker pod's NETWORK POSTURE — the default an operator must
  * reproduce with a namespace NetworkPolicy (#734 lists "worker
@@ -170,7 +175,7 @@ export const WORKER_NETWORK_POSTURE = Object.freeze({
    * Kubernetes does NOT copy a Job's own `metadata.labels` onto the
    * pods it creates — so the pod template carries this selector
    * explicitly, and the Job's own labels carry it too. */
-  selector: Object.freeze({ [LABEL_MANAGED_BY]: "pr-reviewer-action" }),
+  selector: Object.freeze({ [LABEL_MANAGED_BY]: WORKER_IDENTITY_VALUE }),
 });
 
 /** The identity labels every object this executor creates carries: the

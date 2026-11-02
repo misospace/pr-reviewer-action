@@ -1,0 +1,98 @@
+# Admission guardrails for controller-created worker Jobs (#1423).
+#
+# Defense-in-depth over the executor's in-code security defaults
+# (src/executor/kubernetes.ts, docs/architecture/executor-admission-guardrails.md):
+# a cluster-level ValidatingAdmissionPolicy that rejects worker Jobs
+# violating the executor contract. Applies to writes that carry the
+# pr-reviewer-action identity, the deterministic prv- name prefix, or come
+# from one of the operator's controller identities (parameter
+# controllerUsernames) — any one hook is enough.
+#
+# The policy enforces STABLE invariants only (identity labels, dedicated
+# worker SA, fixed security contexts, one-container shape, allowed image
+# repository prefix, bounded lifetime, no retries, no privileged /
+# host-namespace / hostPath escape) — never incidental fields like
+# resource sizes, TTL values, args, or the image tag, so a controller
+# upgrade never deadlocks against this policy.
+#
+# Text is pinned to src/executor/admission-policy.ts by
+# tests-v3/executor-admission-policy.test.ts. Helm delivery is #738.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: pr-reviewer-worker-job
+spec:
+  failurePolicy: Fail
+  sideEffects: None
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups:
+          - batch
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - jobs
+  matchConditions:
+    - name: pr-reviewer-controller-or-identity
+      expression: has(object.metadata.labels) && 'app.kubernetes.io/managed-by' in object.metadata.labels && object.metadata.labels['app.kubernetes.io/managed-by'] == 'pr-reviewer-action' || object.metadata.name.startsWith('prv-') || parameters.data.controllerUsernames.split(',').exists(u, u.trim() == request.userInfo.username)
+  variables:
+    - name: podSpec
+      expression: object.spec.template.spec
+    - name: containers
+      expression: object.spec.template.spec.containers
+  validations:
+    - expression: containers.size() == 1 && containers.all(c, c.name == 'worker')
+      message: a pr-reviewer worker Job must define exactly one container named 'worker'
+    - expression: podSpec.serviceAccountName == parameters.data.workerServiceAccount
+      message: worker pods must run on the operator's dedicated worker service account, never another identity
+    - expression: has(podSpec.automountServiceAccountToken) && podSpec.automountServiceAccountToken == false
+      message: "worker pods must set automountServiceAccountToken: false — a review worker never gets cluster API access"
+    - expression: containers.all(c, c.image == parameters.data.allowedImageRepository || c.image.startsWith(parameters.data.allowedImageRepository + ':') || c.image.startsWith(parameters.data.allowedImageRepository + '@'))
+      message: worker containers must come from the operator's allowed worker image repository
+    - expression: containers.all(c, !has(c.securityContext) || ((!has(c.securityContext.privileged) || c.securityContext.privileged == false) && (!has(c.securityContext.allowPrivilegeEscalation) || c.securityContext.allowPrivilegeEscalation == false)))
+      message: worker containers may never be privileged or allow privilege escalation
+    - expression: (!has(podSpec.hostNetwork) || podSpec.hostNetwork == false) && (!has(podSpec.hostPID) || podSpec.hostPID == false) && (!has(podSpec.hostIPC) || podSpec.hostIPC == false)
+      message: worker pods may never join a host namespace (hostNetwork/hostPID/hostIPC)
+    - expression: "!has(podSpec.volumes) || podSpec.volumes.all(v, !has(v.hostPath))"
+      message: worker pods may never mount a hostPath — shared storage is PVC-only
+    - expression: has(podSpec.securityContext) && podSpec.securityContext.runAsNonRoot == true && podSpec.securityContext.runAsUser == 65532 && podSpec.securityContext.runAsGroup == 65532 && has(podSpec.securityContext.seccompProfile) && podSpec.securityContext.seccompProfile.type == 'RuntimeDefault'
+      message: worker pods must carry the fixed non-root security context (runAsNonRoot, uid/gid 65532, RuntimeDefault seccomp)
+    - expression: containers.all(c, has(c.securityContext) && c.securityContext.allowPrivilegeEscalation == false && c.securityContext.readOnlyRootFilesystem == true && has(c.securityContext.capabilities) && 'ALL' in c.securityContext.capabilities.drop && !has(c.securityContext.capabilities.add) && has(c.securityContext.seccompProfile) && c.securityContext.seccompProfile.type == 'RuntimeDefault')
+      message: worker containers must carry the fixed security context (no privilege escalation, read-only rootfs, ALL capabilities dropped, RuntimeDefault seccomp)
+    - expression: has(object.spec.activeDeadlineSeconds) && object.spec.activeDeadlineSeconds > 0
+      message: worker Jobs must carry a positive activeDeadlineSeconds — a worker without a bounded lifetime is not shippable
+    - expression: has(object.spec.backoffLimit) && object.spec.backoffLimit == 0 && podSpec.restartPolicy == 'Never'
+      message: "one review, one worker: worker Jobs must use backoffLimit 0 and restartPolicy Never"
+    - expression: "['pr-reviewer.io/job-hash', 'pr-reviewer.io/run-hash'].all(k, k in object.metadata.labels && k in object.spec.template.metadata.labels)"
+      message: worker Jobs must carry the pr-reviewer.io/job-hash/pr-reviewer.io/run-hash correlation labels on the Job AND the pod template
+    - expression: containers.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || !('pr-reviewer.io/run-hash' in object.metadata.labels) || e.valueFrom.secretKeyRef.name == 'prv-cred-' + object.metadata.labels['pr-reviewer.io/run-hash'].substring(0, 24)))
+      message: worker credential env may only reference this run's derived per-run Secret ('prv-cred-' + the run-hash label prefix)
+---
+# The binding activates the policy in the namespaces labeled
+# 'pr-reviewer.io/admission: enforce' (the instance-config
+# kubernetes.namespace) and DENIES on failure — including a missing
+# parameter ConfigMap (parameterNotFoundAction: Deny), so a half-applied
+# installation never runs unguarded. The ConfigMap lives in the worker
+# namespace; see worker-admission-params.example.yaml.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: pr-reviewer-worker-job-binding
+spec:
+  policyName: pr-reviewer-worker-job
+  validationActions:
+    - Deny
+  paramRef:
+    name: pr-reviewer-worker-admission-params
+    namespace: review-workers
+    parameterNotFoundAction: Deny
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        pr-reviewer.io/admission: enforce

@@ -391,6 +391,14 @@ fail-closed, so an unlistable cluster refuses the launch.
   CIDR is cluster/operator knowledge, and the executor never accepts a
   PodSpec fragment, a policy object, or a network rule from anywhere.
 
+- **Admission guardrails (#1423).** The `ValidatingAdmissionPolicy`
+  manifests under `deploy/admission/` are the second operator-applied
+  cluster resource, in the same pattern as the NetworkPolicy above. They
+  enforce these same fixed defaults at admission time, so a regressed or
+  buggy controller cannot get a non-conforming worker accepted by the
+  cluster. See
+  [`executor-admission-guardrails.md`](./executor-admission-guardrails.md).
+
 - **Credentials compose with #735; they never alias it.** The durable
   request carries opaque broker REFERENCES only — a reference is never a
   Kubernetes object name (`result-channel:<runId>` is a valid reference
