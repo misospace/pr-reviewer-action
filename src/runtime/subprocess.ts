@@ -63,7 +63,7 @@ export interface ProcessHandle {
   launchRefusal: string | null;
   /** Resolves when the leader can no longer execute: the child emitted
    * `exit`, or the launch was refused/failed before a live child existed.
-   * This is stronger than probing the pid: a dead child may remain as a
+   * This is stronger than the raw signal probe: a dead child may remain as a
    * zombie until reaped and still answer `kill(pid, 0)`. */
   exited: Promise<void>;
   /** Terminate the whole tree now. Idempotent. */

@@ -15,6 +15,7 @@ export {
   pgrepAvailable,
   preflightTreeCleanup,
   processCanExecute,
+  processPresent,
   terminateProcessTree,
   terminateProcessTreeByPid,
   type TerminationReport,
