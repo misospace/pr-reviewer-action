@@ -196,6 +196,21 @@ function procState(pid: number): string {
   }
 }
 
+/** `/proc/<pid>/stat` field 5 (`pgrp`) — the PROCESS GROUP a pid belongs
+ * to. 0 when unreadable. */
+function procGroup(pid: number): number {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return 0;
+    // The remainder starts at field 3 (`state`), so field 5 (`pgrp`) is
+    // its third element.
+    return Number.parseInt(stat.slice(close + 1).trim().split(/\s+/)[2] ?? "", 10);
+  } catch {
+    return 0;
+  }
+}
+
 /** `/proc/<pid>/stat` field 22 (`starttime`) — the PROCESS IDENTITY the
  * executor records next to a pid. "" when unprovable. */
 function procStartTime(pid: number): string {
@@ -352,6 +367,196 @@ function assertZombieBoundary(zombie: ZombieFixture): void {
     "zombie precondition: the raw signal probe keeps answering for a pid that cannot execute",
   );
   assert.notEqual(zombie.pidIdentity, "", "the zombie's process identity is provable");
+}
+
+/** The group-leader fixture needs `setsid` to make the worker lead its own
+ * session and process group; without it the fixture cannot produce the
+ * boundary token, so the caller skips rather than fails. */
+function setsidAvailable(): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const probe = spawn("setsid", ["true"], { stdio: "ignore" });
+    // A successful exec is proven by `close`; any launch error means the
+    // boundary token cannot be produced here.
+    probe.on("error", () => resolve(false));
+    probe.on("close", () => resolve(true));
+  });
+}
+
+interface ZombieGroupLeaderFixture {
+  /** The pid of the unreaped zombie — the boundary token itself. It IS the
+   * process-group leader: its pgid equals its pid. */
+  readonly leaderPid: number;
+  /** The zombie leader's PROCESS IDENTITY (its start time), exactly as the
+   * executor records it next to a pid. */
+  readonly leaderPidIdentity: string;
+  /** A live member of the zombie leader's process group — the shape a
+   * recovered worker's orphaned descendants take (#1390). */
+  readonly survivingPid: number;
+  /** Kill the whole fixture and clean up. */
+  readonly stop: () => void;
+}
+
+/** Spawn a zombie PROCESS-GROUP LEADER with a surviving group member — the
+ * #1390 leak shape itself, not a benign stand-in (#252):
+ *
+ * the holder backgrounds a `setsid` bash, so the worker leads its own
+ * session and process group; that worker spawns a long `sleep` (a member
+ * of the worker's group — non-interactive bash has no job control, so
+ * background children stay in the shell's group) and then blocks; the
+ * test kills the worker. The `exec sleep 60` is the REAPING FIREWALL: by
+ * the time the leader is killed, the holder process IS a plain `sleep` —
+ * no `wait()` can ever run in it — so the killed group leader stays an
+ * unreaped zombie for the whole assertion window instead of being reaped
+ * out from under the test.
+ *
+ * The surviving member is re-parented the moment its leader dies (Linux
+ * re-parents at death, not at reap), which is exactly why `pgrep -P`
+ * cannot find it and ONLY the tree termination's group kill can reach it.
+ *
+ * `null` when `bash` or `setsid` cannot be launched (the caller skips). */
+async function spawnZombieGroupLeader(): Promise<ZombieGroupLeaderFixture | null> {
+  const dir = mkdtempSync(path.join(tmpdir(), "executor-local-zombie-leader-"));
+  const leaderFile = path.join(dir, "leader.pid");
+  const survivingFile = path.join(dir, "surviving.pid");
+  // DETACHED: the holder leads its own process group, so the fixture can
+  // never signal the test runner's process group — the group kill below
+  // reaches the holder and its descendants only.
+  const holder = spawn(
+    "bash",
+    [
+      "-c",
+      `setsid bash -c 'sleep 600 & echo $$ > ${JSON.stringify(leaderFile)}; echo $! > ${JSON.stringify(survivingFile)}; sleep 30' & exec sleep 60`,
+    ],
+    { detached: true, stdio: "ignore" },
+  );
+  const failures: Error[] = [];
+  holder.on("error", (error) => {
+    failures.push(error);
+  });
+  let leaderPid = 0;
+  const stop = (): void => {
+    if (leaderPid > 0) {
+      // The leader's group first — the surviving member and the leader's
+      // own foreground sleep — then a direct hit on the leader. ESRCH-safe:
+      // any piece may already be gone. Killing the holder last lets init
+      // reap the leader's zombie.
+      try {
+        process.kill(-leaderPid, "SIGKILL");
+      } catch {
+        // the group is already gone
+      }
+      try {
+        process.kill(leaderPid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+    const holderPid = holder.pid;
+    if (holderPid !== undefined) {
+      try {
+        process.kill(holderPid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+    holder.unref();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  try {
+    if (!(await setsidAvailable())) {
+      stop();
+      return null;
+    }
+    const deadline = Date.now() + ZOMBIE_WAIT_MS;
+    let written = false;
+    while (Date.now() < deadline) {
+      const failure = failures[0];
+      if (failure !== undefined) {
+        const code = (failure as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") {
+          // No `bash` on this host: the boundary token cannot be produced.
+          stop();
+          return null;
+        }
+        throw new Error(`the zombie-leader holder could not be launched: ${failure.message}`);
+      }
+      try {
+        if (
+          readFileSync(leaderFile, "utf8").trim().length > 0 &&
+          readFileSync(survivingFile, "utf8").trim().length > 0
+        ) {
+          written = true;
+          break;
+        }
+      } catch {
+        // not written yet
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    if (!written) {
+      throw new Error(`the zombie-leader holder never wrote its pid files: ${leaderFile}, ${survivingFile}`);
+    }
+    leaderPid = Number.parseInt(readFileSync(leaderFile, "utf8"), 10);
+    const survivingPid = Number.parseInt(readFileSync(survivingFile, "utf8"), 10);
+    // Kill the leader and wait for the zombie. The parent is a plain
+    // `sleep` (it cannot wait()), so the zombie is stable for the whole
+    // assertion window; a vanished pid means the host reaped it anyway.
+    process.kill(leaderPid, "SIGKILL");
+    await awaitZombie(leaderPid, "executor-local zombie group leader");
+    // The surviving member must still be alive — a vanished member means
+    // the fixture produced nothing to sweep.
+    const survivorDeadline = Date.now() + ZOMBIE_WAIT_MS;
+    while (Date.now() < survivorDeadline) {
+      const survivorState = procState(survivingPid);
+      if (survivorState === "") {
+        throw new Error(
+          "executor-local zombie group leader: the surviving member vanished before it could be observed",
+        );
+      }
+      if (survivorState === "S" || survivorState === "R") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    if (!(procState(survivingPid) === "S" || procState(survivingPid) === "R")) {
+      throw new Error(
+        "executor-local zombie group leader: the surviving member never reached a live state",
+      );
+    }
+    return { leaderPid, leaderPidIdentity: procStartTime(leaderPid), survivingPid, stop };
+  } catch (error) {
+    stop();
+    throw error;
+  }
+}
+
+/** The #252 discipline for the group-leader fixture: the recorded pid must
+ * really be an unreaped zombie AND the process-group leader, and the group
+ * must still hold a live member — without these, a sweep test would pass
+ * against a fixture that never produced the leak shape. */
+function assertZombieGroupLeaderBoundary(zombie: ZombieGroupLeaderFixture): void {
+  assert.equal(
+    procState(zombie.leaderPid),
+    "Z",
+    "fixture precondition: the leader is an unreaped zombie",
+  );
+  assert.doesNotThrow(
+    () => process.kill(zombie.leaderPid, 0),
+    "zombie leader precondition: the raw signal probe keeps answering for a pid that cannot execute",
+  );
+  assert.doesNotThrow(
+    () => process.kill(-zombie.leaderPid, 0),
+    "zombie leader precondition: the leader still owns a live process group",
+  );
+  const survivorState = procState(zombie.survivingPid);
+  assert.ok(
+    survivorState === "S" || survivorState === "R",
+    `fixture precondition: the surviving member is still alive (state '${survivorState}')`,
+  );
+  assert.equal(
+    procGroup(zombie.survivingPid),
+    zombie.leaderPid,
+    "fixture precondition: the surviving member is in the zombie leader's process group",
+  );
+  assert.notEqual(zombie.leaderPidIdentity, "", "the zombie leader's process identity is provable");
 }
 
 /** The recovery record a restarted controller would find: the zombie's pid
@@ -1521,10 +1726,68 @@ test("cancel: a recovered zombie worker is reported terminated, never worker-not
 test("cancel: a recovered zombie leader is still swept, and the cancellation is confirmed", async (t) => {
   // A killed-but-unreaped zombie cannot execute, but it is still PRESENT:
   // it owns its PROCESS GROUP, and the group's members (the worker's
-  // orphaned descendants) can outlive it. Only the tree termination's
-  // group kill removes them, so the recovered cancellation must sweep the
-  // tree even though the leader itself is already gone — skipping the
-  // sweep would report `terminated` and LEAK the group.
+  // orphaned descendants) can outlive it. Linux re-parents a dead leader's
+  // children at death — not at reap — so the descendant snapshot cannot
+  // see them anymore and ONLY the tree termination's group kill reaches
+  // them. This test drives the REAL termination seam (no injected
+  // terminate) against a real zombie process-group leader with a real
+  // surviving member: skipping the sweep would report `terminated` and
+  // LEAK the group.
+  if (!hasProc) {
+    t.skip(NO_PROC_SKIP_REASON);
+    return;
+  }
+  const fixture = makeRequest();
+  const zombie = await spawnZombieGroupLeader();
+  if (zombie === null) {
+    t.skip(BASH_MISSING_SKIP_REASON);
+    return;
+  }
+  try {
+    assertZombieGroupLeaderBoundary(zombie);
+    writeStateFile(fixture.request, {
+      runId: fixture.request.runId,
+      jobId: fixture.request.jobId,
+      attempt: fixture.request.attempt,
+      pid: zombie.leaderPid,
+      pidIdentity: zombie.leaderPidIdentity,
+      startedAtMs: 1,
+      state: "running",
+    });
+    const outcome = await executor("ok").cancel(fixture.request);
+    assert.deepEqual(
+      outcome,
+      { kind: "terminated" },
+      "a present leader is swept even when it can no longer execute: the group kill is the point",
+    );
+    // The surviving member of the zombie leader's group must not survive
+    // the sweep: a pid that can still execute is a leaked descendant. (A
+    // reaped-or-zombie tail is fine — dead is dead; the OS reaps it once
+    // init takes it.)
+    const deadline = Date.now() + ZOMBIE_WAIT_MS;
+    let survivorState = procState(zombie.survivingPid);
+    while ((survivorState === "S" || survivorState === "R") && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      survivorState = procState(zombie.survivingPid);
+    }
+    assert.ok(
+      survivorState === "" || survivorState === "Z",
+      `the zombie leader's surviving group member was swept, not orphaned (state '${survivorState}')`,
+    );
+  } finally {
+    zombie.stop();
+    cleanup(fixture);
+  }
+});
+
+test("cancel: a present-but-cannot-execute recovered worker routes through the termination seam", async (t) => {
+  // The decision table's middle row, pinned in isolation: a pid that is
+  // still PRESENT but cannot execute (an unreaped zombie) is neither the
+  // absent-pid short-circuit (nothing to signal) nor an identity refusal —
+  // it goes through `terminate` so the group kill gets its chance. The
+  // terminate seam is injected here only to OBSERVE the routing; the
+  // real-seam proof that a zombie PROCESS-GROUP LEADER's surviving group
+  // member is actually swept is the test above.
   if (!hasProc) {
     t.skip(NO_PROC_SKIP_REASON);
     return;
@@ -1549,7 +1812,7 @@ test("cancel: a recovered zombie leader is still swept, and the cancellation is 
     assert.deepEqual(
       signalled,
       [zombie.zombiePid],
-      "a present leader is swept even when it can no longer execute: the group kill is the point",
+      "a present worker is swept even when it can no longer execute, instead of the absent-pid short-circuit",
     );
   } finally {
     zombie.stop();
