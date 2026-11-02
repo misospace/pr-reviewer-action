@@ -505,7 +505,7 @@ class TestTokenNeverLeaks:
         assert out == ""
         assert SECRET not in err
 
-    def test_labels_before_a_hostile_one_are_not_reprinted_after_failure(self, cli, stub):
+    def test_labels_printed_before_a_hostile_one_still_reach_stdout(self, cli, stub):
         stub.set_state(labels={"42": ["bug", SECRET]})
         code, out, err = run(cli, "issue-labels", "--repo", "o/r", "--number", "42")
         assert code == 2
@@ -547,6 +547,9 @@ class TestInputValidation:
             ("issue-labels", "--repo", "o/.", "--number", "42"),
             ("issue-labels", "--repo", "o/..", "--number", "42"),
             ("issue-labels", "--repo", "./..", "--number", "42"),
+            ("issue-labels", "--repo", "o/r\n", "--number", "42"),
+            ("issue-labels", "--repo", "o/r", "--number", "42\n"),
+            ("issue-labels", "--repo", "o/r", "--number", "42 "),
             ("issue-labels", "--repo", "o/r", "--number", "0"),
             ("issue-labels", "--repo", "o/r", "--number", "-1"),
             ("issue-labels", "--repo", "o/r", "--number", "abc"),

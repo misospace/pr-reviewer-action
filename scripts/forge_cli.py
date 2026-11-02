@@ -60,15 +60,17 @@ EXIT_ERROR = 2
 
 # Input shapes. Every value that reaches a request path is validated here
 # first: the checks run before any byte goes out, and a rejected value is
-# reported by field name only -- never echoed back.
-REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+# reported by field name only -- never echoed back. Anchored with ``\Z``
+# rather than ``$``: ``$`` also matches before a trailing newline, and a
+# newline inside a request path must never validate.
+REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 # Ref names: slashes are allowed so nested refs (``release/v1``) work.
-REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+REF_RE = re.compile(r"^[A-Za-z0-9._/-]+\Z")
 # Commit-ish identifiers: 40-hex (SHA-1) or 64-hex (SHA-256).
-SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 # Issue/pull request numbers: ASCII digits only, bounded so the value can
 # never be an unbounded integer.
-NUMBER_RE = re.compile(r"^[0-9]{1,18}$")
+NUMBER_RE = re.compile(r"^[0-9]{1,18}\Z")
 
 # Fixed message for a response the capability returned but this adapter
 # cannot use. Deliberately does not echo the payload.
