@@ -538,30 +538,41 @@ def test_main_refuses_a_credential_bearing_base_url_from_the_command_line(
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    ("arguments", "expected_refusal"),
     [
-        # the '--flag=value' form.
-        ["--base-url=http://judge-operator:hunter2@127.0.0.1:1/v1"],
-        # an argparse abbreviation of the flag.
-        ["--base", "http://judge-operator:hunter2@127.0.0.1:1/v1"],
-        ["--base-u", "http://judge-operator:hunter2@127.0.0.1:1/v1"],
-        # an earlier occurrence: a later one does not remove it from the
-        # process argument list.
-        [
-            "--base-url", "http://judge-operator:hunter2@127.0.0.1:1/v1",
-            "--base-url", "http://127.0.0.1:1/v1",
-        ],
-        # an '@' the authority cannot claim: the credential position is
-        # unverifiable, so the value is refused too.
-        ["--base-url", "http://judge-operator:hunter2/pass@127.0.0.1:1/v1"],
+        (
+            ["--base-url=http://judge-operator:hunter2@127.0.0.1:1/v1"],
+            "must not carry a credential",
+        ),
+        # #1413 disables argparse abbreviations entirely. These forms are
+        # rejected by the value-safe unknown-argument guard before URL parsing.
+        (
+            ["--base", "http://judge-operator:hunter2@127.0.0.1:1/v1"],
+            "unrecognized argument",
+        ),
+        (
+            ["--base-u", "http://judge-operator:hunter2@127.0.0.1:1/v1"],
+            "unrecognized argument",
+        ),
+        (
+            [
+                "--base-url", "http://judge-operator:hunter2@127.0.0.1:1/v1",
+                "--base-url", "http://127.0.0.1:1/v1",
+            ],
+            "must not carry a credential",
+        ),
+        (
+            ["--base-url", "http://judge-operator:hunter2/pass@127.0.0.1:1/v1"],
+            "must not carry a credential",
+        ),
     ],
 )
 def test_main_refuses_every_credential_bearing_command_line_form(
-    arguments: list[str], tmp_path: Path, capsys
+    arguments: list[str], expected_refusal: str, tmp_path: Path, capsys
 ) -> None:
-    """#1414: the refusal covers every way a credential can reach the argument
-    list — the ``--flag=value`` form, an argparse abbreviation, an earlier
-    occurrence of a repeated flag, and an '@' the authority cannot claim."""
+    """#1414/#1413: every credential-bearing CLI form is refused without
+    echoing the value; disabled abbreviations fail at the earlier safe parser
+    boundary while exact base-URL forms reach the credential-specific guard."""
     corpus = tmp_path / "empty.json"
     corpus.write_text(json.dumps({"version": 1, "scenarios": []}), encoding="utf-8")
     code = runner.main([
@@ -571,10 +582,9 @@ def test_main_refuses_every_credential_bearing_command_line_form(
     ])
     err = capsys.readouterr().err
     assert code == 2
-    assert "must not carry a credential" in err
+    assert expected_refusal in err
     assert "hunter2" not in err
     assert "judge-operator" not in err
-
 
 def test_main_takes_a_credential_bearing_base_url_from_the_environment(
     monkeypatch,
