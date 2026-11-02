@@ -2,6 +2,7 @@ import type { EnvLike } from "../tools/budget.js";
 import { REASONING_EFFORT_PATTERN } from "../config/load-config.js";
 import { CONFIDENCE_MINIMUM_PROMPT_TOKENS } from "../confidence/prompt.js";
 import { CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS } from "../confidence/scorer.js";
+import { endpointUrlCredential } from "../transport/http.js";
 
 /**
  * Review routing and tier bindings, ported from scripts/sections/classification.sh
@@ -79,6 +80,28 @@ export interface SpecialistProfiles {
 
 function value(env: EnvLike, key: string, fallback = ""): string { return env[key] || fallback; }
 function trimmed(env: EnvLike, key: string): string { return (env[key] ?? "").trim(); }
+
+/**
+ * #1428: one request carries one credential, refused at profile resolution —
+ * before ANY request the run could make, not per wire attempt. An endpoint
+ * URL that carries a credential in its userinfo and a separately configured
+ * API key are two channels for one request; honoring both would drop one
+ * silently. The refusal names the environment variables involved and never
+ * echoes a value. The transport's own wire-boundary assertion stays as the
+ * defense in depth for callers that bypass profile resolution.
+ */
+function refuseConflictingCredentialChannels(
+  baseUrlKey: string,
+  apiKeyKey: string,
+  baseUrl: string,
+  apiKey: string,
+): void {
+  const urlCredential = endpointUrlCredential(baseUrl);
+  if (urlCredential === "" || apiKey === "") return;
+  throw new Error(
+    `${baseUrlKey} carries a credential in its userinfo and ${apiKeyKey} carries a separate model credential; one request carries one credential, so remove one`,
+  );
+}
 function numberValue(env: EnvLike, key: string, fallback: number): number {
   const parsed = Number.parseInt(env[key] ?? "", 10);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -394,6 +417,15 @@ export function resolveSpecialistProfiles(env: EnvLike): SpecialistProfiles {
         apiKey: specialistApiKey || primary.apiKey,
       }
     : primary;
+  // #1428: the same one-credential rule the review lanes refuse at profile
+  // resolution — an inherited endpoint's URL credential plus a separately
+  // configured specialist key is still two channels for one request.
+  refuseConflictingCredentialChannels(
+    specialistBaseUrl !== "" ? "AI_SPECIALIST_BASE_URL" : "AI_BASE_URL",
+    specialistApiKey !== "" ? "AI_SPECIALIST_API_KEY" : "AI_API_KEY",
+    transport.baseUrl,
+    transport.apiKey,
+  );
   const roles = ["correctness", "security", "tests"] as const;
   const roleModels = Object.fromEntries(roles.map((role) => {
     const override = trimmed(env, `AI_SPECIALIST_${role.toUpperCase()}_MODEL`);
@@ -437,6 +469,12 @@ export function resolveSpecialistProfiles(env: EnvLike): SpecialistProfiles {
   };
 }
 
+/** The env key a lane's resolved value actually came from, for refusal
+ * messages that name the configuration the operator must fix. */
+function effectiveKey(env: EnvLike, laneKey: string, baseKey: string): string {
+  return (env[laneKey] ?? "") !== "" ? laneKey : baseKey;
+}
+
 export function resolveTierProfiles(env: EnvLike): TierProfiles {
   const primary = {
     baseUrl: value(env, "AI_PRIMARY_BASE_URL", value(env, "AI_BASE_URL")),
@@ -444,6 +482,12 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
     apiFormat: value(env, "AI_PRIMARY_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
     apiKey: value(env, "AI_PRIMARY_API_KEY", value(env, "AI_API_KEY")),
   };
+  refuseConflictingCredentialChannels(
+    effectiveKey(env, "AI_PRIMARY_BASE_URL", "AI_BASE_URL"),
+    effectiveKey(env, "AI_PRIMARY_API_KEY", "AI_API_KEY"),
+    primary.baseUrl,
+    primary.apiKey,
+  );
   const smartModel = value(env, "AI_SMART_MODEL");
   const smartResolved = smartModel.length > 0;
   const smart = {
@@ -452,6 +496,12 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
     apiFormat: value(env, "AI_SMART_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
     apiKey: value(env, "AI_SMART_API_KEY", value(env, "AI_API_KEY")),
   };
+  refuseConflictingCredentialChannels(
+    effectiveKey(env, "AI_SMART_BASE_URL", "AI_BASE_URL"),
+    effectiveKey(env, "AI_SMART_API_KEY", "AI_API_KEY"),
+    smart.baseUrl,
+    smart.apiKey,
+  );
   const fallback = {
     // #1251: raw-env parity with the config loader's resolveInherited —
     // an unset/empty fallback endpoint inherits the base endpoint (but never
@@ -461,6 +511,12 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
     apiFormat: value(env, "AI_FALLBACK_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
     apiKey: value(env, "AI_FALLBACK_API_KEY", value(env, "AI_API_KEY")),
   };
+  refuseConflictingCredentialChannels(
+    effectiveKey(env, "AI_FALLBACK_BASE_URL", "AI_BASE_URL"),
+    effectiveKey(env, "AI_FALLBACK_API_KEY", "AI_API_KEY"),
+    fallback.baseUrl,
+    fallback.apiKey,
+  );
   const primaryRetries = numberValue(env, "AI_PRIMARY_RETRIES", 8);
   const delay = numberValue(env, "AI_PRIMARY_RETRY_DELAY_SEC", 15);
   const stream = trueValue(env.AI_STREAM === undefined ? "true" : env.AI_STREAM);
@@ -703,11 +759,36 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   // warned about rather than silently degrading.
   const inheritedTransport = !distinctEndpoint;
   const resolvedBaseUrl = distinctEndpoint ? baseUrl : primary.baseUrl;
+  // #1428: the URL-credential channel is resolved here for the refusal rules
+  // below, but the lane's contract is never-fatal: a fail-closed hostile
+  // shape (an encoded `@`, an `@` outside the authority) disables the lane
+  // with the reason named instead of throwing out of profile resolution.
+  let urlCredential = "";
+  try {
+    urlCredential = endpointUrlCredential(resolvedBaseUrl);
+  } catch (error) {
+    warnings.push(
+      `confidence scorer disabled: the endpoint URL cannot be used as a request target (${error instanceof Error ? error.message : String(error)})`,
+    );
+    return { profile: disabledConfidenceProfile(), warnings };
+  }
   const apiKeyResolved = apiKey !== "" ? apiKey : (distinctEndpoint ? "" : primary.apiKey);
-  if (distinctEndpoint && apiKey === "") {
+  // A URL credential IS the lane's credential, so the "set a key explicitly"
+  // notice only applies to a credential-free distinct endpoint (#1428).
+  if (distinctEndpoint && apiKey === "" && urlCredential === "") {
     warnings.push(
       "confidence scorer: ai-confidence-base-url is set but ai-confidence-api-key is empty — a distinct endpoint never inherits the primary API key; set ai-confidence-api-key explicitly",
     );
+  }
+  // #1428: the one-credential rule reaches the confidence lane too, but the
+  // lane's contract is never-fatal — a URL credential plus a separate key is
+  // two channels for one request, so the lane is disabled with the refusal
+  // named instead of sending a request the transport would refuse anyway.
+  if (endpointUrlCredential(resolvedBaseUrl) !== "" && apiKeyResolved !== "") {
+    warnings.push(
+      "confidence scorer disabled: ai-confidence-base-url carries a credential in its userinfo and ai-confidence-api-key carries a separate model credential; one request carries one credential, so remove one",
+    );
+    return { profile: disabledConfidenceProfile(), warnings };
   }
 
   // Same-endpoint AND same-model scoring is less independent: the model that

@@ -3,6 +3,7 @@
  * (`scripts/sections/review.sh`). */
 
 import { pyDumpsAscii } from "../model/conversation.js";
+import { redactEndpointUrlCredential } from "../transport/http.js";
 import { bashLowerCapture } from "./bash.js";
 
 export const MODEL_UNAVAILABLE_ENGINE = "(model unavailable)";
@@ -77,9 +78,12 @@ export function annotateAnalysisEngine(engine: string, origin: string, routing: 
   }
 }
 
-/** `"$AI_MODEL@$AI_BASE_URL ($AI_API_FORMAT)"` — the base engine string. */
+/** `"$AI_MODEL@$AI_BASE_URL ($AI_API_FORMAT)"` — the base engine string.
+ * #1428: a credential the endpoint URL carries in its userinfo is
+ * structurally redacted, so the engine string (logs, run artifacts) never
+ * echoes it; the published body strips the URL token entirely either way. */
 export function analysisEngineBase(model: string, baseUrl: string, apiFormat: string): string {
-  return `${model}@${baseUrl} (${apiFormat})`;
+  return `${model}@${redactEndpointUrlCredential(baseUrl)} (${apiFormat})`;
 }
 
 /** Strips the leading `@<baseUrl>` token `analysisEngineBase` adds (up to the

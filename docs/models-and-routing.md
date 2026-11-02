@@ -55,6 +55,12 @@ Set `ai-api-format: anthropic` to post to `/messages` instead of `/chat/completi
 
 `ai-api-format` has a matching sibling for every model slot: `ai-fallback-api-format`, `ai-primary-api-format`, `ai-smart-api-format`, and `ai-specialist-api-format`. Each defaults to blank and inherits the primary `ai-api-format` unless that profile is active with its own format — so a model on a different provider format must set its own.
 
+### Endpoint URL credentials
+
+An endpoint URL may carry the credential in its userinfo, for example `https://user:pass@proxy.example/v1`. The action sends that credential as `Authorization: Basic base64(user:pass)` (RFC 7617), for both API formats. The request URL keeps the endpoint's identity — scheme, host, port, path — and loses the userinfo, so the credential never rides the request URL.
+
+Set `ai-api-key` OR a URL userinfo, never both on one lane. Both at once are two channels for one request, so the run refuses the configuration instead of picking one. An `ai-api-key` alone is unchanged: it travels as `Authorization: Bearer …` for the OpenAI format and as `x-api-key` for the Anthropic format.
+
 ### Fallback model
 
 `ai-fallback-*` configures an availability fallback, not an escalation target — it only catches the primary model's endpoint being unreachable or erroring out (the first pass is always primary under the #965 routing policy; smart runs only as the reviewer-requested rerun, whose failure publishes the primary review rather than falling back):

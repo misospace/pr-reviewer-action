@@ -38,6 +38,7 @@ import { fenceDelimiterFor, escapeCodeSpan } from "../context/fence.js";
 import { fenceSafeLength } from "../context/related-context.js";
 import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, MIN_KNOWN_SECRET_CONTENT_LEN } from "../context/redact.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
+import { endpointUrlCredentialOrEmpty } from "../transport/http.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
@@ -826,7 +827,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   // #1037: one known-secret list for every response surface of this verdict
   // turn (in-body error message, unusable-response record, and the persisted
   // `ai-response.<tier>.json` body below).
-  const knownSecrets = callKnownSecrets(input.apiKey, input.extraHeaders);
+  const knownSecrets = callKnownSecrets(input.apiKey, input.extraHeaders, endpointUrlCredentialOrEmpty(input.baseUrl));
 
   const request = async (payload: Record<string, unknown>): Promise<{ response: unknown; transportError: string | null }> => {
     try {
@@ -2176,7 +2177,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // the corpus over it would degrade the review it exists to protect. Pure
   // diagnostic surfaces (response bodies, errorLog, transport detail) keep
   // the masker's any-length rule. See `harnessMaskSecrets`.
-  const harnessSecrets = harnessMaskSecrets(callKnownSecrets(input.apiKey, input.extraHeaders));
+  const harnessSecrets = harnessMaskSecrets(callKnownSecrets(input.apiKey, input.extraHeaders, endpointUrlCredentialOrEmpty(input.baseUrl)));
 
   // Read-only MCP tools (#245), allowlisted via TOOL_MCP_SERVERS. Fork-gating
   // happens upstream, so reaching here means MCP is permitted. A server that

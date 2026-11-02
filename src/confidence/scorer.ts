@@ -18,8 +18,9 @@
  */
 import type { ChatRequestInput, ChatRequestOutcome } from "../transport/transport.js";
 import { runChatRequestOnce } from "../transport/transport.js";
-import { describeTransportFailure } from "../transport/http.js";
+import { describeTransportFailure, endpointUrlCredentialOrEmpty } from "../transport/http.js";
 import type { TransportFailureKind } from "../transport/http.js";
+import { basicAuthorizationHeaderValue } from "../transport/headers.js";
 import { maskDiagnostic } from "../context/redact.js";
 import { buildModelRequest, wireEffortOf } from "../model/request.js";
 import type { TokensParam } from "../model/types.js";
@@ -134,6 +135,15 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   const diagnosticSecrets: readonly (string | null | undefined)[] = [
     ...(input.laneSecrets ?? []),
     profile.apiKey,
+    // #1428 review: when the endpoint URL carries the credential, the wire
+    // sends `Authorization: Basic <base64>` (one shared builder, so this list
+    // can never drift from the header bytes); a provider echo of the exact
+    // header value must mask before any diagnostic or artifact is produced.
+    ...(
+      endpointUrlCredentialOrEmpty(profile.baseUrl)
+        ? [endpointUrlCredentialOrEmpty(profile.baseUrl), basicAuthorizationHeaderValue(endpointUrlCredentialOrEmpty(profile.baseUrl))]
+        : []
+    ),
     input.primaryApiKey,
   ];
   if (!profile.enabled) {
@@ -142,7 +152,10 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   // Credential isolation, asserted at call time (the resolver already
   // guarantees both, but this boundary fails closed rather than trusting
   // any upstream wiring):
-  // 1. a distinct endpoint with no explicit key may only be loopback;
+  // 1. a distinct endpoint with no explicit key may only be loopback, or
+  // carry its own credential in the URL userinfo (#1428: a URL credential
+  // IS the lane's credential, so the Basic request reaches the transport —
+  // and a URL whose credential cannot be attributed fails closed here);
   // 2. the primary lane's credential must never ride a distinct scorer URL.
   // Provenance-based, not value-based: an operator may deliberately reuse
   // the same secret on a distinct endpoint; only a resolver wiring bug
@@ -151,7 +164,12 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   // ran: the model identity stays empty (the contract reserves a non-empty
   // `confidence-model` for a call that was actually attempted). Reporting the
   // configured model here would claim that model graded the review.
-  if (profile.apiKey === "" && !profile.inheritedTransport && !isLoopbackUrl(profile.baseUrl)) {
+  if (
+    profile.apiKey === "" &&
+    endpointUrlCredentialOrEmpty(profile.baseUrl) === "" &&
+    !profile.inheritedTransport &&
+    !isLoopbackUrl(profile.baseUrl)
+  ) {
     return {
       result: unscoredConfidenceResult("missing_credential"),
       requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",

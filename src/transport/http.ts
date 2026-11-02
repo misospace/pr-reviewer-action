@@ -3,7 +3,7 @@ import https from "node:https";
 import { URL } from "node:url";
 import type { ApiFormat } from "../model/types.js";
 import { maskKnownSecrets, redactText } from "../context/redact.js";
-import { applyExtraHeaders } from "./headers.js";
+import { applyExtraHeaders, basicAuthorizationHeaderValue } from "./headers.js";
 
 /**
  * Typed HTTP transport for model calls (#677). Replaces the v2 curl/jq wire
@@ -243,15 +243,145 @@ export interface HttpCallResult {
  * Endpoint join: trailing slashes are stripped before the protocol path is
  * appended (the v2 Python transport's rule; v2 bash appended verbatim, which
  * produced `//chat/completions` for slash-suffixed base URLs).
+ *
+ * #1428: the endpoint resolution also owns the URL-credential channel. An
+ * endpoint URL may carry a credential in its userinfo
+ * (`https://user:pass@host`), and a credential must never ride in a request
+ * URL: the userinfo is resolved out of the request target into the HTTP
+ * Basic channel (RFC 7617 — Basic is the scheme for URL userinfo, the same
+ * rule the judge tooling applies), and the resolved URL stays byte-identical
+ * to the pre-#1428 target for every credential-free endpoint. The fail-closed
+ * refusal shapes mirror `pr_reviewer/http_safe.resolve_endpoint` (#1414):
+ * an encoded `@` hidden in the authority, and an `@` outside the authority
+ * (raw or encoded, where a password carrying an unencoded `/` ends the
+ * authority early) are refused instead of being attributed to a channel.
  */
-export function resolveEndpoint(baseUrl: string, apiFormat: ApiFormat): URL {
-  const trimmed = baseUrl.trim().replace(/\/+$/, "");
+export interface ResolvedEndpointChannel {
+  /** The credential-free request target. */
+  url: URL;
+  /** The decoded userinfo credential the endpoint URL carried; `""` when none. */
+  urlCredential: string;
+}
+
+/** Lenient percent-decoding, one escape at a time — the treatment
+ * `urllib.parse.unquote` gives the userinfo it decodes: a valid escape
+ * becomes its byte, an invalid escape sequence stays literal, and the
+ * resulting bytes decode as UTF-8 with replacement (never fatal). Iterated
+ * by code point so a non-BMP character sharing a segment with an escape
+ * survives intact. */
+function lenientUrlDecode(raw: string): string {
+  if (!raw.includes("%")) return raw;
+  const bytes: number[] = [];
+  let i = 0;
+  while (i < raw.length) {
+    const escape = raw.slice(i + 1, i + 3);
+    if (raw[i] === "%" && /^[0-9a-fA-F]{2}$/.test(escape)) {
+      bytes.push(Number.parseInt(escape, 16));
+      i += 3;
+      continue;
+    }
+    const char = String.fromCodePoint(raw.codePointAt(i)!);
+    bytes.push(...Buffer.from(char, "utf8"));
+    i += char.length;
+  }
+  return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+}
+
+function splitEndpointUserinfo(trimmed: string): { base: string; credential: string } {
+  const schemeEnd = trimmed.indexOf("://");
+  if (schemeEnd < 0) return { base: trimmed, credential: "" };
+  const rest = trimmed.slice(schemeEnd + 3);
+  const authorityEnd = rest.search(/[/?#]/);
+  const authority = authorityEnd < 0 ? rest : rest.slice(0, authorityEnd);
+  const after = authorityEnd < 0 ? "" : rest.slice(authorityEnd);
+  const at = authority.lastIndexOf("@");
+  if (at < 0) {
+    // An encoded `@` hides the userinfo from the authority split; refuse the
+    // ambiguous shape instead of guessing where the credential ends.
+    if (lenientUrlDecode(authority).includes("@")) {
+      throw new Error("the endpoint URL carries an encoded credential");
+    }
+    // An `@` outside the authority cannot be attributed to a userinfo: a
+    // password carrying an unencoded `/` ends the authority early, so the
+    // userinfo would land in the request target. Refuse rather than send it
+    // (#1419), raw or percent-encoded.
+    if (after.includes("@") || lenientUrlDecode(after).includes("@")) {
+      throw new Error("the endpoint URL carries a credential outside its authority");
+    }
+    return { base: trimmed, credential: "" };
+  }
+  const userinfo = authority.slice(0, at);
+  const host = authority.slice(at + 1);
+  if (host === "") throw new Error("the endpoint URL carries an unparseable credential");
+  return {
+    base: `${trimmed.slice(0, schemeEnd + 3)}${host}${after}`,
+    // An empty userinfo (`https://@host`) carries no credential, exactly like
+    // the shared resolver's `if userinfo else None`.
+    credential: userinfo === "" ? "" : lenientUrlDecode(userinfo),
+  };
+}
+
+/**
+ * The credential a base URL carries in its userinfo, decoded and resolved out
+ * of the request target (#1428); `""` when the URL carries none. Fail-closed:
+ * a URL whose credential cannot be attributed throws instead of being used.
+ */
+export function endpointUrlCredential(baseUrl: string): string {
+  return splitEndpointUserinfo(baseUrl.trim().replace(/\/+$/, "")).credential;
+}
+
+/** The URL credential as a masking VALUE, `""` when the URL carries none or
+ * its shape cannot be attributed (#1428). The hostile fail-closed shapes are
+ * owned by the structural redaction below, never echoed as a value. */
+export function endpointUrlCredentialOrEmpty(baseUrl: string): string {
+  try {
+    return endpointUrlCredential(baseUrl);
+  } catch {
+    return "";
+  }
+}
+
+/** The endpoint URL as a diagnostic may carry it (#1428): any credential the
+ * URL holds in its userinfo is structurally removed, so interpolating a
+ * resolved base URL into a log line or persisted artifact can never echo the
+ * credential. A credential-free URL passes through byte-for-byte; a URL whose
+ * credential cannot be attributed is replaced wholesale (fail closed — a
+ * shape the transport would refuse is never echoed either). The placeholder
+ * carries no whitespace so the `publicAnalysisEngine` URL-token strip still
+ * removes it whole (#832). */
+export function redactEndpointUrlCredential(baseUrl: string): string {
+  try {
+    const stripped = splitEndpointUserinfo(baseUrl.trim().replace(/\/+$/, ""));
+    return stripped.credential === "" ? baseUrl : stripped.base;
+  } catch {
+    return "<redacted-endpoint-URL>";
+  }
+}
+
+export function resolveEndpointChannel(baseUrl: string, apiFormat: ApiFormat): ResolvedEndpointChannel {
+  const stripped = splitEndpointUserinfo(baseUrl.trim().replace(/\/+$/, ""));
   const path = apiFormat === "anthropic" ? "/messages" : "/chat/completions";
-  return new URL(`${trimmed}${path}`);
+  return { url: new URL(`${stripped.base}${path}`), urlCredential: stripped.credential };
+}
+
+export function resolveEndpoint(baseUrl: string, apiFormat: ApiFormat): URL {
+  return resolveEndpointChannel(baseUrl, apiFormat).url;
+}
+
+/** The message the one-credential refusal carries, shared with the specialist
+ * transport gate's pre-flight so both boundaries name the same rule. */
+export const CREDENTIAL_CHANNEL_CONFLICT_MESSAGE =
+  "the endpoint URL carries a credential and a separate model credential is configured; one request carries one credential";
+
+/** One request carries one credential: a credential in the endpoint URL's
+ * userinfo and a separate API key are two channels for one request, and
+ * honoring both would drop one of them silently. Refused before any request. */
+export function assertSingleCredentialChannel(urlCredential: string, apiKey: string): void {
+  if (urlCredential !== "" && apiKey !== "") throw new Error(CREDENTIAL_CHANNEL_CONFLICT_MESSAGE);
 }
 
 export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResult> {
-  const url = resolveEndpoint(input.baseUrl, input.apiFormat);
+  const { url, urlCredential } = resolveEndpointChannel(input.baseUrl, input.apiFormat);
   const secure = url.protocol === "https:";
   const transport = secure ? https : http;
   const maxResponseBytes = input.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
@@ -259,10 +389,27 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
   // so callers classify both the same way.
   const cancelledFailure = (): TransportFailure =>
     new TransportFailure("cancelled", "model request cancelled");
+  // #1428: the credential-channel conflict is refused before anything else —
+  // no socket, no header work, no provider attempt.
+  assertSingleCredentialChannel(urlCredential, input.apiKey);
   if (input.signal?.aborted) return Promise.reject(cancelledFailure());
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (input.apiFormat === "anthropic") {
+  if (urlCredential !== "") {
+    // #1428: a credential that came from the endpoint URL's userinfo travels
+    // as HTTP Basic (RFC 7617), for both wire formats — the URL channel owns
+    // the request, so the separate-key channels (Bearer, x-api-key) stay out.
+    // Only the credential channel changes: the Anthropic framing headers are
+    // not a credential channel, so an Anthropic endpoint keeps
+    // `anthropic-version` and the streamed Accept header here too.
+    // The value comes from the shared builder so `callKnownSecrets` masks
+    // exactly these bytes (see its doc comment) — the two sites cannot drift.
+    headers["Authorization"] = basicAuthorizationHeaderValue(urlCredential);
+    if (input.apiFormat === "anthropic") {
+      headers["anthropic-version"] = input.anthropicVersion;
+      if (input.stream) headers["Accept"] = "text/event-stream";
+    }
+  } else if (input.apiFormat === "anthropic") {
     headers["anthropic-version"] = input.anthropicVersion;
     if (input.apiKey !== "") headers["x-api-key"] = input.apiKey;
     if (input.stream) headers["Accept"] = "text/event-stream";

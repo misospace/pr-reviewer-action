@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -148,6 +148,58 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
     assert.match(output, /tool-calls=\[\]/);
     // Metadata marker bound to the head.
     assert.match(result.marker, /head_sha.{0,4}a{40}/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+// #1428: an endpoint URL may carry its model credential in the userinfo; that
+// URL is then a resolved profile field, so EVERY diagnostic surface that
+// interpolates it — the per-attempt log line, the analysis-engine string, the
+// persisted artifacts — must carry the credential-free URL, and the wire
+// request must carry the credential only as HTTP Basic.
+test("#1428: a URL-credentialed endpoint never leaks its credential into a run diagnostic", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const credential = "lane-operator:hunter2";
+    const expectedBasic = `Basic ${Buffer.from(credential, "utf8").toString("base64")}`;
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url.replace("http://", `http://${credential}@`),
+        "ai-model": "m",
+        "ai-stream": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    // The credential rode the wire exactly once, as HTTP Basic.
+    const captured = server.requests.at(-1)!;
+    assert.equal(captured.headers.authorization, expectedBasic);
+    // The attempt line names the endpoint, minus its userinfo.
+    assert.ok(
+      logs.some((line) => line.includes("model attempt") && line.includes(server.url)),
+      logs.join(" | "),
+    );
+    // The analysis-engine output is the redacted URL too.
+    assert.equal(result.outputs.analysisEngine, `m@${server.url} (openai)`);
+    // No log line and no persisted artifact carries the raw credential.
+    for (const surface of [logs.join("\n"), ...readdirSync(runDir).filter((name) => statSync(join(runDir, name)).isFile()).map((name) => readFileSync(join(runDir, name), "utf8"))]) {
+      assert.ok(!surface.includes(credential), `a run diagnostic carried the URL credential: ${surface.slice(0, 200)}`);
+    }
   } finally {
     await server.close();
     cleanup();

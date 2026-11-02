@@ -25,6 +25,7 @@ import { completionOverran, extractResponseText, extractResponseUsage, mergeUsag
 import { renderSpecialistLeadsSection } from "./render.js";
 import { containsKnownSecret, maskDiagnostic, maskKnownSecrets, redactText, redactTextDeep } from "../context/redact.js";
 import { callKnownSecrets } from "../transport/headers.js";
+import { endpointUrlCredentialOrEmpty, redactEndpointUrlCredential } from "../transport/http.js";
 import type { TerminalProviderReason } from "../transport/terminal.js";
 import { pyStr } from "../platform/py.js";
 import type { SpecialistRoleModel, SpecialistModelSource } from "../routing/tiers.js";
@@ -668,7 +669,7 @@ async function runSpecialistRole(options: RoleRunOptions): Promise<RoleRunOutcom
   // the in-body-error message, the stop reason, and the persisted response
   // artifact below — so a configured extra-header VALUE the provider echoes
   // back is masked identically wherever it lands.
-  const knownSecrets = callKnownSecrets(config.apiKey, config.extraHeaders);
+  const knownSecrets = callKnownSecrets(config.apiKey, config.extraHeaders, endpointUrlCredentialOrEmpty(config.baseUrl));
   let requestBytes: number | null = null;
   let overrunRetry = false;
   let retryMaxTokens: number | null = null;
@@ -1091,7 +1092,7 @@ async function runSpecialistScout(
   const system = buildScoutSystem(rolePrompts);
   // #1037: the scout's own response-side known-secret list — same shape as
   // the per-role one (the scout is one call shared by every role).
-  const knownSecrets = callKnownSecrets(config.apiKey, config.extraHeaders);
+  const knownSecrets = callKnownSecrets(config.apiKey, config.extraHeaders, endpointUrlCredentialOrEmpty(config.baseUrl));
   // #1200: ONE shared attempt sink — the scout's calls run on behalf of every
   // role, so every role entry carries the same records and the aggregate
   // `request_count` reflects the unique wire attempts, never roles × attempts.
@@ -1565,7 +1566,7 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
     request_count: meter.count,
     request_bytes: meter.bytes,
     usage_totals: meter.usage,
-    model: `${config.model}@${config.baseUrl} (${config.apiFormat})`,
+    model: `${config.model}@${redactEndpointUrlCredential(config.baseUrl)} (${config.apiFormat})`,
     ...(input.roleModels !== undefined ? { specialist_overrides: true } : {}),
     aggregate_elapsed_sec: Math.round(aggregateElapsed * 1000) / 1000,
     specialist_corpus_bytes: input.corpusBytes,

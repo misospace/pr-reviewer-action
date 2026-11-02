@@ -2195,3 +2195,118 @@ test("#1368 review: the prompt budget accounts for the system prompt, not just t
     "system + shrunken diff + scaffolding stays within the budget accounting",
   );
 });
+
+// ── #1428: the one-credential rule in the confidence lane ─────────────────
+test("#1428: a URL credential and a separate key disable the scorer instead of sending a refused request", () => {
+  const resolved = resolveConfidenceProfile({
+    AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_BASE_URL: "https://u:p@scorer.example/v1",
+    AI_CONFIDENCE_API_KEY: "sk-scorer",
+  });
+  assert.equal(resolved.profile.enabled, false);
+  assert.ok(resolved.warnings.some((w) => w.includes("one request carries one credential")));
+});
+
+test("#1428: a URL credential alone is a valid confidence credential channel", () => {
+  const resolved = resolveConfidenceProfile({
+    AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_BASE_URL: "https://u:p@scorer.example/v1",
+  });
+  assert.equal(resolved.profile.enabled, true);
+  assert.equal(resolved.profile.apiKey, "");
+  assert.deepEqual(resolved.warnings, []);
+});
+
+test("#1428: a fail-closed hostile endpoint URL shape disables the scorer, never throws", () => {
+  // The lane's contract is never-fatal: a URL the transport would refuse
+  // turns the lane off with the reason named, and the review still runs.
+  const resolved = resolveConfidenceProfile({
+    AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_BASE_URL: "https://scorer.example/pa@ss/v1",
+  });
+  assert.equal(resolved.profile.enabled, false);
+  assert.ok(resolved.warnings.some((w) => w.includes("cannot be used as a request target")));
+});
+
+test("#1428: a URL-credentialed distinct endpoint reaches the transport with HTTP Basic and no key", async () => {
+  // The resolver enables this lane (#1428), so the scorer's own
+  // missing-credential boundary must accept a URL credential as the lane's
+  // credential — the Basic request goes out and nothing else carries it.
+  const seenTargets: string[] = [];
+  const server = await startMockServer((req, _body, res) => {
+    seenTargets.push(`${req.method} ${req.url}`);
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(okOpenAiResponse('{"score": 4, "risk": "low", "reason": "thorough"}')));
+  });
+  try {
+    const credentialedUrl = `${server.url.replace("://", "://scorer-user:scorer-pass@")}/v1`;
+    const outcome = await runConfidenceScorer({
+      profile: profile({ apiKey: "", inheritedTransport: false, baseUrl: credentialedUrl, credentialSource: "own" }),
+      primaryApiKey: "primary-key-ABC",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(outcome.result.status, "scored");
+    assert.equal(outcome.result.score, 4);
+    const captured = server.requests.at(-1)!;
+    assert.equal(
+      captured.headers.authorization,
+      `Basic ${Buffer.from("scorer-user:scorer-pass", "utf8").toString("base64")}`,
+      "the URL credential must ride the Authorization header as HTTP Basic",
+    );
+    assert.deepEqual(seenTargets, ["POST /v1/chat/completions"], "the credential must not ride the request target");
+    assert.ok(!JSON.stringify(outcome).includes("scorer-pass"), "the URL credential leaked into the scorer outcome");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1428 review: a transport failure echoing the exact Basic header value masks whole", async () => {
+  // The lane's diagnostic mask set must carry not only the decoded URL
+  // credential but the exact `Authorization: Basic …` value the wire sends —
+  // one shared builder, so it cannot drift from the header bytes a provider
+  // could echo back into a persisted diagnostic or artifact.
+  const decoded = "scorer-user:scorer-pass";
+  const headerValue = `Basic ${Buffer.from(decoded, "utf8").toString("base64")}`;
+  const outcome = await runConfidenceScorer({
+    profile: profile({
+      apiKey: "",
+      inheritedTransport: false,
+      baseUrl: "https://scorer-user:scorer-pass@scorer.example/v1",
+      credentialSource: "own",
+    }),
+    primaryApiKey: "",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async (): Promise<never> => { throw new Error(`upstream rejected ${headerValue} (${decoded})`); },
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(outcome.result.status, "unscored");
+  assert.ok(outcome.diagnostic !== "", "the failure is still surfaced");
+  assert.ok(!outcome.diagnostic.includes(headerValue), `exact Basic header value survived in the diagnostic: ${outcome.diagnostic}`);
+  assert.ok(!outcome.diagnostic.includes(decoded), `decoded URL credential survived in the diagnostic: ${outcome.diagnostic}`);
+  assert.ok(!JSON.stringify(outcome).includes(headerValue), "exact Basic header value survived anywhere in the outcome");
+});
+
+test("#1428: a hostile endpoint URL shape fails closed at the scorer's credential boundary", async () => {
+  // The boundary trusts no upstream wiring: a URL whose credential cannot
+  // be attributed is NOT accepted as credentialed — a non-loopback distinct
+  // endpoint with an empty key is still refused before any transport call.
+  let called = false;
+  const outcome = await runConfidenceScorer({
+    profile: profile({ apiKey: "", inheritedTransport: false, baseUrl: "https://scorer.example/pa@ss/v1", credentialSource: "own" }),
+    primaryApiKey: "primary-key-ABC",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async () => { called = true; throw new Error("should not be called"); },
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(outcome.result.status, "unscored");
+  assert.equal(outcome.result.cause, "missing_credential");
+  assert.equal(called, false);
+});
