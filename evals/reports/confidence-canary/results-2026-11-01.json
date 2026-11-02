@@ -1,0 +1,304 @@
+{
+  "plan": "/Users/joryirving/git/pr-reviewer-action/evals/confidence-canary/plan.json",
+  "plan_digest": "sha256:123f40fba2824f61",
+  "artifacts_dir": "/Users/joryirving/git/pra-1286/review-work-live-5",
+  "artifacts_runs_digest": "sha256:1b6a9c1626da8b38",
+  "production_shape": "bridge live-scorer: resolveConfidenceProfile over the plan-declared ai-confidence-* config (ambient AI_CONFIDENCE_* stripped), engine eligibility gates (publish step, approve/request_changes verdict, unresolvedConfidencePins), buildConfidencePrompt at the resolved profile.promptTokens, runConfidenceScorer itself (prompt_over_budget pre-wire refusal, resolved effort/structured-output/budget shape, one-shot transport, tolerant parse, deterministic ceilings), then the engine's credential-masking pass. No bridge-side request-shape override exists; the primary lane env (endpoint/credential inheritance) is inherited exactly as the runtime reads it.",
+  "verdict_policy": "strict",
+  "declared_conditions": [
+    {
+      "id": "dogfood-inherited",
+      "role": "primary",
+      "confidence_env": {
+        "AI_CONFIDENCE_MODEL": "MiniMax-M3.1-Flash",
+        "AI_CONFIDENCE_REASONING_EFFORT": "medium",
+        "AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT": "true",
+        "AI_CONFIDENCE_TIMEOUT_SEC": "120"
+      },
+      "key_env": null,
+      "secret_env_names": [
+        "AI_API_KEY"
+      ]
+    },
+    {
+      "id": "hetero-fallback",
+      "role": "fallback",
+      "confidence_env": {
+        "AI_CONFIDENCE_MODEL": "glm-5.3-flash",
+        "AI_CONFIDENCE_BASE_URL": "$CONFIDENCE_CANARY_HETERO_BASE_URL",
+        "AI_CONFIDENCE_API_FORMAT": "openai",
+        "AI_CONFIDENCE_TIMEOUT_SEC": "120"
+      },
+      "key_env": "CONFIDENCE_CANARY_HETERO_KEY",
+      "secret_env_names": [
+        "AI_API_KEY",
+        "CONFIDENCE_CANARY_HETERO_KEY"
+      ]
+    }
+  ],
+  "ceilings": {
+    "max_verifier_calls": 8,
+    "max_output_tokens": 64000,
+    "wall_time_budget_sec": 1800,
+    "request_timeout_sec": 120
+  },
+  "rows": [
+    {
+      "pr_id": "courier-46-61",
+      "kind": "vulnerable",
+      "expectation": "known_false_approval \u2014 the retained primary approved misospace/courier#46 despite a blocker defect: observeState() (internal/controller/observer.go:37-55) declared checks 'passed' from a single observation while forge check registration is asynchronous, so a poll landing right after PR open saw a partial green set and Courier transitioned Verifying -> AwaitingReview before the complete check set existed (fixed by PR #61).",
+      "source": "corpus",
+      "condition": "dogfood-inherited",
+      "role": "primary",
+      "evidence_state": "primary_ok",
+      "head_sha": "881347c5e2f690da0cc317a6acf4d095cd68ef46",
+      "base_sha": "bcbf215a88c2788861095ce61bfe91f0c1c8672c",
+      "primary": {
+        "verdict_policy": "strict",
+        "verdict": "approve",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "complete",
+        "review_result": "findings"
+      },
+      "verifier": {
+        "status": "scored",
+        "score": 3,
+        "risk": "medium",
+        "reason": "A major CI-state correctness defect remains: the observer treats historical check-run records for the same commit as current, so a rerun can never clear an earlier failure.",
+        "concerns": [
+          {
+            "type": "missed_issue",
+            "severity": "major",
+            "file": "internal/github/observer.go",
+            "line": 56,
+            "evidence": "`for _, check := range checks.CheckRuns { observed.Checks = append(observed.Checks, controller.CheckObservation{State: checkState(check.Status, check.Conclusion)}) }` appends every check run without selecting the latest run per check name/app; after a successful rerun on the same commit, the older failed run remains in the API response and `observeState` consequently returns `observationFailed`, s"
+          }
+        ],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "",
+        "caps": [],
+        "parserNotes": []
+      },
+      "profile": {
+        "model": "MiniMax-M3.1-Flash",
+        "base_url": "<operator-proxy-endpoint>",
+        "api_format": "anthropic",
+        "inherited_transport": true,
+        "credential_source": "primary",
+        "request_timeout_sec": 120,
+        "reasoning_effort": "medium",
+        "max_tokens": 4096,
+        "prompt_tokens": 98304,
+        "model_context_tokens": 0,
+        "anthropic_effort_supported": true,
+        "structured_output_supported": false
+      },
+      "rubric_version": "merge-readiness-verifier-v1",
+      "warnings": [
+        "confidence scorer: the resolved endpoint and model are identical to the primary review lane \u2014 same-model scoring is less independent; point ai-confidence-base-url at a different backend for a genuinely independent second opinion"
+      ],
+      "wire_effort": "medium",
+      "usage": {
+        "prompt_tokens": 24283,
+        "completion_tokens": 2066
+      },
+      "latency_ms": 21324,
+      "prompt_bytes": 85206,
+      "diagnostic": "",
+      "wire_attempts": 1,
+      "artifact_digests": {
+        "ai-output.json": "sha256:b1d8b51475459bcd",
+        "review-coverage.json": "sha256:c5da63ce84f4d4f8",
+        "pr.diff.truncated": "sha256:882dd8af074547cc",
+        "pr.json": "sha256:aad5fc6fb997532c"
+      },
+      "_defect": {
+        "description": "observeState() (added by #46) declared a PR's checks \"passed\" from a single observation where every check visible at that moment was green. Because forge check registration is asynchronous, a poll landing right after PR open can see only a partial set of checks green (others not yet registered), so Courier transitioned Verifying -> AwaitingReview before the complete check set existed, skipping checks that registered later.",
+        "file": "internal/controller/observer.go",
+        "line_range": [
+          37,
+          55
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "internal/controller/envtest_test.go",
+          "line": 164,
+          "message": "`Create` ignores `status.phase` for this status-subresource CRD, so the fixture remains empty/Pending rather than `Verifying` and the envtest can pass without exercising the intended capacity release."
+        }
+      ],
+      "review_result": "findings",
+      "unresolved_pins": []
+    },
+    {
+      "pr_id": "courier-46-61",
+      "kind": "vulnerable",
+      "expectation": "known_false_approval \u2014 the retained primary approved misospace/courier#46 despite a blocker defect: observeState() (internal/controller/observer.go:37-55) declared checks 'passed' from a single observation while forge check registration is asynchronous, so a poll landing right after PR open saw a partial green set and Courier transitioned Verifying -> AwaitingReview before the complete check set existed (fixed by PR #61).",
+      "source": "corpus",
+      "condition": "hetero-fallback",
+      "role": "fallback",
+      "evidence_state": "primary_ok",
+      "head_sha": "881347c5e2f690da0cc317a6acf4d095cd68ef46",
+      "base_sha": "bcbf215a88c2788861095ce61bfe91f0c1c8672c",
+      "primary": {},
+      "verifier": {
+        "status": "disabled",
+        "score": null,
+        "risk": "",
+        "reason": "",
+        "concerns": [],
+        "model": "",
+        "cause": "",
+        "caps": []
+      },
+      "profile": null,
+      "rubric_version": null,
+      "warnings": [],
+      "wire_effort": null,
+      "usage": null,
+      "latency_ms": null,
+      "prompt_bytes": null,
+      "diagnostic": "",
+      "wire_attempts": 0,
+      "artifact_digests": {},
+      "_defect": {
+        "description": "observeState() (added by #46) declared a PR's checks \"passed\" from a single observation where every check visible at that moment was green. Because forge check registration is asynchronous, a poll landing right after PR open can see only a partial set of checks green (others not yet registered), so Courier transitioned Verifying -> AwaitingReview before the complete check set existed, skipping checks that registered later.",
+        "file": "internal/controller/observer.go",
+        "line_range": [
+          37,
+          55
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [],
+      "not_run": "fallback_for dogfood-inherited scored"
+    },
+    {
+      "pr_id": "pr-reviewer-action-133-clean",
+      "kind": "clean",
+      "expectation": "clean_correct_approval \u2014 the retained primary correctly approved a clean medium security-hardening change (review markdown sanitizer).",
+      "source": "corpus",
+      "condition": "dogfood-inherited",
+      "role": "primary",
+      "evidence_state": "primary_ok",
+      "head_sha": "c709740117ff8600d4b7ca967871e01cd1b31320",
+      "base_sha": "3c3a93e81e099861fc8aad976043fee7e0f16833",
+      "primary": {
+        "verdict_policy": "strict",
+        "verdict": "approve",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "review_result": "findings"
+      },
+      "verifier": {
+        "status": "scored",
+        "score": 5,
+        "risk": "low",
+        "reason": "No blocker or major defect is supported by the supplied diff. The review's context-free Markdown-link issue is concrete but limited to malformed rendering after the reference has already been neutralized, and it is already reported as non-blocking.",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "",
+        "caps": [],
+        "parserNotes": []
+      },
+      "profile": {
+        "model": "MiniMax-M3.1-Flash",
+        "base_url": "<operator-proxy-endpoint>",
+        "api_format": "anthropic",
+        "inherited_transport": true,
+        "credential_source": "primary",
+        "request_timeout_sec": 120,
+        "reasoning_effort": "medium",
+        "max_tokens": 4096,
+        "prompt_tokens": 98304,
+        "model_context_tokens": 0,
+        "anthropic_effort_supported": true,
+        "structured_output_supported": false
+      },
+      "rubric_version": "merge-readiness-verifier-v1",
+      "warnings": [
+        "confidence scorer: the resolved endpoint and model are identical to the primary review lane \u2014 same-model scoring is less independent; point ai-confidence-base-url at a different backend for a genuinely independent second opinion"
+      ],
+      "wire_effort": "medium",
+      "usage": {
+        "prompt_tokens": 8216,
+        "completion_tokens": 2841
+      },
+      "latency_ms": 17192,
+      "prompt_bytes": 33993,
+      "diagnostic": "",
+      "wire_attempts": 1,
+      "artifact_digests": {
+        "ai-output.json": "sha256:423343b9afb93740",
+        "review-coverage.json": "sha256:051640eb1baca7a6",
+        "pr.diff.truncated": "sha256:328fcfaeba955830",
+        "pr.json": "sha256:92c81e6ef2f43d23"
+      },
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "scripts/sanitize_review_markdown.py",
+          "line": 123,
+          "message": "The context-free URL substitutions leave Markdown link delimiters intact, so a standard upstream-PR link becomes an invalid space-containing destination such as `[label](upstream owner/repo PR 1)` instead of becoming inert plain text while preserving formatting."
+        }
+      ],
+      "review_result": "findings",
+      "unresolved_pins": []
+    },
+    {
+      "pr_id": "pr-reviewer-action-133-clean",
+      "kind": "clean",
+      "expectation": "clean_correct_approval \u2014 the retained primary correctly approved a clean medium security-hardening change (review markdown sanitizer).",
+      "source": "corpus",
+      "condition": "hetero-fallback",
+      "role": "fallback",
+      "evidence_state": "primary_ok",
+      "head_sha": "c709740117ff8600d4b7ca967871e01cd1b31320",
+      "base_sha": "3c3a93e81e099861fc8aad976043fee7e0f16833",
+      "primary": {},
+      "verifier": {
+        "status": "disabled",
+        "score": null,
+        "risk": "",
+        "reason": "",
+        "concerns": [],
+        "model": "",
+        "cause": "",
+        "caps": []
+      },
+      "profile": null,
+      "rubric_version": null,
+      "warnings": [],
+      "wire_effort": null,
+      "usage": null,
+      "latency_ms": null,
+      "prompt_bytes": null,
+      "diagnostic": "",
+      "wire_attempts": 0,
+      "artifact_digests": {},
+      "_defect": {},
+      "_primary_findings": [],
+      "not_run": "fallback_for dogfood-inherited scored"
+    }
+  ],
+  "budget_exhausted": false,
+  "budget_note": "",
+  "lifetime_wire_calls": 2,
+  "generated_at": "2026-11-01T20:11:10Z",
+  "sanitization_note": "Committed copy of ~/git/pra-1370/canary-results.json with the operator endpoint host redacted (the repo carries no maintainer-infrastructure references). The full record and the masked per-row wire artifacts stay in the local canary work dir."
+}
