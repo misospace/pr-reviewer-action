@@ -44,6 +44,7 @@ build their own :class:`ForgeClient` explicitly.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import urllib.error
@@ -254,11 +255,17 @@ class ForgeClient:
         string is uniform across transport and HTTP failures — the caller
         never sees the status line text, which can echo attacker-controlled
         URL components.
+
+        A malformed response is refused the same way: a truncated body
+        raises :class:`http.client.HTTPException`, whose text can carry
+        bytes the forge chose, so it never reaches the caller.
         """
         try:
             raw = response.read()
         except OSError as exc:
             raise ForgeError("forge response could not be read") from exc
+        except http.client.HTTPException as exc:
+            raise ForgeError("forge response could not be read") from None
         if not raw:
             return None
         try:
@@ -282,6 +289,15 @@ class ForgeClient:
             raise ForgeError(f"forge GET {path} unreachable: {type(exc.reason).__name__}") from None
         except OSError as exc:
             raise ForgeError(f"forge GET {path} unreachable: {type(exc).__name__}") from None
+        except http.client.HTTPException as exc:
+            # A malformed response (a forged status line, a truncated
+            # header) must not reach the caller as an exception: its text
+            # carries bytes the forge chose, and a forge that read the
+            # credential from the Authorization header can put it there.
+            # The message names the exception type only.
+            raise ForgeError(
+                f"forge GET {path} sent a malformed response: {type(exc).__name__}"
+            ) from None
         return self._read_json(response)
 
     def get_pages(
@@ -336,6 +352,12 @@ class ForgeClient:
             raise ForgeError(f"forge DELETE {path} unreachable: {type(exc.reason).__name__}") from None
         except OSError as exc:
             raise ForgeError(f"forge DELETE {path} unreachable: {type(exc).__name__}") from None
+        except http.client.HTTPException as exc:
+            # Same rule as the read: a malformed response is refused with a
+            # fixed message, never with the forge's own bytes.
+            raise ForgeError(
+                f"forge DELETE {path} sent a malformed response: {type(exc).__name__}"
+            ) from None
         return self._read_json(response)
 
     def post(self, path: str, payload: Any) -> Any:
@@ -366,6 +388,12 @@ class ForgeClient:
             raise ForgeError(f"forge POST {path} unreachable: {type(exc.reason).__name__}") from None
         except OSError as exc:
             raise ForgeError(f"forge POST {path} unreachable: {type(exc).__name__}") from None
+        except http.client.HTTPException as exc:
+            # Same rule as the read: a malformed response is refused with a
+            # fixed message, never with the forge's own bytes.
+            raise ForgeError(
+                f"forge POST {path} sent a malformed response: {type(exc).__name__}"
+            ) from None
         return self._read_json(response)
 
 

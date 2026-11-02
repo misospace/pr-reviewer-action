@@ -530,6 +530,41 @@ class TestTokenNeverLeaks:
         assert out == ""
         assert SECRET not in err
 
+    def test_a_malformed_status_line_cannot_reflect_the_token_into_the_output(self, cli, stub):
+        # A hostile forge answers with a status line it forged, and it puts
+        # the credential it read from the Authorization header into that
+        # line. The transport must refuse the response: the forged line
+        # must not reach the log as a traceback, and the refusal must be
+        # the fixed error string, not the forge's own bytes.
+        stub.set_state(malformed_status_paths=["/git/ref/tags/"])
+        code, out, err = run(cli, "tag-ref-sha", "--repo", "o/r", "--tag", "v1.2.3")
+        assert code == 2
+        assert out == ""
+        assert SECRET not in err
+        assert "Traceback" not in err, "the refusal must be an error, not a traceback"
+
+    def test_a_label_containing_the_token_is_refused(self, cli, stub, monkeypatch):
+        # Containment, not equality, on the label path: the token is a
+        # substring of the label, so the label must be refused.
+        monkeypatch.setenv("GITHUB_TOKEN", "42")
+        stub.set_state(labels={"42": ["x42y"]})
+        code, out, err = run(cli, "issue-labels", "--repo", "o/r", "--number", "42")
+        assert code == 2
+        assert out == ""
+        assert "42" not in err
+
+    def test_a_sha_containing_the_token_is_refused(self, cli, stub, monkeypatch):
+        # Containment, not equality, on the SHA path: the token is a
+        # substring of a well-formed SHA, so the SHA must be refused.
+        token = "deadbeef"
+        monkeypatch.setenv("GITHUB_TOKEN", token)
+        sha = token + "a" * 32
+        stub.set_state(tag_refs={"v1.2.3": sha})
+        code, out, err = run(cli, "tag-ref-sha", "--repo", "o/r", "--tag", "v1.2.3")
+        assert code == 2
+        assert out == ""
+        assert token not in err
+
     def test_a_hex_token_reflected_as_a_tag_sha_is_refused(self, cli, stub, monkeypatch):
         # Shape validation alone proves nothing when the configured token
         # is itself 40-hex: the forge's "SHA" passes SHA_RE, so the

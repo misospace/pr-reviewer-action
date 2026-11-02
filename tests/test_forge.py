@@ -476,6 +476,86 @@ class TestForgeErrorDoesNotEchoSecrets:
             server.server_close()
 
 
+class TestForgeClientRefusesMalformedResponses:
+    """A hostile server can answer with a forged status line or a truncated
+    body. Both raise an ``http.client`` exception whose text carries the
+    bytes the server chose, and the server saw the credential in the
+    ``Authorization`` header. The client must refuse the response with a
+    fixed error string, never with the server's own bytes."""
+
+    def _make_server(self, raw: bytes) -> HTTPServer:
+        class Handler(BaseHTTPRequestHandler):
+            def handle_one_request(self):
+                self.raw_requestline = self.rfile.readline()
+                if not self.raw_requestline:
+                    return
+                if not self.parse_request():
+                    return
+                self.wfile.write(raw)
+                self.wfile.flush()
+                self.close_connection = True
+
+            def log_message(self, *_args):  # noqa: ANN001
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def _client(self, server: HTTPServer, token: str) -> "forge.ForgeClient":
+        return forge.ForgeClient(
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            token=token,
+        )
+
+    def test_a_forged_status_line_is_a_fixed_error(self):
+        SECRET = "leaked-in-the-status-line"
+        server = self._make_server(b"HTTP/1.1 " + SECRET.encode() + b"\r\n\r\n")
+        try:
+            with pytest.raises(forge.ForgeError) as info:
+                self._client(server, SECRET).get("/repos/test/repo")
+            assert SECRET not in str(info.value), (
+                "the forged status line must not reach the error string"
+            )
+            assert info.value.status is None, (
+                "a malformed response carries no HTTP status"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_forged_status_line_is_a_fixed_error_for_a_write(self):
+        SECRET = "leaked-in-the-status-line"
+        server = self._make_server(b"HTTP/1.1 " + SECRET.encode() + b"\r\n\r\n")
+        try:
+            client = self._client(server, SECRET)
+            with pytest.raises(forge.ForgeError) as info:
+                client.post("/repos/test/repo/pulls", {"title": "t"})
+            assert SECRET not in str(info.value)
+            with pytest.raises(forge.ForgeError) as info:
+                client.delete("/repos/test/repo/issues/1/labels/bug")
+            assert SECRET not in str(info.value)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_truncated_body_is_a_fixed_error(self):
+        SECRET = "leaked-in-a-truncated-body"
+        server = self._make_server(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n"
+            + SECRET.encode()
+        )
+        try:
+            with pytest.raises(forge.ForgeError) as info:
+                self._client(server, SECRET).get("/repos/test/repo")
+            assert SECRET not in str(info.value), (
+                "the truncated body must not reach the error string"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 # ---------------------------------------------------------------------------
 # Pagination
 # ---------------------------------------------------------------------------

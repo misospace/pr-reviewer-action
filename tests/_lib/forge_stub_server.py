@@ -38,6 +38,10 @@ so a test can change the stub's answers between calls:
                     ``Authorization`` header back -- in the error body of a
                     failed request, and in the ``html_url`` of a created
                     release or pull request
+``malformed_status_paths``
+                    list of path fragments that must answer with a forged
+                    status line carrying the request's credential, so the
+                    transport sees a malformed HTTP response
 ``next_pr_number``  number handed out for a created pull request
 
 Every request is recorded (method, path, query, headers, body) so a test
@@ -66,6 +70,7 @@ DEFAULT_STATE: dict = {
     "commit_parents": {},
     "fail_paths": [],
     "reflect_token": False,
+    "malformed_status_paths": [],
     "next_pr_number": 900,
 }
 
@@ -199,6 +204,17 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send_raw(500, json.dumps({"message": f"bad token {reflected}"}))
                 else:
                     self._send(500, {"message": "stub failure"})
+                return
+        for fragment in state.get("malformed_status_paths") or []:
+            if fragment and fragment in parsed.path:
+                # Hostile mode: answer with a malformed status line that
+                # carries the credential the stub was given. The transport
+                # must refuse the response, and no part of the forged line
+                # may reach a log.
+                reflected = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
+                self.wfile.write(b"HTTP/1.1 " + reflected.encode("utf-8", "replace") + b"\r\n\r\n")
+                self.wfile.flush()
+                self.close_connection = True
                 return
         match = _REPOS.match(parsed.path)
         if not match:
