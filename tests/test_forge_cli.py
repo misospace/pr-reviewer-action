@@ -530,6 +530,64 @@ class TestTokenNeverLeaks:
         assert out == ""
         assert SECRET not in err
 
+    def test_a_hex_token_reflected_as_a_tag_sha_is_refused(self, cli, stub, monkeypatch):
+        # Shape validation alone proves nothing when the configured token
+        # is itself 40-hex: the forge's "SHA" passes SHA_RE, so the
+        # credential gate is what refuses it.
+        hex_token = "d" * 40
+        monkeypatch.setenv("GITHUB_TOKEN", hex_token)
+        stub.set_state(tag_refs={"v1.2.3": hex_token})
+        code, out, err = run(cli, "tag-ref-sha", "--repo", "o/r", "--tag", "v1.2.3")
+        assert code == 2
+        assert out == ""
+        assert hex_token not in err
+
+    def test_a_hex_token_reflected_as_a_parent_sha_is_refused(self, cli, stub, monkeypatch):
+        hex_token = "e" * 64
+        sha = "7" * 40
+        monkeypatch.setenv("GITHUB_TOKEN", hex_token)
+        stub.set_state(commit_parents={sha: hex_token})
+        code, out, err = run(cli, "commit-parent-sha", "--repo", "o/r", "--sha", sha)
+        assert code == 2
+        assert out == ""
+        assert hex_token not in err
+
+    def test_a_numeric_token_reflected_as_a_pr_number_is_refused(self, cli, stub, monkeypatch):
+        # A purely numeric configured token survives the integer shape
+        # check the same way a hex one survives the SHA shape check.
+        sha = "a" * 40
+        monkeypatch.setenv("GITHUB_TOKEN", "42")
+        stub.set_state(commit_pulls={sha: 42})
+        code, out, err = run(cli, "pr-number-for-commit", "--repo", "o/r", "--sha", sha)
+        assert code == 2
+        assert out == ""
+        assert "42" not in err
+
+    def test_a_numeric_token_reflected_inside_a_larger_pr_number_is_refused(
+        self, cli, stub, monkeypatch
+    ):
+        # The gate is containment, not equality: a hostile forge picks the
+        # number it reports, so a partial reflection of a numeric token
+        # must fail too.
+        sha = "a" * 40
+        monkeypatch.setenv("GITHUB_TOKEN", "42")
+        stub.set_state(commit_pulls={sha: 142})
+        code, out, err = run(cli, "pr-number-for-commit", "--repo", "o/r", "--sha", sha)
+        assert code == 2
+        assert out == ""
+        assert "42" not in err
+
+    def test_a_legitimate_tag_sha_still_prints_when_the_token_is_hex(self, cli, stub, monkeypatch):
+        # The gate refuses the credential, not every hex value: a SHA that
+        # is not the token prints normally even when the token is hex.
+        monkeypatch.setenv("GITHUB_TOKEN", "d" * 40)
+        sha = "a" * 40
+        stub.set_state(tag_refs={"v1.2.3": sha})
+        code, out, err = run(cli, "tag-ref-sha", "--repo", "o/r", "--tag", "v1.2.3")
+        assert code == 0
+        assert out == f"{sha}\n"
+        assert err == ""
+
 
 # ---------------------------------------------------------------------------
 # Input validation (fail closed, before any request)

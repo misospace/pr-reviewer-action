@@ -18,12 +18,13 @@ inherits the capability's guarantees unchanged:
   strings -- never the raw response body.
 
 The adapter itself never spawns a subprocess, never accepts a token as an
-argument, and never prints one. It prints only values it validated itself --
-a validated identifier or an integer count -- never a string the forge
-returned verbatim: a hostile forge must not be able to reflect the credential
-into a job log through the adapter's stdout. The one forge-supplied string
-that can reach stdout (a label name) is checked against the configured
-credential first and refused when it carries it.
+argument, and never prints one. Every value printed goes through one gate:
+it is refused when it contains the configured credential, so a hostile forge
+that reflects the bearer token back -- as a label name, a SHA, or a number --
+can never put it into a job log; the read fails closed instead. Input-shape
+validation (a 40/64-hex SHA, a positive integer) is kept as a second rail,
+never as the proof: a token is an arbitrary string, and a configured token
+that happens to be hex or all-digits would pass any shape check.
 
 Exit codes, shared by every command:
 
@@ -154,6 +155,22 @@ def _require_list(payload: object) -> list:
     return payload
 
 
+def _print_value(client: ForgeClient, value: object) -> None:
+    """Print one forge-derived value only after proving it cannot carry the credential.
+
+    Shape validation is not that proof: the capability accepts an arbitrary
+    token string, so a hostile forge can return the configured credential
+    itself as a "SHA" (the token is 40- or 64-hex) or as a "number" (the
+    token is all digits) and it passes every shape check. Every printed
+    value is therefore compared with the credential: a value that contains
+    it fails closed instead of reaching the log.
+    """
+    text = str(value)
+    if client.token and client.token in text:
+        raise CliError(ERR_UNUSABLE_PAYLOAD)
+    print(text)
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -168,7 +185,7 @@ def cmd_pr_number_for_commit(client: ForgeClient, args: argparse.Namespace) -> i
     number = _require_dict(pulls[0]).get("number")
     if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
         raise CliError(ERR_UNUSABLE_PAYLOAD)
-    print(number)
+    _print_value(client, number)
     return EXIT_OK
 
 
@@ -183,13 +200,9 @@ def cmd_issue_labels(client: ForgeClient, args: argparse.Namespace) -> int:
         # makes. An unusable name fails the read closed instead.
         if not isinstance(name, str) or not _valid_label(name):
             raise CliError(ERR_UNUSABLE_PAYLOAD)
-        # A label name is forge-supplied data. Before it reaches stdout it
-        # is checked against the configured credential: a hostile forge
-        # that echoes the bearer token back as a label must not see it
-        # land in a job log. The read fails closed instead.
-        if client.token and client.token in name:
-            raise CliError(ERR_UNUSABLE_PAYLOAD)
-        print(name)
+        # The credential gate inside refuses a hostile forge that echoes
+        # the bearer token back as a label name.
+        _print_value(client, name)
     return EXIT_OK
 
 
@@ -269,7 +282,7 @@ def cmd_pr_number_for_branch(client: ForgeClient, args: argparse.Namespace) -> i
     number = _require_dict(pulls[0]).get("number")
     if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
         raise CliError(ERR_UNUSABLE_PAYLOAD)
-    print(number)
+    _print_value(client, number)
     return EXIT_OK
 
 
@@ -282,13 +295,13 @@ def cmd_pr_create(client: ForgeClient, args: argparse.Namespace) -> int:
         "body": args.body,
     }
     created = _require_dict(client.post(f"/repos/{args.repo}/pulls", payload))
-    # Only the number is printed: it is an integer the adapter validated
-    # itself, never a forge-supplied string that could carry a reflected
-    # credential into a log.
+    # Only the number is printed, and only through the credential gate:
+    # a hostile forge that answers with the configured token as a "number"
+    # (possible when the token is all digits) fails closed instead.
     number = created.get("number")
     if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
         raise CliError(ERR_UNUSABLE_PAYLOAD)
-    print(number)
+    _print_value(client, number)
     return EXIT_OK
 
 
@@ -310,12 +323,12 @@ def cmd_tag_ref_sha(client: ForgeClient, args: argparse.Namespace) -> int:
     if not isinstance(obj, dict):
         raise CliError(ERR_UNUSABLE_PAYLOAD)
     sha = obj.get("sha")
-    # The SHA is the only forge-supplied string this command prints, so it
-    # is validated to the commit-ish shape before it goes out: a value the
-    # adapter proved is 40- or 64-hex cannot also carry the credential.
+    # Shape first (40- or 64-hex), then the credential gate: shape alone is
+    # not proof, because a configured token can itself be 40- or 64-hex and
+    # a hostile forge can return that exact token here.
     if not isinstance(sha, str) or not SHA_RE.match(sha):
         raise CliError(ERR_UNUSABLE_PAYLOAD)
-    print(sha)
+    _print_value(client, sha)
     return EXIT_OK
 
 
@@ -329,11 +342,10 @@ def cmd_commit_parent_sha(client: ForgeClient, args: argparse.Namespace) -> int:
     if not parents:
         return EXIT_OK
     sha = _require_dict(parents[0]).get("sha")
-    # Same commit-ish validation as the tag ref: only a proved SHA is
-    # printed, never an arbitrary forge-supplied string.
+    # Same commit-ish shape plus credential gate as the tag ref.
     if not isinstance(sha, str) or not SHA_RE.match(sha):
         raise CliError(ERR_UNUSABLE_PAYLOAD)
-    print(sha)
+    _print_value(client, sha)
     return EXIT_OK
 
 
