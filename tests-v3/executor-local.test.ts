@@ -500,8 +500,15 @@ async function spawnZombieGroupLeader(): Promise<ZombieGroupLeaderFixture | null
     const survivingPid = Number.parseInt(readFileSync(survivingFile, "utf8"), 10);
     // Kill the leader and wait for the zombie. The parent is a plain
     // `sleep` (it cannot wait()), so the zombie is stable for the whole
-    // assertion window; a vanished pid means the host reaped it anyway.
-    process.kill(leaderPid, "SIGKILL");
+    // assertion window. ESRCH-safe: on a pathologically slow host the
+    // holder's `sleep 60` may already have expired, leaving the leader
+    // re-parented and reaped — awaitZombie then fails loudly, naming what
+    // never happened.
+    try {
+      process.kill(leaderPid, "SIGKILL");
+    } catch {
+      // already gone
+    }
     await awaitZombie(leaderPid, "executor-local zombie group leader");
     // The surviving member must still be alive — a vanished member means
     // the fixture produced nothing to sweep.
@@ -1762,8 +1769,8 @@ test("cancel: a recovered zombie leader is still swept, and the cancellation is 
     );
     // The surviving member of the zombie leader's group must not survive
     // the sweep: a pid that can still execute is a leaked descendant. (A
-    // reaped-or-zombie tail is fine — dead is dead; the OS reaps it once
-    // init takes it.)
+    // reaped-or-zombie tail is fine — dead is dead; an init that reaps
+    // collects the tail, and one that does not leaves it a zombie.)
     const deadline = Date.now() + ZOMBIE_WAIT_MS;
     let survivorState = procState(zombie.survivingPid);
     while ((survivorState === "S" || survivorState === "R") && Date.now() < deadline) {
