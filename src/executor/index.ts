@@ -30,6 +30,7 @@ export {
   MAX_EXECUTION_RESULT_FILE_BYTES,
   ExecutionRequestError,
   ExecutionResultError,
+  forgeApiUrlProblem,
   validateExecutionRequest,
   validateExecutionResult,
 } from "./types.js";

@@ -310,6 +310,7 @@ function makeRequest(overrides: Partial<ExecutionRequest> = {}): ExecutionReques
     attempt: 1,
     kind: "review",
     platform: "github",
+    forgeApiUrl: "https://api.github.com",
     repoFullName: "owner/repo",
     prNumber: 7,
     headSha: "aa11bb22cc33dd44ee55ff667788990001122334",

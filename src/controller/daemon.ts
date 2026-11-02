@@ -90,6 +90,7 @@ import { dispatchCanonicalEvent, type GenerationLedger } from "../ingress/dispat
 import type { MirrorCache } from "../acquisition/index.js";
 import {
   EXECUTION_ORPHANED_CATEGORY,
+  forgeApiUrlProblem,
   validateExecutionRequest,
   validateExecutionResult,
   type ExecutionProfiles,
@@ -896,6 +897,43 @@ export async function startControllerDaemon(
   if (typeof options.resolveProfiles !== "function" || typeof options.credentialRefs !== "function") {
     throw new TypeError("ControllerDaemonOptions.resolveProfiles and credentialRefs are required");
   }
+  // The forge API bases ride EVERY request envelope this daemon composes
+  // (#1433): refuse a configured endpoint that could never pass envelope
+  // validation at startup, instead of failing every job of that platform
+  // later with an opaque builder rejection. EVERY configured integration is
+  // screened, not only the one the served platform resolves to: an
+  // endpoint nobody composes today is still an endpoint the operator
+  // configured, and a credential-shaped path in it is refused the same
+  // way — fail closed on the configuration, not on its current use.
+  //
+  // Each kind may appear at most once. The envelope's endpoint is resolved
+  // by the JOB's platform kind alone — this composition carries no
+  // integration identity with the job — so two integrations of one kind
+  // would silently stamp the first entry's endpoint into every envelope of
+  // that platform, even when the other integration is the one actually
+  // serving the job. The worker would then read and write through the wrong
+  // installation's API base. A deployment that genuinely needs two
+  // same-kind integrations must first carry a stable integration identity
+  // from intake to envelope; until then the ambiguous mapping is refused
+  // here, not guessed. (Instance config keeps `forges` open for that
+  // future: the constraint belongs to this selection site, not to the
+  // durable schema.)
+  const kindOwners = new Map<string, string>();
+  for (const forge of options.instance.forges) {
+    const problem = forgeApiUrlProblem(forge.endpoint);
+    if (problem !== "") {
+      throw new TypeError(
+        `instance forge integration '${forge.name}' endpoint ${problem}: every execution envelope for that platform would be refused`,
+      );
+    }
+    const first = kindOwners.get(forge.kind);
+    if (first !== undefined) {
+      throw new TypeError(
+        `instance forge integrations '${first}' and '${forge.name}' share kind '${forge.kind}': this daemon resolves each envelope's forge endpoint by platform kind alone, so each kind may appear at most once in instance.forges`,
+      );
+    }
+    kindOwners.set(forge.kind, forge.name);
+  }
   const durableStateDir = options.durableStateDir;
   if (typeof durableStateDir !== "string" || durableStateDir === "" || durableStateDir.includes("\u0000")) {
     throw new TypeError("ControllerDaemonOptions.durableStateDir must be a non-empty path");
@@ -959,6 +997,17 @@ export async function startControllerDaemon(
     runsRoot: options.runsRoot,
     mirrorFor: (job) => options.forge.mirrorFor(job),
     resolveProfiles: (job) => options.resolveProfiles(job),
+    // The non-secret forge API base travels in the envelope (#1433): the
+    // instance config's forge integration for the job's platform. GitHub
+    // without an explicit integration entry stays "" (its adapter defaults
+    // to api.github.com); Forgejo without one refuses at request
+    // validation, never at adapter construction inside the worker. The
+    // startup screening above proved each kind appears at most once, so
+    // this kind match is the ONE integration of the job's platform — never
+    // the first of several — and it is the integration the single-platform
+    // entrypoint composes into the forge capability serving the job.
+    resolveForgeApiUrl: async (job) =>
+      options.instance.forges.find((entry) => entry.kind === job.platform)?.endpoint ?? "",
     credentialRefs: (job, runId) => options.credentialRefs(job, runId),
     ...(options.createWorkspace !== undefined ? { createWorkspace: options.createWorkspace } : {}),
   });

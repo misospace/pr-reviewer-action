@@ -58,9 +58,9 @@ the operator's policy could only ever be wider than intended, never narrower.
 version: 1
 unknown-profile-policy: reject        # reject | fallback_default (default reject)
 forges:                               # optional; forge integrations/installations
-  - name: primary
-    kind: github                      # github | forgejo
-    endpoint: https://github.internal
+  - name: primary                     # unique names; each KIND at most once for the
+    kind: github                      # controller, until a job carries an integration
+    endpoint: https://github.internal # github | forgejo
     credential: forge-primary         # opaque reference, resolved by #735
 model-profiles:                       # required, >= 1
   - name: local-fast

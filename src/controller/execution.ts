@@ -123,6 +123,12 @@ export interface RequestBuilderDeps {
   /** Approved profile NAMES for this run, resolved from the operator's
    * effective config — never infrastructure, never repository-derived. */
   resolveProfiles(job: ReviewJob): Promise<ExecutionProfiles>;
+  /** The non-secret forge API base URL for the job's platform (#1433):
+   * a containerized worker has no ambient forge environment, so the
+   * endpoint rides the envelope. Sourced from the instance config's forge
+   * integration for that platform; "" is the GitHub default only — a
+   * Forgejo job without an endpoint fails `validateExecutionRequest`. */
+  resolveForgeApiUrl(job: ReviewJob): Promise<string>;
   /** Opaque credential REFERENCES for the run's worker plan (#735) —
    * references only; the broker resolves material at the final handoff. */
   credentialRefs(job: ReviewJob, runId: string): Promise<readonly CredentialRef[]>;
@@ -156,6 +162,9 @@ export function createControllerRequestBuilder(deps: RequestBuilderDeps): Contro
   if (typeof deps.resolveProfiles !== "function") {
     throw new TypeError("RequestBuilderDeps.resolveProfiles must be a function");
   }
+  if (typeof deps.resolveForgeApiUrl !== "function") {
+    throw new TypeError("RequestBuilderDeps.resolveForgeApiUrl must be a function");
+  }
   if (typeof deps.credentialRefs !== "function") {
     throw new TypeError("RequestBuilderDeps.credentialRefs must be a function");
   }
@@ -186,6 +195,7 @@ export function createControllerRequestBuilder(deps: RequestBuilderDeps): Contro
       workspaces.set(`${job.jobId}#${attempt}`, handle);
       const info: WorkspaceInfo = handle.info;
       const profiles = await deps.resolveProfiles(job);
+      const forgeApiUrl = await deps.resolveForgeApiUrl(job);
       const refs = await deps.credentialRefs(job, runId);
       // The reference field is an opaque handle (#735): an operator who
       // pasted material into it must fail at composition time, before the
@@ -210,6 +220,7 @@ export function createControllerRequestBuilder(deps: RequestBuilderDeps): Contro
         attempt,
         kind: job.kind,
         platform: job.platform,
+        forgeApiUrl,
         repoFullName: job.repoFullName,
         prNumber: job.prNumber,
         headSha: job.headSha,

@@ -98,6 +98,7 @@ export function defaultConformanceRequest(scenario: ConformanceScenario): Execut
     attempt: 1,
     kind: "review" as const,
     platform: "github" as const,
+    forgeApiUrl: "https://api.github.com",
     repoFullName: "owner/repo",
     prNumber: 1,
     headSha,

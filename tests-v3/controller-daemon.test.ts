@@ -495,6 +495,186 @@ test("startup fails closed when durable state cannot be proven usable", async ()
   }
 });
 
+test("the daemon stamps the instance forge endpoint into every execution envelope (#1433)", async (t) => {
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "gh", kind: "github", endpoint: "https://ghe.example/api/v3", credential: "gh-app-credential" },
+        ],
+      } as InstanceConfig,
+    },
+  });
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  assert.equal(h.fake.started[0]!.forgeApiUrl, "https://ghe.example/api/v3");
+});
+
+test("distinct-kind integrations stamp the kind-matched endpoint, not the first entry (#1433)", async (t) => {
+  // The envelope's endpoint is the integration OF THE JOB'S PLATFORM, not
+  // whatever entry happens to be configured first: the other kind's
+  // integration is listed first here so a first-match selection would stamp
+  // the wrong installation's API base into every GitHub envelope.
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj", kind: "forgejo", endpoint: "https://forge.example/api/v1", credential: "fj-token" },
+          { name: "gh", kind: "github", endpoint: "https://ghe.example/api/v3", credential: "gh-app-credential" },
+        ],
+      } as InstanceConfig,
+    },
+  });
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  assert.equal(h.fake.started[0]!.forgeApiUrl, "https://ghe.example/api/v3");
+});
+
+test("two forge integrations of the same kind refuse daemon startup (#1433)", async () => {
+  // Instance config enforces unique integration NAMES only. Selecting the
+  // envelope endpoint by kind among two same-kind entries would silently
+  // stamp the first installation's API base into every job of that
+  // platform, even when the other integration serves the job — so the
+  // ambiguous mapping must be a startup refusal, never a guess.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+              { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+            ],
+          } as InstanceConfig,
+        },
+      }),
+    /forge integrations 'fj-primary' and 'fj-secondary' share kind 'forgejo'/,
+  );
+  // The same ambiguity on the GitHub side refuses too.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              { name: "gh-app-a", kind: "github", endpoint: "https://ghe-a.example/api/v3", credential: "gh-a" },
+              { name: "gh-app-b", kind: "github", endpoint: "https://ghe-b.example/api/v3", credential: "gh-b" },
+            ],
+          } as InstanceConfig,
+        },
+      }),
+    /forge integrations 'gh-app-a' and 'gh-app-b' share kind 'github'/,
+  );
+});
+
+test("a forge integration endpoint that could never pass envelope validation refuses daemon startup (#1433)", async () => {
+  // #252: the hostile value itself — a token riding the configured
+  // endpoint's query. The refusal must be a startup error naming the
+  // integration, not a per-job builder rejection for every review.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              {
+                name: "fj",
+                kind: "forgejo",
+                endpoint: "https://forge.example?access_token=ghp_SECRET",
+                credential: "fj-token",
+              },
+            ],
+          } as InstanceConfig,
+        },
+      }),
+    /forge integration 'fj' endpoint must not contain whitespace, control characters, a query, or a fragment/,
+  );
+});
+
+test("a forge integration endpoint whose path carries a token refuses daemon startup (#1433)", async () => {
+  // #252: the hostile value itself — a gateway credential riding the
+  // configured endpoint's path. The envelope persists that coordinate
+  // verbatim, so the refusal must be a startup error naming the
+  // integration, not a per-job builder rejection for every review.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              {
+                name: "fj",
+                kind: "forgejo",
+                endpoint: "https://forge.example/7f3a9c1e55b20d84aa613c9f02bb71d6/v1",
+                credential: "fj-token",
+              },
+            ],
+          } as InstanceConfig,
+        },
+      }),
+    /forge integration 'fj' endpoint must not contain a credential-shaped path segment/,
+  );
+  // The same credential, percent-encoded: the startup refusal must not be
+  // a plain-text-only screen.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              {
+                name: "fj",
+                kind: "forgejo",
+                endpoint:
+                  "https://forge.example/%37%66%33%61%39%63%31%65%35%35%62%32%30%64%38%34%61%61%36%31%33%63%39%66%30%32%62%62%37%31%64%36/v1",
+                credential: "fj-token",
+              },
+            ],
+          } as InstanceConfig,
+        },
+      }),
+    /forge integration 'fj' endpoint must not contain a credential-shaped path segment/,
+  );
+  // The same credential hidden behind a dot segment in a URL spelling that
+  // carries no "//": the URL parser normalizes the segment away, so only
+  // the path as written still shows the credential. The startup refusal
+  // must not depend on the parser's normalization.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              {
+                name: "fj",
+                kind: "forgejo",
+                endpoint: "http:forge.example/7f3a9c1e55b20d84aa613c9f02bb71d6/../v1",
+                credential: "fj-token",
+              },
+            ],
+          } as InstanceConfig,
+        },
+      }),
+    /forge integration 'fj' endpoint must not contain a credential-shaped path segment/,
+  );
+});
+
 test("an adoption policy the repository did not satisfy never schedules", async (t) => {
   const h = await start({
     options: {
