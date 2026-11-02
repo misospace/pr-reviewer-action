@@ -65,7 +65,14 @@ raw path comes back empty. The parser also ends the authority at `?` and
 path.
 The controller refuses at STARTUP a configured endpoint that could never pass:
 every envelope for that platform would otherwise fail later with an
-opaque builder error.
+opaque builder error. The mapping job-platform → integration must also be
+unambiguous: this composition carries no integration identity with the job,
+so a kind may appear at most once in `instance.forges`. Two same-kind
+integrations would silently stamp the first entry's API base into every
+envelope of that platform — possibly the installation that does not own the
+job — so the daemon refuses them at startup. Supporting several integrations
+of one kind requires carrying a stable integration identity from intake to
+envelope first.
 
 The Python lane only *warns* about a path-embedded credential, because a
 path segment cannot be reliably told apart from a legitimate path part and
