@@ -80,6 +80,23 @@ a forge-specific CLI.
   generation was superseded is cancelled by identity and settled
   `cancelled`. The graceful stop drains an adopted worker and then
   terminates it, so the daemon never orphans a worker it took over.
+- **An orphaned settle is swept before it settles.** A recovered record
+  that reconciles to a settled `orphaned` outcome (the recorded worker
+  can no longer execute and produced no terminal state) first runs the
+  executor's cancellation seam as a compensating sweep: a
+  killed-but-unreaped zombie leader still owns its process group, whose
+  members can outlive it, and only the tree termination's group kill
+  removes them. The sweep is best-effort and never changes the settle
+  decision — the orphaned proof belongs to `reconcile`, and a failed
+  sweep means nothing was signalled. The daemon never signals anything
+  itself, so the executor's guards keep holding (pid 1 and the
+  controller's own pid are refused outright, a pid that names no process
+  short-circuits without a signal, and every signal sits behind the
+  process-identity proof). The sweep cannot race another controller
+  instance: a worker that can still execute — wherever it runs — answers
+  `running` and takes the adoption path, so an orphaned settle proves
+  there is no live worker for the identity anywhere, and the sweep
+  signals only the dead worker's process group.
 - **A record with no readable envelope is safe to requeue.** The
   executor writes the request envelope before it launches the worker. A
   missing envelope therefore proves that no worker ever started, and the

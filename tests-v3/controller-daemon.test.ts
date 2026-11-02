@@ -1179,6 +1179,199 @@ test("a recovered record whose worker settled is settled through the recovery se
   );
 });
 
+test("a restarted daemon sweeps an orphaned recovered worker before settling it", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const request = h.fake.started[0]!;
+
+  // The daemon dies with the worker still running; the leader later
+  // becomes a killed-but-unreaped zombie, so `reconcile` answers
+  // settled-orphaned: the attempt can never produce a result, but the
+  // dead leader still owns its process group.
+  h.daemon.abandon();
+  const orphaned = settledOutcomeFor(request, {
+    status: "failed",
+    failureCategory: "orphaned",
+    resultHeadSha: "",
+    resultArtifactPath: "",
+  });
+
+  const secondFake = new FakeExecution(true);
+  secondFake.reconcileOutcome = orphaned;
+  // The compensating sweep routes through the cancellation seam BEFORE
+  // the record settles: the zombie leader's process group is swept. The
+  // snapshot probe proves the order — at cancel time the record had not
+  // settled yet — so the spy is installed before the restarted daemon
+  // runs its startup recovery. `maxAttempts: 1` keeps the queue's normal
+  // failed-retry semantics out of the way: the orphaned settle lands
+  // terminally instead of requeueing the job.
+  let settledBeforeSweep = false;
+  const realCancel = secondFake.cancel.bind(secondFake);
+  secondFake.cancel = async () => {
+    settledBeforeSweep ||= durableQueueRecords(h.dirs.durableStateDir).some(
+      (entry) => entry.job.jobId === request.jobId && entry.state === "failed",
+    );
+    return realCancel();
+  };
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: secondFake,
+    options: { maxAttempts: 1 },
+  });
+  t.after(() => {
+    h.fake.dispose();
+    secondFake.dispose();
+    h2.daemon.abandon();
+    cleanup(h);
+  });
+
+  await waitFor(() => secondFake.cancelCalls > 0);
+  await waitFor(() =>
+    durableQueueRecords(h.dirs.durableStateDir).some(
+      (entry) => entry.job.jobId === request.jobId && entry.state === "failed",
+    ),
+  );
+  assert.equal(settledBeforeSweep, false, "the sweep ran before the record settled");
+  assert.equal(secondFake.started.length, 0, "the orphaned review was never rerun");
+});
+
+test("an orphaned recovered worker settles even when its sweep cannot be confirmed", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const request = h.fake.started[0]!;
+
+  // The sweep is best-effort: the orphaned proof belongs to `reconcile`,
+  // so a sweep that fails closed (nothing signalled) must not keep the
+  // record active forever.
+  h.daemon.abandon();
+  const orphaned = settledOutcomeFor(request, {
+    status: "failed",
+    failureCategory: "orphaned",
+    resultHeadSha: "",
+    resultArtifactPath: "",
+  });
+
+  const secondFake = new FakeExecution(true);
+  secondFake.reconcileOutcome = orphaned;
+  secondFake.cancelOutcome = { kind: "failed", reason: "worker-not-terminated" };
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: secondFake,
+    options: { maxAttempts: 1 },
+  });
+  t.after(() => {
+    h.fake.dispose();
+    secondFake.dispose();
+    h2.daemon.abandon();
+    cleanup(h);
+  });
+
+  await waitFor(() => secondFake.cancelCalls > 0);
+  await waitFor(() =>
+    durableQueueRecords(h.dirs.durableStateDir).some(
+      (entry) => entry.job.jobId === request.jobId && entry.state === "failed",
+    ),
+  );
+  assert.equal(secondFake.started.length, 0, "the orphaned review was never rerun");
+});
+
+test("an adopted worker that settles orphaned is swept before the recovery seam settles it", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const request = h.fake.started[0]!;
+
+  // The daemon dies with the worker still running; the restarted daemon
+  // adopts it, and on a later tick the worker reconciles to an orphaned
+  // settle (the leader died without a terminal state).
+  h.daemon.abandon();
+
+  const secondFake = new FakeExecution(true);
+  secondFake.reconcileOutcome = { kind: "running" };
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: secondFake,
+    options: { now: clockPastTheAbandonedLease(), maxAttempts: 1 },
+  });
+  t.after(() => {
+    h.fake.dispose();
+    secondFake.dispose();
+    h2.daemon.abandon();
+    cleanup(h);
+  });
+
+  // The recovery pass reached the worker and proved it alive.
+  await waitFor(() => secondFake.reconcileCalls > 0);
+  const adopted = durableQueueRecords(h.dirs.durableStateDir).find(
+    (entry) => entry.job.jobId === request.jobId,
+  );
+  assert.notEqual(adopted, undefined, "the record is still in the durable queue");
+  assert.equal(adopted!.state, "running", "the adopted record stays active");
+
+  // The worker then dies without a terminal state: the next tick's
+  // re-reconcile sweeps the dead leader's group before it settles.
+  secondFake.reconcileOutcome = settledOutcomeFor(request, {
+    status: "failed",
+    failureCategory: "orphaned",
+    resultHeadSha: "",
+    resultArtifactPath: "",
+  });
+  await waitFor(() => secondFake.cancelCalls > 0);
+  await waitFor(() =>
+    durableQueueRecords(h.dirs.durableStateDir).some(
+      (entry) => entry.job.jobId === request.jobId && entry.state === "failed",
+    ),
+  );
+  assert.equal(secondFake.started.length, 0, "the orphaned review was never rerun");
+});
+
+test("a recovered worker that settles completed is not swept", async (t) => {
+  const h = await start({ hangUntilAbort: true });
+  t.after(() => cleanup(h));
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  const request = h.fake.started[0]!;
+
+  // The compensating sweep is scoped to the orphaned settle: a worker
+  // that produced its terminal result takes no cancellation path.
+  h.daemon.abandon();
+  const settled = settledOutcomeFor(request);
+
+  const secondFake = new FakeExecution(true);
+  secondFake.reconcileOutcome = settled;
+  const h2 = await start({
+    hangUntilAbort: true,
+    controlPlane: h.controlPlane,
+    dirs: h.dirs,
+    fake: secondFake,
+  });
+  t.after(() => {
+    h.fake.dispose();
+    secondFake.dispose();
+    h2.daemon.abandon();
+    cleanup(h);
+  });
+
+  await waitFor(() => h2.forgePublishes.length > 0);
+  await waitFor(() =>
+    durableQueueRecords(h.dirs.durableStateDir).some(
+      (entry) => entry.job.jobId === request.jobId && entry.state === "completed",
+    ),
+  );
+  assert.equal(secondFake.cancelCalls, 0, "a completed settle never sweeps");
+});
+
 test("a recovered request whose executor profile is unknown never crashes the restart", async (t) => {
   const h = await start({ hangUntilAbort: true });
   t.after(() => cleanup(h));
