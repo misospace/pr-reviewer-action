@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { MirrorCache, WorkspaceHandle, WorkspaceInfo } from "../src/acquisition/index.js";
-import type { InstanceConfig } from "../src/config/instance-config.js";
+import type { InstanceConfig, KubernetesExecutorSpec } from "../src/config/instance-config.js";
 import type { CredentialRef } from "../src/credentials/types.js";
 import type { ExecutionRequest, Executor } from "../src/executor/index.js";
 import { LocalExecutor } from "../src/executor/index.js";
@@ -356,4 +356,44 @@ test("the selector binds a kubernetes profile through the injected factory", () 
     kubernetes: () => fake,
   });
   assert.equal(selector.forProfile("k8s"), fake);
+});
+
+test("the selector hands the operator's RuntimeClass pin to the executor; profiles reach the request as names only (#1422)", async () => {
+  const K8S_SPEC = {
+    image: "ghcr.io/x:1",
+    args: [],
+    namespace: "review-workers",
+    serviceAccount: "pr-reviewer-worker",
+    ttlSecondsAfterFinished: 3600,
+    resources: { requests: { cpu: "100m", memory: "128Mi" }, limits: { cpu: "500m", memory: "512Mi" } },
+    volumes: [],
+    runtimeClassName: "gvisor",
+  };
+  const seen: KubernetesExecutorSpec[] = [];
+  const fake: Executor = {
+    start: async () => {
+      throw new Error("unreachable");
+    },
+    reconcile: async () => ({ kind: "none" }),
+    cancel: async () => ({ kind: "terminated" }),
+  };
+  const selector = createExecutorSelector({
+    instance: instanceWith([
+      { name: "k8s", kind: "kubernetes", maxReviews: null, local: null, oci: null, kubernetes: K8S_SPEC },
+    ]),
+    kubernetes: (spec) => {
+      seen.push(spec);
+      return fake;
+    },
+  });
+  selector.forProfile("k8s");
+  // The executor is constructed from the OPERATOR's spec verbatim — the
+  // pin included. There is no other input: the composed request carries
+  // the profile NAME only (resolved from the operator's effective
+  // config), so no repository-supplied runtimeClassName can exist.
+  assert.deepEqual([...seen], [K8S_SPEC]);
+  const harness = setup();
+  const request = await harness.builder.build(makeRecord("job-1422"));
+  assert.deepEqual({ ...request.profiles }, { executor: "default", model: "local-fast", evidence: "strict" });
+  assert.ok(!JSON.stringify(request).includes("gvisor"), "no RuntimeClass value can ride the request");
 });

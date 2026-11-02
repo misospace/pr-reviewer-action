@@ -168,6 +168,13 @@ export interface KubernetesExecutorSpec {
   };
   /** 1..8 controller/pod shared-volume mappings. */
   readonly volumes: readonly KubernetesVolumeMapping[];
+  /** Optional RuntimeClass pin (#1422): when set, the worker pod template
+   * carries `runtimeClassName` so the pod runs under the operator's
+   * sandboxed runtime (gVisor, Kata, …). An operator-trusted deployment
+   * fact like the namespace or service account; absent means the cluster
+   * default runtime, and a missing/unsupported RuntimeClass fails the
+   * launch closed — never a fallback to an unpinned pod. */
+  readonly runtimeClassName?: string;
 }
 
 export interface ExecutorProfile {
@@ -516,7 +523,7 @@ function validateKubernetesExecutorSpec(value: unknown, path: string): Kubernete
   // node selector, toleration, or any other raw Kubernetes object has NO
   // field to land in — the executor builds the pod from fixed security
   // defaults plus exactly these operator facts.
-  rejectUnknown(item, ["image", "args", "namespace", "service-account", "ttl-seconds-after-finished", "resources", "volumes"], path);
+  rejectUnknown(item, ["image", "args", "namespace", "service-account", "ttl-seconds-after-finished", "resources", "volumes", "runtime-class-name"], path);
   const image = stringAt(item.image, `${path}.image`);
   if (image.length > MAX_IMAGE_CHARS) fail(`${path}.image`, `must be at most ${MAX_IMAGE_CHARS} characters`);
   if (!OCI_IMAGE_RE.test(image)) fail(`${path}.image`, "must be an image reference (name[:tag][@sha256:digest])");
@@ -535,6 +542,12 @@ function validateKubernetesExecutorSpec(value: unknown, path: string): Kubernete
       memory: kubernetesQuantityAt(pair.memory, `${path}.${label}.memory`),
     });
   };
+  // Optional DNS-1123 label (#1422): the pin is carried through only when
+  // the operator set it, so an absent field stays absent (the pod template
+  // then carries no runtimeClassName and the cluster default applies).
+  const runtimeClassName = item["runtime-class-name"] === undefined
+    ? undefined
+    : kubernetesNameAt(item["runtime-class-name"], `${path}.runtime-class-name`);
   return Object.freeze({
     image,
     args: Object.freeze(argsRaw.map((entry, index) => executorArgvElementAt(entry, `${path}.args[${index}]`))) as readonly string[],
@@ -546,6 +559,7 @@ function validateKubernetesExecutorSpec(value: unknown, path: string): Kubernete
       limits: validatePair(resources.limits, "resources.limits"),
     }),
     volumes: validateKubernetesVolumeMappings(item.volumes, `${path}.volumes`),
+    ...(runtimeClassName === undefined ? {} : { runtimeClassName }),
   });
 }
 
