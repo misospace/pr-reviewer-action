@@ -2,7 +2,7 @@ import type { EnvLike } from "../tools/budget.js";
 import { REASONING_EFFORT_PATTERN } from "../config/load-config.js";
 import { CONFIDENCE_MINIMUM_PROMPT_TOKENS } from "../confidence/prompt.js";
 import { CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS } from "../confidence/scorer.js";
-import { assertSingleCredentialChannel, endpointUrlCredential } from "../transport/http.js";
+import { endpointUrlCredential } from "../transport/http.js";
 
 /**
  * Review routing and tier bindings, ported from scripts/sections/classification.sh
