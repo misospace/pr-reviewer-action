@@ -1091,7 +1091,7 @@ def test_project_spend_budget_follows_configured_budgets() -> None:
     assert empty["basis"] == "documented-default"
     # An unusable declaration resolves like production's positiveIntFrom
     # does — the default, never a crash and never the unusable value.
-    for bad in ("wide", "0", "-5", "1.5", "", "  "):
+    for bad in ("wide", "0", "-5", "1.5", "", "  ", "２０４８"):
         tokens, is_declared = confidence_calibration._declared_completion_budget(
             {"AI_CONFIDENCE_MAX_TOKENS": bad}
         )

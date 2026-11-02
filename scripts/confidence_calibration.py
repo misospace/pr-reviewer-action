@@ -109,7 +109,9 @@ def _declared_completion_budget(confidence_env: Any) -> tuple[int, bool]:
     resolver resolves. Returns ``(tokens, declared)``.
     """
     raw = str((confidence_env or {}).get("AI_CONFIDENCE_MAX_TOKENS", "")).strip()
-    if re.fullmatch(r"\d+", raw):
+    # [0-9], not \\d: JS /^\d+$/ is ASCII-only, and Python's \\d would
+    # accept Unicode decimal digits the resolver's regex rejects.
+    if re.fullmatch(r"[0-9]+", raw):
         value = int(raw)
         if 1 <= value <= 2**53 - 1:
             return value, True
