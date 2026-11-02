@@ -17,6 +17,13 @@
  * zero cost, `unknown` provenance) → commit the reservation with actuals,
  * or refund it on failure.
  *
+ * A concurrent replay of the same `(runId, reservationId)` while the
+ * owning call is still in flight JOINS it (#1397): the replay runs the
+ * full synchronous admission preamble itself, then shares the owner's
+ * in-flight promise instead of dispatching a second provider request. The
+ * owner alone resolves the broker, calls the transport, and settles the
+ * reservation; a joiner never touches the ledger.
+ *
  * `call` is a TOTAL function: it never rejects. The response-byte ceiling
  * and any extra headers are operator config carried by the profile
  * endpoint — a worker supplies neither — and any unexpected throw from the
@@ -120,14 +127,27 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
   const profiles = validateProfiles(options.profiles);
   const runChat = options.runChat ?? runChatRequest;
   const now = options.now ?? Date.now;
+  // The in-flight registry for concurrent same-reservation replays (#1397):
+  // keyed by the PAIR `(runId, reservationId)` — the same #1361 identity
+  // the ledger uses — so a joiner can only ever join its OWN run's
+  // in-flight call, never another run's that happens to reuse the
+  // reservation id. An entry lives exactly as long as the dispatch that
+  // registered it and is removed when that promise settles.
+  const inFlight = new Map<string, Map<string, Promise<GatewayCallOutcome>>>();
   return {
     async call(input: GatewayCallInput): Promise<GatewayCallOutcome> {
       // Total function: `call` never rejects. Any unexpected throw from a
       // seam (transport, broker) is converted into a typed closed-code
       // refusal with the reservation refunded — a seam crash must never
       // escape as a raw rejection or strand a reservation.
-      let reservedId: string | null = null;
+      //
+      // The admission preamble below is fully SYNCHRONOUS — validate →
+      // verify → profile → reserve → join-or-lead — so two concurrent
+      // callers can never both observe an empty registry: by the time any
+      // replay reaches the join-or-lead step, the owner's entry is already
+      // registered (the owner registers before its first `await`).
       let reservedRunId = "";
+      let reservedId = "";
       try {
         const shape = validateCallInput(input);
         if (shape !== "") {
@@ -174,118 +194,50 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
             null,
           );
         }
-        reservedId = input.reservationId;
-        // The ledger's own frozen row carries the run identity it accepted
-        // at reserve time: capture it for the catch-path refund so the
-        // total-function guarantee never depends on re-reading a
+        // The ledger's own frozen row carries the identities it accepted at
+        // reserve time: capture them for dispatch and the catch-path refund
+        // so the total-function guarantee never depends on re-reading a
         // caller-owned `input` object from inside `catch`.
         reservedRunId = reservation.reservation.runId;
-        const resolved = await options.broker.resolve(options.modelCredentialRef, {
-          purpose: "model",
-          platform: input.platform,
-          installationId: input.installationId,
-          repoFullName: input.repoFullName,
-          profileName: input.modelProfile,
-        });
-        if (!resolved.ok) {
-          options.ledger.refund(input.runId, input.reservationId);
-          reservedId = null;
-          return refusal(
-            "credential_refused",
-            `credential broker refused the model credential (${resolved.code}): ${CREDENTIAL_REFUSAL_REASONS[resolved.code]}`,
-            null,
-            null,
-          );
+        reservedId = reservation.reservation.reservationId;
+
+        // CONCURRENT-REPLAY GATE (#1397): a replay of the same
+        // `(runId, reservationId)` while the owning call is still in flight
+        // JOINS it — it receives the owner's outcome and never dispatches a
+        // second provider request, never resolves the broker a second time,
+        // and never settles (commits or refunds) the owner's reservation.
+        // The joiner still ran the full admission preamble above, so it
+        // paid capability and admission verification; what it shares is the
+        // wire call and its outcome. A caller whose row is reserved with no
+        // in-flight owner (nothing to join) proceeds as the owner.
+        let runCalls = inFlight.get(reservedRunId);
+        if (runCalls === undefined) {
+          runCalls = new Map<string, Promise<GatewayCallOutcome>>();
+          inFlight.set(reservedRunId, runCalls);
         }
-        // The response-byte ceiling is the OPERATOR's profile config, never
-        // worker input; extra headers are operator config the transport
-        // seam applies itself — the worker supplies neither. Gateway mode
-        // is not a lesser endpoint: an operator's proxy/token headers reach
-        // the provider exactly as they do in direct mode.
-        const outcome = await runChat({
-          baseUrl: profile.baseUrl,
-          apiFormat: profile.apiFormat,
-          payload: input.payload,
-          apiKey: resolved.material.value,
-          anthropicVersion: profile.anthropicVersion,
-          requestTimeoutSec: profile.requestTimeoutSec,
-          connectTimeoutSec: profile.connectTimeoutSec,
-          ...(profile.maxResponseBytes !== undefined ? { maxResponseBytes: profile.maxResponseBytes } : {}),
-          ...(profile.extraHeaders !== undefined ? { extraHeaders: profile.extraHeaders } : {}),
-          ...(input.signal !== undefined ? { signal: input.signal } : {}),
-        });
-        // The secrets this call must never let escape: the resolved provider
-        // credential plus the VALUES of the operator's extra headers (they
-        // routinely carry proxy tokens), plus each value's JSON-escaped
-        // spelling (a provider that echoes the credential inside a JSON
-        // string writes it escaped). The transport owns the base list, so
-        // gateway mode and direct mode mask the same bytes.
-        const secrets = gatewayCallSecrets(resolved.material.value, profile.extraHeaders);
-        if (outcome.status === "ok") {
-          // CONTENT GATE: a response that quotes the credential fails the
-          // whole call (the #1094 rule — refuse content, never mask a
-          // verdict). The scan covers EVERY provider-authored string in
-          // the response (the completion text, the tool calls, the error
-          // payload, and the `id`/`model`/`finishReason` metadata), leaf
-          // by leaf. The provider billed the call, so the attempt is
-          // recorded honestly and the reservation is refunded.
-          if (responseCarriesKnownSecret(outcome.response, secrets)) {
-            options.ledger.refund(input.runId, input.reservationId);
-            reservedId = null;
-            return refusal(
-              "provider_response_unsafe",
-              "the provider's response carried the model credential; the call was refused",
-              attemptRecord(input, now()),
-              null,
-            );
-          }
-          const usage = buildUsageRecord(input, outcome.response, profile.pricing, now());
-          if (usage === null) {
-            // The provider-billed call succeeded but produced an
-            // unvalidatable usage record: fail closed — refund the
-            // reservation AND still record the attempt honestly (never
-            // erase a provider-billed call from the accounting).
-            options.ledger.refund(input.runId, input.reservationId);
-            reservedId = null;
-            return refusal("usage_record_invalid", "the produced usage record failed durable-shape validation", attemptRecord(input, now()), null);
-          }
-          const committed = options.ledger.commit(input.runId, input.reservationId, {
-            requestCount: 1,
-            tokens: usage.inputTokens + usage.outputTokens,
-            costMicros: usage.costMicros,
-          });
-          if (!committed.ok) {
-            options.ledger.refund(input.runId, input.reservationId);
-            reservedId = null;
-            return refusal(committed.code, committed.reason, usage, null);
-          }
-          reservedId = null;
-          return Object.freeze({
-            ok: true as const,
-            response: outcome.response,
-            // The RAW body is a provider-authored diagnostic surface: a
-            // provider can quote the credential it was given straight back
-            // into it, so it is masked before it reaches the worker-facing
-            // surface (#1149 composition — configured values first, then the
-            // generic credential-shape heuristics).
-            raw: maskProviderBody(outcome.raw, secrets),
-            usage,
-          });
+        const joined = runCalls.get(reservedId);
+        if (joined !== undefined) {
+          // `await` routes a (defensively unexpected) rejection of the
+          // shared promise through this call's own catch below, keeping
+          // the total-function guarantee for the joiner too.
+          return await joined;
         }
-        options.ledger.refund(input.runId, input.reservationId);
-        reservedId = null;
-        return Object.freeze({
-          ok: false as const,
-          code: "transport_failure",
-          reason: `model request failed (${outcome.failure.kind})`,
-          usage: attemptRecord(input, now()),
-          // The preserved non-2xx body is provider-authored too: masked.
-          transportFailure: maskTransportFailure(outcome.failure, secrets),
-        });
+        const pending = dispatch(input, profile, reservedRunId, reservedId);
+        runCalls.set(reservedId, pending);
+        const release = (): void => {
+          const rows = inFlight.get(reservedRunId);
+          if (rows === undefined) return;
+          rows.delete(reservedId);
+          if (rows.size === 0) inFlight.delete(reservedRunId);
+        };
+        pending.then(release, release);
+        return await pending;
       } catch (error) {
-        if (reservedId !== null) {
+        if (reservedId !== "") {
           // A committed row refuses the refund safely, so this can never
-          // double-credit a settled reservation.
+          // double-credit a settled reservation. Registration is
+          // synchronous with the reserve, so a row reserved before a
+          // preamble throw is refunded here rather than stranded.
           options.ledger.refund(reservedRunId, reservedId);
         }
         return refusal(
@@ -308,6 +260,130 @@ export function createModelGateway(options: ModelGatewayOptions): ModelGateway {
       return { gateway: "model", ...this.describe() };
     },
   };
+
+  /** The owning dispatch: everything after admission, for the caller that
+   * holds the in-flight entry. The run and reservation identities are the
+   * LEDGER's (captured from the frozen row at admission), never re-read
+   * from the caller-owned `input`, so every settle path below — commit,
+   * refund, and the catch-path refund — addresses exactly the row this
+   * dispatch reserved. A joiner never runs this body, so no failure or
+   * cancellation path can release or settle another in-flight call's
+   * reservation. */
+  async function dispatch(
+    input: GatewayCallInput,
+    profile: GatewayProfileEndpoint,
+    runId: string,
+    reservationId: string,
+  ): Promise<GatewayCallOutcome> {
+    try {
+      const resolved = await options.broker.resolve(options.modelCredentialRef, {
+        purpose: "model",
+        platform: input.platform,
+        installationId: input.installationId,
+        repoFullName: input.repoFullName,
+        profileName: input.modelProfile,
+      });
+      if (!resolved.ok) {
+        options.ledger.refund(runId, reservationId);
+        return refusal(
+          "credential_refused",
+          `credential broker refused the model credential (${resolved.code}): ${CREDENTIAL_REFUSAL_REASONS[resolved.code]}`,
+          null,
+          null,
+        );
+      }
+      // The response-byte ceiling is the OPERATOR's profile config, never
+      // worker input; extra headers are operator config the transport
+      // seam applies itself — the worker supplies neither. Gateway mode
+      // is not a lesser endpoint: an operator's proxy/token headers reach
+      // the provider exactly as they do in direct mode.
+      const outcome = await runChat({
+        baseUrl: profile.baseUrl,
+        apiFormat: profile.apiFormat,
+        payload: input.payload,
+        apiKey: resolved.material.value,
+        anthropicVersion: profile.anthropicVersion,
+        requestTimeoutSec: profile.requestTimeoutSec,
+        connectTimeoutSec: profile.connectTimeoutSec,
+        ...(profile.maxResponseBytes !== undefined ? { maxResponseBytes: profile.maxResponseBytes } : {}),
+        ...(profile.extraHeaders !== undefined ? { extraHeaders: profile.extraHeaders } : {}),
+        ...(input.signal !== undefined ? { signal: input.signal } : {}),
+      });
+      // The secrets this call must never let escape: the resolved provider
+      // credential plus the VALUES of the operator's extra headers (they
+      // routinely carry proxy tokens), plus each value's JSON-escaped
+      // spelling (a provider that echoes the credential inside a JSON
+      // string writes it escaped). The transport owns the base list, so
+      // gateway mode and direct mode mask the same bytes.
+      const secrets = gatewayCallSecrets(resolved.material.value, profile.extraHeaders);
+      if (outcome.status === "ok") {
+        // CONTENT GATE: a response that quotes the credential fails the
+        // whole call (the #1094 rule — refuse content, never mask a
+        // verdict). The scan covers EVERY provider-authored string in
+        // the response (the completion text, the tool calls, the error
+        // payload, and the `id`/`model`/`finishReason` metadata), leaf
+        // by leaf. The provider billed the call, so the attempt is
+        // recorded honestly and the reservation is refunded.
+        if (responseCarriesKnownSecret(outcome.response, secrets)) {
+          options.ledger.refund(runId, reservationId);
+          return refusal(
+            "provider_response_unsafe",
+            "the provider's response carried the model credential; the call was refused",
+            attemptRecord(input, now()),
+            null,
+          );
+        }
+        const usage = buildUsageRecord(input, outcome.response, profile.pricing, now());
+        if (usage === null) {
+          // The provider-billed call succeeded but produced an
+          // unvalidatable usage record: fail closed — refund the
+          // reservation AND still record the attempt honestly (never
+          // erase a provider-billed call from the accounting).
+          options.ledger.refund(runId, reservationId);
+          return refusal("usage_record_invalid", "the produced usage record failed durable-shape validation", attemptRecord(input, now()), null);
+        }
+        const committed = options.ledger.commit(runId, reservationId, {
+          requestCount: 1,
+          tokens: usage.inputTokens + usage.outputTokens,
+          costMicros: usage.costMicros,
+        });
+        if (!committed.ok) {
+          options.ledger.refund(runId, reservationId);
+          return refusal(committed.code, committed.reason, usage, null);
+        }
+        return Object.freeze({
+          ok: true as const,
+          response: outcome.response,
+          // The RAW body is a provider-authored diagnostic surface: a
+          // provider can quote the credential it was given straight back
+          // into it, so it is masked before it reaches the worker-facing
+          // surface (#1149 composition — configured values first, then the
+          // generic credential-shape heuristics).
+          raw: maskProviderBody(outcome.raw, secrets),
+          usage,
+        });
+      }
+      options.ledger.refund(runId, reservationId);
+      return Object.freeze({
+        ok: false as const,
+        code: "transport_failure",
+        reason: `model request failed (${outcome.failure.kind})`,
+        usage: attemptRecord(input, now()),
+        // The preserved non-2xx body is provider-authored too: masked.
+        transportFailure: maskTransportFailure(outcome.failure, secrets),
+      });
+    } catch (error) {
+      // A committed row refuses the refund safely, so this can never
+      // double-credit a settled reservation.
+      options.ledger.refund(runId, reservationId);
+      return refusal(
+        "gateway_error",
+        "the gateway's transport or credential seam threw an unexpected error",
+        null,
+        null,
+      );
+    }
+  }
 }
 
 function refusal(
