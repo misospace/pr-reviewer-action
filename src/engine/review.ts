@@ -20,7 +20,11 @@ import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, ren
 import { loopContextLimits, type HarnessDeps } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
-import { describeTransportFailure } from "../transport/http.js";
+import {
+  describeTransportFailure,
+  endpointUrlCredentialOrEmpty,
+  redactEndpointUrlCredential,
+} from "../transport/http.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
 import type { TerminalProviderReason } from "../transport/terminal.js";
 import { withCancellationSignal, type FetchLike } from "../platform/http.js";
@@ -2150,6 +2154,7 @@ secrets: [profiles.primary.apiKey],
     // must not ride to the scorer either.
     const confidenceSecrets = [
       confidenceProfile.apiKey,
+      endpointUrlCredentialOrEmpty(confidenceProfile.baseUrl),
       profiles.primary.apiKey,
       profiles.smart.apiKey,
       profiles.fallback.apiKey,
@@ -3066,7 +3071,7 @@ async function callTier(
     const wireFormat = effectiveWireResponseFormat(profile.apiFormat, profile.responseFormat, profile.anthropicStructuredOutputSupported);
     const formatNote = wireFormat === "json_schema" && profile.apiFormat === "anthropic" && stripped === undefined ? ", format=json_schema" : "";
     const raisedNote = outcome.budgetRaisedTo !== undefined ? ` (completion budget raised to ${outcome.budgetRaisedTo} after a token-cap failure)` : "";
-    log(`${profile.label} model attempt ${outcome.attempts}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote}${formatNote})${raisedNote}`);
+    log(`${profile.label} model attempt ${outcome.attempts}: ${profile.model} @ ${redactEndpointUrlCredential(profile.baseUrl)} (${profile.apiFormat}${effortNote}${formatNote})${raisedNote}`);
     const parsed = parseVerdictResponse(outcome.rawResponse, knownSecrets);
     // Deliberately NOT masked here: the parsed verdict is the review's own
     // content, and its structural fields (severity/category/file/line) drive
@@ -3186,7 +3191,15 @@ function configuredExtraHeaderValues(env: StageEnv): string[] {
  * there the summary). Both reuse parses now go through this one helper, so a
  * value the writing lane masked is never unmasked by a later re-parse. */
 export function configuredKnownSecrets(env: StageEnv, profiles: TierProfiles): string[] {
-  return [...new Set([...configuredApiKeys(env.AI_API_KEY, profiles), ...configuredExtraHeaderValues(env)])]
+  // #1428: a credential the endpoint URL carries in its userinfo is a
+  // configured credential too — masked wherever the configured-value mask
+  // set is applied (the raw URL itself is structurally redacted at the
+  // interpolation sites via `redactEndpointUrlCredential`; this value mask
+  // is the defense-in-depth layer for a decoded echo).
+  const urlCredentials = [profiles.primary.baseUrl, profiles.smart.baseUrl, profiles.fallback.baseUrl]
+    .map((baseUrl) => endpointUrlCredentialOrEmpty(baseUrl))
+    .filter((credential) => credential !== "");
+  return [...new Set([...configuredApiKeys(env.AI_API_KEY, profiles), ...configuredExtraHeaderValues(env), ...urlCredentials])]
     .sort((a, b) => b.length - a.length);
 }
 
@@ -3294,8 +3307,8 @@ async function producePrimaryReview(input: ReviewCallInput & {
   // enum-only, so the mask is belt-and-braces. The fallback keeps its own
   // independent profile and credentials either way.
   errorLog(primary.terminal !== undefined
-    ? `${firstProfile.label}: terminal=${primary.terminal}; bypassing retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`
-    : maskKnownSecrets(`${firstProfile.label} model unavailable after ${primary.attempts ?? "?"} attempt(s) in ${primary.elapsedSec ?? "?"}s (last failure: ${primary.lastFailure ?? "unknown"}); trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`, configuredKnownSecrets(env, profiles)));
+    ? `${firstProfile.label}: terminal=${primary.terminal}; bypassing retries; trying fallback: ${profiles.fallback.model} @ ${redactEndpointUrlCredential(profiles.fallback.baseUrl)} (${profiles.fallback.apiFormat})`
+    : maskKnownSecrets(`${firstProfile.label} model unavailable after ${primary.attempts ?? "?"} attempt(s) in ${primary.elapsedSec ?? "?"}s (last failure: ${primary.lastFailure ?? "unknown"}); trying fallback: ${profiles.fallback.model} @ ${redactEndpointUrlCredential(profiles.fallback.baseUrl)} (${profiles.fallback.apiFormat})`, configuredKnownSecrets(env, profiles)));
   // #368: the fallback re-truncates the initial corpus. #940: the bound is
   // the declared fallback capacity — the fallback window can be smaller
   // than the primary tier's — never above the historical 120000-byte

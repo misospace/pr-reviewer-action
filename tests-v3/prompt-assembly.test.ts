@@ -15,6 +15,7 @@ import {
   applySpecialistLeadsFragment,
   applySupersededDiscussionFragment,
   applySystemPromptFragments,
+  analysisEngineBase,
   SUPERSEDED_DISCUSSION_GUIDANCE,
   buildUserMessage,
   handleModelFailure,
@@ -232,6 +233,13 @@ test("publicAnalysisEngine strips the base URL but keeps model, format, and rout
     assert.equal(publicAnalysisEngine(engine), expected);
   }
   assert.equal(publicAnalysisEngine(MODEL_UNAVAILABLE_ENGINE), MODEL_UNAVAILABLE_ENGINE);
+});
+
+test("analysisEngineBase redacts a credential the base URL carries in its userinfo (#1428)", () => {
+  assert.equal(analysisEngineBase("m", "https://user:secret@llm.example.net/v1", "openai"), "m@https://llm.example.net/v1 (openai)");
+  assert.equal(analysisEngineBase("m", "https://llm.example.net/v1", "openai"), "m@https://llm.example.net/v1 (openai)");
+  // The published strip (#832) still removes the URL token after redaction.
+  assert.equal(publicAnalysisEngine(analysisEngineBase("m", "https://user:secret@llm.example.net/v1", "openai")), "m (openai)");
 });
 
 test("harness fallback strips placeholders from the bundled default when no prompt is assembled", () => {

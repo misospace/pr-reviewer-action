@@ -1023,6 +1023,23 @@ test("#1094: configuredKnownSecrets merges API keys + every configured header VA
   assert.ok(thrown.includes(KNOWN_SECRET_REDACTED), thrown);
 });
 
+test("#1428: configuredKnownSecrets includes the credential an endpoint URL carries in its userinfo", () => {
+  // A URL credential is a configured credential too: the mask set that backs
+  // the fallback-recovery line and the persisted re-parse must mask a decoded
+  // echo of it, not just the raw URL (which the interpolation sites redact
+  // structurally). A hostile URL shape contributes nothing and never throws.
+  const env = { AI_API_KEY: "sk-route-key" };
+  const profiles = {
+    primary: { apiKey: "", baseUrl: "https://primary-user:primary-pass@llm.example/v1" },
+    smart: { apiKey: "", baseUrl: "https://llm.example/v1" },
+    fallback: { apiKey: "", baseUrl: "https://llm.example/pa@ss/v1" },
+  } as never;
+  const knownSecrets = configuredKnownSecrets(env as never, profiles);
+  assert.ok(knownSecrets.includes("primary-user:primary-pass"), "the URL credential must be a known secret");
+  assert.ok(!knownSecrets.some((s) => s.includes("@")), "no URL ever enters the mask set, only its credential value");
+  assert.ok(knownSecrets.includes("sk-route-key"), "the route-bound key is still masked");
+});
+
 test("#1094: a canary embedded in the native-loop verdict CONTENT fails closed — no artifact, log, or summary ever carries it", async () => {
   // #252 boundary, blocker direction of review round 3: the completion
   // CONTENT is the one provider-controlled field the accepted-path projection

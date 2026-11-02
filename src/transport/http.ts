@@ -330,6 +330,32 @@ export function endpointUrlCredential(baseUrl: string): string {
   return splitEndpointUserinfo(baseUrl.trim().replace(/\/+$/, "")).credential;
 }
 
+/** The URL credential as a masking VALUE, `""` when the URL carries none or
+ * its shape cannot be attributed (#1428). The hostile fail-closed shapes are
+ * owned by the structural redaction below, never echoed as a value. */
+export function endpointUrlCredentialOrEmpty(baseUrl: string): string {
+  try {
+    return endpointUrlCredential(baseUrl);
+  } catch {
+    return "";
+  }
+}
+
+/** The endpoint URL as a diagnostic may carry it (#1428): any credential the
+ * URL holds in its userinfo is structurally removed, so interpolating a
+ * resolved base URL into a log line or persisted artifact can never echo the
+ * credential. A credential-free URL passes through byte-for-byte; a URL whose
+ * credential cannot be attributed is replaced wholesale (fail closed — a
+ * shape the transport would refuse is never echoed either). */
+export function redactEndpointUrlCredential(baseUrl: string): string {
+  try {
+    const stripped = splitEndpointUserinfo(baseUrl.trim().replace(/\/+$/, ""));
+    return stripped.credential === "" ? baseUrl : stripped.base;
+  } catch {
+    return "<redacted endpoint URL>";
+  }
+}
+
 export function resolveEndpointChannel(baseUrl: string, apiFormat: ApiFormat): ResolvedEndpointChannel {
   const stripped = splitEndpointUserinfo(baseUrl.trim().replace(/\/+$/, ""));
   const path = apiFormat === "anthropic" ? "/messages" : "/chat/completions";

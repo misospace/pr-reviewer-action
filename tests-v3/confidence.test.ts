@@ -2227,3 +2227,58 @@ test("#1428: a fail-closed hostile endpoint URL shape disables the scorer, never
   assert.equal(resolved.profile.enabled, false);
   assert.ok(resolved.warnings.some((w) => w.includes("cannot be used as a request target")));
 });
+
+test("#1428: a URL-credentialed distinct endpoint reaches the transport with HTTP Basic and no key", async () => {
+  // The resolver enables this lane (#1428), so the scorer's own
+  // missing-credential boundary must accept a URL credential as the lane's
+  // credential — the Basic request goes out and nothing else carries it.
+  const seenTargets: string[] = [];
+  const server = await startMockServer((req, _body, res) => {
+    seenTargets.push(`${req.method} ${req.url}`);
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(okOpenAiResponse('{"score": 4, "risk": "low", "reason": "thorough"}')));
+  });
+  try {
+    const credentialedUrl = `${server.url.replace("://", "://scorer-user:scorer-pass@")}/v1`;
+    const outcome = await runConfidenceScorer({
+      profile: profile({ apiKey: "", inheritedTransport: false, baseUrl: credentialedUrl, credentialSource: "own" }),
+      primaryApiKey: "primary-key-ABC",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(outcome.result.status, "scored");
+    assert.equal(outcome.result.score, 4);
+    const captured = server.requests.at(-1)!;
+    assert.equal(
+      captured.headers.authorization,
+      `Basic ${Buffer.from("scorer-user:scorer-pass", "utf8").toString("base64")}`,
+      "the URL credential must ride the Authorization header as HTTP Basic",
+    );
+    assert.deepEqual(seenTargets, ["POST /v1/chat/completions"], "the credential must not ride the request target");
+    assert.ok(!JSON.stringify(outcome).includes("scorer-pass"), "the URL credential leaked into the scorer outcome");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1428: a hostile endpoint URL shape fails closed at the scorer's credential boundary", async () => {
+  // The boundary trusts no upstream wiring: a URL whose credential cannot
+  // be attributed is NOT accepted as credentialed — a non-loopback distinct
+  // endpoint with an empty key is still refused before any transport call.
+  let called = false;
+  const outcome = await runConfidenceScorer({
+    profile: profile({ apiKey: "", inheritedTransport: false, baseUrl: "https://scorer.example/pa@ss/v1", credentialSource: "own" }),
+    primaryApiKey: "primary-key-ABC",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async () => { called = true; throw new Error("should not be called"); },
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(outcome.result.status, "unscored");
+  assert.equal(outcome.result.cause, "missing_credential");
+  assert.equal(called, false);
+});

@@ -25,6 +25,7 @@ import { completionOverran, extractResponseText, extractResponseUsage, mergeUsag
 import { renderSpecialistLeadsSection } from "./render.js";
 import { containsKnownSecret, maskDiagnostic, maskKnownSecrets, redactText, redactTextDeep } from "../context/redact.js";
 import { callKnownSecrets } from "../transport/headers.js";
+import { redactEndpointUrlCredential } from "../transport/http.js";
 import type { TerminalProviderReason } from "../transport/terminal.js";
 import { pyStr } from "../platform/py.js";
 import type { SpecialistRoleModel, SpecialistModelSource } from "../routing/tiers.js";
@@ -1565,7 +1566,7 @@ export async function runSpecialists(input: SpecialistRunInput): Promise<Special
     request_count: meter.count,
     request_bytes: meter.bytes,
     usage_totals: meter.usage,
-    model: `${config.model}@${config.baseUrl} (${config.apiFormat})`,
+    model: `${config.model}@${redactEndpointUrlCredential(config.baseUrl)} (${config.apiFormat})`,
     ...(input.roleModels !== undefined ? { specialist_overrides: true } : {}),
     aggregate_elapsed_sec: Math.round(aggregateElapsed * 1000) / 1000,
     specialist_corpus_bytes: input.corpusBytes,

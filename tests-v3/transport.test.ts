@@ -5,6 +5,8 @@ import {
   resolveEndpoint,
   resolveEndpointChannel,
   endpointUrlCredential,
+  endpointUrlCredentialOrEmpty,
+  redactEndpointUrlCredential,
   assertSingleCredentialChannel,
   CREDENTIAL_CHANNEL_CONFLICT_MESSAGE,
   TransportFailure,
@@ -323,6 +325,22 @@ test("#1428: endpoint userinfo resolves fail-closed, and credential-free endpoin
   assert.throws(() => assertSingleCredentialChannel("user:pass", "sk-key"), /one request carries one credential/);
   assert.doesNotThrow(() => assertSingleCredentialChannel("user:pass", ""));
   assert.doesNotThrow(() => assertSingleCredentialChannel("", "sk-key"));
+});
+
+test("#1428: the diagnostic redaction of a credential-bearing endpoint URL is structural and fail-closed", () => {
+  // The credential leaves the URL exactly as the resolver removes it from
+  // the request target — scheme, host, port, and path survive.
+  assert.equal(redactEndpointUrlCredential("https://user:pass@host:8443/v1"), "https://host:8443/v1");
+  assert.equal(redactEndpointUrlCredential("https://user:pa%2Fss@host/v1"), "https://host/v1");
+  // A credential-free URL passes through byte-for-byte.
+  assert.equal(redactEndpointUrlCredential("https://host/v1"), "https://host/v1");
+  // Fail closed: a URL whose credential cannot be attributed is replaced
+  // wholesale, never echoed in any form.
+  assert.equal(redactEndpointUrlCredential("https://host/pa@ss/v1"), "<redacted endpoint URL>");
+  // The masking-value helper never throws and never echoes a hostile shape.
+  assert.equal(endpointUrlCredentialOrEmpty("https://u:p@host/v1"), "u:p");
+  assert.equal(endpointUrlCredentialOrEmpty("https://host/v1"), "");
+  assert.equal(endpointUrlCredentialOrEmpty("https://host/pa@ss/v1"), "");
 });
 
 test("#1037: configured extra-header VALUES are credentials too — only the wire headers, never the URL, body, or a secret-aware failure detail", async () => {
