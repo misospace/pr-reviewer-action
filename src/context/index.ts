@@ -15,6 +15,14 @@ export {
   parsePrefixes,
 } from "../precheck/linear.js";
 export {
+  buildReReviewScopeMd,
+  computeReReviewDelta,
+  MAX_DELTA_COMMITS,
+  MAX_DELTA_FILES,
+  type DeltaCommit,
+  type ReReviewScopeDelta,
+} from "./rereview-scope.js";
+export {
   MAX_LINKED_ISSUES,
   extractLinkedIssueRefs,
   labelsOf,

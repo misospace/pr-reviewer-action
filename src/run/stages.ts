@@ -596,6 +596,7 @@ export function assembleCorpus(
       evidenceProvidersMd: ws.read("evidence-providers.md"),
       imageDigestContextMd: ws.read("image-digest-context.md"),
       dependencyCoverageMd: ws.read("dependency-coverage.md"),
+      reReviewScopeMd: ws.read("re-review-scope.md"),
       linkedSourcesMd: ws.read("linked-sources.md"),
       repoImpactTruncatedMd: ws.read("repo-impact.truncated.md"),
       repoHistoryTruncatedMd: ws.read("repo-history.truncated.md"),
