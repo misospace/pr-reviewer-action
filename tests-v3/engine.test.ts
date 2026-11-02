@@ -224,9 +224,10 @@ test("#1380: the claim pre-pass gate is a pass-through outside dependency mode",
 });
 
 test("#1388: resolveReviewObligations stamps a cause on unresolved rows only — an unmet row is resolved negatively", async () => {
-  // dependency_upgrade classifies with exactly two must_check rows; the
+  // dependency_upgrade classifies with five must_check rows — the two
+  // family checks plus the three #1379 dependency-evidence obligations; the
   // scripted verdict dispositions one `unmet` (exact text echo, grounded
-  // rationale) and leaves the other undisposed.
+  // rationale) and leaves the other four undisposed.
   const unmetCheck = "check for breaking API changes in updated dependencies";
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -258,12 +259,15 @@ test("#1388: resolveReviewObligations stamps a cause on unresolved rows only —
     assert.deepEqual(persisted.obligations.map((row) => [row.text, row.status, row.cause]), [
       [unmetCheck, "unmet", null],
       ["run full test suite after upgrade", "unresolved", "tool-capability"],
+      ["establish upstream provenance for the updated dependency: publisher and canonical source repository", "unresolved", "tool-capability"],
+      ["inspect the exact old→new upstream release delta for the updated dependency", "unresolved", "tool-capability"],
+      ["check upstream security advisories for the updated dependency version range, or report the advisory check as not performed", "unresolved", "tool-capability"],
     ]);
     // The one-line log is honest about the three states and lists every
     // not-clean id.
     const obligationLog = logLines.find((line) => line.includes("Review obligations:"));
     assert.ok(obligationLog);
-    assert.match(obligationLog!, /Review obligations: 2 total, 0 satisfied, 1 unmet, 1 unresolved \(obligation-1=unmet, obligation-2=unresolved\)/);
+    assert.match(obligationLog!, /Review obligations: 5 total, 0 satisfied, 1 unmet, 4 unresolved \(obligation-1=unmet, obligation-2=unresolved, obligation-3=unresolved, obligation-4=unresolved, obligation-5=unresolved\)/);
   } finally {
     await server.close();
     f.cleanup();

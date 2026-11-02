@@ -34,6 +34,11 @@ function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
     peakConversationTokens: 0,
     requiredEvidenceRequestsHint: 0,
     requiredEvidenceRefusals: 0,
+    requiredEvidenceRequired: 0,
+    requiredEvidenceCredits: [],
+    requiredEvidenceAttempts: 0,
+    requiredEvidenceWindowAttempts: 0,
+    requiredEvidenceReleased: false,
     ...overrides,
   };
 }
