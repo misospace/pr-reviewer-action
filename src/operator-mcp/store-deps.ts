@@ -199,7 +199,17 @@ export function buildStoreBackedMcpDeps(input: StoreBackedMcpInput): ControllerM
         if (job.jobId !== cursor.jobId) continue;
         passed = true;
       }
-      if (scanned >= MAX_MCP_LIST_JOBS_SCANNED) break;
+      if (scanned >= MAX_MCP_LIST_JOBS_SCANNED) {
+        // Job-scan ceiling reached with this matching record UNscanned: the
+        // page ends here but repository history is not exhausted. Hand back
+        // a resumable cursor at the first unscanned job so later findings
+        // stay reachable — the per-call ceiling is preserved, not widened,
+        // and the next call resumes exactly here (offset 0: every scanned
+        // job above was fully considered, so nothing is skipped or
+        // duplicated across the boundary).
+        nextCursor = encodeCursor(job.jobId, 0);
+        break;
+      }
       scanned += 1;
       const publication = await getPublication(job.jobId);
       if (publication === null) continue;
@@ -235,8 +245,11 @@ export function buildStoreBackedMcpDeps(input: StoreBackedMcpInput): ControllerM
   };
 
   const getReviewPolicy: ControllerMcpDeps["getReviewPolicy"] = async (query) => {
-    let platform: McpPlatform | undefined = query.platform;
-    let repository: string | undefined = query.repository;
+    // Run-addressed read (#1399): the run's OWN historical policy identity,
+    // never the repository's current adoption state. The run record is the
+    // only authority for what applied to that review; current adoption
+    // metadata (epoch, enablement, timestamps) is not historical provenance
+    // and stays explicitly absent rather than substituted.
     if (query.runId !== undefined) {
       let run = null;
       try {
@@ -247,8 +260,8 @@ export function buildStoreBackedMcpDeps(input: StoreBackedMcpInput): ControllerM
       if (run === null) return null;
       const join = queueJoinForJob(run.jobId);
       if (join === null) return null;
-      platform = join.job.platform as McpPlatform;
-      repository = join.job.repoFullName;
+      const platform = join.job.platform as McpPlatform;
+      const repository = join.job.repoFullName;
       // Identity-addressed read: the seam decides, and a thrown authorize
       // is a refusal (null), never a permission.
       try {
@@ -256,7 +269,24 @@ export function buildStoreBackedMcpDeps(input: StoreBackedMcpInput): ControllerM
       } catch {
         return null;
       }
+      const view: McpPolicyView = {
+        platform,
+        repository,
+        // An empty run fingerprint is unavailable, not substitutable: omit
+        // it rather than presenting the current adoption's fingerprint.
+        ...(run.configFingerprint === "" ? {} : { configFingerprint: run.configFingerprint }),
+        // The adopted record carries fingerprints, not config material; the
+        // trusted-source REFERENCE lives in the operator's installation
+        // config (#727), which neither record form joins — it stays honestly
+        // empty rather than inventing a reference.
+        configRef: "",
+        provenance: "historical run record",
+      };
+      return view;
     }
+    // Repository-addressed read: the CURRENT adoption state.
+    const platform = query.platform;
+    const repository = query.repository;
     if (platform === undefined || repository === undefined) return null;
     let adopted: StateExport["adoptedRepositories"][number] | null;
     try {
@@ -274,10 +304,6 @@ export function buildStoreBackedMcpDeps(input: StoreBackedMcpInput): ControllerM
       enabled: adopted.enabled,
       adoptedAtMs: adopted.adoptedAtMs,
       updatedAtMs: adopted.updatedAtMs,
-      // The adopted record carries fingerprints, not config material; the
-      // trusted-source REFERENCE lives in the operator's installation
-      // config (#727), which this adapter does not join — it stays honestly
-      // empty rather than inventing a reference.
       configRef: "",
       provenance: "control-plane adoption record",
     };

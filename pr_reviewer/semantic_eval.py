@@ -789,6 +789,17 @@ def _fixture_integrity_cache_key(fixture: dict[str, Any]) -> str | None:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _fixture_git_binary() -> str:
+    """Fixture-validation git binary.
+
+    Mirrors the offline runner's `_resolve_node` contract (#845): the
+    credential-free environment carries no PATH-resolvable tools, only
+    explicit, already-resolved binaries, so `PR_REVIEWER_GIT` names the git
+    executable without extending the bare PATH lookup to it. Falls back to a
+    bare `git` lookup for ordinary environments."""
+    return os.environ.get("PR_REVIEWER_GIT") or "git"
+
+
 def validate_semantic_fixture_integrity(fixture: dict[str, Any]) -> None:
     cache_key = _fixture_integrity_cache_key(fixture)
     if cache_key is not None and cache_key in _FIXTURE_INTEGRITY_VERIFIED:
@@ -817,18 +828,19 @@ def validate_semantic_fixture_integrity(fixture: dict[str, Any]) -> None:
     with _fixture_directory() as directory:
         repo = Path(directory)
         env = _fixture_git_env()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True, env=env)
-        subprocess.run(["git", "-C", str(repo), "config", "user.email", "eval@test"], check=True, capture_output=True, env=env)
-        subprocess.run(["git", "-C", str(repo), "config", "user.name", "semantic-eval"], check=True, capture_output=True, env=env)
+        git = _fixture_git_binary()
+        subprocess.run([git, "init", "-q", str(repo)], check=True, capture_output=True, env=env)
+        subprocess.run([git, "-C", str(repo), "config", "user.email", "eval@test"], check=True, capture_output=True, env=env)
+        subprocess.run([git, "-C", str(repo), "config", "user.name", "semantic-eval"], check=True, capture_output=True, env=env)
         for relative_name, content in expected.items():
             destination = repo / relative_name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(content)
-        subprocess.run(["git", "-C", str(repo), "add", "--all"], check=True, capture_output=True, env=env)
-        subprocess.run(["git", "-C", str(repo), "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-q", "-m", "fixture-head"], check=True, capture_output=True, env=env)
+        subprocess.run([git, "-C", str(repo), "add", "--all"], check=True, capture_output=True, env=env)
+        subprocess.run([git, "-C", str(repo), "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-q", "-m", "fixture-head"], check=True, capture_output=True, env=env)
 
         result = subprocess.run(
-            ["git", "-C", str(repo), "apply", "--check", "--reverse"],
+            [git, "-C", str(repo), "apply", "--check", "--reverse"],
             input=diff.encode("utf-8"), capture_output=True, env=env,
         )
         if result.returncode != 0:
@@ -837,21 +849,21 @@ def validate_semantic_fixture_integrity(fixture: dict[str, Any]) -> None:
                 + result.stderr.decode("utf-8", errors="replace").strip()
             )
         subprocess.run(
-            ["git", "-C", str(repo), "apply", "--reverse"],
+            [git, "-C", str(repo), "apply", "--reverse"],
             input=diff.encode("utf-8"), check=True, capture_output=True, env=env,
         )
         subprocess.run(
-            ["git", "-C", str(repo), "apply", "--check"],
+            [git, "-C", str(repo), "apply", "--check"],
             input=diff.encode("utf-8"), check=True, capture_output=True, env=env,
         )
         subprocess.run(
-            ["git", "-C", str(repo), "apply"],
+            [git, "-C", str(repo), "apply"],
             input=diff.encode("utf-8"), check=True, capture_output=True, env=env,
         )
         actual_paths = {
             path.decode("utf-8")
             for path in subprocess.run(
-                ["git", "-C", str(repo), "ls-files", "-z"], check=True, capture_output=True, env=env,
+                [git, "-C", str(repo), "ls-files", "-z"], check=True, capture_output=True, env=env,
             ).stdout.split(b"\0")
             if path
         }

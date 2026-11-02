@@ -11,6 +11,7 @@ import { validateAdoptedRepository, validatePublication, type PublicationRecord,
 import { newJobRecord, type JobRecord } from "../src/queue/types.js";
 import type { ReviewJob } from "../src/jobs/types.js";
 import type { ControllerMcpDeps, McpAuditEvent, McpFindingView, McpMetrics } from "../src/operator-mcp/types.js";
+import { MAX_MCP_LIST_JOBS_SCANNED } from "../src/operator-mcp/types.js";
 
 const NO_METRICS: McpMetrics = { request: () => undefined, authFailure: () => undefined, auditFailure: () => undefined };
 
@@ -92,8 +93,19 @@ function seedStore(options: { adopted?: Array<{ platform: "github" | "forgejo"; 
   return store;
 }
 
-function seededRun(store: InMemoryControlPlaneStore): RunRecord {
-  const run = newRunRecord({ runId: "run-1", jobId: "job-github-1", kind: "review", executorIdentity: "local:v1", headSha: "aaaa1111bbbb2222cccc3333dddd4444eeee5555", configFingerprint: "aaaaaaaaaaaaaaaa", attempt: 1 }, 1000);
+function seededRun(store: InMemoryControlPlaneStore, overrides: { configFingerprint?: string } = {}): RunRecord {
+  const run = newRunRecord(
+    {
+      runId: "run-1",
+      jobId: "job-github-1",
+      kind: "review",
+      executorIdentity: "local:v1",
+      headSha: "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+      configFingerprint: overrides.configFingerprint ?? "aaaaaaaaaaaaaaaa",
+      attempt: 1,
+    },
+    1000,
+  );
   void store.apply([{ kind: "create-run", record: run }]);
   return run;
 }
@@ -281,6 +293,113 @@ test("store-backed adapter applies severity, category, and path filters", async 
   assert.deepEqual(none.findings, []);
 });
 
+test("list_findings returns a resumable cursor at the job-scan ceiling (#1398)", async () => {
+  const store = seedStore();
+  const jobCount = MAX_MCP_LIST_JOBS_SCANNED + 1;
+  const jobs = Array.from({ length: jobCount }, (_, index) =>
+    reviewJob({ jobId: `job-${index}`, runId: `run-${index}`, prNumber: 100 + index }));
+  // Only the LAST job carries a publication: every job before the ceiling
+  // is a missing-publication job, and the sole matching finding lives
+  // beyond the first MAX_MCP_LIST_JOBS_SCANNED scanned jobs.
+  void store.apply([{ kind: "put-publication", record: publication(`job-${jobCount - 1}`, reviewPayload([
+    { path: "src/late.ts", line: 7, severity: "blocker", category: "correctness", message: "beyond the ceiling" },
+  ])) }]);
+  const deps = buildStoreBackedMcpDeps({ controlPlane: store, queue: queueWith(...jobs) });
+  const first = await deps.listFindings({ platform: "github", repository: "octo/widget", limit: 25 });
+  // Zero matches in the ceiling-bounded page, but history is NOT reported
+  // exhausted: a continuation cursor resumes at the first unscanned job.
+  assert.deepEqual(first.findings, []);
+  assert.ok(first.nextCursor);
+  const second = await deps.listFindings({ platform: "github", repository: "octo/widget", limit: 25, cursor: first.nextCursor! });
+  assert.equal(second.findings.length, 1);
+  assert.equal(second.findings[0]!.path, "src/late.ts");
+  assert.equal(second.findings[0]!.jobId, `job-${jobCount - 1}`);
+  // The repository history is exhausted: no further cursor.
+  assert.equal(second.nextCursor, undefined);
+});
+
+test("a page that exhausts exactly at the job-scan ceiling emits no cursor", async () => {
+  const store = seedStore();
+  const jobs = Array.from({ length: MAX_MCP_LIST_JOBS_SCANNED }, (_, index) =>
+    reviewJob({ jobId: `job-${index}`, runId: `run-${index}`, prNumber: 100 + index }));
+  const deps = buildStoreBackedMcpDeps({ controlPlane: store, queue: queueWith(...jobs) });
+  const page = await deps.listFindings({ platform: "github", repository: "octo/widget", limit: 25 });
+  assert.deepEqual(page.findings, []);
+  assert.equal(page.nextCursor, undefined);
+});
+
+test("filtered pages resume across the job-scan ceiling without loops, skips, or duplicates", async () => {
+  const store = seedStore();
+  const jobCount = MAX_MCP_LIST_JOBS_SCANNED + 2;
+  const jobs = Array.from({ length: jobCount }, (_, index) =>
+    reviewJob({ jobId: `job-${index}`, runId: `run-${index}`, prNumber: 100 + index }));
+  void store.apply([
+    { kind: "put-publication", record: publication(`job-${jobCount - 2}`, reviewPayload([
+      { path: "src/a.ts", line: 1, severity: "blocker", category: "security", message: "first" },
+      { path: "src/b.ts", line: 2, severity: "minor", category: "style", message: "noise" },
+    ])) },
+    { kind: "put-publication", record: publication(`job-${jobCount - 1}`, reviewPayload([
+      { path: "src/c.ts", line: 3, severity: "blocker", category: "security", message: "second" },
+    ])) },
+  ]);
+  const deps = buildStoreBackedMcpDeps({ controlPlane: store, queue: queueWith(...jobs) });
+  const seen: string[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  for (;;) {
+    const page = await deps.listFindings({ platform: "github", repository: "octo/widget", severity: "blocker", limit: 25, ...(cursor === undefined ? {} : { cursor }) });
+    pages += 1;
+    for (const finding of page.findings) seen.push(finding.message);
+    cursor = page.nextCursor;
+    if (cursor === undefined) break;
+    assert.ok(pages < 10, "pagination must terminate");
+  }
+  // Page 1 scans the ceiling (zero matches, cursor at job-500); page 2
+  // resumes there, emits only the blocker (the minor finding is filtered),
+  // continues through the last job, and exhausts.
+  assert.equal(pages, 2);
+  assert.deepEqual(seen, ["first", "second"]);
+});
+
+test("a limit-cursor page composes with a following ceiling-cursor page", async () => {
+  const store = seedStore();
+  const jobCount = MAX_MCP_LIST_JOBS_SCANNED + 2;
+  const jobs = Array.from({ length: jobCount }, (_, index) =>
+    reviewJob({ jobId: `job-${index}`, runId: `run-${index}`, prNumber: 100 + index }));
+  void store.apply([
+    // Early job with three findings: only two fit the first page, so page 1
+    // ends on a LIMIT cursor (job-1 offset 2).
+    { kind: "put-publication", record: publication("job-1", reviewPayload([
+      { path: "src/a.ts", line: 1, severity: "blocker", category: "security", message: "one" },
+      { path: "src/b.ts", line: 2, severity: "blocker", category: "security", message: "two" },
+      { path: "src/c.ts", line: 3, severity: "blocker", category: "security", message: "three" },
+    ])) },
+    // Beyond the ceiling: reachable only through the resume chain.
+    { kind: "put-publication", record: publication(`job-${jobCount - 1}`, reviewPayload([
+      { path: "src/d.ts", line: 4, severity: "blocker", category: "security", message: "four" },
+    ])) },
+  ]);
+  const deps = buildStoreBackedMcpDeps({ controlPlane: store, queue: queueWith(...jobs) });
+  const seen: string[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  for (;;) {
+    const page = await deps.listFindings({ platform: "github", repository: "octo/widget", limit: 2, ...(cursor === undefined ? {} : { cursor }) });
+    pages += 1;
+    for (const finding of page.findings) seen.push(finding.message);
+    cursor = page.nextCursor;
+    if (cursor === undefined) break;
+    assert.ok(pages < 10, "pagination must terminate");
+  }
+  // Page 1 ends on the LIMIT cursor (job-1 offset 2); page 2 emits the
+  // withheld offset-2 finding, scans job-2..job-500 (the ceiling), and ends
+  // on the CEILING cursor (job-501 offset 0); page 3 emits the
+  // beyond-ceiling finding and exhausts. No finding is skipped or repeated
+  // across the two cursor kinds.
+  assert.equal(pages, 3);
+  assert.deepEqual(seen, ["one", "two", "three", "four"]);
+});
+
 test("list_findings denies a repository the authorize seam refuses, with audit and no data", async () => {
   const store = seedStore();
   seededRun(store);
@@ -355,6 +474,17 @@ test("get_review_policy exposes fingerprints and provenance without config mater
   }
   const byRun = await callMcpTool({ deps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { run_id: "run-1" });
   assert.ok(byRun.ok);
+  if (byRun.ok) {
+    const policy = (byRun.data as { policy: Record<string, unknown> }).policy;
+    assert.equal(policy.provenance, "historical run record");
+    assert.equal(policy.configFingerprint, "aaaaaaaaaaaaaaaa");
+    // Current adoption metadata is not historical provenance: the run form
+    // omits it instead of presenting the live adoption record.
+    assert.ok(!("adoptionEpoch" in policy));
+    assert.ok(!("enabled" in policy));
+    assert.ok(!("adoptedAtMs" in policy));
+    assert.ok(!("updatedAtMs" in policy));
+  }
   const absent = await callMcpTool({ deps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { run_id: "absent" });
   assert.equal(absent.ok, false);
   // A disabled adoption is still readable metadata (policy state, not data).
@@ -363,6 +493,66 @@ test("get_review_policy exposes fingerprints and provenance without config mater
   const disabled = await callMcpTool({ deps: disabledDeps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { platform: "github", repository: "octo/widget" });
   assert.ok(disabled.ok);
   if (disabled.ok) assert.equal((disabled.data as { policy: { enabled: boolean } }).policy.enabled, false);
+});
+
+test("run-addressed policy read retains the run's historical fingerprint after adoption changes (#1399)", async () => {
+  const store = seedStore();
+  seededRun(store, { configFingerprint: "1111111111111111" });
+  // The operator re-adopts the repository under NEW configuration after the
+  // run completed; the historical answer must not become the new one.
+  const reAdopted = validateAdoptedRepository({
+    platform: "github",
+    installationId: "1",
+    repoFullName: "octo/widget",
+    adoptionEpoch: "epoch-2",
+    configFingerprint: "2222222222222222",
+    headFingerprint: "",
+    enabled: true,
+    adoptedAtMs: 2000,
+    updatedAtMs: 2000,
+  });
+  assert.ok(reAdopted, "re-adoption fixture must validate");
+  void store.apply([{ kind: "put-adopted-repository", record: reAdopted }]);
+  const deps = buildStoreBackedMcpDeps({ controlPlane: store, queue: queueWith(reviewJob()) });
+  const byRun = await callMcpTool({ deps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { run_id: "run-1" });
+  assert.ok(byRun.ok);
+  if (byRun.ok) {
+    const policy = (byRun.data as { policy: Record<string, unknown> }).policy;
+    assert.equal(policy.configFingerprint, "1111111111111111");
+    assert.equal(policy.provenance, "historical run record");
+    assert.equal(policy.platform, "github");
+    assert.equal(policy.repository, "octo/widget");
+  }
+  // The repository form still describes the CURRENT adoption state.
+  const byRepository = await callMcpTool({ deps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { platform: "github", repository: "octo/widget" });
+  assert.ok(byRepository.ok);
+  if (byRepository.ok) {
+    const policy = (byRepository.data as { policy: Record<string, unknown> }).policy;
+    assert.equal(policy.configFingerprint, "2222222222222222");
+    assert.equal(policy.adoptionEpoch, "epoch-2");
+    assert.equal(policy.provenance, "control-plane adoption record");
+  }
+  // A run recorded with no fingerprint reports the fingerprint as
+  // explicitly unavailable, never substituted from current adoption.
+  const unrecorded = newRunRecord(
+    { runId: "run-2", jobId: "job-github-1", kind: "review", executorIdentity: "local:v1", headSha: "aaaa1111bbbb2222cccc3333dddd4444eeee5555", configFingerprint: "", attempt: 1 },
+    1500,
+  );
+  void store.apply([{ kind: "create-run", record: unrecorded }]);
+  const blankRun = await callMcpTool({ deps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { run_id: "run-2" });
+  assert.ok(blankRun.ok);
+  if (blankRun.ok) {
+    const policy = (blankRun.data as { policy: Record<string, unknown> }).policy;
+    assert.ok(!("configFingerprint" in policy), "empty run fingerprint stays omitted");
+    assert.equal(policy.provenance, "historical run record");
+  }
+  // Fail-closed interaction: once the repository's adoption is removed, the
+  // default authorize seam refuses the run-addressed read (identifier never
+  // grants permission) — historical data is unread, never served unadopted.
+  const noAdoption = new InMemoryControlPlaneStore();
+  seededRun(noAdoption, { configFingerprint: "3333333333333333" });
+  const unadoptedDeps = buildStoreBackedMcpDeps({ controlPlane: noAdoption, queue: queueWith(reviewJob()) });
+  assert.equal(await callMcpTool({ deps: unadoptedDeps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { run_id: "run-1" }).then((r) => r.ok), false);
 });
 
 test("unknown tools are refused at the tool layer", async () => {

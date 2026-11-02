@@ -74,7 +74,7 @@ independence tests.
 |---|---|---|
 | `get_review` | `run_id` XOR `job_id` | One normalized review: controller identity, lifecycle state, verdict, `review_result`, required checks, projected findings, publication status, and the queue-proven PR identity |
 | `list_findings` | `platform` + `repository` (required), `severity`/`category`/`path` filters, `limit`, `cursor` | Findings across a repository's reviews under keyset pagination |
-| `get_review_policy` | `platform` + `repository` XOR `run_id` | The effective config fingerprint, adoption epoch, enabled flag, and provenance of the trusted source |
+| `get_review_policy` | `platform` + `repository` XOR `run_id` | By `run_id`: the run's HISTORICAL config fingerprint and provenance (adoption epoch, enabled flag, and timestamps are current-adoption metadata and stay absent). By `platform`/`repository`: the CURRENT adoption record's fingerprint, epoch, enabled flag, and trusted-source provenance |
 
 Every tool name begins with a read verb (the same read-verb discipline the
 repo's own MCP client enforces at `src/tools/mcp.ts`). There is deliberately
@@ -139,8 +139,11 @@ partitioning before ledgers can be merged).
   validated base64url keyset-plus-offset record (job id + finding offset).
   A cursor that does not decode, names an unknown job, or carries a
   negative offset yields an EMPTY page — a pagination boundary can never
-  widen into an unfiltered read. The reference adapter scans at most 500
-  queue jobs per call.
+   widen into an unfiltered read. The reference adapter scans at most 500
+   queue jobs per call; when it stops at that ceiling with unscanned jobs
+   remaining, the page carries a continuation cursor at the first unscanned
+   job so later findings stay reachable instead of pagination silently
+   reporting its end.
 - No total-count field: a cross-PR count is unbounded work the endpoint
   refuses to do speculatively.
 
