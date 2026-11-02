@@ -51,6 +51,13 @@ const allowlist = new Map<string, string>([
   ["review_route", "the metadata marker's raw JSON field, not the action output"],
   ["escalation_reason", "the metadata marker's raw JSON field, not the action output"],
   ["cache_hit_ratio", "the metadata marker's raw JSON field, not the action output"],
+  // The review-bundle/v1 document's own literal JSON keys (#1425,
+  // src/publish/bundle.ts, documented in docs/review-bundle.md). Persisted
+  // snake_case per the naming rule, distinct from the same-named action
+  // input/output contract ids.
+  ["pr_number", "the review-bundle/v1 JSON key, not the pr-number input"],
+  ["diff_fingerprint", "the review-bundle/v1 JSON key, not the diff-fingerprint output"],
+  ["skip_reason", "the review-bundle/v1 JSON key, not the skip-reason output"],
 ]);
 
 const excludedDocs = new Set(["docs/v3-migration.md", "docs/v3-teardown-audit.md"]);
