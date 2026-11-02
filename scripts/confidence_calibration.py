@@ -93,60 +93,102 @@ BRIDGE_LAUNCHER = REPO_ROOT / "scripts" / "confidence_bridge.mjs"
 # its profile defaults (and the disabled profile) from
 # ``src/confidence/scorer.ts`` CONFIDENCE_MAX_TOKENS — the constant named
 # below — so this fallback mirrors what production actually resolves, and
-# ``tests/test_confidence_calibration.py::test_scorer_max_tokens_matches_production``
+# ``tests/test_confidence_calibration.py::test_scorer_budgets_match_production``
 # pins both the value and the resolver's use of that single source.
 SCORER_MAX_TOKENS = 4096
 
+# The scorer's documented DEFAULT PROMPT budget, the sibling of
+# SCORER_MAX_TOKENS above (#1387): it mirrors CONFIDENCE_PROMPT_TOKENS in
+# ``src/confidence/scorer.ts`` — the SINGLE source production's resolver
+# (``src/routing/tiers.ts``) reads for its ``promptTokens`` default and for
+# the disabled profile. The projection RECORDS this dimension; it never
+# spends against it (the hard ceilings stay on output tokens alone).
+# ``tests/test_confidence_calibration.py::test_scorer_budgets_match_production``
+# pins the two together, so the recorded PROMPT projection cannot drift from
+# what production actually resolves.
+SCORER_PROMPT_TOKENS = 98304
 
-def _declared_completion_budget(confidence_env: Any) -> tuple[int, bool]:
-    """Resolve ONE condition's projected per-call completion budget the way
-    production's resolver treats a declared value (#1387).
+
+def _declared_budget(confidence_env: Any, key: str, fallback: int) -> tuple[int, bool]:
+    """Resolve ONE declared budget the way production's resolver treats a
+    declared value (#1387).
 
     ``positiveIntFrom`` (``src/routing/tiers.ts``) accepts only a
     positive-integer string within JavaScript's safe-integer range and
     otherwise keeps the documented default — so an unusable or absent
-    declaration projects at SCORER_MAX_TOKENS, the same fallback the
-    resolver resolves. Returns ``(tokens, declared)``.
+    declaration projects at *fallback*, the same fallback the resolver
+    resolves. Returns ``(tokens, declared)``.
     """
-    raw = str((confidence_env or {}).get("AI_CONFIDENCE_MAX_TOKENS", "")).strip()
+    raw = str((confidence_env or {}).get(key, "")).strip()
     # [0-9], not \\d: JS /^\d+$/ is ASCII-only, and Python's \\d would
     # accept Unicode decimal digits the resolver's regex rejects.
     if re.fullmatch(r"[0-9]+", raw):
         value = int(raw)
         if 1 <= value <= 2**53 - 1:
             return value, True
-    return SCORER_MAX_TOKENS, False
+    return fallback, False
+
+
+def _declared_completion_budget(confidence_env: Any) -> tuple[int, bool]:
+    """One condition's projected per-call COMPLETION budget (#1387)."""
+    return _declared_budget(confidence_env, "AI_CONFIDENCE_MAX_TOKENS", SCORER_MAX_TOKENS)
+
+
+def _declared_prompt_budget(confidence_env: Any) -> tuple[int, bool]:
+    """One condition's projected per-call PROMPT budget (#1387)."""
+    return _declared_budget(confidence_env, "AI_CONFIDENCE_PROMPT_TOKENS", SCORER_PROMPT_TOKENS)
 
 
 def project_spend_budget(conditions: list[dict[str, Any]]) -> dict[str, Any]:
-    """The per-call completion budget the spend projection must use, plus a
-    record of WHICH budgets it projected against (#1387).
+    """The per-call budgets the spend projection must use, plus a record of
+    WHICH budgets it projected against — per condition and in aggregate
+    (#1387).
 
-    A run's declared ``ai-confidence-max-tokens`` is what the live request
-    actually spends: the bridge resolves declared ``ai-confidence-*`` config
-    through production's ``resolveConfidenceProfile``, whose defaults now
-    come from the same single source this module's fallback mirrors. The
-    projection takes the MAX over conditions — a conservative ceiling:
+    The projection uses the run's configured budgets when they are known: a
+    condition's declared ``ai-confidence-max-tokens`` /
+    ``ai-confidence-prompt-tokens`` are what the live request actually uses,
+    because the bridge resolves declared ``ai-confidence-*`` config through
+    production's ``resolveConfidenceProfile``, whose defaults come from the
+    same single source this module's fallbacks mirror.
+
+    The COMPLETION dimension is the one the spend ceiling multiplies. The
+    PROMPT dimension is RECORDED only — this projection introduces no new
+    spend policy, and the hard ceilings stay on output tokens alone.
+
+    Each dimension takes the MAX over conditions — a conservative ceiling:
     production's context-window clamps (#1368) can only LOWER a resolved
-    budget, never raise it above the declared/default value.
+    budget, never raise it above the declared/default value. The aggregate
+    basis is ``declared`` when ANY condition declared that dimension.
     """
     per_condition: list[dict[str, Any]] = []
-    projected = 0
-    any_declared = False
+    projected_completion = 0
+    projected_prompt = 0
+    any_completion_declared = False
+    any_prompt_declared = False
     for condition in conditions:
-        tokens, declared = _declared_completion_budget(condition.get("confidence_env"))
+        completion, completion_declared = _declared_completion_budget(
+            condition.get("confidence_env")
+        )
+        prompt, prompt_declared = _declared_prompt_budget(condition.get("confidence_env"))
         per_condition.append({
             "id": str(condition.get("id", "")),
-            "completion_tokens_per_call": tokens,
-            "basis": "declared" if declared else "documented-default",
+            "completion_tokens_per_call": completion,
+            "completion_basis": "declared" if completion_declared else "documented-default",
+            "prompt_tokens_per_call": prompt,
+            "prompt_basis": "declared" if prompt_declared else "documented-default",
         })
-        projected = max(projected, tokens)
-        any_declared = any_declared or declared
+        projected_completion = max(projected_completion, completion)
+        projected_prompt = max(projected_prompt, prompt)
+        any_completion_declared = any_completion_declared or completion_declared
+        any_prompt_declared = any_prompt_declared or prompt_declared
     if not per_condition:
-        projected = SCORER_MAX_TOKENS
+        projected_completion = SCORER_MAX_TOKENS
+        projected_prompt = SCORER_PROMPT_TOKENS
     return {
-        "completion_tokens_per_call": projected,
-        "basis": "declared" if any_declared else "documented-default",
+        "completion_tokens_per_call": projected_completion,
+        "completion_basis": "declared" if any_completion_declared else "documented-default",
+        "prompt_tokens_per_call": projected_prompt,
+        "prompt_basis": "declared" if any_prompt_declared else "documented-default",
         "per_condition": per_condition,
     }
 
@@ -1154,8 +1196,11 @@ def cmd_score(args: argparse.Namespace) -> int:
     ledger_total = ledger_calls
     # #1387: project against the budgets the run actually resolves. A pilot
     # live condition declares no ai-confidence-* config, so every live arm
-    # projects at the single-source documented default the bridge's
-    # live-request sends; the record states which budgets were projected.
+    # projects at the single-source documented defaults the bridge's
+    # live-request sends; the record states BOTH dimensions (completion and
+    # prompt) per condition and in aggregate. The ceiling below spends only
+    # the COMPLETION dimension — the PROMPT dimension is recorded, never
+    # spent against.
     projected_budget = project_spend_budget(
         [all_conditions[cid] for cid in selected if all_conditions[cid]["backend"] == "live"]
     )
@@ -2151,9 +2196,11 @@ def cmd_canary(args: argparse.Namespace) -> int:
 
     verdict_policy = plan.get("verdict_policy", "strict")
     # #1387: project against the budgets the run actually resolves — each
-    # condition's declared ai-confidence-max-tokens as production's resolver
-    # would take it, the single-source documented default otherwise — and
-    # record which budgets the projection used.
+    # condition's declared ai-confidence-max-tokens / ai-confidence-prompt-tokens
+    # as production's resolver would take them, the single-source documented
+    # defaults otherwise — and record which budgets the projection used. The
+    # ceiling below spends only the COMPLETION dimension; the PROMPT dimension
+    # is recorded, never spent against.
     projected_budget = project_spend_budget(list(conditions.values()))
     declared_max_tokens = projected_budget["completion_tokens_per_call"]
     # Conservative projection: every selected condition may fire for every
