@@ -42,6 +42,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 import eval_weekly_summary
 from eval_harness import BenchmarkCorpus, BenchmarkResult, ReviewRun, generate_report
 from eval_weekly_summary import (
+    _is_repo_slug,
     all_runs_errored,
     count_completed_runs,
     render_weekly_summary,
@@ -607,7 +608,9 @@ class TestPostIssueArgument:
     def test_skips_gracefully_without_credentials(self, tmp_path, monkeypatch, capsys):
         """No token/repo env → best-effort skip, never a crash."""
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
         monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+        monkeypatch.setenv("GITHUB_API_URL", "https://api.github.com")
         monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
 
         rc = eval_weekly_summary.main([
@@ -697,3 +700,283 @@ class TestPostIssueArgument:
         finally:
             origin_server.shutdown()
             target_server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# #1407 — the tracking comment goes through the configured forge capability
+# ---------------------------------------------------------------------------
+
+
+class TestForgeCapabilityRouting:
+    """The tracking comment is written by ``pr_reviewer.forge``.
+
+    Before #1407 the script hand-built its own ``urllib`` request, which
+    kept one more exception to the rule that every forge read and write
+    goes through the configured capability. These tests pin that the write
+    now goes through ``ForgeClient``, that a plaintext-HTTP base URL for a
+    host that is not loopback is refused before any byte goes out, and
+    that the comment still posts against a loopback stub server.
+    """
+
+    def test_comment_is_written_by_the_forge_capability(self, tmp_path, monkeypatch):
+        """``ForgeClient.post`` carries the comment path and body."""
+        calls: list[tuple[str, object]] = []
+
+        def fake_post(self, path, payload):
+            calls.append((path, payload))
+            return {"id": 1}
+
+        monkeypatch.setattr("pr_reviewer.forge.ForgeClient.post", fake_post)
+        monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "misospace/pr-reviewer-action")
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+
+        rc = eval_weekly_summary.main([
+            "--report", str(FIXTURES / "eval-report-agentic.json"),
+            "--stamp", STAMP,
+            "--post-issue", "715",
+        ])
+
+        assert rc == 0
+        assert len(calls) == 1, "the comment must be written exactly once"
+        path, payload = calls[0]
+        assert path == (
+            "/repos/misospace/pr-reviewer-action/issues/715/comments"
+        )
+        assert "## Weekly eval-harness regression summary" in payload["body"]
+
+    def test_plaintext_http_base_url_is_refused_before_any_request(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A plaintext-HTTP base URL for a non-loopback host sends nothing.
+
+        The bearer token would otherwise travel in cleartext, so the
+        capability refuses the base URL at construction time.
+        """
+        opened: list[str] = []
+
+        def fake_opener_open(request, timeout=None):
+            opened.append(request.full_url)
+            raise AssertionError("no request may go out")
+
+        monkeypatch.setattr(
+            "pr_reviewer.http_safe.OPENER_NO_REDIRECT.open", fake_opener_open
+        )
+        monkeypatch.setenv("GITHUB_API_URL", "http://ghe.example.com")
+        monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        monkeypatch.setenv("GITHUB_REPOSITORY", "misospace/pr-reviewer-action")
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+
+        rc = eval_weekly_summary.main([
+            "--report", str(FIXTURES / "eval-report-agentic.json"),
+            "--stamp", STAMP,
+            "--post-issue", "472",
+        ])
+
+        assert rc == 0
+        assert opened == [], "no request may leave the process"
+        err = capsys.readouterr().err
+        assert "non-loopback HTTP" in err
+        # The credential never reaches the log.
+        assert "test-token" not in err
+
+    def test_comment_posts_against_a_loopback_stub_server(
+        self, tmp_path, monkeypatch
+    ):
+        """The comment still posts — against a loopback stub server."""
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        received: list[dict[str, object]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 - http.server naming
+                length = int(self.headers.get("Content-Length", "0"))
+                received.append({
+                    "method": self.command,
+                    "path": self.path,
+                    "body": json.loads(self.rfile.read(length).decode("utf-8")),
+                    "authorization": self.headers.get("Authorization"),
+                })
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"id": 1}')
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            monkeypatch.setenv(
+                "GITHUB_API_URL", f"http://127.0.0.1:{server.server_port}"
+            )
+            monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+            monkeypatch.setenv(
+                "GITHUB_REPOSITORY", "misospace/pr-reviewer-action"
+            )
+            monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+
+            rc = eval_weekly_summary.main([
+                "--report", str(FIXTURES / "eval-report-agentic.json"),
+                "--stamp", STAMP,
+                "--post-issue", "472",
+            ])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        assert rc == 0
+        assert len(received) == 1, "exactly one comment must be posted"
+        request = received[0]
+        assert request["method"] == "POST"
+        assert request["path"] == (
+            "/repos/misospace/pr-reviewer-action/issues/472/comments"
+        )
+        assert "## Weekly eval-harness regression summary" in request["body"]["body"]
+        # The credential rides only the Authorization header.
+        assert request["authorization"] == "Bearer test-token"
+        # …and reaches nothing else.
+        assert "test-token" not in request["path"]
+        assert "test-token" not in json.dumps(request["body"])
+
+    @pytest.mark.parametrize(
+        "hostile_repo",
+        [
+            "misospace/pr-reviewer-action?x=1",
+            "misospace/..",
+            "../pr-reviewer-action",
+            "..",
+            "misospace/.",
+            "a/b/c",
+        ],
+    )
+    def test_repository_value_that_is_not_an_owner_name_pair_is_refused(
+        self, tmp_path, monkeypatch, capsys, hostile_repo
+    ):
+        """A repository value carrying a query or a traversal segment is
+        refused before any request goes out. Dot-only segments (``.`` and
+        ``..``) match the owner/name character class but traverse the
+        request path, so they are refused too."""
+        opened: list[str] = []
+
+        def fake_opener_open(request, timeout=None):
+            opened.append(request.full_url)
+            raise AssertionError("no request may go out")
+
+        monkeypatch.setattr(
+            "pr_reviewer.http_safe.OPENER_NO_REDIRECT.open", fake_opener_open
+        )
+        monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        monkeypatch.setenv("GITHUB_REPOSITORY", hostile_repo)
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+
+        rc = eval_weekly_summary.main([
+            "--report", str(FIXTURES / "eval-report-agentic.json"),
+            "--stamp", STAMP,
+            "--post-issue", "472",
+        ])
+
+        assert rc == 0
+        assert opened == [], "no request may leave the process"
+        assert "owner/name pair" in capsys.readouterr().err
+
+    def test_unusable_response_body_is_reported_as_an_unclean_post(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A 2xx with a body the capability cannot decode is reported
+        honestly — the write landed, the reply did not read."""
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        received: list[dict[str, object]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 - http.server naming
+                length = int(self.headers.get("Content-Length", "0"))
+                received.append({
+                    "path": self.path,
+                    "body": self.rfile.read(length).decode("utf-8"),
+                })
+                self.send_response(201)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<html>not json</html>")
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            monkeypatch.setenv(
+                "GITHUB_API_URL", f"http://127.0.0.1:{server.server_port}"
+            )
+            monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+            monkeypatch.setenv(
+                "GITHUB_REPOSITORY", "misospace/pr-reviewer-action"
+            )
+            monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+
+            rc = eval_weekly_summary.main([
+                "--report", str(FIXTURES / "eval-report-agentic.json"),
+                "--stamp", STAMP,
+                "--post-issue", "472",
+            ])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        # The write reached the forge; the job still succeeds.
+        assert rc == 0
+        assert len(received) == 1
+        assert received[0]["path"] == (
+            "/repos/misospace/pr-reviewer-action/issues/472/comments"
+        )
+        err = capsys.readouterr().err
+        assert "did not post cleanly" in err
+        assert "test-token" not in err
+
+
+class TestRepoSlug:
+    """The owner/name shape check, pinned directly.
+
+    Dots are legal inside real owner and repository names; the dot-only
+    segments ``.`` and ``..`` are traversal, not names.
+    """
+
+    @pytest.mark.parametrize(
+        "slug",
+        [
+            "misospace/pr-reviewer-action",
+            "a.b/c.d",
+            "a..b/c",
+            "a/b...",
+            "_x/y-1",
+        ],
+    )
+    def test_accepts_real_repository_names(self, slug):
+        assert _is_repo_slug(slug)
+
+    @pytest.mark.parametrize(
+        "slug",
+        [
+            "misospace/..",
+            "../pr-reviewer-action",
+            "..",
+            ".",
+            "misospace/.",
+            "a//b",
+            "a/b/c",
+            "a/b?x=1",
+            "a/b#frag",
+            "",
+            "/b",
+            "a/",
+        ],
+    )
+    def test_refuses_traversal_and_malformed_values(self, slug):
+        assert not _is_repo_slug(slug)
+
+

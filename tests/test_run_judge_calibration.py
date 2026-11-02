@@ -6,6 +6,7 @@ functions against the REAL calibration corpus file. The production transport
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
 import pytest  # noqa: E402
 
 from pr_reviewer import semantic_judge  # noqa: E402
+from pr_reviewer.http_safe import base_url_identity_digest  # noqa: E402
 from scripts import run_judge_calibration as runner  # noqa: E402
 
 CORPUS_PATH = _REPO_ROOT / "evals" / "judge-calibration-corpus.json"
@@ -110,7 +112,8 @@ def test_perfect_judge_full_agreement(corpus: dict) -> None:
 def test_report_shape(corpus: dict) -> None:
     report = runner.run_calibration(corpus, _judge_from(corpus), "fake", "http://x", sleep=_NO_SLEEP)
     for key in (
-        "judge_prompt_version", "judge_model", "base_url", "total", "passed",
+        "judge_prompt_version", "judge_model", "base_url", "base_url_sha256",
+        "total", "passed",
         "agreement_rate", "transport_errors", "by_origin", "by_disposition",
         "failures",
     ):
@@ -321,8 +324,93 @@ def test_run_calibration_requires_no_network(corpus: dict) -> None:
     # Sanity: the module imports without ever importing transport eagerly.
     assert not hasattr(runner, "_REQUESTED")
     # grade_reference / run_calibration never touch the network path.
-    report = runner.run_calibration(corpus, _judge_from(corpus), "m", "u", sleep=_NO_SLEEP)
-    assert report["base_url"] == "u"
+    report = runner.run_calibration(
+        corpus, _judge_from(corpus), "m", "http://x", sleep=_NO_SLEEP
+    )
+    assert report["base_url"] == "http://x"
+
+
+def test_report_redacts_userinfo_in_base_url(corpus: dict) -> None:
+    """#1414: a judge endpoint carrying a credential in its userinfo must
+    never be written verbatim into the shared report. The report keeps the
+    redacted display form, and #1424 binds the credential-free endpoint
+    identity: the digest is computed over the URL with the userinfo
+    stripped, so the credential cannot be tested offline from the artifact."""
+    secret_url = "https://judge-operator:hunter2@judge.internal.example/v1"
+    report = runner.run_calibration(
+        corpus, _judge_from(corpus), "fake", secret_url, sleep=_NO_SLEEP
+    )
+    serialized = json.dumps(report)
+    for secret in ("hunter2", "judge-operator"):
+        assert secret not in serialized
+    assert report["base_url"] == "https://***@judge.internal.example/v1"
+    assert report["base_url_sha256"] == hashlib.sha256(
+        b"https://judge.internal.example/v1"
+    ).hexdigest()
+    assert report["base_url_sha256"] == base_url_identity_digest(
+        "https://judge.internal.example/v1"
+    )
+    # The full credential-bearing URL is never the recorded identity.
+    assert report["base_url_sha256"] != hashlib.sha256(
+        secret_url.encode("utf-8")
+    ).hexdigest()
+
+
+def test_report_digest_does_not_change_when_credential_rotates(corpus: dict) -> None:
+    """#1424: the artifact binds the endpoint, not the credential. Two
+    calibration runs against the same endpoint with different userinfo
+    credentials record the same endpoint identity, and that identity equals
+    the credential-free digest — a credential rotation must not invalidate
+    the artifact, and a reader must not be able to test passwords against
+    the recorded digest."""
+    first = runner.run_calibration(
+        corpus, _judge_from(corpus), "fake",
+        "https://judge-operator:hunter2@judge.internal.example/v1",
+        sleep=_NO_SLEEP,
+    )
+    second = runner.run_calibration(
+        corpus, _judge_from(corpus), "fake",
+        "https://judge-operator:newpw@judge.internal.example/v1",
+        sleep=_NO_SLEEP,
+    )
+    assert first["base_url_sha256"] == second["base_url_sha256"]
+    assert first["base_url_sha256"] == base_url_identity_digest(
+        "https://judge.internal.example/v1"
+    )
+
+
+def test_main_records_the_resolved_credential_free_endpoint(
+    corpus: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1424: the shared artifact a CLI run writes records the resolved
+    credential-free endpoint. The credential-bearing endpoint URL comes from
+    the environment (#1414); the report's display field carries no userinfo,
+    and its digest is the credential-free identity — byte-verifiable against
+    the recorded display URL."""
+    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "JUDGE_BASE_URL", "https://judge-operator:hunter2@judge.internal.example/v1"
+    )
+    monkeypatch.setattr(
+        runner, "_openai_judge_call", lambda *_args, **_kwargs: _judge_from(corpus)
+    )
+    output = tmp_path / "report.json"
+    argv = [
+        "--corpus", str(CORPUS_PATH), "--judge-model", "m", "--output", str(output)
+    ]
+    assert runner.main(argv) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    serialized = json.dumps(report)
+    for secret in ("hunter2", "judge-operator"):
+        assert secret not in serialized
+    assert report["base_url"] == "https://judge.internal.example/v1"
+    assert report["base_url_sha256"] == base_url_identity_digest(
+        "https://judge.internal.example/v1"
+    )
+    # Operator-verifiable: the digest covers the recorded display URL.
+    assert report["base_url_sha256"] == hashlib.sha256(
+        report["base_url"].encode("utf-8")
+    ).hexdigest()
 
 
 def test_main_rejects_missing_judge_args(tmp_path: Path) -> None:
@@ -335,3 +423,259 @@ def test_main_rejects_invalid_corpus(tmp_path: Path) -> None:
     assert runner.main(
         ["--corpus", str(bad), "--judge-model", "m", "--base-url", "http://x"]
     ) == 2
+
+
+# ── credential-free argv (#1413) ────────────────────────────────────────────
+
+_SECRET = "sk-secret-value"
+
+
+def _no_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the judge transport unreachable: a refusal must precede it."""
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("the judge transport must not be reached")
+
+    monkeypatch.setattr(runner, "_openai_judge_call", _boom)
+
+
+def _run_argv(extra: list[str]) -> list[str]:
+    """An otherwise valid run, plus the argument under test."""
+    return [
+        "--corpus", str(CORPUS_PATH),
+        "--judge-model", "m", "--base-url", "http://x",
+        *extra,
+    ]
+
+
+def test_api_key_argument_is_refused_without_echo(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = runner.main(_run_argv(["--api-key", _SECRET]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_api_key_equals_form_is_refused_without_echo(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = runner.main(_run_argv([f"--api-key={_SECRET}"]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_api_key_abbreviation_is_refused_without_echo(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = runner.main(_run_argv(["--api-k", _SECRET]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_unknown_argument_is_refused_without_echo(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = runner.main(_run_argv(["--mystery-flag", _SECRET]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "unrecognized argument" in err
+
+
+def test_judge_key_comes_from_the_environment(
+    corpus: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JUDGE_API_KEY", "env-key-value")
+    recorded: list[str] = []
+
+    def _fake_judge_call(
+        judge_model: str, base_url: str, api_key: str, timeout_sec: int
+    ):
+        recorded.append(api_key)
+        return _judge_from(corpus)
+
+    monkeypatch.setattr(runner, "_openai_judge_call", _fake_judge_call)
+    assert runner.main(_run_argv([])) == 0
+    assert recorded == ["env-key-value"]
+
+
+def test_credential_refusal_comes_before_the_parser(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The refusal runs before argparse, so no parser message can quote a value.
+    code = runner.main(["--api-key", _SECRET])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_a_value_for_a_known_option_is_not_echoed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # argparse quotes the value of an option in its own error message. The
+    # parser of this script must not, so a mistyped secret stays out of the log.
+    with pytest.raises(SystemExit) as excinfo:
+        runner.main(_run_argv(["--timeout", _SECRET]))
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert _SECRET not in err
+
+
+def test_the_parser_knows_no_credential_option() -> None:
+    # The parser must not know the option, so the refusal is the only way in.
+    _args, extras = runner.build_parser().parse_known_args(["--api-key", _SECRET])
+    assert "--api-key" in extras
+
+
+def test_main_refuses_a_credential_bearing_endpoint_with_another_key(
+    monkeypatch, capsys,
+) -> None:
+    """#1414: a credential must ride exactly one channel. Two channels (a URL
+    userinfo and an API key) cannot share one Authorization header, so the
+    run is refused before any request — and the diagnostic never echoes the
+    credential. The credential-bearing URL comes from the environment: a
+    credential never rides in the process argument list."""
+    monkeypatch.setenv(
+        "JUDGE_BASE_URL", "http://judge-operator:hunter2@127.0.0.1:1/v1"
+    )
+    monkeypatch.setenv("JUDGE_API_KEY", "judge-test-credential")
+    code = runner.main([
+        "--corpus", str(CORPUS_PATH),
+        "--judge-model", "m",
+    ])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "one credential channel" in err
+    assert "hunter2" not in err
+    assert "judge-operator" not in err
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "not-a-url",
+        # An ENCODED '@' hides the credential from the authority split while
+        # urllib unquotes the authority into the request's Host value.
+        "http://judge-operator%3Ahunter2%40127.0.0.1/v1",
+    ],
+)
+def test_main_refuses_an_unusable_endpoint_url(base_url: str, capsys) -> None:
+    code = runner.main([
+        "--corpus", str(CORPUS_PATH),
+        "--judge-model", "m",
+        "--base-url", base_url,
+    ])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "hunter2" not in err
+    assert "judge-operator" not in err
+
+
+def test_main_refuses_a_credential_bearing_base_url_from_the_command_line(
+    tmp_path: Path, capsys
+) -> None:
+    """#1414: a credential in an argument list is readable by every other
+    process on the host, so a credential-bearing base URL is accepted from
+    JUDGE_BASE_URL only. The refusal never echoes the credential.
+
+    The corpus is an empty one on purpose: when the refusal stops firing,
+    the run must fail on the corpus instead of reaching the network."""
+    corpus = tmp_path / "empty.json"
+    corpus.write_text(json.dumps({"version": 1, "scenarios": []}), encoding="utf-8")
+    code = runner.main([
+        "--corpus", str(corpus),
+        "--judge-model", "m",
+        "--base-url", "http://judge-operator:hunter2@127.0.0.1:1/v1",
+    ])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "must not carry a credential" in err
+    assert "hunter2" not in err
+    assert "judge-operator" not in err
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_refusal"),
+    [
+        (
+            ["--base-url=http://judge-operator:hunter2@127.0.0.1:1/v1"],
+            "must not carry a credential",
+        ),
+        # #1413 disables argparse abbreviations entirely. These forms are
+        # rejected by the value-safe unknown-argument guard before URL parsing.
+        (
+            ["--base", "http://judge-operator:hunter2@127.0.0.1:1/v1"],
+            "unrecognized argument",
+        ),
+        (
+            ["--base-u", "http://judge-operator:hunter2@127.0.0.1:1/v1"],
+            "unrecognized argument",
+        ),
+        (
+            [
+                "--base-url", "http://judge-operator:hunter2@127.0.0.1:1/v1",
+                "--base-url", "http://127.0.0.1:1/v1",
+            ],
+            "must not carry a credential",
+        ),
+        (
+            ["--base-url", "http://judge-operator:hunter2/pass@127.0.0.1:1/v1"],
+            "must not carry a credential",
+        ),
+    ],
+)
+def test_main_refuses_every_credential_bearing_command_line_form(
+    arguments: list[str], expected_refusal: str, tmp_path: Path, capsys
+) -> None:
+    """#1414/#1413: every credential-bearing CLI form is refused without
+    echoing the value; disabled abbreviations fail at the earlier safe parser
+    boundary while exact base-URL forms reach the credential-specific guard."""
+    corpus = tmp_path / "empty.json"
+    corpus.write_text(json.dumps({"version": 1, "scenarios": []}), encoding="utf-8")
+    code = runner.main([
+        "--corpus", str(corpus),
+        "--judge-model", "m",
+        *arguments,
+    ])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert expected_refusal in err
+    assert "hunter2" not in err
+    assert "judge-operator" not in err
+
+def test_main_takes_a_credential_bearing_base_url_from_the_environment(
+    monkeypatch,
+) -> None:
+    """#1414: the environment is the channel that may carry the credential.
+    The runner uses that endpoint and splits the credential out of the URL,
+    so the request target carries no secret."""
+    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "JUDGE_BASE_URL", "http://judge-operator:hunter2@127.0.0.1:1/v1"
+    )
+    captured: dict = {}
+
+    class _Stop(BaseException):
+        """Stop the run right after the transport is built."""
+
+    def _fake_call(judge_model, endpoint, api_key, timeout_sec):
+        captured["url"] = endpoint.url
+        captured["credential"] = endpoint.credential
+        raise _Stop()
+
+    monkeypatch.setattr(runner, "_openai_judge_call", _fake_call)
+    with pytest.raises(_Stop):
+        runner.main(["--corpus", str(CORPUS_PATH), "--judge-model", "m"])
+    assert captured["url"] == "http://127.0.0.1:1/v1"
+    assert captured["credential"] == "judge-operator:hunter2"

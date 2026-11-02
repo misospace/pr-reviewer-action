@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from pr_reviewer.http_safe import redact_echo_value
 from pr_reviewer.semantic_eval import (
     MERGE_SAFETY_DISPOSITIONS_ORDER,
 )
@@ -419,7 +420,10 @@ def judge_config_identity(judge_model: str, corpus_path: str | Path) -> dict:
 
 def verify_judge_config(artifact_config: Any, expected: dict) -> list[str]:
     """Compare a calibration artifact's recorded judge identity against the
-    expected one. Fail-closed: a missing/extra/mismatched field is an error."""
+    expected one. Fail-closed: a missing/extra/mismatched field is an error.
+    Echoed values come from the untrusted artifact, so both sides render
+    through ``redact_echo_value`` — the field name identifies the mismatch,
+    never a credential-bearing value (#1418)."""
     if not isinstance(artifact_config, dict):
         return ["calibration artifact is missing its judge_config identity"]
     errors: list[str] = []
@@ -429,10 +433,13 @@ def verify_judge_config(artifact_config: Any, expected: dict) -> list[str]:
         elif artifact_config[key] != expected_value:
             errors.append(
                 f"calibration judge_config.{key} mismatch: "
-                f"artifact={artifact_config[key]!r}, live={expected_value!r}"
+                f"artifact={redact_echo_value(artifact_config[key])}, "
+                f"live={redact_echo_value(expected_value)}"
             )
     for key in sorted(set(artifact_config) - set(expected)):
-        errors.append(f"calibration judge_config has unexpected key {key!r}")
+        errors.append(
+            f"calibration judge_config has unexpected key {redact_echo_value(key)}"
+        )
     return errors
 
 
