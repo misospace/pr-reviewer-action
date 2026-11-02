@@ -39,8 +39,18 @@ import type { ConfidencePromptInputs } from "./prompt.js";
  * return no JSON at all — the profile's configured budget
  * (`ai-confidence-max-tokens`, resolved into `ConfidenceProfile.maxTokens`)
  * is the real control, and provider accounting may include reasoning tokens
- * inside it. This constant is only the documented default. */
+ * inside it. This constant is the documented default — and the SINGLE
+ * source for it (#1387): `resolveConfidenceProfile` and the disabled
+ * profile in `src/routing/tiers.ts` resolve these same constants, so the
+ * calibration tooling's projected spend ceiling and the budgets production
+ * actually resolves cannot drift apart. */
 export const CONFIDENCE_MAX_TOKENS = 4096;
+
+/** DEFAULT prompt budget for the scorer's request, the sibling of
+ * `CONFIDENCE_MAX_TOKENS` and the same single source for it (#1387): the
+ * resolver's `promptTokens` default and the disabled profile both read
+ * this constant. */
+export const CONFIDENCE_PROMPT_TOKENS = 98304;
 
 /** Hosts a keyless distinct scorer endpoint may still point at: the
  * operator's own machine. Anything else without a credential is refused. */
