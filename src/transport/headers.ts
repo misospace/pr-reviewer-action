@@ -238,8 +238,16 @@ export function extraHeadersForEnv(raw: string): Record<string, string> | undefi
 export function callKnownSecrets(
   apiKey: string | null | undefined,
   extraHeaders?: Readonly<Record<string, string>>,
+  /** #1428: the credential the endpoint URL carries in its userinfo, already
+   * extracted fail-closed (`endpointUrlCredentialOrEmpty`) — a provider error
+   * body can quote the request's Authorization value straight back, so the
+   * decoded URL credential masks on the response side like every other
+   * configured credential. */
+  urlCredential?: string,
 ): readonly (string | null | undefined)[] {
-  return [apiKey, ...Object.values(extraHeaders ?? {})];
+  // The URL credential joins the list only when present, so every existing
+  // two-argument call keeps its exact pinned shape.
+  return [apiKey, ...Object.values(extraHeaders ?? {}), ...(urlCredential ? [urlCredential] : [])];
 }
 
 /** Ephemeral correlation/session/trace headers: their values legitimately

@@ -1,6 +1,6 @@
 import type { ApiFormat, NormalizedModelResponse, OpenAiWireBody, TokensParam, TransportWirePayload } from "../model/types.js";
 import { reassembleSse } from "./sse.js";
-import { runHttpRequest, TransportFailure } from "./http.js";
+import { runHttpRequest, endpointUrlCredentialOrEmpty, TransportFailure } from "./http.js";
 import { callKnownSecrets } from "./headers.js";
 import { classifyTerminalProviderFailure, terminalProviderFailureLine } from "./terminal.js";
 
@@ -150,7 +150,7 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
       const terminal = classifyTerminalProviderFailure(outcome.failure);
       if (terminal !== null) {
         report(false);
-        process.stderr.write(`${terminalProviderFailureLine(terminal, callKnownSecrets(input.apiKey, input.extraHeaders))}; bypassing same-request retries\n`);
+        process.stderr.write(`${terminalProviderFailureLine(terminal, callKnownSecrets(input.apiKey, input.extraHeaders, endpointUrlCredentialOrEmpty(input.baseUrl)))}; bypassing same-request retries\n`);
         return outcome;
       }
       const clamp = clampRemaining

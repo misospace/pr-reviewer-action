@@ -2987,7 +2987,7 @@ async function callTier(
   // extra-header VALUE is an outbound secret the provider can quote straight
   // back into its own response body, so it is masked here, where the body
   // enters artifact/diagnostic state, not only at each consumer.
-  const knownSecrets = callKnownSecrets(profile.apiKey, profile.extraHeaders);
+  const knownSecrets = callKnownSecrets(profile.apiKey, profile.extraHeaders, endpointUrlCredentialOrEmpty(profile.baseUrl));
 
   // #1305: wall-clock spend of this tier's attempts, reported on the
   // fallback-handoff line so the reason for leaving the lane and the time

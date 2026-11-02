@@ -2,7 +2,7 @@ import { maskKnownSecrets, redactText } from "../context/redact.js";
 import { pyCodepointSlice } from "../platform/py.js";
 import type { ApiFormat, NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { SpecialistDiscardedWireAttempt, SpecialistRequestFn, SpecialistTransportOutcome } from "../specialists/runner.js";
-import { assertSingleCredentialChannel, describeTransportFailure, endpointUrlCredential, resolveEndpoint, TransportFailure } from "../transport/http.js";
+import { assertSingleCredentialChannel, describeTransportFailure, endpointUrlCredential, endpointUrlCredentialOrEmpty, resolveEndpoint, TransportFailure } from "../transport/http.js";
 import { applyExtraHeaders } from "../transport/headers.js";
 import { runChatRequest, type ChatRequestInput, type ChatRequestOutcome } from "../transport/transport.js";
 import { classifyTerminalProviderFailure, sharedTerminalLaneLatch, type TerminalLaneLatch, type TerminalProviderReason } from "../transport/terminal.js";
@@ -300,7 +300,10 @@ const wire = {
         }
       }
       const rawMessage = error instanceof Error ? error.message : String(error);
-      const masked = pyCodepointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey, ...extraSecrets])), 500);
+      // #1428: a URL credential is a configured credential on this lane too —
+      // an error path must never echo it, even though the lane refused any
+      // two-channel request before the wire.
+      const masked = pyCodepointSlice(redactText(maskKnownSecrets(rawMessage, [config.apiKey, endpointUrlCredentialOrEmpty(config.baseUrl), ...extraSecrets])), 500);
       return wireTelemetry({ ok: false, errorMessage: masked, timeout: masked.toLowerCase().includes("timed out") });
     }
     if (outcome.status === "ok") {

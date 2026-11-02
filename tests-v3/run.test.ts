@@ -146,7 +146,7 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
     assert.match(output, /verdict-source=model/);
     assert.match(output, /cache-hit-ratio=/);
     assert.match(output, /tool-calls=\[\]/);
-    // Metadata marker bound head.
+    // Metadata marker bound to the head.
     assert.match(result.marker, /head_sha.{0,4}a{40}/);
   } finally {
     await server.close();

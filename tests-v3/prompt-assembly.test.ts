@@ -240,6 +240,9 @@ test("analysisEngineBase redacts a credential the base URL carries in its userin
   assert.equal(analysisEngineBase("m", "https://llm.example.net/v1", "openai"), "m@https://llm.example.net/v1 (openai)");
   // The published strip (#832) still removes the URL token after redaction.
   assert.equal(publicAnalysisEngine(analysisEngineBase("m", "https://user:secret@llm.example.net/v1", "openai")), "m (openai)");
+  // The fail-closed placeholder is whitespace-free, so the strip removes it
+  // whole too — a hostile URL never leaves a torn token in a published body.
+  assert.equal(publicAnalysisEngine(analysisEngineBase("m", "https://llm.example/pa@ss/v1", "openai")), "m (openai)");
 });
 
 test("harness fallback strips placeholders from the bundled default when no prompt is assembled", () => {

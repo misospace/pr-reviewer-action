@@ -346,13 +346,15 @@ export function endpointUrlCredentialOrEmpty(baseUrl: string): string {
  * resolved base URL into a log line or persisted artifact can never echo the
  * credential. A credential-free URL passes through byte-for-byte; a URL whose
  * credential cannot be attributed is replaced wholesale (fail closed — a
- * shape the transport would refuse is never echoed either). */
+ * shape the transport would refuse is never echoed either). The placeholder
+ * carries no whitespace so the `publicAnalysisEngine` URL-token strip still
+ * removes it whole (#832). */
 export function redactEndpointUrlCredential(baseUrl: string): string {
   try {
     const stripped = splitEndpointUserinfo(baseUrl.trim().replace(/\/+$/, ""));
     return stripped.credential === "" ? baseUrl : stripped.base;
   } catch {
-    return "<redacted endpoint URL>";
+    return "<redacted-endpoint-URL>";
   }
 }
 

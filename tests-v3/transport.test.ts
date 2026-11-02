@@ -335,12 +335,26 @@ test("#1428: the diagnostic redaction of a credential-bearing endpoint URL is st
   // A credential-free URL passes through byte-for-byte.
   assert.equal(redactEndpointUrlCredential("https://host/v1"), "https://host/v1");
   // Fail closed: a URL whose credential cannot be attributed is replaced
-  // wholesale, never echoed in any form.
-  assert.equal(redactEndpointUrlCredential("https://host/pa@ss/v1"), "<redacted endpoint URL>");
+  // wholesale, never echoed in any form. The placeholder is whitespace-free,
+  // so the published engine-string strip (#832) removes it whole.
+  assert.equal(redactEndpointUrlCredential("https://host/pa@ss/v1"), "<redacted-endpoint-URL>");
   // The masking-value helper never throws and never echoes a hostile shape.
   assert.equal(endpointUrlCredentialOrEmpty("https://u:p@host/v1"), "u:p");
   assert.equal(endpointUrlCredentialOrEmpty("https://host/v1"), "");
   assert.equal(endpointUrlCredentialOrEmpty("https://host/pa@ss/v1"), "");
+});
+
+test("#1428: the response-side known-secret list carries the URL credential", () => {
+  // A provider error body can quote the request's Authorization value back —
+  // #1428 puts the decoded URL credential on that same list, so the echo
+  // masks like every other configured credential.
+  const secrets = callKnownSecrets("sk-key", { "x-gateway": "gw-token" }, "u:p");
+  assert.ok(secrets.includes("u:p"), "the URL credential must join the response-side mask set");
+  assert.ok(maskKnownSecrets(`rejected credential u:p for sk-key`, secrets).includes(KNOWN_SECRET_REDACTED));
+  assert.ok(!maskKnownSecrets(`rejected credential u:p for sk-key`, secrets).includes("u:p"));
+  // An absent or unattributable credential contributes nothing and never throws.
+  assert.ok(callKnownSecrets("sk-key", undefined, "").includes("sk-key"));
+  assert.ok(callKnownSecrets("sk-key", undefined, undefined).includes("sk-key"));
 });
 
 test("#1037: configured extra-header VALUES are credentials too — only the wire headers, never the URL, body, or a secret-aware failure detail", async () => {
