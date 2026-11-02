@@ -24,7 +24,7 @@ import {
   type StateMutation,
   type UsageAggregate,
 } from "../src/state/index.js";
-import { emptyQueueSnapshot, type QueueStore } from "../src/queue/index.js";
+import { emptyQueueSnapshot, InMemoryQueueStore, type QueueStore } from "../src/queue/index.js";
 import type { CanonicalForgeEvent } from "../src/events/types.js";
 import type { InstanceConfig } from "../src/config/instance-config.js";
 import type { MirrorCache, WorkspaceHandle } from "../src/acquisition/index.js";
@@ -540,28 +540,152 @@ test("distinct-kind integrations stamp the kind-matched endpoint, not the first 
   assert.equal(h.fake.started[0]!.forgeApiUrl, "https://ghe.example/api/v3");
 });
 
-test("two forge integrations of the same kind refuse daemon startup (#1433)", async () => {
-  // Instance config enforces unique integration NAMES only. Selecting the
-  // envelope endpoint by kind among two same-kind entries would silently
-  // stamp the first installation's API base into every job of that
-  // platform, even when the other integration serves the job — so the
-  // ambiguous mapping must be a startup refusal, never a guess.
-  await assert.rejects(
-    () =>
-      start({
-        options: {
-          instance: {
-            ...instanceConfig(),
-            forges: [
-              { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
-              { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
-            ],
-          } as InstanceConfig,
-        },
-      }),
-    /forge integrations 'fj-primary' and 'fj-secondary' share kind 'forgejo'/,
+test("two same-kind integrations resolve by the job's forge-integration identity (#1440)", async (t) => {
+  // The envelope endpoint is resolved by the job's `forgeIntegration`
+  // identity, not by platform kind alone: two Forgejo installations may be
+  // configured side by side, and a job minted for one of them must read
+  // and write through THAT installation's API base — never the first
+  // entry's.
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+          { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+        ],
+      } as InstanceConfig,
+      forgeIntegration: "fj-secondary",
+      queueStore: store,
+    },
+  });
+  t.after(() => {
+    void h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  // (a) startup succeeded above; (b) the job minted through ingest carries
+  // the bound identity and its envelope resolves to the named
+  // integration's endpoint. The bound integration is deliberately the
+  // SECOND same-kind entry: a regression to first-entry kind resolution
+  // would resolve the other installation's endpoint and fail this test.
+  assert.equal(
+    await h.daemon.ingest(event({ platform: "forgejo", installationId: "9", repoFullName: "owner/forge-repo" })),
+    "scheduled",
   );
-  // The same ambiguity on the GitHub side refuses too.
+  await waitFor(() => h.fake.started.length === 1);
+  const record = store
+    .load()
+    .records.find((entry) => entry.job.jobId === h.fake.started[0]!.jobId);
+  assert.equal(record!.job.forgeIntegration, "fj-secondary");
+  assert.equal(h.fake.started[0]!.forgeApiUrl, "https://forge-b.example/api/v1");
+  // (c) A job minted for the OTHER integration must not be scheduled
+  // through this daemon — its envelope would resolve to the wrong
+  // installation.
+  const foreign = buildReviewJob(event(), { forgeIntegration: "fj-primary" });
+  assert.notEqual(foreign, null);
+  await assert.rejects(
+    () => h.daemon.enqueue(foreign!),
+    /names forge integration 'fj-primary' but this daemon serves 'fj-secondary'/,
+  );
+});
+
+test("an identity-less job refuses at build when several integrations share its kind (#1440)", async (t) => {
+  // A job with NO integration identity resolves by platform kind only when
+  // exactly one integration of that kind exists; with two same-kind
+  // integrations the mapping is ambiguous and the request is refused at
+  // build time — never guessed at the first entry. The refusal surfaces as
+  // the scheduler's failed-outcome path (the builder's build() rejects),
+  // so the job never starts an execution.
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+          { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+        ],
+      } as InstanceConfig,
+      queueStore: store,
+      maxAttempts: 1,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const ev = event({ platform: "forgejo", installationId: "9", repoFullName: "owner/forge-repo" });
+  const job = buildReviewJob(ev);
+  assert.notEqual(job, null);
+  assert.equal(job!.forgeIntegration, "");
+  await h.daemon.enqueue(job!);
+  await waitFor(() => {
+    const record = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
+    return record !== undefined && record.state === "failed";
+  });
+  assert.equal(h.fake.started.length, 0, "the ambiguous job never launched a worker");
+});
+
+test("an unresolvable or cross-platform forge-integration identity refuses the request (#1440)", async (t) => {
+  // A job naming an integration the instance config does not define — or
+  // one whose kind disagrees with the job's platform (e.g. a rehydrated
+  // snapshot record that never passed this daemon's enqueue guard) — is
+  // refused at request build: the envelope would carry an endpoint the job
+  // cannot trust. Never guessed, never launched.
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj", kind: "forgejo", endpoint: "https://forge.example/api/v1", credential: "fj-token" },
+        ],
+      } as InstanceConfig,
+      queueStore: store,
+      maxAttempts: 1,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const forgejoEvent = event({ platform: "forgejo", installationId: "9", repoFullName: "owner/forge-repo" });
+  const githubEvent = event({ platform: "github", installationId: "9", repoFullName: "owner/gh-repo" });
+  for (const [label, job] of [
+    ["unresolvable", buildReviewJob(forgejoEvent, { forgeIntegration: "fj-ghost" })],
+    ["cross-platform", buildReviewJob(githubEvent, { forgeIntegration: "fj" })],
+  ] as const) {
+    assert.notEqual(job, null);
+    await h.daemon.enqueue(job!);
+    await waitFor(() => {
+      const record = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
+      return record !== undefined && record.state === "failed";
+    });
+    const record = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
+    assert.match(record!.failureReason ?? "", /forge integration/, `${label} failure names the identity problem`);
+  }
+  assert.equal(h.fake.started.length, 0, "neither refused job launched a worker");
+});
+
+test("binding an unknown or kind-mismatched forgeIntegration refuses daemon startup (#1440)", async () => {
+  // The bound name must name exactly one configured integration.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          forgeIntegration: "fj-missing",
+        },
+      }),
+    /forgeIntegration 'fj-missing' must name exactly one instance forge integration/,
+  );
+  // A bound name whose integration's kind disagrees with the intake
+  // platform fails closed: the identity the intake stamps and the
+  // capability serving the envelopes must be the same installation.
   await assert.rejects(
     () =>
       start({
@@ -569,13 +693,60 @@ test("two forge integrations of the same kind refuse daemon startup (#1433)", as
           instance: {
             ...instanceConfig(),
             forges: [
-              { name: "gh-app-a", kind: "github", endpoint: "https://ghe-a.example/api/v3", credential: "gh-a" },
-              { name: "gh-app-b", kind: "github", endpoint: "https://ghe-b.example/api/v3", credential: "gh-b" },
+              { name: "fj", kind: "forgejo", endpoint: "https://forge.example/api/v1", credential: "fj-token" },
             ],
           } as InstanceConfig,
+          webhook: {
+            platform: "github",
+            port: 0,
+            secret: GITHUB_WEBHOOK_SECRET,
+            followUp: {} as never,
+          },
+          forgeIntegration: "fj",
         },
       }),
-    /forge integrations 'gh-app-a' and 'gh-app-b' share kind 'github'/,
+    /forgeIntegration 'fj' serves kind 'forgejo', which does not match the bound intake platform/,
+  );
+  // The same kind check guards the reconciliation poll's platform, not
+  // only the webhook intake's.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              { name: "fj", kind: "forgejo", endpoint: "https://forge.example/api/v1", credential: "fj-token" },
+            ],
+          } as InstanceConfig,
+          reconcile: {
+            intervalMs: 1000,
+            platform: "github",
+            run: async () => undefined,
+          },
+          forgeIntegration: "fj",
+        },
+      }),
+    /forgeIntegration 'fj' serves kind 'forgejo', which does not match the bound intake platform/,
+  );
+  // The bound name must be UNAMBIGUOUS too: a hand-built config carrying
+  // the same name twice (instance-config validation would refuse it, but
+  // the daemon owns its own fail-closed check) refuses startup.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              { name: "fj", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+              { name: "fj", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+            ],
+          } as InstanceConfig,
+          forgeIntegration: "fj",
+        },
+      }),
+    /forgeIntegration 'fj' must name exactly one instance forge integration/,
   );
 });
 

@@ -127,6 +127,7 @@ test("deriveGenerationId pins the canonical serialization (fixed key=value order
     nonce: "",
     adoptionEpoch: "",
     eventReference: "",
+    forgeIntegration: "",
   } as const;
   const canonical =
     "platform=github\n" +
@@ -140,7 +141,8 @@ test("deriveGenerationId pins the canonical serialization (fixed key=value order
     "kind=review\n" +
     "nonce=\n" +
     "adoptionEpoch=\n" +
-    "eventReference=\n";
+    "eventReference=\n" +
+    "forgeIntegration=\n";
   const expected = createHash("sha256").update(canonical, "utf8").digest("hex");
   assert.equal(deriveGenerationId(identity), expected);
 });
@@ -159,9 +161,10 @@ test("a newline/CR in any identity value yields the empty id (newline-injection 
     nonce: "",
     adoptionEpoch: "",
     eventReference: "",
+    forgeIntegration: "",
   };
   // The exact hostile boundary: two DISTINCT identities that serialize to
-  // the SAME bytes in the full TWELVE-line `key=value\n` form.
+  // the SAME bytes in the full THIRTEEN-line `key=value\n` form.
   const serialize = (headSha: string, baseSha: string): string =>
     "platform=github\ninstallationId=42\nrepoFullName=owner/repo\nprNumber=7\nprId=4242\n" +
     `headSha=${headSha}\n` +
@@ -379,6 +382,74 @@ test("an invalid provided adoptionEpoch fails the build (newline, too long, bad 
   assert.equal(buildReviewJob(ev, { adoptionEpoch: "a".repeat(65) }), null);
   assert.equal(buildReviewJob(ev, { adoptionEpoch: "!!!" }), null);
   assert.equal(buildReviewJob(ev, { adoptionEpoch: "has space" }), null);
+});
+
+// ── Forge-integration identity (#1440) ──────────────────────────────────────
+
+test("an empty forgeIntegration is ABSENT: it builds the plain job; non-empty identities are validated", () => {
+  const ev = makeEvent();
+  const base = buildReviewJob(ev);
+  const empty = buildReviewJob(ev, { forgeIntegration: "" });
+  assert.notEqual(base, null);
+  assert.notEqual(empty, null);
+  assert.equal(empty!.jobId, base!.jobId);
+  assert.equal(empty!.forgeIntegration, "");
+  assert.equal(base!.forgeIntegration, "");
+  // Boundary: exactly 64 valid chars is accepted, 65 is not.
+  const named = buildReviewJob(ev, { forgeIntegration: "f".repeat(64) });
+  assert.notEqual(named, null);
+  assert.equal(named!.forgeIntegration, "f".repeat(64));
+  assert.equal(buildReviewJob(ev, { forgeIntegration: "f".repeat(65) }), null);
+});
+
+test("an invalid provided forgeIntegration fails the build (newline, too long, bad charset)", () => {
+  const ev = makeEvent();
+  assert.equal(buildReviewJob(ev, { forgeIntegration: "fj\n1" }), null);
+  assert.equal(buildReviewJob(ev, { forgeIntegration: "fj\r1" }), null);
+  assert.equal(buildReviewJob(ev, { forgeIntegration: "a".repeat(65) }), null);
+  assert.equal(buildReviewJob(ev, { forgeIntegration: "!!!" }), null);
+  assert.equal(buildReviewJob(ev, { forgeIntegration: "has space" }), null);
+});
+
+test("two identities differing only in forgeIntegration hash differently; the field is in deriveGenerationId's list", () => {
+  const ev = makeEvent();
+  const unnamed = buildReviewJob(ev, { adoptionEpoch: "1" });
+  const fjPrimary = buildReviewJob(ev, { adoptionEpoch: "1", forgeIntegration: "fj-primary" });
+  const fjSecondary = buildReviewJob(ev, { adoptionEpoch: "1", forgeIntegration: "fj-secondary" });
+  assert.notEqual(unnamed, null);
+  assert.notEqual(fjPrimary, null);
+  assert.notEqual(fjSecondary, null);
+  assert.equal(fjPrimary!.forgeIntegration, "fj-primary");
+  assert.notEqual(fjPrimary!.jobId, unnamed!.jobId);
+  assert.notEqual(fjPrimary!.jobId, fjSecondary!.jobId);
+  // The same identity twice is stable, from either the string or the
+  // numeric form (the accepted-type convention).
+  assert.equal(fjPrimary!.jobId, buildReviewJob(ev, { adoptionEpoch: "1", forgeIntegration: "fj-primary" })!.jobId);
+  assert.equal(
+    buildReviewJob(ev, { forgeIntegration: 12345 as unknown as string })!.forgeIntegration,
+    "12345",
+  );
+  // The field participates in the canonical identity serialization: two
+  // GenerationIdentity objects differing only in forgeIntegration hash
+  // differently.
+  const identityBase = {
+    platform: "github",
+    installationId: "42",
+    repoFullName: "owner/repo",
+    prNumber: 7,
+    prId: 4242,
+    headSha: "aa11bb22cc33",
+    baseSha: "dd44ee55ff66",
+    configFingerprint: "",
+    kind: "review",
+    nonce: "",
+    adoptionEpoch: "",
+    eventReference: "",
+    forgeIntegration: "",
+  } as const;
+  const named = { ...identityBase, forgeIntegration: "fj-primary" };
+  assert.notEqual(deriveGenerationId(identityBase), deriveGenerationId(named));
+  assert.equal(deriveGenerationId(identityBase), deriveGenerationId({ ...identityBase }));
 });
 
 // ── follow_up isolation ─────────────────────────────────────────────────────
@@ -662,7 +733,7 @@ test("a leading-zero installation id fails the build; 32 digits builds, 33 does 
 
 // ── Per-field identity distinctness and hostile shapes ─────────────────────
 
-test("each of the twelve identity fields, varied alone, yields a distinct jobId", () => {
+test("each of the thirteen identity fields, varied alone, yields a distinct jobId", () => {
   const base = buildReviewJob(makeEvent());
   assert.notEqual(base, null);
   const eventFields: Array<[string, Partial<CanonicalForgeEvent>]> = [
@@ -692,6 +763,9 @@ test("each of the twelve identity fields, varied alone, yields a distinct jobId"
   const epoch = buildReviewJob(makeEvent(), { adoptionEpoch: "2" });
   assert.notEqual(epoch, null, "adoptionEpoch");
   assert.notEqual(epoch!.jobId, base!.jobId, "adoptionEpoch");
+  const integration = buildReviewJob(makeEvent(), { forgeIntegration: "fj-primary" });
+  assert.notEqual(integration, null, "forgeIntegration");
+  assert.notEqual(integration!.jobId, base!.jobId, "forgeIntegration");
   // eventReference is an identity field for follow_up jobs only.
   const fuBase = buildReviewJob(makeEvent({ kind: "follow_up", eventReference: "1234" }));
   const fuVaried = buildReviewJob(makeEvent({ kind: "follow_up", eventReference: "5678" }));
@@ -723,6 +797,7 @@ test("a __proto__-keyed event object does not throw and does not pollute Object.
     nonce: "",
     adoptionEpoch: "",
     eventReference: "",
+    forgeIntegration: "",
   };
   Object.defineProperty(identity, "__proto__", {
     value: { polluted: true },
@@ -748,6 +823,7 @@ test("a symbol-valued identity field does not throw (fail closed, never raise)",
     nonce: "",
     adoptionEpoch: "",
     eventReference: "",
+    forgeIntegration: "",
   };
   // Observed: `String()` is total over any field value (a symbol renders
   // as "Symbol(nonce)"), which carries no \n/\r, so a symbol-valued field

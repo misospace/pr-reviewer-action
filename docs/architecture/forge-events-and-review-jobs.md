@@ -67,6 +67,7 @@ with sentinels in the same style as `CanonicalForgeEvent`:
 | `nonce` | manual forced-rereview nonce | `""` |
 | `adoptionEpoch` | operator adoption/config-generation reference layered on the fingerprint (the #728 epoch dimension); changing it re-keys every job for the same head+config | `""` = pre-adoption/absent |
 | `eventReference` | the follow-up comment id a `follow_up` job answers (1–19 digits, no leading zero); forced `""` for `review` jobs | `""` |
+| `forgeIntegration` | the instance-config forge integration `name` the intake carried (#1440) — the stable identity the execution envelope's `forgeApiUrl` is resolved by | `""` = no integration named |
 | `fork` | trust metadata preserved from the event | `false` |
 | `deadlineAtMs` | deadline/cancellation identity | `0` = none |
 | `runId` | assigned run id | `""` = unassigned |
@@ -75,12 +76,12 @@ with sentinels in the same style as `CanonicalForgeEvent`:
 
 `deriveGenerationId` (`src/jobs/generation.ts`) is sha256 over a
 canonical serialization — a fixed-order `key=value\n` line per field — of
-exactly these twelve **identity fields**:
+exactly these thirteen **identity fields**:
 
 ```
 platform, installationId, repoFullName, prNumber, prId,
 headSha, baseSha, configFingerprint, kind, nonce,
-adoptionEpoch, eventReference
+adoptionEpoch, eventReference, forgeIntegration
 ```
 
 **Excluded, deliberately:**
@@ -106,8 +107,20 @@ adoptionEpoch, eventReference
   follow-up comments on the same PR must not collapse into one job.
   Forced `""` for `review` jobs, so a review's identity never depends on
   a comment id (webhook/poll/reconcile dedupe of reviews is unchanged).
+- `forgeIntegration` — the instance-config forge integration `name`
+  (#1440): a deployment may serve SEVERAL forge integrations of the same
+  `kind` (e.g. two Forgejo instances), and a job minted for one of them
+  must never share a generation with the other — the identity is what the
+  controller resolves each execution envelope's `forgeApiUrl` from, so
+  collapsing the two would stamp one installation's API base into the
+  other's envelopes. `""` = no integration named (legacy/pre-#1440 or no
+  named integration; the envelope endpoint then resolves by platform kind
+  only when exactly one integration of that kind exists). The identity is
+  operator infrastructure: it comes from the daemon's instance config,
+  never from repository config or event content, and an unresolvable one
+  refuses the request rather than guessing.
 
-**Rejected:** if ANY of the twelve identity values, stringified, contains
+**Rejected:** if ANY of the thirteen identity values, stringified, contains
 a `\n` or `\r`, `deriveGenerationId` returns `""` instead of a hash — in
 the `key=value\n` join, a newline inside one value can make two distinct
 identities serialize to the same bytes and collide their ids.
@@ -156,6 +169,11 @@ scheduling boundary itself (defense in depth on top of `schedule.ts`):
   safe integer before pattern/coercion (the event-boundary rule); a
   provided-but-invalid epoch fails the build rather than being silently
   emptied into the identity;
+- a provided `forgeIntegration` (any job kind) follows the same
+  conventions as `adoptionEpoch`: it must match
+  `[A-Za-z0-9._-]{1,64}` exactly; only the EMPTY string (or absent) is
+  absent (becomes `""`); a number must be a safe integer before
+  pattern/coercion; a provided-but-invalid identity fails the build;
 - a `follow_up` job's `eventReference` is the event's, and must be
   non-empty and match `/^[1-9]\d{0,18}$/` (1–19 digits, no leading
   zero); a number must be a safe integer before pattern/coercion (the
@@ -260,7 +278,7 @@ runtime.
 |---|---|
 | webhook + poll of the same PR/config dedupe to one job id; only reason/trigger differ (through the REAL normalizers, same installationId) | `normalizeGitHubEvent` + `reconciliationPollEvent` + `buildReviewJob`; test "webhook and poll … identical jobs" |
 | new headSha / new configFingerprint ⇒ new id | `deriveGenerationId`; tests "a new headSha …", "a different configFingerprint …" |
-| each of the twelve identity fields, varied alone ⇒ distinct id | `deriveGenerationId`; test "each of the twelve identity fields …" |
+| each of the thirteen identity fields, varied alone ⇒ distinct id | `deriveGenerationId`; test "each of the thirteen identity fields …" |
 | irrelevant kinds (pr_closed, unknown, visibility_change, …) schedule nothing and build nothing | `shouldSchedule` + `buildReviewJob`; test "irrelevant events …" |
 | headless check_update (no PR number) ⇒ no generation | `shouldSchedule`; test "a headless check_update …" |
 | same head/config: rereview_label ≡ synchronize id; manual nonce breaks it | `deriveGenerationId` (reason out, nonce in); tests "rereview_label and synchronize …", "a manual forced rereview …" |

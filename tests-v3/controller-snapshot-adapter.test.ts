@@ -36,6 +36,7 @@ function makeJob(jobId: string): ReviewJob {
     nonce: "",
     adoptionEpoch: "",
     eventReference: "",
+    forgeIntegration: "",
     fork: false,
     deadlineAtMs: 0,
     runId: "",

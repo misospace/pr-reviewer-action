@@ -29,7 +29,10 @@
  *   PLATFORM-AWARE: one daemon instance serves ONE forge platform, and
  *   `webhook.platform` selects the intake it binds — the GitHub App intake
  *   (`X-Hub-Signature-256`, bound here) or the native Forgejo intake
- *   (`X-Gitea-Signature`).
+ *   (`X-Gitea-Signature`). When the operator binds `forgeIntegration`, the
+ *   daemon additionally serves ONE named forge integration: every job its
+ *   intake mints carries that stable identity and the envelope's endpoint
+ *   is resolved by it (#1440).
  * - **Scheduling and execution** — the daemon drives `tick()` on its own
  *   timer, renews worker leases while the executor reports liveness,
  *   prepares exact-head workspaces through #732, resolves ONLY the
@@ -193,6 +196,13 @@ export interface ControllerDaemonOptions {
   readonly resolveEventIdentity?: EventIdentityResolver;
   /** Executor construction overrides (see `ExecutorBindings`). */
   readonly executors?: ExecutorBindings;
+  /** The instance-config forge integration `name` this daemon instance
+   * serves (#1440). Infrastructure bound by the operator; never
+   * repository- or event-supplied. When bound, every job this daemon's
+   * intake mints carries this identity and the execution envelope's
+   * `forgeApiUrl` is resolved by it; startup refuses unless exactly one
+   * `instance.forges` entry has the name. */
+  readonly forgeIntegration?: string;
   /** Workspace-extraction override (tests bind a fake; production uses
    * `createReviewWorkspace` from #732 acquisition). */
   readonly createWorkspace?: import("./execution.js").RequestBuilderDeps["createWorkspace"];
@@ -906,19 +916,14 @@ export async function startControllerDaemon(
   // configured, and a credential-shaped path in it is refused the same
   // way — fail closed on the configuration, not on its current use.
   //
-  // Each kind may appear at most once. The envelope's endpoint is resolved
-  // by the JOB's platform kind alone — this composition carries no
-  // integration identity with the job — so two integrations of one kind
-  // would silently stamp the first entry's endpoint into every envelope of
-  // that platform, even when the other integration is the one actually
-  // serving the job. The worker would then read and write through the wrong
-  // installation's API base. A deployment that genuinely needs two
-  // same-kind integrations must first carry a stable integration identity
-  // from intake to envelope; until then the ambiguous mapping is refused
-  // here, not guessed. (Instance config keeps `forges` open for that
-  // future: the constraint belongs to this selection site, not to the
-  // durable schema.)
-  const kindOwners = new Map<string, string>();
+  // The envelope's endpoint is resolved by the JOB's `forgeIntegration`
+  // identity (#1440): a job minted with an integration name resolves its
+  // `forgeApiUrl` from that named integration. A job with NO identity
+  // ("" — legacy/pre-#1440) resolves by platform kind only when exactly
+  // one integration of that kind exists; when several share the kind the
+  // request is refused at build time, never guessed. Same-kind
+  // integrations are therefore allowed here: instance config already
+  // enforces unique integration NAMES.
   for (const forge of options.instance.forges) {
     const problem = forgeApiUrlProblem(forge.endpoint);
     if (problem !== "") {
@@ -926,13 +931,30 @@ export async function startControllerDaemon(
         `instance forge integration '${forge.name}' endpoint ${problem}: every execution envelope for that platform would be refused`,
       );
     }
-    const first = kindOwners.get(forge.kind);
-    if (first !== undefined) {
+  }
+  // When the daemon binds an integration name, the name must name exactly
+  // one configured integration, and that integration's platform kind must
+  // agree with the intake(s) this daemon serves — the identity the intake
+  // stamps and the capability that serves the envelopes must be the same
+  // installation (fail closed at construction, not at the first job).
+  if (options.forgeIntegration !== undefined) {
+    const named = options.instance.forges.filter(
+      (entry) => entry.name === options.forgeIntegration,
+    );
+    if (named.length !== 1) {
       throw new TypeError(
-        `instance forge integrations '${first}' and '${forge.name}' share kind '${forge.kind}': this daemon resolves each envelope's forge endpoint by platform kind alone, so each kind may appear at most once in instance.forges`,
+        `ControllerDaemonOptions.forgeIntegration '${options.forgeIntegration}' must name exactly one instance forge integration`,
       );
     }
-    kindOwners.set(forge.kind, forge.name);
+    const boundKind = named[0]!.kind;
+    if (
+      (options.webhook !== undefined && options.webhook.platform !== boundKind) ||
+      (options.reconcile?.platform !== undefined && options.reconcile.platform !== boundKind)
+    ) {
+      throw new TypeError(
+        `ControllerDaemonOptions.forgeIntegration '${options.forgeIntegration}' serves kind '${boundKind}', which does not match the bound intake platform`,
+      );
+    }
   }
   const durableStateDir = options.durableStateDir;
   if (typeof durableStateDir !== "string" || durableStateDir === "" || durableStateDir.includes("\u0000")) {
@@ -997,17 +1019,51 @@ export async function startControllerDaemon(
     runsRoot: options.runsRoot,
     mirrorFor: (job) => options.forge.mirrorFor(job),
     resolveProfiles: (job) => options.resolveProfiles(job),
-    // The non-secret forge API base travels in the envelope (#1433): the
-    // instance config's forge integration for the job's platform. GitHub
-    // without an explicit integration entry stays "" (its adapter defaults
-    // to api.github.com); Forgejo without one refuses at request
-    // validation, never at adapter construction inside the worker. The
-    // startup screening above proved each kind appears at most once, so
-    // this kind match is the ONE integration of the job's platform — never
-    // the first of several — and it is the integration the single-platform
-    // entrypoint composes into the forge capability serving the job.
-    resolveForgeApiUrl: async (job) =>
-      options.instance.forges.find((entry) => entry.kind === job.platform)?.endpoint ?? "",
+    // The non-secret forge API base travels in the envelope (#1433),
+    // resolved by the job's forge-integration identity FIRST (#1440): a
+    // job minted for a named integration reads and writes through THAT
+    // installation's endpoint, and an unresolvable identity refuses the
+    // request (the builder's build() rejects → the scheduler's
+    // failed-outcome path) rather than guessing. An identity-less job
+    // ("") falls back to the platform kind only when exactly one
+    // integration of that kind exists: zero stays "" (GitHub's adapter
+    // defaults to api.github.com; Forgejo still fails
+    // `validateExecutionRequest`), more than one is ambiguous and
+    // refused — never the first of several. Resolution reads the
+    // operator's instance config only: never repository config, never
+    // event content.
+    resolveForgeApiUrl: async (job) => {
+      if (job.forgeIntegration !== "") {
+        const named = options.instance.forges.find(
+          (entry) => entry.name === job.forgeIntegration,
+        );
+        if (named === undefined) {
+          throw new RangeError(
+            `job names unresolvable forge integration '${job.forgeIntegration}': no instance forge integration has that name`,
+          );
+        }
+        // A named integration whose kind does not match the job's platform
+        // is a corrupted/misrouted identity (e.g. a rehydrated snapshot
+        // record that never passed this daemon's enqueue guard): resolving
+        // it would stamp the other installation's endpoint into the
+        // envelope. Refuse the request — fail closed on uncertain state.
+        if (named.kind !== job.platform) {
+          throw new RangeError(
+            `job names forge integration '${job.forgeIntegration}' of kind '${named.kind}' but the job's platform is '${job.platform}': the identity does not match the job's platform`,
+          );
+        }
+        return named.endpoint;
+      }
+      const sameKind = options.instance.forges.filter(
+        (entry) => entry.kind === job.platform,
+      );
+      if (sameKind.length > 1) {
+        throw new RangeError(
+          `job carries no forge integration identity but ${sameKind.length} instance forge integrations share kind '${job.platform}': the envelope endpoint cannot be resolved without guessing`,
+        );
+      }
+      return sameKind[0]?.endpoint ?? "";
+    },
     credentialRefs: (job, runId) => options.credentialRefs(job, runId),
     ...(options.createWorkspace !== undefined ? { createWorkspace: options.createWorkspace } : {}),
   });
@@ -1357,8 +1413,15 @@ export async function startControllerDaemon(
       if (stopped) throw new Error("intake closed");
       // Adoption/effective-config resolution is a GATE, not decoration: a
       // repository the policy did not grant never schedules (fail closed).
-      const buildOptions = await resolveEventIdentity(event);
+      let buildOptions = await resolveEventIdentity(event);
       if (buildOptions === null) return "ignored";
+      // The daemon's bound integration name is operator infrastructure and
+      // overrides whatever the resolver returned: the resolver never
+      // supplies infrastructure, so when the daemon serves one forge
+      // integration, every job its intake mints carries that identity.
+      if (options.forgeIntegration !== undefined) {
+        buildOptions = { ...buildOptions, forgeIntegration: options.forgeIntegration };
+      }
       const dispatched = await dispatchCanonicalEvent(event, {
         ledger,
         buildOptions,
@@ -1382,6 +1445,18 @@ export async function startControllerDaemon(
       return "scheduled";
     },
     async enqueue(job) {
+      // A job minted for a DIFFERENT integration must not be scheduled
+      // through this daemon: its envelope would resolve to the wrong
+      // installation's API base (fail closed, before any queue mutation).
+      if (
+        options.forgeIntegration !== undefined &&
+        job.forgeIntegration !== "" &&
+        job.forgeIntegration !== options.forgeIntegration
+      ) {
+        throw new RangeError(
+          `job names forge integration '${job.forgeIntegration}' but this daemon serves '${options.forgeIntegration}'`,
+        );
+      }
       await enqueueGeneration(job);
     },
     async stop() {
