@@ -41,6 +41,23 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from pr_reviewer import semantic_judge  # noqa: E402
+from pr_reviewer.credential_argv import (  # noqa: E402
+    ValueSafeArgumentParser,
+    credential_argument_refusal,
+    refusal_for_unrecognized_arguments,
+)
+from pr_reviewer.http_safe import (  # noqa: E402
+    BaseUrlArgumentAction,
+    CredentialInProcessArguments,
+    Endpoint,
+    UnsafeEndpointUrl,
+    base_url_identity_digest,
+    normalize_base_url,
+    redact_echo_value,
+    redact_url_userinfo,
+    resolve_endpoint,
+    select_base_url,
+)
 
 DEFAULT_CORPUS = _REPO_ROOT / "evals" / "judge-calibration-corpus.json"
 _MAX_ATTEMPTS = 3
@@ -180,8 +197,13 @@ def score_arm(
 
 
 def _openai_judge_call(
-    judge_model: str, base_url: str, api_key: str, timeout_sec: int
+    judge_model: str, endpoint: Endpoint, api_key: str, timeout_sec: int
 ) -> JudgeCall:
+    """Build the production judge call.
+
+    ``endpoint`` is already resolved: its URL is credential-free and any
+    credential the endpoint URL carried travels in the ``Authorization``
+    header instead of in the request URL (#1414)."""
     from pr_reviewer.judge_http import chat_completion
 
     def _call(messages: list[dict], attempt: int) -> str:
@@ -201,7 +223,10 @@ def _openai_judge_call(
             ),
             "response_format": {"type": "json_object"},
         }
-        return _extract_text(chat_completion(base_url, payload, api_key, timeout_sec))
+        return _extract_text(chat_completion(
+            endpoint.url, payload, api_key, timeout_sec,
+            basic_credential=endpoint.credential,
+        ))
 
     return _call
 
@@ -415,23 +440,15 @@ def validate_arms(
     return errors
 
 
-def _normalize_base_url(url: Any) -> str:
-    """Normalize a judge endpoint for identity comparison: strip surrounding
-    whitespace and trailing slashes only. A ``/v1`` path segment stays
-    significant, so the same model alias behind a different gateway is never
-    treated as equal."""
-    if not isinstance(url, str):
-        return ""
-    return url.strip().rstrip("/")
-
-
 def _load_verified_calibration(
     artifact_path: Path, judge_model: str, corpus_path: Path, base_url: str
 ) -> tuple[Optional[dict], list[str]]:
     """Load the calibration artifact and prove it is the SAME frozen instrument
     this live run is about to use. A different prompt version, judge model,
     judge setting, calibration corpus, or judge endpoint (base_url) fails
-    closed."""
+    closed. The recorded base_url is redacted (#1414), so the endpoint
+    comparison uses the artifact's SHA-256 of the full normalized URL against
+    the full URL of this run — never the redacted display string."""
     try:
         artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -445,8 +462,9 @@ def _load_verified_calibration(
     if artifact.get("agreement_rate") != 1.0 or artifact.get("passed") != total:
         errors.append(
             "calibration artifact did not record 100% agreement "
-            f"(passed={artifact.get('passed')!r}, total={total!r}, "
-            f"agreement_rate={artifact.get('agreement_rate')!r})"
+            f"(passed={redact_echo_value(artifact.get('passed'))}, "
+            f"total={redact_echo_value(total)}, "
+            f"agreement_rate={redact_echo_value(artifact.get('agreement_rate'))})"
         )
     expected = semantic_judge.judge_config_identity(judge_model, corpus_path)
     errors.extend(semantic_judge.verify_judge_config(artifact.get("judge_config"), expected))
@@ -454,23 +472,34 @@ def _load_verified_calibration(
     if not isinstance(recorded_base_url, str):
         errors.append(
             "calibration artifact base_url is missing or not a string "
-            f"(base_url={recorded_base_url!r})"
+            f"(base_url={redact_url_userinfo(recorded_base_url)!r})"
         )
-    elif _normalize_base_url(recorded_base_url) != _normalize_base_url(base_url):
-        errors.append(
-            "calibration artifact base_url does not match this run's judge "
-            f"endpoint (artifact={recorded_base_url!r}, live={base_url!r})"
-        )
-    if not _normalize_base_url(base_url):
+    if not normalize_base_url(base_url):
         errors.append(
             "this run's judge endpoint (base_url) is empty after normalization"
+        )
+    elif not isinstance(artifact.get("base_url_sha256"), str) or not artifact["base_url_sha256"]:
+        errors.append(
+            "calibration artifact is missing base_url_sha256; re-run "
+            "scripts/run_judge_calibration.py with the current tooling"
+        )
+    elif artifact["base_url_sha256"] != base_url_identity_digest(base_url):
+        errors.append(
+            "calibration artifact base_url does not match this run's judge "
+            f"endpoint (artifact={redact_url_userinfo(recorded_base_url)!r}, "
+            f"live={redact_url_userinfo(base_url)!r})"
         )
     return artifact, errors
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    # allow_abbrev=False: a prefix such as "--a" must not resolve to
+    # --allow-subset-scenarios now that --api-key is gone (#1413). The
+    # prefix would silently relax the full-corpus guard, and the operator
+    # would not see what the run did.
+    parser = ValueSafeArgumentParser(
         description="Score blinded #661 live A/B outputs with the frozen semantic judge.",
+        allow_abbrev=False,
     )
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument(
@@ -486,21 +515,77 @@ def build_parser() -> argparse.ArgumentParser:
              + "that must match this run's frozen judge identity, or scoring is refused",
     )
     parser.add_argument("--judge-model", default=os.environ.get("JUDGE_MODEL"))
-    parser.add_argument("--base-url", default=os.environ.get("JUDGE_BASE_URL"))
-    parser.add_argument("--api-key", default=os.environ.get("JUDGE_API_KEY", ""))
+    # default=None, not the environment value: main() has to tell a
+    # command-line value from the environment one, because a credential may
+    # never ride in the process argument list (#1414). The action records
+    # every occurrence, not only the effective one.
+    parser.add_argument("--base-url", default=None, action=BaseUrlArgumentAction)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--output", type=Path, default=None)
     return parser
 
 
+def _judge_api_key() -> str:
+    """Return the judge key from the environment only (never from argv)."""
+    return os.environ.get("JUDGE_API_KEY", "")
+
+
 def main(argv: Optional[list[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    # A credential argument is refused first (#1413). The refusal comes
+    # before argparse runs, so no parser message can quote a value.
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    refusal = credential_argument_refusal(
+        arguments,
+        credential_flags=("--api-key",),
+        credential_env="JUDGE_API_KEY",
+    )
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
+    # Unrecognized arguments are refused without echoing them: argparse's own
+    # "unrecognized arguments" message prints the value, and an argument the
+    # runner does not know may be a credential.
+    args, extras = build_parser().parse_known_args(arguments)
+    refusal = refusal_for_unrecognized_arguments(
+        extras,
+        credential_flags=("--api-key",),
+        credential_env="JUDGE_API_KEY",
+    )
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
+    # The endpoint comes from the environment when the command line carries
+    # none: a credential in an argument list is readable by every other
+    # process on the host, so a credential-bearing URL is accepted from
+    # JUDGE_BASE_URL only (#1414).
+    try:
+        base_url = select_base_url(
+            getattr(args, "base_url_values", ()), os.environ.get("JUDGE_BASE_URL")
+        )
+    except CredentialInProcessArguments as exc:
+        # The message never echoes the value: it can carry a secret.
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     for path in (args.corpus, args.baseline, args.treatment, args.calibration_artifact):
         if not path.exists():
             print(f"Error: file not found: {path}", file=sys.stderr)
             return 2
-    if not args.judge_model or not args.base_url:
-        print("Error: --judge-model and --base-url are required", file=sys.stderr)
+    if not args.judge_model or not base_url:
+        print("Error: --judge-model and --base-url (or JUDGE_MODEL/JUDGE_BASE_URL) "
+              "are required", file=sys.stderr)
+        return 2
+    try:
+        endpoint = resolve_endpoint(base_url)
+    except UnsafeEndpointUrl as error:
+        # The message never echoes the value: an endpoint URL can carry a
+        # credential in its userinfo.
+        print(f"Error: {error}", file=sys.stderr)
+        return 2
+    judge_api_key = _judge_api_key()
+    if endpoint.credential and judge_api_key:
+        print("Error: the judge endpoint URL carries a credential and an API key "
+              "was also supplied; use exactly one credential channel",
+              file=sys.stderr)
         return 2
     corpus = semantic_judge.load_calibration_corpus(args.corpus)
     errors = semantic_judge.validate_calibration_corpus(corpus)
@@ -533,14 +618,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
     artifact, calibration_errors = _load_verified_calibration(
-        args.calibration_artifact, args.judge_model, args.corpus, args.base_url
+        args.calibration_artifact, args.judge_model, args.corpus, base_url
     )
     if calibration_errors:
         print("Calibration artifact does not match this frozen judge — "
               + "refusing to score:", *calibration_errors, sep="\n  ", file=sys.stderr)
         return 2
     judge_call = _openai_judge_call(
-        args.judge_model, args.base_url, args.api_key, args.timeout
+        args.judge_model, endpoint, judge_api_key, args.timeout
     )
     report = compare([
         score_arm(baseline, answer_keys, judge_call),
