@@ -53,7 +53,11 @@
  * record carries the worker's PROCESS IDENTITY (its process start time)
  * next to the pid: the pid is signalled only while that identity still
  * matches the live process, and a pid that cannot be proven (or one that
- * names init or the controller itself) is refused outright.
+ * names init or the controller itself) is refused outright. A pid that is
+ * PRESENT but can no longer execute (a killed-but-unreaped zombie) is still
+ * swept: it owns its PROCESS GROUP, whose members can outlive it, and only
+ * the group kill removes them. Only a pid that names no process at all is
+ * short-circuited as already gone.
  *
  * Operator-mode library (like `src/queue/` and `src/acquisition/`): NOT
  * wired into the Action runtime.
@@ -66,9 +70,10 @@ import { join } from "node:path";
 import { buildChildEnv, extendAllowlist } from "../runtime/env.js";
 import { runProcess } from "../runtime/subprocess.js";
 import type { ProcessHandle, ProcessResult, RunProcessOptions } from "../runtime/subprocess.js";
-import { terminateProcessTreeByPid } from "../runtime/process-tree.js";
+import { processCanExecute, processPresent, terminateProcessTreeByPid } from "../runtime/process-tree.js";
 import type { LocalExecutorSpec } from "../config/instance-config.js";
 import {
+  EXECUTION_ORPHANED_CATEGORY,
   validateExecutionRequest,
   ExecutionRequestError,
   type ExecutionCancelOutcome,
@@ -150,9 +155,22 @@ export interface LocalExecutorDeps {
   readonly runProcess?: (options: RunProcessOptions) => ProcessHandle;
   /** Clock. Default: `Date.now`. */
   readonly nowMs?: () => number;
-  /** Liveness probe for reconcile. Default: `process.kill(pid, 0)`
-   * try/catch semantics (see `src/runtime/process-tree.ts`). */
+  /** Liveness probe for reconcile: "can this pid still EXECUTE", not "does
+   * it answer `kill(pid, 0)`". A killed-but-unreaped zombie cannot execute
+   * and is therefore not alive — under a PID 1 that never reaps orphans it
+   * keeps answering the raw signal probe forever. Default: the runtime's own
+   * `processCanExecute` predicate (see `src/runtime/process-tree.ts`). The
+   * sibling `pidPresent` seam answers the DIFFERENT question — "does this pid
+   * still name a process?" — which a recovered cancellation needs before it
+   * may skip the sweep. */
   readonly pidAlive?: (pid: number) => boolean;
+  /** Presence probe: "does this pid still name a process?" — ALIVE or a
+   * killed-but-unreaped zombie. A present-but-cannot-execute pid still owns
+   * its process GROUP, whose members can outlive it, so the recovered
+   * cancellation must still sweep that group instead of declaring the worker
+   * gone. Default: the runtime's own `processPresent` predicate (see
+   * `src/runtime/process-tree.ts`). */
+  readonly pidPresent?: (pid: number) => boolean;
   /** Terminate a worker's process tree by pid — the seam a RECOVERED
    * cancellation uses (there is no in-memory handle to abort). Resolves
    * `true` only when the worker is CONFIRMED gone. Default: the runtime's
@@ -167,16 +185,29 @@ export interface LocalExecutorDeps {
   readonly pidIdentity?: (pid: number) => Promise<string>;
 }
 
+/** The default liveness probe: the runtime's own "can this pid still
+ * EXECUTE" predicate, not the raw signal probe.
+ *
+ * Liveness here means "can this pid still execute". A killed-but-unreaped
+ * zombie answers `kill(pid, 0)` forever under a PID 1 that never reaps
+ * orphans (a container init or a bare shell), so the raw probe would call a
+ * terminated worker alive forever — the exact false-alive shape the runtime's
+ * tree cleanup already fixed. `processCanExecute` treats a pid that is not a
+ * process (0, negative, non-integer) as dead and falls back to the signal
+ * probe only where `/proc` cannot describe the pid. */
 function defaultPidAlive(pid: number): boolean {
-  // pid 0 is not a process: `process.kill(0, 0)` would signal the whole
-  // process group, so a never-assigned pid is dead by definition.
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return processCanExecute(pid);
+}
+
+/** The default presence probe: the runtime's own "does this pid still name
+ * a process" predicate.
+ *
+ * Presence is not executability. A killed-but-unreaped zombie cannot execute
+ * but IS still present — its pid is not released until it is reaped, so it can
+ * never have been recycled — and it still owns its process group, whose
+ * members can outlive it. Only a pid that names no process at all is gone. */
+function defaultPidPresent(pid: number): boolean {
+  return processPresent(pid);
 }
 
 /** The process start time of a pid — the PROCESS IDENTITY.
@@ -213,9 +244,12 @@ async function readProcStartTime(pid: number): Promise<string> {
  * tree-termination grace. */
 const TERMINATE_GRACE_MS = 2_000;
 /** Liveness poll interval and settle window for the confirmation that a
- * terminated worker is really gone: a killed child stays a ZOMBIE until
- * its parent reaps it, and a zombie still answers the liveness probe, so
- * a single probe would call a dead worker alive. */
+ * terminated worker is really gone: the probe asks "can this pid still
+ * execute", so a killed-but-unreaped zombie already reads as gone — but the
+ * leader can still be executing for a moment after the tree termination
+ * returns, and a platform without `/proc` falls back to the raw signal
+ * probe, where a zombie keeps answering. The confirmation is therefore a
+ * bounded poll, never a single probe. */
 const DEATH_POLL_MS = 50;
 const DEATH_SETTLE_MS = 1_000;
 
@@ -228,11 +262,11 @@ function sleep(ms: number): Promise<void> {
 /** Terminate a worker's process tree and CONFIRM that the worker is gone.
  *
  * The confirmation is a bounded poll, not a single probe: the tree
- * termination kills the leader, but the leader stays addressable (as a
- * zombie) until its parent reaps it, and a zombie still answers the
- * liveness probe. A survivor in the snapshot means the tree was not fully
- * swept — the worker may still have live descendants, so the termination
- * is not confirmed. */
+ * termination kills the leader, but the leader can still be executing for a
+ * moment, and where `/proc` cannot describe the pid the probe falls back to
+ * the raw signal check, where a killed-but-unreaped leader keeps answering.
+ * A survivor in the snapshot means the tree was not fully swept — the worker
+ * may still have live descendants, so the termination is not confirmed. */
 async function terminateWorkerTree(
   pid: number,
   pidAlive: (pid: number) => boolean,
@@ -308,12 +342,15 @@ export class LocalExecutor implements Executor {
   constructor(spec: LocalExecutorSpec, deps: LocalExecutorDeps = {}) {
     this.spec = spec;
     const pidAlive = deps.pidAlive ?? defaultPidAlive;
+    const pidPresent = deps.pidPresent ?? defaultPidPresent;
     this.deps = {
       runProcess: deps.runProcess ?? ((options) => runProcess(options)),
       nowMs: deps.nowMs ?? (() => Date.now()),
       pidAlive,
+      pidPresent,
       // The default termination confirms the worker's death with the SAME
-      // liveness probe the executor uses, so an injected probe and the
+      // liveness probe the executor uses — the runtime's zombie-aware
+      // `processCanExecute` predicate — so an injected probe and the
       // termination seam can never disagree about what is alive.
       terminate: deps.terminate ?? (async (pid: number) => await terminateWorkerTree(pid, pidAlive)),
       pidIdentity: deps.pidIdentity ?? ((pid: number) => readProcStartTime(pid)),
@@ -635,7 +672,7 @@ export class LocalExecutor implements Executor {
     if (pid > 0 && this.deps.pidAlive(pid)) return RECONCILE_RUNNING;
     return this.settledOutcome(validated, {
       status: "failed",
-      failureCategory: "orphaned",
+      failureCategory: EXECUTION_ORPHANED_CATEGORY,
       failureMessage: `the recorded worker (pid ${pid}) is gone with no terminal state`,
     });
   }
@@ -669,6 +706,14 @@ export class LocalExecutor implements Executor {
    * re-reads the live process's token before it signals anything: a pid of
    * `<= 1` or the controller's own pid, a record without a token, an
    * unreadable current token, or a mismatch all fail closed.
+   *
+   * Presence and executability are DIFFERENT questions, and the recovered
+   * path asks both. A pid that is PRESENT but can no longer execute (a
+   * killed-but-unreaped zombie) is still SWEPT: it owns its process group,
+   * whose members can outlive it, and only the group kill removes them —
+   * skipping the sweep would report a terminated worker and LEAK the group.
+   * Only a pid that names no process at all short-circuits to `terminated`
+   * without a signal.
    *
    * Fail closed: a termination that cannot be CONFIRMED is reported
    * `failed` (`worker-not-terminated`), never `terminated` — the caller
@@ -744,7 +789,13 @@ export class LocalExecutor implements Executor {
       // treating the run as possibly alive.
       return CANCEL_WORKER_NOT_TERMINATED;
     }
-    if (!this.deps.pidAlive(pid)) {
+    // The recorded worker is gone ENTIRELY only when its pid names no
+    // process at all: there is nothing running to terminate and nothing
+    // that could be signalled. A pid that is PRESENT but can no longer
+    // execute (a killed-but-unreaped zombie) still owns its process group,
+    // whose members can outlive it — so it falls through to the identity
+    // proof and the tree termination, which is what removes them.
+    if (!this.deps.pidPresent(pid)) {
       // The recorded worker is already gone: there is nothing running to
       // terminate.
       return CANCEL_TERMINATED;
@@ -790,10 +841,10 @@ export class LocalExecutor implements Executor {
 
   /** Confirm a live child cancellation using the two proofs the owner has:
    * the runtime's complete descendant sweep and the ChildProcess `exit`
-   * event for the leader. PID liveness is intentionally NOT used here;
-   * a dead-but-unreaped zombie still answers `kill(pid, 0)`. Recovered
-   * workers, which have no ChildProcess handle, keep the stricter
-   * pid-identity + liveness path in `cancel(request)`. */
+   * event for the leader. PID liveness is intentionally NOT used here: the
+   * leader's own exit event is the direct proof that it can no longer
+   * execute. Recovered workers, which have no ChildProcess handle, keep the
+   * stricter pid-identity + liveness path in `cancel(request)`. */
   private async confirmLiveTermination(run: LocalRun, outcome: ProcessResult): Promise<boolean> {
     const report = outcome.termination;
     if (report === null || !report.swept || report.survived.length > 0) return false;

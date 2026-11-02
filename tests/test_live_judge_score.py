@@ -366,6 +366,19 @@ def test_verified_calibration_rejects_unreadable_artifact(tmp_path: Path) -> Non
     assert errors
 
 
+def test_verified_calibration_rejects_a_binary_artifact_with_a_clean_refusal(
+    tmp_path: Path,
+) -> None:
+    """#1429: a calibration artifact is a shared file, and a binary one must
+    fail closed with the same clean refusal as any other unreadable artifact —
+    not a bare UnicodeDecodeError traceback."""
+    bad = tmp_path / "c.json"
+    bad.write_bytes(b"\xff\xfe\x00binary artifact\x00\xff")
+    _, errors = ljs._load_verified_calibration(bad, "m", CORPUS_PATH, "http://x")
+    assert errors
+    assert any("cannot read calibration artifact" in e for e in errors)
+
+
 def test_main_refuses_mismatched_calibration(tmp_path: Path) -> None:
     base = tmp_path / "b.json"
     treat = tmp_path / "t.json"

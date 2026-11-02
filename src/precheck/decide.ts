@@ -197,6 +197,13 @@ export interface PrecheckOutput {
   incomplete_reason?: string;
   /** #978: carried gate-bypass eligibility, consumed in-process by the gate. */
   degradedGateBypass?: boolean;
+  /** #1426: the previous reviewed head — the authenticated managed marker's
+   * `head_sha` — carried on the review path so the review context can state
+   * the prior-review delta identity explicitly. Empty when there is no
+   * authenticated managed body or the marker's head is not SHA-shaped; a
+   * diff-unchanged skip never carries it (its `head_sha` is the #975
+   * carried-pointer semantics, a different field). */
+  prior_head_sha?: string;
 }
 
 /** Extract the broad fingerprint from the last published comment body —
@@ -359,6 +366,7 @@ function platformOutputs(base: Partial<PrecheckOutput>, resolvedPlatform: string
     head_sha: "",
     base_sha: "",
     is_fork_pr: "",
+    prior_head_sha: "",
     resolved_platform: resolvedPlatform,
     effective_forgejo_api_url: forgejoUrl,
     ...base,
@@ -566,6 +574,15 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   const lastCommentBody = await selectAuthenticatedManagedBody(spec.adapter, comments, reviews, publishMode, commentMarker, diagnostics);
   const storedFingerprint = extractStoredFingerprint(lastCommentBody);
   const previousFingerprints = storedFingerprint ? [storedFingerprint] : [];
+  // #1426: one marker parse for both readers — the skip branch's #812/#975
+  // consumers below and the review path's prior-reviewed-head identity. Only
+  // the authenticated managed body ever reaches here, so the head it names is
+  // as trustworthy as the fingerprints and carried verdict already read from
+  // it; the SHA-shape guard keeps a malformed marker from ever becoming a
+  // delta identity.
+  const managedMarker = parseMetadata(lastCommentBody);
+  const managedMarkerHead = typeof managedMarker?.head_sha === "string" ? managedMarker.head_sha : "";
+  const priorHeadSha = /^[0-9a-f]{7,64}$/i.test(managedMarkerHead) ? managedMarkerHead : "";
 
   // ── #633 auto-selection inputs ────────────────────────────────────────
   const deepReview = (env.DEEP_REVIEW ?? "false").toLowerCase();
@@ -627,8 +644,9 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
     if (skipReason === "diff-unchanged") {
       const carried = carriedVerdict(lastCommentBody);
       // One marker parse for both readers below: the #812 CI-stale
-      // re-check and the #975 head acceptance.
-      const carriedMarker = parseMetadata(lastCommentBody);
+      // re-check and the #975 head acceptance. (The parse itself moved to
+      // the main flow above — #1426 — so the skip branch reuses it.)
+      const carriedMarker = managedMarker;
       // ── #812: the stale carried verdict ──────────────────────────────
       // A carried request_changes binds to the external-CI conclusion the
       // review saw (required-check coverage is not recomputed here). When
@@ -654,7 +672,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
             diagnostics(
               "warning: carried request_changes marker lacks " + (headSha === "" ? "head_sha" : "ci_state") + "; forcing a fresh review (fail closed)\n",
             );
-            return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict");
+            return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict", undefined, false, priorHeadSha);
           }
           const checks = await readAdapter.externalChecks(headSha).catch(() => null);
           const live = checks === null ? null : externalChecksConclusion(checks);
@@ -665,7 +683,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
             diagnostics(
               "warning: carried request_changes is CI-stale (stored: " + storedCiState + ", live: " + (live ?? "unknown") + "); forcing a fresh review\n",
             );
-            return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict");
+            return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict", undefined, false, priorHeadSha);
           }
         }
       }
@@ -705,7 +723,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   // where it documents WHY the skip was refused (still should_review=true).
   // The authorized comment branch already fetched the PR for its fork gate;
   // reuse it rather than re-fetching (the PR object is identical by then).
-  return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "", commentPrObject, commentCommandPath);
+  return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "", commentPrObject, commentCommandPath, priorHeadSha);
 }
 
 async function reviewPathOutputs(
@@ -717,6 +735,7 @@ async function reviewPathOutputs(
   staleReason: string,
   preFetchedPr?: unknown,
   commentCommandPath = false,
+  priorHeadSha = "",
 ): Promise<PrecheckOutput> {
   const repo = env.REPO ?? "";
   const prObject = preFetchedPr ?? await spec.adapter.getPr();
@@ -855,6 +874,9 @@ async function reviewPathOutputs(
       head_sha: identity.headSha,
       base_sha: identity.baseSha,
       is_fork_pr: String(deriveIsFork(prObject ?? {})),
+      // #1426: the previous reviewed head, for the review context's explicit
+      // full-PR vs delta scope split. Only the review path carries it.
+      prior_head_sha: priorHeadSha,
     },
     resolvedPlatform,
     effectiveForgejoApiUrl,

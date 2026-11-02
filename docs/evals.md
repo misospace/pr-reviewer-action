@@ -291,6 +291,24 @@ CI and never affects a review verdict.
   its authority (a password with an unencoded `/` ends the authority early,
   so the userinfo lands in the request path).
 
+  A credential can also ride in the endpoint URL's path — some gateway
+  providers hand out URLs like `https://host/<token>/v1`. A path segment
+  cannot be reliably distinguished from a legitimate path part, so the
+  endpoint resolution neither refuses nor strips one (#1429): the request
+  target keeps the path, the calibration report records it verbatim in
+  `base_url`, and `base_url_sha256` binds it — a digest over a path-embedded
+  secret is an offline oracle exactly like the userinfo digest #1424
+  removed. Refusing every suspect path would break an endpoint whose
+  authentication genuinely rides it, and redacting one would corrupt the
+  request target, so the runner warns instead: before the run, when the
+  endpoint path carries a long opaque segment that may be a credential, the
+  calibration runner prints a warning that never echoes the URL. The
+  heuristic is advisory — a short secret-shaped segment goes unwarned, and a
+  long legitimate segment draws a false warning. An operator who sees the
+  warning should move the credential to a channel the report cannot leak —
+  the endpoint URL's userinfo or `JUDGE_API_KEY` — when the provider
+  supports one, or accept that the shared report carries the path secret.
+
 - **`scripts/live_judge_score.py`** — scores blinded live A/B outputs
   (`--baseline` / `--treatment`, each `{"arm", "reps", "scenarios": [{"scenario",
   "runs": [{"rep", "response"}]}]}`) with the same frozen judge and reports, per

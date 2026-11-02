@@ -107,6 +107,38 @@ generations), reports `running` while the process is still alive, and
 classifies a dead process without a terminal state as `orphaned` — a
 `settled` failed result, because an orphan can never produce a result.
 
+Liveness here means "can this pid still EXECUTE", not "does it answer
+`kill(pid, 0)`" (#1383): a killed-but-unreaped zombie cannot execute, and
+under an init that never reaps orphans it keeps answering the raw signal
+probe forever. The runtime's single definition is the tri-state
+`processLiveness` (`running` / `zombie` / `gone`); `processCanExecute` and
+`processPresent` are its two projections. `processCanExecute` ("running") is
+the reconcile check, the recovered cancellation's death confirmation, and the
+executor's own tree-termination settle loop (through the `pidAlive`
+projection); the runtime's sweep reads the tri-state directly. `processPresent`
+("running" or "zombie") is the recovered cancellation's sweep gate. Both are
+projections of the same tri-state, so they cannot drift apart; they differ
+precisely on the zombie case, and that difference IS the distinction the
+recovered cancellation needs.
+
+**A present pid is swept even when it can no longer execute.** A zombie
+leader is present — its pid is not released until it is reaped, so it can
+never have been recycled — and it still owns its PROCESS GROUP, whose
+members (the worker's orphaned descendants) can outlive it. Only the tree
+termination's group kill removes them, so the recovered cancellation falls
+through to the process-identity proof and the sweep for such a pid; skipping
+it would report `terminated` and leak the group. Only a pid that names no
+process at all short-circuits to `terminated` without a signal, and the
+sweep's group kill is exactly why the pid-1 and own-pid refusals come first:
+they are signal-safety guards, not liveness answers. A pid that names no
+process at all leaves its group unswept — the pid may already have been
+recycled, so a group kill on it could reach an unrelated group — and that
+residual leak is a known, separate gap, not a rule of this path.
+
+The sweep itself reads the tri-state directly (a snapshot member that is
+`zombie` is terminated but not reaped, and is never reported as a survivor),
+so the executor's two projections and the sweep cannot drift apart.
+
 **Cancellation is keyed by identity, not by a live handle.** `handle.cancel()`
 cancels a run THIS process started; `Executor.cancel(request)` cancels by
 the request's correlation identity and therefore works for a RECOVERED run
@@ -390,6 +422,14 @@ fail-closed, so an unlistable cluster refuses the launch.
   Nothing about this posture is repository-configurable: the endpoint
   CIDR is cluster/operator knowledge, and the executor never accepts a
   PodSpec fragment, a policy object, or a network rule from anywhere.
+
+- **Admission guardrails (#1423).** The `ValidatingAdmissionPolicy`
+  manifests under `deploy/admission/` are the second operator-applied
+  cluster resource, in the same pattern as the NetworkPolicy above. They
+  enforce these same fixed defaults at admission time, so a regressed or
+  buggy controller cannot get a non-conforming worker accepted by the
+  cluster. See
+  [`executor-admission-guardrails.md`](./executor-admission-guardrails.md).
 
 - **Credentials compose with #735; they never alias it.** The durable
   request carries opaque broker REFERENCES only — a reference is never a

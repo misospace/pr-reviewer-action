@@ -18,6 +18,7 @@
  * (`src/tools/harness.ts` `resolveReviewSystemPrompt`). */
 
 import { BUNDLED_PROMPT_ASSETS, rawFragment, type PromptAssets } from "./assets.js";
+import { DEPENDENCY_EVIDENCE_KINDS } from "../classification/classify.js";
 import { MAX_DISTRIBUTED_HINTS, MAX_GROUPS_PER_RULE, MAX_GROUP_NAME_CHARS } from "../enforcement/requirement-trace.js";
 import { bashCapture, bashLowerCapture, bashReadCapture, bashReplaceFirst, jqRawPrKind, type PromptWorkspace } from "./bash.js";
 
@@ -132,29 +133,45 @@ export function applySystemPromptFragments(
   if (state.isDefault && workspace.isFile(PROMPT_PRESENCE_FILES.classification)) {
     const bytes = workspace.readBytes(PROMPT_PRESENCE_FILES.classification);
     const kind = bytes === null ? "" : jqRawPrKind(bytes.toString("utf8"));
+    // #1379: the infra set gains the vendor-agnostic dependency-update
+    // kinds — the same manifest-shaped update families as their Renovate
+    // twins without the forge-authorship gate.
     const infra =
       kind === "dependency_upgrade" ||
       kind === "k8s_manifest" ||
       kind === "renovate_chart_update" ||
-      kind === "renovate_image_update";
+      kind === "renovate_image_update" ||
+      kind === "image_update" ||
+      kind === "chart_update" ||
+      kind === "platform_version_update" ||
+      kind === "action_update";
     const digest =
       kind === "renovate_digest_only" ||
       kind === "image_digest_only" ||
       kind === "renovate_image_update";
+    // #1379: upstream-evidence obligations for every dependency-update kind
+    // (the Renovate twins included — the gate only zero-selects specialists,
+    // the primary review's must_check still carries the obligations).
+    // Single source of truth with the tool-harness reserve gate: the same
+    // exported classification family (src/classification/classify.ts).
+    const depEvidence = DEPENDENCY_EVIDENCE_KINDS.has(kind);
     sub("VERSION_BUMP_GUIDANCE", infra ? guidance(assets, "version_bump") : "");
     sub("IMAGE_DIGEST_GUIDANCE", digest ? guidance(assets, "image_digest") : "");
     sub("RELEASE_NOTES_GUIDANCE", infra || digest ? guidance(assets, "release_notes") : "");
+    sub("DEPENDENCY_EVIDENCE_GUIDANCE", depEvidence ? guidance(assets, "dependency_evidence") : "");
     // #1337: dependency-upgrade coverage accounting. Gated on the
     // deterministic section being present (kind-shaped AND dependency
     // changes detected), so the instructions never reference a section the
     // corpus does not carry.
     sub("COVERAGE_ACCOUNTING_GUIDANCE", workspace.isNonEmpty(PROMPT_PRESENCE_FILES.dependencyCoverage) ? guidance(assets, "coverage_accounting") : "");
   } else {
-    // Also runs on a replace-mode operator prompt: v2 strips these three
-    // placeholders (first occurrence) from any prompt text.
+    // Also runs on a replace-mode operator prompt: v2 strips these five
+    // placeholders (first occurrence) from any prompt text (#1379 added
+    // DEPENDENCY_EVIDENCE_GUIDANCE).
     sub("VERSION_BUMP_GUIDANCE", "");
     sub("IMAGE_DIGEST_GUIDANCE", "");
     sub("RELEASE_NOTES_GUIDANCE", "");
+    sub("DEPENDENCY_EVIDENCE_GUIDANCE", "");
     sub("COVERAGE_ACCOUNTING_GUIDANCE", "");
   }
   if (state.addendum !== "") prompt = `${prompt}\n\n${state.addendum}`;

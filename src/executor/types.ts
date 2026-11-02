@@ -156,7 +156,10 @@ export interface ExecutionStatusReport {
  * - `stale_result` — a result file exists but belongs to another
  *   correlation identity; collecting it would mix generations.
  * - `orphaned` — the recorded worker is gone with no terminal state (found
- *   by post-restart reconciliation).
+ *   by post-restart reconciliation). The controller's recovery path keys
+ *   its compensating process-group sweep on exactly this category, so the
+ *   value is pinned by `EXECUTION_ORPHANED_CATEGORY` and both sides import
+ *   it — a rename on either side alone cannot silently detach the sweep.
  * - `terminate_failed` — the executor could NOT confirm that the worker
  *   was terminated (a cancellation whose deletion never succeeded): the
  *   worker may still be running, so the run must never be reported as
@@ -168,8 +171,15 @@ export type ExecutionFailureCategory =
   | "worker_error"
   | "no_result"
   | "stale_result"
-  | "orphaned"
+  | typeof EXECUTION_ORPHANED_CATEGORY
   | "terminate_failed";
+
+/** The reconcile failure category for a recorded worker that can no longer
+ * execute and produced no terminal state: the attempt can never produce a
+ * result, and the controller's recovery path keys its compensating
+ * process-group sweep on exactly this value. One shared constant, imported
+ * by the executor that emits it and the daemon that reacts to it. */
+export const EXECUTION_ORPHANED_CATEGORY = "orphaned";
 
 /** The terminal outcome of one execution. Frozen at construction; the
  * FIRST terminal result for a correlation identity wins — a duplicate

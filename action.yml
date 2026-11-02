@@ -758,6 +758,8 @@ outputs:
     description: Prompt-cache hit ratio for this review (0.0-1.0, from the tool harness in native_loop mode; empty when unavailable)
   tool-calls:
     description: JSON array of read-only tools executed by the native tool harness, with tool names and statuses
+  review-bundle:
+    description: "Single-line JSON 'review-bundle/v1' document for this run (#1425): lifecycle state ('complete', 'partial', 'skipped', 'failed', or 'superseded'), exact reviewed head SHA and base SHA, repository and PR number, per-run review ID, configuration/model identity (diff fingerprint, analysis engine, action version), the authoritative disposition (verdict, verdict source, required-check state, review result, incomplete reason, degraded flag), the publication outcome when attempted, and normalized findings with stable cross-run finding IDs, severity, category and file/line anchors when a review produced a verdict. Bounded (64 KiB) and secret-redacted by construction; contains no transcripts, raw tool output, or rendered Markdown. Written on every run that reaches an output boundary, including skipped and failed runs; empty only when the process crashed before any output could be written. The findings array is present only for review-producing states, so an absent array means no verdict was produced (distinct from a review with zero findings). Schema doc: docs/review-bundle.md."
 runs:
   using: node24
   main: dist/index.js

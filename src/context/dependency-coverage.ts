@@ -53,7 +53,9 @@ export interface BuildDependencyCoverageInput {
 /** The kinds the coverage accounting section and prompt fragment gate on —
  * the "infra" set `VERSION_BUMP_GUIDANCE` uses plus the two digest-only
  * kinds (a digest-only image update is exactly the shape where signature
- * verification accounting matters most). */
+ * verification accounting matters most). #1379 adds the vendor-agnostic
+ * update kinds — the same dependency-update shapes as their Renovate twins
+ * without the authorship gate. */
 export function dependencyCoverageKindEnabled(prKind: string): boolean {
   return (
     prKind === "dependency_upgrade" ||
@@ -61,7 +63,12 @@ export function dependencyCoverageKindEnabled(prKind: string): boolean {
     prKind === "renovate_chart_update" ||
     prKind === "renovate_image_update" ||
     prKind === "renovate_digest_only" ||
-    prKind === "image_digest_only"
+    prKind === "image_digest_only" ||
+    // #1379: vendor-agnostic dependency-update kinds.
+    prKind === "image_update" ||
+    prKind === "chart_update" ||
+    prKind === "platform_version_update" ||
+    prKind === "action_update"
   );
 }
 

@@ -12,6 +12,7 @@ import {
   leakedEnvKeys,
   pgrepAvailable,
   processCanExecute,
+  processPresent,
   runProcess,
   terminateProcessTree,
   terminateProcessTreeByPid,
@@ -737,6 +738,48 @@ test("processCanExecute is false for a killed-but-unreaped zombie (ground truth 
     );
     assert.ok(holder.pid !== null);
     assert.equal(processCanExecute(holder.pid), true, "the still-running holder must stay counted as alive");
+  } finally {
+    await holder.abort();
+  }
+});
+
+test("processPresent is true for a killed-but-unreaped zombie (ground truth /proc)", async (t) => {
+  // The counterpart of the predicate above (#1383): a zombie is still THERE
+  // — its pid is not released until it is reaped, so it can never have been
+  // recycled — even though it can no longer execute. Presence is what tells
+  // a recovered cancellation that the pid still owns a process group worth
+  // sweeping, while executability tells it the worker itself is gone.
+  if (!(await requireTreeTooling(t))) return;
+  if (!hasProc) {
+    t.skip(NO_PROC_SKIP_REASON);
+    return;
+  }
+  const dir = workspace();
+  const zombiePidFile = join(dir, "present-zombie.pid");
+  const holder = runProcess({
+    file: "bash",
+    args: zombieHolderScript(zombiePidFile),
+    env: buildChildEnv(["PATH", "HOME"]),
+    timeoutMs: 30_000,
+  });
+  try {
+    await waitForFile(zombiePidFile);
+    const zombiePid = Number.parseInt(readFileSync(zombiePidFile, "utf8"), 10);
+    await awaitZombie(zombiePid, "present-zombie-holder");
+    assert.equal(procState(zombiePid), "Z", "fixture precondition: an unreaped zombie");
+    assert.doesNotThrow(() => process.kill(zombiePid, 0), "zombie precondition: kill(pid, 0) keeps answering");
+    assert.equal(
+      processPresent(zombiePid),
+      true,
+      "a zombie is still present: its pid is held until it is reaped, so it was never recycled",
+    );
+    assert.equal(
+      processPresent(holder.pid as number),
+      true,
+      "a running process is present too",
+    );
+    // A pid that names no process at all is not present.
+    assert.equal(processPresent(2_147_483_647), false, "a pid above the kernel maximum names no process");
   } finally {
     await holder.abort();
   }

@@ -21,6 +21,7 @@ from pr_reviewer.http_safe import (  # noqa: E402
     UnsafeEndpointUrl,
     base_url_identity_digest,
     carries_url_credential,
+    endpoint_path_may_carry_credential,
     normalize_base_url,
     redact_echo_value,
     redact_url_userinfo,
@@ -304,6 +305,44 @@ def test_resolve_endpoint_errors_never_echo_the_credential() -> None:
             resolve_endpoint(raw)
         assert "hunter2" not in str(caught.value)
         assert "judge-operator" not in str(caught.value)
+
+
+# ── advisory path-credential suspicion (#1429) ──────────────────────────────
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # The issue's shape: a gateway token riding the path.
+        ("https://host/7f3a9c1e55b20d84aa613c9f02bb71d6/v1", True),
+        # Percent-encoded secret in the path: unquote first, then suspect.
+        ("https://host/sk%2Dlive%2Dabcdef0123456789/v1", True),
+        # Ordinary API base paths never warn.
+        ("https://host/v1", False),
+        ("https://host/api/v1", False),
+        ("https://host/openai/chat/completions", False),
+        ("https://host", False),
+        ("", False),
+        # Short secrets stay unwarned: the check is advisory, never a proof
+        # that a path is credential-free.
+        ("https://host/v1/hunter2", False),
+        # Prose-shaped segments (spaces, punctuation) are not token material.
+        ("https://host/my long path segment here/v1", False),
+        # Unparseable values are resolve_endpoint's fail-closed concern.
+        (None, False),
+        (42, False),
+        ("http://[::1", False),
+    ],
+)
+def test_endpoint_path_may_carry_credential(url: object, expected: bool) -> None:
+    assert endpoint_path_may_carry_credential(url) == expected
+
+
+def test_resolve_endpoint_still_accepts_a_path_credential_endpoint() -> None:
+    """#1429: the documented bound — a path segment is neither refused nor
+    stripped; the request target keeps it and the caller is expected to warn."""
+    endpoint = resolve_endpoint("https://host/7f3a9c1e55b20d84aa613c9f02bb71d6/v1")
+    assert endpoint.url == "https://host/7f3a9c1e55b20d84aa613c9f02bb71d6/v1"
+    assert endpoint.credential is None
 
 
 # ── the shared redactor over-redacts an unattributable userinfo (#1419) ────

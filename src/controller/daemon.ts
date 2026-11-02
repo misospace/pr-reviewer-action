@@ -89,6 +89,7 @@ import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
 import { dispatchCanonicalEvent, type GenerationLedger } from "../ingress/dispatch.js";
 import type { MirrorCache } from "../acquisition/index.js";
 import {
+  EXECUTION_ORPHANED_CATEGORY,
   validateExecutionRequest,
   validateExecutionResult,
   type ExecutionProfiles,
@@ -1059,7 +1060,7 @@ export async function startControllerDaemon(
       if (answer.kind === "settled") {
         // A settled worker is NEVER rerun: the result is routed through
         // the recovery seam instead of being recomputed.
-        await controller.resolveRecovered(record.job.jobId, answer.outcome);
+        await settleRecoveredWorker(controller, record.job.jobId, answer, executors, request);
         continue;
       }
       if (answer.kind === "running" && named !== null) {
@@ -1164,7 +1165,13 @@ export async function startControllerDaemon(
         try {
           const answer = await reconcileRecoveredWorker(adopted.executors, adopted.request);
           if (answer.kind !== "settled") continue;
-          await controller.resolveRecovered(adopted.jobId, answer.outcome);
+          await settleRecoveredWorker(
+            controller,
+            adopted.jobId,
+            answer,
+            adopted.executors,
+            adopted.request,
+          );
           adoptedWorkers.delete(adopted.jobId);
         } catch {
           // best-effort; retried on the next tick
@@ -1231,7 +1238,13 @@ export async function startControllerDaemon(
         try {
           const answer = await reconcileRecoveredWorker(adopted.executors, adopted.request);
           if (answer.kind !== "settled") continue;
-          await controller.resolveRecovered(adopted.jobId, answer.outcome);
+          await settleRecoveredWorker(
+            controller,
+            adopted.jobId,
+            answer,
+            adopted.executors,
+            adopted.request,
+          );
           adoptedWorkers.delete(adopted.jobId);
         } catch {
           // best-effort: retried on the next pass
@@ -1471,4 +1484,53 @@ async function cancelRecoveredWorker(
     if (outcome.kind === "failed") failed = true;
   }
   return failed ? { kind: "failed" } : { kind: "terminated" };
+}
+
+/** Settle a recovered record whose worker reconciled to a terminal
+ * result. An `orphaned` settle first runs the compensating sweep through
+ * the executor's cancellation seam.
+ *
+ * Why: the executor's `reconcile` proved that the recorded worker can no
+ * longer execute and produced no terminal state, so the record must not
+ * be adopted — but a killed-but-unreaped zombie leader still OWNS its
+ * process group, and the group's members (the worker's orphaned
+ * descendants) can outlive it. Only the tree termination's group kill
+ * removes them, so the sweep routes through the cancellation seam instead
+ * of settling silently. The daemon never signals anything itself and
+ * cannot bypass the executor's guards: a pid that names no process at all
+ * short-circuits to `terminated` without a signal, a present-but-cannot-
+ * execute pid goes through the process-identity proof and the tree
+ * termination, and an unprovable pid (no identity token, a mismatch,
+ * pid 1, the controller's own pid) fails closed and signals nothing.
+ *
+ * The sweep is best-effort and NEVER changes the settle decision: the
+ * orphaned proof belongs to `reconcile`, and a failed sweep means the
+ * death was not confirmed — the group may already have been signalled, so
+ * the record still settles whatever the sweep answered.
+ *
+ * The sweep cannot race a live worker owned by another controller
+ * instance: a worker that can still execute answers `running` from
+ * `reconcile` and takes the adoption path instead, so by the time a
+ * record reconciles to `orphaned`, the backend that owns the recorded
+ * attempt has proven its worker cannot execute — the sweep signals only
+ * that dead worker's process group. What the sweep cannot fix is a run
+ * whose recorded pid is absent (the pre-spawn window) or unprovable (no
+ * identity token, or a mismatch): those fail closed and signal nothing,
+ * so their groups can still leak. */
+async function settleRecoveredWorker(
+  controller: ReviewQueueController,
+  jobId: string,
+  answer: Extract<RecoveredWorkerAnswer, { kind: "settled" }>,
+  executors: readonly Executor[],
+  request: ExecutionRequest,
+): Promise<void> {
+  if (answer.outcome.failureCategory === EXECUTION_ORPHANED_CATEGORY) {
+    try {
+      await cancelRecoveredWorker(executors, request);
+    } catch {
+      // Best-effort sweep: a thrown error never blocks the settle the
+      // orphaned proof already decided.
+    }
+  }
+  await controller.resolveRecovered(jobId, answer.outcome);
 }

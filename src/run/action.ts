@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { validateContract } from "../config/contract.js";
@@ -13,6 +13,8 @@ import { stageEnvFromConfig } from "./env.js";
 import { buildPublishApi, publishInputFromEnv, publishWithOutcome, readEvent, type StepEvent } from "./entrypoints.js";
 import { runActionFollowUp } from "./followup-action.js";
 import { publishStepRuns } from "../publish/publish.js";
+import { buildReviewBundle, type ReviewBundleInput, type ReviewBundleState } from "../publish/bundle.js";
+import { ACTION_VERSION } from "../version.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
 import { createRunDir } from "./run-dir.js";
 import { blockingGateSummary, escapeWorkflowData, renderBlockingAnnotations } from "./blocking-findings.js";
@@ -55,6 +57,67 @@ export function appendStepSummary(env: NodeJS.ProcessEnv, line: string): void {
   const file = env.GITHUB_STEP_SUMMARY ?? "";
   if (file === "" || file === "/dev/null") return;
   appendFileSync(file, `${line}\n`);
+}
+
+/** #1425: the PR number as the bundle records it — a positive integer, or
+ * null when the run cannot prove one. Never a parsed-best-effort number: an
+ * unrecognized value is honestly "unknown". */
+function parseBundlePrNumber(value: string | undefined): number | null {
+  const raw = (value ?? "").trim();
+  if (!/^\d+$/.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+/** #1425: emit the machine-readable review bundle for this run — the
+ * `review-bundle` step output plus a copy in the run directory (when one
+ * exists) for local/eval consumers. The builder redacts and bounds every
+ * field, and the document is a single-line `JSON.stringify` value, so the
+ * step-output writer cannot have its assignment forged by finding text.
+ * Exactly one call per run reaches an output boundary (skip, review, or
+ * failure); the file copy is best-effort and must never fail the run. */
+function emitReviewBundle(
+  env: NodeJS.ProcessEnv,
+  runDir: string,
+  reviewId: string,
+  input: Omit<ReviewBundleInput, "reviewId" | "generatedAt">,
+): void {
+  const bundle = buildReviewBundle({
+    ...input,
+    reviewId,
+    generatedAt: new Date().toISOString(),
+  });
+  writeOutputs(env, [["review-bundle", bundle]]);
+  if (runDir !== "") {
+    try {
+      writeFileSync(join(runDir, "review-bundle.json"), `${bundle}\n`);
+    } catch {
+      // The run directory is a convenience copy; the step output is the
+      // contract, and neither a missing directory nor a failed write may
+      // change the run's outcome.
+    }
+  }
+}
+
+/** #1425: the bundle lifecycle state for a review-producing run, as a pure
+ * decision the tests pin directly. Precedence: a publication withheld at
+ * the exact-head boundary is `superseded` (the bundle pins the exact
+ * reviewed head so a consumer can prove staleness against the current PR
+ * head); a completed review with an execution or traceability coverage gap
+ * — the same signals the `incomplete-reason` / `review-result` outputs and
+ * the #810 partial-coverage notice carry — is `partial`; otherwise
+ * `complete`. The disposition always describes the review this run
+ * produced, whether or not it was published (same rule as the review-stage
+ * outputs, #1257). */
+export function reviewBundleState(
+  publishStatus: "published" | "superseded" | "failed" | undefined,
+  incompleteReason: string,
+  reviewResult: string,
+  hasPartialCoverage: boolean,
+): ReviewBundleState {
+  if (publishStatus === "superseded") return "superseded";
+  if (incompleteReason !== "none" || reviewResult === "partial" || hasPartialCoverage) return "partial";
+  return "complete";
 }
 
 /** Render untrusted inline text as an inert Markdown code span, following
@@ -146,6 +209,40 @@ function shouldPublish(stage: Env): boolean {
 }
 
 export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  // #1425: one review ID per process run, paired with the reviewed head SHA
+  // inside the machine-readable bundle to name THIS run's review across
+  // reruns. The wrapper exists solely so an uncaught crash still leaves a
+  // deterministic `failed` bundle behind; the pipeline body and the exit
+  // semantics are unchanged, and the original error always propagates.
+  const reviewId = randomBytes(8).toString("hex");
+  const runDirRef: { dir: string } = { dir: "" };
+  try {
+    return await runActionPipeline(env, reviewId, runDirRef);
+  } catch (error) {
+    try {
+      emitReviewBundle(env, runDirRef.dir, reviewId, {
+        state: "failed",
+        repository: env.GITHUB_REPOSITORY ?? "",
+        prNumber: parseBundlePrNumber(env.PR_NUMBER ?? env["INPUT_PR-NUMBER"]),
+        headSha: "",
+        baseSha: "",
+        identity: { diffFingerprint: "", analysisEngine: "", actionVersion: ACTION_VERSION },
+        failureReason: error instanceof Error && error.message !== "" ? error.message : "unknown error",
+        findings: [],
+      });
+    } catch {
+      // The failure bundle is best-effort: a bundle-write failure must
+      // never mask the original error the pipeline propagates.
+    }
+    throw error;
+  }
+}
+
+async function runActionPipeline(
+  env: NodeJS.ProcessEnv,
+  reviewId: string,
+  runDirRef: { dir: string },
+): Promise<number> {
   const stage = actionStageEnv(env);
   const { event, headSha: eventHeadSha } = readEvent(env);
   stage.EVENT_HEAD_SHA = eventHeadSha ?? "";
@@ -171,6 +268,18 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       ["verdict-source", ""],
       ["review-result", ""],
     ]);
+    // #1425: the machine surface mirrors the no-op — a deterministic
+    // `skipped` bundle with no disposition (nothing ran, nothing carried).
+    emitReviewBundle(env, "", reviewId, {
+      state: "skipped",
+      repository: stage.REPO ?? "",
+      prNumber: parseBundlePrNumber(stage.PR_NUMBER),
+      headSha: eventHeadSha ?? "",
+      baseSha: "",
+      identity: { diffFingerprint: "", analysisEngine: "", actionVersion: ACTION_VERSION },
+      skipReason: "comment-not-on-pr",
+      findings: [],
+    });
     process.stderr.write("[v3] Review skipped: comment-not-on-pr\n");
     appendStepSummary(env, "**AI PR Review skipped:** `comment-not-on-pr`");
     return 0;
@@ -203,6 +312,18 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
         ["verdict-source", ""],
         ["review-result", ""],
       ]);
+      // #1425: the follow-up consumption is a deterministic `skipped`
+      // bundle — the fixed reason constant is the only new text.
+      emitReviewBundle(env, "", reviewId, {
+        state: "skipped",
+        repository: stage.REPO ?? "",
+        prNumber: parseBundlePrNumber(stage.PR_NUMBER),
+        headSha: eventHeadSha ?? "",
+        baseSha: "",
+        identity: { diffFingerprint: "", analysisEngine: "", actionVersion: ACTION_VERSION },
+        skipReason: followUpReason,
+        findings: [],
+      });
       // Only fixed constants on both surfaces — no comment body, prompt, or
       // answer text ever reaches the log or the step summary.
       process.stderr.write(`[v3] Follow-up handled: ${followUpReason}\n`);
@@ -225,6 +346,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   stage.CI_CHECKS_FILE = join(temp, "ci-checks-context.md");
   const runDir = createRunDir(temp);
   stage.PR_REVIEWER_RUN_DIR = runDir;
+  runDirRef.dir = runDir;
   const review = await runReview({
     env: stage as NodeJS.ProcessEnv,
     runDir,
@@ -255,6 +377,28 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
   ]);
   if (!review.shouldReview) {
     writeOutputs(env, [["verdict", pre.verdict], ["verdict-source", pre.verdict_source], ["review-result", pre.review_result], ["incomplete-reason", pre.incomplete_reason]]);
+    // #1425: deterministic `skipped` machine state. The disposition carries
+    // whatever verdict the skip retained (`verdict_source` names its origin,
+    // e.g. `carry_forward`); the findings of a carried verdict live in that
+    // earlier run's bundle, exactly as the step summary points there.
+    emitReviewBundle(env, runDir, reviewId, {
+      state: "skipped",
+      repository: stage.REPO ?? "",
+      prNumber: parseBundlePrNumber(stage.PR_NUMBER),
+      headSha: review.reviewedHeadSha || pre.head_sha,
+      baseSha: pre.base_sha,
+      identity: { diffFingerprint: review.diffFingerprint, analysisEngine: "", actionVersion: ACTION_VERSION },
+      disposition: {
+        verdict: pre.verdict ?? "",
+        verdictSource: pre.verdict_source ?? "",
+        requiredChecks: "",
+        reviewResult: pre.review_result ?? "",
+        incompleteReason: pre.incomplete_reason ?? "",
+        degraded: pre.degradedGateBypass === true,
+      },
+      skipReason: pre.skip_reason ?? "",
+      findings: [],
+    });
     // #903: this branch used to exit silently — outputs written, no log
     // line, no step summary — so a labeler-triggered skip showed the same
     // green check as a run that crashed before doing anything. The event
@@ -301,6 +445,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
 
   // ── Publish ───────────────────────────────────────────────────────────
   let publishFailed = false;
+  let publishStatus: "published" | "superseded" | "failed" | undefined;
   if (shouldPublish(stage)) {
     const publishEnv: Env = {
       ...stage,
@@ -384,8 +529,40 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
     // only when publication was attempted — absent means "not attempted"
     // (see the publish-status contract description).
     writeOutputs(env, [["publish-status", publish.status]]);
+    publishStatus = publish.status;
     publishFailed = publish.exitCode !== 0;
   }
+
+  // #1425: the machine-readable bundle for a review this run produced
+  // (state precedence documented on `reviewBundleState`).
+  const bundleState = reviewBundleState(
+    publishStatus,
+    review.outputs.incompleteReason,
+    review.outputs.reviewResult,
+    review.partialCoverage !== undefined,
+  );
+  emitReviewBundle(env, runDir, reviewId, {
+    state: bundleState,
+    repository: stage.REPO ?? "",
+    prNumber: parseBundlePrNumber(stage.PR_NUMBER),
+    headSha: review.reviewedHeadSha || eventHeadSha || pre.head_sha,
+    baseSha: pre.base_sha,
+    identity: {
+      diffFingerprint: review.diffFingerprint,
+      analysisEngine: review.outputs.analysisEngine,
+      actionVersion: ACTION_VERSION,
+    },
+    disposition: {
+      verdict: review.outputs.verdict,
+      verdictSource: review.outputs.verdictSource,
+      requiredChecks: review.outputs.requiredChecks,
+      reviewResult: review.outputs.reviewResult,
+      incompleteReason: review.outputs.incompleteReason,
+      degraded: review.outputs.degradedGateBypass === true,
+    },
+    ...(publishStatus !== undefined ? { publication: { status: publishStatus } } : {}),
+    findings: review.outputs.findings,
+  });
 
   // ── Re-review label ───────────────────────────────────────────────────
   await maybeClearRereviewLabel(stage, event);

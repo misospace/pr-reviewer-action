@@ -22,6 +22,7 @@ export {
   EXECUTION_CREDENTIAL_NAME_RE,
   EXECUTION_CREDENTIAL_REF_RE,
   EXECUTION_ID_RE,
+  EXECUTION_ORPHANED_CATEGORY,
   MAX_EXECUTION_ARTIFACT_PATHS,
   MAX_EXECUTION_DIAGNOSTICS_CHARS,
   MAX_EXECUTION_FAILURE_MESSAGE_CHARS,
@@ -75,9 +76,14 @@ export { toQueueJobExecutor } from "./queue.js";
 export type { QueueRequestBuilder } from "./queue.js";
 
 export {
+  WORKER_CONTAINER_NAME,
   WORKER_CREDENTIAL_REFUSAL_CODES,
+  WORKER_IDENTITY_VALUE,
   WORKER_NETWORK_POSTURE,
   WORKER_RUN_AS_ID,
+  LABEL_JOB_HASH,
+  LABEL_MANAGED_BY,
+  LABEL_RUN_HASH,
   KubernetesExecutor,
   buildReviewJobManifest,
   kubernetesCredentialSecretName,
@@ -99,3 +105,35 @@ export type {
   WorkerCredentialResolution,
   WorkerCredentialResolver,
 } from "./kubernetes.js";
+
+export {
+  ADMISSION_ENFORCE_NAMESPACE_LABEL,
+  ADMISSION_PARAM_KEYS,
+  ADMISSION_PARAMS_CONFIGMAP_NAME,
+  CONTROLLER_USERNAME_MATCH_EXPRESSION,
+  CREDENTIAL_SECRET_NAME_HASH_CHARS,
+  CREDENTIAL_SECRET_NAME_PREFIX,
+  CREDENTIAL_SECRET_NAME_REGEX_SOURCE,
+  IDENTITY_LABEL_MATCH_EXPRESSION,
+  JOB_NAME_PREFIX,
+  SCOPE_MATCH_ERROR_ID,
+  WORKER_JOB_BINDING_NAME,
+  WORKER_JOB_MATCH_CONDITION_EXPRESSION,
+  WORKER_JOB_POLICY_NAME,
+  WORKER_JOB_VALIDATIONS,
+  WORKER_JOB_VARIABLES,
+  WORKER_SECRET_BINDING_NAME,
+  WORKER_SECRET_MATCH_CONDITION_EXPRESSION,
+  WORKER_SECRET_POLICY_NAME,
+  WORKER_SECRET_VALIDATIONS,
+  evaluateWorkerJobAdmission,
+  evaluateWorkerSecretAdmission,
+  toKubernetesCredentialSecretObject,
+  toKubernetesJobObject,
+} from "./admission-policy.js";
+export type {
+  AdmissionPolicyParams,
+  AdmissionReviewContext,
+  AdmissionValidation,
+  AdmissionViolation,
+} from "./admission-policy.js";

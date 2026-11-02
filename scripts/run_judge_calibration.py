@@ -47,6 +47,7 @@ from pr_reviewer.http_safe import (  # noqa: E402
     Endpoint,
     UnsafeEndpointUrl,
     base_url_identity_digest,
+    endpoint_path_may_carry_credential,
     redact_url_userinfo,
     resolve_endpoint,
     select_base_url,
@@ -386,6 +387,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         # credential in its userinfo.
         print(f"Error: {error}", file=sys.stderr)
         return 2
+    if endpoint_path_may_carry_credential(endpoint.url):
+        # #1429: a credential can ride in the endpoint path, and a path
+        # segment cannot be verified as credential-free — refusing one would
+        # break a legitimate gateway endpoint. The report records the path
+        # verbatim in ``base_url`` and binds it with ``base_url_sha256``, so
+        # the operator is warned before the shared artifact is written. The
+        # warning never echoes the URL: it may carry the secret.
+        print(
+            "Warning: the judge endpoint path carries a segment that may be a "
+            "credential. A path segment cannot be verified as credential-free, "
+            "so the report records it verbatim in base_url and binds it with "
+            "base_url_sha256 — anyone holding the report could test candidate "
+            "secrets against that digest offline. Prefer a credential channel "
+            "the report cannot leak: the endpoint URL's userinfo (moved into "
+            "the Authorization header) or JUDGE_API_KEY.",
+            file=sys.stderr,
+        )
     judge_api_key = _judge_api_key()
     if endpoint.credential and judge_api_key:
         print("Error: the judge endpoint URL carries a credential and an API key "
