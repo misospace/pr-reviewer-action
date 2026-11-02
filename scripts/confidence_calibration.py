@@ -1581,6 +1581,12 @@ CANARY_CONFIDENCE_ENV_KEYS = {
 CANARY_CONDITION_FIELDS = {"id", "backend", "role", "fallback_for", "purpose", "confidence_env", "key_env", "secret_env_names"}
 CANARY_MAX_ENTRIES = 6
 CANARY_MAX_CONDITIONS = 4
+# The resolved publish modes the engine's confidence eligibility gate accepts
+# (src/publish/publish.ts publishStepRuns). The plan declares the exact
+# resolved mode of each retained production run — no retained artifact
+# records it, so plan declaration + validation IS the run-state proof; the
+# bridge passes the value verbatim to the same predicate, never a default.
+CANARY_PUBLISH_MODES = ("comment", "review_comment", "review_verdict", "review_blockers")
 
 
 def _validate_canary_plan(plan: Any, corpus: dict[str, dict[str, Any]]) -> list[str]:
@@ -1627,6 +1633,17 @@ def _validate_canary_plan(plan: Any, corpus: dict[str, dict[str, Any]]) -> list[
                         errors.append(f"entry {entry['pr_id']} corpus record has no {pin} pin")
             if not isinstance(entry.get("expectation"), str) or not entry["expectation"]:
                 errors.append(f"entry {entry.get('pr_id')} must declare its expectation label")
+            # The resolved publish mode of the retained production run: no
+            # retained artifact records it, so the plan declares it and this
+            # validation is the run-state proof. Unknown values are refused
+            # here — the bridge passes the value verbatim to the production
+            # predicate, and an unprovable mode must fail the PLAN, not the
+            # predicate.
+            if entry.get("publish_mode") not in CANARY_PUBLISH_MODES:
+                errors.append(
+                    f"entry {entry.get('pr_id')} must declare publish_mode as one of {list(CANARY_PUBLISH_MODES)} "
+                    "(the exact resolved mode of the retained production run)"
+                )
 
     ceilings = plan.get("ceilings")
     if not isinstance(ceilings, dict):
@@ -1762,6 +1779,7 @@ def _canary_row(
     work_dir: Path,
     audit_dir: Path,
     reserve_slot: Any,
+    publish_mode: str,
 ) -> tuple[dict[str, Any], int]:
     """Build and execute one canary row; returns (row, wire_attempts).
 
@@ -1772,6 +1790,8 @@ def _canary_row(
     pin verification failure, unavailable ledger). The caller owns the
     ``reserve_slot`` callback: it durably records one call slot against the
     lifetime ceiling and returns False when the ledger cannot be written.
+    ``publish_mode`` is the plan-declared resolved publish mode of the
+    retained production run (validated at plan level).
     """
     condition_id = condition["id"]
     row: dict[str, Any] = {
@@ -1785,6 +1805,8 @@ def _canary_row(
         "head_sha": (corpus_entry or {}).get("head_sha", ""),
         "base_sha": (corpus_entry or {}).get("base_sha", ""),
         "retained_pins": None,
+        "is_fork_pr": None,
+        "publish_mode": publish_mode,
         "primary": {"verdict_policy": verdict_policy},
         "verifier": disabled_scorer_result(),
         "profile": None,
@@ -1844,6 +1866,17 @@ def _canary_row(
         row["verifier"] = unscored_row("retained_base_mismatch", "")
         row["diagnostic"] = f"retained base {retained_base[:12]} != corpus base {row['base_sha'][:12]}"
         return row, 0
+    # The retained run's RESOLVED fork state — the same request record's
+    # `is_fork_pr`. The bridge must never guess: the resolver treats any
+    # non-"true" flag as same-repo, so an unknown value would silently send
+    # privileged review content to the scorer endpoint on what may be a fork
+    # PR. Unreadable state fails the row closed with ZERO wire calls.
+    retained_fork = str(request_record.get("is_fork_pr") or "")
+    if retained_fork not in ("true", "false"):
+        row["verifier"] = unscored_row("retained_fork_state_unknown", "")
+        row["diagnostic"] = f"retained is_fork_pr {retained_fork!r} is not exactly 'true'/'false'"
+        return row, 0
+    row["is_fork_pr"] = retained_fork
     for artifact_name in ("ai-output.json", "review-coverage.json", "review-request.json", "pr.diff.truncated", "pr.json"):
         artifact_path = run_dir / artifact_name
         if artifact_path.is_file():
@@ -1884,6 +1917,12 @@ def _canary_row(
             "verdict": verdict,
             "verdict_policy": verdict_policy,
             "partial_coverage": bool(coverage.get("partial_coverage")),
+            # Retained run-state proof: the verified fork state (recovered
+            # from review-request.json, gated above) and the plan-declared
+            # resolved publish mode (validated at plan level). The bridge
+            # never synthesizes either.
+            "is_fork_pr": row["is_fork_pr"],
+            "publish_mode": publish_mode,
         },
         "confidence_env": condition["confidence_env"],
         "confidence_key_env": condition.get("key_env") or "",
@@ -2133,7 +2172,8 @@ def cmd_canary(args: argparse.Namespace) -> int:
                         "evidence_state": evidence_state,
                         "head_sha": (corpus_entry or {}).get("head_sha", ""),
                         "base_sha": (corpus_entry or {}).get("base_sha", ""),
-                        "retained_pins": None,
+                        "retained_pins": None, "is_fork_pr": None,
+                        "publish_mode": entry["publish_mode"],
                         "primary": {}, "verifier": disabled_scorer_result(),
                         "profile": None, "rubric_version": None, "warnings": [],
                         "wire_effort": None, "usage": None, "latency_ms": None,
@@ -2152,7 +2192,7 @@ def cmd_canary(args: argparse.Namespace) -> int:
             row, attempts = _canary_row(
                 pr_id, kind, expectation, condition, evidence_state, corpus_entry,
                 run_info, run_dir, verdict_policy, ceilings, work_dir, audit_dir,
-                reserve_slot,
+                reserve_slot, entry["publish_mode"],
             )
             rows.append(row)
             if row["verifier"].get("cause") == "ledger_unavailable":
@@ -2195,7 +2235,8 @@ def cmd_canary(args: argparse.Namespace) -> int:
                     "evidence_state": evidence_state,
                     "head_sha": (corpus_entry or {}).get("head_sha", ""),
                     "base_sha": (corpus_entry or {}).get("base_sha", ""),
-                    "retained_pins": None,
+                    "retained_pins": None, "is_fork_pr": None,
+                    "publish_mode": entry["publish_mode"],
                     "primary": {}, "verifier": unscored_row("budget_exhausted", ""),
                     "profile": None, "rubric_version": None, "warnings": [],
                     "wire_effort": None, "usage": None, "latency_ms": None,

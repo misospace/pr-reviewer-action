@@ -15,13 +15,16 @@
   "entries": [
     {
       "pr_id": "courier-46-61",
-      "expectation": "known_false_approval — the retained primary approved misospace/courier#46 despite a blocker defect: observeState() (internal/controller/observer.go:37-55) declared checks 'passed' from a single observation while forge check registration is asynchronous, so a poll landing right after PR open saw a partial green set and Courier transitioned Verifying -> AwaitingReview before the complete check set existed (fixed by PR #61)."
+      "expectation": "known_false_approval — the retained primary approved misospace/courier#46 despite a blocker defect: observeState() (internal/controller/observer.go:37-55) declared checks 'passed' from a single observation while forge check registration is asynchronous, so a poll landing right after PR open saw a partial green set and Courier transitioned Verifying -> AwaitingReview before the complete check set existed (fixed by PR #61).",
+      "publish_mode": "review_comment"
     },
     {
       "pr_id": "pr-reviewer-action-133-clean",
-      "expectation": "clean_correct_approval — the retained primary correctly approved a clean medium security-hardening change (review markdown sanitizer)."
+      "expectation": "clean_correct_approval — the retained primary correctly approved a clean medium security-hardening change (review markdown sanitizer).",
+      "publish_mode": "review_comment"
     }
   ],
+  "run_state_note": "Retained run-state proof, never synthesis: each row's resolved fork state is recovered from the retained runtime request record (review-request.json is_fork_pr; both rows are 'false' — same-repo) and any unreadable/unknown state fails the row closed with zero wire calls. No retained artifact records the resolved publish mode, so the plan DECLARES the exact resolved mode for these fixtures (the contract default 'review_comment'; the #1286 replay env set no PUBLISH_MODE, so config resolution applied the default) and the driver passes it verbatim to the production publish predicate — the bridge never defaults or infers it.",
   "artifacts_note": "Primary artifacts are REUSED from the #1286 canonical live run (operator passes the work dir via --artifacts-dir; the results record pin runs.json and per-row artifact digests). No primary review is re-run: #1370's cost principle. Exact head+base pinning: each row reads the retained pins from the runtime's own request record (review-request.json head_sha + base_ref) and requires BOTH to equal the corpus pins — a missing/pinless record, a head mismatch, or a base mismatch is recorded unscored (retained_pins_unreadable / retained_head_mismatch / retained_base_mismatch) with ZERO wire calls, and the verified pins ride the outgoing request.",
   "conditions": [
     {

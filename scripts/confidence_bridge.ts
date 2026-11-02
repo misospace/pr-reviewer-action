@@ -56,6 +56,18 @@
  * is the provider-reported token counts read back from the RAW response
  * (pilot cost accounting only — the production scorer never consumes them).
  *
+ * Run-state inputs are PROOF, never synthesis: `row.is_fork_pr` must be the
+ * retained run's resolved fork state (exactly "true" or "false", recovered
+ * by the driver from `review-request.json`) — anything else is rejected
+ * before any resolution, because an unknown fork state must never silently
+ * become same-repo (the resolver treats a non-"true" flag as same-repo, so
+ * a guessed value could send privileged review content across the fork
+ * trust boundary). `row.publish_mode` is the retained run's RESOLVED publish
+ * mode (declared by the plan and validated, since no retained artifact
+ * records it) and is passed to the publish predicate VERBATIM — no
+ * bridge-local default, no ambient-env read, so `undefined` yields the
+ * production `publishStepRuns(undefined) === false` refusal.
+ *
  * `build-prompt` input: {head_sha, base_sha, diff, pr_title, pr_body,
  * findings, review_summary, review_result, required_checks, coverage,
  * secret_env_names: ["NAME", ...]}. Each name is resolved from process.env
@@ -504,9 +516,13 @@ const CONFIDENCE_ENV_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /** Local mirror of `publishStepRuns` (src/publish/publish.ts:52) — the
- * engine's confidence eligibility gate. The composition is three literals
- * and pinned by parity tests; importing publish.ts would drag the whole
- * publish surface into the bundle (see `markerReviewResultLocal`). */
+ * engine's confidence eligibility gate, called with the retained run's
+ * RESOLVED publish mode exactly as the engine calls it (the value has
+ * already been through config resolution in production; the canary proves
+ * it as plan-declared run-state instead). The composition is three literals
+ * and pinned behaviorally by tests against every mode value; importing
+ * publish.ts would drag the whole publish surface into the bundle (see
+ * `markerReviewResultLocal`). */
 function publishStepRunsLocal(mode: string | undefined): boolean {
   const value = mode ?? "";
   return value === "review_comment" || value === "review_verdict" || value === "review_blockers" || value === "comment";
@@ -567,9 +583,14 @@ async function liveScorer(argv: string[]): Promise<void> {
     if (!ENV_NAME_RE.test(keyName)) fail(sub, "bad_confidence_key_env");
     env.AI_CONFIDENCE_API_KEY = process.env[keyName] ?? "";
   }
-  // The canary replays same-repo (privileged) rows; the fork flag is run
-  // state the canary fixes explicitly rather than inherits.
-  env.IS_FORK_PR = "false";
+  // The retained run's RESOLVED fork state — verified run-state proof, never
+  // synthesized. The resolver treats any non-"true" flag as same-repo, so an
+  // unknown value must be REJECTED here rather than defaulted: a driver bug
+  // that dropped the field must fail the bridge, not quietly send privileged
+  // review content to a scorer endpoint on what is actually a fork PR.
+  const isForkPr = row.is_fork_pr;
+  if (isForkPr !== "true" && isForkPr !== "false") fail(sub, "bad_is_fork_pr");
+  env.IS_FORK_PR = isForkPr;
   const laneSecrets = resolveSecrets(input);
   const resolution = resolveConfidenceProfile(env);
   const profile = resolution.profile;
@@ -635,7 +656,11 @@ async function liveScorer(argv: string[]): Promise<void> {
     emit({ ...baseEmit, result: CONFIDENCE_DISABLED });
     return;
   }
-  if (!publishStepRunsLocal(env.PUBLISH_MODE ?? "comment")) {
+  // The retained run's RESOLVED publish mode, passed to the SAME predicate
+  // production calls — verbatim, no bridge-local default, no ambient-env
+  // read. `undefined` (the driver failed to prove the mode) reproduces the
+  // production `publishStepRuns(undefined) === false` refusal exactly.
+  if (!publishStepRunsLocal(typeof row.publish_mode === "string" ? row.publish_mode : undefined)) {
     emit({ ...baseEmit, result: unscoredConfidenceResult("not_published") });
     return;
   }

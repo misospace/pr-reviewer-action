@@ -2103,15 +2103,18 @@ def canary_runs_dir(
     tmp_path: Path,
     head_by_id: dict[str, str] | None = None,
     base_by_id: dict[str, str] | None = None,
+    fork_by_id: dict[str, str] | None = None,
 ) -> Path:
     """A minimal retained-runs dir in the pilot work-dir layout: one run dir
     per canary corpus id, each with the artifact set the canary reads
     (ai-output.json, review-coverage.json, review-request.json, pr.diff,
     pr-body.txt, pr.json). ``head_by_id``/``base_by_id`` override the
-    retained review-request.json pins (defaults: match the corpus pins) so
-    the retained-pin verification paths are exercisable."""
+    retained review-request.json pins and ``fork_by_id`` the resolved fork
+    state (defaults: match the corpus pins / same-repo) so the retained
+    run-state verification paths are exercisable."""
     heads = head_by_id or {}
     bases = base_by_id or {}
+    forks = fork_by_id or {}
     artifacts = {
         "canary-synth-defective": {"verdict": "approve", "sha": "a" * 40, "base": "b" * 40},
         "canary-synth-clean": {"verdict": "approve", "sha": "c" * 40, "base": "d" * 40},
@@ -2132,7 +2135,8 @@ def canary_runs_dir(
             "schema_version": "1", "pr_number": "46",
             "head_sha": heads.get(pr_id, spec["sha"]),
             "base_ref": bases.get(pr_id, spec["base"]),
-            "is_fork_pr": "false", "platform": "github",
+            "is_fork_pr": forks.get(pr_id, "false"),
+            "platform": "github",
         }), encoding="utf-8")
         (run_dir / "pr.diff").write_text("diff --git a/f.go b/f.go\n+func observeState() {}\n", encoding="utf-8")
         (run_dir / "pr-body.txt").write_text("retained PR body", encoding="utf-8")
@@ -2164,8 +2168,10 @@ def canary_plan(
         "production_shape": "bridge live-scorer (test declaration)",
         "corpus_shortfall": "test shortfall note",
         "entries": entries or [
-            {"pr_id": "canary-synth-defective", "expectation": "known_false_approval"},
-            {"pr_id": "canary-synth-clean", "expectation": "clean_correct_approval"},
+            {"pr_id": "canary-synth-defective", "expectation": "known_false_approval",
+             "publish_mode": "review_comment"},
+            {"pr_id": "canary-synth-clean", "expectation": "clean_correct_approval",
+             "publish_mode": "review_comment"},
         ],
         "conditions": conditions,
         "ceilings": ceilings or {
@@ -2276,6 +2282,7 @@ def test_bridge_live_scorer_openai_production_shape(tmp_path: Path, monkeypatch:
                 "findings": [], "review_summary": "s",
                 "required_checks": "complete", "coverage": {"partial_coverage": None},
                 "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
             },
             "confidence_env": {
                 "AI_CONFIDENCE_MODEL": "loopback-model",
@@ -2336,6 +2343,7 @@ def test_bridge_live_scorer_anthropic_production_shape(tmp_path: Path, monkeypat
                 "findings": [], "review_summary": "s",
                 "required_checks": "complete", "coverage": {},
                 "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
             },
             # INHERITED transport: no base URL, no key — endpoint+credential
             # come from the primary lane env (AI_API_KEY), the dogfood-inherited
@@ -2377,7 +2385,8 @@ def test_bridge_live_scorer_context_clamp_fails_closed_without_call(
     try:
         result = live_scorer_via_bridge({
             "row": {"head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "d",
-                    "findings": [], "verdict": "approve", "coverage": {}},
+                    "findings": [], "verdict": "approve", "coverage": {},
+                    "is_fork_pr": "false"},
             "confidence_env": {
                 "AI_CONFIDENCE_MODEL": "loopback-model",
                 "AI_CONFIDENCE_BASE_URL": base_url,
@@ -2409,6 +2418,7 @@ def test_bridge_live_scorer_prompt_over_budget_refuses_without_call(
                 "findings": [{"text": "F" * 60_000}],
                 "review_summary": "s", "coverage": {},
                 "verdict": "approve",
+                "is_fork_pr": "false", "publish_mode": "review_comment",
             },
             "confidence_env": {
                 "AI_CONFIDENCE_MODEL": "loopback-model",
@@ -2438,7 +2448,8 @@ def test_bridge_live_scorer_malformed_answer_is_unscored_with_wire_artifacts(
     try:
         result = live_scorer_via_bridge({
             "row": {"head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
-                    "findings": [], "verdict": "approve", "coverage": {}},
+                    "findings": [], "verdict": "approve", "coverage": {},
+                    "is_fork_pr": "false", "publish_mode": "review_comment"},
             "confidence_env": {
                 "AI_CONFIDENCE_MODEL": "loopback-model",
                 "AI_CONFIDENCE_BASE_URL": base_url,
@@ -2490,6 +2501,9 @@ def test_canary_driver_end_to_end_loopback(tmp_path: Path, monkeypatch: pytest.M
         assert all(row["wire_attempts"] == 1 for row in scored)
         assert all(row["usage"] == {"prompt_tokens": 100, "completion_tokens": 20} for row in scored)
         assert all(row["rubric_version"] == CANARY_RUBRIC for row in scored)
+        # Retained run-state proof rides every row.
+        assert all(row["is_fork_pr"] == "false" for row in scored)
+        assert all(row["publish_mode"] == "review_comment" for row in scored)
         assert all(row["profile"]["api_format"] == "openai" for row in scored)
         # The retained artifacts are pinned per row.
         assert all("ai-output.json" in row["artifact_digests"] for row in scored)
@@ -2740,7 +2754,8 @@ def test_canary_driver_ledger_slot_consumed_when_bridge_fails(
             "AI_CONFIDENCE_BASE_URL": base_url,
             "AI_CONFIDENCE_API_FORMAT": "openai",
         },
-    })], entries=[{"pr_id": "canary-synth-defective", "expectation": "known_false_approval"}],
+    })], entries=[{"pr_id": "canary-synth-defective", "expectation": "known_false_approval",
+                  "publish_mode": "review_comment"}],
         ceilings={
             "max_verifier_calls": 1, "max_output_tokens": 64000,
             "wall_time_budget_sec": 600, "request_timeout_sec": 30,
@@ -2835,3 +2850,245 @@ def test_canary_driver_ledger_write_failure_aborts_without_calls(
                    for row in results["rows"])
     finally:
         server.shutdown()
+
+
+def test_bridge_live_scorer_fork_state_is_proof_not_synthesis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fork flag is the retained run's verified state: 'true' disables the
+    lane under the default enable-for-forks=false (the production fork gate),
+    the explicit operator enable can run it, and a missing/unknown flag is
+    REJECTED rather than silently treated as same-repo."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-fork")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-fork")
+    base_row = {
+        "head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+        "pr_title": "t", "pr_body": "b", "findings": [], "review_summary": "s",
+        "required_checks": "complete", "coverage": {},
+        "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+        "publish_mode": "review_comment",
+    }
+    base_env = {
+        "AI_CONFIDENCE_MODEL": "loopback-model",
+        "AI_CONFIDENCE_BASE_URL": base_url,
+        "AI_CONFIDENCE_API_FORMAT": "openai",
+    }
+    try:
+        # A fork row under the default enable-for-forks=false: the production
+        # fork gate disables the lane BEFORE any wire attempt.
+        result = live_scorer_via_bridge({
+            "row": {**base_row, "is_fork_pr": "true"},
+            "confidence_env": base_env,
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert result["enabled"] is False
+        assert result["result"]["status"] == "disabled"
+        assert any("cross-repository" in warning for warning in result["warnings"])
+        assert len(pilot.requests) == 0
+        # The explicit operator enable lets the fork row run.
+        result = live_scorer_via_bridge({
+            "row": {**base_row, "is_fork_pr": "true"},
+            "confidence_env": {**base_env, "AI_CONFIDENCE_ENABLE_FOR_FORKS": "true"},
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert result["enabled"] is True
+        assert result["result"]["status"] == "scored"
+        assert len(pilot.requests) == 1
+        # A missing or unknown fork flag is a bridge input rejection — it
+        # must NEVER silently become same-repo.
+        for bad in (None, "", "maybe", "False"):
+            row = {**base_row, "is_fork_pr": bad}
+            if bad is None:
+                del row["is_fork_pr"]
+            with pytest.raises(RuntimeError, match="live-scorer failed"):
+                live_scorer_via_bridge({
+                    "row": row,
+                    "confidence_env": base_env,
+                    "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+                }, tmp_path, 60)
+        assert len(pilot.requests) == 1, "rejected inputs dispatch nothing"
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_publish_mode_matches_production_predicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The publish gate consumes the retained run's RESOLVED mode verbatim:
+    every real PublishMode passes the eligibility predicate; a missing mode
+    reproduces `publishStepRuns(undefined) === false`; an unknown value is
+    refused by the same predicate before any scorer dispatch — never a
+    bridge-local default."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-mode")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-mode")
+    row = {
+        "head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+        "pr_title": "t", "pr_body": "b", "findings": [], "review_summary": "s",
+        "required_checks": "complete", "coverage": {},
+        "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+        "is_fork_pr": "false",
+    }
+    env = {
+        "AI_CONFIDENCE_MODEL": "loopback-model",
+        "AI_CONFIDENCE_BASE_URL": base_url,
+        "AI_CONFIDENCE_API_FORMAT": "openai",
+    }
+    try:
+        for mode in ("comment", "review_comment", "review_verdict", "review_blockers"):
+            result = live_scorer_via_bridge({
+                "row": {**row, "publish_mode": mode},
+                "confidence_env": env,
+                "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+            }, tmp_path, 60)
+            assert result["result"]["status"] == "scored", mode
+        assert len(pilot.requests) == 4
+        # Missing mode: undefined reaches the predicate — the production
+        # refusal shape, zero wire calls.
+        result = live_scorer_via_bridge({
+            "row": row, "confidence_env": env,
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert result["result"]["status"] == "unscored"
+        assert result["result"]["cause"] == "not_published"
+        # Unknown mode: the SAME predicate refuses it, zero wire calls.
+        result = live_scorer_via_bridge({
+            "row": {**row, "publish_mode": "banana"},
+            "confidence_env": env,
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert result["result"]["status"] == "unscored"
+        assert result["result"]["cause"] == "not_published"
+        assert len(pilot.requests) == 4, "refusals dispatch nothing"
+    finally:
+        server.shutdown()
+
+
+def test_canary_driver_fork_state_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fork state comes from the retained request record, fail-closed:
+    a fork row is gate-disabled with zero calls, the operator enable can
+    run it, and unreadable state never silently becomes same-repo."""
+    base_env = {
+        "AI_CONFIDENCE_MODEL": "loopback-model",
+        "AI_CONFIDENCE_BASE_URL": "SET-BY-TEST",
+        "AI_CONFIDENCE_API_FORMAT": "openai",
+    }
+    # 1. Fork row + default enable-for-forks=false: zero PROVIDER calls (the
+    # production fork gate disables the lane inside the bridge, before its
+    # wire; the dispatch's spend slot is still consumed — a ceiling on
+    # dispatches, not on provider answers).
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-df")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-df")
+    try:
+        (tmp_path / "fork-case").mkdir()
+        plan = canary_plan(tmp_path / "fork-case", [canary_condition("dogfood-loopback", **{
+            "confidence_env": {**base_env, "AI_CONFIDENCE_BASE_URL": base_url},
+        })])
+        runs_dir = canary_runs_dir(
+            tmp_path / "fork-case", fork_by_id={"canary-synth-defective": "true"},
+        )
+        rc, results = run_canary(
+            tmp_path, plan, runs_dir,
+            work_dir=tmp_path / "fork-case" / "work",
+            out_path=tmp_path / "fork-case" / "results.json",
+        )
+        assert rc == 0
+        defective = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-defective")
+        clean = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-clean")
+        assert defective["is_fork_pr"] == "true"
+        assert defective["verifier"]["status"] == "disabled"
+        assert defective["wire_attempts"] == 1  # dispatch slot consumed
+        assert clean["verifier"]["status"] == "scored"
+        assert len(pilot.requests) == 1, "the fork row makes zero provider calls"
+    finally:
+        server.shutdown()
+    # 2. Same fork row with the explicit operator enable: it runs.
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-df2")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-df2")
+    try:
+        (tmp_path / "fork-enabled").mkdir()
+        plan = canary_plan(tmp_path / "fork-enabled", [canary_condition("dogfood-loopback", **{
+            "confidence_env": {**base_env, "AI_CONFIDENCE_BASE_URL": base_url,
+                               "AI_CONFIDENCE_ENABLE_FOR_FORKS": "true"},
+        })])
+        runs_dir = canary_runs_dir(
+            tmp_path / "fork-enabled", fork_by_id={"canary-synth-defective": "true"},
+        )
+        rc, results = run_canary(
+            tmp_path, plan, runs_dir,
+            work_dir=tmp_path / "fork-enabled" / "work",
+            out_path=tmp_path / "fork-enabled" / "results.json",
+        )
+        assert rc == 0
+        defective = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-defective")
+        assert defective["verifier"]["status"] == "scored"
+        assert len(pilot.requests) == 2
+    finally:
+        server.shutdown()
+    # 3. Unknown retained fork state: fail closed in the DRIVER (before any
+    # reservation), distinct cause, zero calls for that row.
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-df3")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-df3")
+    try:
+        (tmp_path / "fork-unknown").mkdir()
+        plan = canary_plan(tmp_path / "fork-unknown", [canary_condition("dogfood-loopback", **{
+            "confidence_env": {**base_env, "AI_CONFIDENCE_BASE_URL": base_url},
+        })])
+        runs_dir = canary_runs_dir(
+            tmp_path / "fork-unknown", fork_by_id={"canary-synth-defective": "maybe"},
+        )
+        rc, results = run_canary(
+            tmp_path, plan, runs_dir,
+            work_dir=tmp_path / "fork-unknown" / "work",
+            out_path=tmp_path / "fork-unknown" / "results.json",
+        )
+        assert rc == 0
+        defective = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-defective")
+        assert defective["verifier"]["status"] == "unscored"
+        assert defective["verifier"]["cause"] == "retained_fork_state_unknown"
+        assert defective["wire_attempts"] == 0
+        assert len(pilot.requests) == 1  # only the clean row dispatched
+    finally:
+        server.shutdown()
+
+
+def test_canary_plan_requires_publish_mode() -> None:
+    """The resolved publish mode is plan-declared run-state: missing or
+    unknown values are plan errors, never bridge defaults."""
+    plan = json.loads((REPO_ROOT / "evals" / "confidence-canary" / "plan.json").read_text(encoding="utf-8"))
+    corpus = load_corpus_entries(REPO_ROOT / "evals" / "corpus-real-prs.json")
+    assert confidence_calibration._validate_canary_plan(plan, corpus) == []
+    missing = json.loads(json.dumps(plan))
+    del missing["entries"][0]["publish_mode"]
+    errors = confidence_calibration._validate_canary_plan(missing, corpus)
+    assert any("publish_mode" in error for error in errors)
+    unknown = json.loads(json.dumps(plan))
+    unknown["entries"][0]["publish_mode"] = "sticky_comment"
+    errors = confidence_calibration._validate_canary_plan(unknown, corpus)
+    assert any("publish_mode" in error for error in errors)

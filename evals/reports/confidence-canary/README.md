@@ -82,6 +82,22 @@ verified manually afterwards — `review-request.json.base_ref` AND
 the recorded observations stand unchanged under the stricter gate, and any
 future canary run enforces it in code.
 
+**Retained run-state proof (fork + publish mode).** The bridge no longer
+synthesizes eligibility state. The row's resolved fork state is recovered
+from the same retained request record (`review-request.json.is_fork_pr`,
+exactly "true"/"false"; unknown state fails the row closed with zero wire
+calls and the bridge rejects any non-literal value as bad input, because the
+resolver would treat a guessed flag as same-repo) and handed to the
+production fork gate. The resolved publish mode is plan-DECLARED per entry
+(`review_comment`, the contract default the #1286 replay's config resolution
+applied — no retained artifact records it) and passed VERBATIM to the
+production `publishStepRuns` predicate: no bridge-local default, no
+ambient-env read, so a missing mode reproduces
+`publishStepRuns(undefined) === false`. Both recorded rows are same-repo and
+came from publishing runs, so the observations stand; the end-to-end
+offline re-check over the real artifacts exercises the full proof chain
+(pins + fork + mode) on every future run.
+
 ## Acceptance signals
 
 - **Known-defective false approval:** the verifier returned **3/medium —
