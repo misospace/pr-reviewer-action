@@ -24,7 +24,6 @@ metadata:
   name: pr-reviewer-worker-job
 spec:
   failurePolicy: Fail
-  sideEffects: None
   paramKind:
     apiVersion: v1
     kind: ConfigMap

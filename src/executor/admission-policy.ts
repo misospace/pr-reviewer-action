@@ -537,13 +537,13 @@ export function evaluateWorkerJobAdmission(
     credentialSecretBinding: () => {
       const labels = labelsOf(object);
       // CEL evaluates `substring` lazily (only for an entry that carries
-      // a Secret ref); the evaluator derives eagerly, so an unusable
-      // run-hash label fails this rule even with no refs at all. The
-      // stricter direction, and the identity-label rule rejects that
-      // object anyway.
-      const expected = derivedSecretName(labels);
-      const refAllowed = (name: unknown): boolean =>
-        expected === null || name === expected;
+      // a Secret ref); the evaluator mirrors that, deriving the name
+      // only when a Secret ref actually needs it, so an unusable
+      // run-hash label throws like CEL's substring only then.
+      const refAllowed = (name: unknown): boolean => {
+        const expected = derivedSecretName(labels);
+        return expected === null || name === expected;
+      };
       return containersOf(podSpecOf(object)).every((c) => {
         if (c.env !== undefined) {
           if (!Array.isArray(c.env)) throw new TypeError("container env is malformed");

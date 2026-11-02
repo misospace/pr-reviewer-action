@@ -86,7 +86,6 @@ test("the Job policy manifest is a ValidatingAdmissionPolicy over batch Jobs", (
   assert.equal(field(policy!, "metadata", "name"), WORKER_JOB_POLICY_NAME);
   // Fail closed: a policy that cannot run never waves an escape through.
   assert.equal(field(policy!, "spec", "failurePolicy"), "Fail");
-  assert.equal(field(policy!, "spec", "sideEffects"), "None");
   assert.deepEqual(field(policy!, "spec", "paramKind"), { apiVersion: "v1", kind: "ConfigMap" });
   assert.deepEqual(field(policy!, "spec", "matchConstraints", "resourceRules"), [{
     apiGroups: ["batch"],
@@ -141,6 +140,49 @@ test("the Secret policy manifest is a ValidatingAdmissionPolicy over core Secret
   assert.equal(field(binding!, "spec", "policyName"), WORKER_SECRET_POLICY_NAME);
   assert.deepEqual(field(binding!, "spec", "validationActions"), ["Deny"]);
   assert.equal(field(binding!, "spec", "paramRef", "parameterNotFoundAction"), "Deny");
+});
+
+// Schema-level gate, not just YAML parsing: strict server-side validation
+// (default `kubectl apply`) rejects unknown spec fields outright, so the
+// manifests may only carry fields the `admissionregistration.k8s.io/v1`
+// API schema actually defines. Catches e.g. `sideEffects`, a
+// ValidatingWebhook field that is not part of ValidatingAdmissionPolicySpec.
+const VALIDATING_ADMISSION_POLICY_SPEC_FIELDS = new Set([
+  "auditAnnotations",
+  "failurePolicy",
+  "matchConditions",
+  "matchConstraints",
+  "paramKind",
+  "validations",
+  "variables",
+]);
+const VALIDATING_ADMISSION_POLICY_BINDING_SPEC_FIELDS = new Set([
+  "matchResources",
+  "paramRef",
+  "policyName",
+  "validationActions",
+]);
+
+test("the policy specs use only fields the admissionregistration/v1 schema defines", () => {
+  const documents = [...jobDocuments, ...secretDocuments];
+  assert.ok(documents.length > 0);
+  for (const document of documents) {
+    const kind = field(document!, "kind");
+    const allowed = kind === "ValidatingAdmissionPolicy"
+      ? VALIDATING_ADMISSION_POLICY_SPEC_FIELDS
+      : kind === "ValidatingAdmissionPolicyBinding"
+      ? VALIDATING_ADMISSION_POLICY_BINDING_SPEC_FIELDS
+      : null;
+    assert.ok(allowed !== null, `unexpected kind ${String(kind)}`);
+    const spec = field(document!, "spec");
+    assert.ok(typeof spec === "object" && spec !== null);
+    for (const key of Object.keys(spec as Record<string, unknown>)) {
+      assert.ok(
+        allowed.has(key),
+        `spec.${key} on the ${String(kind)} is not a field of the admissionregistration/v1 schema`,
+      );
+    }
+  }
 });
 
 test("the pinned expressions carry the executor's own invariants (no drift)", () => {
