@@ -417,10 +417,12 @@ function lexicallyInsideProblem(child: string, dir: string, path: string): strin
  * the whole rule. */
 const MIN_CREDENTIAL_SHAPED_PATH_RUN = 20;
 
-/** The characters an opaque token is made of: the URL unreserved set plus
- * the base64 alphabet's `+` and `=`. No real token alphabet (hex, base64,
- * base64url, JWT) reaches beyond them; a run built from anything else is
- * path prose, not token material. */
+/** The characters an opaque token is made of: the URL unreserved set
+ * (`A-Z` `a-z` `0-9` `-` `.` `_` `~` — `_` included, base64url uses it)
+ * plus the base64 alphabet's `+` and `=`. No real token alphabet (hex,
+ * base64, base64url, JWT) reaches beyond them; a run built from anything
+ * else is path prose, not token material. Dropping `_` would let a token
+ * split into underscore-joined sub-floor chunks evade the screen. */
 const TOKEN_RUN_RE = /[A-Za-z0-9._~+=-]+/g;
 
 /** A percent-escape the URL cannot decode: the path's meaning is

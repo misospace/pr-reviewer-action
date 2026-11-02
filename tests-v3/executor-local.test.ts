@@ -1269,6 +1269,30 @@ test("validateExecutionRequest refuses a credential riding the forge API path (#
       }),
     /must not contain a credential-shaped path segment/,
   );
+  // A token split into sub-floor chunks with UNDERSCORES, a token character
+  // in both the RFC 3986 unreserved set and base64url: `abcd_efgh_ijkl_mnop_qrst`
+  // is ONE 23-character run, not five 4-character runs. If `_` ever drops out
+  // of the token-run alphabet, each chunk falls under the floor and the
+  // credential rides the envelope.
+  assert.throws(
+    () =>
+      validateExecutionRequest({
+        ...valid,
+        forgeApiUrl: "https://forge.example/abcd_efgh_ijkl_mnop_qrst/v1",
+      }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // The same underscores fully percent-encoded: each RAW run is `5F` plus a
+  // 4-character chunk (sub-floor), so only the decoded form joins them into
+  // the 23-character credential run — the decoding rounds must judge `_` too.
+  assert.throws(
+    () =>
+      validateExecutionRequest({
+        ...valid,
+        forgeApiUrl: "https://forge.example/abcd%5Fefgh%5Fijkl%5Fmnop%5Frst/v1",
+      }),
+    /must not contain a credential-shaped path segment/,
+  );
   // A credential sharing its segment with one punctuation character is
   // still a run of token characters.
   assert.throws(
@@ -1330,6 +1354,13 @@ test("validateExecutionRequest refuses a credential riding the forge API path (#
   assert.equal(
     validateExecutionRequest({ ...valid, forgeApiUrl: "http:forge.example/api/v1" }).forgeApiUrl,
     "http:forge.example/api/v1",
+  );
+  // Underscores are token characters, but a SHORT underscored path stays
+  // legal: the screen judges the joined run's length, not the presence of
+  // `_` itself.
+  assert.equal(
+    validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/api_v1/instances_2" }).forgeApiUrl,
+    "https://forge.example/api_v1/instances_2",
   );
   // One character under the credential-shaped floor stays legal too — the
   // floor is the same one #1429 uses.
