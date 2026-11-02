@@ -2053,7 +2053,16 @@ def run_review_for_pr(
         env = os.environ.copy()
         python_dir = str(Path(sys.executable).resolve().parent)
         env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
-        env["GITHUB_TOKEN"] = model_config.get("github_token", "")
+        # The forge token travels in the environment under BOTH names the
+        # runtime accepts: the v3 runtime takes the token from GITHUB_TOKEN
+        # or GH_TOKEN (src/run/env.ts, src/run/action.ts), so naming both
+        # with the same resolved value keeps the child deterministic whichever
+        # name it consults first — and keeps the credential out of the child's
+        # argv. An empty token leaves the ambient names untouched.
+        forge_token = model_config.get("github_token", "")
+        if forge_token:
+            env["GITHUB_TOKEN"] = forge_token
+            env["GH_TOKEN"] = forge_token
         env["REPO"] = pr_entry["repo_full_name"]
         env["PR_NUMBER"] = str(pr_number)
         env["AI_BASE_URL"] = model_config.get("base_url", "")
@@ -3057,6 +3066,76 @@ def count_completed_runs(report: dict[str, Any]) -> int:
     return completed
 
 
+# Credential-carrying CLI options the harness refuses outright (#1410). A
+# secret passed as an argv element is visible to every other process on the
+# host and lands in shell history and CI logs, so the harness reads the
+# credentials from the environment only — the same rule the shipped runtime
+# follows (AGENTS.md: credentials travel in the HTTP auth headers, never in
+# process argv).
+CREDENTIAL_ARGUMENT_FLAGS = ("--api-key", "--github-token")
+
+
+def _option_part(argument: str) -> str:
+    """Return the option name of an argv element, without its value."""
+    return argument.split("=", 1)[0]
+
+
+def _refuse_unrecognized_arguments(extras: list[str]) -> str | None:
+    """Return an error message when argv carries an argument the CLI refuses.
+
+    Every argument the parser does not know is refused here instead of by
+    argparse, because argparse's own "unrecognized arguments" message echoes
+    the value: an argument the harness does not know may be a credential the
+    operator mistyped, and a secret must never reach a log or an error
+    message (AGENTS.md).
+
+    Only option NAMES are reported, never a value: the refusal stays safe to
+    log even when the secret itself was already typed on the command line.
+    """
+    if not extras:
+        return None
+    for flag in CREDENTIAL_ARGUMENT_FLAGS:
+        for argument in extras:
+            part = _option_part(argument)
+            # An exact flag, or any prefix of it: argparse accepted every
+            # unambiguous abbreviation of `--api-key` before the option was
+            # removed, so the abbreviation must be refused as well.
+            if part == flag or (len(part) > 2 and flag.startswith(part)):
+                return (
+                    f"Error: {flag} must not be passed as an argument: "
+                    "credentials travel in the environment only. "
+                    "Set AI_API_KEY (model API key) and GITHUB_TOKEN or GH_TOKEN "
+                    "(forge token) in the environment instead."
+                )
+    return (
+        f"Error: the harness refuses {len(extras)} unrecognized argument(s): "
+        "an unrecognized argument may carry a secret, so the harness does not "
+        "echo it. Run the harness with --help to see the accepted flags."
+    )
+
+
+def _resolve_forge_token() -> str:
+    """Return the forge token from the environment only (never from argv).
+
+    Mirrors ``pr_reviewer.forge._resolve_token``'s env precedence.
+    """
+    return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+
+
+def _model_config_from_env(args: argparse.Namespace) -> dict[str, str]:
+    """Build the review run's model configuration.
+
+    The credentials come from the environment only (#1410): the CLI has no
+    credential options, so a secret can never sit in this process's argv.
+    """
+    return {
+        "model": args.model if args.model is not None else os.getenv("AI_MODEL", ""),
+        "base_url": args.base_url if args.base_url is not None else os.getenv("AI_BASE_URL", ""),
+        "api_key": os.environ.get("AI_API_KEY", ""),
+        "github_token": _resolve_forge_token(),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="A/B evaluation harness for PR review modes",
@@ -3084,18 +3163,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="AI API base URL",
-    )
-    parser.add_argument(
-        "--api-key",
-        type=str,
-        default=None,
-        help="AI API key",
-    )
-    parser.add_argument(
-        "--github-token",
-        type=str,
-        default=os.getenv("GITHUB_TOKEN", ""),
-        help="GitHub token for PR data access",
     )
     parser.add_argument(
         "--output",
@@ -3247,8 +3314,8 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
         except eval_lanes.LaneConfigError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
-        if any(value is not None for value in (args.model, args.base_url, args.api_key)):
-            print("Error: --model/--base-url/--api-key cannot be combined with --lanes-file", file=sys.stderr)
+        if any(value is not None for value in (args.model, args.base_url)):
+            print("Error: --model/--base-url cannot be combined with --lanes-file", file=sys.stderr)
             return 1
         if args.dry_run:
             print(eval_lanes.format_lane(lane_plan, lane), file=sys.stderr)
@@ -3276,12 +3343,7 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
         print("Error: real-PR corpus is empty", file=sys.stderr)
         return 1
 
-    model_config = {
-        "model": args.model if args.model is not None else os.getenv("AI_MODEL", ""),
-        "base_url": args.base_url if args.base_url is not None else os.getenv("AI_BASE_URL", ""),
-        "api_key": args.api_key if args.api_key is not None else os.getenv("AI_API_KEY", ""),
-        "github_token": args.github_token,
-    }
+    model_config = _model_config_from_env(args)
     if lane_resolved is not None:
         model_config.update({
             "model": lane_resolved.model,
@@ -3373,7 +3435,14 @@ def _main_real_pr_corpus(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    # Unrecognized arguments are refused without echoing them (#1410):
+    # argparse's own "unrecognized arguments" message prints the value, and
+    # an argument the harness does not know may be a credential.
+    args, extras = parser.parse_known_args()
+    argument_error = _refuse_unrecognized_arguments(extras)
+    if argument_error is not None:
+        print(argument_error, file=sys.stderr)
+        return 2
 
     lane_plan = None
     lane = None
@@ -3385,8 +3454,8 @@ def main() -> int:
         except eval_lanes.LaneConfigError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
-        if any(value is not None for value in (args.model, args.base_url, args.api_key)):
-            print("Error: --model/--base-url/--api-key cannot be combined with --lanes-file", file=sys.stderr)
+        if any(value is not None for value in (args.model, args.base_url)):
+            print("Error: --model/--base-url cannot be combined with --lanes-file", file=sys.stderr)
             return 1
         if args.dry_run:
             print(eval_lanes.format_lane(lane_plan, lane), file=sys.stderr)
@@ -3423,12 +3492,7 @@ def main() -> int:
     # Limit PRs if requested
     prs = corpus.prs[:args.max_prs] if args.max_prs else corpus.prs
 
-    model_config = {
-        "model": args.model if args.model is not None else os.getenv("AI_MODEL", ""),
-        "base_url": args.base_url if args.base_url is not None else os.getenv("AI_BASE_URL", ""),
-        "api_key": args.api_key if args.api_key is not None else os.getenv("AI_API_KEY", ""),
-        "github_token": args.github_token,
-    }
+    model_config = _model_config_from_env(args)
     if lane_resolved is not None:
         model_config.update({
             "model": lane_resolved.model,

@@ -32,6 +32,11 @@ python scripts/eval_harness.py \
     --output eval-report/eval-report.json
 ```
 
+The harness reads the model API key from `AI_API_KEY` and the forge token
+from `GITHUB_TOKEN` or `GH_TOKEN`. Both values stay in the environment.
+The harness refuses `--api-key` and `--github-token` arguments (#1410).
+A secret in an argument list is visible to every other process on the host.
+
 The `--modes` flag accepts one or more modes (space-separated on the shell
 line, repeated `--modes x --modes y` works too). The default is
 `tools_off native_loop`.
@@ -231,7 +236,11 @@ CI and never affects a review verdict.
       --output judge-calibration-report.json
   ```
 
-  The judge key is read from `JUDGE_API_KEY`; never pass it on argv.
+  The judge key is read from `JUDGE_API_KEY` and must never be passed on argv.
+  Both `scripts/run_judge_calibration.py` and `scripts/live_judge_score.py` read
+  the judge key from the environment only. Both refuse a credential argument
+  and an argument they do not know. A refusal names the option only. It never
+  echoes an argument value, because a mistyped value may carry a secret.
 
 - **`scripts/live_judge_score.py`** — scores blinded live A/B outputs
   (`--baseline` / `--treatment`, each `{"arm", "reps", "scenarios": [{"scenario",

@@ -41,6 +41,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from pr_reviewer import semantic_judge  # noqa: E402
+from pr_reviewer.credential_argv import (  # noqa: E402
+    ValueSafeArgumentParser,
+    credential_argument_refusal,
+    refusal_for_unrecognized_arguments,
+)
 
 DEFAULT_CORPUS = _REPO_ROOT / "evals" / "judge-calibration-corpus.json"
 _MAX_ATTEMPTS = 3
@@ -469,8 +474,13 @@ def _load_verified_calibration(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    # allow_abbrev=False: a prefix such as "--a" must not resolve to
+    # --allow-subset-scenarios now that --api-key is gone (#1413). The
+    # prefix would silently relax the full-corpus guard, and the operator
+    # would not see what the run did.
+    parser = ValueSafeArgumentParser(
         description="Score blinded #661 live A/B outputs with the frozen semantic judge.",
+        allow_abbrev=False,
     )
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument(
@@ -487,14 +497,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--judge-model", default=os.environ.get("JUDGE_MODEL"))
     parser.add_argument("--base-url", default=os.environ.get("JUDGE_BASE_URL"))
-    parser.add_argument("--api-key", default=os.environ.get("JUDGE_API_KEY", ""))
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--output", type=Path, default=None)
     return parser
 
 
+def _judge_api_key() -> str:
+    """Return the judge key from the environment only (never from argv)."""
+    return os.environ.get("JUDGE_API_KEY", "")
+
+
 def main(argv: Optional[list[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    # A credential argument is refused first (#1413). The refusal comes
+    # before argparse runs, so no parser message can quote a value.
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    refusal = credential_argument_refusal(
+        arguments,
+        credential_flags=("--api-key",),
+        credential_env="JUDGE_API_KEY",
+    )
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
+    # Unrecognized arguments are refused without echoing them: argparse's own
+    # "unrecognized arguments" message prints the value, and an argument the
+    # runner does not know may be a credential.
+    args, extras = build_parser().parse_known_args(arguments)
+    refusal = refusal_for_unrecognized_arguments(
+        extras,
+        credential_flags=("--api-key",),
+        credential_env="JUDGE_API_KEY",
+    )
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
     for path in (args.corpus, args.baseline, args.treatment, args.calibration_artifact):
         if not path.exists():
             print(f"Error: file not found: {path}", file=sys.stderr)
@@ -539,8 +575,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("Calibration artifact does not match this frozen judge — "
               + "refusing to score:", *calibration_errors, sep="\n  ", file=sys.stderr)
         return 2
+    judge_api_key = _judge_api_key()
     judge_call = _openai_judge_call(
-        args.judge_model, args.base_url, args.api_key, args.timeout
+        args.judge_model, args.base_url, judge_api_key, args.timeout
     )
     report = compare([
         score_arm(baseline, answer_keys, judge_call),

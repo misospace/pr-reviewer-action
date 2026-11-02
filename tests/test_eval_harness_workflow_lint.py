@@ -129,6 +129,46 @@ def test_run_eval_harness_step_passes_shellcheck() -> None:
     )
 
 
+def test_run_eval_harness_step_carries_no_credential_argument() -> None:
+    """The harness must never be handed a credential as an argument (#1410).
+
+    A secret in the harness' argv is visible to every other process on the
+    runner and lands in the echoed command and the CI log. The step's env
+    block already exports ``AI_API_KEY`` and ``GITHUB_TOKEN``, and the
+    harness reads both from the environment, so the command array must
+    carry neither flag nor interpolation.
+    """
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    run_block = _extract_run_block("Run eval harness", workflow_text)
+
+    command_array = re.search(r"CMD=\((.*?)\)\n", run_block, flags=re.DOTALL)
+    assert command_array is not None, (
+        "the `Run eval harness` step must build the harness command in a CMD array"
+    )
+    command = command_array.group(1)
+
+    for flag in ("--api-key", "--github-token"):
+        # The whole step, not just the command array: a second harness
+        # invocation elsewhere in the step would leak the same way.
+        assert flag not in run_block, (
+            f"the `Run eval harness` step must not pass {flag} as an argument: "
+            "credentials travel in the environment only"
+        )
+        assert flag not in command, (
+            f"the `Run eval harness` step must not pass {flag} as an argument: "
+            "credentials travel in the environment only"
+        )
+    for interpolation in ("$AI_API_KEY", "${AI_API_KEY}", "$GITHUB_TOKEN", "${GITHUB_TOKEN}"):
+        assert interpolation not in run_block, (
+            f"the `Run eval harness` step must not interpolate {interpolation} "
+            "into the harness command: credentials travel in the environment only"
+        )
+        assert interpolation not in command, (
+            f"the `Run eval harness` step must not interpolate {interpolation} "
+            "into the harness command: credentials travel in the environment only"
+        )
+
+
 def test_summary_step_invokes_renderer_script() -> None:
     """The scheduled summary must render via scripts/eval_weekly_summary.py.
 

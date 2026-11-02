@@ -108,8 +108,12 @@ def test_never_pushes_to_main() -> None:
 
 def test_opens_or_updates_single_pr_never_recreates() -> None:
     text = _all_text()
-    assert "gh pr view" in text, "must check for an existing PR before creating one"
-    assert "gh pr create" in text
+    assert "pr-number-for-branch" in text, (
+        "must check for an existing PR before creating one -- through the "
+        "forge capability adapter (scripts/forge_cli.py), not a forge CLI "
+        "binary"
+    )
+    assert "pr-create" in text
     assert "force-with-lease" in text, (
         "the bot branch push should use --force-with-lease, not a bare force push"
     )
