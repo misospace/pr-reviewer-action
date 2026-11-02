@@ -447,8 +447,12 @@ def _load_verified_calibration(
     this live run is about to use. A different prompt version, judge model,
     judge setting, calibration corpus, or judge endpoint (base_url) fails
     closed. The recorded base_url is redacted (#1414), so the endpoint
-    comparison uses the artifact's SHA-256 of the full normalized URL against
-    the full URL of this run — never the redacted display string."""
+    comparison uses the artifact's SHA-256 of the credential-free normalized
+    URL against the resolved endpoint of this run — never the redacted display
+    string. The digest binds the credential-free endpoint identity (#1424): a
+    credential rotation compares equal, a different endpoint (scheme/host/
+    port/path) does not, and the credential cannot be inverted from the
+    recorded digest."""
     try:
         artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -483,12 +487,27 @@ def _load_verified_calibration(
             "calibration artifact is missing base_url_sha256; re-run "
             "scripts/run_judge_calibration.py with the current tooling"
         )
-    elif artifact["base_url_sha256"] != base_url_identity_digest(base_url):
-        errors.append(
-            "calibration artifact base_url does not match this run's judge "
-            f"endpoint (artifact={redact_url_userinfo(recorded_base_url)!r}, "
-            f"live={redact_url_userinfo(base_url)!r})"
-        )
+    else:
+        # #1424: the artifact binds the credential-free endpoint identity.
+        # A live endpoint that cannot be resolved into one fails closed as
+        # an error — never a raise, and never a digest over the raw value.
+        try:
+            live_digest = base_url_identity_digest(base_url)
+        except UnsafeEndpointUrl:
+            errors.append(
+                "this run's judge endpoint (base_url) could not be resolved "
+                "into a credential-free endpoint identity"
+            )
+        else:
+            if artifact["base_url_sha256"] != live_digest:
+                errors.append(
+                    "calibration artifact base_url does not match this run's judge "
+                    f"endpoint (artifact={redact_url_userinfo(recorded_base_url)!r}, "
+                    f"live={redact_url_userinfo(base_url)!r}); an artifact recorded "
+                    "by tooling older than #1424 never matches (it digested the "
+                    "credential-bearing URL) — re-run "
+                    "scripts/run_judge_calibration.py with the current tooling"
+                )
     return artifact, errors
 
 

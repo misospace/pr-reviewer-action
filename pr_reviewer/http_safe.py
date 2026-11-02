@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -159,17 +160,35 @@ def normalize_base_url(url: object) -> str:
     """Normalize an API endpoint for identity comparison: strip surrounding
     whitespace and trailing slashes only. A ``/v1`` path segment stays
     significant, so the same model alias behind a different gateway is never
-    treated as equal."""
+    treated as equal.
+
+    This does NOT strip a URL userinfo — a userinfo-bearing value normalized
+    here still carries its credential. Never build a recorded identity from
+    it directly; use :func:`base_url_identity_digest`, which resolves the
+    credential-free endpoint first (#1424)."""
     if not isinstance(url, str):
         return ""
     return url.strip().rstrip("/")
 
 
 def base_url_identity_digest(url: object) -> str:
-    """SHA-256 of the normalized *full* endpoint URL. Lets a shared report
-    bind an exact endpoint identity (userinfo included) without recording the
-    credential a userinfo would carry (#1414)."""
-    return hashlib.sha256(normalize_base_url(url).encode("utf-8")).hexdigest()
+    """SHA-256 of the normalized *credential-free* endpoint identity (#1424).
+
+    The userinfo is stripped first — the same resolution the transport uses
+    (:func:`resolve_endpoint`), which moves the credential into the
+    ``Authorization`` header — and the digest binds the resulting request
+    target. An unkeyed, fast digest over a credential-bearing URL is an
+    offline password oracle: anyone holding the shared report could test
+    candidate passwords against it without ever contacting the endpoint
+    (#1424), so the recorded endpoint identity never depends on the
+    credential. Rotating the credential keeps a calibration artifact valid;
+    a different endpoint (scheme/host/port/path) does not compare equal.
+
+    Fail-closed: a value that cannot be resolved into a credential-free
+    endpoint raises :class:`UnsafeEndpointUrl` — there is no defined request
+    target, so there is no endpoint identity to record."""
+    resolved = resolve_endpoint(url)
+    return hashlib.sha256(normalize_base_url(resolved.url).encode("utf-8")).hexdigest()
 
 
 class CredentialInProcessArguments(ValueError):
@@ -333,3 +352,59 @@ def _unsplit(parts: urllib.parse.SplitResult, netloc: str) -> str:
     return urllib.parse.urlunsplit(
         (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
     )
+
+
+class ConflictingCredentialChannels(ValueError):
+    """An endpoint URL and a separate credential both carry a secret.
+
+    One request carries one credential, so the two channels cannot both be
+    honored. The message never echoes either value: an endpoint URL is a
+    credential carrier and the value may carry a secret in its userinfo.
+    """
+
+
+def resolve_credential_channel(url: object, api_key: object = "") -> tuple[str, str]:
+    """Split an endpoint into a credential-free request target and the
+    credential the request carries in its authentication header (#1417).
+
+    A credential rides exactly one channel, and that channel is an HTTP
+    authentication header. A credential in the endpoint URL's userinfo is
+    moved into the credential channel, and the request target keeps the
+    endpoint's identity — scheme, host, port and path — unchanged, so the
+    run still contacts the intended endpoint.
+
+    Supplying a credential in the URL and a separate API key at the same time
+    is refused (:class:`ConflictingCredentialChannels`): one request carries
+    one credential, so honoring both would drop one of them silently.
+
+    Fail-closed: an endpoint that cannot be used as a request target raises
+    :class:`UnsafeEndpointUrl` (see :func:`resolve_endpoint`).
+    """
+    endpoint = resolve_endpoint(url)
+    credential = endpoint.credential or ""
+    key = api_key if isinstance(api_key, str) else ""
+    if credential and key:
+        raise ConflictingCredentialChannels(
+            "the endpoint URL carries a credential and a separate model "
+            "credential is configured; one request carries one credential"
+        )
+    return endpoint.url, credential or key
+
+
+# A URL-shaped token in free text: an absolute URL with its scheme. Only an
+# absolute URL is recognized, because that is the shape the runtime records
+# (``model@https://user:pass@host/v1``) and the shape a client accepts.
+_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
+
+
+def redact_urls_in_text(text: str) -> str:
+    """#1417: Redact the userinfo of every absolute URL in free text.
+
+    Runtime artifacts and captured stderr can embed the operator endpoint
+    (``model@https://user:pass@host/v1``), and those strings reach shared eval
+    reports. Each URL-shaped token goes through :func:`redact_url_userinfo`;
+    text that carries no URL is returned unchanged.
+    """
+    if not isinstance(text, str):
+        return text
+    return _URL_IN_TEXT.sub(lambda match: redact_url_userinfo(match.group(0)), text)

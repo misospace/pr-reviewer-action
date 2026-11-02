@@ -243,10 +243,29 @@ CI and never affects a review verdict.
   and an argument they do not know. A refusal names the option only. It never
   echoes an argument value, because a mistyped value may carry a secret.
 
-  The report records `base_url` with any URL userinfo redacted (`https://***@host`)
-  and binds the full endpoint with `base_url_sha256`, the SHA-256 of the
-  normalized full URL — an operator URL can carry a credential in its
-  userinfo, and reports are shared (#1414).
+  The report records `base_url` with any URL userinfo redacted
+  (`https://***@host`). The runner records the resolved credential-free
+  endpoint, so a report from the command line shows no userinfo; the
+  redaction guards a caller that passes a credential-bearing URL directly.
+  The report binds the endpoint with `base_url_sha256`, the SHA-256 of the
+  normalized endpoint URL with any userinfo stripped (#1424). The digest
+  covers the credential-free request target that the transport resolves,
+  because reports are shared (#1414). A digest over the credential-bearing
+  URL would be an offline password oracle: a reader of the report could test
+  candidate endpoint passwords against it without ever contacting the
+  endpoint. The credential rides the `Authorization` header, so it does not
+  need to be part of the recorded identity.
+
+  Rotate the endpoint credential (the URL userinfo or `JUDGE_API_KEY`) and a
+  calibration artifact stays valid. The artifact no longer proves that the
+  live run uses the same credential, so make sure that a rotated credential
+  addresses the same judge model behind the endpoint. Change the endpoint
+  itself (the scheme, host, port, or path) and the artifact no longer
+  matches; run `scripts/run_judge_calibration.py` again to record the new
+  endpoint. An artifact recorded by tooling older than this change digested
+  the credential-bearing URL, so it never matches the current tooling; run
+  `scripts/run_judge_calibration.py` again to record it with the current
+  digest.
 
   A credential rides exactly one channel, and that channel is always an HTTP
   auth header: `JUDGE_API_KEY` becomes `Authorization: Bearer …`, while a
@@ -283,8 +302,9 @@ CI and never affects a review verdict.
    (a `run_judge_calibration.py` report) proving 100% agreement with the *same*
    judge identity — prompt version, model, settings, calibration corpus
    content hash, and judge endpoint (bound via the artifact's `base_url_sha256`
-   digest of the full normalized URL, never the redacted display string, so two
-   credentials on one host never compare equal) — as this run. An unusable
+   digest of the credential-free normalized endpoint URL, never the redacted
+   display string; a credential rotation compares equal, a different endpoint
+   does not (#1424)) — as this run. An unusable
    judge verdict is fail-closed and counted as a miss, never a pass. It reads
    the endpoint the same way as the calibration runner: a `--base-url` that
    carries no credential, or `JUDGE_BASE_URL` from the environment.
@@ -490,12 +510,31 @@ reports are the diffable artifacts, as elsewhere in this eval workflow.
 `same_model_specialists` enables deep review without overrides, so specialists
 inherit the primary model; `heterogeneous_specialists` enables deep review
 and projects the shared specialist profile and optional role models into the
-`AI_SPECIALIST_*` environment contract. Credentials are read only from the
-environment variable named by `api_key_env`: keys are never stored in the
-plan or report. Dry-run validates and prints a redacted plan without needing
+`AI_SPECIALIST_*` environment contract. Credentials come from the
+environment variable named by `api_key_env`, or from a credential carried in a
+profile base URL's userinfo: a key is never stored in the plan or the report.
+Dry-run validates and prints a redacted plan without needing
 credentials or contacting an endpoint. The report records resolved lane
 identity and redacted profile provenance under `metadata.lane`; existing
-`mode_summary` keys do not change. For lane runs, the harness clears ambient
+`mode_summary` keys do not change. A profile base URL is recorded with any
+URL userinfo redacted (`https://***@host/v1`). An operator endpoint can carry
+a credential in its userinfo, and reports are shared artifacts (#1417). The
+redaction covers every recorded copy of the endpoint: the lane projection
+under `metadata.lane`, the model string in each run record, and the failure
+message of a run that errored. It also covers the dry-run plan print.
+
+A credential never rides in a request URL. When a profile base URL carries a
+credential in its userinfo, the harness resolves it before the request: the
+request target keeps the endpoint's identity (scheme, host, port, path) and
+loses the userinfo, and the credential moves into the provider's HTTP
+authentication header — `AI_API_KEY` for the primary model,
+`AI_SPECIALIST_API_KEY` for the specialist profile. The lane therefore still
+contacts the intended endpoint, and the request URL carries no credential.
+The profile's credential environment variable stays the declared credential
+channel: a URL credential is used only when that variable carries nothing,
+because one request carries one credential, and supplying both is refused
+before any request is sent. The refusal names the environment variable and
+never echoes a value. For lane runs, the harness clears ambient
 `AI_SPECIALIST_*` variables so shell exports cannot leak between lanes, and
 each run receives its own private artifact directory.
 

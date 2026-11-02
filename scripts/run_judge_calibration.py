@@ -168,7 +168,13 @@ def run_calibration(
 ) -> dict:
     """Grade every reference across every scenario. Fail-closed; never raises for
     a judge/transport fault (only for malformed corpus, which callers gate
-    first)."""
+    first, or for a ``base_url`` that cannot be resolved into a credential-free
+    endpoint identity).
+
+    ``base_url`` is the endpoint URL this run used. The report records it
+    redacted and digests the credential-free endpoint identity (#1424), so
+    even a direct caller passing a credential-bearing URL cannot put the
+    credential into the recorded identity."""
     rows: list[dict] = []
     for scenario in corpus["scenarios"]:
         answer_key = dict(scenario["answer_key"])
@@ -207,9 +213,13 @@ def run_calibration(
         "judge_model": judge_model,
         # #1414: the report is written to disk and shared, and an operator
         # endpoint can carry a credential in its userinfo — record the
-        # redacted display form, plus a SHA-256 of the full normalized URL so
-        # a live run can still bind the exact endpoint identity (the digest,
-        # not the redacted string, is what live scoring compares).
+        # redacted display form. #1424: the digest binds the credential-free
+        # endpoint identity, never the credential-bearing URL. An unkeyed
+        # digest over a userinfo-bearing URL is an offline password oracle
+        # (anyone holding the report could test candidate passwords against
+        # it), so the recorded identity must not depend on the credential:
+        # rotating the credential keeps the artifact valid; a different
+        # endpoint (scheme/host/port/path) does not compare equal.
         "base_url": redact_url_userinfo(base_url),
         "base_url_sha256": base_url_identity_digest(base_url),
         "total": total,
@@ -398,8 +408,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     judge_call = _openai_judge_call(
         args.judge_model, endpoint, judge_api_key, args.timeout
     )
+    # The report records the resolved credential-free endpoint (#1424): the
+    # request target the transport actually uses, with the userinfo the
+    # endpoint carried already moved into the Authorization header.
     report = run_calibration(
-        corpus, judge_call, args.judge_model, base_url,
+        corpus, judge_call, args.judge_model, endpoint.url,
         corpus_path=args.corpus,
     )
 
