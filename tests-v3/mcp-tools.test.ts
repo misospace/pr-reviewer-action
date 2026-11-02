@@ -92,8 +92,19 @@ function seedStore(options: { adopted?: Array<{ platform: "github" | "forgejo"; 
   return store;
 }
 
-function seededRun(store: InMemoryControlPlaneStore): RunRecord {
-  const run = newRunRecord({ runId: "run-1", jobId: "job-github-1", kind: "review", executorIdentity: "local:v1", headSha: "aaaa1111bbbb2222cccc3333dddd4444eeee5555", configFingerprint: "aaaaaaaaaaaaaaaa", attempt: 1 }, 1000);
+function seededRun(store: InMemoryControlPlaneStore, overrides: { configFingerprint?: string } = {}): RunRecord {
+  const run = newRunRecord(
+    {
+      runId: "run-1",
+      jobId: "job-github-1",
+      kind: "review",
+      executorIdentity: "local:v1",
+      headSha: "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+      configFingerprint: overrides.configFingerprint ?? "aaaaaaaaaaaaaaaa",
+      attempt: 1,
+    },
+    1000,
+  );
   void store.apply([{ kind: "create-run", record: run }]);
   return run;
 }
@@ -355,6 +366,17 @@ test("get_review_policy exposes fingerprints and provenance without config mater
   }
   const byRun = await callMcpTool({ deps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { run_id: "run-1" });
   assert.ok(byRun.ok);
+  if (byRun.ok) {
+    const policy = (byRun.data as { policy: Record<string, unknown> }).policy;
+    assert.equal(policy.provenance, "historical run record");
+    assert.equal(policy.configFingerprint, "aaaaaaaaaaaaaaaa");
+    // Current adoption metadata is not historical provenance: the run form
+    // omits it instead of presenting the live adoption record.
+    assert.ok(!("adoptionEpoch" in policy));
+    assert.ok(!("enabled" in policy));
+    assert.ok(!("adoptedAtMs" in policy));
+    assert.ok(!("updatedAtMs" in policy));
+  }
   const absent = await callMcpTool({ deps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { run_id: "absent" });
   assert.equal(absent.ok, false);
   // A disabled adoption is still readable metadata (policy state, not data).
@@ -363,6 +385,66 @@ test("get_review_policy exposes fingerprints and provenance without config mater
   const disabled = await callMcpTool({ deps: disabledDeps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { platform: "github", repository: "octo/widget" });
   assert.ok(disabled.ok);
   if (disabled.ok) assert.equal((disabled.data as { policy: { enabled: boolean } }).policy.enabled, false);
+});
+
+test("run-addressed policy read retains the run's historical fingerprint after adoption changes (#1399)", async () => {
+  const store = seedStore();
+  seededRun(store, { configFingerprint: "1111111111111111" });
+  // The operator re-adopts the repository under NEW configuration after the
+  // run completed; the historical answer must not become the new one.
+  const reAdopted = validateAdoptedRepository({
+    platform: "github",
+    installationId: "1",
+    repoFullName: "octo/widget",
+    adoptionEpoch: "epoch-2",
+    configFingerprint: "2222222222222222",
+    headFingerprint: "",
+    enabled: true,
+    adoptedAtMs: 2000,
+    updatedAtMs: 2000,
+  });
+  assert.ok(reAdopted, "re-adoption fixture must validate");
+  void store.apply([{ kind: "put-adopted-repository", record: reAdopted }]);
+  const deps = buildStoreBackedMcpDeps({ controlPlane: store, queue: queueWith(reviewJob()) });
+  const byRun = await callMcpTool({ deps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { run_id: "run-1" });
+  assert.ok(byRun.ok);
+  if (byRun.ok) {
+    const policy = (byRun.data as { policy: Record<string, unknown> }).policy;
+    assert.equal(policy.configFingerprint, "1111111111111111");
+    assert.equal(policy.provenance, "historical run record");
+    assert.equal(policy.platform, "github");
+    assert.equal(policy.repository, "octo/widget");
+  }
+  // The repository form still describes the CURRENT adoption state.
+  const byRepository = await callMcpTool({ deps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { platform: "github", repository: "octo/widget" });
+  assert.ok(byRepository.ok);
+  if (byRepository.ok) {
+    const policy = (byRepository.data as { policy: Record<string, unknown> }).policy;
+    assert.equal(policy.configFingerprint, "2222222222222222");
+    assert.equal(policy.adoptionEpoch, "epoch-2");
+    assert.equal(policy.provenance, "control-plane adoption record");
+  }
+  // A run recorded with no fingerprint reports the fingerprint as
+  // explicitly unavailable, never substituted from current adoption.
+  const unrecorded = newRunRecord(
+    { runId: "run-2", jobId: "job-github-1", kind: "review", executorIdentity: "local:v1", headSha: "aaaa1111bbbb2222cccc3333dddd4444eeee5555", configFingerprint: "", attempt: 1 },
+    1500,
+  );
+  void store.apply([{ kind: "create-run", record: unrecorded }]);
+  const blankRun = await callMcpTool({ deps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { run_id: "run-2" });
+  assert.ok(blankRun.ok);
+  if (blankRun.ok) {
+    const policy = (blankRun.data as { policy: Record<string, unknown> }).policy;
+    assert.ok(!("configFingerprint" in policy), "empty run fingerprint stays omitted");
+    assert.equal(policy.provenance, "historical run record");
+  }
+  // Fail-closed interaction: once the repository's adoption is removed, the
+  // default authorize seam refuses the run-addressed read (identifier never
+  // grants permission) — historical data is unread, never served unadopted.
+  const noAdoption = new InMemoryControlPlaneStore();
+  seededRun(noAdoption, { configFingerprint: "3333333333333333" });
+  const unadoptedDeps = buildStoreBackedMcpDeps({ controlPlane: noAdoption, queue: queueWith(reviewJob()) });
+  assert.equal(await callMcpTool({ deps: unadoptedDeps, metrics: NO_METRICS, requestId: "r" }, "get_review_policy", { run_id: "run-1" }).then((r) => r.ok), false);
 });
 
 test("unknown tools are refused at the tool layer", async () => {

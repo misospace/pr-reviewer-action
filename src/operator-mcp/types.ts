@@ -62,22 +62,30 @@ export interface McpReviewView {
   readonly publication: { readonly state: string; readonly destination: string; readonly publicationId: string; readonly attempt: number; readonly lastError: string } | null;
 }
 
-/** One projected review-policy view: the effective reviewer-config identity
- * the controller recorded, with the PROVENANCE of its trusted source. The
- * reference is opaque (never config material, never a repository file), so
- * the surface answers "what applied and where it came from" without
- * exposing arbitrary repository content. */
+/** One projected review-policy view: the reviewer-config identity with the
+ * PROVENANCE of its source. A repository-addressed read describes the
+ * CURRENT adoption record; a run-addressed read describes the HISTORICAL
+ * policy identity the run itself recorded (#1399) — the two provenances
+ * are distinct, and current adoption metadata is never presented as
+ * historical provenance. The reference is opaque (never config material,
+ * never a repository file), so the surface answers "what applied and where
+ * it came from" without exposing arbitrary repository content. */
 export interface McpPolicyView {
   readonly platform: McpPlatform;
   readonly repository: string;
-  readonly configFingerprint: string;
-  readonly adoptionEpoch: string;
-  readonly enabled: boolean;
-  readonly adoptedAtMs: number;
-  readonly updatedAtMs: number;
+  /** The run record may carry no fingerprint; when unavailable it stays
+   * omitted rather than substituted from the current adoption record. */
+  readonly configFingerprint?: string;
+  /** Adoption-record metadata: present only for the CURRENT adoption view
+   * (provenance "control-plane adoption record"). A historical view omits
+   * it explicitly — the run record does not carry these fields. */
+  readonly adoptionEpoch?: string;
+  readonly enabled?: boolean;
+  readonly adoptedAtMs?: number;
+  readonly updatedAtMs?: number;
   /** Opaque reference to the operator-side trusted source of the policy. */
   readonly configRef: string;
-  readonly provenance: "control-plane adoption record";
+  readonly provenance: "control-plane adoption record" | "historical run record";
 }
 
 /** Authorization is checked PER REPOSITORY on EVERY call that names one.
