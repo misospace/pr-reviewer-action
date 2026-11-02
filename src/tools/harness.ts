@@ -63,16 +63,21 @@ import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import { extractApprovalPrerequisites, mustCheckObligationsEnabled, obligationAdmissionTokens, type ReviewObligationSource } from "../enforcement/review-obligations.js";
 import {
+  DEPENDENCY_EVIDENCE_OBLIGATIONS,
+  DEPENDENCY_EVIDENCE_RESERVE,
   STOP_BUDGET,
   STOP_REQUEST_ERROR,
   STOP_WALL_CLOCK,
   adaptiveLoopBudgets,
+  dependencyObligationForCheckText,
   driveToolLoop,
   extractToolCalls,
   type LoopOutcome,
   type NativeLoopRoundTelemetry,
+  type RequiredEvidenceRow,
   type ToolTurnSignal,
 } from "./loop.js";
+import { DEPENDENCY_EVIDENCE_KINDS } from "../classification/classify.js";
 import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
 import {
   COVERAGE_NOTICE_MAX_ITEMS,
@@ -1667,6 +1672,20 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         max_rounds: meta.max_rounds ?? 0,
         wall_clock_sec: meta.wall_clock_sec ?? 0.0,
         ...(meta.max_conversation_tokens !== undefined ? { max_conversation_tokens: meta.max_conversation_tokens } : {}),
+        // #1381; #1396: budget provenance for the ONE enforced obligation
+        // window — present for every loop run; the keys appear in the
+        // artifact whenever the raw meta carries them. The counters mirror
+        // the window's enforcement outcome over ALL row kinds (review-owned
+        // prose rows and dependency-evidence shape rows alike): attempts and
+        // credits track what the evidence calls actually covered, released
+        // says whether the window was open at loop end. There is exactly
+        // one refusal counter — no per-mechanism second set.
+        ...(meta.required_evidence_requests_hint !== undefined ? { required_evidence_requests_hint: meta.required_evidence_requests_hint } : {}),
+        ...(meta.required_evidence_refusals !== undefined ? { required_evidence_refusals: meta.required_evidence_refusals } : {}),
+        ...(meta.required_evidence_required !== undefined ? { required_evidence_required: meta.required_evidence_required } : {}),
+        ...(meta.required_evidence_attempts !== undefined ? { required_evidence_attempts: meta.required_evidence_attempts } : {}),
+        ...(meta.required_evidence_credits !== undefined ? { required_evidence_credits: meta.required_evidence_credits } : {}),
+        ...(meta.required_evidence_released !== undefined ? { required_evidence_released: meta.required_evidence_released } : {}),
       },
       usage: {
         tool_calls_issued: result.planned_request_count ?? 0,
@@ -2034,6 +2053,45 @@ export type TraceGapProbe = (
   loop: TraceGapLoopState,
 ) => TraceGapContinuation | null | Promise<TraceGapContinuation | null>;
 
+/**
+ * #1379: the dependency-evidence budget reserve the native loop should run
+ * with, resolved from the workspace's classification artifact. When the PR
+ * classified into a dependency-evidence family the loop reserves
+ * DEPENDENCY_EVIDENCE_RESERVE of its request budget for the required
+ * upstream evidence (deterministic driver notes prioritize it and enforce
+ * the window in driveToolLoop). Budgets of two or more keep one unreserved
+ * head request; the minimum valid budget of one reserves its SOLE request —
+ * the unattempted-evidence exhaustion this reserve exists to prevent must be
+ * unreachable for every supported budget, and a one-request run's only
+ * request is exactly the tail to protect. Anything else — absent/unparsable
+ * artifact, a non-dependency kind, or a degenerate non-positive budget
+ * (nothing to reserve) — resolves to 0 so non-dependency PRs keep the exact
+ * legacy loop behavior. Tolerant by construction: classification is advisory
+ * context here, never a gate.
+ */
+export function dependencyEvidenceReserveFromClassification(
+  readClassification: () => string | null,
+  maxRequests: number,
+): number {
+  const body = readClassification();
+  if (body === null) return 0;
+  let kind: unknown = null;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      kind = (parsed as Record<string, unknown>).pr_kind;
+    }
+  } catch {
+    return 0;
+  }
+  if (typeof kind !== "string" || !DEPENDENCY_EVIDENCE_KINDS.has(kind)) return 0;
+  if (maxRequests < 1) return 0;
+  // Floor of 1: a one-request budget reserves its sole request (the whole
+  // budget is the tail), so no supported budget ever resolves the reserve
+  // to 0 while the PR carries the dependency-evidence obligation.
+  return Math.min(DEPENDENCY_EVIDENCE_RESERVE, Math.max(1, maxRequests - 1));
+}
+
 export interface RunNativeLoopInput {
   repo: string;
   baseUrl: string;
@@ -2044,14 +2102,16 @@ export interface RunNativeLoopInput {
    * every response surface); unset adds nothing to the mask list. */
   extraHeaders?: Readonly<Record<string, string>>;
   corpusText: string;
-  /** #1381: requests held back at the end of the loop budget for unresolved
-   * required-evidence obligations; inside that window the driver enforces the
+  /** #1381; #1396: requests held back at the end of the loop budget for the
+   * one enforced obligation window (review-owned rows plus dependency-
+   * evidence shape rows); inside that window the driver enforces the
    * reservation (see `requiredEvidence`). */
   reserveForRequiredEvidence?: number;
-  /** #1381 (review): the admission vocabulary of the shown obligations —
-   * id plus the deterministic target tokens a tool call must overlap to be
-   * admitted inside the reserved window. */
-  requiredEvidence?: ReadonlyArray<{ id: string; tokens: readonly string[] }>;
+  /** #1381 (review); #1396: the ONE admission-row set for the enforced
+   * reservation — prose rows carry the deterministic target tokens a tool
+   * call must overlap; dependency-evidence rows carry their obligation id
+   * and gate on the call's own URL/query shape. */
+  requiredEvidence?: ReadonlyArray<RequiredEvidenceRow>;
   allowedGhApiRepos: Set<string>;
   allowedHosts: string[];
   workspaceRoot: string;
@@ -2498,6 +2558,16 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     compaction_truncate: outcome.compactionTruncate,
     max_conversation_tokens: budgets.maxConversationTokens,
     peak_conversation_tokens: outcome.peakConversationTokens,
+    // #1381; #1396: budget provenance for the one enforced obligation
+    // window; the telemetry budget block mirrors these conditionally. The
+    // enforceability counters (blocker 5728634290): the rows the window
+    // committed to, the evidence-channel calls executed, the rows discharged
+    // from those calls' own targets/vocabularies, and whether the window was
+    // released at loop end.
+    required_evidence_required: outcome.requiredEvidenceRequired,
+    required_evidence_attempts: outcome.requiredEvidenceAttempts,
+    required_evidence_credits: outcome.requiredEvidenceCredits,
+    required_evidence_released: outcome.requiredEvidenceReleased,
     // #1199: per-round latency/usage records (persisted into tool_loop_telemetry
     // and consumed/nulled with the rest of this meta by buildToolLoopTelemetry).
     round_telemetry: roundTelemetry,
@@ -2995,6 +3065,24 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
               anthropicEffortSupported: anthropicEffort,
               summarizeFn,
               timeFn,
+              // #1379 (blocker 5728634290); #1396: the obligation state
+              // carries across the repair seam. When the main loop released
+              // the window (every tracked row discharged or cap-released),
+              // the continuation runs unreserved; otherwise its intact
+              // reserved tail IS what this continuation is being handed, so
+              // the enforcement stays on and the repair cannot spend it on
+              // unrelated calls either. The main loop's discharged rows seed
+              // the continuation so an obligation the main loop already
+              // covered is never required twice. The reserve is clamped to
+              // the requests the continuation actually holds (the same
+              // clamp-to-budget rule the reserve resolution applies), so its
+              // no-lockout attempts cap stays reachable and a repair round
+              // handed a short tail is never stuck refusing every call.
+              reserveForRequiredEvidence: outcome.requiredEvidenceReleased
+                ? 0
+                : Math.min(input.reserveForRequiredEvidence ?? 0, outcome.requestsRemaining),
+              ...(input.requiredEvidence !== undefined ? { requiredEvidence: input.requiredEvidence } : {}),
+              requiredEvidenceCredits: outcome.requiredEvidenceCredits,
               // #1198: the repair round shares the ORIGINAL run's absolute
               // deadline — the allowance above is a share, never an extension.
               wallClockDeadline: deadline,
@@ -3018,6 +3106,35 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             log(`  native_loop: trace-gap repair round failed (${maskKnownSecrets(message, harnessSecrets)}) — keeping the original verdict`);
           }
           if (repair !== null) {
+            // #1379 (blocker 5728634290); #1396: the obligation state is
+            // run-wide. An evidence-channel attempt in the repair counts
+            // toward the run's provenance, its window refusals and attempts
+            // join the run's counts, its released flag ORs in, and the
+            // credits are the union in row order, so the telemetry never
+            // claims outstanding obligations the continuation already
+            // covered. `required` describes the rows the run committed to
+            // and stays unchanged.
+            const evidenceMeta = input.result.tool_loop_meta;
+            if (evidenceMeta !== null && evidenceMeta !== undefined) {
+              evidenceMeta.required_evidence_refusals =
+                Number(evidenceMeta.required_evidence_refusals ?? 0) + repair.requiredEvidenceRefusals;
+              evidenceMeta.required_evidence_attempts =
+                Number(evidenceMeta.required_evidence_attempts ?? 0) + repair.requiredEvidenceAttempts;
+              if (repair.requiredEvidenceReleased) evidenceMeta.required_evidence_released = true;
+              const runCredits = new Set<string>([
+                ...(Array.isArray(evidenceMeta.required_evidence_credits)
+                  ? (evidenceMeta.required_evidence_credits as unknown[]).filter(
+                      (id): id is string => typeof id === "string",
+                    )
+                  : []),
+                ...repair.requiredEvidenceCredits,
+              ]);
+              const rowOrder = (input.requiredEvidence ?? []).map((row) => row.id);
+              evidenceMeta.required_evidence_credits = [
+                ...rowOrder.filter((id) => runCredits.has(id)),
+                ...[...runCredits].filter((id) => !rowOrder.includes(id)),
+              ];
+            }
             // Fold the repair's executed calls into the harness trace so the
             // artifact shows everything the reviewer actually read. The
             // loop-level fields (`rounds`, `stop_reason`, `budget_exhausted`,
@@ -3393,27 +3510,66 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // Build the planning context from the high-signal corpus pieces.
   const planning = buildPlanningContext(corpusMaxBytes, deps, corpusName);
   const candidateArtifact = deps.readText("review-obligations-candidates.json");
-  // #1381 (review): the reservation is ENFORCEABLE, so it guards exactly the
-  // rows the model was actually shown — a section recorded as not injected
-  // gates nothing — and only rows whose text names a reviewer-gatherable
-  // target: generic checklist prose cannot be targeted by any specific call,
-  // so admitting on its vocabulary would lock the window forever.
-  let requiredEvidence: Array<{ id: string; tokens: readonly string[] }> = [];
+  // #1381 (review); #1396: the reservation is ENFORCEABLE, so it guards
+  // exactly the rows the model was actually shown — a section recorded as
+  // not injected gates nothing — and only rows whose text names a
+  // reviewer-gatherable target: generic checklist prose cannot be targeted
+  // by any specific call, so admitting on its vocabulary would lock the
+  // window forever. #1396: the dependency-evidence obligations ride with
+  // their #1379 URL/query-SHAPE vocabulary, not free prose tokens — a real
+  // provenance or advisories fetch does not repeat the check's prose words,
+  // so prose-token gating would refuse the very call that discharges its
+  // row. One row set, produced once here, serves the whole enforced window.
+  const dependencyReserve = dependencyEvidenceReserveFromClassification(
+    () => deps.readText("classification.json"),
+    maxRequests.budget,
+  );
+  // The canonical prefix the reserved dependency tail can pay for
+  // (#1379): reserve 1 requires provenance, 2 adds the release delta, 3+
+  // all three. Obligations beyond the prefix gate nothing.
+  const trackedDependencyObligations = dependencyReserve > 0
+    ? DEPENDENCY_EVIDENCE_OBLIGATIONS.slice(0, Math.min(DEPENDENCY_EVIDENCE_OBLIGATIONS.length, dependencyReserve))
+    : [];
+  const requiredEvidence: RequiredEvidenceRow[] = [];
   try {
     const parsed = candidateArtifact ? JSON.parse(candidateArtifact) as { injected?: unknown; obligations?: unknown } : null;
     if (parsed?.injected === true && Array.isArray(parsed.obligations)) {
       for (const row of parsed.obligations) {
-        const record = (row ?? {}) as { id?: unknown; text?: unknown };
+        const record = (row ?? {}) as { id?: unknown; source?: unknown; text?: unknown };
         if (typeof record.id !== "string" || typeof record.text !== "string") continue;
+        if (dependencyReserve > 0 && record.source === "must_check") {
+          // A dependency-evidence obligation row: it re-enters below once,
+          // as a shape row, so it must not also gate on its prose tokens.
+          if (dependencyObligationForCheckText(record.text) !== null) continue;
+        }
         const tokens = obligationAdmissionTokens(record.text);
         if (tokens !== null) requiredEvidence.push({ id: record.id, tokens });
       }
     }
   } catch {
-    requiredEvidence = [];
+    requiredEvidence.length = 0;
   }
-  const reserveForRequiredEvidence = computeRequiredEvidenceReservation(requiredEvidence.length, maxRequests.budget);
-  if (reserveForRequiredEvidence === 0) requiredEvidence = [];
+  for (const obligation of trackedDependencyObligations) {
+    requiredEvidence.push({ id: obligation, tokens: [], obligation });
+  }
+  // #1396: ONE reservation over the shared budget tail — the max of the two
+  // resolutions, never their sum. Side by side, each held requests back near
+  // the same ceiling, so a dependency-update PR had most of its remaining
+  // budget reserved twice over by one loop.
+  const reserveForRequiredEvidence = Math.max(
+    computeRequiredEvidenceReservation(
+      requiredEvidence.filter((row) => row.obligation === undefined).length,
+      maxRequests.budget,
+    ),
+    dependencyReserve,
+  );
+  if (reserveForRequiredEvidence === 0) requiredEvidence.length = 0;
+  if (dependencyReserve > 0) {
+    (deps.log ?? (() => {}))(
+      `  dependency-evidence reserve: ${dependencyReserve} tool request(s)` +
+        `, ${trackedDependencyObligations.length} obligation(s)`,
+    );
+  }
 
   const currentRepoNorm = normalizeRepoName(repo);
   const allowedGhApiRepos = new Set<string>();

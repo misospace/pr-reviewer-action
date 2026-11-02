@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, dependencyEvidenceReserveFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
@@ -2531,4 +2531,395 @@ test("#1261: the diff-head excerpt keeps its closer on its own line for a payloa
   const lines = text.split("\n");
   assert.ok(inside.has(lines.findIndex((line) => line === "+# PR Classification")), "the forged heading stays inert");
   assert.ok(!inside.has(lines.findIndex((line) => line === "# Planning Notes")), "the notes heading stays live");
+});
+
+// ── #1379: dependency-evidence budget reserve from the classification ─────
+
+test("#1379: dependency-evidence families reserve a budget tail; other kinds resolve 0", () => {
+  const forKind = (prKind: unknown, maxRequests = 24): number =>
+    dependencyEvidenceReserveFromClassification(
+      prKind === null ? () => null : () => JSON.stringify({ pr_kind: prKind, version: 1 }),
+      maxRequests,
+    );
+  // Every dependency-evidence family reserves the tail (clamped to the budget).
+  for (const kind of ["image_update", "chart_update", "platform_version_update", "action_update", "dependency_upgrade", "renovate_image_update", "renovate_chart_update"]) {
+    assert.equal(forKind(kind), 4, kind);
+    assert.equal(forKind(kind, 2), 1, kind);
+    // The supported MINIMUM budget (clampedPositive floors TOOL_MAX_REQUESTS
+    // at 1) reserves its sole request: no supported budget resolves the
+    // reserve to 0 while the dependency obligation is carried (review
+    // 5726673529's one-request counterexample).
+    assert.equal(forKind(kind, 1), 1, kind);
+    // Degenerate non-positive budget: nothing to reserve, the legacy loop
+    // refuses every call on the ordinary budget check anyway.
+    assert.equal(forKind(kind, 0), 0, kind);
+  }
+  // Non-dependency kinds, digest-only kinds, absent/unparsable artifacts and
+  // junk resolve 0 — the legacy loop behavior is byte-identical for them.
+  for (const kind of [null, "app_code", "k8s_manifest", "renovate_digest_only", "image_digest_only", 42]) {
+    assert.equal(forKind(kind), 0, String(kind));
+    assert.equal(forKind(kind, 1), 0, String(kind));
+  }
+  assert.equal(dependencyEvidenceReserveFromClassification(() => "not json", 24), 0);
+  assert.equal(dependencyEvidenceReserveFromClassification(() => null, 24), 0);
+  assert.equal(dependencyEvidenceReserveFromClassification(() => '["image_update"]', 24), 0);
+});
+
+test("#1379: runToolHarness wires the classification-driven dependency-evidence reserve into the loop", async () => {
+  const run = async (prKind: string) => {
+    const { root, deps } = workspace();
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: prKind, version: 1 }));
+    const payloads: Array<Record<string, unknown>> = [];
+    let n = 0;
+    const scripted = [
+      openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+      openAiText("evidence gathered"),
+      validVerdict(),
+    ];
+    const logs: string[] = [];
+    const { result } = await runToolHarness(deps({
+      transport: async (_baseUrl: string, _apiFormat: string, payload: Record<string, unknown>) => {
+        payloads.push(payload);
+        return scripted[n++];
+      },
+      log: (line: string) => logs.push(line),
+      ...withPrompt,
+    }));
+    const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+    return { payloads, result, artifact, logs };
+  };
+  // image_update classification: the loop's first request carries the
+  // driver-owned priority note and the artifact records the reserve.
+  const dep = await run("image_update");
+  assert.equal((dep.result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  const firstTexts = ((dep.payloads[0]!.messages ?? []) as Array<{ content: unknown }>)
+    .map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.ok(firstTexts.includes("dependency evidence comes first"));
+  const telemetryDep = (dep.artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetryDep.budget?.required_evidence_requests_hint, 4);
+  // The enforcement counters mirror the loop's obligation state: this scripted
+  // model stopped before the window, so nothing was attempted, credited, or
+  // refused and the window never opened. The reserve commits all three
+  // obligations (blocker 5728634290).
+  assert.equal(telemetryDep.budget?.required_evidence_refusals, 0);
+  assert.equal(telemetryDep.budget?.required_evidence_required, 3);
+  assert.equal(telemetryDep.budget?.required_evidence_attempts, 0);
+  assert.equal(telemetryDep.budget?.required_evidence_released, false);
+  assert.deepEqual(telemetryDep.budget?.required_evidence_credits, []);
+  assert.ok(dep.logs.some((l) => l.includes("dependency-evidence reserve: 4 tool request(s)")));
+  // app_code classification: reserve 0, no priority note, no reserve in
+  // the legacy path.
+  const plain = await run("app_code");
+  const plainTexts = ((plain.payloads[0]!.messages ?? []) as Array<{ content: unknown }>)
+    .map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.ok(!plainTexts.includes("dependency evidence comes first"));
+  const telemetryPlain = (plain.artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetryPlain.budget?.required_evidence_requests_hint, 0);
+  assert.equal(telemetryPlain.budget?.required_evidence_refusals, 0);
+  // Nothing reserved: the window is trivially open (released) with zero
+  // obligations, zero attempts, and no credits.
+  assert.equal(telemetryPlain.budget?.required_evidence_required, 0);
+  assert.equal(telemetryPlain.budget?.required_evidence_attempts, 0);
+  assert.equal(telemetryPlain.budget?.required_evidence_released, true);
+  assert.deepEqual(telemetryPlain.budget?.required_evidence_credits, []);
+  assert.ok(!plain.logs.some((l) => l.includes("dependency-evidence reserve")));
+});
+
+test("#1396: the harness emits ONE row set — dependency must_check rows ride the shape vocabulary, and the reserve is the max, never the sum", async () => {
+  // A dependency-update PR carrying BOTH reservation sources: the shown
+  // obligation rows are the three dependency-evidence must_check items plus
+  // one gatherable guidance row. Side by side, #1388 reserved for four
+  // prose rows and #1379 reserved four more over the same tail — and #1381's
+  // prose vocabulary refused the bare provenance fetch below. Unified: the
+  // must_check evidence rows become shape rows (no prose duplicate), the
+  // guidance row keeps its prose vocabulary, and one reserve covers all of
+  // it: max(prose 1, dependency 4) = 4 on a 6-request budget.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_update",
+    version: 1,
+    must_check: [
+      "establish upstream provenance for the updated image: publisher and canonical source repository",
+      "inspect the exact old→new upstream release delta for the updated image",
+      "check upstream security advisories for the updated image version range, or report the advisory check as not performed",
+      "verify the upstream compatibility matrix document for the new tag",
+    ],
+  }));
+  const payloads: Array<Record<string, unknown>> = [];
+  let n = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "read_file", '{"path":"docs/x.md"}'),
+    openAiCall("c3", "read_file", '{"path":"docs/optional.md"}'),
+    openAiCall("c4", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
+    openAiText("done"),
+    validVerdict(),
+  ];
+  await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_MAX_REQUESTS: "6" },
+    transport: async (_baseUrl: string, _apiFormat: string, payload: Record<string, unknown>) => {
+      payloads.push(payload);
+      return scripted[n++];
+    },
+  }));
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const trace = (artifact.tool_calls ?? []) as Array<{ tool: string; status: string }>;
+  // The optional read inside the window was refused (it is absent from the
+  // trace) while the provenance fetch EXECUTED — the exact cross-starvation
+  // call #1381's row vocabulary used to refuse (#1396's core defect).
+  assert.deepEqual(trace.map((call) => call.tool), ["read_file", "read_file", "web_fetch"]);
+  const tel = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  // One window, sized by the MAX (4), never prose(1)+dependency(4)=5; four
+  // rows tracked (3 shape + 1 prose), not five.
+  assert.equal(tel.budget?.required_evidence_requests_hint, 4);
+  assert.equal(tel.budget?.required_evidence_required, 4);
+  assert.deepEqual(tel.budget?.required_evidence_credits, ["provenance"]);
+  assert.equal(tel.budget?.required_evidence_refusals, 1);
+  assert.equal(tel.budget?.required_evidence_attempts, 1);
+  // The prose guidance row is still gating — the window is NOT released.
+  assert.equal(tel.budget?.required_evidence_released, false);
+  // Exactly one budget note per round still holds end to end with both
+  // sources present.
+  const noteCount = (payload: Record<string, unknown>): number =>
+    ((payload.messages ?? []) as Array<{ content: unknown }>)
+      .filter((m) => typeof m.content === "string" && (m.content as string).startsWith("[loop budget]"))
+      .length;
+  payloads.slice(0, 5).forEach((payload, index) => {
+    assert.equal(noteCount(payload), index + 1, `request ${index} must carry exactly one note per round`);
+  });
+});
+
+test("#1379: the trace-gap repair continuation inherits the credits and cannot spend the reserved tail", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "image_update", version: 1 }));
+  // Budget 6, reserve 4: the investigation loop executes one provenance
+  // fetch (internal.test is outside ALLOWED_SOURCE_HOSTS — the refused fetch
+  // still credits the obligation its target names) and one optional read
+  // outside the window (left 4), then stops voluntarily. The window is NOT
+  // released: release_delta and security_advisory stay outstanding, so its
+  // intact reserved tail — seeded with the provenance credit (blocker
+  // 5728634290) — is what the repair continuation is handed, and the window
+  // enforcement must carry across the seam and refuse its optional read too.
+  const scripted = [
+    openAiCall("c1", "web_fetch", '{"url":"https://internal.test/provenance"}'),
+    openAiCall("c2", "read_file", '{"path":"other.ts"}'),
+    openAiText("done locally"),
+    validVerdict(),
+    openAiCall("c3", "read_file", '{"path":"notes.md"}'),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_MAX_REQUESTS: "6", SYSTEM_PROMPT: "You are the reviewer." },
+    transport: async () => scripted[n++],
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  // The repair ran, issued one call, executed nothing (refused), and produced
+  // no new evidence — so no refresh turn was spent on it.
+  assert.equal(result.trace_repair_continuation?.outcome, "skipped_no_evidence");
+  assert.equal(result.trace_repair_continuation?.tool_calls, 0);
+  assert.equal(n, 5);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetry.budget?.required_evidence_requests_hint, 4);
+  // The run-wide fold: attempted ORs in from the main loop, refusals sum
+  // (0 in the main loop — its two calls were outside the window — plus 1 in
+  // the continuation), attempts sum, and the credits are the union of both
+  // loops' credits in canonical order. The window never released: two of
+  // the three tracked obligations stayed uncredited across the seam.
+  assert.equal(telemetry.budget?.required_evidence_refusals, 1);
+  assert.equal(telemetry.budget?.required_evidence_required, 3);
+  assert.equal(telemetry.budget?.required_evidence_attempts, 1);
+  assert.equal(telemetry.budget?.required_evidence_released, false);
+  assert.deepEqual(telemetry.budget?.required_evidence_credits, ["provenance"]);
+  // The repair read never entered the harness trace.
+  const trace = (artifact.tool_calls ?? []) as Array<{ tool: string }>;
+  assert.deepEqual(trace.map((c) => c.tool), ["web_fetch", "read_file"]);
+});
+
+test("#1379: the repair continuation's reserve is clamped to the tail it is handed", async () => {
+  // The reserve's no-lockout cap is "the loop spent the whole reserve on
+  // evidence attempts". Handed a SHORTER tail than the reserve (the main loop
+  // had already spent part of it on evidence), the unclamped cap would be
+  // unreachable and the continuation could never release its window; the seam
+  // therefore clamps the reserve to the requests the continuation actually
+  // holds, so the cap stays payable inside that tail.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "image_update", version: 1 }));
+  // Budget 6, reserve 4: the main loop executes a provenance fetch (credits
+  // provenance) plus two UNATTRIBUTED fetches — three attempts of four, so
+  // the window is not released — and stops voluntarily with three requests
+  // left. The repair round is handed exactly those three.
+  const scripted = [
+    openAiCall("c1", "web_fetch", '{"url":"https://github.com/owner/repo"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://unrelated.test/a"}'),
+    openAiCall("c3", "web_fetch", '{"url":"https://elsewhere.test/b"}'),
+    openAiText("done upstream-ish"),
+    validVerdict(),
+    // One round, three unattributed evidence calls: attempts reach the
+    // clamped reserve, so the window releases inside the handed tail.
+    {
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              { id: "c4", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://nowhere.test/c"}' } },
+              { id: "c5", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://neither.test/d"}' } },
+              { id: "c6", type: "function", function: { name: "web_fetch", arguments: '{"url":"https://nobody.test/e"}' } },
+            ],
+          },
+        },
+      ],
+    },
+    validVerdict(),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_MAX_REQUESTS: "6", SYSTEM_PROMPT: "You are the reviewer." },
+    transport: async () => scripted[n++],
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  assert.equal(result.trace_repair_continuation?.tool_calls, 3, "the repair's three fetches executed");
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  // Run-wide fold across the seam: six evidence attempts, only the lexical
+  // provenance credit, and the window RELEASED — possible only because the
+  // continuation's cap was its own three-request tail.
+  assert.equal(telemetry.budget?.required_evidence_requests_hint, 4);
+  assert.equal(telemetry.budget?.required_evidence_attempts, 6);
+  assert.deepEqual(telemetry.budget?.required_evidence_credits, ["provenance"]);
+  assert.equal(telemetry.budget?.required_evidence_released, true);
+});
+
+test("#1379: a one-request dependency budget reserves its sole request end to end", async () => {
+  // Review 5726673529's counterexample: TOOL_MAX_REQUESTS=1 is the supported
+  // floor (clampedPositive), and the old min(4, maxRequests - 1) formula
+  // resolved the reserve to 0 there — an optional call could spend the only
+  // request and stop with tool-call-budget-exhausted while dependency
+  // evidence was unattempted. The reserve now floors at 1, so the window is
+  // active on the FIRST disposition of a one-request run.
+  const run = async (scripted: unknown[]) => {
+    const { root, deps } = workspace();
+    fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+    fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+    fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "image_update", version: 1 }));
+    const payloads: Array<Record<string, unknown>> = [];
+    let n = 0;
+    const { result } = await runToolHarness(deps({
+      env: { TOOL_MAX_REQUESTS: "1", SYSTEM_PROMPT: "You are the reviewer." },
+      transport: async (_baseUrl: string, _apiFormat: string, payload: Record<string, unknown>) => {
+        payloads.push(payload);
+        return scripted[n++];
+      },
+    }));
+    const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+    return { payloads, result, artifact };
+  };
+  type LoopTelemetry = { budget?: Record<string, unknown>; usage?: Record<string, unknown>; stop_reason?: string };
+
+  // A model that only requests optional work can never spend the sole
+  // request: every call is refused without executing, the loop stops on the
+  // model's own hand, and the tail is byte-for-byte intact.
+  const starved = await run([
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "git_log", "{}"),
+    openAiText("done locally"),
+    validVerdict(),
+  ]);
+  assert.equal((starved.result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  const starvedTrace = (starved.artifact.tool_calls ?? []) as Array<{ tool: string }>;
+  assert.equal(starvedTrace.length, 0, "the refused optional calls never reached the executor");
+  const starvedTel = (starved.artifact.tool_loop_telemetry ?? {}) as LoopTelemetry;
+  assert.equal(starvedTel.budget?.required_evidence_requests_hint, 1);
+  assert.equal(starvedTel.budget?.required_evidence_refusals, 2);
+  // Reserve 1 commits exactly ONE obligation (provenance) — the tail can
+  // only pay for one — and with nothing attempted it stays closed.
+  assert.equal(starvedTel.budget?.required_evidence_required, 1);
+  assert.equal(starvedTel.budget?.required_evidence_attempts, 0);
+  assert.equal(starvedTel.budget?.required_evidence_released, false);
+  assert.deepEqual(starvedTel.budget?.required_evidence_credits, []);
+  // Never tool-call-budget-exhausted with the obligation unattempted.
+  assert.equal(starvedTel.stop_reason, "model-stopped");
+  assert.equal(starvedTel.usage?.requests_remaining_at_stop, 1, "the reserved sole request survived");
+  // The first request carries the driver's priority note even at this budget.
+  const starvedFirstTexts = ((starved.payloads[0]!.messages ?? []) as Array<{ content: unknown }>)
+    .map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.ok(starvedFirstTexts.includes("dependency evidence comes first"));
+
+  // The model can always unlock the window: an evidence call executes for
+  // real and spends the sole request whatever the executor returned
+  // (example.test is outside ALLOWED_SOURCE_HOSTS — a refused fetch is still
+  // an attempt, so an evidence-unreachable model is never locked out). The
+  // loop then stops on the ordinary post-round budget check, exactly like
+  // the legacy tail: exhaustion with the obligation ATTEMPTED is allowed;
+  // exhaustion with it unattempted is what the reserve makes unreachable.
+  const evidence = await run([
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://example.test/releases"}'),
+    validVerdict(),
+  ]);
+  const evidenceTrace = (evidence.artifact.tool_calls ?? []) as Array<{ tool: string }>;
+  assert.deepEqual(evidenceTrace.map((c) => c.tool), ["web_fetch"]);
+  const evidenceTel = (evidence.artifact.tool_loop_telemetry ?? {}) as LoopTelemetry;
+  assert.equal(evidenceTel.budget?.required_evidence_requests_hint, 1);
+  assert.equal(evidenceTel.budget?.required_evidence_refusals, 1);
+  assert.equal(evidenceTel.stop_reason, "tool-call-budget-exhausted");
+  // Reserve 1 keeps the historical one-call release through the attempts
+  // cap: the single evidence call (a refused fetch that would credit only
+  // release_delta, outside the tracked [provenance] prefix — so nothing is
+  // credited) hits the cap and opens the window.
+  assert.equal(evidenceTel.budget?.required_evidence_required, 1);
+  assert.equal(evidenceTel.budget?.required_evidence_attempts, 1);
+  assert.equal(evidenceTel.budget?.required_evidence_released, true);
+  assert.deepEqual(evidenceTel.budget?.required_evidence_credits, []);
+});
+
+test("#1379: a release-notes-only fetch inside the window leaves the artifact reporting the open obligations", async () => {
+  // End-to-end pin of the blocker 5728634290 semantics through the real
+  // harness executor: the scripted model spends one window request on
+  // release notes (example.test is outside ALLOWED_SOURCE_HOSTS — the
+  // refused fetch still credits release_delta from its own target), and its
+  // next optional read is REFUSED because provenance and security_advisory
+  // are still outstanding.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({ pr_kind: "image_update", version: 1 }));
+  // TOOL_MAX_REQUESTS 5 → reserve 4: the window opens once 1 request has
+  // been spent, so the fetch and the optional read both land inside it.
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiCall("c2", "web_fetch", '{"url":"https://example.test/releases"}'),
+    openAiCall("c3", "read_file", '{"path":"notes.md"}'),
+    openAiText("done locally"),
+    validVerdict(),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_MAX_REQUESTS: "5", SYSTEM_PROMPT: "You are the reviewer." },
+    transport: async () => scripted[n++],
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetry.budget?.required_evidence_requests_hint, 4);
+  assert.deepEqual(telemetry.budget?.required_evidence_credits, ["release_delta"]);
+  assert.equal(telemetry.budget?.required_evidence_required, 3);
+  assert.equal(telemetry.budget?.required_evidence_attempts, 1);
+  assert.equal(telemetry.budget?.required_evidence_released, false);
+  assert.equal(telemetry.budget?.required_evidence_refusals, 1);
+  // The refused optional read never entered the harness trace; the refused
+  // fetch did (attempted, executor error).
+  const trace = (artifact.tool_calls ?? []) as Array<{ tool: string }>;
+  assert.deepEqual(trace.map((c) => c.tool), ["read_file", "web_fetch"]);
 });

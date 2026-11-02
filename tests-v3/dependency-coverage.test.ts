@@ -210,6 +210,11 @@ test("dependencyCoverageKindEnabled gates the infra kinds plus the digest-only k
   for (const kind of ["dependency_upgrade", "k8s_manifest", "renovate_chart_update", "renovate_image_update", "renovate_digest_only", "image_digest_only"]) {
     assert.equal(dependencyCoverageKindEnabled(kind), true, kind);
   }
+  // #1379: the vendor-agnostic dependency-update kinds ride the same
+  // coverage-accounting surface as their Renovate twins.
+  for (const kind of ["image_update", "chart_update", "platform_version_update", "action_update"]) {
+    assert.equal(dependencyCoverageKindEnabled(kind), true, kind);
+  }
   assert.equal(dependencyCoverageKindEnabled("app_code"), false);
   assert.equal(dependencyCoverageKindEnabled(""), false);
 });
