@@ -356,10 +356,14 @@ def test_offline_runner_writes_report_without_credentials(tmp_path: Path) -> Non
         [sys.executable, str(RUNNER), "--corpus", str(CORPUS), "--report", str(report)],
         cwd=ROOT,
         # Credential-free (#845): the environment carries no PATH-resolvable
-        # secrets or tools, only an explicit, already-resolved node binary —
+        # secrets or tools, only explicit, already-resolved binaries —
         # the gate's own credential-free contract does not extend to needing
-        # `node` reachable via a bare PATH lookup.
-        env={"PATH": "/usr/bin:/bin", "PR_REVIEWER_NODE": shutil.which("node") or ""},
+        # `node` or `git` reachable via a bare PATH lookup (#1393).
+        env={
+            "PATH": "/usr/bin:/bin",
+            "PR_REVIEWER_NODE": shutil.which("node") or "",
+            "PR_REVIEWER_GIT": shutil.which("git") or "",
+        },
         capture_output=True,
         text=True,
         check=False,
