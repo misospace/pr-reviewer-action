@@ -440,21 +440,37 @@ function decodePathTolerant(path: string): string {
 /** The path AS WRITTEN in the value, before the URL parser's
  * normalization: the parser removes dot segments, so a credential can hide
  * in a path that `url.pathname` no longer shows — while the envelope
- * persists the raw value verbatim. The raw path is therefore judged too. */
+ * persists the raw value verbatim. The raw path is therefore judged too.
+ *
+ * The authority boundary is found the way the URL PARSER finds it, not by
+ * searching for "//": the parser accepts `http:host/path`,
+ * `http:/host/path` and `http://host/path` alike, and for http(s) it
+ * treats a backslash as a path separator. A "//"-only search returns an
+ * empty raw path for the first two spellings, and the credential that
+ * hides behind the parser's dot-segment removal would then be judged
+ * nowhere — the parsed path is already normalized and the raw path is
+ * empty. */
 function rawPathOf(value: string): string {
-  const authorityStart = value.indexOf("//");
-  if (authorityStart < 0) return "";
-  const pathStart = value.indexOf("/", authorityStart + 2);
-  return pathStart < 0 ? "" : value.slice(pathStart);
+  const schemeEnd = value.indexOf(":");
+  if (schemeEnd < 0) return "";
+  // The authority starts after the scheme's slashes; the parser skips any
+  // number of them.
+  let index = schemeEnd + 1;
+  while (index < value.length && (value[index] === "/" || value[index] === "\\")) index += 1;
+  // The authority ends at the first path separator.
+  while (index < value.length && value[index] !== "/" && value[index] !== "\\") index += 1;
+  return index < value.length ? value.slice(index) : "";
 }
 
 /** The token-character RUNS of one path form: a run, not a whole
  * segment, so a credential sharing its segment with one punctuation
  * character (`token!junk`, `token;v=1`) is still a run of token
  * characters. The separators are removed, so a token split across a
- * separator (base64's own `/`) is judged as ONE run. */
+ * separator (base64's own `/`) is judged as ONE run. A backslash is a
+ * separator too — the URL parser reads it as one for http(s) — so it is
+ * removed as well and the raw form is joined like the parsed one. */
 function tokenRunsIn(path: string): string[] {
-  return path.replaceAll("/", "").match(TOKEN_RUN_RE) ?? [];
+  return path.replaceAll("/", "").replaceAll("\\", "").match(TOKEN_RUN_RE) ?? [];
 }
 
 /** Path-credential problem of a URL's path, or "" when the path carries no

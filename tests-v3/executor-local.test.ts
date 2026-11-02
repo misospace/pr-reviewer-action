@@ -1204,6 +1204,47 @@ test("validateExecutionRequest refuses a credential riding the forge API path (#
     () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example/v1/../${token}` }),
     /must not contain a credential-shaped path segment/,
   );
+  // The same hiding in a URL spelling that carries no "//": the parser
+  // accepts `http:host/path` and `http:/host/path`, and it normalizes the
+  // dot segment out of the parsed path, so the parsed path shows neither
+  // the token nor the segment. The path AS WRITTEN must still be judged —
+  // if the raw path is looked up by searching for "//", it comes back
+  // empty and the credential is screened nowhere, then rides the envelope
+  // verbatim.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `http:example.com/${token}/../v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https:/forge.example/${token}/../v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // Percent-encoded in the same spelling: the raw path hides the token
+  // behind BOTH the dot segment and the encoding, so the raw path must be
+  // judged through its decoding rounds too.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `http:example.com/${hexEscaped}/../v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // A backslash is a path separator for http(s) — the parser reads it as
+  // one — so the same hiding works spelled with one.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://forge.example\\${token}\\..\\v1` }),
+    /must not contain a credential-shaped path segment/,
+  );
+  // A token split across the parser's OWN separator into sub-floor halves,
+  // and hidden from the parsed path by a dot segment: neither half reaches
+  // the floor on its own, so the halves must be joined before they are
+  // judged — the backslash analogue of the `/`-split case above.
+  assert.throws(
+    () =>
+      validateExecutionRequest({
+        ...valid,
+        forgeApiUrl: `https://forge.example\\${"A".repeat(10)}\\${"B".repeat(10)}\\..\\v1`,
+      }),
+    /must not contain a credential-shaped path segment/,
+  );
+
   // A token split across separators into sub-floor pieces (base64's own
   // `/`, or a hex token broken into chunks): the pieces are joined, so the
   // split cannot smuggle the token past the floor.
@@ -1283,6 +1324,12 @@ test("validateExecutionRequest refuses a credential riding the forge API path (#
   assert.equal(
     validateExecutionRequest({ ...valid, forgeApiUrl: "https://forge.example/gitlab/api/v4" }).forgeApiUrl,
     "https://forge.example/gitlab/api/v4",
+  );
+  // The URL spellings that carry no "//" stay legal for a prose path: the
+  // screen judges the credential's shape, not the spelling of the URL.
+  assert.equal(
+    validateExecutionRequest({ ...valid, forgeApiUrl: "http:forge.example/api/v1" }).forgeApiUrl,
+    "http:forge.example/api/v1",
   );
   // One character under the credential-shaped floor stays legal too — the
   // floor is the same one #1429 uses.

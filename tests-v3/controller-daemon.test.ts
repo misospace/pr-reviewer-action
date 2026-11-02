@@ -586,6 +586,29 @@ test("a forge integration endpoint whose path carries a token refuses daemon sta
       }),
     /forge integration 'fj' endpoint must not contain a credential-shaped path segment/,
   );
+  // The same credential hidden behind a dot segment in a URL spelling that
+  // carries no "//": the URL parser normalizes the segment away, so only
+  // the path as written still shows the credential. The startup refusal
+  // must not depend on the parser's normalization.
+  await assert.rejects(
+    () =>
+      start({
+        options: {
+          instance: {
+            ...instanceConfig(),
+            forges: [
+              {
+                name: "fj",
+                kind: "forgejo",
+                endpoint: "http:forge.example/7f3a9c1e55b20d84aa613c9f02bb71d6/../v1",
+                credential: "fj-token",
+              },
+            ],
+          } as InstanceConfig,
+        },
+      }),
+    /forge integration 'fj' endpoint must not contain a credential-shaped path segment/,
+  );
 });
 
 test("an adoption policy the repository did not satisfy never schedules", async (t) => {
