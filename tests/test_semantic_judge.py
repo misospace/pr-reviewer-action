@@ -171,6 +171,55 @@ class TestJudgeConfigIdentity:
         assert any("judge_system_prompt_sha256" in error for error in errors)
 
 
+class TestVerifyJudgeConfigEchoSafety:
+    # #1418 (adversarial-boundary, #252): verify_judge_config echoes recorded
+    # artifact values and unexpected keys into its errors. The artifact is
+    # untrusted input; the boundary token itself — a credential URL — planted
+    # in any echoed position must not survive in the returned messages.
+
+    CREDENTIAL_URL = "https://judge-operator:hunter2@judge.internal.example/v1"
+
+    def _no_secret(self, errors: list[str]) -> None:
+        joined = "\n".join(errors)
+        for secret in ("hunter2", "judge-operator"):
+            assert secret not in joined
+
+    def test_mismatch_error_redacts_credential_url_value(self):
+        identity = judge_config_identity("judge-model", CORPUS_PATH)
+        hostile = dict(identity)
+        hostile["judge_model"] = self.CREDENTIAL_URL
+        errors = verify_judge_config(hostile, identity)
+        assert any("judge_model" in e and "mismatch" in e for e in errors)
+        self._no_secret(errors)
+
+    def test_mismatch_error_redacts_container_value(self):
+        identity = judge_config_identity("judge-model", CORPUS_PATH)
+        hostile = dict(identity)
+        hostile["judge_system_prompt_sha256"] = {"u": self.CREDENTIAL_URL}
+        errors = verify_judge_config(hostile, identity)
+        assert any(
+            "judge_system_prompt_sha256" in e and "mismatch" in e for e in errors
+        )
+        self._no_secret(errors)
+
+    def test_unexpected_key_error_redacts_credential_url_key(self):
+        identity = judge_config_identity("judge-model", CORPUS_PATH)
+        hostile = dict(identity)
+        hostile[self.CREDENTIAL_URL] = "x"
+        errors = verify_judge_config(hostile, identity)
+        assert any("unexpected key" in e for e in errors)
+        self._no_secret(errors)
+
+    def test_benign_mismatch_still_shows_both_values(self):
+        identity = judge_config_identity("judge-model", CORPUS_PATH)
+        stale = dict(identity)
+        stale["judge_model"] = "old-model"
+        errors = verify_judge_config(stale, identity)
+        detail = next(e for e in errors if "judge_model" in e and "mismatch" in e)
+        assert "'old-model'" in detail
+        assert "'judge-model'" in detail
+
+
 class TestBuildJudgeMessages:
     def test_shape_and_rubric_lines(self):
         messages = build_judge_messages(VULNERABLE_ANSWER_KEY, make_response())

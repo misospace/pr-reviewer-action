@@ -53,6 +53,7 @@ from pr_reviewer.http_safe import (  # noqa: E402
     UnsafeEndpointUrl,
     base_url_identity_digest,
     normalize_base_url,
+    redact_echo_value,
     redact_url_userinfo,
     resolve_endpoint,
     select_base_url,
@@ -461,8 +462,9 @@ def _load_verified_calibration(
     if artifact.get("agreement_rate") != 1.0 or artifact.get("passed") != total:
         errors.append(
             "calibration artifact did not record 100% agreement "
-            f"(passed={artifact.get('passed')!r}, total={total!r}, "
-            f"agreement_rate={artifact.get('agreement_rate')!r})"
+            f"(passed={redact_echo_value(artifact.get('passed'))}, "
+            f"total={redact_echo_value(total)}, "
+            f"agreement_rate={redact_echo_value(artifact.get('agreement_rate'))})"
         )
     expected = semantic_judge.judge_config_identity(judge_model, corpus_path)
     errors.extend(semantic_judge.verify_judge_config(artifact.get("judge_config"), expected))
