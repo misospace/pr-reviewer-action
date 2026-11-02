@@ -44,6 +44,7 @@ build their own :class:`ForgeClient` explicitly.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import urllib.error
@@ -72,12 +73,19 @@ class ForgeError(RuntimeError):
     """The forge could not be reached, rejected the request, or returned an
     unusable payload.
 
-    The ``message`` is a fixed string — never the raw response body, never
-    the token, and never a URL that contains the token. Callers can compare
-    the message against the ``kind`` attribute (``"transport"``,
-    ``"http_status"``, ``"redirect"``, ``"invalid_json"``) to distinguish
-    failure modes without parsing English text.
+    The ``message`` is a fixed string — never the raw response body, never the
+    token, and never a URL that contains the token.
+
+    The optional ``status`` attribute carries the HTTP status code when the
+    failure was an HTTP error (``404`` for a resource that does not exist,
+    for example) and is ``None`` for a transport failure, a refused redirect
+    or an unusable payload. A caller that must tell "absent" from "broken"
+    reads the attribute instead of parsing the message.
     """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "ip6-localhost", "ip6-loopback"})
@@ -247,11 +255,17 @@ class ForgeClient:
         string is uniform across transport and HTTP failures — the caller
         never sees the status line text, which can echo attacker-controlled
         URL components.
+
+        A malformed response is refused the same way: a truncated body
+        raises :class:`http.client.HTTPException`, whose text can carry
+        bytes the forge chose, so it never reaches the caller.
         """
         try:
             raw = response.read()
         except OSError as exc:
             raise ForgeError("forge response could not be read") from exc
+        except http.client.HTTPException as exc:
+            raise ForgeError("forge response could not be read") from None
         if not raw:
             return None
         try:
@@ -270,11 +284,20 @@ class ForgeClient:
         try:
             response = self._open("GET", url)
         except urllib.error.HTTPError as exc:
-            raise ForgeError(f"forge GET {path} returned HTTP {exc.code}") from None
+            raise ForgeError(f"forge GET {path} returned HTTP {exc.code}", status=exc.code) from None
         except urllib.error.URLError as exc:
             raise ForgeError(f"forge GET {path} unreachable: {type(exc.reason).__name__}") from None
         except OSError as exc:
             raise ForgeError(f"forge GET {path} unreachable: {type(exc).__name__}") from None
+        except http.client.HTTPException as exc:
+            # A malformed response (a forged status line, a truncated
+            # header) must not reach the caller as an exception: its text
+            # carries bytes the forge chose, and a forge that read the
+            # credential from the Authorization header can put it there.
+            # The message names the exception type only.
+            raise ForgeError(
+                f"forge GET {path} sent a malformed response: {type(exc).__name__}"
+            ) from None
         return self._read_json(response)
 
     def get_pages(
@@ -304,6 +327,39 @@ class ForgeClient:
                 return
             page += 1
 
+    def delete(self, path: str) -> Any:
+        """Single DELETE; returns the parsed JSON payload.
+
+        Mirrors :meth:`get` exactly: the same validated base URL, the same
+        no-redirect opener, the same fixed header set, and the token only
+        in the ``Authorization`` header. A 404 is an ordinary
+        :class:`ForgeError` here — the caller decides whether "the
+        resource is already gone" is a failure or an expected outcome
+        (e.g. removing a label that is not present). A 3xx is refused
+        with the redirect error, so the bearer token can never follow a
+        redirect to another origin.
+
+        The error message is a fixed string: it names the request path
+        and the HTTP status, never the response body and never the
+        token.
+        """
+        url = self._url(path)
+        try:
+            response = self._open("DELETE", url)
+        except urllib.error.HTTPError as exc:
+            raise ForgeError(f"forge DELETE {path} returned HTTP {exc.code}", status=exc.code) from None
+        except urllib.error.URLError as exc:
+            raise ForgeError(f"forge DELETE {path} unreachable: {type(exc.reason).__name__}") from None
+        except OSError as exc:
+            raise ForgeError(f"forge DELETE {path} unreachable: {type(exc).__name__}") from None
+        except http.client.HTTPException as exc:
+            # Same rule as the read: a malformed response is refused with a
+            # fixed message, never with the forge's own bytes.
+            raise ForgeError(
+                f"forge DELETE {path} sent a malformed response: {type(exc).__name__}"
+            ) from None
+        return self._read_json(response)
+
     def post(self, path: str, payload: Any) -> Any:
         """Single POST; returns the parsed JSON payload.
 
@@ -327,11 +383,17 @@ class ForgeClient:
         except urllib.error.HTTPError as exc:
             if 300 <= exc.code < 400:
                 raise ForgeError("forge redirected; refusing to follow") from None
-            raise ForgeError(f"forge POST {path} returned HTTP {exc.code}") from None
+            raise ForgeError(f"forge POST {path} returned HTTP {exc.code}", status=exc.code) from None
         except urllib.error.URLError as exc:
             raise ForgeError(f"forge POST {path} unreachable: {type(exc.reason).__name__}") from None
         except OSError as exc:
             raise ForgeError(f"forge POST {path} unreachable: {type(exc).__name__}") from None
+        except http.client.HTTPException as exc:
+            # Same rule as the read: a malformed response is refused with a
+            # fixed message, never with the forge's own bytes.
+            raise ForgeError(
+                f"forge POST {path} sent a malformed response: {type(exc).__name__}"
+            ) from None
         return self._read_json(response)
 
 

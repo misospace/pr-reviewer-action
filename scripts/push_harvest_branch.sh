@@ -23,6 +23,12 @@
 # the merge step's own SHA means the lease correctly rejects the push if
 # the branch moved in the meantime, preserving the newer run.
 #
+# Every forge read and write goes through scripts/forge_cli.py, the adapter
+# over the repository's configured forge capability (`pr_reviewer.forge`):
+# the token rides only the Authorization header, redirects are refused, and
+# a failure is reported as the capability's fixed, credential-free error
+# string.
+#
 # Required env:
 #   BRANCH           - bot branch name (e.g. bot/harvest-human-findings)
 #   BASE_BRANCH      - PR base branch (e.g. main)
@@ -30,7 +36,8 @@
 #   COMMIT_MESSAGE   - commit message for the corpus update
 #   PR_TITLE         - PR title
 #   PR_BODY          - PR body
-#   GH_TOKEN         - token for `gh` (auth + push credential helper)
+#   GH_TOKEN         - token for the forge (API + push credential helper)
+#   GITHUB_REPOSITORY - owner/name of the repository the branch lives in
 #   EXPECTED_BOT_SHA - the SHA the merge step based its merge on (may be
 #                      empty, meaning "the branch must not exist yet"); must
 #                      be set (even to "") by the caller, never omitted
@@ -38,10 +45,22 @@ set -euo pipefail
 
 : "${BRANCH:?}" "${BASE_BRANCH:?}" "${CORPUS_PATH:?}" "${COMMIT_MESSAGE:?}" \
   "${PR_TITLE:?}" "${PR_BODY:?}" "${GH_TOKEN:?}"
+REPO=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}
+# The forge capability resolves GITHUB_TOKEN before GH_TOKEN; `gh` resolved
+# GH_TOKEN first. Pin both names to the same credential so the adapter and
+# the git credential helper below can never authenticate as different
+# principals.
+export GITHUB_TOKEN="$GH_TOKEN"
 if [ -z "${EXPECTED_BOT_SHA+x}" ]; then
   echo "EXPECTED_BOT_SHA must be set (even to an empty string) by the caller" >&2
   exit 1
 fi
+
+# The forge adapter lives at the repository root; resolve it from this
+# script's own location so the script works from any working directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FORGE_CLI="$ROOT/scripts/forge_cli.py"
 
 if git diff --quiet -- "$CORPUS_PATH"; then
   echo "No new findings; nothing to open a PR for."
@@ -55,7 +74,9 @@ git config user.email "miso[bot]@users.noreply.github.com"
 # app token here, not a persisted default GITHUB_TOKEN. `gh auth setup-git`
 # registers `gh` as git's credential helper: it reads GH_TOKEN from the
 # environment at push time and never puts the token in argv or in a
-# persisted .git/config value.
+# persisted .git/config value. This is git-transport credential plumbing,
+# not a forge API read or write -- the API calls below go through the forge
+# capability instead.
 gh auth setup-git
 
 # The branch only ever carries this one kind of change, so resetting it to
@@ -66,12 +87,9 @@ git add "$CORPUS_PATH"
 git commit -m "$COMMIT_MESSAGE"
 git push --force-with-lease="${BRANCH}:${EXPECTED_BOT_SHA}" origin "$BRANCH"
 
-if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+if python3 "$FORGE_CLI" pr-number-for-branch --repo "$REPO" --branch "$BRANCH" >/dev/null 2>&1; then
   echo "PR for $BRANCH already open; branch push above updated it."
 else
-  gh pr create \
-    --head "$BRANCH" \
-    --base "$BASE_BRANCH" \
-    --title "$PR_TITLE" \
-    --body "$PR_BODY"
+  PR_NUMBER="$(python3 "$FORGE_CLI" pr-create --repo "$REPO" --head "$BRANCH" --base "$BASE_BRANCH" --title "$PR_TITLE" --body "$PR_BODY")"
+  echo "opened PR #$PR_NUMBER for $BRANCH"
 fi
