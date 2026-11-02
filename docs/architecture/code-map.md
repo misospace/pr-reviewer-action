@@ -33,7 +33,7 @@ durable agent rules, which live in [`AGENTS.md`](../../AGENTS.md)).
 
 ### Retained Python tooling (`scripts/`, `pr_reviewer/`)
 
-Not part of the action. `scripts/eval_harness.py` (drives `node dist/index.js run` over the eval corpora), `scripts/run_semantic_eval_ci.py` (CI semantic gate), `scripts/harvest_human_findings.py` and friends (human-findings corpus), `scripts/fork_review_gate.py` (fork workflow gate), `scripts/live_judge_score.py` / `scripts/run_judge_calibration.py` (semantic judge), and `pr_reviewer/{semantic_eval,semantic_judge,metadata,judge_http}.py` supporting them.
+Not part of the action. `scripts/eval_harness.py` (drives `node dist/index.js run` over the eval corpora), `scripts/run_semantic_eval_ci.py` (CI semantic gate), `scripts/harvest_human_findings.py` and friends (human-findings corpus), `scripts/fork_review_gate.py` (fork workflow gate), `scripts/live_judge_score.py` / `scripts/run_judge_calibration.py` (semantic judge), and `pr_reviewer/{semantic_eval,semantic_judge,metadata,judge_http,credential_argv}.py` supporting them. `pr_reviewer/credential_argv.py` (#1413) keeps a credential out of a process argument list: it refuses an argument that names a credential option, refuses an unknown argument without echoing it, and supplies a parser whose error message never quotes an argument value.
 
 - **`scripts/forge_cli.py`** — the CLI adapter over the configured forge capability (`pr_reviewer/forge.py`): every forge API read/write in the operational tooling (release convergence, the manual release, the harvest branch push) goes through it, so the token rides only the `Authorization` header and redirects stay refused.
 

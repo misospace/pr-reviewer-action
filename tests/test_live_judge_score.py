@@ -533,3 +533,147 @@ def test_main_refuses_both_arms_omitting_same_scenario(tmp_path: Path) -> None:
         "--judge-model", "m", "--base-url", "http://x",
     ]) == 2
 
+
+# ── credential-free argv (#1413) ────────────────────────────────────────────
+
+_SECRET = "sk-secret-value"
+
+
+def _no_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the judge transport unreachable: a refusal must precede it."""
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("the judge transport must not be reached")
+
+    monkeypatch.setattr(ljs, "_openai_judge_call", _boom)
+
+
+def _run_argv(tmp_path: Path, extra: list[str]) -> list[str]:
+    """An otherwise valid run, plus the argument under test."""
+    base = tmp_path / "b.json"
+    treat = tmp_path / "t.json"
+    base.write_text(json.dumps(_full_corpus_arm("baseline")))
+    treat.write_text(json.dumps(_full_corpus_arm("treatment")))
+    art = _write_artifact(tmp_path / "c.json", model="m")
+    return [
+        "--baseline", str(base), "--treatment", str(treat),
+        "--calibration-artifact", str(art),
+        "--judge-model", "m", "--base-url", "http://x",
+        *extra,
+    ]
+
+
+def test_api_key_argument_is_refused_without_echo(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = ljs.main(_run_argv(tmp_path, ["--api-key", _SECRET]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_api_key_equals_form_is_refused_without_echo(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = ljs.main(_run_argv(tmp_path, [f"--api-key={_SECRET}"]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_api_key_abbreviation_is_refused_without_echo(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = ljs.main(_run_argv(tmp_path, ["--api-k", _SECRET]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_unknown_argument_is_refused_without_echo(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_transport(monkeypatch)
+    code = ljs.main(_run_argv(tmp_path, ["--mystery-flag", _SECRET]))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "unrecognized argument" in err
+
+
+def test_judge_key_comes_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JUDGE_API_KEY", "env-key-value")
+    recorded: list[str] = []
+
+    def _fake_judge_call(
+        judge_model: str, base_url: str, api_key: str, timeout_sec: int
+    ):
+        recorded.append(api_key)
+        return _always("correct")
+
+    monkeypatch.setattr(ljs, "_openai_judge_call", _fake_judge_call)
+    assert ljs.main(_run_argv(tmp_path, [])) == 0
+    assert recorded == ["env-key-value"]
+
+
+def test_credential_refusal_comes_before_the_parser(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The refusal runs before argparse, so the missing required arguments do
+    # not hide the credential guidance and no parser message can quote a value.
+    code = ljs.main(["--api-key", _SECRET])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert _SECRET not in err
+    assert "--api-key" in err
+
+
+def test_a_value_for_a_known_option_is_not_echoed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # argparse quotes the value of an option in its own error message. The
+    # parser of this script must not, so a mistyped secret stays out of the log.
+    with pytest.raises(SystemExit) as excinfo:
+        ljs.main(_run_argv(tmp_path, ["--timeout", _SECRET]))
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert _SECRET not in err
+
+
+def test_an_abbreviated_flag_cannot_relax_the_full_corpus_guard(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # "--a" and "--al" must not resolve to --allow-subset-scenarios. The
+    # prefix would silently relax the fail-closed full-corpus guard.
+    for prefix in ("--a", "--al"):
+        code = ljs.main(_run_argv(tmp_path, [prefix]))
+        err = capsys.readouterr().err
+        assert code == 2
+        assert _SECRET not in err
+
+
+def test_the_parser_knows_no_credential_option() -> None:
+    # The parser must not know the option, so the refusal is the only way in.
+    _args, extras = ljs.build_parser().parse_known_args([
+        "--baseline", "b.json", "--treatment", "t.json",
+        "--calibration-artifact", "c.json", "--api-key", _SECRET,
+    ])
+    assert "--api-key" in extras
+
+
+def test_the_exact_subset_flag_still_parses() -> None:
+    args, extras = ljs.build_parser().parse_known_args([
+        "--baseline", "b.json", "--treatment", "t.json",
+        "--calibration-artifact", "c.json", "--allow-subset-scenarios",
+    ])
+    assert args.allow_subset_scenarios is True
+    assert extras == []
+
