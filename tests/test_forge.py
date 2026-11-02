@@ -25,6 +25,7 @@ exercises the request-building path before any byte goes out.
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
 import threading
@@ -783,3 +784,121 @@ class TestReExportsKeepBackwardsCompat:
             assert hhf.GitHubAPIError is forge.ForgeError
         finally:
             sys.path.pop(sys.path.index(str(ROOT / "scripts")))
+
+
+# ---------------------------------------------------------------------------
+# The one-transport invariant over scripts/
+# ---------------------------------------------------------------------------
+
+
+class TestScriptsDoNotHandRollForgeRequests:
+    """No script under ``scripts/`` builds its own forge request.
+
+    Every forge read and write goes through :mod:`pr_reviewer.forge`. A
+    script that imports a request transport builds its own request, and a
+    hand-built request is exactly how the weekly eval summary kept a
+    plaintext-HTTP base URL and an unattached-token window open
+    (#1407). The gate is an import scan, not a text scan — a mention of
+    ``urllib`` in a docstring is fine.
+
+    A script that genuinely needs a non-forge transport must be named in
+    :data:`_EXEMPT` with a reason, so the exemption is visible instead of
+    silent. The empty list is the honest state today: no script under
+    ``scripts/`` talks to a forge except through the capability. The
+    ``gh`` calls in the shell scripts are a separate item (#1041); they
+    are not Python request transports and are covered by their own gate.
+    """
+
+    # Python modules that can issue an HTTP request. ``urllib.parse`` is
+    # deliberately absent — building a URL is not talking to a forge.
+    REQUEST_MODULES = frozenset({
+        "urllib.request",
+        "http.client",
+        "requests",
+        "httpx",
+        "urllib3",
+    })
+
+    # Repo-relative paths exempt from the gate, each with a non-empty reason.
+    _EXEMPT: dict[str, str] = {}
+
+    @classmethod
+    def transport_imports(cls, tree: ast.AST) -> list[str]:
+        """Every prohibited request transport the module imports.
+
+        Covers both spellings a transport can arrive under: the whole
+        dotted module (``import urllib.request``, ``from http.client
+        import HTTPConnection``) and a transport imported as a name from
+        its parent package (``from urllib import request``, ``from http
+        import client``). Checking only ``ImportFrom.module`` misses the
+        second spelling, which binds the very module the gate forbids.
+        """
+        found: list[str] = []
+        for node in ast.walk(tree):
+            dotted: list[str] = []
+            if isinstance(node, ast.Import):
+                dotted = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module:
+                    dotted = [
+                        module,
+                        *(f"{module}.{alias.name}" for alias in node.names),
+                    ]
+            else:
+                continue
+            found.extend(name for name in dotted if name in cls.REQUEST_MODULES)
+        return found
+
+    def test_no_script_imports_a_request_transport(self):
+        scripts_dir = ROOT / "scripts"
+        offenders: list[str] = []
+        for path in sorted(scripts_dir.rglob("*.py")):
+            relative = str(path.relative_to(ROOT))
+            if relative in self._EXEMPT:
+                assert self._EXEMPT[relative].strip(), (
+                    f"{relative} is exempt from the transport gate "
+                    "without a reason"
+                )
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            if self.transport_imports(tree):
+                offenders.append(relative)
+        assert offenders == [], (
+            "scripts must not hand-roll forge requests; use "
+            "pr_reviewer.forge: " + ", ".join(sorted(set(offenders)))
+        )
+
+    def test_every_exemption_carries_a_reason(self):
+        for path, reason in self._EXEMPT.items():
+            assert reason.strip(), (
+                f"{path} is exempt from the transport gate without a reason"
+            )
+
+    @pytest.mark.parametrize(
+        ("source", "flagged"),
+        [
+            ("import urllib.request", True),
+            ("import urllib.request as req", True),
+            ("from urllib import request", True),
+            ("from urllib import request as req", True),
+            ("from urllib.request import urlopen", True),
+            ("import http.client", True),
+            ("from http import client", True),
+            ("from http.client import HTTPConnection", True),
+            ("import requests", True),
+            ("from requests import get", True),
+            ("import httpx", True),
+            ("import urllib3", True),
+            # Building a URL is not talking to a forge.
+            ("import urllib.parse", False),
+            ("from urllib.parse import urlparse", False),
+            ("import json", False),
+        ],
+    )
+    def test_gate_detects_each_transport_spelling(self, source, flagged):
+        tree = ast.parse(source)
+        found = self.transport_imports(tree)
+        assert bool(found) is flagged, f"{source!r} -> {found}"
+
+
