@@ -1,0 +1,16 @@
+# Operator parameters for the worker admission guardrails (#1423): the ONE
+# worker service account, the allowed worker image REPOSITORY (prefix —
+# tags/digests are free, so upgrades never touch this), and the controller
+# identities whose writes are guarded even when object identity is missing.
+# Copy, edit to your deployment (these values must match the instance-config
+# 'kubernetes' executor spec), and apply into the worker namespace named by
+# paramRef.namespace in the binding manifests.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pr-reviewer-worker-admission-params
+  namespace: review-workers
+data:
+  workerServiceAccount: pr-reviewer-worker
+  allowedImageRepository: ghcr.io/acme/pr-reviewer-worker
+  controllerUsernames: system:serviceaccount/pr-reviewer:pr-reviewer-controller
