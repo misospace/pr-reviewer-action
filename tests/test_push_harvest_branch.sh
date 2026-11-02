@@ -96,7 +96,8 @@ python3 "$STUB" serve --state "$STATE" --log "$LOG" --port-file "$TMPDIR/port" >
 STUB_PID=$!
 for _ in $(seq 1 100); do [ -s "$TMPDIR/port" ] && break; sleep 0.1; done
 [ -s "$TMPDIR/port" ] || { echo "the forge stub did not start" >&2; exit 1; }
-export GITHUB_API_URL="http://127.0.0.1:$(cat "$TMPDIR/port")"
+GITHUB_API_URL="http://127.0.0.1:$(cat "$TMPDIR/port")"
+export GITHUB_API_URL
 
 # stub_state <json>: the stub's answers for the next scenario.
 stub_state() {

@@ -51,7 +51,8 @@ python3 "$STUB" serve --state "$STATE" --log "$LOG" --port-file "$WORK/port" >"$
 STUB_PID=$!
 for _ in $(seq 1 100); do [ -s "$WORK/port" ] && break; sleep 0.1; done
 [ -s "$WORK/port" ] || { echo "the forge stub did not start" >&2; exit 1; }
-export GITHUB_API_URL="http://127.0.0.1:$(cat "$WORK/port")"
+GITHUB_API_URL="http://127.0.0.1:$(cat "$WORK/port")"
+export GITHUB_API_URL
 
 # requests: every forge request the script made, as "METHOD PATH BODY".
 requests() { python3 "$STUB" dump --log "$LOG"; }

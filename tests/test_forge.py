@@ -632,7 +632,8 @@ class TestForgeClientDelete:
         server, _seen = self._server(body=json.dumps({"ok": True}).encode("utf-8"))
         try:
             client = forge.ForgeClient(base_url=f"http://127.0.0.1:{server.server_port}")
-            assert client.delete("/repos/test/repo/issues/1/labels/bug") == {"ok": True}
+            payload = client.delete("/repos/test/repo/issues/1/labels/bug")
+            assert payload == {"ok": True}
         finally:
             server.shutdown()
             server.server_close()
