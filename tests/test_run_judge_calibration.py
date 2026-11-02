@@ -18,6 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
 import pytest  # noqa: E402
 
 from pr_reviewer import semantic_judge  # noqa: E402
+from pr_reviewer.http_safe import base_url_identity_digest  # noqa: E402
 from scripts import run_judge_calibration as runner  # noqa: E402
 
 CORPUS_PATH = _REPO_ROOT / "evals" / "judge-calibration-corpus.json"
@@ -323,15 +324,18 @@ def test_run_calibration_requires_no_network(corpus: dict) -> None:
     # Sanity: the module imports without ever importing transport eagerly.
     assert not hasattr(runner, "_REQUESTED")
     # grade_reference / run_calibration never touch the network path.
-    report = runner.run_calibration(corpus, _judge_from(corpus), "m", "u", sleep=_NO_SLEEP)
-    assert report["base_url"] == "u"
+    report = runner.run_calibration(
+        corpus, _judge_from(corpus), "m", "http://x", sleep=_NO_SLEEP
+    )
+    assert report["base_url"] == "http://x"
 
 
 def test_report_redacts_userinfo_in_base_url(corpus: dict) -> None:
     """#1414: a judge endpoint carrying a credential in its userinfo must
     never be written verbatim into the shared report. The report keeps the
-    redacted display form plus a SHA-256 of the full normalized URL, so the
-    endpoint identity survives without the credential."""
+    redacted display form, and #1424 binds the credential-free endpoint
+    identity: the digest is computed over the URL with the userinfo
+    stripped, so the credential cannot be tested offline from the artifact."""
     secret_url = "https://judge-operator:hunter2@judge.internal.example/v1"
     report = runner.run_calibration(
         corpus, _judge_from(corpus), "fake", secret_url, sleep=_NO_SLEEP
@@ -341,7 +345,71 @@ def test_report_redacts_userinfo_in_base_url(corpus: dict) -> None:
         assert secret not in serialized
     assert report["base_url"] == "https://***@judge.internal.example/v1"
     assert report["base_url_sha256"] == hashlib.sha256(
+        b"https://judge.internal.example/v1"
+    ).hexdigest()
+    assert report["base_url_sha256"] == base_url_identity_digest(
+        "https://judge.internal.example/v1"
+    )
+    # The full credential-bearing URL is never the recorded identity.
+    assert report["base_url_sha256"] != hashlib.sha256(
         secret_url.encode("utf-8")
+    ).hexdigest()
+
+
+def test_report_digest_does_not_change_when_credential_rotates(corpus: dict) -> None:
+    """#1424: the artifact binds the endpoint, not the credential. Two
+    calibration runs against the same endpoint with different userinfo
+    credentials record the same endpoint identity, and that identity equals
+    the credential-free digest — a credential rotation must not invalidate
+    the artifact, and a reader must not be able to test passwords against
+    the recorded digest."""
+    first = runner.run_calibration(
+        corpus, _judge_from(corpus), "fake",
+        "https://judge-operator:hunter2@judge.internal.example/v1",
+        sleep=_NO_SLEEP,
+    )
+    second = runner.run_calibration(
+        corpus, _judge_from(corpus), "fake",
+        "https://judge-operator:newpw@judge.internal.example/v1",
+        sleep=_NO_SLEEP,
+    )
+    assert first["base_url_sha256"] == second["base_url_sha256"]
+    assert first["base_url_sha256"] == base_url_identity_digest(
+        "https://judge.internal.example/v1"
+    )
+
+
+def test_main_records_the_resolved_credential_free_endpoint(
+    corpus: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1424: the shared artifact a CLI run writes records the resolved
+    credential-free endpoint. The credential-bearing endpoint URL comes from
+    the environment (#1414); the report's display field carries no userinfo,
+    and its digest is the credential-free identity — byte-verifiable against
+    the recorded display URL."""
+    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "JUDGE_BASE_URL", "https://judge-operator:hunter2@judge.internal.example/v1"
+    )
+    monkeypatch.setattr(
+        runner, "_openai_judge_call", lambda *_args, **_kwargs: _judge_from(corpus)
+    )
+    output = tmp_path / "report.json"
+    argv = [
+        "--corpus", str(CORPUS_PATH), "--judge-model", "m", "--output", str(output)
+    ]
+    assert runner.main(argv) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    serialized = json.dumps(report)
+    for secret in ("hunter2", "judge-operator"):
+        assert secret not in serialized
+    assert report["base_url"] == "https://judge.internal.example/v1"
+    assert report["base_url_sha256"] == base_url_identity_digest(
+        "https://judge.internal.example/v1"
+    )
+    # Operator-verifiable: the digest covers the recorded display URL.
+    assert report["base_url_sha256"] == hashlib.sha256(
+        report["base_url"].encode("utf-8")
     ).hexdigest()
 
 

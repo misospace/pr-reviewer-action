@@ -160,17 +160,35 @@ def normalize_base_url(url: object) -> str:
     """Normalize an API endpoint for identity comparison: strip surrounding
     whitespace and trailing slashes only. A ``/v1`` path segment stays
     significant, so the same model alias behind a different gateway is never
-    treated as equal."""
+    treated as equal.
+
+    This does NOT strip a URL userinfo — a userinfo-bearing value normalized
+    here still carries its credential. Never build a recorded identity from
+    it directly; use :func:`base_url_identity_digest`, which resolves the
+    credential-free endpoint first (#1424)."""
     if not isinstance(url, str):
         return ""
     return url.strip().rstrip("/")
 
 
 def base_url_identity_digest(url: object) -> str:
-    """SHA-256 of the normalized *full* endpoint URL. Lets a shared report
-    bind an exact endpoint identity (userinfo included) without recording the
-    credential a userinfo would carry (#1414)."""
-    return hashlib.sha256(normalize_base_url(url).encode("utf-8")).hexdigest()
+    """SHA-256 of the normalized *credential-free* endpoint identity (#1424).
+
+    The userinfo is stripped first — the same resolution the transport uses
+    (:func:`resolve_endpoint`), which moves the credential into the
+    ``Authorization`` header — and the digest binds the resulting request
+    target. An unkeyed, fast digest over a credential-bearing URL is an
+    offline password oracle: anyone holding the shared report could test
+    candidate passwords against it without ever contacting the endpoint
+    (#1424), so the recorded endpoint identity never depends on the
+    credential. Rotating the credential keeps a calibration artifact valid;
+    a different endpoint (scheme/host/port/path) does not compare equal.
+
+    Fail-closed: a value that cannot be resolved into a credential-free
+    endpoint raises :class:`UnsafeEndpointUrl` — there is no defined request
+    target, so there is no endpoint identity to record."""
+    resolved = resolve_endpoint(url)
+    return hashlib.sha256(normalize_base_url(resolved.url).encode("utf-8")).hexdigest()
 
 
 class CredentialInProcessArguments(ValueError):
