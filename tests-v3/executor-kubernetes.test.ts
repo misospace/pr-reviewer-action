@@ -487,6 +487,98 @@ test("every worker pod template carries the NetworkPolicy selector and joins no 
   rmSync(fixture.root, { recursive: true, force: true });
 });
 
+test("the pod template carries the operator's RuntimeClass pin only when the spec sets one (#1422)", () => {
+  const fixture = makeFixture({ kind: "succeed", result: "ok" });
+  const { request, spec } = fixture;
+  // Pinned: the pod template stamps the operator's RuntimeClass verbatim,
+  // and every fixed security default is unchanged around it.
+  const pinnedSpec: KubernetesExecutorSpec = { ...spec, runtimeClassName: "gvisor" };
+  const { manifest } = buildReviewJobManifest(pinnedSpec, request, { nowMs: Date.now() });
+  assert.equal(manifest.pod.runtimeClassName, "gvisor");
+  assert.deepEqual(Object.keys(manifest.pod), [
+    "restartPolicy", "serviceAccountName", "runtimeClassName",
+    "automountServiceAccountToken", "hostNetwork", "terminationGracePeriodSeconds",
+    "securityContext", "containers", "volumes",
+  ], "the pin is one new closed field, never a PodSpec-shaped escape hatch");
+  assert.deepEqual(manifest.pod.securityContext, {
+    runAsNonRoot: true,
+    runAsUser: WORKER_RUN_AS_ID,
+    runAsGroup: WORKER_RUN_AS_ID,
+    seccompProfile: { type: "RuntimeDefault" },
+  }, "the fixed pod security context survives the pin unchanged");
+  assert.deepEqual(manifest.pod.containers[0]!.securityContext, {
+    allowPrivilegeEscalation: false,
+    readOnlyRootFilesystem: true,
+    capabilities: { drop: ["ALL"] },
+    seccompProfile: { type: "RuntimeDefault" },
+  }, "the fixed container security context survives the pin unchanged");
+  // Unpinned: the key is not emitted at all — the cluster default runtime
+  // applies, exactly as before #1422.
+  const unpinned = buildReviewJobManifest(spec, request, { nowMs: Date.now() });
+  assert.equal("runtimeClassName" in unpinned.manifest.pod, false);
+  assert.deepEqual(Object.keys(unpinned.manifest.pod), [
+    "restartPolicy", "serviceAccountName", "automountServiceAccountToken",
+    "hostNetwork", "terminationGracePeriodSeconds", "securityContext",
+    "containers", "volumes",
+  ]);
+  rmSync(fixture.root, { recursive: true, force: true });
+});
+
+test("a create failure while a RuntimeClass is pinned settles launch_refused, never a fallback (#1422)", async () => {
+  const fixture = makeFixture({ kind: "hang" });
+  const spec: KubernetesExecutorSpec = { ...fixture.spec, runtimeClassName: "gvisor" };
+  const createError = 'admission webhook "runtimeclass.runtime.polixys.io" denied the request: RuntimeClass "gvisor" not found';
+  const api: KubernetesApi = {
+    createJob: async () => {
+      throw new Error(createError);
+    },
+    getJob: async () => null,
+    deleteJob: async () => {},
+    listJobs: async () => [],
+  };
+  const executor = new KubernetesExecutor(spec, { api, pollMs: 5 });
+  const handle = await executor.start(fixture.request, new AbortController().signal);
+  const result = await handle.collect();
+  assert.equal(result.status, "failed");
+  assert.equal(result.failureCategory, "launch_refused");
+  assert.match(result.failureMessage, /pinned RuntimeClass 'gvisor'/, "the refusal names the pin");
+  assert.ok(
+    result.failureMessage.includes(createError),
+    "the refusal is derived from the create failure, never a silent fallback to the cluster default",
+  );
+  rmSync(fixture.root, { recursive: true, force: true });
+});
+
+test("a pinned-RuntimeClass create failure still deletes the projected credential Secret", async () => {
+  const fixture = makeFixture({ kind: "hang" }, {
+    credentials: [{ name: "model", reference: "vault:model-ref-1" }],
+  });
+  fixture.resolver.resolution = { ok: true, credentials: [{ name: "model", value: "material-model-0000000001" }] };
+  const spec: KubernetesExecutorSpec = { ...fixture.spec, runtimeClassName: "gvisor" };
+  const api: KubernetesApi = {
+    createJob: async () => {
+      throw new Error("jobs.batch is forbidden from creating pods with an unknown runtimeClassName");
+    },
+    getJob: async () => null,
+    deleteJob: async () => {},
+    listJobs: async () => [],
+  };
+  const executor = new KubernetesExecutor(spec, {
+    api,
+    pollMs: 5,
+    credentialResolver: fixture.resolver,
+    credentialStore: fixture.store,
+  });
+  const handle = await executor.start(fixture.request, new AbortController().signal);
+  const result = await handle.collect();
+  assert.equal(result.failureCategory, "launch_refused");
+  assert.deepEqual(fixture.store.deletions, [{
+    namespace: fixture.spec.namespace,
+    name: kubernetesCredentialSecretName(fixture.request.runId),
+  }], "the projected material never outlives the refused launch");
+  rmSync(fixture.root, { recursive: true, force: true });
+});
+
 test("the executor-boundary doc states the NetworkPolicy posture the code pins", () => {
   const doc = readFileSync("docs/architecture/executor-boundary.md", "utf8");
   assert.match(doc, /WORKER_NETWORK_POSTURE/, "the posture must be pinned in code, not only in prose");

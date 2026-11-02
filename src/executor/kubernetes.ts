@@ -552,6 +552,11 @@ export interface KubernetesJobManifest {
   readonly pod: {
     readonly restartPolicy: "Never";
     readonly serviceAccountName: string;
+    /** The operator's optional RuntimeClass pin (#1422), stamped from the
+     * spec verbatim; ABSENT when the spec does not set one, so the pod
+     * runs under the cluster default runtime. No repository-controlled
+     * value can ever reach this field. */
+    readonly runtimeClassName?: string;
     /** A review worker never needs cluster API access: the token is not
      * mounted unless a concrete executor protocol someday requires it. */
     readonly automountServiceAccountToken: false;
@@ -677,6 +682,10 @@ export function buildReviewJobManifest(
     pod: {
       restartPolicy: "Never",
       serviceAccountName: spec.serviceAccount,
+      // The optional RuntimeClass pin (#1422), operator config only.
+      // Absent from the spec means absent from the pod template: the
+      // cluster default runtime applies, and no key is emitted at all.
+      ...(spec.runtimeClassName === undefined ? {} : { runtimeClassName: spec.runtimeClassName }),
       automountServiceAccountToken: false,
       hostNetwork: false,
       terminationGracePeriodSeconds: TERMINATION_GRACE_SECONDS,
@@ -1059,6 +1068,32 @@ export class KubernetesExecutor implements Executor {
       let created: "created" | "already-exists";
       try {
         created = await this.deps.api.createJob(launchManifest);
+      } catch (err) {
+        if (this.spec.runtimeClassName === undefined) throw err;
+        // The RuntimeClass pin (#1422) is the operator's sandbox
+        // requirement: a create that fails while a pin is set means the
+        // cluster refused (or could not admit) the worker AS PINNED — a
+        // missing or unsupported RuntimeClass among its causes. The
+        // launch fails CLOSED with the refusal derived from the create
+        // failure, and the pin is never stripped to fall back to the
+        // cluster default runtime. (The seam deliberately has no
+        // RuntimeClass read verb: the create failure IS the signal.)
+        // Without a pin, a create failure keeps its existing
+        // infrastructure-error semantics (the rethrow the outer catch
+        // handles).
+        signal.removeEventListener("abort", onAbort);
+        this.runs.delete(validated.runId);
+        if (credentialSecretProjected) {
+          await this.deleteRunCredentialSecret(run);
+          credentialSecretProjected = false;
+        }
+        const gate = this.launchGate(run);
+        if (gate !== null) return refusedHandle(this.preLaunchResult(run, gate));
+        return refusedHandle(this.refusalResult(
+          run,
+          "launch_refused",
+          `the execution was refused before launch: the worker pod could not be created with the pinned RuntimeClass '${this.spec.runtimeClassName}': ${err instanceof Error ? err.message : String(err)}`,
+        ));
       } finally {
         run.jobCreationPending = false;
       }

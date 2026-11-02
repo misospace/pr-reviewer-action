@@ -112,6 +112,38 @@ test("profiles are selected by name and resolved to operator-approved entries", 
   assert.equal(config.executorProfile?.kind, "local");
 });
 
+test("repo config cannot set or influence the executor spec's runtimeClassName (#1422)", () => {
+  const kubernetesInstance = instance({
+    "executor-profiles": [{
+      name: "k8s",
+      kind: "kubernetes",
+      kubernetes: {
+        image: "ghcr.io/acme/pr-reviewer-worker:1",
+        args: ["--worker"],
+        namespace: "review-workers",
+        "service-account": "pr-reviewer-worker",
+        "ttl-seconds-after-finished": 3_600,
+        resources: {
+          requests: { cpu: "500m", memory: "512Mi" },
+          limits: { cpu: "2", memory: "2Gi" },
+        },
+        volumes: [{ claim: "pr-reviewer-data", "controller-root": "/var/lib/pr-reviewer" }],
+        "runtime-class-name": "kata",
+      },
+    }],
+    "default-executor-profile": "k8s",
+  });
+  const config = resolve(kubernetesInstance, "executor-profile: k8s\nruntimeClassName: gvisor\nruntime-class-name: gvisor\n");
+  // Profile selection is by NAME only: the operator's pinned spec survives
+  // verbatim, and no repository key can reach into it.
+  assert.equal(config.executorProfile?.name, "k8s");
+  assert.equal(config.executorProfile?.kubernetes?.runtimeClassName, "kata");
+  // Both spellings the repository tried are unrecognized no-ops, visibly.
+  const joined = config.warnings.join("\n");
+  assert.match(joined, /'runtimeClassName'.*does not recognize/);
+  assert.match(joined, /'runtime-class-name'.*does not recognize/);
+});
+
 test("an unknown profile is rejected (fail closed) under the default policy", () => {
   assert.throws(() => resolve(instance(), "model-profile: invented"), (error: unknown) => {
     const ok = error instanceof EffectiveConfigError && /unknown model profile 'invented'.*policy is reject/.test(error.message);

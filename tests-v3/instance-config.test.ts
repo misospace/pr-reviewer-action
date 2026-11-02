@@ -313,6 +313,7 @@ test("the kubernetes executor spec is a closed set — a PodSpec fragment has no
   for (const field of [
     "podSpec", "nodeSelector", "hostPath", "command", "tolerations", "affinity",
     "securityContext", "env", "volumeMounts", "containers", "imagePullPolicy",
+    "runtimeClassName",
   ] as const) {
     expectError(
       {
@@ -391,6 +392,55 @@ test("the kubernetes executor spec's fields are grammar-bounded (#734)", () => {
     volumes: [{ ...spec.volumes[0], "controller-root": "/" }],
   }), "must not be the filesystem root");
   broken("volumes-none", (spec) => ({ ...spec, volumes: undefined }), "must be a list of volume mappings");
+});
+
+test("the kubernetes spec's optional runtime-class-name is a DNS-1123 label pin (#1422)", () => {
+  const baseKubernetes = () => ({
+    image: "ghcr.io/acme/pr-reviewer-worker:1",
+    namespace: "review-workers",
+    "service-account": "pr-reviewer-worker",
+    "ttl-seconds-after-finished": 3_600,
+    resources: {
+      requests: { cpu: "500m", memory: "512Mi" },
+      limits: { cpu: "2", memory: "2Gi" },
+    },
+    volumes: [{
+      claim: "pr-reviewer-data",
+      "controller-root": "/var/lib/pr-reviewer",
+    }],
+  });
+  // A valid DNS-1123 label is accepted and carried through.
+  const pinned = validate({
+    ...baseInstance(),
+    "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: { ...baseKubernetes(), "runtime-class-name": "gvisor" } }],
+  });
+  assert.equal(pinned.executorProfiles[0]!.kubernetes!.runtimeClassName, "gvisor");
+  // Absent means absent: no runtimeClassName key exists at all, so the
+  // executor can never emit one for an unpinned spec.
+  const unpinned = validate({
+    ...baseInstance(),
+    "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: baseKubernetes() }],
+  });
+  assert.equal("runtimeClassName" in unpinned.executorProfiles[0]!.kubernetes!, false);
+  // Invalid strings fail closed (grammar shared with namespace /
+  // service-account / claim).
+  for (const [value, why] of [
+    ["Gvisor", "DNS-1123"],
+    ["-gvisor", "DNS-1123"],
+    ["gvisor-", "DNS-1123"],
+    ["g_visor", "DNS-1123"],
+    ["a".repeat(64), "DNS-1123"],
+    ["", "non-empty string"],
+    [42, "non-empty string"],
+  ] as const) {
+    expectError(
+      {
+        ...baseInstance(),
+        "executor-profiles": [{ name: "k8s", kind: "kubernetes", kubernetes: { ...baseKubernetes(), "runtime-class-name": value } }],
+      },
+      why,
+    );
+  }
 });
 
 test("local executor specs are bounded single argv elements, not shell lines", () => {

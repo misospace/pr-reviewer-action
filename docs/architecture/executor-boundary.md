@@ -359,6 +359,21 @@ fail-closed, so an unlistable cluster refuses the launch.
   executor-side timer that settles `deadline` and deletes the Job);
   `ttlSecondsAfterFinished` required (1..604800); termination grace 30s
   is the worker's engine-cancellation window.
+- **RuntimeClass pinning (#1422) is an operator-trusted setting.** The
+  spec's optional `runtime-class-name` (a DNS-1123 label, the same
+  grammar as the namespace/service account) is the ONE pod-infrastructure
+  field the operator may set: when present, the executor stamps
+  `runtimeClassName` onto the pod template so the worker runs under the
+  operator's sandboxed runtime (gVisor, Kata, …). Absent means the field
+  is not emitted at all and the cluster default runtime applies. The pin
+  is never negotiated: a create that fails while a pin is set — a missing
+  or unsupported RuntimeClass among its causes — settles the run failed
+  `launch_refused` with the refusal derived from the create failure (the
+  `KubernetesApi` seam deliberately has no RuntimeClass read verb), and
+  the executor never strips the pin to fall back to an unpinned pod.
+  Repository config cannot set or influence the field: it reaches the
+  executor only through the operator's instance-config profile, selected
+  by name.
 - **Worker network posture (NetworkPolicy).** #734 lists "worker
   NetworkPolicy guidance/defaults" among the security defaults, and the
   konflate reference carries NetworkPolicy options. The executor's API
@@ -577,7 +592,7 @@ extension the #727 module reserved for #733/#734:
 |---|---|---|
 | `local` | `local: { command, args }` | required; argv elements bounded, NUL-free, metacharacter-free |
 | `oci` | `oci: { image }` | required; image-reference grammar |
-| `kubernetes` | `kubernetes: { image, args, namespace, service-account, ttl-seconds-after-finished, resources, volumes }` | required; image-reference grammar, DNS-1123 names, bounded TTL, REQUIRED requests+limits, and 1..8 PVC volume mappings (`claim` mounted at `controller-root` on both sides) — the ONLY shared-storage surface; there is no field for a PodSpec fragment, hostPath, nodeSelector, toleration, or any raw Kubernetes object |
+| `kubernetes` | `kubernetes: { image, args, namespace, service-account, ttl-seconds-after-finished, resources, volumes, runtime-class-name? }` | required; image-reference grammar, DNS-1123 names, bounded TTL, REQUIRED requests+limits, and 1..8 PVC volume mappings (`claim` mounted at `controller-root` on both sides) — the ONLY shared-storage surface; there is no field for a PodSpec fragment, hostPath, nodeSelector, toleration, or any raw Kubernetes object |
 
 Profiles remain **names, not infrastructure**: the spec is operator-owned
 configuration inside the trusted instance config; repository config still
