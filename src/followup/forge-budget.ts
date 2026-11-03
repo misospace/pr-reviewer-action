@@ -78,6 +78,7 @@
 
 import { FOLLOWUP_REPLY_MARKER, classifyFollowUpComment } from "./classify.js";
 import type { RateLimitStore } from "./rate-limit.js";
+import { isPlainObject } from "../platform/jq.js";
 
 /** The count returned for a scope whose budget headroom cannot be proven.
  * `consumeFollowUpBudget` denies when the count reaches the scope's limit,
@@ -94,10 +95,6 @@ interface BudgetComment {
   createdAtMs: number | null;
   /** The comment body. */
   body: string;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** The author's login from the platform seam's comment shape. Both platforms

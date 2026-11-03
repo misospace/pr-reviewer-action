@@ -32,6 +32,7 @@
 import { INSTALLATION_ID_PATTERN } from "../events/normalize.js";
 import { containsSecretShapedContent, isCanonicalJsonEncoding } from "../context/redact.js";
 import type { JobLifecycleState } from "../queue/types.js";
+import { isPlainObject } from "../platform/object.js";
 
 /** The two platforms the controller knows (mirrors `ReviewJob`). */
 export type ControlPlanePlatform = "github" | "forgejo";
@@ -82,12 +83,6 @@ export const PUBLICATION_HISTORY_CAP = 32;
  * capped at 65536 characters), so a payload the publisher could never
  * send is never persisted. */
 export const PUBLICATION_PAYLOAD_MAX_CHARS = 65536;
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-}
 
 function isBoundedString(value: unknown, max: number): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= max;

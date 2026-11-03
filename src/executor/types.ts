@@ -28,6 +28,7 @@
 import { hasControlCharacters } from "../config/instance-config.js";
 import type { ReviewJobKind } from "../jobs/types.js";
 import type { WorkspaceInfo } from "../acquisition/types.js";
+import { isPlainObject } from "../platform/object.js";
 
 /** Credential-reference name: lowercase kebab-case, bounded. */
 export const EXECUTION_CREDENTIAL_NAME_RE = /^[a-z][a-z0-9-]{0,63}$/;
@@ -312,12 +313,6 @@ export class ExecutionResultError extends Error {
     super(message);
     this.name = "ExecutionResultError";
   }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
 }
 
 function requireString(

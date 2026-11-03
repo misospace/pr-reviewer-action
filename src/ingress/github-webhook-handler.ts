@@ -48,6 +48,7 @@ import type { CanonicalForgeEvent } from "../events/types.js";
 import { verifyGitHubWebhookSignature } from "./github-app-signature.js";
 import type { OperatorEventRouter } from "./operator-router.js";
 import { DEFAULT_MAX_WEBHOOK_BODY_BYTES } from "./webhook-handler.js";
+import { isPlainObject } from "../platform/object.js";
 
 const EVENT_HEADER = /^[A-Za-z0-9._-]{1,64}$/;
 
@@ -62,12 +63,6 @@ const VOCABULARY_ANCHORS: Readonly<Record<string, string>> = {
   check_run: "check_run",
   check_suite: "check_suite",
 };
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-}
 
 /** True when the SIGNED body carries the shape the named vocabulary
  * requires, and can therefore authorize it. A vocabulary without a shape

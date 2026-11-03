@@ -17,6 +17,7 @@
  * is required with an explicit sentinel (""/0/false) instead of an optional,
  * so consumers never branch on `undefined`. No runtime I/O lives here.
  */
+import { isPlainObject } from "../platform/object.js";
 
 /** What a credential is FOR. The closed purpose union drives scope binding:
  * a credential minted for one purpose can never satisfy a request for
@@ -213,12 +214,6 @@ export class CredentialPlanError extends Error {
     super(message);
     this.name = "CredentialPlanError";
   }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
 }
 
 /** One opaque, short-lived credential reference the worker will look up by

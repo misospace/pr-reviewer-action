@@ -71,10 +71,7 @@
 // normalization is acked 200-ignored.
 
 import { carriesCheckUpdateShape } from "../events/normalize.js";
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isPlainObject } from "../platform/jq.js";
 
 /** The check/status family names: the group headers that reach the envelope as
  * a plain passthrough hint but whose kind is only reachable when the SIGNED
