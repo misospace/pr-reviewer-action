@@ -61,6 +61,7 @@ import { renderClaimsSection } from "../claims/render.js";
 import { runDerivedObligationsPass } from "../derived/pass.js";
 import { renderDerivedSectionForStatus, renderDerivedUnavailable } from "../derived/render.js";
 import { buildModelRequest } from "../model/request.js";
+import { opaqueModelId } from "../model/identity.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
 import { maskDiagnostic, maskKnownSecrets, redactTextDeep } from "../context/redact.js";
@@ -689,6 +690,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // stage; a host that injects its own adapter binds the request signal at
   // construction — see docs/architecture/engine-boundary.md.
   const profiles: TierProfiles = resolveTierProfiles(env);
+  // #1465: the tier resolution's notices (a configured model value that
+  // holds only whitespace, for example). Advisory only, never fatal, and
+  // never a secret.
+  for (const warning of profiles.warnings) log(`WARNING: ${warning}`);
   const streamBool = (env.AI_STREAM ?? "true").toLowerCase() === "true";
 
   // Standards resolution + initial system prompt (config.sh).
@@ -3451,7 +3456,11 @@ async function producePrimaryReview(input: ReviewCallInput & {
         return {
           artifact,
           analysisEngine: annotateAnalysisEngine(
-            analysisEngineBase(env.AI_MODEL ?? "", env.AI_BASE_URL ?? "", env.AI_API_FORMAT ?? "openai"),
+            // #1465: the native loop calls the route-bound AI_* environment,
+            // and the harness trims that model name before it sends it. Name
+            // the trimmed name here, so the published engine names the model
+            // the provider actually saw.
+            analysisEngineBase(opaqueModelId(env.AI_MODEL), (env.AI_BASE_URL ?? "").trim(), (env.AI_API_FORMAT ?? "").trim() || "openai"),
             "primary",
             {
               ...(env.REVIEW_ROUTE !== undefined ? { reviewRoute: env.REVIEW_ROUTE } : {}),

@@ -123,6 +123,7 @@ on-model-failure: notice   # visible explanation instead of a long red check
 | Verdict parse failures, retries, then fallback | model wraps JSON in prose | set `ai-response-format: json_object` |
 | Reviews time out behind a proxy | idle-read timer on non-streamed response | keep `ai-stream: "true"` |
 | HTTP 400 mentioning `temperature` | model rejects non-default sampling | `ai-temperature: ""` |
+| Independent verifier reports `unscored` with `http_403` | the provider refused the call: the verifier model name is not the provider's exact name, or the key does not cover that model | set `ai-confidence-model` to the provider's exact name, letter case included, and check that the key covers it |
 
 ## Thinking models need `ai-max-tokens` headroom
 
@@ -135,6 +136,14 @@ Raise `ai-max-tokens` to `16000`+ (or higher) for verbose reasoners so there's r
 A long native-loop turn (big corpus, slow local hardware, a thinking model chewing through reasoning) can outlast a reverse proxy's idle-read timeout — for example Cloudflare's HTTP 524 on a connection that goes quiet too long. `ai-stream: "true"` (the default) mitigates this for the main review call by keeping bytes flowing before the timer fires.
 
 If the native-loop's in-conversation verdict turn still fails outright (timeout, dropped connection, or any transport error), the harness logs it and the run doesn't fail: the standard (non-tool-loop) review call synthesizes the verdict as a separate, fresh request instead. You lose the inline tool-conversation framing for that one turn, but you still get a published verdict.
+
+## Independent verifier reports `unscored` with `http_403`
+
+The independent merge-safety verifier reports `confidence-status=unscored` with cause `http_403` when the provider refuses the call. A provider refuses a call for two usual reasons. The model name is not the name the provider knows, or the key does not cover that model.
+
+A provider treats a model name as a case-sensitive identifier, so a name that differs from the provider's name only in letter case is a name the provider does not know. Check that `ai-confidence-model` matches the provider's name exactly, letter case included. Then check that the key covers the model.
+
+The action sends the configured name as written, apart from surrounding whitespace, and never rewrites it. When two names that go to the same endpoint differ only in letter case, the run logs a warning that names both.
 
 ## Common misconfigurations
 

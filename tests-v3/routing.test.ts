@@ -59,7 +59,11 @@ test("specialist profiles resolve role, profile, and primary model precedence", 
     tests: { model: "specialist-model", source: "specialist-profile" },
   });
   assert.equal(resolved.overridesActive, true);
-  assert.deepEqual(resolved.warnings, []);
+  // #1465: the whitespace-only role model carries no name, so the role falls
+  // back to the specialist profile model — and the lane says that it did.
+  assert.deepEqual(resolved.warnings, [
+    "ai-specialist-tests-model holds only whitespace, so it is treated as unset and the role falls back to the specialist profile model or the primary model",
+  ]);
 
   const primary = resolveSpecialistProfiles({ AI_BASE_URL: " primary-url ", AI_MODEL: " primary-model ", AI_API_FORMAT: " OpenAI ", AI_API_KEY: " key ", AI_SPECIALIST_SECURITY_MODEL: " security-model " });
   assert.equal(primary.profileActive, false);

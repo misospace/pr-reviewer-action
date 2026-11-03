@@ -2,6 +2,7 @@ import type { EnvLike } from "../tools/budget.js";
 import { REASONING_EFFORT_PATTERN } from "../config/load-config.js";
 import { CONFIDENCE_MINIMUM_PROMPT_TOKENS } from "../confidence/prompt.js";
 import { CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS } from "../confidence/scorer.js";
+import { differsOnlyByCase, isBlankModelValue, modelNameForNotice, opaqueModelId } from "../model/identity.js";
 import { endpointUrlCredential } from "../transport/http.js";
 
 /**
@@ -52,6 +53,10 @@ export interface TierProfiles {
   primary: ResolvedTier;
   smart: ResolvedTier;
   fallback: ResolvedTier;
+  /** #1465: operator-facing notices from the tier resolution — for example a
+   * configured model value that holds nothing but whitespace, which the lane
+   * treats as unset. Never fatal, and never a secret. */
+  warnings: string[];
 }
 
 export type SpecialistModelSource = "role-override" | "specialist-profile" | "primary";
@@ -385,11 +390,16 @@ export function resolveSpecialistProfiles(env: EnvLike): SpecialistProfiles {
   const warnings: string[] = [];
   const primary = {
     baseUrl: trimmed(env, "AI_BASE_URL"),
-    model: trimmed(env, "AI_MODEL"),
+    // #1465: a model identifier is an opaque provider token — trimmed, never
+    // case-folded.
+    model: opaqueModelId(env.AI_MODEL),
     apiFormat: trimmed(env, "AI_API_FORMAT").toLowerCase() || "openai",
     apiKey: trimmed(env, "AI_API_KEY"),
   };
-  const specialistModel = trimmed(env, "AI_SPECIALIST_MODEL");
+  const specialistModel = opaqueModelId(env.AI_SPECIALIST_MODEL);
+  if (isBlankModelValue(env.AI_SPECIALIST_MODEL)) {
+    warnings.push("ai-specialist-model holds only whitespace, so it is treated as unset and the specialist profile falls back to the primary model");
+  }
   const specialistBaseUrl = trimmed(env, "AI_SPECIALIST_BASE_URL");
   const specialistApiFormat = trimmed(env, "AI_SPECIALIST_API_FORMAT");
   const specialistApiKey = trimmed(env, "AI_SPECIALIST_API_KEY");
@@ -428,7 +438,14 @@ export function resolveSpecialistProfiles(env: EnvLike): SpecialistProfiles {
   );
   const roles = ["correctness", "security", "tests"] as const;
   const roleModels = Object.fromEntries(roles.map((role) => {
-    const override = trimmed(env, `AI_SPECIALIST_${role.toUpperCase()}_MODEL`);
+    const roleKey = `AI_SPECIALIST_${role.toUpperCase()}_MODEL`;
+    const override = opaqueModelId(env[roleKey]);
+    // #1465: a whitespace-only override carries no name, so the role falls
+    // back to the profile or the primary model. The lane reports it instead
+    // of dropping it silently.
+    if (isBlankModelValue(env[roleKey])) {
+      warnings.push(`${roleKey.toLowerCase().replaceAll("_", "-")} holds only whitespace, so it is treated as unset and the role falls back to the specialist profile model or the primary model`);
+    }
     if (override !== "") return [role, { model: override, source: "role-override" as const }];
     if (profileActive) return [role, { model: specialistModel, source: "specialist-profile" as const }];
     return [role, { model: primary.model, source: "primary" as const }];
@@ -476,9 +493,26 @@ function effectiveKey(env: EnvLike, laneKey: string, baseKey: string): string {
 }
 
 export function resolveTierProfiles(env: EnvLike): TierProfiles {
+  // #1465: a configured model value that holds nothing but whitespace carries
+  // no name, so every lane treats it as unset. The lane reports it instead of
+  // dropping it silently: the operator has to know that a value they set is
+  // not the model the lane will call.
+  const warnings: string[] = [];
+  const blankModelNotices: Array<[string, string]> = [
+    ["AI_MODEL", "ai-model holds only whitespace, so it is treated as unset and the review lanes have no model to call"],
+    ["AI_PRIMARY_MODEL", "ai-primary-model holds only whitespace, so it is treated as unset and the primary lane falls back to ai-model"],
+    ["AI_SMART_MODEL", "ai-smart-model holds only whitespace, so it is treated as unset and the smart lane stays off"],
+    ["AI_FALLBACK_MODEL", "ai-fallback-model holds only whitespace, so it is treated as unset and the fallback lane stays off"],
+  ];
+  for (const [key, notice] of blankModelNotices) {
+    if (isBlankModelValue(env[key])) warnings.push(notice);
+  }
   const primary = {
     baseUrl: value(env, "AI_PRIMARY_BASE_URL", value(env, "AI_BASE_URL")),
-    model: value(env, "AI_PRIMARY_MODEL", value(env, "AI_MODEL")),
+    // #1465: every lane's model is an opaque provider token, resolved
+    // through the one shared place (`opaqueModelId`) — trimmed, never
+    // case-folded. An empty lane override still inherits the base model.
+    model: opaqueModelId(env.AI_PRIMARY_MODEL) || opaqueModelId(env.AI_MODEL),
     apiFormat: value(env, "AI_PRIMARY_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
     apiKey: value(env, "AI_PRIMARY_API_KEY", value(env, "AI_API_KEY")),
   };
@@ -488,7 +522,7 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
     primary.baseUrl,
     primary.apiKey,
   );
-  const smartModel = value(env, "AI_SMART_MODEL");
+  const smartModel = opaqueModelId(env.AI_SMART_MODEL);
   const smartResolved = smartModel.length > 0;
   const smart = {
     baseUrl: value(env, "AI_SMART_BASE_URL", value(env, "AI_BASE_URL")),
@@ -507,7 +541,7 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
     // an unset/empty fallback endpoint inherits the base endpoint (but never
     // the base model; the config loader deliberately leaves that unset).
     baseUrl: value(env, "AI_FALLBACK_BASE_URL", value(env, "AI_BASE_URL")),
-    model: value(env, "AI_FALLBACK_MODEL"),
+    model: opaqueModelId(env.AI_FALLBACK_MODEL),
     apiFormat: value(env, "AI_FALLBACK_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
     apiKey: value(env, "AI_FALLBACK_API_KEY", value(env, "AI_API_KEY")),
   };
@@ -569,6 +603,7 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
       // own ai-fallback-base-url, which may be a different backend).
       anthropicStructuredOutputSupported: laneAnthropicStructuredOutputSupported("fallback", env),
     },
+    warnings,
   };
 }
 
@@ -653,7 +688,9 @@ export interface ConfidenceResolution {
 function primaryLane(env: EnvLike): { baseUrl: string; model: string; apiFormat: string; apiKey: string } {
   return {
     baseUrl: trimmed(env, "AI_PRIMARY_BASE_URL") || trimmed(env, "AI_BASE_URL"),
-    model: trimmed(env, "AI_PRIMARY_MODEL") || trimmed(env, "AI_MODEL"),
+    // #1465: the primary lane's model is an opaque provider token — trimmed,
+    // never case-folded.
+    model: opaqueModelId(env.AI_PRIMARY_MODEL) || opaqueModelId(env.AI_MODEL),
     apiFormat: (trimmed(env, "AI_PRIMARY_API_FORMAT") || trimmed(env, "AI_API_FORMAT") || "openai").toLowerCase(),
     apiKey: trimmed(env, "AI_PRIMARY_API_KEY") || trimmed(env, "AI_API_KEY"),
   };
@@ -703,14 +740,47 @@ function confidenceCapabilityFlag(env: EnvLike, key: string): boolean {
   return (env[key] ?? "").trim().toLowerCase() === "true";
 }
 
+/** #1465: the public input name for an env key (`AI_PRIMARY_MODEL` becomes
+ * `ai-primary-model`), so a warning names the input the operator edits. */
+function inputName(envKey: string): string {
+  return envKey.toLowerCase().replaceAll("_", "-");
+}
+
+/** #1465: the input that supplied the primary lane's model. The config loader
+ * inherits `ai-primary-model` from `ai-model`, so the lane value equals the
+ * base value when the operator never set one of their own. The notice names
+ * the input the operator actually wrote. */
+function primaryModelInput(env: EnvLike): string {
+  const lane = opaqueModelId(env.AI_PRIMARY_MODEL);
+  const base = opaqueModelId(env.AI_MODEL);
+  return lane !== "" && lane !== base ? "ai-primary-model" : "ai-model";
+}
+
+/** #1465: the deterministic near-miss notice for two model names that differ
+ * ONLY in letter case and go to the same endpoint. One provider's namespace
+ * holds one spelling of a name, so a case difference inside it is a typo.
+ * The notice is advisory only: it never changes the resolved model, never
+ * changes the request bytes, and never fails the run. */
+function confidenceModelCaseWarning(confidenceModel: string, siblingInput: string, siblingModel: string): string {
+  return `confidence scorer: the verifier model '${modelNameForNotice(confidenceModel)}' and ${siblingInput} '${modelNameForNotice(siblingModel)}' differ only in letter case, and both names go to the same endpoint. A provider treats a model name as a case-sensitive identifier, so one of the two names is not the name that provider knows. Set both names to the exact name the provider expects.`;
+}
+
 export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   const warnings: string[] = [];
   const primary = primaryLane(env);
-  const model = trimmed(env, "AI_CONFIDENCE_MODEL");
+  // #1465: the scorer's model identifier is an opaque provider token — the
+  // configured value, trimmed, never case-folded. The request and the
+  // published telemetry carry it byte-identically.
+  const model = opaqueModelId(env.AI_CONFIDENCE_MODEL);
   const enabled = model !== "";
   const baseUrl = trimmed(env, "AI_CONFIDENCE_BASE_URL");
   const apiFormatRaw = trimmed(env, "AI_CONFIDENCE_API_FORMAT");
   const apiKey = trimmed(env, "AI_CONFIDENCE_API_KEY");
+  // #1465: a whitespace-only model value carries no name, so the lane treats
+  // it as unset. The lane reports it instead of dropping it silently.
+  if (isBlankModelValue(env.AI_CONFIDENCE_MODEL)) {
+    warnings.push("ai-confidence-model holds only whitespace, so it is treated as unset and the verifier stays disabled");
+  }
 
   if (!enabled) {
     // Disabled is the default: a transport configured without a model is a
@@ -799,6 +869,33 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
     warnings.push(
       "confidence scorer: the resolved endpoint and model are identical to the primary review lane — same-model scoring is less independent; point ai-confidence-base-url at a different backend for a genuinely independent second opinion",
     );
+  }
+
+  // #1465: the near-miss check for a case-mangled sibling model. Two names
+  // that differ only in letter case and go to the SAME endpoint are the
+  // shape of the refusal an operator actually hit (an HTTP 403 for the
+  // exact string sent): one provider's namespace holds one spelling of a
+  // name. Names on a different endpoint are left alone, because two
+  // providers may each name their own model as they like. Deterministic and
+  // advisory: one notice per sibling, never fatal, and the resolved model is
+  // never rewritten.
+  const siblings: Array<{ input: string; model: string; baseUrl: string }> = [
+    { input: primaryModelInput(env), model: primary.model, baseUrl: primary.baseUrl },
+    {
+      input: inputName("AI_SMART_MODEL"),
+      model: opaqueModelId(env.AI_SMART_MODEL),
+      baseUrl: trimmed(env, "AI_SMART_BASE_URL") || primary.baseUrl,
+    },
+    {
+      input: inputName("AI_FALLBACK_MODEL"),
+      model: opaqueModelId(env.AI_FALLBACK_MODEL),
+      baseUrl: trimmed(env, "AI_FALLBACK_BASE_URL") || primary.baseUrl,
+    },
+  ];
+  for (const sibling of siblings) {
+    if (sibling.baseUrl !== resolvedBaseUrl) continue;
+    if (!differsOnlyByCase(model, sibling.model)) continue;
+    warnings.push(confidenceModelCaseWarning(model, sibling.input, sibling.model));
   }
 
   const effort = effortFrom(env, "AI_CONFIDENCE_REASONING_EFFORT");
