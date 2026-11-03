@@ -21,12 +21,15 @@ import type { ReviewJob } from "../src/jobs/types.js";
 const T0 = 1_000_000;
 
 function makeJob(jobId: string, overrides: Partial<ReviewJob> = {}): ReviewJob {
+  // The literal is CHECKED against ReviewJob (no cast): a new required
+  // identity field that a fixture does not carry is a typecheck error,
+  // not a runtime drift the snapshot parser silently papers over (#1440).
   return Object.freeze({
     jobId,
-    kind: "review",
-    trigger: "webhook",
+    kind: "review" as const,
+    trigger: "webhook" as const,
     reason: "pull_request.synchronize",
-    platform: "github",
+    platform: "github" as const,
     installationId: "123",
     repoFullName: "octo-org/repo",
     prNumber: 1,
@@ -37,11 +40,12 @@ function makeJob(jobId: string, overrides: Partial<ReviewJob> = {}): ReviewJob {
     nonce: "",
     adoptionEpoch: "",
     eventReference: "",
+    forgeIntegration: "",
     fork: false,
     deadlineAtMs: 0,
     runId: "",
     ...overrides,
-  }) as ReviewJob;
+  });
 }
 
 function makeRecord(jobId: string, state: JobRecord["state"], updatedAtMs: number, prOverrides: Partial<ReviewJob> = {}): JobRecord {

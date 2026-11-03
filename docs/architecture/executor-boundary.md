@@ -65,16 +65,18 @@ raw path comes back empty. The parser also ends the authority at `?` and
 path.
 The controller refuses at STARTUP a configured endpoint that could never pass:
 every envelope for that platform would otherwise fail later with an
-opaque builder error. The mapping job-platform → integration must also be
-unambiguous: this composition carries no integration identity with the job,
-so a kind may appear at most once in `instance.forges`. Two same-kind
-integrations would silently stamp the first entry's API base into every
-envelope of that platform — possibly the installation that does not own the
-job — so the daemon refuses them at startup. The refusal judges the
-configuration, not the platform served today: a duplicated kind nobody
-composes yet is still an ambiguous mapping waiting for its first job of that
-platform. Supporting several integrations of one kind requires carrying a
-stable integration identity from intake to envelope first.
+opaque builder error. The mapping job → integration must also be
+unambiguous: the envelope's endpoint is resolved by the job's
+forge-integration identity (`forgeIntegration`, #1440), so a job naming
+an integration resolves to that installation's API base and never to the
+first entry of several. An identity-less job falls back to the platform
+kind only when exactly one integration of that kind exists; several
+same-kind integrations make that fallback ambiguous, and such a job is
+REFUSED at request build instead of being stamped with one of them. A
+daemon that serves one named installation binds that identity at
+startup, and the refusal then names the rule instead of the
+configuration. Supporting several installations of one kind requires
+carrying that stable integration identity from intake to envelope.
 
 The Python lane only *warns* about a path-embedded credential, because a
 path segment cannot be reliably told apart from a legitimate path part and

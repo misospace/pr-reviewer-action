@@ -186,10 +186,15 @@ Because job identity is `deriveGenerationId`'s field set alone — trigger
 (`source`) and reason (`kind`) are excluded — a webhook delivery and a
 reconciliation poll of the same head/config mint the **same** `jobId`, so
 exactly one job survives — provided the identity metadata agrees: the
-poller must supply the same `installationId` the webhook carried, and both
+poller must supply the same `installationId` the webhook carried, both
 observations must carry the PR `id` (a missing `id` on one side sends
 `prId` 0-vs-N and splits the generation; see
-[forge-events-and-review-jobs.md](forge-events-and-review-jobs.md)); a new
+[forge-events-and-review-jobs.md](forge-events-and-review-jobs.md)), and
+both must carry the same forge-integration identity (the daemon's
+reconcile context resolves the poll's identity PER REPOSITORY through the
+daemon's own intake resolution — bound name, config fingerprint and
+adoption epoch alike — so the poll mints the generation the intake
+mints), and a new
 head or a material config-fingerprint change re-keys.
 `shouldSchedule` remains the single scheduling policy: `follow_up` and
 terminal kinds never mint review generations through dispatch.

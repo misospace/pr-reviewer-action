@@ -678,3 +678,88 @@ test("skips that are not handoff refusals report no refusal entries", async () =
   assert.equal(report.jobs.length, 1);
   assert.deepEqual([...report.handoffRefusals], []);
 });
+
+test("a per-event resolver supplies the identity the poll mints with", async () => {
+  // The intake resolves its identity PER REPOSITORY (config fingerprint,
+  // adoption epoch, bound forge integration), so a poll that mints from
+  // one static options object cannot converge with it: the two would mint
+  // different generations of the same head. The per-event resolver is the
+  // seam that carries the intake's own answer.
+  const lister = listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } });
+
+  // (a) A resolver that returns options: the job carries them.
+  const resolved = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    resolveBuildOptions: () => ({
+      configFingerprint: "abcdef12",
+      adoptionEpoch: "3",
+      forgeIntegration: "gh-app",
+    }),
+  });
+  assert.equal(resolved.jobs.length, 1, "the resolver's options produced a job");
+  assert.equal(resolved.skipped, 0);
+  assert.equal(resolved.jobs[0]!.configFingerprint, "abcdef12");
+  assert.equal(resolved.jobs[0]!.adoptionEpoch, "3");
+  assert.equal(resolved.jobs[0]!.forgeIntegration, "gh-app");
+  // The resolver saw the DISCOVERED event, not a static stand-in, and it
+  // is called ONCE per REPOSITORY: the identity is per repository, and the
+  // resolution reads the control plane, so one read per open pull request
+  // would be waste.
+  const seen: string[] = [];
+  const twoPrs = listerFor({
+    "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD), makeBarePr(8, 800, HEAD)] },
+  });
+  const perRepo = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: twoPrs,
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    resolveBuildOptions: (discovered) => {
+      seen.push(discovered.repoFullName);
+      return { adoptionEpoch: "1" };
+    },
+  });
+  assert.deepEqual(seen, ["org/repo"], "the resolver is called once per repository");
+  assert.equal(perRepo.jobs.length, 2, "both pull requests of the repository were minted");
+  assert.equal(perRepo.jobs[0]!.adoptionEpoch, "1");
+  assert.equal(perRepo.jobs[1]!.adoptionEpoch, "1", "the repository's answer reached both jobs");
+
+  // (b) A resolver that returns null: the intake mints nothing for that
+  // repository, so the poll mints nothing either — no job, no
+  // reservation, and the entry is counted as skipped.
+  const ledger = new MemoryGenerationLedger();
+  const refused = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger,
+    resolveBuildOptions: () => null,
+  });
+  assert.equal(refused.jobs.length, 0, "the refused repository mints no job");
+  assert.equal(refused.discovered, 1);
+  assert.equal(refused.skipped, 1, "the refused entry is counted as skipped");
+  assert.deepEqual([...refused.handoffRefusals], [], "no handoff was attempted");
+  const pollEvent = reconciliationPollEvent("github", makeBarePr(7, 700, HEAD));
+  assert.notEqual(pollEvent, null);
+  assert.equal(
+    await ledger.has(buildReviewJob(pollEvent!, {})!.jobId),
+    false,
+    "no reservation survives a refused entry",
+  );
+
+  // (c) WITHOUT a resolver the static path is unchanged: the static
+  // options decide the identity, exactly as before.
+  const staticReport = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    buildOptions: { adoptionEpoch: "7" },
+  });
+  assert.equal(staticReport.jobs.length, 1);
+  assert.equal(staticReport.jobs[0]!.adoptionEpoch, "7");
+  assert.equal(staticReport.jobs[0]!.configFingerprint, "");
+});
