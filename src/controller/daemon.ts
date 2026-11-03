@@ -25,7 +25,10 @@
  *   the ledger reservation (the dispatch contract). The forge webhook
  *   ingress binds through `createOperatorHost` (which unconditionally
  *   wires the follow-up consumer); missed-webhook reconciliation runs on
- *   a bounded schedule through the injected reconcile pass. The intake is
+ *   a bounded schedule through the injected reconcile pass, which the
+ *   daemon hands its CONTEXT to (the ledger, the build options carrying
+ *   the bound identity, and the queue handoff) so the poll mints the SAME
+ *   generation the intake mints (#1443). The intake is
  *   PLATFORM-AWARE: one daemon instance serves ONE forge platform, and
  *   `webhook.platform` selects the intake it binds — the GitHub App intake
  *   (`X-Hub-Signature-256`, bound here) or the native Forgejo intake
@@ -159,6 +162,33 @@ export interface ExecutorBindings {
   readonly local?: (spec: import("../config/instance-config.js").LocalExecutorSpec, profileName: string) => Executor;
 }
 
+/** The context the daemon hands the operator's reconciliation pass (#1443).
+ *
+ * The poll mints its OWN generations (the daemon does not mint them for
+ * it), so the identity those generations carry is the operator's business
+ * — except for the daemon's bound forge-integration identity, which is
+ * INFRASTRUCTURE the daemon owns. The context is the single handoff that
+ * carries it: a poll that minted an identity-less job would mint a
+ * generation id that never converges with the daemon's own intake (the
+ * identity is part of the id), and would buy a SECOND review of the same
+ * head. */
+export interface ReconcileContext {
+  /** The daemon's own durable generation ledger — the poll's dedupe ledger. */
+  readonly ledger: GenerationLedger;
+  /** The build options the poll must mint its jobs with: the operator's
+   *  own `reconcile.buildOptions` merged with the daemon's bound
+   *  forge-integration identity when the daemon is bound. */
+  readonly buildOptions: BuildJobOptions;
+  /** The queue handoff for the polled generations: resolves TRUE when the
+   * daemon accepted the job, and REJECTS with the daemon's refusal (a
+   * `RangeError` naming the rule) when it refused it. The poll treats a
+   * rejecting handoff as a refusal, RECORDS the reason, and releases the
+   * generation's durable reservation — so a mis-wired poll is observable
+   * (the operator reads the reason) and re-discovered on the next pass,
+   * never a silently duplicated review. */
+  enqueueJob(job: ReviewJob): Promise<boolean>;
+}
+
 export interface ControllerDaemonOptions {
   /** The validated operator instance config (#727). The daemon refuses to
    * start without it — there is no partial policy. */
@@ -231,10 +261,19 @@ export interface ControllerDaemonOptions {
      * the daemon serves an intake (`webhook.platform`), the two MUST
      * agree — a mismatch fails construction (fail closed). */
     readonly platform?: "github" | "forgejo";
+    /** The operator's own per-deployment identity fields for the poll
+     * (e.g. `configFingerprint`, `adoptionEpoch`). They are the poll's
+     * half of the generation identity; the daemon's bound forge
+     * integration is merged ON TOP of them (the daemon's binding is the
+     * single source for that field). */
+    readonly buildOptions?: BuildJobOptions;
     /** One reconciliation pass (the operator binds
      * `reconcileRepositories` with this daemon's ledger and the
-     * `enqueue` handoff this daemon exposes). */
-    run(): Promise<void>;
+     * `enqueue` handoff this daemon exposes). The daemon hands the pass
+     * its context — the ledger, the build options (with the bound
+     * identity), and the queue handoff — so the poll mints the SAME
+     * generation the daemon's own intake mints. */
+    run(context: ReconcileContext): Promise<void>;
   };
   /** The forge webhook ingress binding. The intake is PLATFORM-AWARE: the
    * daemon serves exactly ONE forge platform per instance (its forge
@@ -883,6 +922,50 @@ function createDaemonJobExecutor(
   };
 }
 
+/** The daemon's forge-integration identity guard: the ONE rule every
+ * queue handoff runs BEFORE it mutates the queue.
+ *
+ * A bound daemon serves exactly ONE installation, and the bound identity
+ * is part of the generation id. A job that carries NO identity (the
+ * "no integration named" sentinel) is therefore not a job of this
+ * daemon's generation: it resolves its envelope endpoint by platform
+ * KIND — ambiguous when several integrations share the kind, and (with
+ * exactly one) a SECOND generation of the same head. Both break the
+ * webhook/poll convergence invariant, so the handoff refuses it.
+ *
+ * An UNBOUND daemon keeps the permissive behavior: the operator's own
+ * build options decide which identity (if any) a job carries, and the
+ * daemon does not police them.
+ *
+ * The refusal names the RULE and the bound integration — never a
+ * configured endpoint or a credential reference. */
+function assertJobForgeIdentity(job: ReviewJob, bound: string | undefined): void {
+  if (bound === undefined) return;
+  // A MISSING field means "no identity named" — the same convention the
+  // queue's rehydration uses — never the string "undefined".
+  const named = job.forgeIntegration ?? "";
+  if (named === "") {
+    throw new RangeError(
+      `job carries no forge integration identity but this daemon serves '${bound}': bind the identity into the poll's build options (the daemon's reconcile context carries it)`,
+    );
+  }
+  // A MALFORMED identity is a contract violation, and its value is
+  // never echoed: the refusal names the rule, not the value.
+  if (!FORGE_INTEGRATION_PATTERN.test(named)) {
+    throw new RangeError(
+      `job names a malformed forge integration: the identity must match ${FORGE_INTEGRATION_PATTERN.source}`,
+    );
+  }
+  // A job minted for a DIFFERENT integration must not be scheduled
+  // through this daemon: its envelope would resolve to the wrong
+  // installation's API base (fail closed, before any queue mutation).
+  if (named !== bound) {
+    throw new RangeError(
+      `job names forge integration '${named}' but this daemon serves '${bound}'`,
+    );
+  }
+}
+
 /** Start the controller daemon. Fails closed: every option is validated
  * before anything binds, migrations run before work is accepted, and
  * queue/state recovery happens before the first tick. */
@@ -1497,26 +1580,11 @@ export async function startControllerDaemon(
       return "scheduled";
     },
     async enqueue(job) {
-      // A job minted for a DIFFERENT integration must not be scheduled
-      // through this daemon: its envelope would resolve to the wrong
-      // installation's API base (fail closed, before any queue mutation).
-      // A MISSING field means "no identity named" — the same convention
-      // the queue's rehydration uses — never the string "undefined".
-      const named = job.forgeIntegration ?? "";
-      if (options.forgeIntegration !== undefined && named !== "") {
-        // A MALFORMED identity is a contract violation, and its value is
-        // never echoed: the refusal names the rule, not the value.
-        if (!FORGE_INTEGRATION_PATTERN.test(named)) {
-          throw new RangeError(
-            `job names a malformed forge integration: the identity must match ${FORGE_INTEGRATION_PATTERN.source}`,
-          );
-        }
-        if (named !== options.forgeIntegration) {
-          throw new RangeError(
-            `job names forge integration '${named}' but this daemon serves '${options.forgeIntegration}'`,
-          );
-        }
-      }
+      // The identity guard runs BEFORE any queue mutation: a job this
+      // daemon must not schedule (a foreign installation's, a malformed
+      // identity, or — on a bound daemon — no identity at all) never
+      // reaches the queue.
+      assertJobForgeIdentity(job, options.forgeIntegration);
       await enqueueGeneration(job);
     },
     async stop() {
@@ -1548,6 +1616,40 @@ export async function startControllerDaemon(
   };
   daemonRef = daemon;
 
+  // The reconciliation context (#1443): the daemon hands the operator's
+  // poll the ledger it must dedupe against, the build options it must
+  // mint its jobs with, and the queue handoff for what it mints.
+  //
+  // THE DAEMON'S BOUND IDENTITY IS THE SINGLE SOURCE. The operator's own
+  // `reconcile.buildOptions` supply the poll's half of the identity (the
+  // config fingerprint, the adoption epoch); the daemon's bound
+  // forge-integration identity is merged ON TOP of them, so a poll that
+  // forgot it cannot mint a generation the daemon's own intake would never
+  // mint (the identity is part of the generation id). An UNBOUND daemon
+  // passes the operator's build options through untouched: it does not
+  // police an unbound daemon's build options.
+  const reconcileContext: ReconcileContext = {
+    ledger,
+    buildOptions:
+      options.forgeIntegration !== undefined
+        ? {
+            ...options.reconcile?.buildOptions,
+            forgeIntegration: options.forgeIntegration,
+          }
+        : { ...options.reconcile?.buildOptions },
+    // The handoff REJECTS with the daemon's refusal: the poll records the
+    // reason (an actionable diagnostic — WHICH rule the job broke) and
+    // releases its reservation over it. A refusal that resolved FALSE
+    // instead would reach the operator as a bare counter with no reason
+    // attached, which is exactly the failure this handoff exists to make
+    // visible.
+    enqueueJob: async (job: ReviewJob): Promise<boolean> => {
+      assertJobForgeIdentity(job, options.forgeIntegration);
+      await enqueueGeneration(job);
+      return true;
+    },
+  };
+
   if (operatorHost !== undefined) {
     server = createServer(operatorHost.handler);
     await new Promise<void>((resolve, reject) => {
@@ -1566,7 +1668,7 @@ export async function startControllerDaemon(
     }
     reconcileTimer = setInterval(() => {
       if (stopped) return;
-      void options.reconcile!.run().catch(() => undefined);
+      void options.reconcile!.run(reconcileContext).catch(() => undefined);
     }, interval);
   }
 

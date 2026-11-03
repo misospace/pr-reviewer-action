@@ -139,6 +139,16 @@ a forge-specific CLI.
   daemon’s `enqueue`, which releases the durable reservation when the
   queue refuses the job — so a refused handoff is re-discovered on the
   next pass instead of staying suppressed.
+- **The poll mints the same generation the intake mints.** The daemon
+  hands the poll its `ReconcileContext`: the ledger it must dedupe
+  against, the build options it must mint with (the operator’s own
+  `reconcile.buildOptions` with the daemon’s bound forge-integration
+  identity merged on top), and the queue handoff. The bound identity is
+  part of the generation id, so a poll that minted its jobs without it
+  would mint a second generation of the same head and buy a second
+  review. A bound daemon therefore REFUSES an identity-less job at the
+  enqueue seam, before the queue is mutated, and the refusal’s reason
+  reaches the operator through the poll’s report.
 
 ## Testing posture
 

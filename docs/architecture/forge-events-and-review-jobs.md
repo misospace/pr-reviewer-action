@@ -226,12 +226,20 @@ operator's follow-up build options), so an operator that wants a
 command and a delivery on one head to collapse into ONE generation
 wires the same fields into both. An UNBOUND daemon stamps nothing; an
 operator serving several installations of one platform supplies the
-identity through its own `resolveEventIdentity` resolver. Jobs the
-OPERATOR mints outside the daemon — the reconciliation poll's own jobs
-— carry whatever identity the operator gives them; in a deployment with
-several same-kind integrations, an identity-less job is ambiguous and
-its request is REFUSED (never guessed), so such a deployment must stamp
-the identity on the jobs it mints.
+identity through its own `resolveEventIdentity` resolver.
+
+**The reconciliation poll's jobs.** The poll mints its OWN generations,
+so the daemon hands it the identity through the RECONCILE CONTEXT
+(`ReconcileContext`): the daemon's ledger, the build options to mint
+with (the operator's own `reconcile.buildOptions` with the bound name
+merged on top), and the queue handoff. A poll that binds those mints
+the SAME generation the intake mints, so a webhook delivery and a poll
+of one head collapse into one review. A poll that ignores the context
+and mints an identity-less job is REFUSED at the enqueue seam on a
+bound daemon, before the queue is mutated: the refusal names the rule
+and the bound identity, the poll's report records that reason, and the
+head is re-discovered on the next pass. An unbound daemon keeps the
+permissive behavior: the operator's own build options decide.
 
 **How the endpoint is resolved.** Identity first: a job naming an
 integration resolves to that integration's `forgeApiUrl` (a non-secret

@@ -14,7 +14,15 @@
  * `deriveGenerationId`'s field set alone — the trigger (`source`) and the
  * reason (event `kind`) are excluded from it. That is what makes the ledger
  * suppress the duplicate: a missed webhook discovers exactly one job, and a
- * discovered-but-already-known head discovers none.
+ * discovered-but-already-known head discovers none. The forge-integration
+ * identity is one of those fields, so the poll MUST mint its jobs with the
+ * SAME identity the intake mints them with (the daemon hands the poll its
+ * build options through the reconcile context, #1443).
+ *
+ * A REFUSED handoff is observable: the generation is reported in
+ * `refusals` (with the reason the handoff gave) and its durable
+ * reservation is released, so the head is re-discovered on the next pass
+ * instead of staying suppressed until the claim's horizon expires.
  *
  * Poll-scope binding (#1025): the adapter only schedules jobs for the
  * repository it polled. An entry whose normalized target repository
@@ -38,13 +46,22 @@ import type { GenerationLedger } from "./dispatch.js";
 
 /** One reconciliation pass. `discovered` counts EVERY array entry the lister
  * returned (including ones that fail normalization); `skipped` counts every
- * discovered entry that was not scheduled (unnormalizable, unbuildable, or
- * already known to the ledger). */
+ * discovered entry that was not scheduled (unnormalizable, unbuildable,
+ * already known to the ledger, or refused by the queue handoff). */
 export interface ReconcileReport {
   readonly jobs: readonly ReviewJob[];
   readonly discovered: number;
   readonly skipped: number;
   readonly failedRepositories: readonly string[];
+  /** Every generation whose queue handoff was REFUSED, with the reason the
+   * handoff gave (the thrown error's message; "" when the handoff refused
+   * without throwing). The refusal releases the durable reservation, so
+   * the head is re-discovered on the next pass — the report is how the
+   * operator SEES that a pass handed nothing over. */
+  readonly refusals: readonly {
+    readonly repository: string;
+    readonly reason: string;
+  }[];
 }
 
 export interface ReconcileOptions {
@@ -65,6 +82,10 @@ export interface ReconcileOptions {
    * dispatch contract — so the head is re-discovered on the next pass
    * instead of staying suppressed until the claim's horizon expires.
    *
+   * A handoff that RESOLVES FALSE and a handoff that REJECTS are both
+   * refusals; a rejection's message is the reason the report carries, so
+   * the operator sees WHY the pass handed nothing over.
+   *
    * Absent → the caller owns the handoff AND the release: a caller that
    * enqueues the returned jobs itself MUST release the reservation when
    * its handoff fails (`ledger.remove(job.jobId)`). */
@@ -84,6 +105,7 @@ export async function reconcileRepositories(
 ): Promise<ReconcileReport> {
   const jobs: ReviewJob[] = [];
   const failed: string[] = [];
+  const refusals: { readonly repository: string; readonly reason: string }[] = [];
   let discovered = 0;
   let skipped = 0;
   for (const rawRepo of options.repos) {
@@ -136,17 +158,22 @@ export async function reconcileRepositories(
         // The reservation is taken; the job is handed over. A REFUSED
         // handoff releases it (the dispatch contract), so the head is
         // re-discovered on the next pass instead of staying suppressed
-        // until the claim's horizon expires.
+        // until the claim's horizon expires. A refusal is RECORDED: the
+        // pass handed nothing over, and the operator has to be able to
+        // see which generation was refused and why.
         if (options.enqueueJob !== undefined) {
           let handedOver = false;
+          let reason = "";
           try {
             handedOver = await options.enqueueJob(job);
-          } catch {
+          } catch (err) {
             handedOver = false;
+            reason = err instanceof Error ? err.message : "";
           }
           if (!handedOver) {
             await Promise.resolve(options.ledger.remove(job.jobId)).catch(() => undefined);
             skipped += 1;
+            refusals.push(Object.freeze({ repository: job.repoFullName, reason }));
             continue;
           }
         }
@@ -161,5 +188,6 @@ export async function reconcileRepositories(
     discovered,
     skipped,
     failedRepositories: Object.freeze([...failed]),
+    refusals: Object.freeze([...refusals]),
   });
 }

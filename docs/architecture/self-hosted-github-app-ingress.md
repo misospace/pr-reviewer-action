@@ -90,7 +90,9 @@ have minted: `reconcileRepositories` polls through the same
 `listOpenPullRequests` lister this client exposes, and the caller
 declares the platform it polls — the platform is part of the generation
 identity, so a poll mislabelled as the other forge would never converge
-with its own webhook delivery.
+with its own webhook delivery. The daemon's reconcile context also carries
+the bound forge-integration identity into the poll's build options, so the
+poll mints the same generation the webhook delivery mints.
 
 ## Credential lifecycle
 

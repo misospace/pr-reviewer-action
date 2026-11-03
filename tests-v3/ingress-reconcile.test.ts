@@ -473,3 +473,81 @@ test("a refused queue handoff releases the durable reservation", async () => {
   });
   assert.equal(again.jobs.length, 1);
 });
+
+test("a refused queue handoff is REPORTED with its reason", async () => {
+  // A pass that handed nothing over must be OBSERVABLE: the operator sees
+  // which generation was refused and why, not only a `skipped` counter.
+  const lister = listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } });
+
+  // (a) a handoff that refuses without throwing: the reason is empty.
+  const refused = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    enqueueJob: () => false,
+  });
+  assert.equal(refused.jobs.length, 0);
+  assert.equal(refused.skipped, 1, "the refused generation is still counted as skipped");
+  assert.deepEqual(
+    refused.refusals.map((entry) => ({ ...entry })),
+    [{ repository: "org/repo", reason: "" }],
+  );
+
+  // (b) a handoff that THROWS: the error's message is the reason.
+  const thrown = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    enqueueJob: () => {
+      throw new Error("the daemon refused the identity-less job");
+    },
+  });
+  assert.equal(thrown.jobs.length, 0);
+  assert.equal(thrown.skipped, 1);
+  assert.deepEqual(
+    thrown.refusals.map((entry) => ({ ...entry })),
+    [
+      {
+        repository: "org/repo",
+        reason: "the daemon refused the identity-less job",
+      },
+    ],
+  );
+});
+
+test("a refused queue handoff releases the reservation so the head is re-discovered", async () => {
+  // The refusal is not a suppression: the durable reservation is released
+  // exactly as before, so the NEXT pass discovers the head again (and can
+  // hand it over once the handoff works).
+  const lister = listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } });
+  const ledger = new MemoryGenerationLedger();
+  const refused = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger,
+    enqueueJob: () => {
+      throw new Error("the queue refused the handoff");
+    },
+  });
+  assert.equal(refused.refusals.length, 1);
+  const pollEvent = reconciliationPollEvent("github", makeBarePr(7, 700, HEAD));
+  assert.notEqual(pollEvent, null);
+  const jobId = buildReviewJob(pollEvent!, {})!.jobId;
+  assert.equal(
+    await ledger.has(jobId),
+    false,
+    "no reservation survives a refused handoff",
+  );
+  const again = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger,
+    enqueueJob: () => true,
+  });
+  assert.equal(again.jobs.length, 1, "the next pass re-discovers the head");
+  assert.equal(again.refusals.length, 0);
+});
