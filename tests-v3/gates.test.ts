@@ -100,14 +100,22 @@ test("specialist deadline with stragglers: deadline branch terminated, sibling f
 
 test("parent cancellation mid-flight terminates both gates, join still resolves", async () => {
   const scope = createCancellationScope();
-  const pending = runConcurrentGates({
+  let launchStateReached = false;
+  const result = await runConcurrentGates({
     ci: sleepBranch(60),
     specialists: sleepBranch(60),
     scope,
     ambientEnv: ambientBase,
+    // Abort from the launch-state hook instead of a wall-clock delay: a fixed
+    // timer races the async pgrep preflight on slow machines, where the abort
+    // landed before the spawn and surfaced as GateLaunchError ("cancelled
+    // before launch") instead of a cancelled join.
+    onLaunched: () => {
+      launchStateReached = true;
+      scope.abort("SIGTERM");
+    },
   });
-  setTimeout(() => scope.abort("SIGTERM"), 150);
-  const result = await pending;
+  assert.equal(launchStateReached, true, "the abort must fire after both gates reached their launch state");
   assert.equal(result.ci.status, "cancelled");
   assert.equal(result.specialists.status, "cancelled");
   assert.equal(result.ci.ok, false);
