@@ -534,6 +534,13 @@ test("file store: a malformed nested job fails the load closed", () => {
       ["malformed forgeIntegration", { job: rawJob({ forgeIntegration: "not a token" }) }],
       ["forgeIntegration of 65 characters", { job: rawJob({ forgeIntegration: "f".repeat(65) }) }],
       ["non-string forgeIntegration", { job: rawJob({ forgeIntegration: 7 }) }],
+      // #252: the boundary token ITSELF — the same hostile shapes the
+      // builder's identical fence refuses: a newline (which would also
+      // collide two identities in the canonical id join), a control
+      // character, and a value shaped like an endpoint.
+      ["forgeIntegration with a newline", { job: rawJob({ forgeIntegration: "fj\n1" }) }],
+      ["forgeIntegration with a control character", { job: rawJob({ forgeIntegration: "fj\u00071" }) }],
+      ["forgeIntegration shaped like an endpoint", { job: rawJob({ forgeIntegration: "https://evil.example/api" }) }],
       ["non-empty eventReference on a review job", { job: rawJob({ eventReference: "17" }) }],
       [
         "follow_up without an eventReference",

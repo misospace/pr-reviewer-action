@@ -590,6 +590,87 @@ test("two same-kind integrations resolve by the job's forge-integration identity
   );
 });
 
+test("a bound forgeIntegration is stamped on the follow-up consumer's jobs too (#1440)", async (t) => {
+  // The daemon's intake mints jobs on TWO paths: a webhook delivery and a
+  // comment command (`/ai-review`) through the follow-up consumer the
+  // daemon composes. Both must carry the bound identity — a rereview
+  // command on a bound daemon reaches the SAME installation the daemon
+  // serves. An identity-less job would instead hit the ambiguity refusal
+  // (several same-kind integrations) and the command would never run.
+  const port = await freePort();
+  const minted: ReviewJob[] = [];
+  const h = await start({
+    options: {
+      queueStore: { load: () => emptyQueueSnapshot(), save: () => undefined },
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "gh-primary", kind: "github", endpoint: "https://ghe-a.example/api/v3", credential: "gh-a" },
+          { name: "gh-secondary", kind: "github", endpoint: "https://ghe-b.example/api/v3", credential: "gh-b" },
+        ],
+      } as InstanceConfig,
+      webhook: {
+        platform: "github",
+        port,
+        secret: GITHUB_WEBHOOK_SECRET,
+        followUp: {
+          adapter: {
+            ...followUpAdapter(),
+            // The comment author is a collaborator: the planner's
+            // authority gate must pass before a rereview is planned.
+            async readPermission() {
+              return { permission: "admin", roleName: "", subject: "absent" };
+            },
+            // The operator host carries no comment body, so the consumer
+            // reads it by canonical comment id.
+            async readComment() {
+              return "/ai-review";
+            },
+          },
+          botLogin: async () => "reviewer-bot",
+          clock: () => 1_000_000,
+          rereviewCommand: "/ai-review",
+          mentionHandles: ["reviewer-bot"],
+          answer: async () => "an answer",
+          enqueueRereviewJob: async (job) => {
+            minted.push(job);
+            return true;
+          },
+        },
+      },
+      forgeIntegration: "gh-primary",
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+
+  const body = JSON.stringify({
+    action: "created",
+    issue: { number: 7, pull_request: { url: "https://api.github.com/repos/owner/repo/pulls/7" } },
+    comment: { id: 555, user: { login: "alice" }, body: "/ai-review" },
+    repository: { full_name: "owner/repo" },
+    installation: { id: 1 },
+    sender: { login: "alice" },
+  });
+  const res = await fetch(`http://127.0.0.1:${port}/`, {
+    method: "POST",
+    headers: {
+      "x-github-event": "issue_comment",
+      "x-hub-signature-256": computeGitHubWebhookSignature(GITHUB_WEBHOOK_SECRET, body),
+    },
+    body,
+  });
+  assert.equal(res.status, 202);
+  await waitFor(() => minted.length === 1);
+  assert.equal(
+    minted[0]!.forgeIntegration,
+    "gh-primary",
+    "the follow-up consumer's job carries the bound integration identity",
+  );
+});
+
 test("an identity-less job refuses at build when several integrations share its kind (#1440)", async (t) => {
   // A job with NO integration identity resolves by platform kind only when
   // exactly one integration of that kind exists; with two same-kind
@@ -748,6 +829,64 @@ test("binding an unknown or kind-mismatched forgeIntegration refuses daemon star
       }),
     /forgeIntegration 'fj' must name exactly one instance forge integration/,
   );
+});
+
+test("binding a forgeIntegration that is not a valid identity refuses daemon startup (#1440)", async () => {
+  // The bound name is hashed into EVERY generation id, so a name the job
+  // builder would refuse must never be bound: the daemon would start,
+  // stamp an unusable identity on every job it mints, and silently mint
+  // NOTHING (the build fails closed) — a silent drop instead of a
+  // startup refusal. #252: the hostile value itself (a newline in the
+  // name), and the refusal must not echo it into the diagnostics.
+  await assert.rejects(
+    () => start({ options: { forgeIntegration: "fj\n1" } }),
+    /forgeIntegration must match/,
+  );
+  await assert.rejects(
+    () => start({ options: { forgeIntegration: "fj\u00071" } }),
+    /forgeIntegration must match/,
+  );
+});
+
+test("an ambiguous integration name refuses the request rather than taking the first (#1440)", async (t) => {
+  // The parsed instance config refuses duplicate integration names, but
+  // the daemon owns its own fail-closed check: two entries sharing a
+  // name make the identity AMBIGUOUS, and resolving it to whichever
+  // entry happens to come first would stamp one installation's API base
+  // into the other's envelope — a guess.
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+          { name: "fj", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+        ],
+      } as InstanceConfig,
+      queueStore: store,
+      maxAttempts: 1,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const job = buildReviewJob(
+    event({ platform: "forgejo", installationId: "9", repoFullName: "owner/forge-repo" }),
+    { forgeIntegration: "fj" },
+  );
+  assert.notEqual(job, null);
+  await h.daemon.enqueue(job!);
+  await waitFor(() => {
+    const record = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
+    return record !== undefined && record.state === "failed";
+  });
+  const record = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
+  assert.match(record!.failureReason ?? "", /share|without guessing/);
+  assert.equal(h.fake.started.length, 0, "the ambiguous identity never launched a worker");
 });
 
 test("a forge integration endpoint that could never pass envelope validation refuses daemon startup (#1433)", async () => {

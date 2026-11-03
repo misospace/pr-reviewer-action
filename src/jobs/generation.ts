@@ -168,8 +168,12 @@ const ADOPTION_EPOCH_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 /** A provided forge-integration identity (the instance-config forge
  * integration `name` the intake carried) must be exactly this: 1–64 chars
  * of `[A-Za-z0-9._-]`. Anything else (including a too-long run of valid
- * chars) is invalid. */
-const FORGE_INTEGRATION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+ * chars) is invalid.
+ *
+ * Exported so the daemon's startup screening (#1440) validates a bound
+ * integration name with the SAME rule the job builder applies: one
+ * definition of a valid identity, no drift between the two. */
+export const FORGE_INTEGRATION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
 /** Build the immutable job a canonical event spawns, or `null` when the
  * event produces no job. Returns a frozen object.

@@ -208,6 +208,44 @@ for the rest — including `follow_up`, which is not a VERDICT review (it
 becomes a `follow_up` job via `buildReviewJob` but is never a candidate
 for the review generation a verdict is published against).
 
+### Forge-integration identity wiring (#1440)
+
+The controller daemon (`src/controller/daemon.ts`) owns where the
+identity comes from and how the execution envelope's endpoint is
+resolved from it. The identity is OPERATOR infrastructure: the daemon's
+instance config, never repository config and never event content.
+
+**Where the identity is stamped.** A daemon bound to an integration
+(`ControllerDaemonOptions.forgeIntegration`) stamps that name on every
+job its intake mints: the webhook delivery path (`ingest`) AND the
+follow-up consumer it composes (a `/ai-review` comment command) — both
+stamp the SAME name, so a command and a webhook on the same head still
+mint ONE generation. An UNBOUND daemon stamps nothing; an operator
+serving several installations of one platform supplies the identity
+through its own `resolveEventIdentity` resolver. Jobs the OPERATOR
+mints outside the daemon — the reconciliation poll's own jobs — carry
+whatever identity the operator gives them; in a deployment with several
+same-kind integrations, an identity-less job is ambiguous and its
+request is REFUSED (never guessed), so such a deployment must stamp
+the identity on the jobs it mints.
+
+**How the endpoint is resolved.** Identity first: a job naming an
+integration resolves to that integration's `forgeApiUrl` (a non-secret
+coordinate, screened at startup by `forgeApiUrlProblem`). An
+identity-less job falls back to the platform kind ONLY when exactly one
+integration of that kind exists; zero keeps the GitHub default and more
+than one is ambiguous and refused. A named integration whose kind
+disagrees with the job's platform is refused, and so is an AMBIGUOUS
+name (several configured integrations sharing one name) — resolution
+never takes the first of several. Every refusal is a `RangeError` the
+scheduler turns into a failed outcome: the job never reaches a worker.
+
+**Startup screening.** The daemon refuses to start when the bound name
+names no integration or more than one, when the named integration's
+kind disagrees with the bound intake platform, or when the name is not
+a valid identity token (`[A-Za-z0-9._-]{1,64}` — the builder's own
+rule, so a bound name can never mint an unusable identity).
+
 ## Manual rereview nonce
 
 A manual forced rereview passes a `nonce` in `BuildJobOptions`. Because

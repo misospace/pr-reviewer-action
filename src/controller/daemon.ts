@@ -89,6 +89,7 @@ import {
 } from "../queue/index.js";
 import type { JobRecord } from "../queue/types.js";
 import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
+import { FORGE_INTEGRATION_PATTERN } from "../jobs/generation.js";
 import { dispatchCanonicalEvent, type GenerationLedger } from "../ingress/dispatch.js";
 import type { MirrorCache } from "../acquisition/index.js";
 import {
@@ -938,6 +939,19 @@ export async function startControllerDaemon(
   // stamps and the capability that serves the envelopes must be the same
   // installation (fail closed at construction, not at the first job).
   if (options.forgeIntegration !== undefined) {
+    // The bound name is an identity the job builder hashes into every
+    // generation id, so a name the builder would REFUSE must never be
+    // bound here: the daemon would start, stamp an unusable identity on
+    // every job it mints, and silently mint NOTHING (the build fails
+    // closed) — a silent drop instead of a startup refusal. The rule is
+    // the builder's own (`FORGE_INTEGRATION_PATTERN`), one definition.
+    // The rejected value is NOT echoed: a bound name is operator input,
+    // and a hostile one (control characters) must not reach a log line.
+    if (!FORGE_INTEGRATION_PATTERN.test(options.forgeIntegration)) {
+      throw new TypeError(
+        `ControllerDaemonOptions.forgeIntegration must match ${FORGE_INTEGRATION_PATTERN.source}`,
+      );
+    }
     const named = options.instance.forges.filter(
       (entry) => entry.name === options.forgeIntegration,
     );
@@ -1034,12 +1048,22 @@ export async function startControllerDaemon(
     // event content.
     resolveForgeApiUrl: async (job) => {
       if (job.forgeIntegration !== "") {
-        const named = options.instance.forges.find(
+        const named = options.instance.forges.filter(
           (entry) => entry.name === job.forgeIntegration,
         );
-        if (named === undefined) {
+        if (named.length === 0) {
           throw new RangeError(
             `job names unresolvable forge integration '${job.forgeIntegration}': no instance forge integration has that name`,
+          );
+        }
+        // An AMBIGUOUS name (several configured integrations share it)
+        // is unresolvable state, not a license to take the first: the
+        // parsed instance config refuses duplicate names, but the daemon
+        // must not depend on that — an unvalidated config would resolve
+        // to whichever entry happens to come first, i.e. guess.
+        if (named.length > 1) {
+          throw new RangeError(
+            `job names forge integration '${job.forgeIntegration}' which ${named.length} instance forge integrations share: the envelope endpoint cannot be resolved without guessing`,
           );
         }
         // A named integration whose kind does not match the job's platform
@@ -1047,12 +1071,12 @@ export async function startControllerDaemon(
         // record that never passed this daemon's enqueue guard): resolving
         // it would stamp the other installation's endpoint into the
         // envelope. Refuse the request — fail closed on uncertain state.
-        if (named.kind !== job.platform) {
+        if (named[0]!.kind !== job.platform) {
           throw new RangeError(
-            `job names forge integration '${job.forgeIntegration}' of kind '${named.kind}' but the job's platform is '${job.platform}': the identity does not match the job's platform`,
+            `job names forge integration '${job.forgeIntegration}' of kind '${named[0]!.kind}' but the job's platform is '${job.platform}': the identity does not match the job's platform`,
           );
         }
-        return named.endpoint;
+        return named[0]!.endpoint;
       }
       const sameKind = options.instance.forges.filter(
         (entry) => entry.kind === job.platform,
@@ -1393,6 +1417,22 @@ export async function startControllerDaemon(
       followUp: {
         ...options.webhook.followUp,
         ledger,
+        // The bound integration identity is stamped on EVERY job this
+        // daemon's intake mints — the follow-up consumer included: a
+        // rereview command on a bound daemon must reach the same
+        // installation the daemon serves, exactly like a webhook
+        // delivery. Both paths stamp the SAME identity, so a command
+        // and a webhook on the same head still mint ONE generation (the
+        // cross-trigger dedupe is unchanged). An unbound daemon stamps
+        // nothing: the operator's own build options decide.
+        ...(options.forgeIntegration !== undefined
+          ? {
+              buildOptions: {
+                ...options.webhook.followUp?.buildOptions,
+                forgeIntegration: options.forgeIntegration,
+              },
+            }
+          : {}),
       },
       dispatch: (event) => {
         const bound = daemonRef;
