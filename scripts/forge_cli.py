@@ -2,10 +2,10 @@
 """Thin command-line adapter over the repository's configured forge capability.
 
 Operational tooling (release convergence, the manual release, the harvest
-branch push) needs a small, fixed set of forge API reads and writes. This
-adapter is the single place those calls are expressed: it is a thin,
-stdlib-only wrapper over :mod:`pr_reviewer.forge`, so every forge request
-inherits the capability's guarantees unchanged:
+branch push, the dogfood re-review gate) needs a small, fixed set of forge
+API reads and writes. This adapter is the single place those calls are
+expressed: it is a thin, stdlib-only wrapper over :mod:`pr_reviewer.forge`,
+so every forge request inherits the capability's guarantees unchanged:
 
 - the base URL comes from ``GITHUB_API_URL`` and is validated (HTTPS for
   every non-loopback origin);
@@ -30,9 +30,14 @@ Exit codes, shared by every command:
 
 - ``0`` -- the command succeeded;
 - ``1`` -- the thing does not exist (no pull request for the commit or the
-  branch, no release for the tag, no such tag ref);
+  branch, no such pull request, no release for the tag, no such tag ref);
 - ``2`` -- the command failed: invalid input, an unusable response, or a
   forge that could not be reached / rejected the request.
+
+``pr-details`` is the read a comment-triggered re-review needs: it prints
+exactly three lines -- ``head_sha=<sha>``, ``head_repo_id=<id>`` and
+``is_draft=true|false`` -- so a caller can decide where to check out
+without ever seeing the raw response body.
 """
 
 from __future__ import annotations
@@ -155,6 +160,19 @@ def _require_list(payload: object) -> list:
     return payload
 
 
+def _reject_credential(client: ForgeClient, value: object) -> str:
+    """The value as text, refused when it carries the credential.
+
+    Split out of :func:`_print_value` so a command that prints several
+    values can refuse all of them before printing any: a hostile forge
+    cannot get half of a record into a log.
+    """
+    text = str(value)
+    if client.token and client.token in text:
+        raise CliError(ERR_UNUSABLE_PAYLOAD)
+    return text
+
+
 def _print_value(client: ForgeClient, value: object) -> None:
     """Print one forge-derived value only after proving it cannot carry the credential.
 
@@ -165,10 +183,7 @@ def _print_value(client: ForgeClient, value: object) -> None:
     value is therefore compared with the credential: a value that contains
     it fails closed instead of reaching the log.
     """
-    text = str(value)
-    if client.token and client.token in text:
-        raise CliError(ERR_UNUSABLE_PAYLOAD)
-    print(text)
+    print(_reject_credential(client, value))
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +298,63 @@ def cmd_pr_number_for_branch(client: ForgeClient, args: argparse.Namespace) -> i
     if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
         raise CliError(ERR_UNUSABLE_PAYLOAD)
     _print_value(client, number)
+    return EXIT_OK
+
+
+def cmd_pr_details(client: ForgeClient, args: argparse.Namespace) -> int:
+    """The head SHA, the head repository id and the draft flag of a pull request.
+
+    Prints exactly three lines, in this order:
+
+    - ``head_sha=<sha>``
+    - ``head_repo_id=<id>``
+    - ``is_draft=true|false``
+
+    A caller (the dogfood re-review gate) needs those three facts to route
+    the run -- the head SHA of a same-repository pull request, the head
+    repository id to tell a fork from the base repository, and the draft
+    flag to skip a draft before anything is checked out. Nothing else of
+    the response is printed: the payload is forge-supplied data, and a
+    hostile forge can put anything (a reflected credential) into it.
+
+    Every printed line goes through the credential gate, and all three
+    lines are checked before any of them is printed: a forge that reflects
+    the bearer token back fails the read closed instead of putting it --
+    or half of the record -- into a job log.
+    """
+    path = f"/repos/{args.repo}/pulls/{args.number}"
+    try:
+        payload = _require_dict(client.get(path))
+    except ForgeError as exc:
+        # A pull request that does not exist is "absent" (exit 1), the
+        # same shape the other read commands use.
+        if _is_not_found(exc):
+            return EXIT_ABSENT
+        raise
+    head = _require_dict(payload.get("head"))
+    sha = head.get("sha")
+    # Shape first (40- or 64-hex), then the credential gate: shape alone
+    # is not proof, because a configured token can itself be 40- or 64-hex
+    # and a hostile forge can return that exact token here.
+    if not isinstance(sha, str) or not SHA_RE.match(sha):
+        raise CliError(ERR_UNUSABLE_PAYLOAD)
+    head_repo = _require_dict(head.get("repo"))
+    repo_id = head_repo.get("id")
+    if not isinstance(repo_id, int) or isinstance(repo_id, bool) or repo_id <= 0:
+        raise CliError(ERR_UNUSABLE_PAYLOAD)
+    draft = payload.get("draft")
+    if not isinstance(draft, bool):
+        raise CliError(ERR_UNUSABLE_PAYLOAD)
+    # All three lines are checked against the credential before any of them
+    # is printed: a hostile forge that reflects the token back must not get
+    # half of the record into the log.
+    lines = [
+        _reject_credential(client, f"head_sha={sha}"),
+        _reject_credential(client, f"head_repo_id={repo_id}"),
+        _reject_credential(client, f"is_draft={'true' if draft else 'false'}"),
+    ]
+    for line in lines:
+        _print_value(client, line)
     return EXIT_OK
 
 
@@ -421,6 +493,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_repo(branch_pr)
     branch_pr.add_argument("--branch", required=True)
     branch_pr.set_defaults(handler=cmd_pr_number_for_branch)
+
+    pr_details = sub.add_parser(
+        "pr-details",
+        help="head sha, head repo id and draft flag of a pull request",
+    )
+    _add_repo(pr_details)
+    pr_details.add_argument("--number", required=True)
+    pr_details.set_defaults(handler=cmd_pr_details)
 
     pr_create = sub.add_parser("pr-create", help="open a pull request")
     _add_repo(pr_create)
