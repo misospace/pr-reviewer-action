@@ -250,7 +250,9 @@ against another installation, and it is why the value is handed over rather
 than re-derived from a private copy of the instance config. A bound daemon's
 name always wins over a `buildOptions.forgeIntegration` the operator put
 there; an unbound daemon keeps what the operator supplied, which is how a
-single-installation or per-repository deployment names its installation.
+single-installation or per-repository deployment names its installation —
+and, exactly like the intake's own resolver, that operator-supplied name is
+validated when the endpoint is resolved, not at startup.
 
 An identity-less job is a coordinate only while exactly one integration of
 its kind exists, so the daemon's `enqueue` handoff refuses one BEFORE any

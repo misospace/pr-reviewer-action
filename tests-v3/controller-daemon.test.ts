@@ -2267,10 +2267,14 @@ test("the daemon-composed poll converges with the webhook delivery into one gene
   // callback between the daemon and the mint, so a reconciled head and the
   // webhook delivery of that head cannot split into two generations.
   // ONE integration of the kind, on purpose: an identity-less poll job is
-  // then ACCEPTED by the platform-kind fallback, so if the daemon ever stops
-  // injecting its own name the poll mints a genuinely DIFFERENT generation
-  // and this test sees a second durable record — instead of the duplicate
-  // hiding behind the ambiguous-kind refusal.
+  // then a coordinate the platform-kind fallback ACCEPTS, so a dropped
+  // identity here cannot hide behind the ambiguous-kind refusal — it either
+  // converges on the webhook's generation or it buys a second durable
+  // record. Which of the two happens is pinned from both sides: this test
+  // fails the moment the identity stops reaching the mint site AND the
+  // bound-daemon `enqueue` refusal stops backing it up (both rails gone = a
+  // second record), while the enqueue-seam test above pins the refusal on
+  // its own and the stamping test below pins the injection on its own.
   const store = new InMemoryQueueStore();
   let pollCalls = 0;
   // The bare PR the lister returns describes the SAME pull request as the
@@ -2332,12 +2336,15 @@ test("the daemon-composed poll converges with the webhook delivery into one gene
   );
   await waitFor(() => store.load().records.length > 0);
   const webhookJobId = store.load().records[0]!.job.jobId;
+  // Count from the FLIP: passes that ran while the lister was silent prove
+  // nothing about this head, so a `pollCalls >= 3` that the startup passes
+  // already satisfied would let the assertions below run vacuously.
   prVisible = true;
-  await waitFor(() => pollCalls > 0);
-  // Several more passes see the same open head: the daemon's bound identity
+  const passesBeforeHead = pollCalls;
+  await waitFor(() => pollCalls >= passesBeforeHead + 2);
+  // Repeated passes see the same open head: the daemon's bound identity
   // makes every poll mint converge on the webhook's generation, so the
   // queue never grows a second record.
-  await waitFor(() => pollCalls >= 3);
   assert.equal(store.load().records.length, 1, "the poll never minted a second generation");
   assert.equal(store.load().records[0]!.job.jobId, webhookJobId);
   // The direct convergence proof: the job the pass mints (poll event + the
@@ -2481,6 +2488,16 @@ test("reconcile binds exactly one pass, and poll names the platform it mints wit
         startControllerDaemon({
           ...baseOptions,
           reconcile: { intervalMs: 1_000, platform: "forgejo", poll, run: async () => undefined },
+        }),
+      /exactly one of poll/,
+    );
+    // A schedule with NO pass would poll nothing while looking like it
+    // polls; and the timer would dereference an absent `run` on every tick.
+    await assert.rejects(
+      () =>
+        startControllerDaemon({
+          ...baseOptions,
+          reconcile: { intervalMs: 1_000, platform: "forgejo" },
         }),
       /exactly one of poll/,
     );

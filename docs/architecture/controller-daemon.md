@@ -149,7 +149,11 @@ a forge-specific CLI.
   into the pass’s build options BEFORE `buildReviewJob()` hashes the
   generation — there is no callback between the daemon and the mint site that
   could drop it. One source, so a reconciled head and the webhook delivery of
-  that head land on the same installation and in the same generation.
+  that head land on the same installation and in the same generation. An
+  UNBOUND daemon forwards the name its operator put in the pass’s build
+  options exactly as the intake forwards its resolver’s — startup screens
+  neither, and the resolution rules refuse an unresolvable or cross-kind
+  name at request build.
   `reconcile.run` (an operator’s own pass, the only shape before #1446) is
   handed the same `ReconcilePassIdentity` and must stamp it, because
   `enqueue` refuses a job that does not: ALWAYS on a daemon bound to a named
