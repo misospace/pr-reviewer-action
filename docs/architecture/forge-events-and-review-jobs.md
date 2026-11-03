@@ -219,14 +219,18 @@ instance config, never repository config and never event content.
 (`ControllerDaemonOptions.forgeIntegration`) stamps that name on every
 job its intake mints: the webhook delivery path (`ingest`) AND the
 follow-up consumer it composes (a `/ai-review` comment command) — both
-stamp the SAME name, so a command and a webhook on the same head still
-mint ONE generation. An UNBOUND daemon stamps nothing; an operator
-serving several installations of one platform supplies the identity
-through its own `resolveEventIdentity` resolver. Jobs the OPERATOR
-mints outside the daemon — the reconciliation poll's own jobs — carry
-whatever identity the operator gives them; in a deployment with several
-same-kind integrations, an identity-less job is ambiguous and its
-request is REFUSED (never guessed), so such a deployment must stamp
+stamp the SAME name, so the two paths never disagree about WHICH
+installation a job belongs to. The remaining identity fields still
+come from each path's own source (the intake resolver's, resp. the
+operator's follow-up build options), so an operator that wants a
+command and a delivery on one head to collapse into ONE generation
+wires the same fields into both. An UNBOUND daemon stamps nothing; an
+operator serving several installations of one platform supplies the
+identity through its own `resolveEventIdentity` resolver. Jobs the
+OPERATOR mints outside the daemon — the reconciliation poll's own jobs
+— carry whatever identity the operator gives them; in a deployment with
+several same-kind integrations, an identity-less job is ambiguous and
+its request is REFUSED (never guessed), so such a deployment must stamp
 the identity on the jobs it mints.
 
 **How the endpoint is resolved.** Identity first: a job naming an

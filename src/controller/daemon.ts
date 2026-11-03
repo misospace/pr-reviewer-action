@@ -947,6 +947,11 @@ export async function startControllerDaemon(
     // the builder's own (`FORGE_INTEGRATION_PATTERN`), one definition.
     // The rejected value is NOT echoed: a bound name is operator input,
     // and a hostile one (control characters) must not reach a log line.
+    if (options.forgeIntegration === "") {
+      throw new TypeError(
+        "ControllerDaemonOptions.forgeIntegration must name an instance forge integration (omit the option for a daemon that serves no installation)",
+      );
+    }
     if (!FORGE_INTEGRATION_PATTERN.test(options.forgeIntegration)) {
       throw new TypeError(
         `ControllerDaemonOptions.forgeIntegration must match ${FORGE_INTEGRATION_PATTERN.source}`,
@@ -1421,10 +1426,14 @@ export async function startControllerDaemon(
         // daemon's intake mints — the follow-up consumer included: a
         // rereview command on a bound daemon must reach the same
         // installation the daemon serves, exactly like a webhook
-        // delivery. Both paths stamp the SAME identity, so a command
-        // and a webhook on the same head still mint ONE generation (the
-        // cross-trigger dedupe is unchanged). An unbound daemon stamps
-        // nothing: the operator's own build options decide.
+        // delivery. Both paths stamp the SAME identity, so they never
+        // disagree about WHICH installation a job belongs to. The
+        // remaining identity fields still come from each path's own
+        // source (the intake resolver's, resp. the operator's follow-up
+        // build options), so an operator that wants a command and a
+        // delivery on one head to collapse into ONE generation wires the
+        // same fields into both. An unbound daemon stamps nothing: the
+        // operator's own build options decide.
         ...(options.forgeIntegration !== undefined
           ? {
               buildOptions: {
@@ -1488,14 +1497,22 @@ export async function startControllerDaemon(
       // A job minted for a DIFFERENT integration must not be scheduled
       // through this daemon: its envelope would resolve to the wrong
       // installation's API base (fail closed, before any queue mutation).
-      if (
-        options.forgeIntegration !== undefined &&
-        job.forgeIntegration !== "" &&
-        job.forgeIntegration !== options.forgeIntegration
-      ) {
-        throw new RangeError(
-          `job names forge integration '${job.forgeIntegration}' but this daemon serves '${options.forgeIntegration}'`,
-        );
+      // A MISSING field means "no identity named" — the same convention
+      // the queue's rehydration uses — never the string "undefined".
+      const named = job.forgeIntegration ?? "";
+      if (options.forgeIntegration !== undefined && named !== "") {
+        // A MALFORMED identity is a contract violation, and its value is
+        // never echoed: the refusal names the rule, not the value.
+        if (!FORGE_INTEGRATION_PATTERN.test(named)) {
+          throw new RangeError(
+            `job names a malformed forge integration: the identity must match ${FORGE_INTEGRATION_PATTERN.source}`,
+          );
+        }
+        if (named !== options.forgeIntegration) {
+          throw new RangeError(
+            `job names forge integration '${named}' but this daemon serves '${options.forgeIntegration}'`,
+          );
+        }
       }
       await enqueueGeneration(job);
     },

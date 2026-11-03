@@ -169,7 +169,7 @@ test("a newline/CR in any identity value yields the empty id (newline-injection 
     "platform=github\ninstallationId=42\nrepoFullName=owner/repo\nprNumber=7\nprId=4242\n" +
     `headSha=${headSha}\n` +
     `baseSha=${baseSha}\n` +
-    "configFingerprint=\nkind=review\nnonce=\nadoptionEpoch=\neventReference=\n";
+    "configFingerprint=\nkind=review\nnonce=\nadoptionEpoch=\neventReference=\nforgeIntegration=\n";
   assert.equal(serialize("x\nbaseSha=b", ""), serialize("x", "b\nbaseSha="));
   // With the guard, neither mints an id:
   assert.equal(deriveGenerationId({ ...base, headSha: "x\nbaseSha=b", baseSha: "" }), "");
@@ -182,6 +182,10 @@ test("a newline/CR in any identity value yields the empty id (newline-injection 
   assert.equal(deriveGenerationId({ ...base, eventReference: "1\n2" }), "");
   // ...and one more CR case:
   assert.equal(deriveGenerationId({ ...base, eventReference: "1\r2" }), "");
+  // ...and the forge-integration identity (#1440) is guarded the same
+  // way: a newline in it would collide two identities in the join.
+  assert.equal(deriveGenerationId({ ...base, forgeIntegration: "a\nb" }), "");
+  assert.equal(deriveGenerationId({ ...base, forgeIntegration: "a\rb" }), "");
   // ...and buildReviewJob refuses to build a job for them:
   assert.equal(buildReviewJob(makeEvent({ headSha: "x\nbaseSha=b", baseSha: "" })), null);
   assert.equal(buildReviewJob(makeEvent({ headSha: "x", baseSha: "b\nbaseSha=" })), null);

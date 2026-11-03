@@ -588,6 +588,18 @@ test("two same-kind integrations resolve by the job's forge-integration identity
     () => h.daemon.enqueue(foreign!),
     /names forge integration 'fj-primary' but this daemon serves 'fj-secondary'/,
   );
+  // #252: a MALFORMED identity is refused by the rule, and the refusal
+  // never echoes the hostile value into the diagnostics. A job carrying
+  // one can only be hand-crafted (the builder and the queue's
+  // rehydration both refuse it), so this is the last fence.
+  const malformed = { ...foreign!, forgeIntegration: "fj\n1" } as ReviewJob;
+  const refusal = await h.daemon.enqueue(malformed).then(
+    () => null,
+    (reason: unknown) => reason,
+  );
+  assert.ok(refusal instanceof RangeError);
+  assert.match(refusal.message, /malformed forge integration/);
+  assert.ok(!refusal.message.includes("fj\n1"), "the refusal does not echo the hostile identity");
 });
 
 test("a bound forgeIntegration is stamped on the follow-up consumer's jobs too (#1440)", async (t) => {
@@ -838,14 +850,26 @@ test("binding a forgeIntegration that is not a valid identity refuses daemon sta
   // NOTHING (the build fails closed) — a silent drop instead of a
   // startup refusal. #252: the hostile value itself (a newline in the
   // name), and the refusal must not echo it into the diagnostics.
-  await assert.rejects(
-    () => start({ options: { forgeIntegration: "fj\n1" } }),
-    /forgeIntegration must match/,
+  for (const hostile of ["fj\n1", "fj\u00071", "fj 1"]) {
+    const err = await start({ options: { forgeIntegration: hostile } }).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    assert.ok(err instanceof TypeError, "the refusal is a startup TypeError");
+    assert.match(err.message, /forgeIntegration must match/);
+    assert.ok(
+      !err.message.includes(hostile),
+      "the refusal never echoes the rejected name into the diagnostics",
+    );
+  }
+  // An explicitly EMPTY name names no integration: it is a refusal too,
+  // with a message that says what to do instead.
+  const empty = await start({ options: { forgeIntegration: "" } }).then(
+    () => null,
+    (reason: unknown) => reason,
   );
-  await assert.rejects(
-    () => start({ options: { forgeIntegration: "fj\u00071" } }),
-    /forgeIntegration must match/,
-  );
+  assert.ok(empty instanceof TypeError);
+  assert.match(empty.message, /must name an instance forge integration/);
 });
 
 test("an ambiguous integration name refuses the request rather than taking the first (#1440)", async (t) => {
