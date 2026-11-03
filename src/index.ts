@@ -9,6 +9,8 @@ import { runStripSourceTextFixture } from "./context/linked-sources-fixture.js";
 import { CI_GATE_SUBMODE, SPECIALIST_GATE_SUBMODE, ciGateMain, exitAfterFlush, specialistsGateMain } from "./gates/workloads.js";
 import { runReview, RunReviewError } from "./run/index.js";
 import { engineMain } from "./engine/cli.js";
+import { workerMain } from "./executor/worker-main.js";
+import { controllerMain } from "./controller/main.js";
 import { publishMain } from "./run/entrypoints.js";
 import { actionMain } from "./run/action.js";
 
@@ -84,6 +86,32 @@ if (require.main === module) {
       .then((code) => exitAfterFlush(code))
       .catch((error: unknown) => {
         process.stderr.write(`v3 engine error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        exitAfterFlush(1);
+      });
+  } else if (firstArg === "worker") {
+    // The #733 worker entrypoint (the image the executor's envelope
+    // protocol launches): runs ONE review execution from the request
+    // envelope — the FINAL argv element — and writes the structured
+    // result file the executor's contract consumes. Operator args may
+    // precede the envelope path; the last element is always the envelope.
+    assertSupportedNode(process.versions.node);
+    workerMain(argv.slice(1), process.env)
+      .then((code) => exitAfterFlush(code))
+      .catch((error: unknown) => {
+        process.stderr.write(`v3 worker error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        exitAfterFlush(1);
+      });
+  } else if (firstArg === "controller") {
+    // The #738 self-hosted controller entrypoint: composes the #1348
+    // daemon from the operator's environment (instance config, PostgreSQL
+    // control plane, forge capability, executor bindings, ingress) and
+    // runs it until SIGTERM/SIGINT. Exit 2 = configuration refusal,
+    // 1 = composition/runtime failure, 0 = clean stop.
+    assertSupportedNode(process.versions.node);
+    controllerMain(argv.slice(1), process.env)
+      .then((code) => exitAfterFlush(code))
+      .catch((error: unknown) => {
+        process.stderr.write(`v3 controller error: ${error instanceof Error ? error.message : "unknown error"}\n`);
         exitAfterFlush(1);
       });
   } else if (firstArg === CI_GATE_SUBMODE || firstArg === SPECIALIST_GATE_SUBMODE) {

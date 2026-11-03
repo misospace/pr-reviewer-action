@@ -101,6 +101,22 @@ export interface MetadataOptions {
    * "unavailable"), only when the model emitted a `dependency_coverage`
    * answer; omitted otherwise so pre-#1337 marker bytes are preserved. */
   dependency_coverage?: string | null;
+  /** #1455: the verifier's action-owned machine-token cause (e.g. "timeout",
+   * "http_429"), only for an unscored run whose cause matches the
+   * conservative token grammar; omitted otherwise. */
+  confidence_cause?: string | null;
+  /** #1455: the measured wall-clock duration (ms) of the verifier's provider
+   * attempt; omitted when no attempt was made. */
+  confidence_latency_ms?: number | null;
+  /** #1455: the prompt tokens the verifier's call used; omitted when the
+   * provider reported none. */
+  confidence_prompt_tokens?: number | null;
+  /** #1455: the completion tokens the verifier's call used; omitted when the
+   * provider reported none. */
+  confidence_completion_tokens?: number | null;
+  /** #1455: the total tokens the verifier's call used; omitted when the
+   * provider reported none. */
+  confidence_total_tokens?: number | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -192,6 +208,30 @@ data.confidence_score = options.confidence_score;
 // to the pre-#1337 marker, and older parsers ignore keys they do not know.
 if (options.dependency_coverage !== null && options.dependency_coverage !== undefined && options.dependency_coverage !== "") {
 data.dependency_coverage = options.dependency_coverage;
+}
+// #1455 additive keys: appended last, same discipline as every key above —
+// a run whose verifier was disabled, or that refused before the wire, or
+// that saw no provider usage, serializes byte-identical to the pre-#1455
+// marker, and older parsers ignore keys they do not know. Every value is a
+// scalar, so the marker stays a flat wire format.
+if (options.confidence_cause !== null && options.confidence_cause !== undefined && options.confidence_cause !== "") {
+data.confidence_cause = options.confidence_cause;
+}
+if (options.confidence_latency_ms !== null && options.confidence_latency_ms !== undefined
+  && Number.isInteger(options.confidence_latency_ms) && options.confidence_latency_ms >= 0) {
+data.confidence_latency_ms = options.confidence_latency_ms;
+}
+if (options.confidence_prompt_tokens !== null && options.confidence_prompt_tokens !== undefined
+  && Number.isInteger(options.confidence_prompt_tokens) && options.confidence_prompt_tokens >= 0) {
+data.confidence_prompt_tokens = options.confidence_prompt_tokens;
+}
+if (options.confidence_completion_tokens !== null && options.confidence_completion_tokens !== undefined
+  && Number.isInteger(options.confidence_completion_tokens) && options.confidence_completion_tokens >= 0) {
+data.confidence_completion_tokens = options.confidence_completion_tokens;
+}
+if (options.confidence_total_tokens !== null && options.confidence_total_tokens !== undefined
+  && Number.isInteger(options.confidence_total_tokens) && options.confidence_total_tokens >= 0) {
+data.confidence_total_tokens = options.confidence_total_tokens;
 }
 return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }

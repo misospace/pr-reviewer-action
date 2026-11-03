@@ -14,7 +14,11 @@
  * `deriveGenerationId`'s field set alone — the trigger (`source`) and the
  * reason (event `kind`) are excluded from it. That is what makes the ledger
  * suppress the duplicate: a missed webhook discovers exactly one job, and a
- * discovered-but-already-known head discovers none.
+ * discovered-but-already-known head discovers none. The forge-integration
+ * identity is one of those fields, so the poll MUST mint its jobs with the
+ * SAME identity the intake mints them with. The daemon supplies a PER-EVENT
+ * identity resolver through the reconciliation context (#1443/#1446), covering
+ * the per-repository config fingerprint, adoption epoch, and bound integration.
  *
  * Poll-scope binding (#1025): the adapter only schedules jobs for the
  * repository it polled. An entry whose normalized target repository
@@ -34,13 +38,15 @@ import { DIAGNOSTIC_MAX_CHARS, maskDiagnostic } from "../context/redact.js";
 import { reconciliationPollEvent, normalizeRepoFullName } from "../events/normalize.js";
 import { buildReviewJob } from "../jobs/generation.js";
 import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
+import type { CanonicalForgeEvent } from "../events/types.js";
 import type { ReadResult } from "./api-client.js";
 import type { GenerationLedger } from "./dispatch.js";
 
 /** One reconciliation pass. `discovered` counts EVERY array entry the lister
  * returned (including ones that fail normalization); `skipped` counts every
  * discovered entry that was not scheduled (unnormalizable, unbuildable,
- * already known to the ledger, or refused by the queue handoff). */
+ * already known to the ledger, refused by the identity resolver, or refused
+ * by the queue handoff). */
 export interface ReconcileReport {
   readonly jobs: readonly ReviewJob[];
   readonly discovered: number;
@@ -112,7 +118,29 @@ export interface ReconcileOptions {
   readonly listOpenPullRequests: (repo: string) => Promise<ReadResult<unknown[]>>;
   readonly repos: readonly string[];
   readonly ledger: GenerationLedger;
+  /** The build options for the jobs this pass mints, when the caller
+   *  resolves them ONCE for the whole pass. A per-event resolver (below)
+   *  WINS over these: the intake resolves its identity per repository, so
+   *  a static object cannot mirror it — the two would mint different
+   *  generations of the same head. Use this only when the caller has no
+   *  per-repository identity to resolve. */
   readonly buildOptions?: BuildJobOptions | undefined;
+  /** The build options for the jobs this pass mints, resolved PER
+   *  REPOSITORY. The intake resolves its identity per repository (the
+   *  config fingerprint and the adoption epoch), so a poll that uses one
+   *  static object cannot converge with it: the two would mint different
+   *  generations of the same head. The pass calls the resolver ONCE per
+   *  repository — with the first discovered event of that repository — and
+   *  reuses that answer for the repository's other entries, because the
+   *  identity is per repository. `null` means the intake mints nothing for
+   *  that repository, so the poll mints nothing either (the entries are
+   *  skipped, with no job and no reservation).
+   *
+   *  When it is present, it REPLACES `buildOptions`: a caller that passes
+   *  both gets the static options dropped. */
+  readonly resolveBuildOptions?:
+    | ((event: CanonicalForgeEvent) => BuildJobOptions | null | Promise<BuildJobOptions | null>)
+    | undefined;
   readonly installationId?: string | undefined;
   /** The queue handoff for the discovered generations (the same seam the
    * follow-up host uses). When provided, each minted job is handed over
@@ -158,6 +186,10 @@ export async function reconcileRepositories(
         failed.push(rawRepo);
         continue;
       }
+      // The resolved identity for THIS repository: `undefined` until the
+      // first entry resolves it, `null` when the intake mints nothing
+      // for the repository (every entry of it is skipped).
+      let resolvedForRepo: BuildJobOptions | null | undefined;
       for (const entry of listed.data) {
         discovered += 1;
         const event = reconciliationPollEvent(
@@ -180,7 +212,31 @@ export async function reconcileRepositories(
           skipped += 1;
           continue;
         }
-        const job = buildReviewJob(event, options.buildOptions ?? {});
+        // The identity the job is minted with. A PER-REPOSITORY resolver
+        // wins over the static options: the intake resolves its identity
+        // PER REPOSITORY (config fingerprint, adoption epoch, bound forge
+        // integration), so a static object cannot mirror it — the two
+        // would mint different generations of the same head.
+        //
+        // The resolver is called ONCE per repository and its answer is
+        // reused for the repository's other entries: the identity is per
+        // repository, and the resolution reads the control plane, so one
+        // read per open pull request would be waste.
+        if (resolvedForRepo === undefined) {
+          resolvedForRepo =
+            options.resolveBuildOptions !== undefined
+              ? await options.resolveBuildOptions(event)
+              : options.buildOptions ?? {};
+        }
+        const buildOptions = resolvedForRepo;
+        if (buildOptions === null) {
+          // The intake mints NOTHING for this repository (the adoption
+          // policy refuses it), so the poll must mint nothing either: no
+          // job, no reservation, no worker.
+          skipped += 1;
+          continue;
+        }
+        const job = buildReviewJob(event, buildOptions);
         if (job === null) {
           skipped += 1;
           continue;

@@ -1858,3 +1858,126 @@ test("#1368: a prompt budget below the smallest real request is raised with a wa
     await server.close();
   }
 });
+
+// ── #1455: the verifier's telemetry leaves the run directory ─────────────
+test("#1455: the run artifact carries the measured latency and the provider usage", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] })));
+  }));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+    });
+    const artifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    // The artifact version stays 2 — the new keys are additive, not a
+    // semantic migration.
+    assert.equal(artifact.version, 2);
+    assert.equal(artifact.rubric, CONFIDENCE_RUBRIC_VERSION);
+    // The measured latency of the one wire attempt.
+    assert.equal(typeof artifact.latency_ms, "number");
+    assert.ok((artifact.latency_ms as number) >= 0, "the measured latency must be a non-negative duration");
+    // The provider's own accounting, in the same wire shape the marker uses.
+    assert.deepEqual(artifact.usage, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1455: a failed call measures its latency but reports no usage", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.statusCode = 429;
+    res.end("rate limited");
+  }));
+  try {
+    const run = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+    });
+    const artifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(artifact.cause, "http_429");
+    assert.equal(typeof artifact.latency_ms, "number");
+    assert.ok(!(artifact.usage !== undefined), "a failed call reports no usage");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1455: a run that never called the verifier leaves the artifact free of the telemetry", async () => {
+  // The review model itself fails, so the run ends `incomplete_review` and
+  // the scorer is never called: there is no call whose latency or cost the
+  // run could report.
+  const failing = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: { message: "no verdict here" } }));
+  });
+  try {
+    const run = await runConfidenceRun(failing, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": failing.url,
+    });
+    const artifact = JSON.parse(readFileSync(join(run.runDir, "confidence-score.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(artifact.cause, "incomplete_review");
+    assert.ok(!("latency_ms" in artifact), "a run that never called the verifier measured no latency");
+    assert.ok(!("usage" in artifact), "a run that never called the verifier reported no usage");
+  } finally {
+    await failing.close();
+  }
+});
+
+test("#1455: the run marker carries the verifier's telemetry, and a scored run carries no cause", async () => {
+  const server = await startMockServer(routedHandler((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(chatBody(SCORER_MODEL, JSON.stringify({ score: 4, risk: "low", reason: "fine", concerns: [] })));
+  }));
+  try {
+    const scored = await runConfidenceRun(server, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": server.url,
+    });
+    // A scored run has no cause to explain — the score IS the outcome.
+    assert.match(scored.result.marker, /"confidence_status":"scored"/);
+    assert.doesNotMatch(scored.result.marker, /confidence_cause/);
+    assert.match(scored.result.marker, /"confidence_latency_ms":\d+/);
+    assert.match(scored.result.marker, /"confidence_prompt_tokens":10/);
+    assert.match(scored.result.marker, /"confidence_completion_tokens":5/);
+    assert.match(scored.result.marker, /"confidence_total_tokens":15/);
+  } finally {
+    await server.close();
+  }
+
+  const failing = await startMockServer(routedHandler((_req, _body, res) => {
+    res.statusCode = 429;
+    res.end("rate limited");
+  }));
+  try {
+    const unscored = await runConfidenceRun(failing, {
+      "ai-confidence-model": SCORER_MODEL,
+      "ai-confidence-base-url": failing.url,
+    });
+    // The unscored run publishes the action-owned machine token, so a later
+    // collector can tell a rate limit from a timeout.
+    assert.match(unscored.result.marker, /"confidence_status":"unscored"/);
+    assert.match(unscored.result.marker, /"confidence_cause":"http_429"/);
+    assert.match(unscored.result.marker, /"confidence_latency_ms":\d+/);
+    assert.doesNotMatch(unscored.result.marker, /confidence_prompt_tokens/);
+  } finally {
+    await failing.close();
+  }
+});
+
+test("#1455: a disabled run's marker carries none of the telemetry keys", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  try {
+    const off = await runConfidenceRun(server, {});
+    // Byte-identical to the pre-#1455 marker: the three keys are absent
+    // altogether, not present and empty.
+    assert.doesNotMatch(off.result.marker, /confidence_cause|confidence_latency_ms|confidence_prompt_tokens/);
+  } finally {
+    await server.close();
+  }
+});

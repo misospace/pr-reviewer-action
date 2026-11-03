@@ -46,6 +46,7 @@ function makeJob(jobId: string, overrides: Partial<ReviewJob> = {}): ReviewJob {
     nonce: "",
     adoptionEpoch: "",
     eventReference: "",
+    forgeIntegration: "",
     fork: false,
     deadlineAtMs: 5_000,
     runId: "",

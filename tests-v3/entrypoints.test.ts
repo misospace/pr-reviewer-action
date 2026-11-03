@@ -8,6 +8,7 @@ import { TangledNotImplementedError } from "../src/platform/tangled.js";
 import { buildAdapter, buildPublishApi, publishInputFromEnv, publishMain, readEvent } from "../src/run/entrypoints.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
+import { buildRunMetadataMarker } from "../src/metadata/markers.js";
 import { parseInlineFindingsMax } from "../src/publish/inline-findings.js";
 import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
@@ -382,6 +383,130 @@ test("#873: a missing, empty, or structurally unrecognizable review-coverage.jso
     // Missing the one field this whole decision hinges on.
     writeFileSync(join(dir, "review-coverage.json"), JSON.stringify({ version: 1 }));
     assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").coverageUnknown, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1455: the standalone `publish` CLI must publish the verifier's telemetry
+// too. The values ride the run dir's own `confidence-score.json` artifact,
+// so both publish paths publish ONE record.
+// ---------------------------------------------------------------------------
+
+/** Writes the verifier artifact the review stage produces. */
+function writeConfidenceArtifact(dir: string, overrides: Partial<{
+  version: number;
+  status: string;
+  cause: string;
+  latency_ms: number;
+  usage: Record<string, number>;
+}> = {}): void {
+  const artifact = {
+    version: 2,
+    rubric: "merge-safety-v1",
+    status: "unscored",
+    score: null,
+    risk: "unknown",
+    reason: "",
+    concerns: [],
+    model: "scorer-model",
+    cause: "http_429",
+    caps: [],
+    parser_notes: [],
+    latency_ms: 250,
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    ...overrides,
+  };
+  writeFileSync(join(dir, "confidence-score.json"), JSON.stringify(artifact));
+}
+
+test("#1455: the standalone publish path reads the verifier's telemetry from the run dir artifact", () => {
+  withRunDir((dir) => {
+    writeConfidenceArtifact(dir);
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(input.confidenceTelemetry, {
+      status: "unscored",
+      cause: "http_429",
+      latencyMs: 250,
+      usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+    });
+  });
+});
+
+test("#1455: the standalone publish path publishes the telemetry even when no confidence status reached the environment", () => {
+  // The telemetry carries the status it was measured under, so the marker
+  // does not depend on an ambient CONFIDENCE_STATUS that may be absent or
+  // stale: the standalone CLI publishes what the composite action publishes
+  // for the same run.
+  withRunDir((dir) => {
+    writeConfidenceArtifact(dir);
+    for (const env of [
+      { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" },
+      { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment", CONFIDENCE_STATUS: "unscored" },
+      // A stale status that contradicts the record: the marker must not
+      // carry a cause beside a "scored" claim.
+      { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment", CONFIDENCE_STATUS: "scored" },
+    ]) {
+      const input = publishInputFromEnv(env as NodeJS.ProcessEnv, "github");
+      // The publish seam builds the marker from the confidence block and the
+      // telemetry exactly as the composite path does.
+      const marker = buildRunMetadataMarker({
+        headSha: "a".repeat(40),
+        baseSha: "b".repeat(40),
+        reviewResult: "clean",
+        ...(input.confidence && input.confidence.status !== ""
+          ? { confidenceStatus: input.confidence.status === "scored" || input.confidence.status === "unscored" ? input.confidence.status : "" }
+          : {}),
+        ...(input.confidenceTelemetry !== undefined ? { confidenceTelemetry: input.confidenceTelemetry } : {}),
+      });
+      assert.match(marker, /"confidence_latency_ms":250/, `marker: ${marker}`);
+      assert.match(marker, /"confidence_prompt_tokens":10/, `marker: ${marker}`);
+      assert.match(marker, /"confidence_total_tokens":15/, `marker: ${marker}`);
+      if (env.CONFIDENCE_STATUS === "scored") {
+        assert.doesNotMatch(marker, /confidence_cause/, "a scored marker carries no cause");
+      } else {
+        assert.match(marker, /"confidence_cause":"http_429"/, `marker: ${marker}`);
+      }
+    }
+  });
+});
+
+test("#1455: a missing, unreadable, or version-mismatched confidence artifact publishes no telemetry", () => {
+  withRunDir((dir) => {
+    // No artifact at all.
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").confidenceTelemetry, undefined);
+  });
+  withRunDir((dir) => {
+    writeFileSync(join(dir, "confidence-score.json"), "not json");
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").confidenceTelemetry, undefined);
+  });
+  withRunDir((dir) => {
+    // A version-1 artifact is a pre-#1369 prose-quality confidence grade:
+    // its semantics are not comparable, so it is trusted for nothing.
+    writeConfidenceArtifact(dir, { version: 1 });
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").confidenceTelemetry, undefined);
+  });
+  withRunDir((dir) => {
+    // A run whose verifier measured no latency and no usage still carries
+    // its unscored cause — that is the fact the collector needs most.
+    writeConfidenceArtifact(dir, { latency_ms: undefined as unknown as number, usage: undefined as unknown as Record<string, number> });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.confidenceTelemetry?.status, "unscored");
+    assert.equal(input.confidenceTelemetry?.cause, "http_429");
+    assert.equal(input.confidenceTelemetry?.latencyMs, null);
+    assert.equal(input.confidenceTelemetry?.usage, null);
+  });
+  withRunDir((dir) => {
+    // A record the verifier never ran for publishes nothing.
+    writeConfidenceArtifact(dir, { status: "disabled" });
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").confidenceTelemetry, undefined);
+  });
+});
+
+test("#1455: a cause that is not a conservative machine token never leaves the artifact", () => {
+  withRunDir((dir) => {
+    writeConfidenceArtifact(dir, { cause: "provider said: rate limited" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.confidenceTelemetry?.cause, "");
   });
 });
 

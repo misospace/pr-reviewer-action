@@ -136,14 +136,50 @@ a forge-specific CLI.
   same head, and the two would never converge). The daemon refuses to
   start when the poll’s declared platform disagrees with the intake’s
   (fail closed), and the poll’s queue handoff goes through the
-  daemon’s `enqueue`, which releases the durable reservation when the
-  queue refuses the job — so a refused handoff is re-discovered on the
-  next pass instead of staying suppressed. #1445: the pass report
-  carries the *why* next to the count — `handoffRefusals` lists a
-  bounded (`{ repo, reason }`) entry per refused handoff, with the
-  thrown value’s message run through the shared `maskDiagnostic` seam
-  (single-line, secret-redacted, length-capped) because operator handoff
-  code is untrusted; `skipped` keeps its exact prior meaning.
+  `context.enqueueJob` handoff the daemon hands it — which resolves
+  `true` when the daemon accepted the job and REJECTS with the refusal
+  reason when it refused it, and which releases the durable reservation
+  on a refusal, so a refused handoff is re-discovered on the next pass
+  instead of staying suppressed.
+- **The poll mints the same generation the intake mints.** The daemon
+  hands the poll its `ReconcileContext`: the ledger it must dedupe
+  against, the PER-REPOSITORY identity resolver (`resolveBuildOptions`),
+  and the queue handoff. The resolver runs the daemon’s OWN intake
+  resolution for the repository — the per-repository config fingerprint
+  and adoption epoch, plus the daemon’s bound forge-integration identity
+  — so the poll and the intake agree on every identity field the
+  resolver contributes. The poll’s installation id stays the
+  operator’s own declaration and must match the webhook’s, as the poll
+  always required. A static options object could not do that: the
+  fingerprint is per-repository, so a poll minting from one static value
+  would mint a SECOND generation of the same head and buy a second
+  review. A resolver that answers `null` means the intake mints nothing
+  for that repository (the adoption policy refuses it), so the poll mints
+  nothing either — the entry is skipped, with no job and no reservation.
+  A bound daemon REFUSES an identity-less job at the enqueue seam,
+  before the queue is mutated, and the refusal’s reason reaches the
+  operator through the poll’s `handoffRefusals` report entry. #1445 runs
+  that untrusted diagnostic through the shared `maskDiagnostic` seam
+  (single-line, secret-shaped material redacted, length-capped). A refused handoff releases the
+  durable reservation BEFORE the failure propagates, so the head is
+  re-discovered instead of staying suppressed for the claim’s horizon.
+- **`reconcile.poll` binds that composition in the daemon (#1446).** The
+  schedule takes exactly one pass: `poll` (the lister, the repositories, and
+  the optional listing installation id) or `run` (the operator’s own pass).
+  With `poll` the daemon calls `reconcileRepositories` itself against the
+  context above, so there is no callback between the daemon and the mint
+  site that could drop the identity, use a private copy of the instance
+  config, or hand the job to another installation — the invariant is
+  un-ignorable rather than merely available. `poll.onReport` is the pass’s
+  only audience: the composed pass has no operator holding its return value,
+  so without it a lister that fails every tick looks exactly like a quiet
+  forge. The daemon hands over the whole report (counts, per-repository
+  failures, and each refused handoff with its reason) and decides nothing
+  from it; a reporter that throws cannot stop the schedule. Construction
+  refuses a schedule
+  binding both or neither, and a `poll` with no platform of its own when
+  there is no `webhook.platform` to inherit: generations that cannot name
+  the forge they were polled against converge with nothing.
 
 ## Testing posture
 

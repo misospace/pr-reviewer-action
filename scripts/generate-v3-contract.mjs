@@ -1,17 +1,22 @@
-import { readFileSync, mkdirSync, writeFileSync, rmSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { parse } from 'yaml';
 
 const parsed = parse(readFileSync('contracts/action-v3.yml', 'utf8'));
+// .v3-generated holds one source asset per generator. This generator owns
+// contract/prompt-assets/version and writes them below; it never deletes an
+// asset it does not own (#1456): the node suite runs this generator in the
+// repository root, and a whole-directory wipe here deleted
+// action-source.generated.ts, which scripts/generate-action-source.mjs owns
+// and which the Python suite compiles against right after the node suite
+// runs ("Cannot find module '../.v3-generated/action-source.generated.js'").
+//
+// The directory itself belongs to the build entry point: `npm run build` and
+// `npm run typecheck` clear .v3-generated (scripts/clean-generated-assets.mjs)
+// before generating, so a stale shadow cannot survive (a leftover CJS
+// contract.generated.js from an older generator wins esbuild's module
+// resolution and would be embedded silently) and a generator that stops
+// running fails the build loudly instead of leaving a stale asset behind.
 mkdirSync('.v3-generated', { recursive: true });
-// .v3-generated is fully generated and gitignored; clear it first so stale
-// leftovers (e.g. a CJS contract.generated.js from an older generator) can
-// never shadow the freshly written .ts during esbuild module resolution —
-// that divergence makes the CI rebuild differ from the committed bundle.
-if (existsSync('.v3-generated')) {
-  for (const entry of readdirSync('.v3-generated')) {
-    rmSync(`.v3-generated/${entry}`, { recursive: true, force: true });
-  }
-}
 const generated = `// Generated from contracts/action-v3.yml; do not edit.\nexport const V3_CONTRACT = ${JSON.stringify(parsed, null, 2)} as const;\n`;
 writeFileSync('.v3-generated/contract.generated.ts', generated);
 

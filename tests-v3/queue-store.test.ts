@@ -51,6 +51,7 @@ function makeJob(jobId: string, overrides: Partial<ReviewJob> = {}): ReviewJob {
     nonce: "",
     adoptionEpoch: "",
     eventReference: "",
+    forgeIntegration: "",
     fork: false,
     deadlineAtMs: 0,
     runId: "",
@@ -455,6 +456,7 @@ function rawJob(overrides: Record<string, unknown> = {}): Record<string, unknown
     nonce: "",
     adoptionEpoch: "",
     eventReference: "",
+    forgeIntegration: "",
     fork: false,
     deadlineAtMs: 0,
     runId: "",
@@ -529,6 +531,16 @@ test("file store: a malformed nested job fails the load closed", () => {
       ["malformed configFingerprint", { job: rawJob({ configFingerprint: "not-hex" }) }],
       ["malformed nonce", { job: rawJob({ nonce: "not a nonce" }) }],
       ["malformed adoptionEpoch", { job: rawJob({ adoptionEpoch: "not an epoch" }) }],
+      ["malformed forgeIntegration", { job: rawJob({ forgeIntegration: "not a token" }) }],
+      ["forgeIntegration of 65 characters", { job: rawJob({ forgeIntegration: "f".repeat(65) }) }],
+      ["non-string forgeIntegration", { job: rawJob({ forgeIntegration: 7 }) }],
+      // #252: the boundary token ITSELF — the same hostile shapes the
+      // builder's identical fence refuses: a newline (which would also
+      // collide two identities in the canonical id join), a control
+      // character, and a value shaped like an endpoint.
+      ["forgeIntegration with a newline", { job: rawJob({ forgeIntegration: "fj\n1" }) }],
+      ["forgeIntegration with a control character", { job: rawJob({ forgeIntegration: "fj\u00071" }) }],
+      ["forgeIntegration shaped like an endpoint", { job: rawJob({ forgeIntegration: "https://evil.example/api" }) }],
       ["non-empty eventReference on a review job", { job: rawJob({ eventReference: "17" }) }],
       [
         "follow_up without an eventReference",
@@ -679,6 +691,23 @@ test("in-memory store: save fails closed on a malformed job, an inconsistent prK
   );
 });
 
+test("a pre-#1440 record without forgeIntegration rehydrates tolerantly as ''", () => {
+  // The field did not exist before #1440: a snapshot already on disk
+  // keeps its old by-kind endpoint semantics instead of being rejected.
+  const dir = makeDir("legacy-no-forge-integration");
+  try {
+    const file = path.join(dir, "queue.json");
+    const legacyJob = rawJob();
+    delete legacyJob["forgeIntegration"];
+    new JsonFileQueueStore(file).save(rawSnapshot([rawJobRecord(legacyJob)]));
+    const loaded = new JsonFileQueueStore(file).load();
+    assert.equal(loaded.records.length, 1);
+    assert.equal(loaded.records[0]!.job.forgeIntegration, "");
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test("file store: sentinel-valued jobs and a follow_up job round-trip unchanged", () => {
   const dir = makeDir("sentinels");
   try {
@@ -688,6 +717,7 @@ test("file store: sentinel-valued jobs and a follow_up job round-trip unchanged"
       nonce: "",
       adoptionEpoch: "",
       eventReference: "",
+      forgeIntegration: "",
       baseSha: "",
       deadlineAtMs: 0,
       runId: "",

@@ -22,6 +22,7 @@ import {
 import { redactText } from "../context/redact.js";
 import { escapeCodeSpan } from "../context/fence.js";
 import { stripRevealedCapNoteTails } from "../confidence/result.js";
+import type { ConfidenceTelemetry } from "../confidence/telemetry.js";
 import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, parseMetadata, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
 import { FINDING_OUTCOMES_SCHEMA, isProvenHeadSha, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, serializeOutcomeLedger, type OutcomeEvent, type OutcomeLedger } from "../outcomes/schema.js";
 import { parseFindingIdentityMarker } from "../outcomes/identity.js";
@@ -170,6 +171,11 @@ export interface PublishInput {
      * standalone publish CLI's env round-trip predates them. */
     concerns?: Array<{ file: string; line: number | null; evidence: string; type?: string; severity?: string }>;
   };
+  /** #1455: the verifier's own telemetry — the unscored cause, the measured
+   * latency and the provider's token counts. Advisory telemetry: it rides
+   * the metadata marker and changes nothing else. Absent when the run
+   * measured none of it. */
+  confidenceTelemetry?: ConfidenceTelemetry;
 }
 
 export interface PublishResult {
@@ -1513,6 +1519,10 @@ export async function publishReview(
     ...(input.confidence && input.confidence.status === "scored" && /^[0-5]$/.test(input.confidence.score)
       ? { confidenceScore: Number(input.confidence.score) }
       : {}),
+    // #1455: the verifier's telemetry, only when the run measured it — the
+    // marker keeps its pre-#1455 bytes when the verifier was disabled, or
+    // when a call reported no usage.
+    ...(input.confidenceTelemetry !== undefined ? { confidenceTelemetry: input.confidenceTelemetry } : {}),
     actionVersion: ACTION_VERSION,
   };
   if (input.partialCoverage) {
