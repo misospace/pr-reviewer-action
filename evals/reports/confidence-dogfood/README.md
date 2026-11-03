@@ -37,7 +37,7 @@
 
 - **`unscored`/unavailable ⇒ error/fail closed** — vindicated: it is already #1075's contract, and a gate enabled over this window would have held 99.76% of runs red. That behavior is correct (never turn unscored into 0/5) and also means the gate is unusable until the unscored rate collapses.
 - **Verifier model must differ from the primary model.** The dogfood profile inherits the primary's arm; the single live scored run's own advisory concern warned "same-model correlation acknowledged but not verified live" against `ai-confidence-model: vars.CONFIDENCE_MODEL \|\| vars.SMART_MODEL` (`.github/workflows/ai-pr-review.yaml:218`), and #1286's same-model arm returned 32/32 `malformed_answer`. Same-model verifier output is disqualified from gating.
-- **Exact-head/config/rubric pin match** — already #1075's contract; the evidence file's per-run pins are the shape the gate must re-verify.
+- **Exact-head/config pin match** — already #1075's contract, and the only pin components this window can evidence: the artifact carries per-run head/config pins, while it records `rubric_version` as unavailable for every run in the window, so rubric-pin matching remains contract-backed, not evidence-backed.
 - A numeric pass threshold (e.g. ≥4/5) has no evidence base: n=1 live scored run and n=2 canary rows cannot calibrate one, and #1286's no-ship calibration result stands.
 
 ## Material disagreement adjudications
