@@ -22,6 +22,7 @@ import { partialCoverageOf } from "./review.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { formatOutputAssignment, isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
+import { confidenceTelemetryFromArtifact, type ConfidenceTelemetry } from "../confidence/telemetry.js";
 import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 
 /**
@@ -346,6 +347,29 @@ function reviewRoutingFromRunDir(env: NodeJS.ProcessEnv): HumanReviewRoutingPlan
   };
 }
 
+/** #1455: read the verifier's telemetry from the run dir's own
+ * `confidence-score.json` artifact (never cwd, never ambient env).
+ *
+ * This is the ONE seam the publish step reads the telemetry through, so the
+ * composite action and the standalone `publish` CLI publish the SAME values
+ * from the SAME record — neither path re-derives them, and neither can
+ * publish a value the other would not.
+ *
+ * A missing, unreadable, or structurally unrecognized artifact yields
+ * `undefined` (no telemetry), so an uncertain record never publishes a
+ * half-validated value. */
+function confidenceTelemetryFromRunDir(env: NodeJS.ProcessEnv): ConfidenceTelemetry | undefined {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return undefined;
+  const record = readJsonObject(join(runDir, "confidence-score.json"));
+  if (record === null) return undefined;
+  const telemetry = confidenceTelemetryFromArtifact(record);
+  // A record the verifier never ran for publishes nothing: the marker keeps
+  // its pre-#1455 bytes exactly.
+  if (telemetry.status === "") return undefined;
+  return telemetry;
+}
+
 /** The platform publish seam (GitHub REST/GraphQL, Forgejo /api/v1, or the
  * Tangled ATProto record client). */
 export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
@@ -404,6 +428,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
   // or stale for the run actually being published.
   const coverage = partialCoverageFromRunDir(env);
   const reviewRouting = reviewRoutingFromRunDir(env);
+  const confidenceTelemetry = confidenceTelemetryFromRunDir(env);
   return {
     mode: publishMode(env.PUBLISH_MODE),
     reviewMarkdown: env.REVIEW_MARKDOWN ?? "",
@@ -496,6 +521,11 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
       }
       : {}),
     degradedGateBypass: env.DEGRADED_GATE_BYPASS === "true",
+    // #1455: the verifier's telemetry (the unscored cause, the measured
+    // latency, the provider's token counts), read back from the run dir's own
+    // artifact so the standalone `publish` CLI publishes the SAME values the
+    // composite action does. Absent when the run measured none of them.
+    ...(confidenceTelemetry !== undefined ? { confidenceTelemetry } : {}),
     // #1005: the deterministic reviewer-routing plan the review step persisted
     // (read from the run dir, never cwd). Absent when routing did not run.
     ...(reviewRouting ? { reviewRouting } : {}),

@@ -51,6 +51,13 @@ const allowlist = new Map<string, string>([
   ["review_route", "the metadata marker's raw JSON field, not the action output"],
   ["escalation_reason", "the metadata marker's raw JSON field, not the action output"],
   ["cache_hit_ratio", "the metadata marker's raw JSON field, not the action output"],
+  // The metadata marker's own raw JSON keys for the independent verifier
+  // (src/metadata/markers.ts, src/confidence/telemetry.ts) — literally
+  // `confidence_status` and `confidence_score` inside the marker's JSON blob,
+  // distinct from the action's own `confidence-status` / `confidence-score`
+  // outputs, which carry the same values under the kebab contract names.
+  ["confidence_status", "the metadata marker's raw JSON field, not the action output"],
+  ["confidence_score", "the metadata marker's raw JSON field, not the action output"],
   // The review-bundle/v1 document's own literal JSON keys (#1425,
   // src/publish/bundle.ts, documented in docs/review-bundle.md). Persisted
   // snake_case per the naming rule, distinct from the same-named action

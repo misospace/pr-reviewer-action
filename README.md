@@ -107,6 +107,8 @@ Set `ai-confidence-model` and the review runs one extra, bounded model call. It 
 
 **Where results appear:** the five `confidence-*` step outputs, an `Independent confidence` row in the step summary, an advisory section in the published review, the additive confidence keys in the review marker, and the `confidence-score.json` / `confidence-request.json` / `confidence-response.json` run artifacts. Disabled runs keep all of it absent.
 
+The review marker also carries the verifier's own evidence. `confidence_cause` says why the verifier did not score, for example a timeout or a rate limit. `confidence_latency_ms` says how long the provider took to answer the verifier's call. `confidence_prompt_tokens`, `confidence_completion_tokens`, and `confidence_total_tokens` say how many tokens the call used. A key is absent when the run has no value for it.
+
 ## ⚙️ How it works
 
 ```mermaid
