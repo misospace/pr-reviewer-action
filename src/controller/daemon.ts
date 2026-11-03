@@ -1050,7 +1050,10 @@ export async function startControllerDaemon(
     // `validateExecutionRequest`), more than one is ambiguous and
     // refused — never the first of several. Resolution reads the
     // operator's instance config only: never repository config, never
-    // event content.
+    // event content. The resolved endpoint belongs to the installation
+    // whose capability serves the job; composing that capability from
+    // the bound integration is the single-platform entrypoint's job
+    // (#738): it composes one capability from that one integration.
     resolveForgeApiUrl: async (job) => {
       if (job.forgeIntegration !== "") {
         const named = options.instance.forges.filter(

@@ -70,9 +70,11 @@ unambiguous: this composition carries no integration identity with the job,
 so a kind may appear at most once in `instance.forges`. Two same-kind
 integrations would silently stamp the first entry's API base into every
 envelope of that platform — possibly the installation that does not own the
-job — so the daemon refuses them at startup. Supporting several integrations
-of one kind requires carrying a stable integration identity from intake to
-envelope first.
+job — so the daemon refuses them at startup. The refusal judges the
+configuration, not the platform served today: a duplicated kind nobody
+composes yet is still an ambiguous mapping waiting for its first job of that
+platform. Supporting several integrations of one kind requires carrying a
+stable integration identity from intake to envelope first.
 
 The Python lane only *warns* about a path-embedded credential, because a
 path segment cannot be reliably told apart from a legitimate path part and

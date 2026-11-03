@@ -720,6 +720,17 @@ test("an identity-less job refuses at build when several integrations share its 
     return record !== undefined && record.state === "failed";
   });
   assert.equal(h.fake.started.length, 0, "the ambiguous job never launched a worker");
+  // #252 (carried forward from the #1433 startup refusal this identity
+  // model supersedes): the refusal names the CONFIGURATION and echoes
+  // nothing else — no configured endpoint and no credential reference
+  // reaches the persisted failure reason.
+  const record = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
+  for (const material of ["forge-a.example", "forge-b.example", "/api/v1", "fj-a", "fj-b"]) {
+    assert.ok(
+      !(record!.failureReason ?? "").includes(material),
+      `refusal must not echo '${material}': ${record!.failureReason}`,
+    );
+  }
 });
 
 test("an unresolvable or cross-platform forge-integration identity refuses the request (#1440)", async (t) => {
@@ -911,6 +922,14 @@ test("an ambiguous integration name refuses the request rather than taking the f
   const record = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
   assert.match(record!.failureReason ?? "", /share|without guessing/);
   assert.equal(h.fake.started.length, 0, "the ambiguous identity never launched a worker");
+  // #252: the refusal names the identity and echoes no configured
+  // endpoint and no credential reference.
+  for (const material of ["forge-a.example", "forge-b.example", "/api/v1", "fj-a", "fj-b"]) {
+    assert.ok(
+      !(record!.failureReason ?? "").includes(material),
+      `refusal must not echo '${material}': ${record!.failureReason}`,
+    );
+  }
 });
 
 test("a forge integration endpoint that could never pass envelope validation refuses daemon startup (#1433)", async () => {
