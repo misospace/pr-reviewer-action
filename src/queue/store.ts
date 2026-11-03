@@ -258,6 +258,18 @@ export function validateReviewJob(value: unknown): ReviewJob | null {
     return null;
   }
 
+  // Tolerant rehydration (#1440): the field did not exist in pre-#1440
+  // queue snapshots, so a MISSING field rehydrates as "" (those
+  // snapshots keep their old by-kind endpoint semantics); a PRESENT
+  // value must be a string, either "" or the canonical token form —
+  // anything else is a malformed record (reject, never guess).
+  const forgeIntegration =
+    value["forgeIntegration"] === undefined ? "" : value["forgeIntegration"];
+  if (!isString(forgeIntegration)) return null;
+  if (forgeIntegration !== "" && !TOKEN_PATTERN.test(forgeIntegration)) {
+    return null;
+  }
+
   const fork = value["fork"];
   if (!isBoolean(fork)) return null;
 
@@ -290,6 +302,7 @@ export function validateReviewJob(value: unknown): ReviewJob | null {
     nonce,
     adoptionEpoch,
     eventReference,
+    forgeIntegration,
     fork,
     deadlineAtMs,
     runId,

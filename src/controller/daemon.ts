@@ -25,11 +25,20 @@
  *   the ledger reservation (the dispatch contract). The forge webhook
  *   ingress binds through `createOperatorHost` (which unconditionally
  *   wires the follow-up consumer); missed-webhook reconciliation runs on
- *   a bounded schedule through the injected reconcile pass. The intake is
+ *   a bounded schedule through the injected reconcile pass, which the
+ *   daemon hands its CONTEXT to (the ledger, the PER-EVENT identity
+ *   resolver the daemon's own intake mints with, and the queue handoff)
+ *   so the poll mints the SAME generation the intake mints on EVERY
+ *   identity field (#1443). `reconcile.poll` binds that composition in the
+ *   daemon itself, so no operator callback can drop the identity (#1446).
+ *   The intake is
  *   PLATFORM-AWARE: one daemon instance serves ONE forge platform, and
  *   `webhook.platform` selects the intake it binds — the GitHub App intake
  *   (`X-Hub-Signature-256`, bound here) or the native Forgejo intake
- *   (`X-Gitea-Signature`).
+ *   (`X-Gitea-Signature`). When the operator binds `forgeIntegration`, the
+ *   daemon additionally serves ONE named forge integration: every job its
+ *   intake mints carries that stable identity and the envelope's endpoint
+ *   is resolved by it (#1440).
  * - **Scheduling and execution** — the daemon drives `tick()` on its own
  *   timer, renews worker leases while the executor reports liveness,
  *   prepares exact-head workspaces through #732, resolves ONLY the
@@ -86,7 +95,10 @@ import {
 } from "../queue/index.js";
 import type { JobRecord } from "../queue/types.js";
 import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
+import { FORGE_INTEGRATION_PATTERN } from "../jobs/generation.js";
 import { dispatchCanonicalEvent, type GenerationLedger } from "../ingress/dispatch.js";
+import { reconcileRepositories, type ReconcileReport } from "../ingress/reconcile.js";
+import type { ReadResult } from "../ingress/api-client.js";
 import type { MirrorCache } from "../acquisition/index.js";
 import {
   EXECUTION_ORPHANED_CATEGORY,
@@ -155,6 +167,82 @@ export interface ExecutorBindings {
   readonly local?: (spec: import("../config/instance-config.js").LocalExecutorSpec, profileName: string) => Executor;
 }
 
+/** The context the daemon hands the operator's reconciliation pass (#1443).
+ *
+ * The poll mints its OWN generations (the daemon does not mint them for
+ * it), so the identity those generations carry is the operator's business
+ * — except for the daemon's bound forge-integration identity, which is
+ * INFRASTRUCTURE the daemon owns. The context is the single handoff that
+ * carries it: a poll that minted an identity-less job would mint a
+ * generation id that never converges with the daemon's own intake (the
+ * identity is part of the id), and would buy a SECOND review of the same
+ * head. */
+export interface ReconcileContext {
+  /** The daemon's own durable generation ledger — the poll's dedupe ledger. */
+  readonly ledger: GenerationLedger;
+  /** The identity the daemon's own intake mints a job with for the SAME
+   *  event: the per-repository resolution (config fingerprint, adoption
+   *  epoch) plus the bound forge-integration identity. `null` means the
+   *  intake mints NOTHING for that repository (the adoption policy
+   *  refuses it), so the poll must mint nothing either. */
+  resolveBuildOptions(event: CanonicalForgeEvent): Promise<BuildJobOptions | null>;
+  /** The queue handoff for the polled generations: resolves TRUE when the
+   * daemon accepted the job, and REJECTS with the daemon's refusal (a
+   * `RangeError` naming the rule) when it refused it — the daemon
+   * RELEASES the durable reservation before the rejection propagates. The
+   * poll treats a rejecting handoff as a refusal, RECORDS the reason, and
+   * releases the reservation over it (idempotent — the daemon already
+   * released it) — so a mis-wired poll is observable (the operator reads
+   * the reason) and re-discovered on the next pass, never a silently
+   * duplicated review. */
+  enqueueJob(job: ReviewJob): Promise<boolean>;
+}
+
+/** The poll wiring the daemon composes into a reconciliation pass when the
+ * operator binds `reconcile.poll` (#1446).
+ *
+ * It is the SAME composition an operator `run` writes by hand —
+ * `reconcileRepositories` bound to the daemon's context — minus any callback
+ * the operator could mis-wire. The daemon supplies the ledger, the PER-EVENT
+ * identity resolver, and the queue handoff itself, so the identity the mint
+ * site hashes cannot be dropped, replaced with a private copy of the
+ * instance config, or handed to the wrong installation: a bound daemon's
+ * poll converges with its own intake by construction (#1443's invariant,
+ * made un-ignorable). Bind `run` instead when the pass needs anything this
+ * shape does not carry. */
+export interface ReconcilePollBinding {
+  /** The forge lister for the polled platform: the GitHub App capability
+   * client and the Forgejo ingress client both expose this shape. It is the
+   * operator's injected capability, never a forge CLI. */
+  readonly listOpenPullRequests: (repo: string) => Promise<ReadResult<unknown[]>>;
+  /** The repositories the pass polls. A discovered entry outside this scope
+   * never reserves a generation (#1025). */
+  readonly repos: readonly string[];
+  /** The installation the lister spoke to, when the platform carries one.
+   * It is a minted identity field, not just a listing coordinate: it is
+   * hashed into the generation id, so it MUST be the same installation the
+   * daemon's intake normalizes its deliveries to — a poll that names another
+   * one mints a second generation of the head the webhook already claimed.
+   * The daemon cannot read the forge's installation id off a delivery, so it
+   * cannot check this for you. */
+  readonly installationId?: string | undefined;
+  /** What the daemon does with every pass's report (#1446).
+   *
+   * The composed pass has no operator holding its return value, so WITHOUT
+   * this a permanently broken poll — a lister that fails every tick, a
+   * handoff that refuses — is indistinguishable from a quiet forge. The
+   * daemon hands over the WHOLE report (`discovered`, `skipped`,
+   * `handoffRefusals` with the reason each handoff gave, `failedRepositories`) and
+   * decides nothing from it: logging, metrics, and alerting stay the
+   * operator's. Absent → the pass still runs and its refusals still release
+   * their reservations; the operator has simply chosen to see nothing.
+   *
+   * Called once per pass, after the pass settled; a throwing callback is
+   * swallowed, because a broken logger must never stop the reconciliation
+   * schedule. */
+  onReport?(report: ReconcileReport): void | Promise<void>;
+}
+
 export interface ControllerDaemonOptions {
   /** The validated operator instance config (#727). The daemon refuses to
    * start without it — there is no partial policy. */
@@ -193,6 +281,13 @@ export interface ControllerDaemonOptions {
   readonly resolveEventIdentity?: EventIdentityResolver;
   /** Executor construction overrides (see `ExecutorBindings`). */
   readonly executors?: ExecutorBindings;
+  /** The instance-config forge integration `name` this daemon instance
+   * serves (#1440). Infrastructure bound by the operator; never
+   * repository- or event-supplied. When bound, every job this daemon's
+   * intake mints carries this identity and the execution envelope's
+   * `forgeApiUrl` is resolved by it; startup refuses unless exactly one
+   * `instance.forges` entry has the name. */
+  readonly forgeIntegration?: string;
   /** Workspace-extraction override (tests bind a fake; production uses
    * `createReviewWorkspace` from #732 acquisition). */
   readonly createWorkspace?: import("./execution.js").RequestBuilderDeps["createWorkspace"];
@@ -211,19 +306,40 @@ export interface ControllerDaemonOptions {
    * retention (#736: the durable dedupe and the compaction horizon are a
    * coupled pair). */
   readonly generationClaimTtlMs?: number;
-  /** Bounded missed-webhook reconciliation schedule. */
+  /** Bounded missed-webhook reconciliation schedule. Exactly ONE of `poll`
+   * or `run` is bound: `poll` is the canonical composition the daemon drives
+   * itself, `run` is a custom pass the operator owns. Neither or both fails
+   * construction. */
   readonly reconcile?: {
     readonly intervalMs: number;
     /** The forge platform the poll observes. It is part of the generation
      * identity, so a poll mislabelled as the other platform would mint a
      * generation that never converges with its own webhook delivery. When
      * the daemon serves an intake (`webhook.platform`), the two MUST
-     * agree — a mismatch fails construction (fail closed). */
+     * agree — a mismatch fails construction (fail closed). REQUIRED for
+     * `poll` when there is no intake platform to inherit: the daemon mints
+     * the poll's generations and must name the forge it polled. */
     readonly platform?: "github" | "forgejo";
-    /** One reconciliation pass (the operator binds
-     * `reconcileRepositories` with this daemon's ledger and the
-     * `enqueue` handoff this daemon exposes). */
-    run(): Promise<void>;
+    /** The canonical reconciliation composition (#1446): the daemon runs
+     * `reconcileRepositories` itself against its OWN context (ledger,
+     * per-event identity resolver, queue handoff), so the identity the mint
+     * site hashes cannot be ignored — there is no operator callback between
+     * the daemon and the mint. */
+    readonly poll?: ReconcilePollBinding;
+    /** One reconciliation pass the OPERATOR composes: bind
+     * `reconcileRepositories` with `context.ledger`,
+     * `context.resolveBuildOptions`, and `context.enqueueJob` (which
+     * resolves TRUE when the daemon accepted the job and REJECTS with the
+     * refusal reason when it refused it). The daemon hands the pass its
+     * context — the ledger, the PER-EVENT identity resolver (so the poll
+     * mints the SAME generation the daemon's own intake mints, on every
+     * identity field), and the queue handoff. On a BOUND daemon a pass that
+     * mints from its own options instead is refused by the handoff, never
+     * silently diverged; an UNBOUND daemon keeps its permissive contract (the
+     * operator's own build options decide), so there the two mint sites are
+     * the operator's to keep in step. Prefer `poll`, where the wiring cannot
+     * be mis-stated. */
+    run?(context: ReconcileContext): Promise<void>;
   };
   /** The forge webhook ingress binding. The intake is PLATFORM-AWARE: the
    * daemon serves exactly ONE forge platform per instance (its forge
@@ -258,9 +374,9 @@ export interface ControllerDaemon {
   ingest(event: CanonicalForgeEvent): Promise<"scheduled" | "duplicate" | "ignored">;
   /** Hand one minted generation to the queue — the reconciliation pass's
    * handoff (the poll mints the generation; the daemon owns the queue).
-   * A failed handoff releases the durable reservation BEFORE the failure
-   * propagates, so the head is re-discovered instead of staying
-   * suppressed. */
+   * A REFUSED handoff (the daemon's forge-integration identity guard)
+   * releases the durable reservation BEFORE the failure propagates, so
+   * the head is re-discovered instead of staying suppressed. */
   enqueue(job: ReviewJob): Promise<void>;
   /** The generation ledger the operator's ingress/reconciliation binds. */
   readonly ledger: GenerationLedger;
@@ -872,6 +988,50 @@ function createDaemonJobExecutor(
   };
 }
 
+/** The daemon's forge-integration identity guard: the ONE rule every
+ * queue handoff runs BEFORE it mutates the queue.
+ *
+ * A bound daemon serves exactly ONE installation, and the bound identity
+ * is part of the generation id. A job that carries NO identity (the
+ * "no integration named" sentinel) is therefore not a job of this
+ * daemon's generation: it resolves its envelope endpoint by platform
+ * KIND — ambiguous when several integrations share the kind, and (with
+ * exactly one) a SECOND generation of the same head. Both break the
+ * webhook/poll convergence invariant, so the handoff refuses it.
+ *
+ * An UNBOUND daemon keeps the permissive behavior: the operator's own
+ * build options decide which identity (if any) a job carries, and the
+ * daemon does not police them.
+ *
+ * The refusal names the RULE and the bound integration — never a
+ * configured endpoint or a credential reference. */
+function assertJobForgeIdentity(job: ReviewJob, bound: string | undefined): void {
+  if (bound === undefined) return;
+  // A MISSING field means "no identity named" — the same convention the
+  // queue's rehydration uses — never the string "undefined".
+  const named = job.forgeIntegration ?? "";
+  if (named === "") {
+    throw new RangeError(
+      `job carries no forge integration identity but this daemon serves '${bound}': resolve the poll's identity through the daemon's reconcile context (context.resolveBuildOptions)`,
+    );
+  }
+  // A MALFORMED identity is a contract violation, and its value is
+  // never echoed: the refusal names the rule, not the value.
+  if (!FORGE_INTEGRATION_PATTERN.test(named)) {
+    throw new RangeError(
+      `job names a malformed forge integration: the identity must match ${FORGE_INTEGRATION_PATTERN.source}`,
+    );
+  }
+  // A job minted for a DIFFERENT integration must not be scheduled
+  // through this daemon: its envelope would resolve to the wrong
+  // installation's API base (fail closed, before any queue mutation).
+  if (named !== bound) {
+    throw new RangeError(
+      `job names forge integration '${named}' but this daemon serves '${bound}'`,
+    );
+  }
+}
+
 /** Start the controller daemon. Fails closed: every option is validated
  * before anything binds, migrations run before work is accepted, and
  * queue/state recovery happens before the first tick. */
@@ -906,19 +1066,14 @@ export async function startControllerDaemon(
   // configured, and a credential-shaped path in it is refused the same
   // way — fail closed on the configuration, not on its current use.
   //
-  // Each kind may appear at most once. The envelope's endpoint is resolved
-  // by the JOB's platform kind alone — this composition carries no
-  // integration identity with the job — so two integrations of one kind
-  // would silently stamp the first entry's endpoint into every envelope of
-  // that platform, even when the other integration is the one actually
-  // serving the job. The worker would then read and write through the wrong
-  // installation's API base. A deployment that genuinely needs two
-  // same-kind integrations must first carry a stable integration identity
-  // from intake to envelope; until then the ambiguous mapping is refused
-  // here, not guessed. (Instance config keeps `forges` open for that
-  // future: the constraint belongs to this selection site, not to the
-  // durable schema.)
-  const kindOwners = new Map<string, string>();
+  // The envelope's endpoint is resolved by the JOB's `forgeIntegration`
+  // identity (#1440): a job minted with an integration name resolves its
+  // `forgeApiUrl` from that named integration. A job with NO identity
+  // ("" — legacy/pre-#1440) resolves by platform kind only when exactly
+  // one integration of that kind exists; when several share the kind the
+  // request is refused at build time, never guessed. Same-kind
+  // integrations are therefore allowed here: instance config already
+  // enforces unique integration NAMES.
   for (const forge of options.instance.forges) {
     const problem = forgeApiUrlProblem(forge.endpoint);
     if (problem !== "") {
@@ -926,13 +1081,48 @@ export async function startControllerDaemon(
         `instance forge integration '${forge.name}' endpoint ${problem}: every execution envelope for that platform would be refused`,
       );
     }
-    const first = kindOwners.get(forge.kind);
-    if (first !== undefined) {
+  }
+  // When the daemon binds an integration name, the name must name exactly
+  // one configured integration, and that integration's platform kind must
+  // agree with the intake(s) this daemon serves — the identity the intake
+  // stamps and the capability that serves the envelopes must be the same
+  // installation (fail closed at construction, not at the first job).
+  if (options.forgeIntegration !== undefined) {
+    // The bound name is an identity the job builder hashes into every
+    // generation id, so a name the builder would REFUSE must never be
+    // bound here: the daemon would start, stamp an unusable identity on
+    // every job it mints, and silently mint NOTHING (the build fails
+    // closed) — a silent drop instead of a startup refusal. The rule is
+    // the builder's own (`FORGE_INTEGRATION_PATTERN`), one definition.
+    // The rejected value is NOT echoed: a bound name is operator input,
+    // and a hostile one (control characters) must not reach a log line.
+    if (options.forgeIntegration === "") {
       throw new TypeError(
-        `instance forge integrations '${first}' and '${forge.name}' share kind '${forge.kind}': this daemon resolves each envelope's forge endpoint by platform kind alone, so each kind may appear at most once in instance.forges`,
+        "ControllerDaemonOptions.forgeIntegration must name an instance forge integration (omit the option for a daemon that serves no installation)",
       );
     }
-    kindOwners.set(forge.kind, forge.name);
+    if (!FORGE_INTEGRATION_PATTERN.test(options.forgeIntegration)) {
+      throw new TypeError(
+        `ControllerDaemonOptions.forgeIntegration must match ${FORGE_INTEGRATION_PATTERN.source}`,
+      );
+    }
+    const named = options.instance.forges.filter(
+      (entry) => entry.name === options.forgeIntegration,
+    );
+    if (named.length !== 1) {
+      throw new TypeError(
+        `ControllerDaemonOptions.forgeIntegration '${options.forgeIntegration}' must name exactly one instance forge integration`,
+      );
+    }
+    const boundKind = named[0]!.kind;
+    if (
+      (options.webhook !== undefined && options.webhook.platform !== boundKind) ||
+      (options.reconcile?.platform !== undefined && options.reconcile.platform !== boundKind)
+    ) {
+      throw new TypeError(
+        `ControllerDaemonOptions.forgeIntegration '${options.forgeIntegration}' serves kind '${boundKind}', which does not match the bound intake platform`,
+      );
+    }
   }
   const durableStateDir = options.durableStateDir;
   if (typeof durableStateDir !== "string" || durableStateDir === "" || durableStateDir.includes("\u0000")) {
@@ -957,6 +1147,31 @@ export async function startControllerDaemon(
   ) {
     throw new TypeError(
       "ControllerDaemonOptions.reconcile.platform must match the intake platform (webhook.platform)",
+    );
+  }
+  // The reconciliation schedule binds EXACTLY ONE pass: the canonical `poll`
+  // the daemon composes itself, or the operator's own `run`. Neither is a
+  // schedule the operator believes is polling while nothing polls; both is
+  // two owners of one head's mint site. Fail closed at construction.
+  if (options.reconcile !== undefined) {
+    const passBindingAmbiguous =
+      (options.reconcile.poll === undefined) === (options.reconcile.run === undefined);
+    if (passBindingAmbiguous) {
+      throw new TypeError(
+        "ControllerDaemonOptions.reconcile must bind exactly one of poll (the daemon-composed pass) or run (the operator's own pass)",
+      );
+    }
+  }
+  // The platform the canonical poll mints with: its own declaration, or the
+  // intake's when the operator declared none. `poll` REQUIRES one — the
+  // daemon mints the discovered heads' generations, and one that cannot name
+  // the forge it observed converges with nothing — so the omission refuses
+  // startup instead of surfacing on the first pass. For a custom `run` the
+  // platform stays what it always was: the consistency assertion above.
+  const reconcilePollPlatform = options.reconcile?.platform ?? options.webhook?.platform;
+  if (options.reconcile?.poll !== undefined && reconcilePollPlatform === undefined) {
+    throw new TypeError(
+      "ControllerDaemonOptions.reconcile.platform is required when reconcile.poll is bound and no intake platform can be inherited from webhook.platform",
     );
   }
 
@@ -997,18 +1212,64 @@ export async function startControllerDaemon(
     runsRoot: options.runsRoot,
     mirrorFor: (job) => options.forge.mirrorFor(job),
     resolveProfiles: (job) => options.resolveProfiles(job),
-    // The non-secret forge API base travels in the envelope (#1433): the
-    // instance config's forge integration for the job's platform. GitHub
-    // without an explicit integration entry stays "" (its adapter defaults
-    // to api.github.com); Forgejo without one refuses at request
-    // validation, never at adapter construction inside the worker. The
-    // startup screening above proved each kind appears at most once, so
-    // this kind match is the ONE integration of the job's platform — never
-    // the first of several. Tying it to the installation whose capability
-    // actually serves the job is the single-platform entrypoint's job
+    // The non-secret forge API base travels in the envelope (#1433),
+    // resolved by the job's forge-integration identity FIRST (#1440): a
+    // job minted for a named integration reads and writes through THAT
+    // installation's endpoint, and an unresolvable identity refuses the
+    // request (the builder's build() rejects → the scheduler's
+    // failed-outcome path) rather than guessing. An identity-less job
+    // ("") falls back to the platform kind only when exactly one
+    // integration of that kind exists: zero stays "" (GitHub's adapter
+    // defaults to api.github.com; Forgejo still fails
+    // `validateExecutionRequest`), more than one is ambiguous and
+    // refused — never the first of several. Resolution reads the
+    // operator's instance config only: never repository config, never
+    // event content. The resolved endpoint belongs to the installation
+    // whose capability serves the job; composing that capability from
+    // the bound integration is the single-platform entrypoint's job
     // (#738): it composes one capability from that one integration.
-    resolveForgeApiUrl: async (job) =>
-      options.instance.forges.find((entry) => entry.kind === job.platform)?.endpoint ?? "",
+    resolveForgeApiUrl: async (job) => {
+      if (job.forgeIntegration !== "") {
+        const named = options.instance.forges.filter(
+          (entry) => entry.name === job.forgeIntegration,
+        );
+        if (named.length === 0) {
+          throw new RangeError(
+            `job names unresolvable forge integration '${job.forgeIntegration}': no instance forge integration has that name`,
+          );
+        }
+        // An AMBIGUOUS name (several configured integrations share it)
+        // is unresolvable state, not a license to take the first: the
+        // parsed instance config refuses duplicate names, but the daemon
+        // must not depend on that — an unvalidated config would resolve
+        // to whichever entry happens to come first, i.e. guess.
+        if (named.length > 1) {
+          throw new RangeError(
+            `job names forge integration '${job.forgeIntegration}' which ${named.length} instance forge integrations share: the envelope endpoint cannot be resolved without guessing`,
+          );
+        }
+        // A named integration whose kind does not match the job's platform
+        // is a corrupted/misrouted identity (e.g. a rehydrated snapshot
+        // record that never passed this daemon's enqueue guard): resolving
+        // it would stamp the other installation's endpoint into the
+        // envelope. Refuse the request — fail closed on uncertain state.
+        if (named[0]!.kind !== job.platform) {
+          throw new RangeError(
+            `job names forge integration '${job.forgeIntegration}' of kind '${named[0]!.kind}' but the job's platform is '${job.platform}': the identity does not match the job's platform`,
+          );
+        }
+        return named[0]!.endpoint;
+      }
+      const sameKind = options.instance.forges.filter(
+        (entry) => entry.kind === job.platform,
+      );
+      if (sameKind.length > 1) {
+        throw new RangeError(
+          `job carries no forge integration identity but ${sameKind.length} instance forge integrations share kind '${job.platform}': the envelope endpoint cannot be resolved without guessing`,
+        );
+      }
+      return sameKind[0]?.endpoint ?? "";
+    },
     credentialRefs: (job, runId) => options.credentialRefs(job, runId),
     ...(options.createWorkspace !== undefined ? { createWorkspace: options.createWorkspace } : {}),
   });
@@ -1172,6 +1433,53 @@ export async function startControllerDaemon(
       controlPlane: options.controlPlane,
       now,
     });
+
+  /** The identity the daemon's OWN intake mints a job with for one event.
+   *
+   * ONE resolver, ONE answer: the intake's adoption/effective-config
+   * resolution (per repository — the config fingerprint and the adoption
+   * epoch) plus the daemon's bound forge-integration identity (the
+   * operator infrastructure, which OVERRIDES whatever the resolver
+   * returned: a resolver never supplies infrastructure).
+   *
+   * The intake AND the reconciliation poll share this function, so the two
+   * converge on EVERY identity field — a static value could not mirror a
+   * per-repository fingerprint, and the two would mint different
+   * generations of the same head (#1443). */
+  const resolveIntakeBuildOptions = async (
+    event: CanonicalForgeEvent,
+  ): Promise<BuildJobOptions | null> => {
+    const resolved = await resolveEventIdentity(event);
+    if (resolved === null) return null;
+    return options.forgeIntegration !== undefined
+      ? { ...resolved, forgeIntegration: options.forgeIntegration }
+      : resolved;
+  };
+
+  /** Hand one minted generation to the queue — the ONE handoff seam the
+   * OPERATOR's paths use (the `daemon.enqueue` seam and the
+   * reconciliation poll's `context.enqueueJob`). The daemon's own intake
+   * mints its jobs with the bound identity, so it never needs the guard.
+   *
+   * The forge-integration identity guard runs BEFORE any queue mutation: a
+   * job this daemon must not schedule (a foreign installation's, a
+   * malformed identity, or — on a bound daemon — no identity at all) never
+   * reaches the queue.
+   *
+   * A REFUSED handoff releases the DURABLE reservation BEFORE the failure
+   * propagates (the dispatch contract): a claim left behind suppresses the
+   * redelivery until its horizon expires (7 days by default). The release
+   * only ever touches a claim THIS process owns (`ledger.remove` refuses a
+   * foreign one), so it is safe to attempt. */
+  const handOffGeneration = async (job: ReviewJob): Promise<void> => {
+    try {
+      assertJobForgeIdentity(job, options.forgeIntegration);
+    } catch (err) {
+      await Promise.resolve(ledger.remove(job.jobId)).catch(() => undefined);
+      throw err;
+    }
+    await enqueueGeneration(job);
+  };
 
   // 8. Timers, ingress server, lifecycle.
   let timer: NodeJS.Timeout | null = null;
@@ -1338,6 +1646,26 @@ export async function startControllerDaemon(
       followUp: {
         ...options.webhook.followUp,
         ledger,
+        // The bound integration identity is stamped on EVERY job this
+        // daemon's intake mints — the follow-up consumer included: a
+        // rereview command on a bound daemon must reach the same
+        // installation the daemon serves, exactly like a webhook
+        // delivery. Both paths stamp the SAME identity, so they never
+        // disagree about WHICH installation a job belongs to. The
+        // remaining identity fields still come from each path's own
+        // source (the intake resolver's, resp. the operator's follow-up
+        // build options), so an operator that wants a command and a
+        // delivery on one head to collapse into ONE generation wires the
+        // same fields into both. An unbound daemon stamps nothing: the
+        // operator's own build options decide.
+        ...(options.forgeIntegration !== undefined
+          ? {
+              buildOptions: {
+                ...options.webhook.followUp?.buildOptions,
+                forgeIntegration: options.forgeIntegration,
+              },
+            }
+          : {}),
       },
       dispatch: (event) => {
         const bound = daemonRef;
@@ -1358,7 +1686,9 @@ export async function startControllerDaemon(
       if (stopped) throw new Error("intake closed");
       // Adoption/effective-config resolution is a GATE, not decoration: a
       // repository the policy did not grant never schedules (fail closed).
-      const buildOptions = await resolveEventIdentity(event);
+      // The SAME resolution the poll uses (`resolveIntakeBuildOptions`),
+      // so the two converge on every identity field.
+      const buildOptions = await resolveIntakeBuildOptions(event);
       if (buildOptions === null) return "ignored";
       const dispatched = await dispatchCanonicalEvent(event, {
         ledger,
@@ -1383,7 +1713,9 @@ export async function startControllerDaemon(
       return "scheduled";
     },
     async enqueue(job) {
-      await enqueueGeneration(job);
+      // The identity guard runs BEFORE any queue mutation, and a refusal
+      // releases the durable reservation before the failure propagates.
+      await handOffGeneration(job);
     },
     async stop() {
       if (stopped) return;
@@ -1414,6 +1746,36 @@ export async function startControllerDaemon(
   };
   daemonRef = daemon;
 
+  // The reconciliation context (#1443): the daemon hands the operator's
+  // poll the ledger it must dedupe against, the PER-EVENT identity
+  // resolver it must mint its jobs with, and the queue handoff for what
+  // it mints.
+  //
+  // THE DAEMON'S OWN INTAKE IS THE SINGLE SOURCE. The poll resolves the
+  // identity through the SAME function the intake mints with
+  // (`resolveIntakeBuildOptions`), so the two agree on EVERY identity
+  // field: the per-repository config fingerprint and adoption epoch, and
+  // the daemon's bound forge-integration identity. A static operator value
+  // could not mirror a per-repository fingerprint — the two would mint
+  // different generations of the same head and buy a SECOND review of it.
+  const reconcileContext: ReconcileContext = {
+    ledger,
+    // The resolver the poll calls PER DISCOVERED EVENT. `null` means the
+    // intake mints nothing for that repository (the adoption policy
+    // refuses it): the poll mints nothing either.
+    resolveBuildOptions: (event: CanonicalForgeEvent) => resolveIntakeBuildOptions(event),
+    // The handoff REJECTS with the daemon's refusal: the poll records the
+    // reason (an actionable diagnostic — WHICH rule the job broke) and
+    // releases its reservation over it. A refusal that resolved FALSE
+    // instead would reach the operator as a bare counter with no reason
+    // attached, which is exactly the failure this handoff exists to make
+    // visible.
+    enqueueJob: async (job: ReviewJob): Promise<boolean> => {
+      await handOffGeneration(job);
+      return true;
+    },
+  };
+
   if (operatorHost !== undefined) {
     server = createServer(operatorHost.handler);
     await new Promise<void>((resolve, reject) => {
@@ -1432,7 +1794,49 @@ export async function startControllerDaemon(
     }
     reconcileTimer = setInterval(() => {
       if (stopped) return;
-      void options.reconcile!.run().catch(() => undefined);
+      // The canonical composition (#1446): the daemon runs the SAME pass an
+      // operator would bind, against its own context, so the per-event
+      // identity (bound integration, config fingerprint, adoption epoch) is
+      // in the build options before `buildReviewJob` hashes the generation,
+      // and there is no operator callback that could drop it.
+      const poll = options.reconcile!.poll;
+      if (poll !== undefined) {
+        // The canonical composition (#1446): the daemon runs the SAME pass an
+        // operator would bind, against its own context, so the per-event
+        // identity (bound integration, config fingerprint, adoption epoch) is
+        // in the build options before `buildReviewJob` hashes the generation,
+        // and there is no operator callback that could drop it.
+        void reconcileRepositories({
+          platform: reconcilePollPlatform!,
+          listOpenPullRequests: poll.listOpenPullRequests,
+          repos: poll.repos,
+          ...(poll.installationId !== undefined ? { installationId: poll.installationId } : {}),
+          ledger: reconcileContext.ledger,
+          resolveBuildOptions: reconcileContext.resolveBuildOptions,
+          // A refusal REJECTS, and `reconcileRepositories` releases the
+          // reservation over it (idempotent — the handoff already released
+          // it) and records the reason, so the head is re-discovered on the
+          // next pass instead of staying suppressed until the claim's
+          // horizon expires.
+          enqueueJob: reconcileContext.enqueueJob,
+        })
+          .then((report) => {
+            // The pass has no operator holding its return value: the report
+            // is the ONLY way a broken poll becomes visible, so it goes to
+            // whoever bound `onReport`. A callback that throws must not stop
+            // the schedule — the next tick reconciles again either way.
+            try {
+              const reported = poll.onReport?.(report);
+              if (reported !== undefined) void Promise.resolve(reported).catch(() => undefined);
+            } catch {
+              // observability only: never fatal, and never a reason to skip
+              // the next pass.
+            }
+          })
+          .catch(() => undefined);
+        return;
+      }
+      void options.reconcile!.run!(reconcileContext).catch(() => undefined);
     }, interval);
   }
 

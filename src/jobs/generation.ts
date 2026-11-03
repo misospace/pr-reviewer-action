@@ -37,12 +37,19 @@ export interface GenerationIdentity {
   /** The follow-up comment id the follow_up job answers; "" for review
    * jobs (a review's identity never depends on a comment id). */
   readonly eventReference: string;
+  /** The instance-config forge integration `name` the intake carried; ""
+   * = no integration named (legacy/pre-#1440 or no named integration). */
+  readonly forgeIntegration: string;
 }
 
 /** Fixed serialization order of the identity fields. The order is part of
  * the id contract: changing it re-keys every job. Appending
- * `adoptionEpoch`/`eventReference` after `nonce` does exactly that —
- * acceptable while the module has no production callers yet. */
+ * `adoptionEpoch`/`eventReference`/`forgeIntegration` after `nonce` does
+ * exactly that — and that is the POINT of an identity field: two
+ * generations of the same head that differ in it MUST be separable
+ * generations. The cost of the re-key is one fresh review per open pull
+ * request across the change, never a lost one (the durable queue
+ * rehydrates a pre-field snapshot with the field's sentinel value). */
 const IDENTITY_FIELDS = [
   "platform",
   "installationId",
@@ -56,10 +63,11 @@ const IDENTITY_FIELDS = [
   "nonce",
   "adoptionEpoch",
   "eventReference",
+  "forgeIntegration",
 ] as const;
 
 /** Canonical identity serialization: a fixed-order `key=value\n` join over
- * the twelve identity fields, each value stringified with `String()`
+ * the thirteen identity fields, each value stringified with `String()`
  * (total over any field value — including a symbol — where a template
  * literal would throw a TypeError). Unlike `computeConfigHash` — which
  * SORTS its lines — the field order here is fixed by `IDENTITY_FIELDS`
@@ -80,7 +88,7 @@ function canonicalIdentity(identity: GenerationIdentity): string {
  * adoption epoch, new follow-up comment id, review vs follow_up) => a new
  * id.
  *
- * Returns `""` (a fail-closed sentinel, not a hash) when ANY of the twelve
+ * Returns `""` (a fail-closed sentinel, not a hash) when ANY of the thirteen
  * identity values, stringified, contains a `\n` or `\r`: in the
  * `key=value\n` join, a newline inside one value can make two DISTINCT
  * identities serialize to the same byte string (e.g. headSha
@@ -160,6 +168,16 @@ const NONCE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
  * Anything else (including a too-long run of valid chars) is invalid. */
 const ADOPTION_EPOCH_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
+/** A provided forge-integration identity (the instance-config forge
+ * integration `name` the intake carried) must be exactly this: 1–64 chars
+ * of `[A-Za-z0-9._-]`. Anything else (including a too-long run of valid
+ * chars) is invalid.
+ *
+ * Exported so the daemon's startup screening (#1440) validates a bound
+ * integration name with the SAME rule the job builder applies: one
+ * definition of a valid identity, no drift between the two. */
+export const FORGE_INTEGRATION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
 /** Build the immutable job a canonical event spawns, or `null` when the
  * event produces no job. Returns a frozen object.
  *
@@ -178,11 +196,11 @@ const ADOPTION_EPOCH_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
  *   guard for hand-built events.
  * - the builder never throws: every option/event value is type-checked
  *   before it is tested or stored. `headSha`/`baseSha` must be strings;
- *   a provided `nonce`/`adoptionEpoch`/`configFingerprint` and a
- *   `follow_up` `eventReference` must be a string or a number.
- *   Anything else (symbol, object, boolean, bigint) is refused with
- *   `null` before any `String(...)` coercion, so a hostile value can
- *   never raise.
+ *   a provided `nonce`/`adoptionEpoch`/`forgeIntegration`/
+ *   `configFingerprint` and a `follow_up` `eventReference` must be a
+ *   string or a number. Anything else (symbol, object, boolean, bigint)
+ *   is refused with `null` before any `String(...)` coercion, so a
+ *   hostile value can never raise.
  * - the scoping identity fields are well-formed (the builder's own
  *   fail-closed guard for hand-built events): `platform` is exactly
  *   "github" or "forgejo"; `installationId` is a string and, when
@@ -205,6 +223,13 @@ const ADOPTION_EPOCH_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
  *   payload.
  * - a provided `adoptionEpoch` (any job kind) must match
  *   `ADOPTION_EPOCH_PATTERN`, else the build fails (a
+ *   provided-but-invalid value is never silently emptied into the
+ *   identity); only the EMPTY string (or absent) is ABSENT (not
+ *   validated, becomes "") — a cast numeric 0 is PROVIDED; a number
+ *   must be a safe integer BEFORE pattern/coercion (the same rule the
+ *   event boundary applies).
+ * - a provided `forgeIntegration` (any job kind) must match
+ *   `FORGE_INTEGRATION_PATTERN`, else the build fails (a
  *   provided-but-invalid value is never silently emptied into the
  *   identity); only the EMPTY string (or absent) is ABSENT (not
  *   validated, becomes "") — a cast numeric 0 is PROVIDED; a number
@@ -295,6 +320,36 @@ export function buildReviewJob(
     // Store the STRING form: a type-cast non-string can never land in
     // the string field / persisted payload.
     adoptionEpoch = String(options.adoptionEpoch);
+  }
+
+  // Like the adoption epoch, the forge-integration identity is an
+  // identity field of every job kind (the stable coordinate the
+  // execution envelope's endpoint is resolved by).
+  let forgeIntegration = "";
+  if (
+    options.forgeIntegration !== undefined &&
+    options.forgeIntegration !== null &&
+    options.forgeIntegration !== ""
+  ) {
+    // Only the empty string (or undefined/null) is ABSENT: a cast
+    // numeric 0 is PROVIDED and validates as "0".
+    // Accepted type: a string or a number — anything else is refused
+    // before the pattern test, so a hostile value can never raise.
+    if (!isStringOrNumber(options.forgeIntegration)) return null;
+    // A number must be a safe integer BEFORE coercion: the same rule the
+    // event boundary (src/events) applies. An unsafe integer coerces to a
+    // "different" value (9007199254740993 -> "9007199254740992"), which
+    // would split one identity across two values, so it is refused.
+    if (
+      typeof options.forgeIntegration === "number" &&
+      !Number.isSafeInteger(options.forgeIntegration)
+    ) {
+      return null;
+    }
+    if (!FORGE_INTEGRATION_PATTERN.test(options.forgeIntegration)) return null;
+    // Store the STRING form: a type-cast non-string can never land in
+    // the string field / persisted payload.
+    forgeIntegration = String(options.forgeIntegration);
   }
 
   // A follow_up's identity IS the comment it answers: an unidentifiable
@@ -388,6 +443,7 @@ export function buildReviewJob(
     nonce,
     adoptionEpoch,
     eventReference,
+    forgeIntegration,
   });
   if (jobId === "") return null;
 
@@ -407,6 +463,7 @@ export function buildReviewJob(
     nonce,
     adoptionEpoch,
     eventReference,
+    forgeIntegration,
     fork: event.fork,
     deadlineAtMs,
     runId: sanitizeRunId(options.runId),

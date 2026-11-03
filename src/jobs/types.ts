@@ -55,6 +55,11 @@ export interface ReviewJob {
    * no leading zero); "" for `review` jobs — a review's identity never
    * depends on a comment id, even if a stray event carries one. */
   readonly eventReference: string;
+  /** The instance-config forge integration `name` the intake carried (the
+   * stable identity the execution envelope's `forgeApiUrl` is resolved
+   * by, #1440); "" = no integration named (legacy/pre-#1440 or no named
+   * integration — the envelope endpoint then resolves by platform kind). */
+  readonly forgeIntegration: string;
   /** Trust metadata preserved from the event. */
   readonly fork: boolean;
   /** Deadline in epoch ms; 0 = no deadline (deadline/cancellation
@@ -78,6 +83,13 @@ export interface BuildJobOptions {
     * fails the build); an EMPTY/absent epoch is treated as absent
     * (becomes ""). Default "". Applies to every job kind. */
   adoptionEpoch?: string;
+  /** Instance-config forge integration `name` the intake carried.
+   * Documented with the same conventions as `adoptionEpoch`: an
+   * EMPTY/absent value is treated as ABSENT (becomes ""); a PROVIDED
+   * value must match `[A-Za-z0-9._-]{1,64}` or the build fails; a number
+   * must be a safe integer before coercion; the String form is stored.
+   * Applies to every job kind. Default "". */
+  forgeIntegration?: string;
   /** Deadline in epoch ms. Default 0 (no deadline). */
   deadlineAtMs?: number;
   /** Run id. Default "" (not yet assigned). */
