@@ -91,7 +91,10 @@ function describeHandoffRefusal(error: unknown): string {
       : typeof error === "string"
         ? error
         : "";
-  const singleLine = message.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  // Same class as `CELL_BREAK_RE` (src/gates/ci-wait.ts): C0, DEL, C1, and
+  // the Unicode line/paragraph separators — NEL/LS/PS end a rendered line
+  // just as well as \n and would let a reason forge log/report structure.
+  const singleLine = message.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
   return maskDiagnostic(
     singleLine === "" ? HANDOFF_REFUSED_REASON : singleLine,
     [],

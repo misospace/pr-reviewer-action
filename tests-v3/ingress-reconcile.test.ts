@@ -561,7 +561,7 @@ test("a hostile refusal reason is single-line and free of secret-shaped material
     ledger: new MemoryGenerationLedger(),
     enqueueJob: () => {
       throw new Error(
-        `queue rejected job\n### ReconcileReport\npassword=SuperSecretValue1 token: ${providerKey} ${secretToken}\u0000tail`,
+        `queue rejected job\n### ReconcileReport\npassword=SuperSecretValue1 token: ${providerKey} ${secretToken}\u0085next\u2028line\u009ftail`,
       );
     },
   });
@@ -570,9 +570,27 @@ test("a hostile refusal reason is single-line and free of secret-shaped material
   assert.ok(!reason.includes(providerKey));
   assert.ok(!reason.includes("SuperSecretValue1"));
   assert.ok(reason.includes("[REDACTED]"));
-  // Control characters (including the newline and NUL) are collapsed: the
-  // reason stays ONE line and cannot forge a heading.
-  assert.ok(!/[\n\r\u0000-\u001f]/.test(reason));
+  // Control characters (C0/NEL/C1, including NUL) and the Unicode
+  // line/paragraph separators are collapsed: the reason stays ONE line and
+  // cannot forge a heading.
+  assert.ok(!/[\n\r\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(reason));
+});
+
+test("a hostile refusal reason cannot break the single line with NEL or LS/PS alone", async () => {
+  // #252 boundary token ITSELF: the separators that survive a C0-only
+  // collapse, with no ordinary newline present at all.
+  const report = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } }),
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    enqueueJob: () => {
+      throw new Error("refused\u0085line\u2028break\u2029paragraph\u009ftail");
+    },
+  });
+  const reason = report.handoffRefusals[0]!.reason;
+  assert.ok(!/[\n\r\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(reason));
+  assert.match(reason, /^refused .*tail$/);
 });
 
 test("a messageless or non-Error throw falls back to the generic reason", async () => {
@@ -589,6 +607,41 @@ test("a messageless or non-Error throw falls back to the generic reason", async 
     assert.equal(report.handoffRefusals.length, 1);
     assert.equal(report.handoffRefusals[0]!.reason, "the queue handoff refused the job");
   }
+});
+
+test("describing a refusal never aborts the pass: a throwing message getter degrades to the generic reason", async () => {
+  // #252 on the describe path itself: the hostile boundary is a thrown
+  // value whose `message` getter throws while being read. The pass must
+  // still finish, still record exactly one bounded refusal, and still
+  // release the reservation.
+  const ledger = new MemoryGenerationLedger();
+  const hostile = new Error("placeholder");
+  Object.defineProperty(hostile, "message", {
+    get(): string {
+      throw new Error("getter attack");
+    },
+  });
+  const report = await reconcileRepositories({
+    platform: "github",
+    // A second in-scope entry proves the pass continued past the describe failure.
+    listOpenPullRequests: listerFor({
+      "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD), makeBarePr(8, 800, NEW_HEAD)] },
+    }),
+    repos: ["org/repo"],
+    ledger,
+    enqueueJob: (job) => {
+      if (job.headSha === HEAD) throw hostile;
+      return true;
+    },
+  });
+  assert.equal(report.jobs.length, 1);
+  assert.equal(report.skipped, 1);
+  assert.deepEqual([...report.handoffRefusals], [
+    { repo: "org/repo", reason: "the queue handoff refused the job" },
+  ]);
+  const refusedJobId = buildReviewJob(reconciliationPollEvent("github", makeBarePr(7, 700, HEAD))!)!
+    .jobId;
+  assert.equal(await ledger.has(refusedJobId), false);
 });
 
 test("refusals past the per-pass cap are still counted in skipped but not listed", async () => {
