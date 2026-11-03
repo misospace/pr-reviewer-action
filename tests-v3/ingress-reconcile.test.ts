@@ -5,6 +5,7 @@ import {
   type ReconcileOptions,
 } from "../src/ingress/reconcile.js";
 import { MemoryGenerationLedger } from "../src/ingress/dispatch.js";
+import { DIAGNOSTIC_MAX_CHARS } from "../src/context/redact.js";
 import { reconciliationPollEvent, normalizeForgejoEvent } from "../src/events/normalize.js";
 import { buildReviewJob } from "../src/jobs/generation.js";
 import type { ReadResult } from "../src/ingress/api-client.js";
@@ -472,4 +473,208 @@ test("a refused queue handoff releases the durable reservation", async () => {
     enqueueJob: () => true,
   });
   assert.equal(again.jobs.length, 1);
+});
+
+// ── refused-handoff reasons (#1445) ────────────────────────────────────────
+//
+// `skipped` answers "how many"; `handoffRefusals` answers "why". The
+// never-abort contract is unchanged: one refused head must not end the
+// pass, and because a refused handoff releases its reservation the head is
+// re-discovered on every later pass — a reasonless permanent skip is the
+// silence this closes. Reason strings come from arbitrary operator handoff
+// code, so they are untrusted diagnostics: single-line, secret-redacted,
+// length-bounded, and the refused-entry list itself is capped.
+
+test("a handoff returning false reports a generic bounded refusal for its repo", async () => {
+  const report = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } }),
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    enqueueJob: () => false,
+  });
+  assert.equal(report.skipped, 1);
+  assert.deepEqual([...report.handoffRefusals], [
+    { repo: "org/repo", reason: "the queue handoff refused the job" },
+  ]);
+});
+
+test("a throwing handoff reports the error message and the pass continues past it", async () => {
+  // #1444-shaped refusal: a RangeError naming the remedy. The first PR is
+  // refused, the second must still be handed over, and the refused head's
+  // reservation must still be released.
+  const ledger = new MemoryGenerationLedger();
+  const report = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: listerFor({
+      "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD), makeBarePr(8, 800, NEW_HEAD)] },
+    }),
+    repos: ["org/repo"],
+    ledger,
+    enqueueJob: (job) => {
+      if (job.headSha === HEAD) {
+        throw new RangeError(
+          "job carries no forge integration id and 2 configured integrations share its kind; set forge-integration-id",
+        );
+      }
+      return true;
+    },
+  });
+  assert.equal(report.jobs.length, 1);
+  assert.equal(report.skipped, 1);
+  assert.equal(report.handoffRefusals.length, 1);
+  const refusal = report.handoffRefusals[0]!;
+  assert.equal(refusal.repo, "org/repo");
+  assert.match(refusal.reason, /forge integration id/);
+  assert.match(refusal.reason, /forge-integration-id/);
+  // The refusal is a receipt, not just prose: the reservation was released.
+  const refusedJobId = buildReviewJob(reconciliationPollEvent("github", makeBarePr(7, 700, HEAD))!)!
+    .jobId;
+  assert.equal(await ledger.has(refusedJobId), false);
+});
+
+test("an oversized refusal reason is length-bounded with a visible truncation marker", async () => {
+  const report = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } }),
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    enqueueJob: () => {
+      throw new Error("x".repeat(10_000));
+    },
+  });
+  const reason = report.handoffRefusals[0]!.reason;
+  assert.ok(reason.length <= DIAGNOSTIC_MAX_CHARS + "...[truncated]".length);
+  assert.ok(reason.endsWith("...[truncated]"));
+});
+
+test("a hostile refusal reason is single-line and free of secret-shaped material", async () => {
+  // #252: feed the boundary tokens THEMSELVES — a GitHub PAT, an OpenAI
+  // key, a key=value credential, and self-closing/heading prose that must
+  // not be able to forge report structure once the reason is logged.
+  const secretToken = `ghp_${"a".repeat(36)}`;
+  const providerKey = `sk-${"b".repeat(24)}`;
+  const report = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } }),
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    enqueueJob: () => {
+      throw new Error(
+        `queue rejected job\n### ReconcileReport\npassword=SuperSecretValue1 token: ${providerKey} ${secretToken}\u0085next\u2028line\u009ftail`,
+      );
+    },
+  });
+  const reason = report.handoffRefusals[0]!.reason;
+  assert.ok(!reason.includes(secretToken));
+  assert.ok(!reason.includes(providerKey));
+  assert.ok(!reason.includes("SuperSecretValue1"));
+  assert.ok(reason.includes("[REDACTED]"));
+  // Control characters (C0/NEL/C1, including NUL) and the Unicode
+  // line/paragraph separators are collapsed: the reason stays ONE line and
+  // cannot forge a heading.
+  assert.ok(!/[\n\r\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(reason));
+});
+
+test("a hostile refusal reason cannot break the single line with NEL or LS/PS alone", async () => {
+  // #252 boundary token ITSELF: the separators that survive a C0-only
+  // collapse, with no ordinary newline present at all.
+  const report = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } }),
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    enqueueJob: () => {
+      throw new Error("refused\u0085line\u2028break\u2029paragraph\u009ftail");
+    },
+  });
+  const reason = report.handoffRefusals[0]!.reason;
+  assert.ok(!/[\n\r\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(reason));
+  assert.match(reason, /^refused .*tail$/);
+});
+
+test("a messageless or non-Error throw falls back to the generic reason", async () => {
+  for (const thrown of [new Error(), new RangeError(""), 42, null, undefined, Symbol("nope")]) {
+    const report = await reconcileRepositories({
+      platform: "github",
+      listOpenPullRequests: listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } }),
+      repos: ["org/repo"],
+      ledger: new MemoryGenerationLedger(),
+      enqueueJob: () => {
+        throw thrown;
+      },
+    });
+    assert.equal(report.handoffRefusals.length, 1);
+    assert.equal(report.handoffRefusals[0]!.reason, "the queue handoff refused the job");
+  }
+});
+
+test("describing a refusal never aborts the pass: a throwing message getter degrades to the generic reason", async () => {
+  // #252 on the describe path itself: the hostile boundary is a thrown
+  // value whose `message` getter throws while being read. The pass must
+  // still finish, still record exactly one bounded refusal, and still
+  // release the reservation.
+  const ledger = new MemoryGenerationLedger();
+  const hostile = new Error("placeholder");
+  Object.defineProperty(hostile, "message", {
+    get(): string {
+      throw new Error("getter attack");
+    },
+  });
+  const report = await reconcileRepositories({
+    platform: "github",
+    // A second in-scope entry proves the pass continued past the describe failure.
+    listOpenPullRequests: listerFor({
+      "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD), makeBarePr(8, 800, NEW_HEAD)] },
+    }),
+    repos: ["org/repo"],
+    ledger,
+    enqueueJob: (job) => {
+      if (job.headSha === HEAD) throw hostile;
+      return true;
+    },
+  });
+  assert.equal(report.jobs.length, 1);
+  assert.equal(report.skipped, 1);
+  assert.deepEqual([...report.handoffRefusals], [
+    { repo: "org/repo", reason: "the queue handoff refused the job" },
+  ]);
+  const refusedJobId = buildReviewJob(reconciliationPollEvent("github", makeBarePr(7, 700, HEAD))!)!
+    .jobId;
+  assert.equal(await ledger.has(refusedJobId), false);
+});
+
+test("refusals past the per-pass cap are still counted in skipped but not listed", async () => {
+  const many = Array.from({ length: 30 }, (_, i) =>
+    makeBarePr(i + 1, 1000 + i, i.toString(16).padStart(40, "0")),
+  );
+  const report = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: listerFor({ "org/repo": { ok: true, data: many } }),
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    enqueueJob: () => false,
+  });
+  assert.equal(report.skipped, 30);
+  assert.equal(report.handoffRefusals.length, 25);
+});
+
+test("skips that are not handoff refusals report no refusal entries", async () => {
+  const ledger = new MemoryGenerationLedger();
+  const known = makeBarePr(7, 700, HEAD);
+  await ledger.add(buildReviewJob(reconciliationPollEvent("github", known)!)!.jobId);
+  const report = await reconcileRepositories({
+    platform: "github",
+    // known head (ledger-suppressed) + garbage (unnormalizable) + a job
+    // that hands over cleanly.
+    listOpenPullRequests: listerFor({
+      "org/repo": { ok: true, data: [known, 42, makeBarePr(8, 800, NEW_HEAD)] },
+    }),
+    repos: ["org/repo"],
+    ledger,
+    enqueueJob: () => true,
+  });
+  assert.equal(report.skipped, 2);
+  assert.equal(report.jobs.length, 1);
+  assert.deepEqual([...report.handoffRefusals], []);
 });

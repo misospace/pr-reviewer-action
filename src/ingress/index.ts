@@ -90,7 +90,11 @@ export {
 export type { GenerationLedger, DispatchOutcome, PublishGate } from "./dispatch.js";
 export { MemoryGenerationLedger, dispatchCanonicalEvent, gateJobPublication } from "./dispatch.js";
 
-export type { ReconcileReport, ReconcileOptions } from "./reconcile.js";
+export type {
+  ReconcileReport,
+  ReconcileHandoffRefusal,
+  ReconcileOptions,
+} from "./reconcile.js";
 export { reconcileRepositories } from "./reconcile.js";
 
 export type {
