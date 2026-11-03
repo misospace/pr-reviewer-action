@@ -217,6 +217,231 @@ test("#1380: dependency-update classification drives the claim pass dependency m
   }
 });
 
+test("#1448: the derived-obligations pre-pass runs on the primary route and its section reaches the final corpus", async () => {
+  const obligationsPayload = JSON.stringify({
+    obligations: [{
+      obligation: "Both enqueue producers must place the integration identity before generation hashing.",
+      change: "generationId() now hashes an integration field; only one producer supplies it.",
+      topology: "producer_convergence",
+      paths: ["src/ingress/reconcile.ts:mintFoundJob"],
+      basis: "The hashed canonical tuple changed and one mint site does not pass the new field.",
+    }],
+  });
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (body.includes("You derive the architectural obligations")) {
+      res.end(JSON.stringify({ id: "d1", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content: obligationsPayload }, finish_reason: "stop" }], usage: { prompt_tokens: 50, completion_tokens: 30, total_tokens: 80 } }));
+      return;
+    }
+    res.end(verdictBody());
+  });
+  const f = fixture();
+  try {
+    const req = request(server.url, f.runDir);
+    req.inputs = { ...req.inputs, "derived-obligations": "true" };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter: mockPlatform() }));
+    // The derivation is a review target, not a verdict input: the scripted
+    // approve still stands (#1448 scope; #1449 owns withholding).
+    assert.equal(result.outputs.verdict, "approve");
+    const deriveRequests = server.requests.filter((r) => r.body.includes("You derive the architectural obligations"));
+    assert.equal(deriveRequests.length, 1);
+    assert.match(deriveRequests[0]!.body, /untrusted PR content/);
+    const record = JSON.parse(readFileSync(join(f.runDir, "derived-obligations.json"), "utf8")) as {
+      status: string; method: string; obligations: { topology: string }[]; section_bytes: number;
+    };
+    assert.equal(record.status, "ok");
+    assert.equal(record.method, "model");
+    assert.equal(record.obligations[0]?.topology, "producer_convergence");
+    assert.ok(record.section_bytes > 0);
+    const corpus = readFileSync(join(f.runDir, "review-corpus.md"), "utf8");
+    assert.match(corpus, /# Derived Architectural Obligations/);
+    assert.match(corpus, /mintFoundJob/);
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
+test("#1448: a failing derivation renders a visible unavailable note in the corpus, never silence", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    // The verdict JSON carries no obligations array: malformed for this
+    // pass, which must surface rather than read as "no obligations".
+    res.end(verdictBody());
+  });
+  const f = fixture();
+  try {
+    const req = request(server.url, f.runDir);
+    req.inputs = { ...req.inputs, "derived-obligations": "true" };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter: mockPlatform() }));
+    assert.equal(result.outputs.verdict, "approve");
+    const record = JSON.parse(readFileSync(join(f.runDir, "derived-obligations.json"), "utf8")) as { status: string; error_kind: string | null };
+    assert.equal(record.status, "error");
+    assert.equal(record.error_kind, "malformed");
+    const corpus = readFileSync(join(f.runDir, "review-corpus.md"), "utf8");
+    assert.match(corpus, /# Derived Architectural Obligations/);
+    assert.match(corpus, /did not complete for this run \(reason: malformed\)/);
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
+test("#1448: disabled derived-obligations records no artifact and adds no corpus section", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody());
+  });
+  const f = fixture();
+  try {
+    const result = await runReviewEngine(request(server.url, f.runDir), engineDeps(f.root, f.runDir, { adapter: mockPlatform() }));
+    assert.equal(result.outputs.verdict, "approve");
+    assert.ok(!existsSync(join(f.runDir, "derived-obligations.json")));
+    assert.ok(!server.requests.some((r) => r.body.includes("You derive the architectural obligations")));
+    assert.ok(!readFileSync(join(f.runDir, "review-corpus.md"), "utf8").includes("Derived Architectural Obligations"));
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
+// ── #1448 review: input completeness (truncated-diff blinding) ──────────
+
+/** A source-rank chunk of roughly `lines` × 45 bytes. */
+function diffChunk(path: string, tag: string, lines: number): string {
+  const body = Array.from({ length: lines }, (_, i) => `+${tag} filler line ${i} ${"a".repeat(24)}`);
+  return [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, `@@ -1,3 +1,${lines + 2} @@`, " context", ...body, " more", ""].join("\n");
+}
+
+const DERIVE_PAYLOAD = JSON.stringify({
+  obligations: [{
+    obligation: "Both enqueue producers must place the integration identity before generation hashing.",
+    change: "generationId() now hashes an integration field; only one producer supplies it.",
+    topology: "producer_convergence",
+    paths: ["src/ingress/reconcile.ts:mintFoundJob"],
+    basis: "The hashed canonical tuple changed and one mint site does not pass the new field.",
+  }],
+});
+const DERIVE_EMPTY = JSON.stringify({ obligations: [] });
+
+test("#1448 review: the derivation is fed the complete diff, not the prioritized slice", async () => {
+  // The obligation-triggering hunk lives in a generated-rank chunk
+  // (`*.min.js`), which `prioritizeDiff` drops whole from
+  // `pr.diff.truncated` under a tight budget. The mock model reports the
+  // obligation only when the request body actually contains the hunk, so a
+  // derivation fed the prioritized slice comes back `empty` — exactly the
+  // silent blind spot the complete-diff feed pins out (#1449 consumes this).
+  const sentinel = "+const IDENTITY_HUNK_SENTINEL = \"reconciliation-must-place-integration-id-before-hash\";";
+  const fullDiff = [
+    diffChunk("src/one.ts", "one", 55),
+    diffChunk("src/two.ts", "two", 55),
+    diffChunk("src/three.ts", "three", 55),
+    ["diff --git a/dist/app.min.js b/dist/app.min.js", "--- a/dist/app.min.js", "+++ b/dist/app.min.js", "@@ -1,3 +1,5 @@", " generated bundle", sentinel, " more bundle", ""].join("\n"),
+  ].join("\n");
+  const adapter = {
+    ...mockPlatform(),
+    getPrDiff: async () => fullDiff,
+    listPrFiles: async () => ({ ok: true, data: ["src/one.ts", "src/two.ts", "src/three.ts", "dist/app.min.js"].map((filename) => ({ filename, status: "modified", additions: 50, deletions: 1, changes: 51 })) }),
+  } as unknown as PlatformReadAdapter;
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (body.includes("You derive the architectural obligations")) {
+      res.end(JSON.stringify({ id: "d1", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content: body.includes("IDENTITY_HUNK_SENTINEL") ? DERIVE_PAYLOAD : DERIVE_EMPTY }, finish_reason: "stop" }], usage: { prompt_tokens: 50, completion_tokens: 30, total_tokens: 80 } }));
+      return;
+    }
+    res.end(verdictBody());
+  });
+  const f = fixture();
+  try {
+    const req = request(server.url, f.runDir);
+    req.inputs = {
+      ...req.inputs,
+      "derived-obligations": "true",
+      // The smallest primary window the tool loop admits (~22.4k tokens)
+      // floors maxDiff at ~7.4 KB, so the ~8.7 KB diff cannot fit the
+      // prioritized slice whole and the generated-rank sentinel chunk is
+      // dropped from it entirely.
+      "primary-model-context-tokens": "22500",
+    };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
+    // The derivation is a review target, not a verdict input (#1449 owns withholding).
+    assert.equal(result.outputs.verdict, "approve");
+    // The trap is real at this budget: the prioritized slice omitted the hunk…
+    const truncated = readFileSync(join(f.runDir, "pr.diff.truncated"), "utf8");
+    assert.ok(!truncated.includes("IDENTITY_HUNK_SENTINEL"), "fixture precondition: the sentinel must be outside pr.diff.truncated");
+    // …but the derivation saw it through the complete diff.
+    const deriveRequests = server.requests.filter((r) => r.body.includes("You derive the architectural obligations"));
+    assert.equal(deriveRequests.length, 1);
+    assert.ok(deriveRequests[0]!.body.includes("IDENTITY_HUNK_SENTINEL"), "the derivation must receive the complete diff");
+    const record = JSON.parse(readFileSync(join(f.runDir, "derived-obligations.json"), "utf8")) as {
+      status: string; diff_source: string; diff_clipped: boolean; input_complete: boolean; obligations: { topology: string }[];
+    };
+    assert.equal(record.status, "ok");
+    assert.equal(record.diff_source, "full");
+    assert.equal(record.diff_clipped, false);
+    assert.equal(record.input_complete, true);
+    assert.equal(record.obligations[0]?.topology, "producer_convergence");
+    const corpus = readFileSync(join(f.runDir, "review-corpus.md"), "utf8");
+    assert.match(corpus, /# Derived Architectural Obligations/);
+    assert.match(corpus, /mintFoundJob/);
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
+test("#1448 review: a clipped derivation input renders incomplete coverage, never a silent empty", async () => {
+  // The obligation-triggering hunk sits beyond the pass's own 48 KB input
+  // clip, so the model can only return an empty derivation. The run must
+  // surface that as unavailable coverage (reason: input-clipped) and record
+  // input_complete=false: an `empty` over an unseen tail is not "no
+  // obligations", and #1449 must be able to fail toward partial.
+  const sentinel = "+const IDENTITY_HUNK_SENTINEL = \"reconciliation-must-place-integration-id-before-hash\";";
+  const fullDiff = [
+    diffChunk("src/generated-filler.ts", "filler", 1150),
+    ["diff --git a/src/mint-site.ts b/src/mint-site.ts", "--- a/src/mint-site.ts", "+++ b/src/mint-site.ts", "@@ -1,3 +1,5 @@", " context", sentinel, " more", ""].join("\n"),
+  ].join("\n");
+  const adapter = {
+    ...mockPlatform(),
+    getPrDiff: async () => fullDiff,
+    listPrFiles: async () => ({ ok: true, data: [{ filename: "src/generated-filler.ts", status: "modified", additions: 1150, deletions: 1, changes: 1151 }, { filename: "src/mint-site.ts", status: "modified", additions: 2, deletions: 1, changes: 3 }] }),
+  } as unknown as PlatformReadAdapter;
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (body.includes("You derive the architectural obligations")) {
+      res.end(JSON.stringify({ id: "d1", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content: body.includes("IDENTITY_HUNK_SENTINEL") ? DERIVE_PAYLOAD : DERIVE_EMPTY }, finish_reason: "stop" }], usage: { prompt_tokens: 50, completion_tokens: 30, total_tokens: 80 } }));
+      return;
+    }
+    res.end(verdictBody());
+  });
+  const f = fixture();
+  try {
+    const req = request(server.url, f.runDir);
+    req.inputs = { ...req.inputs, "derived-obligations": "true" };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
+    assert.equal(result.outputs.verdict, "approve");
+    // The pass clipped its input: the hunk never reached the model.
+    const deriveRequests = server.requests.filter((r) => r.body.includes("You derive the architectural obligations"));
+    assert.equal(deriveRequests.length, 1);
+    assert.ok(!deriveRequests[0]!.body.includes("IDENTITY_HUNK_SENTINEL"));
+    assert.ok(deriveRequests[0]!.body.includes("[diff truncated]"));
+    const record = JSON.parse(readFileSync(join(f.runDir, "derived-obligations.json"), "utf8")) as {
+      status: string; diff_source: string; diff_clipped: boolean; input_complete: boolean; obligations: unknown[];
+    };
+    assert.equal(record.status, "empty");
+    assert.equal(record.diff_source, "full");
+    assert.equal(record.diff_clipped, true);
+    assert.equal(record.input_complete, false);
+    assert.equal(record.obligations.length, 0);
+    // …and the corpus says coverage is unavailable instead of reading clean.
+    const corpus = readFileSync(join(f.runDir, "review-corpus.md"), "utf8");
+    assert.match(corpus, /did not complete for this run \(reason: input-clipped\)/);
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
 test("#1380: the claim pre-pass gate is a pass-through outside dependency mode", async () => {
   const neverSettles: Promise<never> = new Promise(() => {});
   await claimsPrepassGate(false, neverSettles);

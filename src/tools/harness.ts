@@ -1005,7 +1005,7 @@ const CORPUS_TITLES = new Set([
   "PR Files", "Version Hints from Diff", "PR Diff",
   "Tool Harness Findings", "Evidence Providers", "CI Check Results",
   "Image Digest Provenance", "Linked Sources", "Repository Impact Scan",
-  "Repository History", "Claims to Falsify", "Specialist Review Leads",
+  "Repository History", "Claims to Falsify", "Derived Architectural Obligations", "Specialist Review Leads",
 ]);
 
 /** Corpus-section regions for the planning context (the same level-1 ATX
@@ -1028,7 +1028,7 @@ export function extractCorpusRegions(corpusText: string): Record<string, string>
   const bounds = [...starts, lines.length];
   for (let i = 0; i < starts.length; i++) {
     const title = (lines[starts[i]!] ?? "").slice(2).trim();
-    if (["PR Metadata", "PR Classification", "Linked Issue Context", "Related Code Context", "Repository Map", "PR Files", "Version Hints from Diff", "Specialist Review Leads", "Claims to Falsify"].includes(title)) {
+    if (["PR Metadata", "PR Classification", "Linked Issue Context", "Related Code Context", "Repository Map", "PR Files", "Version Hints from Diff", "Specialist Review Leads", "Claims to Falsify", "Derived Architectural Obligations"].includes(title)) {
       if (regions[title] === undefined) {
         regions[title] = lines.slice(starts[i]!, bounds[i + 1] ?? lines.length).join("\n").replace(/\s+$/, "");
       }
@@ -1305,6 +1305,27 @@ export function buildPlanningContext(
   }
   if (clSection !== null && clRoom >= 400) {
     sections.push(clSection);
+  }
+
+  // ── Derived Architectural Obligations (#1448): whole section, right
+  // behind the claims ──────────────────────────────────────────────────────
+  // The loop is what opens the equivalent producers and consumers a derived
+  // obligation names, so the obligations must be in the FIRST planning turn.
+  // Same whole-or-nothing embedding as the claims region (never sliced).
+  const dvRoom = maxBytes - used() - PLANNING_RESERVE;
+  const dvCap = envIntBounded(deps.env, "DERIVED_OBLIGATIONS_SECTION_MAX_BYTES", 8000, 1, 200000) + 2;
+  let dvSection: string | null = regions["Derived Architectural Obligations"] ?? null;
+  if (dvSection !== null && Buffer.byteLength(dvSection, "utf8") + 2 > Math.min(dvCap, Math.max(dvRoom, 0))) {
+    dvSection = null;
+  }
+  if (dvSection === null) {
+    const body = readStripped("derived-obligations.md");
+    if (body !== null && Buffer.byteLength(body, "utf8") + 2 <= Math.min(dvCap, Math.max(dvRoom, 0))) {
+      dvSection = body;
+    }
+  }
+  if (dvSection !== null && dvRoom >= 400) {
+    sections.push(dvSection);
   }
 
   // ── Specialist Review Leads: reserved FIRST for first-turn visibility ──

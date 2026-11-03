@@ -58,6 +58,8 @@ import { runSpecialistsGate } from "../gates/specialists-gate.js";
 import { specialistRequestFn } from "../gates/specialist-transport.js";
 import { runClaimFalsificationPass } from "../claims/pass.js";
 import { renderClaimsSection } from "../claims/render.js";
+import { runDerivedObligationsPass } from "../derived/pass.js";
+import { renderDerivedSectionForStatus, renderDerivedUnavailable } from "../derived/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
@@ -1255,6 +1257,134 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       });
   }
 
+  // ── Derived architectural-obligation pre-pass (#1448) ──────────────────
+  // Fail-soft like the claims pre-pass above, but NOT silent on failure: a
+  // derivation that did not complete renders a visible "coverage
+  // unavailable" note, because this pass exists to surface obligations the
+  // PR never states — an absent section must never read as "nothing was
+  // implied". The JSON artifact records status/error kind so #1449 can tell
+  // `empty` (model ran, no obligation) from `error`/`timeout`/`malformed`
+  // (derivation incomplete). One bounded model call on the primary route.
+  // Shares the #1380 budget-priority gate: on a dependency update it
+  // launches only after the mandatory evidence phase settles.
+  //
+  // Input completeness (#1448 review: truncated-diff blinding): the pass is
+  // fed the COMPLETE diff (`pr.diff`) — the prioritized `pr.diff.truncated`
+  // slice can omit the very hunk that raises the obligation (the #909
+  // caveat, classification's own feed comment). The pass applies its own
+  // bounded selection/clipping on top, and the artifact records
+  // `diff_source`/`diff_clipped`/`input_complete` so #1449 can fail toward
+  // partial/needs-review instead of treating an `empty` over a clipped or
+  // sliced input as complete coverage. `pr.diff` is the complete fetched
+  // diff (a capped platform read throws rather than silently clipping);
+  // the truncated-slice fallback only fires when the full artifact is
+  // absent, and records exactly that.
+  const derivedDiffFull = ws.readText("pr.diff");
+  const derivedDiffSource: "full" | "truncated" | "none" = derivedDiffFull !== null
+    ? "full"
+    : ws.readText("pr.diff.truncated") !== null
+    ? "truncated"
+    : "none";
+  const derivedDiff = derivedDiffFull ?? ws.readText("pr.diff.truncated") ?? "";
+  ws.write("derived-obligations.md", new Uint8Array(0));
+  let derivedPromise: Promise<void> = Promise.resolve();
+  if ((env.DERIVED_OBLIGATIONS ?? "false").toLowerCase() === "true") {
+    const rawDerivedTemp = (env.AI_TEMPERATURE ?? "").trim();
+    const derivedTemperature = rawDerivedTemp === "" || Number.isNaN(Number(rawDerivedTemp)) ? null : Number(rawDerivedTemp);
+    const derivedTimeoutSec = Math.min(
+      Number(env.DERIVED_OBLIGATIONS_TIMEOUT_SEC ?? "180") || 180,
+      Number(env.AI_REQUEST_TIMEOUT_SEC ?? "180") || 180,
+    );
+    // #1037 correlation headers ride the derivation call too, same rule as
+    // the claims pre-pass: resolved only when the primary route exists, and
+    // unset config omits the key.
+    const derivedExtra = profiles.primary.baseUrl && profiles.primary.model
+      ? extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "")
+      : undefined;
+    derivedPromise = claimsPrepassGate(
+      DEPENDENCY_UPDATE_KINDS.has(classification.prKind),
+      evidencePromise,
+    ).then(() => runDerivedObligationsPass({
+      title: String(pr.title ?? ""),
+      body: String(pr.body ?? ""),
+      files: safeJson(ws.read("pr-files.json")),
+      diff: derivedDiff,
+      diffComplete: derivedDiffSource === "full",
+      model:
+        profiles.primary.baseUrl && profiles.primary.model
+          ? {
+              config: {
+                apiFormat: profiles.primary.apiFormat,
+                model: profiles.primary.model,
+                baseUrl: profiles.primary.baseUrl,
+                apiKey: profiles.primary.apiKey,
+                maxTokens: Number(env.DERIVED_OBLIGATIONS_MAX_TOKENS ?? "4096") || 4096,
+                temperature: derivedTemperature,
+                responseFormat: profiles.primary.responseFormat,
+                tokensParam: env.AI_TOKENS_PARAM ?? "max_tokens",
+                stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
+                timeoutSec: derivedTimeoutSec,
+                inputMaxBytes: Number(env.DERIVED_OBLIGATIONS_INPUT_MAX_BYTES ?? "48000") || 48000,
+                // #998: the pre-pass runs on the primary route, so it uses
+                // the primary lane's resolved effort.
+                reasoningEffort: profiles.primary.reasoningEffort,
+                anthropicEffortSupported: profiles.primary.anthropicEffortSupported,
+              },
+              requestFn: specialistRequestFn({
+                baseUrl: profiles.primary.baseUrl,
+                apiKey: profiles.primary.apiKey,
+                anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
+                ...(derivedExtra !== undefined ? { extraHeaders: derivedExtra } : {}),
+              }),
+            }
+          : undefined,
+    }))
+      .then((result) => {
+        const section = renderDerivedSectionForStatus(result, Number(env.DERIVED_OBLIGATIONS_SECTION_MAX_BYTES ?? "8000") || 8000);
+        const record = {
+          status: result.status,
+          error_kind: result.errorKind,
+          error: result.error,
+          diff_source: derivedDiffSource,
+          diff_clipped: result.diffClipped,
+          input_complete: result.inputComplete,
+          method: result.artifact.method,
+          obligations: result.artifact.obligations,
+          truncated: result.artifact.truncated,
+          errors: result.artifact.errors,
+          section_bytes: Buffer.byteLength(section, "utf8"),
+        };
+        ws.write("derived-obligations.json", Buffer.from(`${pyJsonDumps(record)}\n`, "utf8"));
+        ws.write("derived-obligations.md", Buffer.from(section, "utf8"));
+      })
+      .catch((cause: unknown) => {
+        // The pass itself never throws; this only guards the artifact-write
+        // path. Even here the review proceeds, with an explicit unavailable
+        // note rather than a silent gap — and the JSON artifact is written
+        // too, so a #1449 consumer never sees "no artifact" (indistinguishable
+        // from a disabled run) while the corpus says a derivation happened.
+        log(`WARNING: derived-obligations pre-pass failed; continuing without derived obligations: ${cause instanceof Error ? cause.message : String(cause)}`);
+        const note = Buffer.from(renderDerivedUnavailable("internal"), "utf8");
+        ws.write("derived-obligations.md", note);
+        ws.write(
+          "derived-obligations.json",
+          Buffer.from(`${pyJsonDumps({
+            status: "error",
+            error_kind: "internal",
+            error: cause instanceof Error ? cause.message : String(cause),
+            diff_source: derivedDiffSource,
+            diff_clipped: false,
+            input_complete: false,
+            method: "none",
+            obligations: [],
+            truncated: false,
+            errors: [],
+            section_bytes: note.length,
+          })}\n`, "utf8"),
+        );
+      });
+  }
+
   // ── Gates: advisory specialists (in-process) + CI join (#634) ────────
   const deepMode = (env.DEEP_REVIEW ?? "false").toLowerCase();
   let specialistOutcome: GateOutcome = NO_GATE_OUTCOME("specialists");
@@ -1295,6 +1425,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     cancellation.release(specialistFork);
   }
   await claimsPromise;
+  await derivedPromise;
   if (ciFork !== null) {
     const outcome = await ciFork.join();
     // Joined: the second (result-building) join reads the cached outcome and
@@ -1342,7 +1473,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
 
   // Rebuild the corpus with both branches resolved (finalized CI evidence
   // + any rendered specialist leads + refreshed PR metadata).
-  if (env.CI_GATE_ACTIVE === "true" || ws.isNonEmpty("specialists.md") || ws.isNonEmpty("claim-falsification.md")) {
+  if (env.CI_GATE_ACTIVE === "true" || ws.isNonEmpty("specialists.md") || ws.isNonEmpty("claim-falsification.md") || ws.isNonEmpty("derived-obligations.md")) {
     log("review gates resolved: rebuilding corpus with finalized CI evidence and specialist leads");
     corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
     ws.write("review-corpus.truncated.md", ws.read(corpusResult.outputName) ?? new Uint8Array(0));

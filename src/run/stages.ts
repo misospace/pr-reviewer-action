@@ -607,6 +607,7 @@ export function assembleCorpus(
       standardsContextMd: ws.read("standards-context.md"),
       requirementLedgerMd: ws.read("requirement-ledger.md"),
       claimFalsificationMd: ws.read("claim-falsification.md"),
+      derivedObligationsMd: ws.read("derived-obligations.md"),
       specialistsMd: ws.read("specialists.md"),
       requirementLedgerPresent: ws.read("requirement-ledger-present.txt"),
       specialistLeadsPresent: ws.read("specialist-leads-present.txt"),

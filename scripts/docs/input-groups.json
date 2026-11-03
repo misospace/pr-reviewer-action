@@ -163,7 +163,8 @@
       "deep-review-timeout-sec",
       "deep-review-max-tokens",
       "deep-review-corpus-max-bytes",
-      "claim-falsification"
+      "claim-falsification",
+      "derived-obligations"
     ]
   },
   {
