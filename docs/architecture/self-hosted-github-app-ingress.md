@@ -91,7 +91,7 @@ have minted: `reconcileRepositories` polls through the same
 declares the platform it polls — the platform is part of the generation
 identity, so a poll mislabelled as the other forge would never converge
 with its own webhook delivery. The daemon's reconcile context also resolves
-the poll's identity PER EVENT through the daemon's own intake resolution —
+the poll's identity PER REPOSITORY through the daemon's own intake resolution —
 the bound forge-integration identity, the per-repository config fingerprint
 and the adoption epoch — so the poll mints the same generation the webhook
 delivery mints.

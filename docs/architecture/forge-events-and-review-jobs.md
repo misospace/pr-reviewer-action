@@ -228,28 +228,30 @@ wires the same fields into both. An UNBOUND daemon stamps nothing; an
 operator serving several installations of one platform supplies the
 identity through its own `resolveEventIdentity` resolver.
 
-**The reconciliation poll's jobs.** The poll mints its OWN generations,
+**The reconciliation poll’s jobs.** The poll mints its OWN generations,
 so the daemon hands it the identity through the RECONCILE CONTEXT
-(`ReconcileContext`): the daemon's ledger, the PER-EVENT identity
+(`ReconcileContext`): the daemon’s ledger, the PER-REPOSITORY identity
 resolver (`resolveBuildOptions`), and the queue handoff
-(`context.enqueueJob`). The resolver runs the daemon's OWN intake
-resolution for the discovered event — the per-repository config
-fingerprint and adoption epoch, plus the bound forge-integration name —
-so the poll and the intake agree on EVERY identity field: a webhook
-delivery and a poll of one head collapse into one review. A STATIC
-options object could not do that: the fingerprint is per-repository, so a
-poll minting from one static value would mint a second generation of the
+(`context.enqueueJob`). The resolver runs the daemon’s OWN intake
+resolution for the repository — the per-repository config fingerprint
+and adoption epoch, plus the bound forge-integration name — so the poll
+and the intake agree on every identity field the resolver contributes: a
+webhook delivery and a poll of one head collapse into one review. The
+poll’s installation id stays the operator’s own declaration and must
+match the webhook’s, as the poll always required. A STATIC options
+object could not do that: the fingerprint is per-repository, so a poll
+minting from one static value would mint a second generation of the
 same head and buy a second review of it. A resolver that answers `null`
 means the intake mints nothing for that repository (the adoption policy
 refuses it), so the poll mints nothing either — the entry is skipped,
 with no job and no reservation. A poll that ignores the context and
 mints an identity-less job is REFUSED at the enqueue seam on a bound
 daemon, before the queue is mutated: the refusal names the rule and the
-bound identity, the poll's report records that reason (bounded: control
+bound identity, the poll’s report records that reason (bounded: control
 characters stripped, capped at 128 characters), and the head is
 re-discovered on the next pass — a refused handoff releases the durable
 reservation before the failure propagates. An unbound daemon keeps the
-permissive behavior: the operator's own build options decide.
+permissive behavior: the operator’s own build options decide.
 
 **How the endpoint is resolved.** Identity first: a job naming an
 integration resolves to that integration's `forgeApiUrl` (a non-secret

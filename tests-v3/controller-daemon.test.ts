@@ -1143,7 +1143,11 @@ test("a bound daemon refuses an identity-less job at the enqueue seam (#1443)", 
   assert.ok(refusal instanceof RangeError, "the refusal is a RangeError");
   assert.match(refusal.message, /carries no forge integration identity/);
   assert.match(refusal.message, /fj-secondary/, "the refusal names the bound identity");
-  assert.match(refusal.message, /build options/, "the refusal says what to do");
+  assert.match(
+    refusal.message,
+    /context\.resolveBuildOptions/,
+    "the refusal names the seam the operator must use",
+  );
   // #252: the refusal echoes no configured endpoint and no credential
   // reference — only the operator-chosen integration name and the rule.
   for (const material of ["forge-a.example", "forge-b.example", "/api/v1", "fj-a", "fj-b"]) {

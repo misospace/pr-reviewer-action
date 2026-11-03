@@ -577,11 +577,17 @@ test("a per-event resolver supplies the identity the poll mints with", async () 
   assert.equal(resolved.jobs[0]!.configFingerprint, "abcdef12");
   assert.equal(resolved.jobs[0]!.adoptionEpoch, "3");
   assert.equal(resolved.jobs[0]!.forgeIntegration, "gh-app");
-  // The resolver saw the DISCOVERED event, not a static stand-in.
+  // The resolver saw the DISCOVERED event, not a static stand-in, and it
+  // is called ONCE per REPOSITORY: the identity is per repository, and the
+  // resolution reads the control plane, so one read per open pull request
+  // would be waste.
   const seen: string[] = [];
-  await reconcileRepositories({
+  const twoPrs = listerFor({
+    "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD), makeBarePr(8, 800, HEAD)] },
+  });
+  const perRepo = await reconcileRepositories({
     platform: "github",
-    listOpenPullRequests: lister,
+    listOpenPullRequests: twoPrs,
     repos: ["org/repo"],
     ledger: new MemoryGenerationLedger(),
     resolveBuildOptions: (discovered) => {
@@ -589,7 +595,10 @@ test("a per-event resolver supplies the identity the poll mints with", async () 
       return { adoptionEpoch: "1" };
     },
   });
-  assert.deepEqual(seen, ["org/repo"], "the resolver is called per discovered event");
+  assert.deepEqual(seen, ["org/repo"], "the resolver is called once per repository");
+  assert.equal(perRepo.jobs.length, 2, "both pull requests of the repository were minted");
+  assert.equal(perRepo.jobs[0]!.adoptionEpoch, "1");
+  assert.equal(perRepo.jobs[1]!.adoptionEpoch, "1", "the repository's answer reached both jobs");
 
   // (b) A resolver that returns null: the intake mints nothing for that
   // repository, so the poll mints nothing either — no job, no

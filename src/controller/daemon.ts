@@ -947,7 +947,7 @@ function assertJobForgeIdentity(job: ReviewJob, bound: string | undefined): void
   const named = job.forgeIntegration ?? "";
   if (named === "") {
     throw new RangeError(
-      `job carries no forge integration identity but this daemon serves '${bound}': bind the identity into the poll's build options (the daemon's reconcile context carries it)`,
+      `job carries no forge integration identity but this daemon serves '${bound}': resolve the poll's identity through the daemon's reconcile context (context.resolveBuildOptions)`,
     );
   }
   // A MALFORMED identity is a contract violation, and its value is

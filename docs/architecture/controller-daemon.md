@@ -14,7 +14,7 @@ a forge-specific CLI.
 | module | owns |
 |---|---|
 | `daemon.ts` | startup composition: options validation (fail closed), the #736 migration hook (work is accepted only after durable state is proven), queue-store binding, recovered-worker reconciliation (it runs before `recover()`), `recover()`, intake (`ingest`), tick loop, lease renewal, adopted-worker reconciliation and termination, graceful stop |
-| `run-lifecycle.ts` | the control-plane run mirror: the `RunRecord` lifecycle (`queued` → `starting` → `running` → `publishing` → `completed`/`failed`/`cancelled`/`superseded`) over the queue's own transition table, and the attempt bookkeeping (create + lease under the daemon’s instance id) |
+| `run-lifecycle.ts` | the control-plane run mirror: the `RunRecord` lifecycle (`queued` → `starting` → `running` → `publishing` → `completed`/`failed`/`cancelled`/`superseded`) over the queue's own transition table, and the attempt bookkeeping (create + lease under the daemon's instance id) |
 | `snapshot-adapter.ts` | the sync-over-async bridge the #736 doc named: `QueueStore` (sync, #731) over `QueueSnapshotStore` (async, PostgreSQL). Cache == durable truth: a failed persist rolls the cache back to the last snapshot the backend accepted; failures latch and are reported (`persistenceError`/`flush`) until the next successful save clears them |
 | `execution.ts` | the host-side `QueueRequestBuilder` (#733's division of labor): deterministic per-attempt run-dir layout (`<runsRoot>/<jobId>/<attempt>/request.json` + `result.json` — the layout the publisher re-derives, so it is a contract), workspace extraction (#732), operator-approved profile names, opaque credential references (#735); plus the profile→`Executor` selector (local + #734 Kubernetes; `oci` refuses until an implementation ships) |
 | `publication.ts` | the durable `JobPublisher`: reads the worker's review artifact (the `resultArtifactPath` the validated execution result names, never the `result.json` wrapper), persists the canonical payload + usage to the control plane BEFORE any forge side effect, enforces the exact-head gate, retries the write from the durable `PublicationRecord` (never the model), usage ids are replay-idempotent; stale/expired results settle terminally instead of retrying forever |
@@ -33,7 +33,7 @@ a forge-specific CLI.
   schedules anything. The operator denylist is the hard-off layer, so a
   repository the operator denylisted stops scheduling at once. The stored
   epoch and fingerprint are used only after the gate passes.
-- **One forge platform per daemon instance.** The daemon’s forge
+- **One forge platform per daemon instance.** The daemon's forge
   capability is a single per-platform capability, so the intake it binds
   is platform-aware: `webhook.platform` selects the GitHub App intake
   (`X-Hub-Signature-256`, `X-GitHub-Event`) or the native Forgejo intake
@@ -143,12 +143,14 @@ a forge-specific CLI.
   instead of staying suppressed.
 - **The poll mints the same generation the intake mints.** The daemon
   hands the poll its `ReconcileContext`: the ledger it must dedupe
-  against, the PER-EVENT identity resolver (`resolveBuildOptions`), and
-  the queue handoff. The resolver runs the daemon’s OWN intake
-  resolution for the discovered event — the per-repository config
-  fingerprint and adoption epoch, plus the daemon’s bound
-  forge-integration identity — so the poll and the intake agree on
-  EVERY identity field. A static options object could not do that: the
+  against, the PER-REPOSITORY identity resolver (`resolveBuildOptions`),
+  and the queue handoff. The resolver runs the daemon’s OWN intake
+  resolution for the repository — the per-repository config fingerprint
+  and adoption epoch, plus the daemon’s bound forge-integration identity
+  — so the poll and the intake agree on every identity field the
+  resolver contributes. The poll’s installation id stays the
+  operator’s own declaration and must match the webhook’s, as the poll
+  always required. A static options object could not do that: the
   fingerprint is per-repository, so a poll minting from one static value
   would mint a SECOND generation of the same head and buy a second
   review. A resolver that answers `null` means the intake mints nothing

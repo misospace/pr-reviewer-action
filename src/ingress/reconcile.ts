@@ -81,7 +81,8 @@ function boundedReason(message: string): string {
 /** One reconciliation pass. `discovered` counts EVERY array entry the lister
  * returned (including ones that fail normalization); `skipped` counts every
  * discovered entry that was not scheduled (unnormalizable, unbuildable,
- * already known to the ledger, or refused by the queue handoff). */
+ * already known to the ledger, refused by the identity resolver, or refused
+ * by the queue handoff). */
 export interface ReconcileReport {
   readonly jobs: readonly ReviewJob[];
   readonly discovered: number;
@@ -109,13 +110,26 @@ export interface ReconcileOptions {
   readonly listOpenPullRequests: (repo: string) => Promise<ReadResult<unknown[]>>;
   readonly repos: readonly string[];
   readonly ledger: GenerationLedger;
+  /** The build options for the jobs this pass mints, when the caller
+   *  resolves them ONCE for the whole pass. A per-event resolver (below)
+   *  WINS over these: the intake resolves its identity per repository, so
+   *  a static object cannot mirror it — the two would mint different
+   *  generations of the same head. Use this only when the caller has no
+   *  per-repository identity to resolve. */
   readonly buildOptions?: BuildJobOptions | undefined;
   /** The build options for the jobs this pass mints, resolved PER
-   *  DISCOVERED EVENT. The intake resolves its identity per repository,
-   *  so a poll that uses one static object cannot converge with it: the
-   *  two would mint different generations of the same head. `null` means
-   *  the intake mints nothing for that repository, so the poll mints
-   *  nothing either (the entry is skipped). */
+   *  REPOSITORY. The intake resolves its identity per repository (the
+   *  config fingerprint and the adoption epoch), so a poll that uses one
+   *  static object cannot converge with it: the two would mint different
+   *  generations of the same head. The pass calls the resolver ONCE per
+   *  repository — with the first discovered event of that repository — and
+   *  reuses that answer for the repository's other entries, because the
+   *  identity is per repository. `null` means the intake mints nothing for
+   *  that repository, so the poll mints nothing either (the entries are
+   *  skipped, with no job and no reservation).
+   *
+   *  When it is present, it REPLACES `buildOptions`: a caller that passes
+   *  both gets the static options dropped. */
   readonly resolveBuildOptions?:
     | ((event: CanonicalForgeEvent) => BuildJobOptions | null | Promise<BuildJobOptions | null>)
     | undefined;
@@ -166,12 +180,16 @@ export async function reconcileRepositories(
       continue;
     }
     try {
-      const listed = await options.listOpenPullRequests(rawRepo);
-      if (!listed.ok) {
-        failed.push(rawRepo);
-        continue;
-      }
-      for (const entry of listed.data) {
+        const listed = await options.listOpenPullRequests(rawRepo);
+        if (!listed.ok) {
+          failed.push(rawRepo);
+          continue;
+        }
+        // The resolved identity for THIS repository: `undefined` until the
+        // first entry resolves it, `null` when the intake mints nothing
+        // for the repository (every entry of it is skipped).
+        let resolvedForRepo: BuildJobOptions | null | undefined;
+        for (const entry of listed.data) {
         discovered += 1;
         const event = reconciliationPollEvent(
           options.platform,
@@ -193,15 +211,23 @@ export async function reconcileRepositories(
           skipped += 1;
           continue;
         }
-        // The identity the job is minted with. A PER-EVENT resolver wins
-        // over the static options: the intake resolves its identity PER
-        // REPOSITORY (config fingerprint, adoption epoch, bound forge
+        // The identity the job is minted with. A PER-REPOSITORY resolver
+        // wins over the static options: the intake resolves its identity
+        // PER REPOSITORY (config fingerprint, adoption epoch, bound forge
         // integration), so a static object cannot mirror it — the two
         // would mint different generations of the same head.
-        const buildOptions =
-          options.resolveBuildOptions !== undefined
-            ? await options.resolveBuildOptions(event)
-            : options.buildOptions ?? {};
+        //
+        // The resolver is called ONCE per repository and its answer is
+        // reused for the repository's other entries: the identity is per
+        // repository, and the resolution reads the control plane, so one
+        // read per open pull request would be waste.
+        if (resolvedForRepo === undefined) {
+          resolvedForRepo =
+            options.resolveBuildOptions !== undefined
+              ? await options.resolveBuildOptions(event)
+              : options.buildOptions ?? {};
+        }
+        const buildOptions = resolvedForRepo;
         if (buildOptions === null) {
           // The intake mints NOTHING for this repository (the adoption
           // policy refuses it), so the poll must mint nothing either: no
