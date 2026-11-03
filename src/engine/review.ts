@@ -59,7 +59,7 @@ import { specialistRequestFn } from "../gates/specialist-transport.js";
 import { runClaimFalsificationPass } from "../claims/pass.js";
 import { renderClaimsSection } from "../claims/render.js";
 import { runDerivedObligationsPass } from "../derived/pass.js";
-import { renderDerivedSection, renderDerivedUnavailable } from "../derived/render.js";
+import { renderDerivedSectionForStatus, renderDerivedUnavailable } from "../derived/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
@@ -1315,12 +1315,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
           : undefined,
     }))
       .then((result) => {
-        const section =
-          result.status === "ok"
-            ? renderDerivedSection(result.artifact, Number(env.DERIVED_OBLIGATIONS_SECTION_MAX_BYTES ?? "8000") || 8000)
-            : result.status === "error" || result.status === "timeout"
-              ? renderDerivedUnavailable(result.errorKind ?? result.status)
-              : "";
+        const section = renderDerivedSectionForStatus(result, Number(env.DERIVED_OBLIGATIONS_SECTION_MAX_BYTES ?? "8000") || 8000);
         const record = {
           status: result.status,
           error_kind: result.errorKind,
@@ -1337,9 +1332,25 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       .catch((cause: unknown) => {
         // The pass itself never throws; this only guards the artifact-write
         // path. Even here the review proceeds, with an explicit unavailable
-        // note rather than a silent gap.
+        // note rather than a silent gap — and the JSON artifact is written
+        // too, so a #1449 consumer never sees "no artifact" (indistinguishable
+        // from a disabled run) while the corpus says a derivation happened.
         log(`WARNING: derived-obligations pre-pass failed; continuing without derived obligations: ${cause instanceof Error ? cause.message : String(cause)}`);
-        ws.write("derived-obligations.md", Buffer.from(renderDerivedUnavailable("internal"), "utf8"));
+        const note = Buffer.from(renderDerivedUnavailable("internal"), "utf8");
+        ws.write("derived-obligations.md", note);
+        ws.write(
+          "derived-obligations.json",
+          Buffer.from(`${pyJsonDumps({
+            status: "error",
+            error_kind: "internal",
+            error: cause instanceof Error ? cause.message : String(cause),
+            method: "none",
+            obligations: [],
+            truncated: false,
+            errors: [],
+            section_bytes: note.length,
+          })}\n`, "utf8"),
+        );
       });
   }
 

@@ -15,12 +15,14 @@ buildDerivedUserMessage,
 normalizeDerivedPayload,
 parseDerivedResponse,
 renderDerivedSection,
+renderDerivedSectionForStatus,
 renderDerivedUnavailable,
 runDerivedObligationsModelPass,
 runDerivedObligationsPass,
 type DerivedObligation,
 } from "../src/derived/index.js";
 import { buildReviewCorpus, type CorpusWorkspace } from "../src/corpus/index.js";
+import { extractCorpusRegions } from "../src/tools/harness.js";
 import { extractClaimsDeterministic } from "../src/claims/index.js";
 import type { SpecialistRequestFn, SpecialistTransportOutcome } from "../src/specialists/runner.js";
 
@@ -444,4 +446,70 @@ test("#1448: the cross-path generation-identity obligation flows derivation → 
   const text = Buffer.from(buildReviewCorpus(ws, corpusOptions).artifacts.get("review-corpus.md")!).toString("utf8");
   assert.match(text, new RegExp(`# ${DERIVED_TITLE}`));
   for (const marker of fixture.expected_markers) assert.ok(text.includes(marker), `missing marker: ${marker}`);
+});
+
+// ── planner region wiring ───────────────────────────────────────────────
+
+test("#1448 review: extractCorpusRegions keeps claims and derived sections as separate regions", () => {
+  const corpus = [
+    "# Repository Standards and Conventions (AGENTS.md)\n\nstandards body\n",
+    "# Changed Manifest Context\n\nmanifests\n",
+    "# Claims to Falsify\n\nclaim material\n",
+    `# ${DERIVED_TITLE}\n\nOBLIGATION SENTINEL\n`,
+    "# Specialist Review Leads\n\nadvisory leads\n",
+  ].join("\n");
+  const regions = extractCorpusRegions(corpus);
+  assert.equal(regions["Claims to Falsify"], "# Claims to Falsify\n\nclaim material");
+  assert.ok(!regions["Claims to Falsify"]!.includes("OBLIGATION SENTINEL"));
+  assert.equal(regions[DERIVED_TITLE], `# ${DERIVED_TITLE}\n\nOBLIGATION SENTINEL`);
+  assert.equal(regions["Specialist Review Leads"], "# Specialist Review Leads\n\nadvisory leads");
+});
+
+// ── status → section mapping ────────────────────────────────────────────
+
+const artifactWith = (n: number) => ({
+  version: 1,
+  obligations: Array.from({ length: n }, (_, i) => obligation({ obligation: `Obligation ${i} body ${"x".repeat(50)}.` })),
+  truncated: false,
+  errors: [],
+  method: (n > 0 ? "model" : "none") as "model" | "none",
+});
+
+test("#1448 review: status→section mapping keeps every outcome visible or intentionally silent", () => {
+  const ok = renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: artifactWith(1) });
+  assert.match(ok, new RegExp(`# ${DERIVED_TITLE}`));
+  assert.ok(!ok.includes("did not complete"));
+  // ok but the cap drops every obligation → the note, never silence.
+  const capped = renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: artifactWith(1) }, 40);
+  assert.match(capped, /did not complete for this run \(reason: section-cap\)/);
+  assert.match(renderDerivedSectionForStatus({ status: "error", errorKind: "malformed", artifact: artifactWith(0) }), /reason: malformed/);
+  assert.match(renderDerivedSectionForStatus({ status: "timeout", errorKind: null, artifact: artifactWith(0) }), /reason: timeout/);
+  assert.equal(renderDerivedSectionForStatus({ status: "empty", errorKind: null, artifact: artifactWith(0) }), "");
+  assert.equal(renderDerivedSectionForStatus({ status: "skipped", errorKind: null, artifact: artifactWith(0) }), "");
+});
+
+// ── hostile changed-file names ──────────────────────────────────────────
+
+test("#1448: a hostile changed-file name cannot close the files fence in the derivation request", () => {
+  const hostile = "`".repeat(13) + "evil.ts";
+  const [message] = buildDerivedUserMessage({
+    title: "t",
+    body: "b",
+    files: [hostile, "a.ts"],
+    diff: "d",
+  });
+  const lines = message.split("\n");
+  const label = lines.indexOf("Changed files:");
+  assert.ok(label >= 0);
+  const fence = lines[label + 1]!;
+  assert.match(fence, /^`{4,}$/);
+  const close = lines.indexOf(fence, label + 2);
+  assert.ok(close > label + 1, "files fence must have a matching closer");
+  const content = lines.slice(label + 2, close).join("\n");
+  // The 13-run is neutralized (≥ 11 → 10) and the emitted fence is strictly
+  // longer than any run surviving inside this block.
+  assert.ok(longestBacktickRun(content) < fence.length);
+  assert.ok(longestBacktickRun(content) <= 10);
+  // Nothing between the fences can forge a closing delimiter for them.
+  assert.ok(!lines.slice(label + 2, close).some((line) => line === fence));
 });

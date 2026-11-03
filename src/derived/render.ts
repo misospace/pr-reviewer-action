@@ -126,3 +126,26 @@ export function renderDerivedUnavailable(kind: string): string {
     "derived-obligation coverage is unavailable.\n"
   );
 }
+
+/** Map a pass result to the corpus section for the engine: derived targets on
+ * `ok`, the visible unavailable note on `error`/`timeout`, and `""` on
+ * `empty`/`skipped` (a completed derivation that found nothing is not a
+ * failure). An `ok` result whose obligations were ALL dropped by the byte cap
+ * still renders the note — a silent success would read exactly like a clean
+ * "no obligations" outcome, which the feature's visibility contract forbids. */
+export function renderDerivedSectionForStatus(
+  result: {
+    status: "ok" | "empty" | "error" | "timeout" | "skipped";
+    errorKind: string | null;
+    artifact: DerivedObligationsArtifact;
+  },
+  maxBytes = 8000,
+): string {
+  if (result.status === "error" || result.status === "timeout") {
+    return renderDerivedUnavailable(result.errorKind ?? result.status);
+  }
+  if (result.status !== "ok") return "";
+  const section = renderDerivedSection(result.artifact, maxBytes);
+  if (section === "" && result.artifact.obligations.length > 0) return renderDerivedUnavailable("section-cap");
+  return section;
+}
