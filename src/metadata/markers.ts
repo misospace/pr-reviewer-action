@@ -14,6 +14,10 @@
  */
 import { DEFAULT_MANAGED_MARKER } from "../context/pr-thread.js";
 import { buildMetadataMarker, parseMetadata, type MetadataOptions } from "../precheck/metadata.js";
+import {
+  CONFIDENCE_CAUSE_TOKEN_PATTERN,
+  type ConfidenceTelemetry,
+} from "../confidence/telemetry.js";
 
 export { buildMetadataMarker, parseMetadata };
 export type { MetadataOptions };
@@ -469,6 +473,11 @@ export interface RunMarkerContext {
    * "unavailable"), only when the model emitted a `dependency_coverage`
    * answer; omitted otherwise so pre-#1337 marker bytes are preserved. */
   dependencyCoverage?: string;
+  /** #1455: the verifier's own telemetry — the unscored cause, the measured
+   * latency and the provider's token counts — published so a later collector
+   * can read them from the published record. Omitted when the run measured
+   * none of them. */
+  confidenceTelemetry?: ConfidenceTelemetry;
 }
 
 /**
@@ -503,6 +512,42 @@ export function buildRunMetadataMarker(context: RunMarkerContext): string {
     && context.confidenceScore <= 5
     ? context.confidenceScore
     : null;
+  // #1455: the verifier's cause, latency and usage are advisory telemetry
+  // for a later collector, published in the marker so they survive the
+  // runner. The telemetry arrives already validated (one authority builds
+  // it), and the marker publishes it verbatim — a flat, scalar-only value
+  // set, so the marker stays a flat wire format that a `grep` over published
+  // comments can still read.
+  //
+  // The group rides the telemetry's OWN status, never an ambient env var:
+  // the telemetry carries the status it was measured under, so the standalone
+  // `publish` CLI publishes exactly what the composite action publishes for
+  // the same run, whether or not the caller wired the confidence status
+  // through the environment. A telemetry with no status (the verifier never
+  // ran) publishes nothing.
+  //
+  // The cause additionally rides the score's coupling: a cause explains a
+  // MISSING score, so a marker that claims a SCORED run must not carry one.
+  // The marker's own status is what it claims, so a contradiction between it
+  // and the telemetry resolves by dropping the cause — the conservative
+  // direction, and never by publishing both.
+  const telemetry = context.confidenceTelemetry;
+  const verifierRan = telemetry !== undefined && (telemetry.status === "scored" || telemetry.status === "unscored");
+  // The cause is bounded AGAIN here, at the published surface: the marker
+  // applies its own grammar to the string it publishes, so no caller can
+  // push unbounded or provider-shaped text into a public comment through
+  // this key.
+  const confidenceCause = verifierRan
+    && telemetry.status === "unscored"
+    && telemetry.cause !== ""
+    && CONFIDENCE_CAUSE_TOKEN_PATTERN.test(telemetry.cause)
+    && confidenceStatus !== "scored"
+    ? telemetry.cause
+    : null;
+  const confidenceLatencyMs = verifierRan && telemetry.latencyMs !== null
+    ? telemetry.latencyMs
+    : null;
+  const confidenceUsage = verifierRan ? telemetry.usage : null;
   let cacheHitRatio: number | null = null;
   if (chr !== "" && chr !== "-") {
     const parsed = Number(chr);
@@ -544,6 +589,18 @@ confidence_score: confidenceScore,
     ...(context.dependencyCoverage === "complete" || context.dependencyCoverage === "partial" || context.dependencyCoverage === "unavailable"
       ? { dependency_coverage: context.dependencyCoverage }
       : {}),
+    // #1455: the verifier's telemetry, appended last under the same
+    // additive-key discipline — present only when the run measured it, so a
+    // disabled verifier (or a call with no usage) keeps the pre-#1455
+    // marker bytes exactly. Every value is a scalar: the marker stays a flat
+    // wire format, so a collector can read it with the documented
+    // `grep -oE 'ai-pr-reviewer:\{[^}]*\}'` recipe without a nested object
+    // truncating the match.
+    confidence_cause: confidenceCause,
+    confidence_latency_ms: confidenceLatencyMs,
+    confidence_prompt_tokens: confidenceUsage === null ? null : confidenceUsage.promptTokens,
+    confidence_completion_tokens: confidenceUsage === null ? null : confidenceUsage.completionTokens,
+    confidence_total_tokens: confidenceUsage === null ? null : confidenceUsage.totalTokens,
   });
 }
 

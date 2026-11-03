@@ -25,6 +25,7 @@ import { maskDiagnostic } from "../context/redact.js";
 import { buildModelRequest, wireEffortOf } from "../model/request.js";
 import type { TokensParam } from "../model/types.js";
 import type { ConfidenceProfile } from "../routing/tiers.js";
+import { confidenceUsageFromProviderBody, type ConfidenceUsageTelemetry } from "./telemetry.js";
 import {
   applyConfidenceCeilings,
   CONFIDENCE_ANSWER_JSON_SCHEMA,
@@ -119,6 +120,20 @@ export interface ConfidenceScorerOutcome {
    * #998's truth-telling rule: the run persists what was SENT, never what
    * the configuration named. */
   wireEffort: string;
+  /** #1455: the token counts the provider reported for this call, in the
+   * repo's canonical format-aware accounting. Null when the provider
+   * reported none, and null on every failure path (a failed call has no
+   * usage to report). The scorer is one-shot by contract, so this is one
+   * call's usage. */
+  usage: ConfidenceUsageTelemetry | null;
+  /** #1455: the wall-clock milliseconds the scorer's provider call took —
+   * the time the provider took to answer a request that demonstrably reached
+   * it. Null when no such call happened: a refusal before the wire (the
+   * pre-wire refusals above), a request that never left the machine (a
+   * connect timeout, a cancellation), or a transport that failed before a
+   * request existed. A latency for a call that never happened would be a
+   * claim the run cannot back. */
+  latencyMs: number | null;
 }
 
 /**
@@ -147,7 +162,7 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     input.primaryApiKey,
   ];
   if (!profile.enabled) {
-    return { result: disabledResult(), requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "" };
+    return { result: disabledResult(), requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "", usage: null, latencyMs: null };
   }
   // Credential isolation, asserted at call time (the resolver already
   // guarantees both, but this boundary fails closed rather than trusting
@@ -173,12 +188,14 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     return {
       result: unscoredConfidenceResult("missing_credential"),
       requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",
+      usage: null, latencyMs: null,
     };
   }
   if (!profile.inheritedTransport && profile.credentialSource === "primary") {
     return {
       result: unscoredConfidenceResult("credential_isolation"),
       requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",
+      usage: null, latencyMs: null,
     };
   }
   // #1368 review: the declared prompt budget is an ACTUAL bound. The prompt
@@ -197,6 +214,7 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     return {
       result: unscoredConfidenceResult("prompt_over_budget"),
       requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",
+      usage: null, latencyMs: null,
     };
   }
   const payload = buildModelRequest({
@@ -229,6 +247,11 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   const wireEffort = wireEffortOf(payload);
   const call = input.transport ?? ((chatInput: ChatRequestInput) => runChatRequestOnce(chatInput));
   let outcome: ChatRequestOutcome;
+  // #1455: the wall-clock cost of the scorer's ONE wire attempt, measured
+  // around the awaited call. The pre-wire refusals above returned before
+  // this point, so they carry no latency at all — a duration for a call
+  // that never happened would be a claim the run cannot back.
+  const startedAt = Date.now();
   try {
     outcome = await call({
       baseUrl: profile.baseUrl,
@@ -249,14 +272,26 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     // #998: a THROWN transport never produced a request — the endpoint URL
     // never resolved, the headers never merged — so nothing was sent and the
     // run reports no effort, whatever the body would have carried.
+    //
+    // #1455: the same truth bounds the latency: nothing reached the
+    // provider, so there is no provider-call duration to report. The time
+    // spent failing locally is not the provider's latency.
     return {
       result: unscoredConfidenceResult("transport_error", profile.model),
       requestPayload: null, rawResponse: null,
       diagnostic: maskDiagnostic(cause instanceof Error ? cause.message : String(cause), diagnosticSecrets),
       wireEffort: "",
+      usage: null,
+      latencyMs: null,
     };
   }
+  const latencyMs = Date.now() - startedAt;
   if (outcome.status !== "ok") {
+    // #1455: the latency is the provider's answer time, so it rides the same
+    // predicate the effort provenance rides: a request that demonstrably
+    // reached the provider has an answer to wait for, and one that never
+    // left the machine (a connect timeout, a cancellation) has none. The
+    // cause already tells the consumer which of the two happened.
     return {
       result: unscoredConfidenceResult(
         transportCause(outcome.failure.kind, outcome.failure.status),
@@ -265,15 +300,29 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
       requestPayload: null, rawResponse: null,
       diagnostic: describeTransportFailure(outcome.failure, { secrets: diagnosticSecrets }),
       wireEffort: failureReachedProvider(outcome.failure.kind) ? wireEffort : "",
+      usage: null,
+      latencyMs: failureReachedProvider(outcome.failure.kind) ? latencyMs : null,
     };
   }
   const parsed = parseConfidenceAnswer(outcome.response.content);
+  // #1455: the usage the provider reported for THIS call, read from the raw
+  // provider body in the wire format the run used. The raw body is the
+  // source on purpose: the transport's own projection is shape-only, so it
+  // sums a total the provider did not report and cannot see the Anthropic
+  // cache tokens the canonical accounting counts.
+  const usage = confidenceUsageFromProviderBody(outcome.raw, profile.apiFormat === "anthropic" ? "anthropic" : "openai");
   if (!parsed.ok) {
     return {
       result: unscoredConfidenceResult(parsed.cause, profile.model),
       requestPayload: payload.body, rawResponse: outcome.raw,
       diagnostic: "",
       wireEffort,
+      // #1455: the provider DID answer and DID report its accounting for
+      // that answer — only the parse failed. The run spent those tokens, so
+      // the usage is reported; dropping it would understate the cost of a
+      // run that failed to read the answer, not save it.
+      usage,
+      latencyMs,
     };
   }
   const ceilings = applyConfidenceCeilings(parsed.answer, {
@@ -294,6 +343,11 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     rawResponse: outcome.raw,
     diagnostic: "",
     wireEffort,
+    // #1455: the provider's own accounting for the one call that produced
+    // this answer — the transport normalized it, the scorer no longer drops
+    // it.
+    usage,
+    latencyMs,
   };
 }
 

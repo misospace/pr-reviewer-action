@@ -69,6 +69,7 @@ import { resolveReviewerRouting } from "../config/reviewer-routing.js";
 import { resolveHumanReviewRouting, type HumanReviewRoutingMode, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { buildConfidencePrompt, unresolvedConfidencePins } from "../confidence/prompt.js";
 import { runConfidenceScorer } from "../confidence/scorer.js";
+import { confidenceTelemetryOf, confidenceUsageWireShape, validConfidenceUsageTelemetry, type ConfidenceTelemetry, type ConfidenceUsageTelemetry } from "../confidence/telemetry.js";
 import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, CONFIDENCE_RUBRIC_VERSION, confidenceCapNote, confidenceOutputFields, confidenceReasonWithoutCapNote, maskComposedConfidenceReason, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
@@ -191,6 +192,10 @@ export interface RunReviewResult {
    * scorer produced a scored answer; the publish step renders them as
    * advisory bullets. */
   confidenceConcerns?: Array<{ file: string; line: number | null; evidence: string }>;
+  /** #1455: the verifier's own telemetry — the unscored cause, the measured
+   * latency and the provider's token counts. The publish step carries it
+   * into the metadata marker; it is advisory and changes nothing else. */
+  confidenceTelemetry?: ConfidenceTelemetry;
   /** Wall-clock seconds for the whole run. */
   durationSec: number;
   /** #726: the engine-owned admission decision — present on BOTH the skip
@@ -2110,6 +2115,14 @@ secrets: [profiles.primary.apiKey],
     }),
   };
   const unresolvedProofPins = unresolvedConfidencePins(confidenceProofPins);
+  // #1455: the verifier's own telemetry — the unscored cause, the measured
+  // latency and the provider's token counts. Both the measured values stay
+  // null until the scorer's ONE wire attempt actually happened: the
+  // pre-wire gates below never call the model, so they carry neither, and a
+  // duration for a call that never happened would be a claim the run cannot
+  // back.
+  let confidenceLatencyMs: number | null = null;
+  let confidenceUsage: ConfidenceUsageTelemetry | null = null;
   let confidenceResult: ConfidenceResult;
   if (!confidenceProfile.enabled) {
     // Disabled: no request, no artifacts, no outputs.
@@ -2212,8 +2225,21 @@ secrets: [profiles.primary.apiKey],
         // never what the config named — and a claim it cannot back is not a
         // claim).
         wireEffort: "",
+        // #1455: a crash carries no latency and no usage — the run cannot
+        // say how long a call took, nor what it cost, when it does not know
+        // whether the call happened at all.
+        usage: null,
+        latencyMs: null,
       };
     }
+    // #1455: the scorer's own measurement of its ONE wire attempt — the
+    // wall-clock duration it observed and the token counts the provider
+    // reported. The scorer's pre-wire refusals (a disabled profile, a missing
+    // credential, a credential isolation refusal, a prompt over budget)
+    // report neither, so a run that never reached the provider carries no
+    // latency and no usage.
+    confidenceLatencyMs = confidenceOutcome.latencyMs;
+    confidenceUsage = confidenceOutcome.usage;
     // #1140 review: model-authored text (reason, concern file/evidence) is
     // masked against EVERY lane's credential BEFORE the canonical result
     // exists — every downstream consumer (persisted artifact, step outputs,
@@ -2263,8 +2289,10 @@ secrets: [profiles.primary.apiKey],
       })),
     };
     // Persist the sanitized artifacts alongside ai-output.json /
-    // review-coverage.json.
-    writeConfidenceScoreArtifact(ws, confidenceResult, maskConfidenceText(confidenceOutcome.diagnostic), confidenceProvenance(confidenceOutcome.wireEffort !== ""));
+    // review-coverage.json. The telemetry rides the artifact too, so the
+    // publish step reads the verifier's own record (the same seam the
+    // standalone `publish` CLI reads) instead of re-deriving the values.
+    writeConfidenceScoreArtifact(ws, confidenceResult, maskConfidenceText(confidenceOutcome.diagnostic), confidenceProvenance(confidenceOutcome.wireEffort !== ""), confidenceLatencyMs, confidenceUsage);
     if (confidenceOutcome.requestPayload !== null) {
       // #1140 review: raw provider/agent JSON goes to disk through
       // `redactTextDeep`, not `maskKnownSecretsDeep` — configured-value
@@ -2294,6 +2322,23 @@ secrets: [profiles.primary.apiKey],
     }
   }
   const confidenceOutputs = confidenceOutputFields(confidenceResult);
+  // #1455: the verifier's telemetry, resolved ONCE by the single authority
+  // (`confidenceTelemetryOf`) that every published surface shares. The cause
+  // is the run's action-owned machine token — never provider text — and it is
+  // published only for an unscored run whose cause matches the conservative
+  // grammar; anything else is dropped rather than published, because the
+  // marker is a surface a collector reads and may only carry values this
+  // action can vouch for.
+  const confidenceTelemetry = confidenceTelemetryOf({
+    status: confidenceResult.status,
+    cause: confidenceResult.cause,
+    latencyMs: confidenceLatencyMs,
+    usage: confidenceUsage,
+  });
+  // A verifier that never ran carries no telemetry: the marker keeps its
+  // pre-#1455 bytes exactly. The same rule the standalone publish path
+  // applies to the artifact it reads, so both paths publish one record.
+  const publishedConfidenceTelemetry = confidenceTelemetry.status === "" ? undefined : confidenceTelemetry;
 
   // #1003: the triage outputs. Disabled means "" for BOTH — "did not run",
   // deliberately distinct from the fail-closed `unknown` answer, so a
@@ -2438,6 +2483,10 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
 ...(outputs.dependencyCoverageStatus === "complete" || outputs.dependencyCoverageStatus === "partial" || outputs.dependencyCoverageStatus === "unavailable"
   ? { dependencyCoverage: outputs.dependencyCoverageStatus }
   : {}),
+    // #1455: the verifier's telemetry, only when the run measured it — a
+    // disabled verifier, or a call with no usage, keeps the pre-#1455
+    // marker bytes exactly.
+    ...(publishedConfidenceTelemetry !== undefined ? { confidenceTelemetry: publishedConfidenceTelemetry } : {}),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCalls: toolBudgetTelemetry.calls } : {}),
@@ -2484,6 +2533,9 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     admission: pre,
     // #1073: advisory concerns for the published section, scored answers only.
     ...(confidenceResult.status === "scored" ? { confidenceConcerns: confidenceResult.concerns } : {}),
+    // #1455: the verifier's telemetry for the published marker — advisory
+    // only, never a verdict input.
+    ...(publishedConfidenceTelemetry !== undefined ? { confidenceTelemetry: publishedConfidenceTelemetry } : {}),
   };
 }
 
@@ -2762,7 +2814,14 @@ function removeConfidenceWireArtifacts(ws: RunWorkspace): void {
  *
  * #1368: `provenance` is an ADDITIVE record of the request budgets and
  * capability assertions the enabled profile resolved; absent when disabled,
- * and every pre-existing key stays byte-for-byte as before. */
+ * and every pre-existing key stays byte-for-byte as before.
+ *
+ * #1455: `latencyMs` and `usage` are ADDITIVE records of the verifier's ONE
+ * wire attempt — the wall-clock duration it observed and the provider's
+ * normalized token usage. Both are absent when no call was attempted or when
+ * the provider reported no usage; every pre-existing key stays byte-for-byte
+ * as before and the artifact `version` stays 2 (the new keys are additive,
+ * not a semantic migration). */
 interface ConfidenceRequestProvenance {
   max_tokens: number;
   prompt_tokens: number;
@@ -2777,7 +2836,13 @@ function writeConfidenceScoreArtifact(
   result: ConfidenceResult,
   diagnostic?: string,
   provenance?: ConfidenceRequestProvenance,
+  latencyMs?: number | null,
+  usage?: ConfidenceUsageTelemetry | null,
 ): void {
+  // #1455: the usage goes through the SAME validation the marker builder
+  // applies, so the artifact and the published marker can never disagree
+  // about the same measurement.
+  const validUsage = validConfidenceUsageTelemetry(usage);
   ws.write("confidence-score.json", Buffer.from(`${pyJsonDumps({
     version: 2,
     rubric: CONFIDENCE_RUBRIC_VERSION,
@@ -2801,6 +2866,12 @@ function writeConfidenceScoreArtifact(
     parser_notes: result.parserNotes,
     ...(diagnostic !== undefined && diagnostic !== "" ? { diagnostic } : {}),
     ...(provenance !== undefined ? { request: provenance } : {}),
+    // #1455: the measured latency and the provider's token usage, in the
+    // same wire shape the metadata marker carries them. Both go through the
+    // SAME validation the marker builder applies, so the artifact and the
+    // published marker can never disagree about the same measurement.
+    ...(typeof latencyMs === "number" && Number.isInteger(latencyMs) && latencyMs >= 0 ? { latency_ms: latencyMs } : {}),
+    ...(validUsage !== null ? { usage: confidenceUsageWireShape(validUsage) } : {}),
   })}\n`, "utf8"));
 }
 

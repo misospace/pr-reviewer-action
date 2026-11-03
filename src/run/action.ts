@@ -494,6 +494,14 @@ async function runActionPipeline(
       // published marker and body only through these.
       ...(review.partialCoverage ? { partialCoverage: review.partialCoverage } : {}),
       ...(review.ciState !== undefined ? { ciState: review.ciState } : {}),
+      // #1455: the verifier's telemetry (the unscored cause, the measured
+      // latency, the provider's token counts) reaches the published marker
+      // only through this, in process — same as partialCoverage/ciState
+      // above. Advisory only: it never touches the verdict, the findings, or
+      // the required checks. The standalone `publish` CLI reads the SAME
+      // values from the run dir's own artifact, so both paths publish one
+      // record.
+      ...(review.confidenceTelemetry !== undefined ? { confidenceTelemetry: review.confidenceTelemetry } : {}),
       // #847: the #810/#702 tool-budget provenance reaches the published
       // marker only through these, same as partialCoverage/ciState above.
       ...(review.toolBudget !== undefined ? { toolBudget: review.toolBudget } : {}),
