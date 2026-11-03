@@ -13,7 +13,7 @@
 # Base image is pinned to the major tag; production builds must resolve
 # this to a sha256 digest (renovate/dependabot digest pinning) before the
 # image is published to a registry.
-FROM node:24-slim AS build
+FROM node:26-slim AS build
 WORKDIR /build
 
 # Dependency lock first for layer caching.
@@ -33,7 +33,7 @@ RUN npm run build
 # `git` is required by the worker engine inside the acquired workspace
 # and kept in both targets for image parity. Lists are cleaned and
 # recommendations dropped to keep the surface minimal.
-FROM node:24-slim AS runtime
+FROM node:26-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
