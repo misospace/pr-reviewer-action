@@ -29,6 +29,31 @@ export interface UsageTelemetry {
    * reads, which Anthropic reports outside `input_tokens`). */
   cachedTokens: number | null;
   totalTokens: number | null;
+  /**
+   * #1466: the UNCACHED input count the provider reported — the part of
+   * the prompt that was NOT served from the provider's cache. Anthropic
+   * reports it as `input_tokens` (the cache counters sit outside it);
+   * OpenAI has no such field, so it is the prompt total minus the cached
+   * subset, and only when both are known.
+   *
+   * Null when the provider reported nothing usable. A token count is
+   * NEVER estimated from elapsed time or any other proxy: an estimate
+   * would be indistinguishable from a provider-reported measurement.
+   *
+   * Optional so the hand-built aggregate literals elsewhere (the #1199
+   * per-field fold) keep compiling unchanged; the normalizer always sets
+   * it explicitly.
+   */
+  uncachedPromptTokens?: number | null;
+  /**
+   * #1466: the cache-WRITE count — the prompt tokens the provider wrote
+   * INTO its cache during this turn. Anthropic reports it as
+   * `cache_creation_input_tokens`; OpenAI reports no cache writes at all,
+   * so the OpenAI format's value is always null.
+   *
+   * Optional for the same reason as `uncachedPromptTokens`.
+   */
+  cacheWriteTokens?: number | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -89,7 +114,14 @@ function intOrNull(value: unknown): number | null {
  */
 export function normalizeUsageTelemetry(usage: unknown, apiFormat: string): UsageTelemetry {
   if (!isRecord(usage)) {
-    return { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null };
+    return {
+      promptTokens: null,
+      completionTokens: null,
+      cachedTokens: null,
+      totalTokens: null,
+      uncachedPromptTokens: null,
+      cacheWriteTokens: null,
+    };
   }
   const u = usage;
   const details = isRecord(u.prompt_tokens_details) ? u.prompt_tokens_details : {};
@@ -120,7 +152,21 @@ export function normalizeUsageTelemetry(usage: unknown, apiFormat: string): Usag
     // branch counts — so the total follows the accounted prompt instead.
     const totalTokens =
       promptTokens !== null && completionTokens !== null ? promptTokens + completionTokens : null;
-    return { promptTokens, completionTokens, cachedTokens, totalTokens };
+    // #1466: the uncached input count is the count Anthropic reports as
+    // `input_tokens` (or `prompt_tokens` for a reassembled streamed turn,
+    // which carries the cache fields alongside) — the same value the
+    // prompt total above adds the cache counters TO. The cache-WRITE count
+    // is Anthropic's own `cache_creation_input_tokens`; a body that
+    // reported no cache write reports null, never a zero standing in for
+    // "not reported".
+    return {
+      promptTokens,
+      completionTokens,
+      cachedTokens,
+      totalTokens,
+      uncachedPromptTokens: uncached,
+      cacheWriteTokens: cacheCreation,
+    };
   }
   // OpenAI: `prompt_tokens` already includes the cached tokens, so the cache
   // fields are only a breakdown of it — never added to the prompt total. Only
@@ -134,7 +180,25 @@ export function normalizeUsageTelemetry(usage: unknown, apiFormat: string): Usag
   const totalTokens =
     intOrNull(u.total_tokens)
     ?? (promptTokens !== null && completionTokens !== null ? promptTokens + completionTokens : null);
-  return { promptTokens, completionTokens, cachedTokens, totalTokens };
+  // #1466: OpenAI reports no separate uncached input count, so it is the
+  // prompt total minus the cached subset — and only when BOTH are known:
+  // a body that reports one without the other leaves the uncached count
+  // unknown rather than guessing it. A cached subset LARGER than the prompt
+  // total is a malformed body, not a measurement: the difference would be a
+  // negative token count, so it stays unknown. OpenAI reports no cache
+  // writes at all, so that field is always null.
+  const uncachedDifference =
+    promptTokens !== null && cachedTokens !== null ? promptTokens - cachedTokens : null;
+  const uncachedPromptTokens =
+    uncachedDifference !== null && uncachedDifference >= 0 ? uncachedDifference : null;
+  return {
+    promptTokens,
+    completionTokens,
+    cachedTokens,
+    totalTokens,
+    uncachedPromptTokens,
+    cacheWriteTokens: null,
+  };
 }
 
 /** v2 cache_hit_ratio: round(cached/prompt, 3); unusable inputs → null. */

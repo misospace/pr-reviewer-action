@@ -9,7 +9,14 @@ test("openai usage with cached-token details (reasoning-model variants)", () => 
     total_tokens: 120,
     prompt_tokens_details: { cached_tokens: 40 },
   }, "openai");
-  assert.deepEqual(telemetry, { promptTokens: 100, completionTokens: 20, cachedTokens: 40, totalTokens: 120 });
+  assert.deepEqual(telemetry, {
+    promptTokens: 100,
+    completionTokens: 20,
+    cachedTokens: 40,
+    totalTokens: 120,
+    uncachedPromptTokens: 60,
+    cacheWriteTokens: null,
+  });
   assert.equal(cacheHitRatio(telemetry), 0.4);
 });
 
@@ -20,13 +27,13 @@ test("anthropic usage field family: the cache tokens count in the prompt total",
   // to it instead of under-reporting it.
   assert.deepEqual(
     normalizeUsageTelemetry({ input_tokens: 50, output_tokens: 10, cache_read_input_tokens: 25 }, "anthropic"),
-    { promptTokens: 75, completionTokens: 10, cachedTokens: 25, totalTokens: 85 },
+    { promptTokens: 75, completionTokens: 10, cachedTokens: 25, totalTokens: 85, uncachedPromptTokens: 50, cacheWriteTokens: null },
   );
   // A cache WRITE is part of the prompt total but not a cache READ, so it is
   // not counted as a cached token (the aggregate counts reads only).
   assert.deepEqual(
     normalizeUsageTelemetry({ input_tokens: 50, output_tokens: 10, cache_creation_input_tokens: 5 }, "anthropic"),
-    { promptTokens: 55, completionTokens: 10, cachedTokens: null, totalTokens: 65 },
+    { promptTokens: 55, completionTokens: 10, cachedTokens: null, totalTokens: 65, uncachedPromptTokens: 50, cacheWriteTokens: 5 },
   );
 });
 
@@ -44,7 +51,7 @@ test("anthropic streamed turn reassembled into the OpenAI chat shape counts the 
       cache_read_input_tokens: 300,
       cache_creation_input_tokens: 200,
     }, "anthropic"),
-    { promptTokens: 1000, completionTokens: 40, cachedTokens: 300, totalTokens: 1040 },
+    { promptTokens: 1000, completionTokens: 40, cachedTokens: 300, totalTokens: 1040, uncachedPromptTokens: 500, cacheWriteTokens: 200 },
   );
   // The cached subset is a fraction of the accounted prompt, matching the
   // aggregate's cache_hit_ratio.
@@ -67,20 +74,20 @@ test("a body reporting the other format's field names under the OpenAI format co
   // records and the aggregate in step.
   assert.deepEqual(
     normalizeUsageTelemetry({ input_tokens: 50, output_tokens: 10, cache_read_input_tokens: 25 }, "openai"),
-    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null },
+    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null, uncachedPromptTokens: null, cacheWriteTokens: null },
   );
 });
 
 test("junk token fields are never published as counts", () => {
   assert.deepEqual(
     normalizeUsageTelemetry({ prompt_tokens: true, completion_tokens: "", total_tokens: {} }, "openai"),
-    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null },
+    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null, uncachedPromptTokens: null, cacheWriteTokens: null },
   );
   // A numeric string is a reported number (gateways have been known to send
   // those), so it counts — like the aggregate counts it.
   assert.deepEqual(
     normalizeUsageTelemetry({ prompt_tokens: "500", completion_tokens: 40 }, "openai"),
-    { promptTokens: 500, completionTokens: 40, cachedTokens: null, totalTokens: 540 },
+    { promptTokens: 500, completionTokens: 40, cachedTokens: null, totalTokens: 540, uncachedPromptTokens: null, cacheWriteTokens: null },
   );
 });
 
@@ -95,12 +102,12 @@ test("a negative token count is malformed input, not a measurement (#1207)", () 
       total_tokens: -8,
       prompt_tokens_details: { cached_tokens: -2 },
     }, "openai"),
-    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null },
+    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null, uncachedPromptTokens: null, cacheWriteTokens: null },
   );
   // A negative numeric string counts as malformed the same way.
   assert.deepEqual(
     normalizeUsageTelemetry({ prompt_tokens: "-5", completion_tokens: "-3" }, "openai"),
-    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null },
+    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null, uncachedPromptTokens: null, cacheWriteTokens: null },
   );
   // -0 survives the clamp as exactly 0 (no signed zero pinned into records).
   assert.equal(normalizeUsageTelemetry({ prompt_tokens: -0, completion_tokens: "-0" }, "openai").promptTokens, 0);
@@ -108,7 +115,7 @@ test("a negative token count is malformed input, not a measurement (#1207)", () 
   // the fallback synthesizes only from the reported (non-negative) siblings.
   assert.deepEqual(
     normalizeUsageTelemetry({ prompt_tokens: 5, completion_tokens: 3, total_tokens: -100 }, "openai"),
-    { promptTokens: 5, completionTokens: 3, cachedTokens: null, totalTokens: 8 },
+    { promptTokens: 5, completionTokens: 3, cachedTokens: null, totalTokens: 8, uncachedPromptTokens: null, cacheWriteTokens: null },
   );
   // Anthropic: negative counts in every format-native field.
   assert.deepEqual(
@@ -118,23 +125,30 @@ test("a negative token count is malformed input, not a measurement (#1207)", () 
       cache_read_input_tokens: -1,
       cache_creation_input_tokens: -3,
     }, "anthropic"),
-    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null },
+    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null, uncachedPromptTokens: null, cacheWriteTokens: null },
   );
   // Per-field accounting: a positive part of the same malformed body still
   // counts, the same way a missing name would not suppress its siblings.
   const mixed = normalizeUsageTelemetry({ input_tokens: -5, output_tokens: 9, cache_read_input_tokens: 25 }, "anthropic");
-  assert.deepEqual(mixed, { promptTokens: 25, completionTokens: 9, cachedTokens: 25, totalTokens: 34 });
+  assert.deepEqual(mixed, {
+    promptTokens: 25,
+    completionTokens: 9,
+    cachedTokens: 25,
+    totalTokens: 34,
+    uncachedPromptTokens: null,
+    cacheWriteTokens: null,
+  });
   assert.equal(cacheHitRatio(mixed), 1);
 });
 
 test("missing usage degrades to nulls, never throws", () => {
   assert.deepEqual(
     normalizeUsageTelemetry(undefined, "openai"),
-    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null },
+    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null, uncachedPromptTokens: null, cacheWriteTokens: null },
   );
   assert.deepEqual(
     normalizeUsageTelemetry("junk", "openai"),
-    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null },
+    { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null, uncachedPromptTokens: null, cacheWriteTokens: null },
   );
 });
 
@@ -144,4 +158,54 @@ test("total is derived when absent; cache ratio is null without a usable prompt"
   assert.equal(telemetry.cachedTokens, null);
   assert.equal(cacheHitRatio(telemetry), null);
   assert.equal(cacheHitRatio(normalizeUsageTelemetry({ prompt_tokens: 0, cache_read_input_tokens: 0 }, "openai")), null);
+});
+
+// ── #1466: the uncached input count and the cache-write count ─────────────
+
+test("#1466: the Anthropic uncached count is the input count, and the cache write is its own field", () => {
+  const telemetry = normalizeUsageTelemetry({
+    input_tokens: 447,
+    output_tokens: 1330,
+    cache_read_input_tokens: 189952,
+    cache_creation_input_tokens: 2048,
+  }, "anthropic");
+  // Anthropic reports the cache tokens OUTSIDE `input_tokens`, so the
+  // uncached count IS `input_tokens` — not the prompt total.
+  assert.equal(telemetry.uncachedPromptTokens, 447);
+  assert.equal(telemetry.cacheWriteTokens, 2048);
+  // A body that reported no cache write reports null, never a zero.
+  assert.equal(normalizeUsageTelemetry({ input_tokens: 5 }, "anthropic").cacheWriteTokens, null);
+  assert.equal(normalizeUsageTelemetry({ input_tokens: 5 }, "anthropic").uncachedPromptTokens, 5);
+});
+
+test("#1466: the OpenAI uncached count is the prompt total minus the cached subset, only when both are known", () => {
+  assert.equal(
+    normalizeUsageTelemetry({ prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 40 } }, "openai").uncachedPromptTokens,
+    60,
+  );
+  // OpenAI reports no cache writes at all.
+  assert.equal(
+    normalizeUsageTelemetry({ prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 40 } }, "openai").cacheWriteTokens,
+    null,
+  );
+  // Without a cached count the uncached count is unknown — never guessed.
+  assert.equal(normalizeUsageTelemetry({ prompt_tokens: 100, completion_tokens: 20 }, "openai").uncachedPromptTokens, null);
+  // Without a prompt count it is unknown too.
+  assert.equal(normalizeUsageTelemetry({ prompt_tokens_details: { cached_tokens: 40 } }, "openai").uncachedPromptTokens, null);
+});
+
+test("#1466: a reassembled streamed Anthropic turn reports the same uncached and cache-write counts", () => {
+  // The streamed turn arrives in the OpenAI chat shape: the uncached count
+  // as `prompt_tokens`, the cache counters kept beside it.
+  const telemetry = normalizeUsageTelemetry({
+    prompt_tokens: 500,
+    completion_tokens: 40,
+    total_tokens: 540,
+    prompt_tokens_details: { cached_tokens: 300 },
+    cache_read_input_tokens: 300,
+    cache_creation_input_tokens: 200,
+  }, "anthropic");
+  assert.equal(telemetry.uncachedPromptTokens, 500);
+  assert.equal(telemetry.cacheWriteTokens, 200);
+  assert.equal(telemetry.promptTokens, 1000);
 });

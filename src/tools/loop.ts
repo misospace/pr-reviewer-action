@@ -34,6 +34,7 @@ import {
 import type { EvidenceProvenance } from "../context/evidence-provenance.js";
 import { SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
+import { type TransportTiming } from "../transport/timing.js";
 
 // Stop reasons (LoopOutcome.stopReason)
 export const STOP_MODEL_DONE = "model-stopped";
@@ -526,6 +527,88 @@ export interface ExecutedCall {
 }
 
 /**
+ * #1466: the transport measurements of ONE accepted model attempt — the
+ * fields that separate "the provider was slow" from "the provider answered
+ * fast and the Action was slow afterwards", and that make a
+ * streamed→non-streamed fallback separately attributable.
+ *
+ * A TYPE ALIAS deliberately (like `NativeLoopVerdictTelemetry` in the
+ * harness): an object-literal type is assignable to `Record<string, unknown>`
+ * while an interface with the same members is NOT, and the verdict record
+ * reuses this shape.
+ *
+ * Every field is a number, a nullable number, or a bounded enum token. No
+ * prompt text, response text, tool arguments, credentials, or provider error
+ * bodies ever ride here — the finish reason is reduced to an enum token
+ * before it is published.
+ */
+export type AcceptedAttemptTiming = {
+  /**
+   * #1466: seconds from the ACCEPTED attempt's dispatch to its first
+   * CONTENT-bearing stream event — the provider's time-to-first-token.
+   *
+   * Null when the accepted attempt was not streamed (a non-streamed answer
+   * carries no content event on the wire) or when the transport reported no
+   * timing at all. Never a zero standing in for an unmeasured value: a
+   * fabricated zero reads as "the provider answered instantly".
+   */
+  ttft_sec: number | null;
+  /**
+   * #1466: seconds from the ACCEPTED attempt's dispatch to its first response
+   * byte — the provider's queue/prefill time, measured separately from the
+   * decode that follows. Null when the transport reported no timing.
+   */
+  first_event_sec: number | null;
+  /**
+   * #1466: the cache-WRITE tokens the provider reported for this attempt
+   * (Anthropic's `cache_creation_input_tokens`). Null when the provider
+   * reported none — never a zero standing in for "not reported".
+   */
+  cache_write_tokens: number | null;
+  /**
+   * #1466: the UNCACHED input tokens the provider reported for this attempt
+   * — the part of the prompt that was NOT served from the provider's cache.
+   * Null when the provider reported nothing usable; never estimated from
+   * elapsed time (an estimate would be indistinguishable from a measurement).
+   */
+  uncached_prompt_tokens: number | null;
+  /**
+   * #1466: the decode rate of the accepted attempt — its completion tokens
+   * over the window between its first content event and its end.
+   *
+   * Null unless the attempt streamed AND reported completion tokens AND the
+   * window is positive: without a content event there is no decode window
+   * to divide by, and a rate built from anything else would be a guess.
+   */
+  decode_tokens_per_sec: number | null;
+  /**
+   * #1466: how many transport calls the attempt's turn made — one, or two
+   * when the streamed attempt was unusable and the non-streamed fallback ran.
+   * The fallback is separately attributable because the two attempts are
+   * counted, not because a boolean says "something was retried".
+   */
+  attempts: number;
+  /**
+   * #1466: how many ACTUAL HTTP attempts the turn made in total — the
+   * transport's own 429/5xx/clamp/strip retries included. A turn that needed
+   * three wire calls to get one answer is a different story from a turn that
+   * needed one, and only the count tells them apart.
+   */
+  wire_calls: number;
+  /**
+   * #1466: the provider's stop reason for the ACCEPTED attempt, reduced to a
+   * bounded enum token.
+   *
+   * It is provider-controlled free text, so it is NEVER echoed raw: a value
+   * that is not a bare `[A-Za-z0-9_.:-]` token is dropped WHOLE (not filtered
+   * into something that could still read as content — a hostile value must
+   * not be able to forge a heading here), and the kept value is capped at 40
+   * characters. Empty means "not reported".
+   */
+  finish_reason: string;
+};
+
+/**
  * #1199: bounded, content-free per-round telemetry for one native-loop model
  * turn. The loop owns the round timeline and emits exactly one record per
  * model turn (a turn that internally retried a streamed response still
@@ -553,7 +636,7 @@ export interface ExecutedCall {
  * so records + those categories derive the aggregate exactly — never an
  * under-count, never an over-count (#1199 review round 5).
  */
-export interface NativeLoopRoundTelemetry {
+export interface NativeLoopRoundTelemetry extends AcceptedAttemptTiming {
   /** 1-based model-turn index within this loop run. */
   round: number;
   /** Wall-clock seconds the model request took, incl. any streamed→non-streamed
@@ -592,6 +675,116 @@ export interface NativeLoopRoundTelemetry {
  */
 export interface ToolTurnSignal {
   reportFallback(): void;
+  /**
+   * #1466: report the transport probe of ONE transport call this turn made.
+   *
+   * The seam calls it once per call it made, in call order, so the loop can
+   * tell three things apart that the old `streamed_fallback` boolean could
+   * not: WHEN the provider answered (the probe's own instants), HOW MANY
+   * calls the turn made (the report count), and HOW MANY actual HTTP attempts
+   * those calls needed (the probes' wire-call counts).
+   *
+   * A call that produced NO body reports `null`: it was still a transport
+   * call (it cost a wire attempt), and it has no timing to report. The
+   * distinction matters because the LAST report is the ACCEPTED attempt's —
+   * the seam makes the accepted call last — so a report of `null` for the
+   * accepted call means "this answer carried no measurement", never "the
+   * previous attempt's measurement still applies".
+   */
+  reportTiming?(timing: TransportTiming | null): void;
+}
+
+/**
+ * #1466: fold a turn's transport reports into the counts the records carry.
+ *
+ * The reports arrive in call order, one per transport call, and the LAST one
+ * is the ACCEPTED attempt's: the seam makes the accepted call last (a
+ * streamed attempt that turned out unusable is followed by the non-streamed
+ * fallback that produced the response the turn returned). A `null` report
+ * (a call that produced no body) is the accepted attempt's answer "no
+ * measurement" — never the previous attempt's measurement.
+ *
+ * `attempts` is the turn's transport-call count: the report count, floored
+ * by `minimumAttempts` (a seam that reported selectively still made the
+ * calls it knows about). `wire_calls` is the sum of the probes' own wire-call
+ * counts, floored by the same call count — a transport call that reported no
+ * count made at least one HTTP attempt, and a count must never understate
+ * the calls that were made.
+ */
+export function summarizeTransportProbes(
+  probes: readonly (TransportTiming | null)[],
+  minimumAttempts = 1,
+): { accepted: TransportTiming | null; attempts: number; wire_calls: number } {
+  const attempts = Math.max(minimumAttempts, probes.length);
+  const reported = probes.reduce((sum, probe) => sum + (probe === null ? 0 : (probe.wireCalls ?? 1)), 0);
+  return {
+    accepted: probes.length > 0 ? probes[probes.length - 1]! : null,
+    attempts,
+    wire_calls: Math.max(attempts, reported),
+  };
+}
+
+/**
+ * #1466: the decode rate of one attempt — its completion tokens over the
+ * window between its first content event and its end.
+ *
+ * Null unless the attempt streamed AND reported completion tokens AND the
+ * window is positive. There is no substitute measurement: without a content
+ * event there is no decode window, and a rate derived from the total time
+ * would fold the provider's prefill into the decode.
+ */
+export function decodeTokensPerSec(
+  completionTokens: number | null,
+  timing: TransportTiming | null,
+): number | null {
+  if (completionTokens === null || completionTokens <= 0) return null;
+  if (timing === null || timing.firstContentSec === null) return null;
+  const windowSec = timing.totalSec - timing.firstContentSec;
+  if (!(windowSec > 0)) return null;
+  return Math.round((completionTokens / windowSec) * 10) / 10;
+}
+
+/**
+ * #1466: the provider's stop reason, reduced to a bounded enum token.
+ *
+ * The value is provider-controlled free text, so it is never echoed raw. A
+ * value that is not a bare `[A-Za-z0-9_.:-]` token is dropped WHOLE: a
+ * filter would keep the words of a hostile value and only remove the
+ * punctuation, and a value that can forge a heading in the artifact must not
+ * survive in pieces either. A kept value is capped at 40 characters.
+ *
+ * Both provider shapes are read: the OpenAI chat projection's
+ * `choices[0].finish_reason` and the Anthropic body's `stop_reason`.
+ */
+export function sanitizedFinishReason(response: unknown): string {
+  if (response === null || typeof response !== "object") return "";
+  const body = response as Record<string, unknown>;
+  const choices = body.choices;
+  if (Array.isArray(choices) && choices.length > 0) {
+    const first = choices[0];
+    if (first !== null && typeof first === "object") {
+      const reason = (first as Record<string, unknown>).finish_reason;
+      if (typeof reason === "string") return sanitizeFinishReasonToken(reason);
+    }
+  }
+  if (typeof body.stop_reason === "string") return sanitizeFinishReasonToken(body.stop_reason);
+  return "";
+}
+
+/**
+ * #1466: reduce ONE provider-supplied stop reason to a bounded enum token.
+ *
+ * The value is provider-controlled free text, so it is never echoed raw: a
+ * value that is not a bare `[A-Za-z0-9_.:-]` token is dropped WHOLE (a
+ * filter would keep the words of a hostile value and only remove the
+ * punctuation, and a value that can forge a heading must not survive in
+ * pieces either). A kept value is capped at 40 characters. Anything that is
+ * not a string is "not reported" — an empty token.
+ */
+export function sanitizeFinishReasonToken(value: unknown): string {
+  if (typeof value !== "string") return "";
+  if (!/^[A-Za-z0-9_.:-]+$/.test(value)) return "";
+  return value.slice(0, 40);
 }
 
 export interface LoopOutcome {
@@ -978,33 +1171,60 @@ export async function driveToolLoop(
   // `outcome.rounds` and emits round `outcome.rounds + 1` with null usage as
   // the loop's final stop. Reads only live loop state — never tool/model
   // content.
-  const emitRound = (
-    roundIndex: number,
-    requested: number,
-    executed: number,
-    refused: number,
-    deduplicated: number,
-    toolElapsedSec: number,
-    modelElapsedSec: number,
-    usage: UsageTelemetry,
-    fellBack: boolean,
-  ): void => {
+  //
+  // #1466: the record grew past nine positional arguments, so the emitter
+  // takes ONE options object — the positional form made it impossible to see
+  // which of the many numbers was which, and a wrong one was silent.
+  const emitRound = (record: {
+    roundIndex: number;
+    requested: number;
+    executed: number;
+    refused: number;
+    deduplicated: number;
+    toolElapsedSec: number;
+    modelElapsedSec: number;
+    usage: UsageTelemetry;
+    fellBack: boolean;
+    /** #1466: the turn's transport reports (one per transport call, in call
+     * order; null when that call produced no body). The accepted attempt's
+     * is the last. */
+    probes: readonly (TransportTiming | null)[];
+    /** #1466: the provider's stop reason for the accepted attempt, already
+     * reduced to a bounded enum token. */
+    finishReason: string;
+  }): void => {
     if (options.onRound === undefined) return;
+    // #1466: the accepted attempt's probe and the turn's call counts. The
+    // fallback flag raises the call-count floor: a streamed attempt that
+    // produced no body still WAS a transport call.
+    const probe = summarizeTransportProbes(record.probes, record.fellBack ? 2 : 1);
+    const accepted = probe.accepted;
     options.onRound({
-      round: roundIndex,
-      model_sec: roundSec(modelElapsedSec),
-      prompt_tokens: usage.promptTokens,
-      completion_tokens: usage.completionTokens,
-      cached_tokens: usage.cachedTokens,
-      tools_requested: requested,
-      tools_executed: executed,
-      tools_refused: refused,
-      tools_deduplicated: deduplicated,
-      tool_elapsed_sec: roundSec(toolElapsedSec),
+      round: record.roundIndex,
+      model_sec: roundSec(record.modelElapsedSec),
+      prompt_tokens: record.usage.promptTokens,
+      completion_tokens: record.usage.completionTokens,
+      cached_tokens: record.usage.cachedTokens,
+      tools_requested: record.requested,
+      tools_executed: record.executed,
+      tools_refused: record.refused,
+      tools_deduplicated: record.deduplicated,
+      tool_elapsed_sec: roundSec(record.toolElapsedSec),
       requests_remaining: Math.max(0, budgets.maxToolCalls - callsExecuted),
       rounds_remaining: Math.max(0, budgets.maxRounds - outcome.rounds),
       wall_clock_remaining_sec: roundSec(Math.max(0, budgets.wallClockSec - (nowFn() - telemetryStart))),
-      streamed_fallback: fellBack,
+      streamed_fallback: record.fellBack,
+      // #1466: the transport measurements of the accepted attempt. Null
+      // timings mean "not measured" — never a zero standing in for a
+      // measurement the transport never made.
+      ttft_sec: accepted === null || accepted.firstContentSec === null ? null : roundSec(accepted.firstContentSec),
+      first_event_sec: accepted === null || accepted.firstEventSec === null ? null : roundSec(accepted.firstEventSec),
+      cache_write_tokens: record.usage.cacheWriteTokens ?? null,
+      uncached_prompt_tokens: record.usage.uncachedPromptTokens ?? null,
+      decode_tokens_per_sec: decodeTokensPerSec(record.usage.completionTokens, accepted),
+      attempts: probe.attempts,
+      wire_calls: probe.wire_calls,
+      finish_reason: record.finishReason,
     });
   };
 
@@ -1132,7 +1352,15 @@ export async function driveToolLoop(
     // folds into this one call), and `roundFellBack` is set by `postFn` through
     // the `turnSignal` only when that fallback actually fired this turn.
     let roundFellBack = false;
-    const turnSignal: ToolTurnSignal = { reportFallback: () => { roundFellBack = true; } };
+    // #1466: the transport probes of THIS turn's calls, in call order — one
+    // entry per transport call (null when that call produced no body). The
+    // last entry is the accepted attempt's. The list is per turn, so a turn
+    // never inherits the previous turn's measurements.
+    const turnProbes: Array<TransportTiming | null> = [];
+    const turnSignal: ToolTurnSignal = {
+      reportFallback: () => { roundFellBack = true; },
+      reportTiming: (timing) => { turnProbes.push(timing); },
+    };
     const modelStart = nowFn();
     try {
       response = await postFn(payload, turnSignal);
@@ -1144,17 +1372,19 @@ export async function driveToolLoop(
       // (the anchor for `usage.rounds_used`, stop reasons, and budget notes).
       outcome.stopReason = STOP_REQUEST_ERROR;
       outcome.error = exc instanceof Error ? exc.message : String(exc);
-      emitRound(
-        outcome.rounds + 1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        Math.max(0, nowFn() - modelStart),
-        normalizeUsageTelemetry(null, options.apiFormat),
-        roundFellBack,
-      );
+      emitRound({
+        roundIndex: outcome.rounds + 1,
+        requested: 0,
+        executed: 0,
+        refused: 0,
+        deduplicated: 0,
+        toolElapsedSec: 0,
+        modelElapsedSec: Math.max(0, nowFn() - modelStart),
+        usage: normalizeUsageTelemetry(null, options.apiFormat),
+        fellBack: roundFellBack,
+        probes: turnProbes,
+        finishReason: "",
+      });
       broke = true;
       break;
     }
@@ -1163,6 +1393,9 @@ export async function driveToolLoop(
       ? (response as Record<string, unknown>).usage ?? null
       : null;
     const turnUsage = normalizeUsageTelemetry(usageObj, options.apiFormat);
+    // #1466: the accepted attempt's stop reason, reduced to a bounded enum
+    // token before it can reach the record or a log line.
+    const finishReason = sanitizedFinishReason(response);
 
     outcome.rounds++;
     const { calls, text } = extractToolCalls(response, options.apiFormat);
@@ -1170,7 +1403,19 @@ export async function driveToolLoop(
     if (calls.length === 0) {
       outcome.finalText = text;
       outcome.stopReason = outcome.toolCallsIssued > 0 ? STOP_MODEL_DONE : STOP_NO_TOOL_CALLS;
-      emitRound(outcome.rounds, 0, 0, 0, 0, 0, modelElapsedSec, turnUsage, roundFellBack);
+      emitRound({
+        roundIndex: outcome.rounds,
+        requested: 0,
+        executed: 0,
+        refused: 0,
+        deduplicated: 0,
+        toolElapsedSec: 0,
+        modelElapsedSec,
+        usage: turnUsage,
+        fellBack: roundFellBack,
+        probes: turnProbes,
+        finishReason,
+      });
       broke = true;
       break;
     }
@@ -1367,7 +1612,19 @@ export async function driveToolLoop(
 
     // #1199: the turn's telemetry, emitted once per model turn. A round that
     // ends on budget exhaustion still records its turn before the stop below.
-    emitRound(outcome.rounds, calls.length, roundExecuted, roundRefused, roundDedup, toolElapsedSec, modelElapsedSec, turnUsage, roundFellBack);
+    emitRound({
+      roundIndex: outcome.rounds,
+      requested: calls.length,
+      executed: roundExecuted,
+      refused: roundRefused,
+      deduplicated: roundDedup,
+      toolElapsedSec,
+      modelElapsedSec,
+      usage: turnUsage,
+      fellBack: roundFellBack,
+      probes: turnProbes,
+      finishReason,
+    });
 
     // #1388; #1396: round-ceiling extension for the reserved window.
     // Extension is earned ONLY at the (current) ceiling and only on

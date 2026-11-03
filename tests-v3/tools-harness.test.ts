@@ -11,14 +11,16 @@ import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import { redactPrTextDeep } from "../src/context/redact.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
 import { reassembleSse } from "../src/transport/sse.js";
-import { normalizedToOpenAiChat } from "../src/run/stages.js";
+import { attachTransportTiming, readTransportTiming } from "../src/transport/timing.js";
+import { harnessTransportAdapter, normalizedToOpenAiChat } from "../src/run/stages.js";
+import type { StageEnv } from "../src/run/env.js";
 import { prioritizeDiff } from "../src/corpus/diff-priority.js";
 import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../src/corpus/assemble.js";
 import { markerReviewResult, renderPartialCoverageNotice } from "../src/publish/publish.js";
 import { publishInputFromEnv } from "../src/run/entrypoints.js";
 import { resolvePartialCoverage, toolBudgetTelemetryOf } from "../src/engine/review.js";
 import type { PartialCoverage } from "../src/tools/coverage.js";
-import { linesInsideCodeFences } from "./helpers.js";
+import { linesInsideCodeFences, startMockServer } from "./helpers.js";
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "harness-test-"));
@@ -2972,4 +2974,347 @@ test("#1379: a release-notes-only fetch inside the window leaves the artifact re
   // fetch did (attempted, executor error).
   const trace = (artifact.tool_calls ?? []) as Array<{ tool: string }>;
   assert.deepEqual(trace.map((c) => c.tool), ["read_file", "web_fetch"]);
+});
+
+// ---------------------------------------------------------------------------
+// #1466 — the per-round and verdict transport measurements.
+//
+// The acceptance criterion of #1466 is the #1459 fixture: the REAL
+// MiniMax/LiteLLM streamed Anthropic body, reassembled and projected by the
+// production code, must make the round record report the provider's real
+// prompt and cache usage instead of `prompt=0 cached=-`.
+// ---------------------------------------------------------------------------
+
+/** #1459: the real MiniMax/LiteLLM streamed Anthropic body. The
+ * `message_start` carries only the `{input_tokens: 0, output_tokens: 0}`
+ * placeholder, and the authoritative input/cache counters arrive in the LATER
+ * `message_delta`. */
+const MINIMAX_ANTHROPIC_STREAM = [
+  'data: {"type":"message_start","message":{"id":"msg_1","model":"minimax-m2","usage":{"input_tokens":0,"output_tokens":0}}}',
+  "",
+  'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}',
+  "",
+  'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"src.ts\\"}"}}',
+  "",
+  'data: {"type":"content_block_stop","index":0}',
+  "",
+  'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":447,"cache_read_input_tokens":189952,"output_tokens":1330}}',
+  "",
+  'data: {"type":"message_stop"}',
+  "",
+].join("\n");
+
+test("#1466: the #1459 MiniMax/LiteLLM streamed body reports its real prompt and cache usage", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // The PRODUCTION reassembler and projection: the body the transport would
+  // hand the harness for a streamed Anthropic turn.
+  const projection = normalizedToOpenAiChat(reassembleSse(MINIMAX_ANTHROPIC_STREAM, "anthropic"));
+  // The transport probe rides the body (the production adapter attaches it).
+  attachTransportTiming(projection, {
+    firstEventSec: 0.3,
+    firstContentSec: 2.5,
+    totalSec: 14.2,
+    wireCalls: 1,
+  });
+  const anthropicText = (text: string) => ({ content: [{ type: "text", text }] });
+  const scripted = [
+    projection,
+    anthropicText("evidence gathered"),
+    anthropicText(JSON.stringify({ verdict: "approve", review_markdown: "## Review\nLooks fine.", findings: [] })),
+  ];
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_API_FORMAT: "anthropic" },
+    transport: async () => scripted[n++],
+    log: (line) => { logs.push(line); },
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const rounds = artifact.tool_loop_telemetry.rounds;
+  assert.equal(rounds.length, 2);
+  // The provider's REAL counters, not the `message_start` placeholder: the
+  // prompt total is the uncached 447 plus the 189952 cache reads (#910).
+  assert.equal(rounds[0].prompt_tokens, 190399);
+  assert.equal(rounds[0].completion_tokens, 1330);
+  assert.equal(rounds[0].cached_tokens, 189952);
+  assert.equal(rounds[0].uncached_prompt_tokens, 447);
+  // No cache write was reported: null, never a zero standing in for "not
+  // reported".
+  assert.equal(rounds[0].cache_write_tokens, null);
+  // The transport measurements of the accepted attempt.
+  assert.equal(rounds[0].ttft_sec, 2.5);
+  assert.equal(rounds[0].first_event_sec, 0.3);
+  assert.equal(rounds[0].decode_tokens_per_sec, 113.7);
+  assert.equal(rounds[0].attempts, 1);
+  assert.equal(rounds[0].wire_calls, 1);
+  assert.equal(rounds[0].finish_reason, "tool_calls");
+
+  // The heartbeat line shows the real usage — the symptom #1459 reported
+  // (`prompt=0 cached=-`) is gone.
+  const joined = logs.join("\n");
+  assert.match(joined, /native_loop round 1: model=[0-9.]+s prompt=190399 completion=1330 cached=189952/);
+  assert.match(joined, /ttft=2\.5s first_event=0\.3s cache_write=- uncached=447 decode=113\.7tok\/s attempts=1 wire_calls=1 finish=tool_calls/);
+});
+
+test("#1466: the verdict record carries the turn's token counts and the accepted attempt's timings", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    withUsage(openAiCall("c1", "read_file", '{"path":"src.ts"}'), { prompt_tokens: 1000, completion_tokens: 50 }),
+    openAiText("evidence gathered"),
+    withUsage({ ...validVerdict(), choices: [{ ...validVerdict().choices[0]!, finish_reason: "stop" }] }, { prompt_tokens: 21000, completion_tokens: 900, prompt_tokens_details: { cached_tokens: 16000 } }),
+  ];
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    transport: async () => {
+      const body = scripted[n++];
+      // The transport probe rides the body the transport returned.
+      return attachTransportTiming(body as Record<string, unknown>, {
+        firstEventSec: 0.4,
+        firstContentSec: 1.1,
+        totalSec: 3.6,
+        wireCalls: 1,
+      });
+    },
+    log: (line) => { logs.push(line); },
+    ...withPrompt,
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  // The verdict record carries the accepted attempt's transport measurements.
+  assert.equal(telemetry.verdict.ttft_sec, 1.1);
+  assert.equal(telemetry.verdict.first_event_sec, 0.4);
+  assert.equal(telemetry.verdict.decode_tokens_per_sec, 900 / 2.5);
+  assert.equal(telemetry.verdict.attempts, 1);
+  assert.equal(telemetry.verdict.wire_calls, 1);
+  assert.equal(telemetry.verdict.finish_reason, "stop");
+  // The cache breakdown of the turn (OpenAI: no cache writes, the uncached
+  // count is the prompt total minus the cached subset). One attempt here, so
+  // the turn's counts and the attempt's counts are the same numbers.
+  assert.equal(telemetry.verdict.uncached_prompt_tokens, 21000 - 16000);
+  assert.equal(telemetry.verdict.cache_write_tokens, null);
+  // …and the pre-#1466 fields are unchanged.
+  assert.equal(telemetry.verdict.prompt_tokens, 21000);
+  assert.equal(telemetry.verdict.completion_tokens, 900);
+  assert.equal(telemetry.verdict.cached_tokens, 16000);
+  assert.equal(telemetry.verdict.streamed_fallback, false);
+
+  // The verdict heartbeat line carries the same figures.
+  assert.match(
+    logs.join("\n"),
+    /native_loop verdict: model=[0-9.]+s prompt=21000 completion=900 cached=16000 ttft=1\.1s first_event=0\.4s cache_write=- uncached=5000 decode=360\.0tok\/s attempts=1 wire_calls=1 finish=stop/,
+  );
+});
+
+test("#1466: a verdict turn whose streamed attempt failed reports the accepted (non-streamed) attempt", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    withUsage(openAiCall("c1", "read_file", '{"path":"src.ts"}'), { prompt_tokens: 1000, completion_tokens: 50 }),
+    openAiText("evidence gathered"),
+    // verdict attempt 1 (streamed): a body the verdict parser rejects.
+    withUsage(openAiText("not a verdict body"), { prompt_tokens: 21000, completion_tokens: 900 }),
+    // verdict attempt 2 (non-streamed): the accepted one.
+    withUsage(validVerdict(), { prompt_tokens: 22000, completion_tokens: 1000 }),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    ...withPrompt,
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    transport: async () => {
+      const body = scripted[n++];
+      // The streamed attempt carried a content event; the non-streamed retry
+      // did not (a non-streamed answer has no content event on the wire).
+      const streamed = n === 3;
+      return attachTransportTiming(body as Record<string, unknown>, streamed
+        ? { firstEventSec: 0.2, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
+        : { firstEventSec: 0.6, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
+    },
+  }));
+  assert.equal(result.native_loop_verdict_retried, true);
+
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry;
+  // The fallback is separately attributable: two transport calls, two wire
+  // attempts.
+  assert.equal(telemetry.verdict.attempts, 2);
+  assert.equal(telemetry.verdict.wire_calls, 2);
+  assert.equal(telemetry.verdict.streamed_fallback, true);
+  // The ACCEPTED attempt's timings — the non-streamed retry's.
+  assert.equal(telemetry.verdict.ttft_sec, null);
+  assert.equal(telemetry.verdict.first_event_sec, 0.6);
+  assert.equal(telemetry.verdict.decode_tokens_per_sec, null);
+});
+
+test("#1466: a retried verdict turn sums its token counts over BOTH attempts and times only the accepted one", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const anthropicText = (text: string) => ({ content: [{ type: "text", text }] });
+  const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
+  const scripted = [
+    // The loop's two turns: the tool call, then the answer.
+    normalizedToOpenAiChat(reassembleSse(MINIMAX_ANTHROPIC_STREAM, "anthropic")),
+    anthropicText("evidence gathered"),
+    // verdict attempt 1 (streamed): a body the verdict parser rejects.
+    withUsage(anthropicText("not a verdict body"), {
+      prompt_tokens: 447,
+      completion_tokens: 900,
+      cache_read_input_tokens: 16000,
+      cache_creation_input_tokens: 100,
+    }),
+    // verdict attempt 2 (non-streamed): the accepted one.
+    withUsage(anthropicText(JSON.stringify({ verdict: "approve", review_markdown: "## Review\nLooks fine.", findings: [] })), {
+      prompt_tokens: 500,
+      completion_tokens: 1000,
+      cache_read_input_tokens: 18000,
+      cache_creation_input_tokens: 200,
+    }),
+  ];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_API_FORMAT: "anthropic", AI_STREAM: "true" },
+    transport: async () => {
+      const body = scripted[n++];
+      // The streamed attempt carried a content event; the non-streamed retry
+      // did not (a non-streamed answer has no content event on the wire).
+      const streamed = n === 3;
+      return attachTransportTiming(body as Record<string, unknown>, streamed
+        ? { firstEventSec: 0.2, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
+        : { firstEventSec: 0.6, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
+    },
+  }));
+  assert.equal(result.native_loop_verdict_retried, true);
+
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const verdict = (artifact.tool_loop_telemetry.verdict ?? {}) as Record<string, unknown>;
+  // The token counts are the billed sums over BOTH attempts: attempt 1
+  // billed 16547 prompt tokens (447 uncached + 16000 cache reads + 100
+  // cache writes), attempt 2 billed 18700 (500 + 18000 + 200).
+  assert.equal(verdict.prompt_tokens, 35247);
+  assert.equal(verdict.completion_tokens, 1900);
+  assert.equal(verdict.cached_tokens, 34000);
+  assert.equal(verdict.uncached_prompt_tokens, 947);
+  assert.equal(verdict.cache_write_tokens, 300);
+  // The token counts agree with each other: the prompt total is the uncached
+  // count plus the cache reads plus the cache writes, over the same sum.
+  assert.equal(
+    verdict.prompt_tokens as number,
+    (verdict.uncached_prompt_tokens as number) + (verdict.cached_tokens as number) + (verdict.cache_write_tokens as number),
+  );
+  // The timing fields describe the ACCEPTED attempt only: the non-streamed
+  // retry, which has no content event on the wire.
+  assert.equal(verdict.ttft_sec, null);
+  assert.equal(verdict.first_event_sec, 0.6);
+  assert.equal(verdict.decode_tokens_per_sec, null);
+  assert.equal(verdict.attempts, 2);
+  assert.equal(verdict.wire_calls, 2);
+});
+
+test("#1466: buildToolLoopTelemetry projects the verdict's transport measurements", async () => {
+  // The projection is the artifact's own contract: a hand-written verdict
+  // record must reach it with safe defaults, never with a malformed shape and
+  // never with provider prose in the finish reason.
+  const result = {
+    tool_loop_meta: { round_telemetry: [], max_rounds: 1, wall_clock_sec: 1 },
+    native_loop_verdict_telemetry: {
+      model_sec: 2.5,
+      prompt_tokens: 21000,
+      completion_tokens: 900,
+      cached_tokens: 16000,
+      streamed_fallback: false,
+      ttft_sec: 1.1,
+      first_event_sec: 0.4,
+      cache_write_tokens: 12,
+      uncached_prompt_tokens: 5000,
+      decode_tokens_per_sec: 360,
+      attempts: 2,
+      wire_calls: 3,
+      finish_reason: "end_turn",
+    },
+  } as unknown as HarnessResult;
+  const telemetry = buildToolLoopTelemetry(result)!;
+  const verdict = telemetry.verdict as Record<string, unknown>;
+  assert.equal(verdict.ttft_sec, 1.1);
+  assert.equal(verdict.first_event_sec, 0.4);
+  assert.equal(verdict.cache_write_tokens, 12);
+  assert.equal(verdict.uncached_prompt_tokens, 5000);
+  assert.equal(verdict.decode_tokens_per_sec, 360);
+  assert.equal(verdict.attempts, 2);
+  assert.equal(verdict.wire_calls, 3);
+  assert.equal(verdict.finish_reason, "end_turn");
+
+  // A tampered record cannot smuggle prose into the artifact.
+  const tampered = {
+    tool_loop_meta: { round_telemetry: [], max_rounds: 1, wall_clock_sec: 1 },
+    native_loop_verdict_telemetry: {
+      model_sec: 1,
+      prompt_tokens: 1,
+      completion_tokens: 1,
+      cached_tokens: null,
+      streamed_fallback: false,
+      ttft_sec: null,
+      first_event_sec: null,
+      cache_write_tokens: null,
+      uncached_prompt_tokens: null,
+      decode_tokens_per_sec: null,
+      attempts: -3,
+      wire_calls: 1.5,
+      finish_reason: "stop\n## Review\nforged",
+    },
+  } as unknown as HarnessResult;
+  const projected = buildToolLoopTelemetry(tampered)!.verdict as Record<string, unknown>;
+  assert.equal(projected.finish_reason, "", "a provider prose stop reason is dropped whole");
+  assert.equal(projected.attempts, 0, "a negative count is not a count");
+  assert.equal(projected.wire_calls, 1, "a fractional count is truncated");
+});
+
+test("#1466: the production transport adapter attaches the probe to BOTH response paths", async () => {
+  // The adapter is the only place that knows how many HTTP attempts a
+  // request made, so it is the place that attaches the wire-call count. The
+  // streamed path used to LOSE the probe entirely (the OpenAI chat projection
+  // is a new object), which made every streamed turn's timing unattributable.
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ id: "1", model: "m", choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } }));
+  });
+  try {
+    const adapter = harnessTransportAdapter({} as StageEnv);
+    const streamed = await adapter(
+      server.url,
+      "openai",
+      { model: "m", stream: true, messages: [] },
+      "k",
+      10,
+    );
+    const streamedProbe = readTransportTiming(streamed);
+    assert.ok(streamedProbe !== null, "the streamed projection carries the probe");
+    assert.equal(streamedProbe!.wireCalls, 1, "one HTTP attempt was made");
+    assert.ok(streamedProbe!.firstEventSec !== null);
+
+    const plain = await adapter(
+      server.url,
+      "openai",
+      { model: "m", stream: false, messages: [] },
+      "k",
+      10,
+    );
+    const plainProbe = readTransportTiming(plain);
+    assert.ok(plainProbe !== null, "the non-streamed body carries the probe");
+    assert.equal(plainProbe!.wireCalls, 1);
+  } finally {
+    await server.close();
+  }
 });

@@ -21,6 +21,7 @@ import {
   type ToolTurnSignal,
 } from "../src/tools/loop.js";
 import { buildSummarizerConversation } from "../src/tools/harness.js";
+import { attachTransportTiming, readTransportTiming, type TransportTiming } from "../src/transport/timing.js";
 
 function scriptedLoop(responses: unknown[], execResults: Record<string, unknown>[], clock: number[] = []) {
   let responseIndex = 0;
@@ -880,6 +881,187 @@ test("#1199: a transport-error turn records the streamed fallback it attempted",
   assert.equal(rounds[0]!.round, 1);
   assert.equal(rounds[0]!.model_sec, 0.25);
   assert.equal(rounds[0]!.streamed_fallback, true);
+});
+
+// ---------------------------------------------------------------------------
+// #1466 — the per-round transport measurements.
+//
+// The point of these records is to separate "the provider was slow" from
+// "the provider answered fast and the Action was slow afterwards", and to
+// make a streamed→non-streamed fallback separately attributable. Every
+// measurement comes from the transport's own probe; nothing is estimated.
+// ---------------------------------------------------------------------------
+
+/** A body that carries a transport probe, the way the production adapter
+ * attaches one to the body the transport returned. */
+function timedBody(
+  body: Record<string, unknown>,
+  timing: TransportTiming,
+): Record<string, unknown> {
+  return attachTransportTiming(body, timing);
+}
+
+test("#1466: the round record carries the accepted attempt's transport measurements", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // A streamed turn's body: the OpenAI chat projection of an Anthropic
+  // stream, with the cache counters the #910 accounting reads.
+  const timed = timedBody(
+    {
+      choices: [{ message: { content: "done" }, finish_reason: "end_turn" }],
+      usage: {
+        prompt_tokens: 447,
+        completion_tokens: 1330,
+        total_tokens: 1777,
+        prompt_tokens_details: { cached_tokens: 189952 },
+        cache_read_input_tokens: 189952,
+        cache_creation_input_tokens: 25,
+      },
+    },
+    { firstEventSec: 0.2, firstContentSec: 1.4, totalSec: 2.71, wireCalls: 1 },
+  );
+  const postFn = async (_payload: Record<string, unknown>, turn?: ToolTurnSignal) => {
+    // The seam reports the probe of the call it made.
+    turn?.reportTiming?.(readTransportTiming(timed));
+    return timed;
+  };
+  const { executeFn, timeFn, nowFn, rounds } = telemetryLoop([], [], []);
+  await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "anthropic",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    timeFn,
+    nowFn,
+    onRound: (r) => rounds.push(r),
+  });
+  assert.equal(rounds.length, 1);
+  const r1 = rounds[0]!;
+  // The timings are the accepted attempt's own instants.
+  assert.equal(r1.ttft_sec, 1.4);
+  assert.equal(r1.first_event_sec, 0.2);
+  // 1330 completion tokens over the 1.31s decode window.
+  assert.equal(r1.decode_tokens_per_sec, 1015.3);
+  // One transport call, one HTTP attempt.
+  assert.equal(r1.attempts, 1);
+  assert.equal(r1.wire_calls, 1);
+  // The provider's stop reason, as a bounded enum token.
+  assert.equal(r1.finish_reason, "end_turn");
+  // The cache breakdown comes from the provider's own reported counters.
+  assert.equal(r1.cache_write_tokens, 25);
+  assert.equal(r1.uncached_prompt_tokens, 447);
+  // …and the prompt total stays the #910 accounting (447 + 189952 + 25).
+  assert.equal(r1.prompt_tokens, 190424);
+  assert.equal(r1.cached_tokens, 189952);
+});
+
+test("#1466: a response without a timing yields null timings, never a fabricated zero", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // No probe on the body: the transport reported nothing.
+  const untimed = {
+    choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 10, completion_tokens: 4 },
+  };
+  const postFn = async (_payload: Record<string, unknown>, turn?: ToolTurnSignal) => {
+    turn?.reportTiming?.(readTransportTiming(untimed));
+    return untimed;
+  };
+  const { executeFn, timeFn, nowFn, rounds } = telemetryLoop([], [], []);
+  await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    timeFn,
+    nowFn,
+    onRound: (r) => rounds.push(r),
+  });
+  const r1 = rounds[0]!;
+  assert.equal(r1.ttft_sec, null, "no measurement is null, never a zero");
+  assert.equal(r1.first_event_sec, null);
+  assert.equal(r1.decode_tokens_per_sec, null);
+  // The provider's own figures still ride the record.
+  assert.equal(r1.prompt_tokens, 10);
+  assert.equal(r1.completion_tokens, 4);
+  // OpenAI reports no cache writes and no separate uncached count.
+  assert.equal(r1.cache_write_tokens, null);
+  assert.equal(r1.uncached_prompt_tokens, null);
+  // The turn still made one transport call.
+  assert.equal(r1.attempts, 1);
+  assert.equal(r1.wire_calls, 1);
+  assert.equal(r1.finish_reason, "stop");
+});
+
+test("#1466: a streamed→non-streamed fallback reports the ACCEPTED attempt's measurements", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // The streamed attempt answered (with a body the seam judged unusable) and
+  // the non-streamed fallback produced the response the turn returned.
+  const streamed = timedBody(
+    { choices: [{ message: { content: null }, finish_reason: "stop" }], error: { message: "unusable" } },
+    { firstEventSec: 0.1, firstContentSec: 0.2, totalSec: 0.3, wireCalls: 1 },
+  );
+  const fallback = timedBody(
+    {
+      choices: [{ message: { content: "done" }, finish_reason: "length" }],
+      usage: { prompt_tokens: 12, completion_tokens: 5 },
+    },
+    // A non-streamed answer has no content event on the wire.
+    { firstEventSec: 0.5, firstContentSec: null, totalSec: 1.5, wireCalls: 2 },
+  );
+  let calls = 0;
+  const postFn = async (_payload: Record<string, unknown>, turn?: ToolTurnSignal) => {
+    // One turn = one `postFn` call; the SEAM (the harness) makes the two
+    // transport calls inside it and reports both probes.
+    calls++;
+    turn?.reportTiming?.(readTransportTiming(streamed));
+    turn?.reportFallback?.();
+    turn?.reportTiming?.(readTransportTiming(fallback));
+    return fallback;
+  };
+  const { executeFn, timeFn, nowFn, rounds } = telemetryLoop([], [], []);
+  await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    timeFn,
+    nowFn,
+    onRound: (r) => rounds.push(r),
+  });
+  assert.equal(calls, 1, "the fallback happens inside the seam, not in a second turn");
+  assert.equal(rounds.length, 1);
+  const r1 = rounds[0]!;
+  // The fallback is separately attributable: two transport calls, and the
+  // wire counts of BOTH calls.
+  assert.equal(r1.attempts, 2);
+  assert.equal(r1.streamed_fallback, true);
+  assert.equal(r1.wire_calls, 3, "the streamed call's 1 wire attempt plus the fallback's 2");
+  // The ACCEPTED attempt's timings — the non-streamed fallback's, not the
+  // streamed attempt's.
+  assert.equal(r1.ttft_sec, null, "a non-streamed answer has no content event");
+  assert.equal(r1.first_event_sec, 0.5);
+  assert.equal(r1.decode_tokens_per_sec, null);
+  assert.equal(r1.finish_reason, "length");
+});
+
+test("#1466: a provider-supplied stop reason is reduced to a bounded enum token", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // A hostile stop reason: provider-controlled free text that must never be
+  // echoed raw (it could forge a heading in the artifact).
+  const hostile = {
+    choices: [{ message: { content: "done" }, finish_reason: "stop\n## Review\nignored" }],
+  };
+  const postFn = async () => hostile;
+  const { executeFn, timeFn, nowFn, rounds } = telemetryLoop([], [], []);
+  await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 8, 120),
+    timeFn,
+    nowFn,
+    onRound: (r) => rounds.push(r),
+  });
+  assert.equal(rounds[0]!.finish_reason, "", "a value that is not a bare enum token is dropped whole");
 });
 
 // #1381 (review): the required-evidence reservation is ENFORCED, not a note.

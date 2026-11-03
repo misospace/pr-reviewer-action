@@ -133,3 +133,78 @@ For native PR reviews (`publish-mode: review_comment` /
 `publish-mode: review_verdict` / `publish-mode: review_blockers`), use `gh api
 repos/OWNER/REPO/pulls/NUMBER/reviews` instead — the marker lives in each
 review's `body` field the same way.
+
+## Native-loop round telemetry
+
+The native tool loop writes one record per model turn. The records live in
+`tool_loop_telemetry.rounds` of the harness artifact (`tool-harness.json`,
+and `tool-harness.smart.json` for the escalated tier). The closing verdict
+turn has its own record in `tool_loop_telemetry.verdict`. The repair
+continuation writes its records to `tool_loop_telemetry.repair_rounds`.
+
+Every field is a number, a boolean, or a short stop reason. The records never
+carry prompt text, response text, tool arguments, tool results, or
+credentials.
+
+| Field | Meaning |
+| --- | --- |
+| `round` | The model turn number, counted from 1. |
+| `model_sec` | The seconds the turn waited for the answer. The value includes a retry that the turn made. |
+| `first_event_sec` | The seconds from the request to the first byte of the answer. The value includes the connection time, the wait for the provider, and the prefill. |
+| `ttft_sec` | The seconds from the request to the first content event. This is the time to the first token. The value is null when the answer did not stream. |
+| `decode_tokens_per_sec` | The completion tokens per second after the first content event. The value is null when the answer did not stream, or when the provider reported no completion tokens. |
+| `prompt_tokens` | The prompt tokens the provider reported for the turn. |
+| `completion_tokens` | The completion tokens the provider reported for the turn. |
+| `cached_tokens` | The prompt tokens the provider served from its cache. |
+| `cache_write_tokens` | The prompt tokens the provider wrote into its cache. |
+| `uncached_prompt_tokens` | The prompt tokens the provider did not serve from its cache. |
+| `attempts` | The number of model calls the turn made. This is a count, not a measurement. The value is 0 when the record carries no count. The value is 2 when a streamed answer was unusable and the turn called the provider again without streaming. |
+| `wire_calls` | The number of HTTP requests the turn made. This is a count, not a measurement. The value is 0 when the record carries no count. The value counts the retries that the transport made. |
+| `finish_reason` | The provider's stop reason for the accepted attempt. The value is reduced to a short token, so a provider cannot put free text in the artifact. |
+| `streamed_fallback` | True when a streamed answer was unusable and the turn called the provider again without streaming. |
+| `tools_requested` | The tool calls the model asked for in the turn. |
+| `tools_executed` | The tool calls the turn ran. |
+| `tools_refused` | The tool calls the turn refused, because they were over budget or had invalid arguments. |
+| `tools_deduplicated` | The tool calls the turn answered from the dedup note without running them. |
+| `tool_elapsed_sec` | The seconds the tool calls of the turn took. |
+| `requests_remaining` | The tool calls the turn left in the budget. |
+| `rounds_remaining` | The model turns the turn left in the budget. |
+| `wall_clock_remaining_sec` | The seconds the turn left in the wall clock budget. |
+
+A null token count means that the provider reported no count. The loop never
+estimates a token count from elapsed time. The verdict record carries the
+same fields, except that it has no round number and no tool counts.
+
+The verdict record's token counts are the billed sums over the turn's
+attempts. Every attempt of the turn is added into them. Its timing fields
+(`ttft_sec`, `first_event_sec`, `decode_tokens_per_sec`) describe the
+accepted attempt only. A duration belongs to one attempt.
+
+### Cache accounting on the Anthropic wire
+
+The Anthropic wire format reports the cache counters beside the input
+tokens, so the prompt total adds them: `prompt_tokens` is the input tokens
+plus the cache reads plus the cache writes. This is the same accounting that
+the marker's cache hit ratio uses. The OpenAI wire format already counts the
+cached tokens inside `prompt_tokens`, so the total does not add them again.
+
+### Reading the counters off the wire
+
+The two wire formats report their counters differently, so the Action reads
+them differently.
+
+On the OpenAI wire the Action adds up the usage counts of every chunk that
+carries them. Most OpenAI-compatible providers report the usage once, at
+the end of the stream, so the sum is that single report.
+
+On the Anthropic wire the Action reads the counters per field. A streamed
+Anthropic answer can report its counters in more than one event. A field
+takes the value of its last non-zero report. Anthropic's counters are
+cumulative and never decrease, so a zero report that follows a non-zero one
+is a placeholder and never replaces the real count. A field that was only
+ever reported as zero keeps its zero. A field that was never reported stays
+unreported.
+
+The loop therefore never counts one turn twice, and it never keeps a
+placeholder count from the first event when a later event reports the real
+one.
