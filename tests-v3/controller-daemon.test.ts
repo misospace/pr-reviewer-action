@@ -688,13 +688,17 @@ test("a bound forgeIntegration is stamped on the follow-up consumer's jobs too (
   );
 });
 
-test("an identity-less handoff is refused at the enqueue seam when its kind is ambiguous (#1444)", async (t) => {
-  // The reconciliation poll mints its OWN generations, so the enqueue
-  // handoff is where a job with no integration identity arrives. With two
-  // same-kind integrations the endpoint cannot be resolved from the platform
-  // alone, so the handoff refuses BEFORE any queue mutation and names the
-  // mint site — a queued job that fails later at request build tells the
-  // operator about an endpoint they never chose.
+test("an identity-less handoff is refused at the enqueue seam (#1444/#1446)", async (t) => {
+  // A reconciliation pass outside the daemon's own composition mints its OWN
+  // generations, so the enqueue handoff is where a job with no integration
+  // identity arrives. A BOUND daemon refuses EVERY such job: its intake
+  // stamps the bound name, so an identity-less copy of one head hashes to a
+  // DIFFERENT generation and buys the head a second review resolved from the
+  // platform kind instead of the installation the daemon serves. An UNBOUND
+  // daemon refuses it when the endpoint could only be guessed, i.e. several
+  // integrations share the kind (#1440). Both refuse BEFORE any queue
+  // mutation and name the mint site — a queued job that fails later at
+  // request build tells the operator about an endpoint they never chose.
   const twoForgejo = {
     ...instanceConfig(),
     forges: [
@@ -702,14 +706,21 @@ test("an identity-less handoff is refused at the enqueue seam when its kind is a
       { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
     ],
   } as InstanceConfig;
-  for (const [label, bound, remedy] of [
-    ["unbound", undefined, /bind ControllerDaemonOptions\.forgeIntegration/],
-    ["bound", "fj-primary", /this daemon's forge-integration identity 'fj-primary'/],
+  const oneForgejo = {
+    ...instanceConfig(),
+    forges: [
+      { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+    ],
+  } as InstanceConfig;
+  for (const [label, instance, bound, remedy] of [
+    ["unbound", twoForgejo, undefined, /bind ControllerDaemonOptions\.forgeIntegration/],
+    ["bound single-kind", oneForgejo, "fj-primary", /mint the job with the identity this daemon hands its reconciliation pass/],
+    ["bound ambiguous", twoForgejo, "fj-primary", /mint the job with the identity this daemon hands its reconciliation pass/],
   ] as const) {
     const store = new InMemoryQueueStore();
     const h = await start({
       options: {
-        instance: twoForgejo,
+        instance,
         queueStore: store,
         maxAttempts: 1,
         retryBaseMs: 1,
@@ -733,14 +744,25 @@ test("an identity-less handoff is refused at the enqueue seam when its kind is a
     assert.ok(refusal instanceof RangeError, `${label}: the handoff refuses with a RangeError`);
     const message = (refusal as Error).message;
     assert.match(message, /no forge-integration identity/, `${label}: names what is missing`);
-    assert.match(
-      message,
-      /'fj-primary'.*'fj-secondary'/,
-      `${label}: names the integrations that share the kind`,
-    );
+    if (bound === undefined) {
+      assert.match(
+        message,
+        /'fj-primary'.*'fj-secondary'/,
+        `${label}: names the integrations that share the kind`,
+      );
+    } else {
+      // The bound name is instance config, so naming it is safe (#252); the
+      // kind-sharing list is NOT reached, because a bound daemon never needs
+      // the platform-kind fallback in the first place.
+      assert.match(
+        message,
+        new RegExp(`this daemon serves forge integration '${bound}'`),
+        `${label}: names the identity this daemon serves`,
+      );
+    }
     assert.match(message, remedy, `${label}: names the remedy for this daemon`);
-    assert.equal(store.load().records.length, 0, `${label}: the ambiguous job was never queued`);
-    assert.equal(h.fake.started.length, 0, `${label}: the ambiguous job never launched a worker`);
+    assert.equal(store.load().records.length, 0, `${label}: the identity-less job was never queued`);
+    assert.equal(h.fake.started.length, 0, `${label}: the identity-less job never launched a worker`);
   }
 });
 

@@ -38,4 +38,5 @@ export {
   type EventIdentityResolver,
   type ExecutorBindings,
   type ReconcilePassIdentity,
+  type ReconcilePollBinding,
 } from "./daemon.js";
