@@ -370,6 +370,12 @@ export function collectConfigLines(env: Record<string, string>): string[] {
   if ((env.CLAIM_FALSIFICATION ?? "").trim().toLowerCase() === "true") {
     lines.push("CLAIM_FALSIFICATION=true");
   }
+  // DERIVED_OBLIGATIONS (#1448): only an enabled pre-pass changes the corpus,
+  // so only "true" contributes and the default leaves existing fingerprints
+  // valid (same rule as CLAIM_FALSIFICATION above).
+  if ((env.DERIVED_OBLIGATIONS ?? "").trim().toLowerCase() === "true") {
+    lines.push("DERIVED_OBLIGATIONS=true");
+  }
   // #1003/#1005: human-review triage and its routing layer only run when
   // opted in, so only the enabled state contributes and the defaults leave
   // existing fingerprints valid (same rule as CLAIM_FALSIFICATION above).

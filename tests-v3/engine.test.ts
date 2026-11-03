@@ -217,6 +217,94 @@ test("#1380: dependency-update classification drives the claim pass dependency m
   }
 });
 
+test("#1448: the derived-obligations pre-pass runs on the primary route and its section reaches the final corpus", async () => {
+  const obligationsPayload = JSON.stringify({
+    obligations: [{
+      obligation: "Both enqueue producers must place the integration identity before generation hashing.",
+      change: "generationId() now hashes an integration field; only one producer supplies it.",
+      topology: "producer_convergence",
+      paths: ["src/ingress/reconcile.ts:mintFoundJob"],
+      basis: "The hashed canonical tuple changed and one mint site does not pass the new field.",
+    }],
+  });
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (body.includes("You derive the architectural obligations")) {
+      res.end(JSON.stringify({ id: "d1", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content: obligationsPayload }, finish_reason: "stop" }], usage: { prompt_tokens: 50, completion_tokens: 30, total_tokens: 80 } }));
+      return;
+    }
+    res.end(verdictBody());
+  });
+  const f = fixture();
+  try {
+    const req = request(server.url, f.runDir);
+    req.inputs = { ...req.inputs, "derived-obligations": "true" };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter: mockPlatform() }));
+    // The derivation is a review target, not a verdict input: the scripted
+    // approve still stands (#1448 scope; #1449 owns withholding).
+    assert.equal(result.outputs.verdict, "approve");
+    const deriveRequests = server.requests.filter((r) => r.body.includes("You derive the architectural obligations"));
+    assert.equal(deriveRequests.length, 1);
+    assert.match(deriveRequests[0]!.body, /untrusted PR content/);
+    const record = JSON.parse(readFileSync(join(f.runDir, "derived-obligations.json"), "utf8")) as {
+      status: string; method: string; obligations: { topology: string }[]; section_bytes: number;
+    };
+    assert.equal(record.status, "ok");
+    assert.equal(record.method, "model");
+    assert.equal(record.obligations[0]?.topology, "producer_convergence");
+    assert.ok(record.section_bytes > 0);
+    const corpus = readFileSync(join(f.runDir, "review-corpus.md"), "utf8");
+    assert.match(corpus, /# Derived Architectural Obligations/);
+    assert.match(corpus, /mintFoundJob/);
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
+test("#1448: a failing derivation renders a visible unavailable note in the corpus, never silence", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    // The verdict JSON carries no obligations array: malformed for this
+    // pass, which must surface rather than read as "no obligations".
+    res.end(verdictBody());
+  });
+  const f = fixture();
+  try {
+    const req = request(server.url, f.runDir);
+    req.inputs = { ...req.inputs, "derived-obligations": "true" };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter: mockPlatform() }));
+    assert.equal(result.outputs.verdict, "approve");
+    const record = JSON.parse(readFileSync(join(f.runDir, "derived-obligations.json"), "utf8")) as { status: string; error_kind: string | null };
+    assert.equal(record.status, "error");
+    assert.equal(record.error_kind, "malformed");
+    const corpus = readFileSync(join(f.runDir, "review-corpus.md"), "utf8");
+    assert.match(corpus, /# Derived Architectural Obligations/);
+    assert.match(corpus, /did not complete for this run \(reason: malformed\)/);
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
+test("#1448: disabled derived-obligations records no artifact and adds no corpus section", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody());
+  });
+  const f = fixture();
+  try {
+    const result = await runReviewEngine(request(server.url, f.runDir), engineDeps(f.root, f.runDir, { adapter: mockPlatform() }));
+    assert.equal(result.outputs.verdict, "approve");
+    assert.ok(!existsSync(join(f.runDir, "derived-obligations.json")));
+    assert.ok(!server.requests.some((r) => r.body.includes("You derive the architectural obligations")));
+    assert.ok(!readFileSync(join(f.runDir, "review-corpus.md"), "utf8").includes("Derived Architectural Obligations"));
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
 test("#1380: the claim pre-pass gate is a pass-through outside dependency mode", async () => {
   const neverSettles: Promise<never> = new Promise(() => {});
   await claimsPrepassGate(false, neverSettles);

@@ -1,6 +1,6 @@
 # Opt-in features
 
-Four features default to `false`. None change the verdict policy on their own; each adds context or coverage the final reviewer can use, and fails soft on error.
+Five features default to `false`. None change the verdict policy on their own; each adds context or coverage the final reviewer can use, and fails soft on error.
 
 ## `claim-falsification`
 
@@ -19,6 +19,24 @@ Four features default to `false`. None change the verdict policy on their own; e
 | `CLAIMS_SECTION_MAX_BYTES` (env) | `8000` | Corpus section cap |
 
 **Status:** default off, experimental. Pre-release it was measured only together with `requirement-trace` and `equivalent-paths` (all three on vs. off, blind-adjudicated), which showed no net gain as a bundle. A small three-PR smoke on its own found one extra catch with one model and none with two others; that smoke also exposed the extraction defects #898 fixed (line fragments, crowded-out body claims, unenumerated quantified items, bot boilerplate). The smoke is to be re-run before the feature is measured again.
+
+## `derived-obligations`
+
+**What it does:** one bounded model call on the primary route, over the PR's diff, changed files, title and body (all untrusted data), derives from the change itself the cross-path obligations it implies even when the PR never states them — identity/dedupe keys, converging producers, routing keys, persistence/recovery, retry/reconciliation/fallback, trust boundaries, ordering, compatibility — at most 4 structured obligations, each with its topology class, the change that raises it, the relationship that must hold, concrete `path:symbol` locations to check, and its provenance basis. Bounds are enforced by normalization, not by trusting the model: an unknown topology class normalizes, and oversize fields/paths are truncated with visible flags. The review corpus then gets a `Derived Architectural Obligations` section the reviewer must disposition each entry against, and a derivation that failed, timed out, or returned malformed output renders a short visible "coverage unavailable" note in the section instead of silence; the per-run JSON artifact records the status and error kind so #1449 can distinguish "no obligations" from "derivation incomplete". When no obligations derive cleanly the corpus is byte-identical to a disabled run.
+
+**Enable:** `derived-obligations: true` (workflow input only — not repository-configurable).
+
+**Artifacts and knobs:**
+
+| Name | Default | Notes |
+| --- | --- | --- |
+| `derived-obligations.json` / `derived-obligations.md` | — | Per-run artifacts |
+| `DERIVED_OBLIGATIONS_MAX_TOKENS` (env) | `4096` | Derivation-call completion budget |
+| `DERIVED_OBLIGATIONS_TIMEOUT_SEC` (env) | `180` | Capped by `ai-request-timeout-sec` |
+| `DERIVED_OBLIGATIONS_INPUT_MAX_BYTES` (env) | `48000` | Derivation-call input cap |
+| `DERIVED_OBLIGATIONS_SECTION_MAX_BYTES` (env) | `8000` | Corpus section cap |
+
+**Status:** default off, experimental; derived targets are advisory until #1449 threads them into coverage/enforcement.
 
 ## `requirement-trace`
 

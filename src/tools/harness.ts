@@ -1307,6 +1307,27 @@ export function buildPlanningContext(
     sections.push(clSection);
   }
 
+  // ── Derived Architectural Obligations (#1448): whole section, right
+  // behind the claims ──────────────────────────────────────────────────────
+  // The loop is what opens the equivalent producers and consumers a derived
+  // obligation names, so the obligations must be in the FIRST planning turn.
+  // Same whole-or-nothing embedding as the claims region (never sliced).
+  const dvRoom = maxBytes - used() - PLANNING_RESERVE;
+  const dvCap = envIntBounded(deps.env, "DERIVED_OBLIGATIONS_SECTION_MAX_BYTES", 8000, 1, 200000) + 2;
+  let dvSection: string | null = regions["Derived Architectural Obligations"] ?? null;
+  if (dvSection !== null && Buffer.byteLength(dvSection, "utf8") + 2 > Math.min(dvCap, Math.max(dvRoom, 0))) {
+    dvSection = null;
+  }
+  if (dvSection === null) {
+    const body = readStripped("derived-obligations.md");
+    if (body !== null && Buffer.byteLength(body, "utf8") + 2 <= Math.min(dvCap, Math.max(dvRoom, 0))) {
+      dvSection = body;
+    }
+  }
+  if (dvSection !== null && dvRoom >= 400) {
+    sections.push(dvSection);
+  }
+
   // ── Specialist Review Leads: reserved FIRST for first-turn visibility ──
   // The advisory leads must already be in the context when the native loop
   // takes its FIRST tool-planning turn (#609 placement guarantee). Stale-
