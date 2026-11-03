@@ -139,6 +139,20 @@ a forge-specific CLI.
   daemon’s `enqueue`, which releases the durable reservation when the
   queue refuses the job — so a refused handoff is re-discovered on the
   next pass instead of staying suppressed.
+- **The poll is handed the forge-integration identity (#1444).** A
+  reconciliation pass mints its own generations, so the intake’s identity
+  stamping (#1440) cannot reach them, and stamping afterwards would leave
+  the job id inconsistent with its identity fields. The daemon therefore
+  passes a `ReconcilePassIdentity` to each `reconcile.run()` call: its
+  `forgeIntegration` is the value the daemon bound and stamps on intake
+  (`""` when it serves no named integration), and the pass puts it into the
+  build options of the jobs it mints. One source, so a reconciled head and
+  the webhook delivery of that head land on the same installation and in
+  the same generation. An identity-less handoff into a config where several
+  integrations share the poll’s kind is refused by `enqueue` before any
+  queue mutation, with the remedy named, instead of failing later as a run
+  whose endpoint nobody chose; the request builder keeps its own refusal
+  for a record that never passed the handoff (a rehydrated snapshot).
 
 ## Testing posture
 

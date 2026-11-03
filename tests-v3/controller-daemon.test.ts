@@ -24,7 +24,12 @@ import {
   type StateMutation,
   type UsageAggregate,
 } from "../src/state/index.js";
-import { emptyQueueSnapshot, InMemoryQueueStore, type QueueStore } from "../src/queue/index.js";
+import {
+  emptyQueueSnapshot,
+  InMemoryQueueStore,
+  ReviewQueueController,
+  type QueueStore,
+} from "../src/queue/index.js";
 import type { CanonicalForgeEvent } from "../src/events/types.js";
 import type { InstanceConfig } from "../src/config/instance-config.js";
 import type { MirrorCache, WorkspaceHandle } from "../src/acquisition/index.js";
@@ -683,14 +688,92 @@ test("a bound forgeIntegration is stamped on the follow-up consumer's jobs too (
   );
 });
 
-test("an identity-less job refuses at build when several integrations share its kind (#1440)", async (t) => {
-  // A job with NO integration identity resolves by platform kind only when
-  // exactly one integration of that kind exists; with two same-kind
-  // integrations the mapping is ambiguous and the request is refused at
-  // build time — never guessed at the first entry. The refusal surfaces as
-  // the scheduler's failed-outcome path (the builder's build() rejects),
-  // so the job never starts an execution.
+test("an identity-less handoff is refused at the enqueue seam when its kind is ambiguous (#1444)", async (t) => {
+  // The reconciliation poll mints its OWN generations, so the enqueue
+  // handoff is where a job with no integration identity arrives. With two
+  // same-kind integrations the endpoint cannot be resolved from the platform
+  // alone, so the handoff refuses BEFORE any queue mutation and names the
+  // mint site — a queued job that fails later at request build tells the
+  // operator about an endpoint they never chose.
+  const twoForgejo = {
+    ...instanceConfig(),
+    forges: [
+      { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+      { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+    ],
+  } as InstanceConfig;
+  for (const [label, bound, remedy] of [
+    ["unbound", undefined, /bind ControllerDaemonOptions\.forgeIntegration/],
+    ["bound", "fj-primary", /this daemon's forge-integration identity 'fj-primary'/],
+  ] as const) {
+    const store = new InMemoryQueueStore();
+    const h = await start({
+      options: {
+        instance: twoForgejo,
+        queueStore: store,
+        maxAttempts: 1,
+        retryBaseMs: 1,
+        retryMaxMs: 1,
+        ...(bound !== undefined ? { forgeIntegration: bound } : {}),
+      },
+    });
+    t.after(async () => {
+      await h.daemon.stop().catch(() => undefined);
+      cleanup(h);
+    });
+    const job = buildReviewJob(
+      event({ platform: "forgejo", installationId: "9", repoFullName: `owner/forge-${label}` }),
+    );
+    assert.notEqual(job, null);
+    assert.equal(job!.forgeIntegration, "");
+    const refusal = await h.daemon.enqueue(job!).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    assert.ok(refusal instanceof RangeError, `${label}: the handoff refuses with a RangeError`);
+    const message = (refusal as Error).message;
+    assert.match(message, /no forge-integration identity/, `${label}: names what is missing`);
+    assert.match(
+      message,
+      /'fj-primary'.*'fj-secondary'/,
+      `${label}: names the integrations that share the kind`,
+    );
+    assert.match(message, remedy, `${label}: names the remedy for this daemon`);
+    assert.equal(store.load().records.length, 0, `${label}: the ambiguous job was never queued`);
+    assert.equal(h.fake.started.length, 0, `${label}: the ambiguous job never launched a worker`);
+  }
+});
+
+test("a rehydrated identity-less record still refuses at build when its kind is ambiguous (#1444)", async (t) => {
+  // The handoff guard is EARLIER, not a replacement. A queue record that
+  // never passed it — a snapshot persisted while the deployment had one
+  // integration, restarted against a config that gained a second — is still
+  // refused by the request builder, so the endpoint is never guessed and
+  // the ambiguous generation never launches.
+  const job = buildReviewJob(
+    event({ platform: "forgejo", installationId: "9", repoFullName: "owner/forge-repo" }),
+  );
+  assert.notEqual(job, null);
+  assert.equal(job!.forgeIntegration, "");
+  // Seed the queue the way a restart finds it: a real `queued` record,
+  // written by the queue's own controller rather than hand-built.
   const store = new InMemoryQueueStore();
+  new ReviewQueueController(
+    store,
+    {
+      maxConcurrent: 1,
+      settleWindowMs: 0,
+      leaseTtlMs: 5_000,
+      maxAttempts: 1,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+      executor: {
+        start: async () => ({ status: "failed", resultHeadSha: "", failureCategory: "unused" }),
+      },
+    },
+    () => 1_000,
+  ).enqueue(job!);
+  assert.equal(store.load().records[0]!.state, "queued");
   const h = await start({
     options: {
       instance: {
@@ -710,16 +793,106 @@ test("an identity-less job refuses at build when several integrations share its 
     await h.daemon.stop().catch(() => undefined);
     cleanup(h);
   });
-  const ev = event({ platform: "forgejo", installationId: "9", repoFullName: "owner/forge-repo" });
-  const job = buildReviewJob(ev);
-  assert.notEqual(job, null);
-  assert.equal(job!.forgeIntegration, "");
-  await h.daemon.enqueue(job!);
   await waitFor(() => {
     const record = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
     return record !== undefined && record.state === "failed";
   });
-  assert.equal(h.fake.started.length, 0, "the ambiguous job never launched a worker");
+  const record = store
+    .load()
+    .records.find((entry) => entry.job.jobId === job!.jobId)!;
+  assert.match(
+    record.failureReason ?? "",
+    /forge.integration/,
+    "the failed outcome names the identity problem",
+  );
+  assert.equal(h.fake.started.length, 0, "the ambiguous record never launched a worker");
+});
+
+test("the reconciliation pass receives the daemon's forge-integration identity (#1444)", async (t) => {
+  // The poll cannot be stamped at intake, so the daemon HANDS the identity
+  // to each pass. It must be the one value the intake stamps too: if the two
+  // mint sites read different sources, a reconciled head and its webhook
+  // delivery split into two generations on two installations.
+  const twoForgejo = {
+    ...instanceConfig(),
+    forges: [
+      { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+      { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+    ],
+  } as InstanceConfig;
+  const boundSeen: string[] = [];
+  const bound = await start({
+    options: {
+      instance: twoForgejo,
+      forgeIntegration: "fj-secondary",
+      reconcile: {
+        intervalMs: 50,
+        platform: "forgejo",
+        run: async (identity) => {
+          boundSeen.push(identity.forgeIntegration);
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await bound.daemon.stop().catch(() => undefined);
+    cleanup(bound);
+  });
+  await waitFor(() => boundSeen.length > 0);
+  assert.deepEqual(
+    [...new Set(boundSeen)],
+    ["fj-secondary"],
+    "every pass gets the bound integration identity",
+  );
+  // The same value the intake stamps, from ONE source: a webhook delivery
+  // on this daemon carries what the pass was handed.
+  const store = new InMemoryQueueStore();
+  const intake = await start({
+    options: {
+      instance: twoForgejo,
+      forgeIntegration: "fj-secondary",
+      queueStore: store,
+    },
+  });
+  t.after(async () => {
+    await intake.daemon.stop().catch(() => undefined);
+    cleanup(intake);
+  });
+  assert.equal(
+    await intake.daemon.ingest(
+      event({ platform: "forgejo", installationId: "9", repoFullName: "owner/forge-repo" }),
+    ),
+    "scheduled",
+  );
+  await waitFor(() => store.load().records.length > 0);
+  assert.equal(
+    store.load().records[0]!.job.forgeIntegration,
+    boundSeen[0],
+    "the reconcile pass and the intake carry the same identity",
+  );
+  // An unbound daemon hands NO identity: the pass mints identity-less jobs,
+  // which stay correct for a single-installation deployment.
+  const unboundSeen: string[] = [];
+  const unbound = await start({
+    options: {
+      reconcile: {
+        intervalMs: 50,
+        run: async (identity) => {
+          unboundSeen.push(identity.forgeIntegration);
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await unbound.daemon.stop().catch(() => undefined);
+    cleanup(unbound);
+  });
+  await waitFor(() => unboundSeen.length > 0);
+  assert.deepEqual(
+    [...new Set(unboundSeen)],
+    [""],
+    "an unbound daemon hands no identity",
+  );
 });
 
 test("an unresolvable or cross-platform forge-integration identity refuses the request (#1440)", async (t) => {
