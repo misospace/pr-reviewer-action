@@ -37,7 +37,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "glm-5.3-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -74,7 +74,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "glm-5.3-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -111,7 +111,7 @@
     "latency_ms": null,
     "score": 3,
     "risk": "low",
-    "model": null,
+    "model": "glm-5.3-flash",
     "concern_count": 2,
     "concerns": [
      "at .github/workflows/ai-pr-review.yaml:218 — ai-confidence-model: ${{ vars.CONFIDENCE_MODEL \\|\\| vars.SMART_MODEL }} — same-model correlation acknowledged but not verified live",
@@ -152,7 +152,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -189,7 +189,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -226,7 +226,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -263,7 +263,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -300,7 +300,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -337,7 +337,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -374,7 +374,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -411,7 +411,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -448,7 +448,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -485,7 +485,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -522,7 +522,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -559,7 +559,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -596,7 +596,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -633,7 +633,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -670,7 +670,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -707,7 +707,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -744,7 +744,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -781,7 +781,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -818,7 +818,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -855,7 +855,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -892,7 +892,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -929,7 +929,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1003,7 +1003,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1040,7 +1040,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1077,7 +1077,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1114,7 +1114,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1151,7 +1151,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1188,7 +1188,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1225,7 +1225,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1262,7 +1262,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1299,7 +1299,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1336,7 +1336,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1373,7 +1373,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1410,7 +1410,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1447,7 +1447,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1484,7 +1484,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1521,7 +1521,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1558,7 +1558,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1595,7 +1595,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1632,7 +1632,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1669,7 +1669,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1706,7 +1706,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1743,7 +1743,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1780,7 +1780,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1817,7 +1817,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1854,7 +1854,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1891,7 +1891,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1928,7 +1928,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -1965,7 +1965,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2002,7 +2002,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2039,7 +2039,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2076,7 +2076,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2113,7 +2113,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2150,7 +2150,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2187,7 +2187,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2224,7 +2224,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2261,7 +2261,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2298,7 +2298,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2335,7 +2335,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2372,7 +2372,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2409,7 +2409,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2446,7 +2446,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2483,7 +2483,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2520,7 +2520,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2557,7 +2557,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2594,7 +2594,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2631,7 +2631,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2668,7 +2668,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2705,7 +2705,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2742,7 +2742,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2779,7 +2779,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2816,7 +2816,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2853,7 +2853,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2890,7 +2890,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2927,7 +2927,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -2964,7 +2964,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3001,7 +3001,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3038,7 +3038,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3075,7 +3075,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3112,7 +3112,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3149,7 +3149,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3186,7 +3186,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3223,7 +3223,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3260,7 +3260,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3297,7 +3297,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3334,7 +3334,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3371,7 +3371,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3408,7 +3408,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3445,7 +3445,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3482,7 +3482,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3519,7 +3519,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3556,7 +3556,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3593,7 +3593,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3630,7 +3630,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3667,7 +3667,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3704,7 +3704,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3741,7 +3741,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3778,7 +3778,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3815,7 +3815,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3852,7 +3852,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3889,7 +3889,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3926,7 +3926,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -3963,7 +3963,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4000,7 +4000,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4037,7 +4037,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4074,7 +4074,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4111,7 +4111,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4148,7 +4148,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4185,7 +4185,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4222,7 +4222,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4259,7 +4259,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4296,7 +4296,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4333,7 +4333,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4370,7 +4370,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4407,7 +4407,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4444,7 +4444,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4481,7 +4481,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4518,7 +4518,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4555,7 +4555,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4592,7 +4592,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4629,7 +4629,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4666,7 +4666,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4703,7 +4703,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4740,7 +4740,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4777,7 +4777,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4814,7 +4814,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4851,7 +4851,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4888,7 +4888,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4925,7 +4925,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4962,7 +4962,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -4999,7 +4999,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5036,7 +5036,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5073,7 +5073,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5110,7 +5110,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5147,7 +5147,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5184,7 +5184,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5221,7 +5221,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5258,7 +5258,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5295,7 +5295,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5332,7 +5332,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5369,7 +5369,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5406,7 +5406,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5443,7 +5443,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5480,7 +5480,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5517,7 +5517,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5554,7 +5554,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5591,7 +5591,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5628,7 +5628,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5665,7 +5665,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5702,7 +5702,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5739,7 +5739,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5776,7 +5776,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5813,7 +5813,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5850,7 +5850,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5887,7 +5887,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5924,7 +5924,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5961,7 +5961,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -5998,7 +5998,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6035,7 +6035,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6072,7 +6072,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6109,7 +6109,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6146,7 +6146,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6183,7 +6183,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6220,7 +6220,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6257,7 +6257,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6294,7 +6294,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6331,7 +6331,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6368,7 +6368,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6405,7 +6405,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6442,7 +6442,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6479,7 +6479,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6516,7 +6516,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6553,7 +6553,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6590,7 +6590,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6627,7 +6627,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6664,7 +6664,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6701,7 +6701,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6738,7 +6738,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6775,7 +6775,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6812,7 +6812,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6849,7 +6849,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6886,7 +6886,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6923,7 +6923,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6960,7 +6960,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -6997,7 +6997,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7034,7 +7034,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7071,7 +7071,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7108,7 +7108,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7145,7 +7145,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7182,7 +7182,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7219,7 +7219,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7256,7 +7256,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7293,7 +7293,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7330,7 +7330,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7367,7 +7367,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7404,7 +7404,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7441,7 +7441,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7478,7 +7478,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7515,7 +7515,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7552,7 +7552,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7589,7 +7589,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7626,7 +7626,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7663,7 +7663,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7700,7 +7700,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7737,7 +7737,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7774,7 +7774,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7811,7 +7811,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7848,7 +7848,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7885,7 +7885,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7922,7 +7922,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7959,7 +7959,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -7996,7 +7996,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8033,7 +8033,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8070,7 +8070,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8107,7 +8107,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8144,7 +8144,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8181,7 +8181,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8218,7 +8218,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8255,7 +8255,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8292,7 +8292,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8329,7 +8329,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8366,7 +8366,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8403,7 +8403,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8440,7 +8440,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8477,7 +8477,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8514,7 +8514,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8551,7 +8551,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8588,7 +8588,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8625,7 +8625,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8662,7 +8662,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8699,7 +8699,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8736,7 +8736,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8773,7 +8773,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8810,7 +8810,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8847,7 +8847,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8884,7 +8884,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8921,7 +8921,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8958,7 +8958,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -8995,7 +8995,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9032,7 +9032,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9069,7 +9069,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9106,7 +9106,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9143,7 +9143,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9180,7 +9180,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9217,7 +9217,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9254,7 +9254,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9291,7 +9291,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9328,7 +9328,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9365,7 +9365,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9402,7 +9402,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9439,7 +9439,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9476,7 +9476,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9513,7 +9513,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9550,7 +9550,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9587,7 +9587,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9624,7 +9624,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9661,7 +9661,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9698,7 +9698,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9735,7 +9735,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9772,7 +9772,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9809,7 +9809,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9846,7 +9846,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9883,7 +9883,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9920,7 +9920,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9957,7 +9957,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -9994,7 +9994,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10031,7 +10031,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10068,7 +10068,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10105,7 +10105,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10142,7 +10142,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10179,7 +10179,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10216,7 +10216,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10253,7 +10253,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10290,7 +10290,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10327,7 +10327,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10364,7 +10364,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10401,7 +10401,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10438,7 +10438,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10475,7 +10475,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10512,7 +10512,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10549,7 +10549,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10586,7 +10586,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10623,7 +10623,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10660,7 +10660,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10697,7 +10697,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10734,7 +10734,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10771,7 +10771,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10808,7 +10808,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10845,7 +10845,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10882,7 +10882,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10919,7 +10919,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10956,7 +10956,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -10993,7 +10993,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11030,7 +11030,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11067,7 +11067,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11104,7 +11104,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11141,7 +11141,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11178,7 +11178,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11215,7 +11215,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11252,7 +11252,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11289,7 +11289,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11326,7 +11326,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11363,7 +11363,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11400,7 +11400,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11437,7 +11437,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11474,7 +11474,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11511,7 +11511,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11548,7 +11548,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11585,7 +11585,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11622,7 +11622,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11659,7 +11659,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11696,7 +11696,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11733,7 +11733,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11770,7 +11770,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11807,7 +11807,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11844,7 +11844,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11881,7 +11881,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11918,7 +11918,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11955,7 +11955,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -11992,7 +11992,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12029,7 +12029,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12066,7 +12066,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12103,7 +12103,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12140,7 +12140,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12177,7 +12177,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12214,7 +12214,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12251,7 +12251,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12288,7 +12288,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12325,7 +12325,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12362,7 +12362,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12399,7 +12399,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12436,7 +12436,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12473,7 +12473,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12510,7 +12510,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12547,7 +12547,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12584,7 +12584,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12621,7 +12621,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12658,7 +12658,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12695,7 +12695,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12732,7 +12732,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12769,7 +12769,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12806,7 +12806,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12843,7 +12843,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12880,7 +12880,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12917,7 +12917,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12954,7 +12954,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -12991,7 +12991,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13028,7 +13028,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13065,7 +13065,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13102,7 +13102,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13139,7 +13139,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13176,7 +13176,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13213,7 +13213,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13250,7 +13250,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13287,7 +13287,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13324,7 +13324,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13435,7 +13435,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13509,7 +13509,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13546,7 +13546,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13583,7 +13583,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13657,7 +13657,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13731,7 +13731,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13805,7 +13805,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13879,7 +13879,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13916,7 +13916,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13953,7 +13953,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -13990,7 +13990,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14027,7 +14027,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14064,7 +14064,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14101,7 +14101,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14175,7 +14175,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14212,7 +14212,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14286,7 +14286,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14323,7 +14323,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14360,7 +14360,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14434,7 +14434,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14471,7 +14471,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14508,7 +14508,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14545,7 +14545,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14582,7 +14582,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14619,7 +14619,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14656,7 +14656,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14693,7 +14693,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14730,7 +14730,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14767,7 +14767,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14841,7 +14841,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14878,7 +14878,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14952,7 +14952,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -14989,7 +14989,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15026,7 +15026,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15100,7 +15100,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15137,7 +15137,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15211,7 +15211,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15248,7 +15248,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15285,7 +15285,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15322,7 +15322,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15359,7 +15359,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15396,7 +15396,7 @@
     "latency_ms": 400,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15433,7 +15433,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15470,7 +15470,7 @@
     "latency_ms": null,
     "score": null,
     "risk": null,
-    "model": null,
+    "model": "Minimax-M3.1-flash",
     "concern_count": 0
    },
    "unavailable": {
@@ -15517,5 +15517,6 @@
     "cause": null
    }
   }
- ]
+ ],
+ "verifier_model_provenance": "regenerated 2026-11-03: verifier.model copied from the published review body's Independent Confidence block, matched by ai-pr-review-sha marker (full sha) to pins.head_sha (20-char prefix). null = no model published on that run's review body."
 }

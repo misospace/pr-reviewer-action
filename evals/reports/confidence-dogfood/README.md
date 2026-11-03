@@ -19,7 +19,7 @@
 | Live true catches | 0 |
 | Live false challenges | 0 |
 | Adjudicated known-miss PRs in the window where the verifier published nothing | 5 (#1438, #1435, #1443, #1446, #1453) |
-| Verifier model on enabled runs | `Minimax-M3.1-flash` 415 (same family as the primary route), `glm-5.3-flash` 2, unset 2 |
+| Verifier model on enabled runs | `Minimax-M3.1-flash` 400 (same family as the primary route), `glm-5.3-flash` 3, unset 16 — 15 review bodies carry no `ai-pr-review-sha` marker and 1 carries no model line; regenerated from published bodies, see `verifier_model_provenance` in the artifact |
 
 ## The six decision questions
 
@@ -31,7 +31,7 @@
 
 **4. Does it catch the same composition/dataflow misses motivating #1447?** No. The canonical cross-path invariant — webhook intake and reconciliation must populate the same forge-integration identity before generation hashing — was live across PRs #1443/#1446 while the verifier published no usable result on any of their 7 combined runs (see adjudications 1–2). The one composition-adjacent catch in the window was made by the primary itself, on its glm fallback route (PR #1446, `tests-v3/controller-daemon.test.ts:902`, the converged-generation assertion still indirect).
 
-**5. Are latency/token costs acceptable?** Yes, where a call completes. The canary's production-path reference: 17.2 s / 2 066 completion tokens and 21.3 s / 2 841 tokens (~38.5 s total wire time for both calls). Live, the only measured latency is a failed call (400 ms to the `http_403`); no live token-usage sample exists yet because usage publishes only on completed calls since #1457 and is absent when unmeasured. Cost is not the constraint; availability is.
+**5. Are latency/token costs acceptable?** Yes, where a call completes. The canary's production-path reference: 21.3 s / 2 066 completion tokens (`courier-46-61`, the known false approval) and 17.2 s / 2 841 tokens (`pr-reviewer-action-133-clean`, the clean control) — ~38.5 s total wire time for both calls. Live, the only measured latency is a failed call (400 ms to the `http_403`); no live token-usage sample exists yet because usage publishes only on completed calls since #1457 and is absent when unmeasured. Cost is not the constraint; availability is.
 
 **6. Is there an evidence-backed deterministic gate rule for #1075?** Only fail-closed components are evidence-backed; no score threshold is:
 
