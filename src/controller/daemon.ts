@@ -25,7 +25,9 @@
  *   the ledger reservation (the dispatch contract). The forge webhook
  *   ingress binds through `createOperatorHost` (which unconditionally
  *   wires the follow-up consumer); missed-webhook reconciliation runs on
- *   a bounded schedule through the injected reconcile pass. The intake is
+ *   a bounded schedule through `reconcile.poll` (the composition THIS module
+ *   drives, with its own ledger, queue handoff, and forge-integration
+ *   identity) or through an operator-supplied `reconcile.run`. The intake is
  *   PLATFORM-AWARE: one daemon instance serves ONE forge platform, and
  *   `webhook.platform` selects the intake it binds — the GitHub App intake
  *   (`X-Hub-Signature-256`, bound here) or the native Forgejo intake

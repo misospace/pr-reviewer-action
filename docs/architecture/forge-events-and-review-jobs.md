@@ -231,24 +231,37 @@ wires the same fields into both. An UNBOUND daemon stamps nothing; an
 operator serving several installations of one platform supplies the
 identity through its own `resolveEventIdentity` resolver.
 
-**The reconciliation poll (#1444).** The poll mints its OWN generations,
-so intake stamping cannot reach them, and stamping afterwards would leave
-the job id inconsistent with its identity fields — splitting one event's
-dedupe key in two. The daemon therefore hands the identity to each pass:
-`reconcile.run(identity)` receives a `ReconcilePassIdentity` whose
-`forgeIntegration` is the SAME value the intake stamps (`""` when the
-daemon serves no named integration). The pass puts it into the
-`buildOptions` it gives `reconcileRepositories`. That is what makes a
-reconciled head converge with the webhook delivery of that head instead of
-minting a second generation against another installation, and it is why
-the value is handed over rather than re-derived from a private copy of the
-instance config.
+**The reconciliation poll (#1444, #1446).** The poll mints its OWN
+generations, so intake stamping cannot reach them, and stamping afterwards
+would leave the job id inconsistent with its identity fields — splitting one
+event's dedupe key in two. The canonical shape is therefore the
+daemon-composed poll: `reconcile.poll` binds only the lister, the
+repositories, and the pass's OTHER build options, and the daemon inserts its
+own `forgeIntegration` — the SAME value the intake stamps (`""` when it
+serves no named integration) — into the `buildOptions` it hands
+`reconcileRepositories`, before `buildReviewJob()` hashes the generation.
+There is then no operator callback between the daemon and the mint site that
+could drop the identity. An operator that composes its own pass
+(`reconcile.run`, the only shape before #1446) is handed a
+`ReconcilePassIdentity` and must stamp it into the `buildOptions` it gives
+`reconcileRepositories`. That is what makes a reconciled head converge with
+the webhook delivery of that head instead of minting a second generation
+against another installation, and it is why the value is handed over rather
+than re-derived from a private copy of the instance config. A bound daemon's
+name always wins over a `buildOptions.forgeIntegration` the operator put
+there; an unbound daemon keeps what the operator supplied, which is how a
+single-installation or per-repository deployment names its installation.
 
 An identity-less job is a coordinate only while exactly one integration of
 its kind exists, so the daemon's `enqueue` handoff refuses one BEFORE any
-queue mutation when several share the kind. The refusal names what is
-missing, which integrations share the kind, and the remedy for that daemon
-(stamp the identity the pass received, or bind one). The request builder
+queue mutation: always, when the daemon is BOUND to a named integration
+(#1446 — that daemon stamps its name on everything the intake mints, so an
+identity-less handoff came from outside it and would hash to a SECOND
+generation for a head the webhook already claimed), and whenever several
+integrations share the kind, so an unbound daemon never guesses an endpoint
+either. The refusal names what is missing and the remedy for that daemon
+(stamp the identity the pass received or was handed, or bind one), and never
+echoes a job-supplied value. The request builder
 keeps its own refusal as the authority for a record that never passed the
 handoff — a queue snapshot persisted before the deployment gained the
 second integration — so for any job the builder or the queue's rehydration

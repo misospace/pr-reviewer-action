@@ -47,8 +47,13 @@ import {
   startControllerDaemon,
   type ControllerDaemon,
   type ControllerDaemonOptions,
+  type ReconcilePassIdentity,
+  type ReconcilePollBinding,
 } from "../src/controller/index.js";
 import { buildReviewJob } from "../src/jobs/generation.js";
+import { reconciliationPollEvent } from "../src/events/normalize.js";
+import { reconcileRepositories } from "../src/ingress/reconcile.js";
+import type { ReadResult } from "../src/ingress/api-client.js";
 
 const HEAD = "aa11bb22cc33dd44ee55ff667788990001122334";
 const BASE = "dd44ee55ff66aa77bb88cc99001122334455667788";
@@ -2254,4 +2259,364 @@ test("a graceful stop terminates an adopted worker instead of orphaning it", asy
   // by the daemon's own shutdown.
   await h2.daemon.stop();
   assert.equal(secondFake.cancelCalls > 0, true, "the adopted worker was terminated by identity");
+});
+
+test("the daemon-composed poll converges with the webhook delivery into one generation (#1446)", async (t) => {
+  // The bound identity reaches the mint site BEFORE `buildReviewJob` hashes
+  // the generation: on the daemon-composed poll there is no operator
+  // callback between the daemon and the mint, so a reconciled head and the
+  // webhook delivery of that head cannot split into two generations.
+  // ONE integration of the kind, on purpose: an identity-less poll job is
+  // then ACCEPTED by the platform-kind fallback, so if the daemon ever stops
+  // injecting its own name the poll mints a genuinely DIFFERENT generation
+  // and this test sees a second durable record — instead of the duplicate
+  // hiding behind the ambiguous-kind refusal.
+  const store = new InMemoryQueueStore();
+  let pollCalls = 0;
+  // The bare PR the lister returns describes the SAME pull request as the
+  // webhook event below (same number, prId, head, base, repo), so the two
+  // mint sites must hash to one generation id.
+  const barePr = {
+    number: 7,
+    id: 4242,
+    head: { sha: HEAD, repo: { full_name: "owner/forge-repo" } },
+    base: { sha: BASE, repo: { full_name: "owner/forge-repo" } },
+    merged: false,
+    draft: false,
+  };
+  // The webhook must win the first claim for step 1's "scheduled" to be
+  // provable, so the lister stays silent until the delivery is in the
+  // queue; from then on every pass observes the same head.
+  let prVisible = false;
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj-bound", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+        ],
+      } as InstanceConfig,
+      forgeIntegration: "fj-bound",
+      queueStore: store,
+      maxAttempts: 1,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+      resolveEventIdentity: async () => ({
+        adoptionEpoch: "1",
+        configFingerprint: "0123456789abcdef",
+      }),
+      reconcile: {
+        intervalMs: 50,
+        platform: "forgejo",
+        poll: {
+          repos: ["owner/forge-repo"],
+          installationId: "9",
+          listOpenPullRequests: async (): Promise<ReadResult<unknown[]>> => {
+            pollCalls += 1;
+            return { ok: true, data: prVisible ? [barePr] : [] };
+          },
+          buildOptions: { adoptionEpoch: "1", configFingerprint: "0123456789abcdef" },
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(
+    await h.daemon.ingest(
+      event({ platform: "forgejo", installationId: "9", repoFullName: "owner/forge-repo" }),
+    ),
+    "scheduled",
+  );
+  await waitFor(() => store.load().records.length > 0);
+  const webhookJobId = store.load().records[0]!.job.jobId;
+  prVisible = true;
+  await waitFor(() => pollCalls > 0);
+  // Several more passes see the same open head: the daemon's bound identity
+  // makes every poll mint converge on the webhook's generation, so the
+  // queue never grows a second record.
+  await waitFor(() => pollCalls >= 3);
+  assert.equal(store.load().records.length, 1, "the poll never minted a second generation");
+  assert.equal(store.load().records[0]!.job.jobId, webhookJobId);
+  // The direct convergence proof: the job the pass mints (poll event + the
+  // identity the daemon injects) carries the webhook's generation id.
+  const pollEvent = reconciliationPollEvent("forgejo", barePr, { installationId: "9" });
+  assert.notEqual(pollEvent, null);
+  const expected = buildReviewJob(pollEvent!, {
+    adoptionEpoch: "1",
+    configFingerprint: "0123456789abcdef",
+    forgeIntegration: "fj-bound",
+  });
+  assert.notEqual(expected, null);
+  assert.equal(
+    expected!.jobId,
+    webhookJobId,
+    "the pass's minted jobId IS the webhook's generation id",
+  );
+  assert.equal(store.load().records[0]!.job.forgeIntegration, "fj-bound");
+  assert.equal(h.fake.started.length, 1, "the head was minted once, never a second time");
+});
+
+test("an operator pass that ignores the handed identity is refused, never diverged (#1446)", async (t) => {
+  // A bound daemon refuses EVERY identity-less handoff, so ignoring the
+  // identity the pass is handed cannot buy a second generation: the job
+  // never enters the queue, and the refused reservation is released so the
+  // head is re-discovered rather than suppressed.
+  const store = new InMemoryQueueStore();
+  const barePr = {
+    number: 7,
+    id: 700,
+    head: { sha: HEAD, repo: { full_name: "owner/forge-repo" } },
+    base: { sha: BASE, repo: { full_name: "owner/forge-repo" } },
+    merged: false,
+    draft: false,
+  };
+  const lister = async (): Promise<ReadResult<unknown[]>> => ({ ok: true, data: [barePr] });
+  // The deliberate omission: no `buildOptions`, so the minted job carries
+  // no forge-integration identity the daemon was handed.
+  const pass = () =>
+    reconcileRepositories({
+      platform: "forgejo",
+      listOpenPullRequests: lister,
+      repos: ["owner/forge-repo"],
+      ledger: h.daemon.ledger,
+      enqueueJob: (job) => h.daemon.enqueue(job).then(() => true),
+    });
+  // ONE forgejo integration: the platform-kind fallback WOULD have accepted
+  // an identity-less job on an unbound daemon — the bound refusal is what
+  // closes the gap here. intervalMs 1_000 keeps the timer from racing the
+  // explicit calls below.
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj-single", kind: "forgejo", endpoint: "https://forge.example/api/v1", credential: "fj-token" },
+        ],
+      } as InstanceConfig,
+      forgeIntegration: "fj-single",
+      queueStore: store,
+      maxAttempts: 1,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+      reconcile: {
+        intervalMs: 1_000,
+        platform: "forgejo",
+        run: async () => {
+          await pass();
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const report = await pass();
+  assert.equal(report.discovered, 1);
+  assert.equal(report.skipped, 1, "the refused handoff is counted as skipped");
+  assert.equal(report.jobs.length, 0, "the identity-less job was NOT scheduled");
+  assert.equal(store.load().records.length, 0, "nothing was queued");
+  assert.equal(h.fake.started.length, 0, "no worker started");
+  const mintedIdentityLessJob = buildReviewJob(
+    reconciliationPollEvent("forgejo", barePr, { installationId: "9" })!,
+  );
+  assert.notEqual(mintedIdentityLessJob, null);
+  await assert.rejects(
+    () => h.daemon.enqueue(mintedIdentityLessJob!),
+    /job carries no forge-integration identity but this daemon serves forge integration 'fj-single'/,
+    "the refusal is the actionable one and never echoes job data",
+  );
+  // A refused handoff RELEASES the reservation, so the next pass rediscovers
+  // the head instead of leaving it suppressed until the claim's horizon.
+  assert.equal(await h.daemon.ledger.addIfAbsent(mintedIdentityLessJob!.jobId), true);
+  await h.daemon.ledger.remove(mintedIdentityLessJob!.jobId);
+  // The positive contrast: stamping the handed identity converges the
+  // handoff — exactly one job scheduled, on the daemon's installation.
+  const passStamped = (identity: ReconcilePassIdentity) =>
+    reconcileRepositories({
+      platform: "forgejo",
+      listOpenPullRequests: lister,
+      repos: ["owner/forge-repo"],
+      ledger: h.daemon.ledger,
+      enqueueJob: (job) => h.daemon.enqueue(job).then(() => true),
+      buildOptions: { forgeIntegration: identity.forgeIntegration },
+    });
+  const stamped = await passStamped({ forgeIntegration: "fj-single" });
+  assert.equal(stamped.jobs.length, 1);
+  await waitFor(() => store.load().records.length > 0);
+  assert.equal(store.load().records[0]!.job.forgeIntegration, "fj-single");
+});
+
+test("reconcile binds exactly one pass, and poll names the platform it mints with (#1446)", async () => {
+  const poll: ReconcilePollBinding = {
+    repos: ["owner/repo"],
+    listOpenPullRequests: async () => ({ ok: true, data: [] }),
+  };
+  const dirs = {
+    durableStateDir: mkdtempSync(join(tmpdir(), "prv-daemon-state-")),
+    runsRoot: mkdtempSync(join(tmpdir(), "prv-daemon-runs-")),
+    workspaceCacheRoot: mkdtempSync(join(tmpdir(), "prv-daemon-cache-")),
+  };
+  const baseOptions = {
+    instance: instanceConfig(),
+    controlPlane: new InMemoryControlPlaneStore(),
+    durableStateDir: dirs.durableStateDir,
+    runsRoot: dirs.runsRoot,
+    workspaceCacheRoot: dirs.workspaceCacheRoot,
+    forge: {
+      mirrorFor: async () => ({}) as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      publish: async () => ({ publicationId: "x" }),
+    },
+    resolveProfiles: async () => ({ executor: "default", model: "m", evidence: "e" }),
+    credentialRefs: async () => [],
+  };
+  try {
+    // Both passes bound is two owners of one head's mint site.
+    await assert.rejects(
+      () =>
+        startControllerDaemon({
+          ...baseOptions,
+          reconcile: { intervalMs: 1_000, platform: "forgejo", poll, run: async () => undefined },
+        }),
+      /exactly one of poll/,
+    );
+    // A poll with no platform of its own and no intake to inherit from
+    // cannot name the forge it mints with: refuse construction.
+    await assert.rejects(
+      () => startControllerDaemon({ ...baseOptions, reconcile: { intervalMs: 1_000, poll } }),
+      /reconcile\.platform is required/,
+    );
+    // With an intake to inherit from, the same binding starts: the poll
+    // names its platform through `webhook.platform`. `forgeIntegration`
+    // stays unbound so no kind check interferes with the inheritance check.
+    const daemon = await startControllerDaemon({
+      ...baseOptions,
+      webhook: { platform: "forgejo", port: 0, secret: "s", followUp: {} as never },
+      reconcile: { intervalMs: 1_000, poll },
+    });
+    await daemon.stop();
+  } finally {
+    for (const dir of Object.values(dirs)) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the daemon-composed poll stamps its bound identity into the generation it mints (#1446)", async (t) => {
+  // The decisive half of the convergence claim, without a webhook in the
+  // way: on a config whose kind is ambiguous, an identity-less poll job is
+  // REFUSED, so this pass scheduling at all proves the daemon's own name is
+  // in the build options before the generation is hashed — not merely that
+  // one generation exists.
+  const barePr = {
+    number: 7,
+    id: 4242,
+    head: { sha: HEAD, repo: { full_name: "owner/forge-repo" } },
+    base: { sha: BASE, repo: { full_name: "owner/forge-repo" } },
+    merged: false,
+    draft: false,
+  };
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+          { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+        ],
+      } as InstanceConfig,
+      forgeIntegration: "fj-secondary",
+      queueStore: store,
+      maxAttempts: 1,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+      reconcile: {
+        intervalMs: 50,
+        platform: "forgejo",
+        poll: {
+          repos: ["owner/forge-repo"],
+          installationId: "9",
+          listOpenPullRequests: async (): Promise<ReadResult<unknown[]>> => ({
+            ok: true,
+            data: [barePr],
+          }),
+          buildOptions: { adoptionEpoch: "1", configFingerprint: "0123456789abcdef" },
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  await waitFor(() => store.load().records.length > 0);
+  assert.equal(store.load().records.length, 1, "one pass, one generation");
+  const minted = store.load().records[0]!.job;
+  assert.equal(minted.forgeIntegration, "fj-secondary", "the minted job carries the daemon's identity");
+  const expected = buildReviewJob(reconciliationPollEvent("forgejo", barePr, { installationId: "9" })!, {
+    adoptionEpoch: "1",
+    configFingerprint: "0123456789abcdef",
+    forgeIntegration: "fj-secondary",
+  });
+  assert.notEqual(expected, null);
+  assert.equal(expected!.jobId, minted.jobId, "the pass minted the identity-bearing generation, not a guess");
+});
+
+test("an unbound daemon's poll keeps the identity its operator supplied (#1446)", async (t) => {
+  // A daemon that serves no named integration must not erase the identity
+  // field the operator put in the pass's build options: that is how a
+  // single-installation or per-repository deployment names its installation,
+  // and a blank override would silently re-key every generation it mints.
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "gh-primary", kind: "github", endpoint: "https://api.github.com", credential: "gh-token" },
+        ],
+      } as InstanceConfig,
+      queueStore: store,
+      maxAttempts: 1,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+      reconcile: {
+        intervalMs: 50,
+        platform: "github",
+        poll: {
+          repos: ["owner/repo"],
+          installationId: "12345",
+          listOpenPullRequests: async (): Promise<ReadResult<unknown[]>> => ({
+            ok: true,
+            data: [
+              {
+                number: 7,
+                id: 4242,
+                head: { sha: HEAD, repo: { full_name: "owner/repo" } },
+                base: { sha: BASE, repo: { full_name: "owner/repo" } },
+                merged: false,
+                draft: false,
+              },
+            ],
+          }),
+          buildOptions: { adoptionEpoch: "1", forgeIntegration: "gh-primary" },
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  await waitFor(() => store.load().records.length > 0);
+  const minted = store.load().records[0]!.job;
+  assert.equal(
+    minted.forgeIntegration,
+    "gh-primary",
+    "the operator's own identity survives the daemon's injection",
+  );
+  assert.equal(minted.adoptionEpoch, "1", "the pass's other build options reach the mint site");
 });
