@@ -551,3 +551,107 @@ test("a refused queue handoff releases the reservation so the head is re-discove
   assert.equal(again.jobs.length, 1, "the next pass re-discovers the head");
   assert.equal(again.refusals.length, 0);
 });
+
+test("a per-event resolver supplies the identity the poll mints with", async () => {
+  // The intake resolves its identity PER REPOSITORY (config fingerprint,
+  // adoption epoch, bound forge integration), so a poll that mints from
+  // one static options object cannot converge with it: the two would mint
+  // different generations of the same head. The per-event resolver is the
+  // seam that carries the intake's own answer.
+  const lister = listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } });
+
+  // (a) A resolver that returns options: the job carries them.
+  const resolved = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    resolveBuildOptions: () => ({
+      configFingerprint: "abcdef12",
+      adoptionEpoch: "3",
+      forgeIntegration: "gh-app",
+    }),
+  });
+  assert.equal(resolved.jobs.length, 1, "the resolver's options produced a job");
+  assert.equal(resolved.skipped, 0);
+  assert.equal(resolved.jobs[0]!.configFingerprint, "abcdef12");
+  assert.equal(resolved.jobs[0]!.adoptionEpoch, "3");
+  assert.equal(resolved.jobs[0]!.forgeIntegration, "gh-app");
+  // The resolver saw the DISCOVERED event, not a static stand-in.
+  const seen: string[] = [];
+  await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    resolveBuildOptions: (discovered) => {
+      seen.push(discovered.repoFullName);
+      return { adoptionEpoch: "1" };
+    },
+  });
+  assert.deepEqual(seen, ["org/repo"], "the resolver is called per discovered event");
+
+  // (b) A resolver that returns null: the intake mints nothing for that
+  // repository, so the poll mints nothing either — no job, no
+  // reservation, and the entry is counted as skipped.
+  const ledger = new MemoryGenerationLedger();
+  const refused = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger,
+    resolveBuildOptions: () => null,
+  });
+  assert.equal(refused.jobs.length, 0, "the refused repository mints no job");
+  assert.equal(refused.discovered, 1);
+  assert.equal(refused.skipped, 1, "the refused entry is counted as skipped");
+  assert.deepEqual([...refused.refusals], [], "no handoff was attempted");
+  const pollEvent = reconciliationPollEvent("github", makeBarePr(7, 700, HEAD));
+  assert.notEqual(pollEvent, null);
+  assert.equal(
+    await ledger.has(buildReviewJob(pollEvent!, {})!.jobId),
+    false,
+    "no reservation survives a refused entry",
+  );
+
+  // (c) WITHOUT a resolver the static path is unchanged: the static
+  // options decide the identity, exactly as before.
+  const staticReport = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    buildOptions: { adoptionEpoch: "7" },
+  });
+  assert.equal(staticReport.jobs.length, 1);
+  assert.equal(staticReport.jobs[0]!.adoptionEpoch, "7");
+  assert.equal(staticReport.jobs[0]!.configFingerprint, "");
+});
+
+test("a refusal reason is bounded and control-character-free", async () => {
+  // A handoff's throw text is UNTRUSTED: it lands in the operator-visible
+  // report, so it is echoed through the house bound (control characters
+  // stripped, capped at 128 characters) rather than verbatim.
+  const lister = listerFor({ "org/repo": { ok: true, data: [makeBarePr(7, 700, HEAD)] } });
+  const hostile = `refused\u0000\u0007\u001b[31m${"x".repeat(500)}`;
+  const report = await reconcileRepositories({
+    platform: "github",
+    listOpenPullRequests: lister,
+    repos: ["org/repo"],
+    ledger: new MemoryGenerationLedger(),
+    enqueueJob: () => {
+      throw new Error(hostile);
+    },
+  });
+  assert.equal(report.refusals.length, 1);
+  const reason = report.refusals[0]!.reason;
+  assert.ok(reason.length <= 128, `the reason is bounded: ${reason.length}`);
+  assert.ok(
+    ![...reason].some((char) => {
+      const code = char.codePointAt(0) ?? 0;
+      return code < 0x20 || code === 0x7f;
+    }),
+    `the reason carries no control character: ${JSON.stringify(reason)}`,
+  );
+  assert.ok(reason.startsWith("refused"), `the readable head of the reason survives: ${reason}`);
+});

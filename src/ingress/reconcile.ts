@@ -16,8 +16,11 @@
  * suppress the duplicate: a missed webhook discovers exactly one job, and a
  * discovered-but-already-known head discovers none. The forge-integration
  * identity is one of those fields, so the poll MUST mint its jobs with the
- * SAME identity the intake mints them with (the daemon hands the poll its
- * build options through the reconcile context, #1443).
+ * SAME identity the intake mints them with (the daemon hands the poll a
+ * PER-EVENT identity resolver through the reconcile context, #1443): the
+ * intake resolves its identity per repository (config fingerprint,
+ * adoption epoch, bound forge integration), so a poll that mints from one
+ * static options object cannot converge with it.
  *
  * A REFUSED handoff is observable: the generation is reported in
  * `refusals` (with the reason the handoff gave) and its durable
@@ -41,8 +44,39 @@
 import { reconciliationPollEvent, normalizeRepoFullName } from "../events/normalize.js";
 import { buildReviewJob } from "../jobs/generation.js";
 import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
+import type { CanonicalForgeEvent } from "../events/types.js";
 import type { ReadResult } from "./api-client.js";
 import type { GenerationLedger } from "./dispatch.js";
+
+/** The house bound for an echoed refusal reason — the same shape as
+ * `boundedEcho` in `src/config/effective-config.ts`: control characters
+ * are stripped and the text is capped at 128 characters.
+ *
+ * The daemon's own refusal message is LONGER than the cap ("job carries
+ * no forge integration identity but this daemon serves '<name>': bind the
+ * identity into the poll's build options …"), so the cap DOES truncate
+ * it. That is deliberate: the rule and the bound identity sit inside the
+ * first 128 characters, and the daemon's own `enqueue` throws the full
+ * message to whoever calls it directly. The cap is kept regardless — an
+ * unbounded throw text from any handoff lands in the operator-visible
+ * report. */
+const MAX_REFUSAL_REASON_CHARS = 128;
+
+/** Bound one refusal reason: strip control characters, cap the length.
+ *
+ * A handoff's throw text is UNTRUSTED (it carries whatever the throwing
+ * side put there) and it lands in the operator-visible report, so it is
+ * echoed through the house bound rather than verbatim. */
+function boundedReason(message: string): string {
+  let out = "";
+  for (const char of message) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) continue;
+    out += char;
+    if (out.length >= MAX_REFUSAL_REASON_CHARS) break;
+  }
+  return out.slice(0, MAX_REFUSAL_REASON_CHARS);
+}
 
 /** One reconciliation pass. `discovered` counts EVERY array entry the lister
  * returned (including ones that fail normalization); `skipped` counts every
@@ -54,10 +88,11 @@ export interface ReconcileReport {
   readonly skipped: number;
   readonly failedRepositories: readonly string[];
   /** Every generation whose queue handoff was REFUSED, with the reason the
-   * handoff gave (the thrown error's message; "" when the handoff refused
-   * without throwing). The refusal releases the durable reservation, so
-   * the head is re-discovered on the next pass — the report is how the
-   * operator SEES that a pass handed nothing over. */
+   * handoff gave (the thrown error's message, BOUNDED: control characters
+   * stripped, capped at 128 characters; "" when the handoff refused without
+   * throwing). The refusal releases the durable reservation, so the head is
+   * re-discovered on the next pass — the report is how the operator SEES
+   * that a pass handed nothing over. */
   readonly refusals: readonly {
     readonly repository: string;
     readonly reason: string;
@@ -75,6 +110,15 @@ export interface ReconcileOptions {
   readonly repos: readonly string[];
   readonly ledger: GenerationLedger;
   readonly buildOptions?: BuildJobOptions | undefined;
+  /** The build options for the jobs this pass mints, resolved PER
+   *  DISCOVERED EVENT. The intake resolves its identity per repository,
+   *  so a poll that uses one static object cannot converge with it: the
+   *  two would mint different generations of the same head. `null` means
+   *  the intake mints nothing for that repository, so the poll mints
+   *  nothing either (the entry is skipped). */
+  readonly resolveBuildOptions?:
+    | ((event: CanonicalForgeEvent) => BuildJobOptions | null | Promise<BuildJobOptions | null>)
+    | undefined;
   readonly installationId?: string | undefined;
   /** The queue handoff for the discovered generations (the same seam the
    * follow-up host uses). When provided, each minted job is handed over
@@ -84,7 +128,10 @@ export interface ReconcileOptions {
    *
    * A handoff that RESOLVES FALSE and a handoff that REJECTS are both
    * refusals; a rejection's message is the reason the report carries, so
-   * the operator sees WHY the pass handed nothing over.
+   * the operator sees WHY the pass handed nothing over. The message is
+   * BOUNDED (control characters stripped, capped at 128 characters): a
+   * handoff's throw text is untrusted and the report is
+   * operator-visible.
    *
    * Absent → the caller owns the handoff AND the release: a caller that
    * enqueues the returned jobs itself MUST release the reservation when
@@ -146,7 +193,23 @@ export async function reconcileRepositories(
           skipped += 1;
           continue;
         }
-        const job = buildReviewJob(event, options.buildOptions ?? {});
+        // The identity the job is minted with. A PER-EVENT resolver wins
+        // over the static options: the intake resolves its identity PER
+        // REPOSITORY (config fingerprint, adoption epoch, bound forge
+        // integration), so a static object cannot mirror it — the two
+        // would mint different generations of the same head.
+        const buildOptions =
+          options.resolveBuildOptions !== undefined
+            ? await options.resolveBuildOptions(event)
+            : options.buildOptions ?? {};
+        if (buildOptions === null) {
+          // The intake mints NOTHING for this repository (the adoption
+          // policy refuses it), so the poll must mint nothing either: no
+          // job, no reservation, no worker.
+          skipped += 1;
+          continue;
+        }
+        const job = buildReviewJob(event, buildOptions);
         if (job === null) {
           skipped += 1;
           continue;
@@ -168,7 +231,7 @@ export async function reconcileRepositories(
             handedOver = await options.enqueueJob(job);
           } catch (err) {
             handedOver = false;
-            reason = err instanceof Error ? err.message : "";
+            reason = err instanceof Error ? boundedReason(err.message) : "";
           }
           if (!handedOver) {
             await Promise.resolve(options.ledger.remove(job.jobId)).catch(() => undefined);

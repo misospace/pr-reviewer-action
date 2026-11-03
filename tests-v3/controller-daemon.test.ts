@@ -937,13 +937,15 @@ test("an ambiguous integration name refuses the request rather than taking the f
 // ── the webhook/poll convergence invariant (#1443) ─────────────────────────
 //
 // The daemon's intake mints a generation that carries the daemon's BOUND
-// forge-integration identity; the reconciliation poll mints its own. The
-// identity is part of the generation id, so the two MUST mint the SAME
-// id for the same PR/head/config — otherwise the poll buys a SECOND
-// review of a head the webhook already reviewed (and, with several
-// same-kind integrations, the identity-less poll job would be refused at
-// the envelope instead). The daemon hands the poll its build options
-// through the reconcile context, so the poll mints what the intake mints.
+// forge-integration identity AND the per-repository adoption identity (the
+// config fingerprint, the adoption epoch); the reconciliation poll mints
+// its own. EVERY identity field is part of the generation id, so the two
+// MUST mint the SAME id for the same PR/head/config — otherwise the poll
+// buys a SECOND review of a head the webhook already reviewed (and, with
+// several same-kind integrations, the identity-less poll job would be
+// refused at the envelope instead). The daemon hands the poll a PER-EVENT
+// identity resolver through the reconcile context, so the poll mints
+// exactly what the intake mints.
 
 /** The webhook event's Forgejo twin: the SAME PR/head the reconciliation
  * poll discovers. Every identity field the generation id hashes agrees
@@ -985,7 +987,10 @@ function forgejoPrPayload(): Record<string, unknown> {
  * The poll is the daemon's own timer-driven pass; `enablePoll()` gates
  * whether it actually polls (the context is captured from the first
  * invocation either way), so a test can order the two sources
- * deterministically. */
+ * deterministically.
+ *
+ * The poll resolves its identity through the CONTEXT (per event), exactly
+ * as the daemon's own intake does — never from a static options object. */
 async function startBoundDaemonWithPoll(): Promise<{
   readonly harness: Harness;
   readonly reports: ReconcileReport[];
@@ -1009,10 +1014,6 @@ async function startBoundDaemonWithPoll(): Promise<{
       reconcile: {
         intervalMs: 50,
         platform: "forgejo",
-        // The operator's own per-deployment identity fields: the adoption
-        // epoch the intake's default resolver assigns. The daemon's bound
-        // identity is merged on top of them.
-        buildOptions: { adoptionEpoch: "1" },
         run: async (ctx) => {
           context = ctx;
           if (!enabled) return;
@@ -1025,7 +1026,9 @@ async function startBoundDaemonWithPoll(): Promise<{
               }),
               repos: ["owner/repo"],
               ledger: ctx.ledger,
-              buildOptions: ctx.buildOptions,
+              // The PER-EVENT identity: the daemon's own intake resolution
+              // (adoption identity + the bound forge integration).
+              resolveBuildOptions: (discovered) => ctx.resolveBuildOptions(discovered),
               installationId: "12345",
               enqueueJob: (job) => ctx.enqueueJob(job),
             }),
@@ -1051,17 +1054,19 @@ test("the reconciliation poll and the webhook intake converge on ONE generation 
     cleanup(h);
   });
   // The daemon's timer called the poll: the context exists, and it
-  // carries the daemon's BOUND identity.
+  // resolves the identity the daemon's OWN intake mints with.
   await waitFor(() => pollContext() !== undefined);
+  const resolved = await pollContext()!.resolveBuildOptions(forgejoEvent());
+  assert.notEqual(resolved, null, "the context resolves the intake's identity");
   assert.equal(
-    pollContext()!.buildOptions.forgeIntegration,
+    resolved!.forgeIntegration,
     "fj-secondary",
     "the reconcile context carries the daemon's bound identity",
   );
   assert.equal(
-    pollContext()!.buildOptions.adoptionEpoch,
+    resolved!.adoptionEpoch,
     "1",
-    "the reconcile context carries the operator's own identity fields",
+    "the reconcile context carries the intake's per-repository identity",
   );
 
   // (1) The webhook intake mints the generation.
@@ -1152,14 +1157,15 @@ test("a bound daemon refuses an identity-less job at the enqueue seam (#1443)", 
   assert.equal(h.fake.started.length, 0, "the refused job never launched a worker");
 });
 
-test("a poll that ignores the context's build options is refused with an actionable reason (#1443)", async (t) => {
-  // A MIS-WIRED poll — one that mints its jobs with its own build options
-  // instead of the daemon's context — mints an identity-less generation.
-  // It can never converge with the daemon's own intake (the identity is
-  // part of the generation id), so the handoff refuses it BEFORE the
-  // queue is mutated, and the refusal's REASON reaches the operator
-  // through the poll's report: the diagnostic names the rule and the
-  // bound identity, and the head is re-discovered on the next pass.
+test("a poll that ignores the context's identity is refused with an actionable reason (#1443)", async (t) => {
+  // A MIS-WIRED poll — one that mints its jobs with its own static build
+  // options instead of resolving them through the daemon's context —
+  // mints an identity-less generation. It can never converge with the
+  // daemon's own intake (the identity is part of the generation id), so
+  // the handoff refuses it BEFORE the queue is mutated, and the refusal's
+  // REASON reaches the operator through the poll's report: the diagnostic
+  // names the rule and the bound identity, and the head is re-discovered
+  // on the next pass.
   const store = new InMemoryQueueStore();
   const reports: ReconcileReport[] = [];
   const h = await start({
@@ -1222,6 +1228,242 @@ test("a poll that ignores the context's build options is refused with an actiona
   // The refused job never reached the queue and no worker ran.
   assert.equal(store.load().records.length, 0, "the refused job never reached the queue");
   assert.equal(h.fake.started.length, 0, "the refused job never launched a worker");
+});
+
+test("a refused handoff RELEASES the durable reservation (#1443)", async (t) => {
+  // The seam's own contract: "A failed handoff releases the durable
+  // reservation BEFORE the failure propagates". The forge-integration
+  // guard runs BEFORE the queue handoff, so a REFUSED handoff must
+  // release the claim too — otherwise the head stays suppressed for the
+  // claim's horizon (7 days by default) and the review is never bought.
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+          { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+        ],
+      } as InstanceConfig,
+      forgeIntegration: "fj-secondary",
+      queueStore: new InMemoryQueueStore(),
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const job = buildReviewJob(forgejoEvent());
+  assert.notEqual(job, null);
+  // The reservation is standing (the intake took it, or the poll did).
+  assert.equal(await h.daemon.ledger.addIfAbsent(job!.jobId), true);
+  assert.equal(await h.daemon.ledger.has(job!.jobId), true, "the claim is standing");
+  const refusal = await h.daemon.enqueue(job!).then(
+    () => null,
+    (reason: unknown) => reason,
+  );
+  assert.ok(refusal instanceof RangeError, "the refusal is a RangeError");
+  assert.equal(
+    await h.daemon.ledger.has(job!.jobId),
+    false,
+    "a refused handoff releases the durable reservation",
+  );
+  // No durable generation claim survives the refusal either.
+  const exported = await h.controlPlane.exportState();
+  assert.equal(
+    exported.idempotencyKeys.filter((key) => key.key.startsWith("generation:")).length,
+    0,
+    "no generation claim survives a refused handoff",
+  );
+});
+
+test("the daemon's bound identity WINS over an operator-supplied one (#1443)", async (t) => {
+  // The bound forge integration is INFRASTRUCTURE the daemon owns: it
+  // overrides whatever the operator's own resolver supplied. The identity
+  // is part of the generation id, so the poll and the intake must stamp
+  // the SAME name — a disagreement would split one head's generation in
+  // two (a second review of the same head).
+  let context: ReconcileContext | undefined;
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+          { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+        ],
+      } as InstanceConfig,
+      forgeIntegration: "fj-secondary",
+      queueStore: new InMemoryQueueStore(),
+      // The operator's own resolver names a DIFFERENT integration.
+      resolveEventIdentity: async () => ({ adoptionEpoch: "1", forgeIntegration: "fj-primary" }),
+      reconcile: {
+        intervalMs: 50,
+        platform: "forgejo",
+        run: async (ctx) => {
+          context = ctx;
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  await waitFor(() => context !== undefined);
+  const resolved = await context!.resolveBuildOptions(forgejoEvent());
+  assert.notEqual(resolved, null);
+  assert.equal(
+    resolved!.forgeIntegration,
+    "fj-secondary",
+    "the daemon's bound identity wins over the operator's own",
+  );
+  assert.equal(resolved!.adoptionEpoch, "1", "the operator's own identity fields survive");
+});
+
+test("the poll converges with the intake on the CONFIG dimension (#1443)", async (t) => {
+  // The reproduction: with an adoption record that carries a config
+  // fingerprint and an adoption epoch, a poll that mints from a STATIC
+  // options object mints a DIFFERENT generation of the same head than
+  // the webhook intake does (the fingerprint is part of the generation
+  // id) — two workers, two reviews, one head. The daemon's context
+  // resolves the identity PER EVENT through the daemon's OWN resolver,
+  // so the two converge on the config dimension too.
+  const store = new InMemoryQueueStore();
+  const reports: ReconcileReport[] = [];
+  let context: ReconcileContext | undefined;
+  let enabled = false;
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+          { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+        ],
+      } as InstanceConfig,
+      forgeIntegration: "fj-secondary",
+      queueStore: store,
+      // The operator's hook: the adoption record's own identity fields.
+      resolveEventIdentity: async () => ({ configFingerprint: "abcdef12", adoptionEpoch: "3" }),
+      reconcile: {
+        intervalMs: 50,
+        platform: "forgejo",
+        run: async (ctx) => {
+          context = ctx;
+          if (!enabled) return;
+          reports.push(
+            await reconcileRepositories({
+              platform: "forgejo",
+              listOpenPullRequests: async () => ({ ok: true, data: [forgejoPrPayload()] }),
+              repos: ["owner/repo"],
+              ledger: ctx.ledger,
+              // The PER-EVENT identity: BOTH sides go through the daemon's
+              // own resolution, so they agree on the config dimension.
+              resolveBuildOptions: (discovered) => ctx.resolveBuildOptions(discovered),
+              installationId: "12345",
+              enqueueJob: (job) => ctx.enqueueJob(job),
+            }),
+          );
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  await waitFor(() => context !== undefined);
+  const resolved = await context!.resolveBuildOptions(forgejoEvent());
+  assert.equal(resolved!.configFingerprint, "abcdef12", "the context resolves the config fingerprint");
+  assert.equal(resolved!.adoptionEpoch, "3", "the context resolves the adoption epoch");
+
+  // (1) The webhook intake mints the generation.
+  assert.equal(await h.daemon.ingest(forgejoEvent()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+
+  // (2) The poll discovers the SAME PR/head.
+  enabled = true;
+  await waitFor(() => reports.length >= 1);
+  const report = reports[0]!;
+  assert.equal(report.discovered, 1, "the poll discovered the head");
+  assert.equal(report.jobs.length, 0, "the poll scheduled no second generation");
+  assert.equal(report.skipped, 1, "the poll's discovery was suppressed as a duplicate");
+  assert.deepEqual([...report.refusals], [], "the poll's handoff was not refused");
+  await settleFor(200);
+  assert.equal(h.fake.started.length, 1, "exactly ONE generation was executed");
+  assert.equal(store.load().records.length, 1, "exactly ONE queue record");
+  await waitFor(() => h.forgePublishes.length > 0);
+  assert.equal(h.forgePublishes.length, 1, "the review published exactly once");
+});
+
+test("the poll skips a repository the intake refuses (#1443)", async (t) => {
+  // The adoption policy refuses the repository: the intake mints NOTHING
+  // for it. The poll must mint nothing either — a job here would buy a
+  // review the operator never granted, and would reserve a generation id
+  // for a head the intake never reviewed.
+  const store = new InMemoryQueueStore();
+  const reports: ReconcileReport[] = [];
+  let context: ReconcileContext | undefined;
+  let enabled = false;
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj-primary", kind: "forgejo", endpoint: "https://forge-a.example/api/v1", credential: "fj-a" },
+          { name: "fj-secondary", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+        ],
+      } as InstanceConfig,
+      forgeIntegration: "fj-secondary",
+      queueStore: store,
+      // The adoption policy refuses this repository outright.
+      resolveEventIdentity: async () => null,
+      reconcile: {
+        intervalMs: 50,
+        platform: "forgejo",
+        run: async (ctx) => {
+          context = ctx;
+          if (!enabled) return;
+          reports.push(
+            await reconcileRepositories({
+              platform: "forgejo",
+              listOpenPullRequests: async () => ({ ok: true, data: [forgejoPrPayload()] }),
+              repos: ["owner/repo"],
+              ledger: ctx.ledger,
+              resolveBuildOptions: (discovered) => ctx.resolveBuildOptions(discovered),
+              installationId: "12345",
+              enqueueJob: (job) => ctx.enqueueJob(job),
+            }),
+          );
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  await waitFor(() => context !== undefined);
+  // The intake mints nothing for the refused repository.
+  assert.equal(await h.daemon.ingest(forgejoEvent()), "ignored");
+
+  enabled = true;
+  await waitFor(() => reports.length >= 1);
+  const report = reports[0]!;
+  assert.equal(report.discovered, 1, "the poll discovered the head");
+  assert.equal(report.jobs.length, 0, "the poll minted nothing");
+  assert.equal(report.skipped, 1, "the refused entry is counted as skipped");
+  assert.deepEqual([...report.refusals], [], "the refusal was the intake's, not a handoff's");
+  // No job, no reservation, no worker.
+  assert.equal(store.load().records.length, 0, "no queue record");
+  assert.equal(h.fake.started.length, 0, "no worker ran");
+  const exported = await h.controlPlane.exportState();
+  assert.equal(
+    exported.idempotencyKeys.filter((key) => key.key.startsWith("generation:")).length,
+    0,
+    "no generation was reserved",
+  );
 });
 
 test("a forge integration endpoint that could never pass envelope validation refuses daemon startup (#1433)", async () => {

@@ -191,8 +191,10 @@ observations must carry the PR `id` (a missing `id` on one side sends
 `prId` 0-vs-N and splits the generation; see
 [forge-events-and-review-jobs.md](forge-events-and-review-jobs.md)), and
 both must carry the same forge-integration identity (the daemon's
-reconcile context hands the poll the bound name, so the poll mints the
-generation the intake mints), and a new
+reconcile context resolves the poll's identity PER EVENT through the
+daemon's own intake resolution — bound name, config fingerprint and
+adoption epoch alike — so the poll mints the generation the intake
+mints), and a new
 head or a material config-fingerprint change re-keys.
 `shouldSchedule` remains the single scheduling policy: `follow_up` and
 terminal kinds never mint review generations through dispatch.

@@ -26,9 +26,10 @@
  *   ingress binds through `createOperatorHost` (which unconditionally
  *   wires the follow-up consumer); missed-webhook reconciliation runs on
  *   a bounded schedule through the injected reconcile pass, which the
- *   daemon hands its CONTEXT to (the ledger, the build options carrying
- *   the bound identity, and the queue handoff) so the poll mints the SAME
- *   generation the intake mints (#1443). The intake is
+ *   daemon hands its CONTEXT to (the ledger, the PER-EVENT identity
+ *   resolver the daemon's own intake mints with, and the queue handoff)
+ *   so the poll mints the SAME generation the intake mints on EVERY
+ *   identity field (#1443). The intake is
  *   PLATFORM-AWARE: one daemon instance serves ONE forge platform, and
  *   `webhook.platform` selects the intake it binds — the GitHub App intake
  *   (`X-Hub-Signature-256`, bound here) or the native Forgejo intake
@@ -175,17 +176,21 @@ export interface ExecutorBindings {
 export interface ReconcileContext {
   /** The daemon's own durable generation ledger — the poll's dedupe ledger. */
   readonly ledger: GenerationLedger;
-  /** The build options the poll must mint its jobs with: the operator's
-   *  own `reconcile.buildOptions` merged with the daemon's bound
-   *  forge-integration identity when the daemon is bound. */
-  readonly buildOptions: BuildJobOptions;
+  /** The identity the daemon's own intake mints a job with for the SAME
+   *  event: the per-repository resolution (config fingerprint, adoption
+   *  epoch) plus the bound forge-integration identity. `null` means the
+   *  intake mints NOTHING for that repository (the adoption policy
+   *  refuses it), so the poll must mint nothing either. */
+  resolveBuildOptions(event: CanonicalForgeEvent): Promise<BuildJobOptions | null>;
   /** The queue handoff for the polled generations: resolves TRUE when the
    * daemon accepted the job, and REJECTS with the daemon's refusal (a
-   * `RangeError` naming the rule) when it refused it. The poll treats a
-   * rejecting handoff as a refusal, RECORDS the reason, and releases the
-   * generation's durable reservation — so a mis-wired poll is observable
-   * (the operator reads the reason) and re-discovered on the next pass,
-   * never a silently duplicated review. */
+   * `RangeError` naming the rule) when it refused it — the daemon
+   * RELEASES the durable reservation before the rejection propagates. The
+   * poll treats a rejecting handoff as a refusal, RECORDS the reason, and
+   * releases the reservation over it (idempotent — the daemon already
+   * released it) — so a mis-wired poll is observable (the operator reads
+   * the reason) and re-discovered on the next pass, never a silently
+   * duplicated review. */
   enqueueJob(job: ReviewJob): Promise<boolean>;
 }
 
@@ -261,18 +266,14 @@ export interface ControllerDaemonOptions {
      * the daemon serves an intake (`webhook.platform`), the two MUST
      * agree — a mismatch fails construction (fail closed). */
     readonly platform?: "github" | "forgejo";
-    /** The operator's own per-deployment identity fields for the poll
-     * (e.g. `configFingerprint`, `adoptionEpoch`). They are the poll's
-     * half of the generation identity; the daemon's bound forge
-     * integration is merged ON TOP of them (the daemon's binding is the
-     * single source for that field). */
-    readonly buildOptions?: BuildJobOptions;
     /** One reconciliation pass (the operator binds
      * `reconcileRepositories` with this daemon's ledger and the
-     * `enqueue` handoff this daemon exposes). The daemon hands the pass
-     * its context — the ledger, the build options (with the bound
-     * identity), and the queue handoff — so the poll mints the SAME
-     * generation the daemon's own intake mints. */
+     * `context.enqueueJob` handoff the daemon hands the pass — it
+     * resolves TRUE when the daemon accepted the job and REJECTS with
+     * the refusal reason when it refused it). The daemon hands the pass
+     * its context — the ledger, the PER-EVENT identity resolver (so the
+     * poll mints the SAME generation the daemon's own intake mints, on
+     * every identity field), and the queue handoff. */
     run(context: ReconcileContext): Promise<void>;
   };
   /** The forge webhook ingress binding. The intake is PLATFORM-AWARE: the
@@ -308,9 +309,9 @@ export interface ControllerDaemon {
   ingest(event: CanonicalForgeEvent): Promise<"scheduled" | "duplicate" | "ignored">;
   /** Hand one minted generation to the queue — the reconciliation pass's
    * handoff (the poll mints the generation; the daemon owns the queue).
-   * A failed handoff releases the durable reservation BEFORE the failure
-   * propagates, so the head is re-discovered instead of staying
-   * suppressed. */
+   * A REFUSED handoff (the daemon's forge-integration identity guard)
+   * releases the durable reservation BEFORE the failure propagates, so
+   * the head is re-discovered instead of staying suppressed. */
   enqueue(job: ReviewJob): Promise<void>;
   /** The generation ledger the operator's ingress/reconciliation binds. */
   readonly ledger: GenerationLedger;
@@ -1343,6 +1344,53 @@ export async function startControllerDaemon(
       now,
     });
 
+  /** The identity the daemon's OWN intake mints a job with for one event.
+   *
+   * ONE resolver, ONE answer: the intake's adoption/effective-config
+   * resolution (per repository — the config fingerprint and the adoption
+   * epoch) plus the daemon's bound forge-integration identity (the
+   * operator infrastructure, which OVERRIDES whatever the resolver
+   * returned: a resolver never supplies infrastructure).
+   *
+   * The intake AND the reconciliation poll share this function, so the two
+   * converge on EVERY identity field — a static value could not mirror a
+   * per-repository fingerprint, and the two would mint different
+   * generations of the same head (#1443). */
+  const resolveIntakeBuildOptions = async (
+    event: CanonicalForgeEvent,
+  ): Promise<BuildJobOptions | null> => {
+    const resolved = await resolveEventIdentity(event);
+    if (resolved === null) return null;
+    return options.forgeIntegration !== undefined
+      ? { ...resolved, forgeIntegration: options.forgeIntegration }
+      : resolved;
+  };
+
+  /** Hand one minted generation to the queue — the ONE handoff seam the
+   * OPERATOR's paths use (the `daemon.enqueue` seam and the
+   * reconciliation poll's `context.enqueueJob`). The daemon's own intake
+   * mints its jobs with the bound identity, so it never needs the guard.
+   *
+   * The forge-integration identity guard runs BEFORE any queue mutation: a
+   * job this daemon must not schedule (a foreign installation's, a
+   * malformed identity, or — on a bound daemon — no identity at all) never
+   * reaches the queue.
+   *
+   * A REFUSED handoff releases the DURABLE reservation BEFORE the failure
+   * propagates (the dispatch contract): a claim left behind suppresses the
+   * redelivery until its horizon expires (7 days by default). The release
+   * only ever touches a claim THIS process owns (`ledger.remove` refuses a
+   * foreign one), so it is safe to attempt. */
+  const handOffGeneration = async (job: ReviewJob): Promise<void> => {
+    try {
+      assertJobForgeIdentity(job, options.forgeIntegration);
+    } catch (err) {
+      await Promise.resolve(ledger.remove(job.jobId)).catch(() => undefined);
+      throw err;
+    }
+    await enqueueGeneration(job);
+  };
+
   // 8. Timers, ingress server, lifecycle.
   let timer: NodeJS.Timeout | null = null;
   let reconcileTimer: NodeJS.Timeout | null = null;
@@ -1548,15 +1596,10 @@ export async function startControllerDaemon(
       if (stopped) throw new Error("intake closed");
       // Adoption/effective-config resolution is a GATE, not decoration: a
       // repository the policy did not grant never schedules (fail closed).
-      let buildOptions = await resolveEventIdentity(event);
+      // The SAME resolution the poll uses (`resolveIntakeBuildOptions`),
+      // so the two converge on every identity field.
+      const buildOptions = await resolveIntakeBuildOptions(event);
       if (buildOptions === null) return "ignored";
-      // The daemon's bound integration name is operator infrastructure and
-      // overrides whatever the resolver returned: the resolver never
-      // supplies infrastructure, so when the daemon serves one forge
-      // integration, every job its intake mints carries that identity.
-      if (options.forgeIntegration !== undefined) {
-        buildOptions = { ...buildOptions, forgeIntegration: options.forgeIntegration };
-      }
       const dispatched = await dispatchCanonicalEvent(event, {
         ledger,
         buildOptions,
@@ -1580,12 +1623,9 @@ export async function startControllerDaemon(
       return "scheduled";
     },
     async enqueue(job) {
-      // The identity guard runs BEFORE any queue mutation: a job this
-      // daemon must not schedule (a foreign installation's, a malformed
-      // identity, or — on a bound daemon — no identity at all) never
-      // reaches the queue.
-      assertJobForgeIdentity(job, options.forgeIntegration);
-      await enqueueGeneration(job);
+      // The identity guard runs BEFORE any queue mutation, and a refusal
+      // releases the durable reservation before the failure propagates.
+      await handOffGeneration(job);
     },
     async stop() {
       if (stopped) return;
@@ -1617,26 +1657,23 @@ export async function startControllerDaemon(
   daemonRef = daemon;
 
   // The reconciliation context (#1443): the daemon hands the operator's
-  // poll the ledger it must dedupe against, the build options it must
-  // mint its jobs with, and the queue handoff for what it mints.
+  // poll the ledger it must dedupe against, the PER-EVENT identity
+  // resolver it must mint its jobs with, and the queue handoff for what
+  // it mints.
   //
-  // THE DAEMON'S BOUND IDENTITY IS THE SINGLE SOURCE. The operator's own
-  // `reconcile.buildOptions` supply the poll's half of the identity (the
-  // config fingerprint, the adoption epoch); the daemon's bound
-  // forge-integration identity is merged ON TOP of them, so a poll that
-  // forgot it cannot mint a generation the daemon's own intake would never
-  // mint (the identity is part of the generation id). An UNBOUND daemon
-  // passes the operator's build options through untouched: it does not
-  // police an unbound daemon's build options.
+  // THE DAEMON'S OWN INTAKE IS THE SINGLE SOURCE. The poll resolves the
+  // identity through the SAME function the intake mints with
+  // (`resolveIntakeBuildOptions`), so the two agree on EVERY identity
+  // field: the per-repository config fingerprint and adoption epoch, and
+  // the daemon's bound forge-integration identity. A static operator value
+  // could not mirror a per-repository fingerprint — the two would mint
+  // different generations of the same head and buy a SECOND review of it.
   const reconcileContext: ReconcileContext = {
     ledger,
-    buildOptions:
-      options.forgeIntegration !== undefined
-        ? {
-            ...options.reconcile?.buildOptions,
-            forgeIntegration: options.forgeIntegration,
-          }
-        : { ...options.reconcile?.buildOptions },
+    // The resolver the poll calls PER DISCOVERED EVENT. `null` means the
+    // intake mints nothing for that repository (the adoption policy
+    // refuses it): the poll mints nothing either.
+    resolveBuildOptions: (event: CanonicalForgeEvent) => resolveIntakeBuildOptions(event),
     // The handoff REJECTS with the daemon's refusal: the poll records the
     // reason (an actionable diagnostic — WHICH rule the job broke) and
     // releases its reservation over it. A refusal that resolved FALSE
@@ -1644,8 +1681,7 @@ export async function startControllerDaemon(
     // attached, which is exactly the failure this handoff exists to make
     // visible.
     enqueueJob: async (job: ReviewJob): Promise<boolean> => {
-      assertJobForgeIdentity(job, options.forgeIntegration);
-      await enqueueGeneration(job);
+      await handOffGeneration(job);
       return true;
     },
   };
