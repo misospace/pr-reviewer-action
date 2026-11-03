@@ -251,8 +251,10 @@ missing, which integrations share the kind, and the remedy for that daemon
 (stamp the identity the pass received, or bind one). The request builder
 keeps its own refusal as the authority for a record that never passed the
 handoff — a queue snapshot persisted before the deployment gained the
-second integration — so the two fences agree on WHAT is refused and differ
-only in how early they say it. The INTAKE keeps the request-build refusal
+second integration — so for any job the builder or the queue's rehydration
+produced (both always carry the field, `""` when no integration is named)
+the two fences refuse the SAME job and differ only in how early they say
+it. The INTAKE keeps the request-build refusal
 (#1440, unchanged): there is no pass there to hand an identity to, and a
 delivery already carries its own visible record — the failed run naming the
 identity problem — for the operator to act on.
@@ -265,10 +267,13 @@ integration of that kind exists; zero keeps the GitHub default and more
 than one is ambiguous and refused. A named integration whose kind
 disagrees with the job's platform is refused, and so is an AMBIGUOUS
 name (several configured integrations sharing one name) — resolution
-never takes the first of several. Every refusal is a `RangeError`: at the
-handoff it reaches the operator's poll directly, and at request build the
-scheduler turns it into a failed outcome — either way the job never
-reaches a worker.
+never takes the first of several. Every refusal is a `RangeError`. At the
+handoff it propagates to whoever holds the `enqueue` call — a pass that
+wraps its handoff sees the reason, while `reconcileRepositories` reports a
+refused handoff as a skipped head (its own contract), so an operator who
+wants the reason inside the poll report catches it where they bind
+`enqueueJob`. At request build the scheduler turns it into a failed
+outcome. Either way the job never reaches a worker.
 
 **Startup screening.** The daemon refuses to start when the bound name
 names no integration or more than one, when the named integration's

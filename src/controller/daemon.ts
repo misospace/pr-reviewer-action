@@ -1551,8 +1551,10 @@ export async function startControllerDaemon(
       // refused HERE, before a queue mutation and a wasted attempt, with
       // the mint site named. The builder keeps its own refusal as the
       // authority for a record that never passed this guard (a rehydrated
-      // queue snapshot), so the two never disagree about WHAT is refused —
-      // only about how early and with how much of the remedy in view.
+      // queue snapshot). For any job the builder or the queue's rehydration
+      // produced — both always carry the field, `""` when no integration is
+      // named — the two refuse the SAME job and differ only in how early
+      // and with how much of the remedy in view.
       if (named === "") {
         assertKindResolvesUnambiguously(
           job.platform,
