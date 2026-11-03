@@ -30,6 +30,7 @@
  * `reconciliationPollEvent`; nothing in this module interprets them.
  */
 
+import { DIAGNOSTIC_MAX_CHARS, maskDiagnostic } from "../context/redact.js";
 import { reconciliationPollEvent, normalizeRepoFullName } from "../events/normalize.js";
 import { buildReviewJob } from "../jobs/generation.js";
 import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
@@ -38,13 +39,64 @@ import type { GenerationLedger } from "./dispatch.js";
 
 /** One reconciliation pass. `discovered` counts EVERY array entry the lister
  * returned (including ones that fail normalization); `skipped` counts every
- * discovered entry that was not scheduled (unnormalizable, unbuildable, or
- * already known to the ledger). */
+ * discovered entry that was not scheduled (unnormalizable, unbuildable,
+ * already known to the ledger, or refused by the queue handoff). */
 export interface ReconcileReport {
   readonly jobs: readonly ReviewJob[];
   readonly discovered: number;
   readonly skipped: number;
   readonly failedRepositories: readonly string[];
+  /** WHY each queue handoff was refused (#1445), next to the `skipped`
+   * count that alone cannot explain itself. A refused head releases its
+   * reservation and is re-discovered on every later pass, so without the
+   * reason a permanently refused head is silent and the operator has to
+   * reconstruct the cause from source. Bounded on purpose: at most
+   * `MAX_HANDOFF_REFUSALS` entries, and every `reason` is a single line
+   * passed through `maskDiagnostic` (secret masking, credential-shape
+   * redaction, `DIAGNOSTIC_MAX_CHARS` cap) because a throw from arbitrary
+   * operator handoff code is untrusted diagnostic text. */
+  readonly handoffRefusals: readonly ReconcileHandoffRefusal[];
+}
+
+/** One refused queue handoff: the configured repository the entry was
+ * polled from (same identity `failedRepositories` reports) and a bounded,
+ * redacted one-line reason. */
+export interface ReconcileHandoffRefusal {
+  readonly repo: string;
+  readonly reason: string;
+}
+
+/** Cap on reported refusals per pass: refusals exist to diagnose, not to
+ * grow the report without bound on a queue that refuses everything.
+ * Refusals past the cap are still counted in `skipped`. */
+const MAX_HANDOFF_REFUSALS = 25;
+
+/** Reason recorded when the handoff simply returns `false` (or throws a
+ * value carrying no usable message): the refusal itself is the whole
+ * information the operator code offered. */
+const HANDOFF_REFUSED_REASON = "the queue handoff refused the job";
+
+/** Turn a thrown handoff value into a safe reason string: an `Error`'s
+ * (or a bare string's) message, control characters and newlines collapsed
+ * so the reason stays a single line, then the shared `maskDiagnostic`
+ * recipe (known-secret masking, credential-shape heuristics, length cap).
+ * Anything else thrown yields the generic refusal reason — the pass must
+ * never itself fail while describing a refusal. */
+function describeHandoffRefusal(error: unknown): string {
+  const message =
+    error instanceof Error
+      ? typeof error.message === "string"
+        ? error.message
+        : ""
+      : typeof error === "string"
+        ? error
+        : "";
+  const singleLine = message.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  return maskDiagnostic(
+    singleLine === "" ? HANDOFF_REFUSED_REASON : singleLine,
+    [],
+    DIAGNOSTIC_MAX_CHARS,
+  );
 }
 
 export interface ReconcileOptions {
@@ -84,6 +136,7 @@ export async function reconcileRepositories(
 ): Promise<ReconcileReport> {
   const jobs: ReviewJob[] = [];
   const failed: string[] = [];
+  const refusals: ReconcileHandoffRefusal[] = [];
   let discovered = 0;
   let skipped = 0;
   for (const rawRepo of options.repos) {
@@ -136,17 +189,32 @@ export async function reconcileRepositories(
         // The reservation is taken; the job is handed over. A REFUSED
         // handoff releases it (the dispatch contract), so the head is
         // re-discovered on the next pass instead of staying suppressed
-        // until the claim's horizon expires.
+        // until the claim's horizon expires. #1445: the refusal also
+        // records WHY on the report — the handoff's `false`, or the
+        // thrown value's bounded and redacted message (e.g. #1444's
+        // RangeError naming the remedy for an ambiguous forge
+        // integration) — because a re-discovered-and-refused-every-pass
+        // head is otherwise silent. The catch stays total: describing a
+        // refusal must never abort the pass.
         if (options.enqueueJob !== undefined) {
           let handedOver = false;
+          let reason = HANDOFF_REFUSED_REASON;
           try {
             handedOver = await options.enqueueJob(job);
-          } catch {
+          } catch (error) {
             handedOver = false;
+            try {
+              reason = describeHandoffRefusal(error);
+            } catch {
+              reason = HANDOFF_REFUSED_REASON;
+            }
           }
           if (!handedOver) {
             await Promise.resolve(options.ledger.remove(job.jobId)).catch(() => undefined);
             skipped += 1;
+            if (refusals.length < MAX_HANDOFF_REFUSALS) {
+              refusals.push({ repo: rawRepo, reason });
+            }
             continue;
           }
         }
@@ -161,5 +229,6 @@ export async function reconcileRepositories(
     discovered,
     skipped,
     failedRepositories: Object.freeze([...failed]),
+    handoffRefusals: Object.freeze(refusals.map((refusal) => Object.freeze({ ...refusal }))),
   });
 }

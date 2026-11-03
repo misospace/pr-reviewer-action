@@ -138,7 +138,12 @@ a forge-specific CLI.
   (fail closed), and the poll’s queue handoff goes through the
   daemon’s `enqueue`, which releases the durable reservation when the
   queue refuses the job — so a refused handoff is re-discovered on the
-  next pass instead of staying suppressed.
+  next pass instead of staying suppressed. #1445: the pass report
+  carries the *why* next to the count — `handoffRefusals` lists a
+  bounded (`{ repo, reason }`) entry per refused handoff, with the
+  thrown value’s message run through the shared `maskDiagnostic` seam
+  (single-line, secret-redacted, length-capped) because operator handoff
+  code is untrusted; `skipped` keeps its exact prior meaning.
 
 ## Testing posture
 
