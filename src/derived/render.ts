@@ -99,13 +99,19 @@ function buildSection(obligations: DerivedObligation[], omitted: number): string
 /** Render the "Derived Architectural Obligations" corpus section, or `""`
  * for none. A hard UTF-8 byte cap on the whole document: whole obligations
  * are dropped from the end with a visible footer, and `""` is returned when
- * no obligation fits. Deterministic for identical input. */
-export function renderDerivedSection(artifact: DerivedObligationsArtifact | null | undefined, maxBytes = 8000): string {
+ * no obligation fits. `footer` (static text only — never PR-derived) is
+ * included in the cap arithmetic so the document never exceeds `maxBytes`.
+ * Deterministic for identical input. */
+export function renderDerivedSection(
+  artifact: DerivedObligationsArtifact | null | undefined,
+  maxBytes = 8000,
+  footer = "",
+): string {
   if (!artifact || !Array.isArray(artifact.obligations)) return "";
   let obligations = artifact.obligations.filter((o) => typeof o?.obligation === "string" && o.obligation.trim());
   let omitted = 0;
   while (obligations.length > 0) {
-    const doc = buildSection(obligations, omitted);
+    const doc = buildSection(obligations, omitted) + footer;
     if (Buffer.byteLength(doc, "utf8") <= maxBytes) return doc;
     obligations = obligations.slice(0, -1);
     omitted += 1;
@@ -127,25 +133,47 @@ export function renderDerivedUnavailable(kind: string): string {
   );
 }
 
+/** Static footer appended to a derived section rendered over an incomplete
+ * input: the obligations listed are real targets, but the derivation could
+ * not have seen obligations raised by hunks outside its view. */
+function incompleteFooter(diffClipped: boolean): string {
+  return `… derivation input was incomplete (reason: ${diffClipped ? "input-clipped" : "input-truncated"}); obligations may be missing\n`;
+}
+
 /** Map a pass result to the corpus section for the engine: derived targets on
- * `ok`, the visible unavailable note on `error`/`timeout`, and `""` on
- * `empty`/`skipped` (a completed derivation that found nothing is not a
- * failure). An `ok` result whose obligations were ALL dropped by the byte cap
- * still renders the note — a silent success would read exactly like a clean
- * "no obligations" outcome, which the feature's visibility contract forbids. */
+ * `ok`, the visible unavailable note on `error`/`timeout`, and `""` only for
+ * a genuinely clean `empty` — one that saw the COMPLETE diff. An `empty`
+ * over an incomplete input renders the note (reason `input-clipped` when the
+ * pass's own bounded clipping cut the diff, `input-truncated` when the input
+ * was a prioritized slice or missing): a derivation that never saw the
+ * relevant hunk must not read as "no obligations". An `ok` result over an
+ * incomplete input keeps its obligations but carries the incomplete footer;
+ * an `ok` result whose obligations were ALL dropped by the byte cap still
+ * renders the note (reason `section-cap`) — a silent success would read
+ * exactly like a clean "no obligations" outcome, which the feature's
+ * visibility contract forbids. */
 export function renderDerivedSectionForStatus(
   result: {
     status: "ok" | "empty" | "error" | "timeout" | "skipped";
     errorKind: string | null;
     artifact: DerivedObligationsArtifact;
+    /** From `runDerivedObligationsPass`: false means the derivation did not
+     * see the whole diff (truncated source, clipped input, or no terminal
+     * derivation), so an `empty` result must not read as clean coverage. */
+    inputComplete: boolean;
+    diffClipped?: boolean;
   },
   maxBytes = 8000,
 ): string {
   if (result.status === "error" || result.status === "timeout") {
     return renderDerivedUnavailable(result.errorKind ?? result.status);
   }
+  if (result.status === "empty" && result.inputComplete === false) {
+    return renderDerivedUnavailable(result.diffClipped === true ? "input-clipped" : "input-truncated");
+  }
   if (result.status !== "ok") return "";
-  const section = renderDerivedSection(result.artifact, maxBytes);
+  const footer = result.inputComplete === false ? incompleteFooter(result.diffClipped === true) : "";
+  const section = renderDerivedSection(result.artifact, maxBytes, footer);
   if (section === "" && result.artifact.obligations.length > 0) return renderDerivedUnavailable("section-cap");
   return section;
 }

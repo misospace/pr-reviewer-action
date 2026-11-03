@@ -1262,6 +1262,25 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // (derivation incomplete). One bounded model call on the primary route.
   // Shares the #1380 budget-priority gate: on a dependency update it
   // launches only after the mandatory evidence phase settles.
+  //
+  // Input completeness (#1448 review: truncated-diff blinding): the pass is
+  // fed the COMPLETE diff (`pr.diff`) — the prioritized `pr.diff.truncated`
+  // slice can omit the very hunk that raises the obligation (the #909
+  // caveat, classification's own feed comment). The pass applies its own
+  // bounded selection/clipping on top, and the artifact records
+  // `diff_source`/`diff_clipped`/`input_complete` so #1449 can fail toward
+  // partial/needs-review instead of treating an `empty` over a clipped or
+  // sliced input as complete coverage. `pr.diff` is the complete fetched
+  // diff (a capped platform read throws rather than silently clipping);
+  // the truncated-slice fallback only fires when the full artifact is
+  // absent, and records exactly that.
+  const derivedDiffFull = ws.readText("pr.diff");
+  const derivedDiffSource: "full" | "truncated" | "none" = derivedDiffFull !== null
+    ? "full"
+    : ws.readText("pr.diff.truncated") !== null
+    ? "truncated"
+    : "none";
+  const derivedDiff = derivedDiffFull ?? ws.readText("pr.diff.truncated") ?? "";
   ws.write("derived-obligations.md", new Uint8Array(0));
   let derivedPromise: Promise<void> = Promise.resolve();
   if ((env.DERIVED_OBLIGATIONS ?? "false").toLowerCase() === "true") {
@@ -1284,7 +1303,8 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       title: String(pr.title ?? ""),
       body: String(pr.body ?? ""),
       files: safeJson(ws.read("pr-files.json")),
-      diff: (ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? ""),
+      diff: derivedDiff,
+      diffComplete: derivedDiffSource === "full",
       model:
         profiles.primary.baseUrl && profiles.primary.model
           ? {
@@ -1320,6 +1340,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
           status: result.status,
           error_kind: result.errorKind,
           error: result.error,
+          diff_source: derivedDiffSource,
+          diff_clipped: result.diffClipped,
+          input_complete: result.inputComplete,
           method: result.artifact.method,
           obligations: result.artifact.obligations,
           truncated: result.artifact.truncated,
@@ -1344,6 +1367,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
             status: "error",
             error_kind: "internal",
             error: cause instanceof Error ? cause.message : String(cause),
+            diff_source: derivedDiffSource,
+            diff_clipped: false,
+            input_complete: false,
             method: "none",
             obligations: [],
             truncated: false,

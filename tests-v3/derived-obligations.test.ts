@@ -231,6 +231,60 @@ test("#1448: runDerivedObligationsPass passes the model result through and never
   assert.equal(failed.artifact.method, "none");
 });
 
+// ── input completeness (#1448 review: truncated-diff blinding) ──────────
+
+test("#1448 review: inputComplete is true only for a complete, unclipped derivation input", async () => {
+  const content = JSON.stringify({ obligations: [{ obligation: "every producer places the integration id before hashing", topology: "producer_convergence" }] });
+
+  // The caller supplied the complete diff and the pass did not clip it.
+  const complete = await runDerivedObligationsPass({
+    title: "t", body: "b", files: [], diff: "+hash(integrationId)",
+    diffComplete: true,
+    model: { config: modelConfig, requestFn: stubRequestFn(openaiContent(content)) },
+  });
+  assert.equal(complete.status, "ok");
+  assert.equal(complete.diffClipped, false);
+  assert.equal(complete.inputComplete, true);
+
+  // A caller that does not assert completeness fails toward incomplete —
+  // the pass cannot verify what it was handed.
+  const unasserted = await runDerivedObligationsPass({
+    title: "t", body: "b", files: [], diff: "+hash(integrationId)",
+    model: { config: modelConfig, requestFn: stubRequestFn(openaiContent(content)) },
+  });
+  assert.equal(unasserted.status, "ok");
+  assert.equal(unasserted.inputComplete, false);
+
+  // The pass's own bounded clipping marks the input incomplete even when
+  // the caller supplied the complete diff.
+  const clipped = await runDerivedObligationsPass({
+    title: "t", body: "b", files: [], diff: "+line\n".repeat(400),
+    diffComplete: true,
+    model: { config: { ...modelConfig, inputMaxBytes: 400 }, requestFn: stubRequestFn(openaiContent(content)) },
+  });
+  assert.equal(clipped.status, "ok");
+  assert.equal(clipped.diffClipped, true);
+  assert.equal(clipped.inputComplete, false);
+
+  // No derivation ran (no model route): no coverage was established.
+  const skipped = await runDerivedObligationsPass({ title: "t", body: "b", files: [], diff: "+x", diffComplete: true });
+  assert.equal(skipped.status, "skipped");
+  assert.equal(skipped.diffClipped, false);
+  assert.equal(skipped.inputComplete, false);
+
+  // An internal failure never reports complete input either.
+  const syncThrow: SpecialistRequestFn = (() => {
+    throw new Error("sync boom");
+  }) as SpecialistRequestFn;
+  const failed = await runDerivedObligationsPass({
+    title: "t", body: "b", files: [], diff: "+x",
+    diffComplete: true,
+    model: { config: modelConfig, requestFn: syncThrow },
+  });
+  assert.equal(failed.status, "error");
+  assert.equal(failed.inputComplete, false);
+});
+
 // ── rendering ───────────────────────────────────────────────────────────
 
 function obligation(overrides: Partial<DerivedObligation> = {}): DerivedObligation {
@@ -287,6 +341,18 @@ test("#1448: renderDerivedSection drops whole obligations under a byte cap with 
   assert.match(capped, /… 1 obligation\(s\) omitted \(byte cap\)/);
   // The kept obligations are rendered whole, not truncated mid-line.
   assert.ok(capped.includes("obligation 2 " + "e".repeat(300)));
+});
+
+test("#1448 review: a static incomplete-input footer participates in the byte cap", () => {
+  const artifact = normalizeDerivedPayload({
+    obligations: Array.from({ length: 4 }, (_, i) => ({ obligation: `obligation ${i} ` + "e".repeat(300) })),
+  });
+  const footer = "… derivation input was incomplete (reason: input-clipped); obligations may be missing\n";
+  const section = renderDerivedSection(artifact, 2400, footer);
+  assert.ok(section.includes(footer), "the incompleteness footer must survive the cap");
+  assert.ok(Buffer.byteLength(section, "utf8") <= 2400);
+  // A complete input (no footer) renders without the incompleteness language.
+  assert.ok(!renderDerivedSection(artifact, 2400).includes("incomplete"));
 });
 
 test("#1448: renderDerivedSection is fence-safe against hostile obligation content", () => {
@@ -476,16 +542,34 @@ const artifactWith = (n: number) => ({
 });
 
 test("#1448 review: status→section mapping keeps every outcome visible or intentionally silent", () => {
-  const ok = renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: artifactWith(1) });
+  const ok = renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: artifactWith(1), inputComplete: true });
   assert.match(ok, new RegExp(`# ${DERIVED_TITLE}`));
   assert.ok(!ok.includes("did not complete"));
+  assert.ok(!ok.includes("incomplete"), "a complete input must not carry incompleteness language");
   // ok but the cap drops every obligation → the note, never silence.
-  const capped = renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: artifactWith(1) }, 40);
+  const capped = renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: artifactWith(1), inputComplete: true }, 40);
   assert.match(capped, /did not complete for this run \(reason: section-cap\)/);
-  assert.match(renderDerivedSectionForStatus({ status: "error", errorKind: "malformed", artifact: artifactWith(0) }), /reason: malformed/);
-  assert.match(renderDerivedSectionForStatus({ status: "timeout", errorKind: null, artifact: artifactWith(0) }), /reason: timeout/);
-  assert.equal(renderDerivedSectionForStatus({ status: "empty", errorKind: null, artifact: artifactWith(0) }), "");
-  assert.equal(renderDerivedSectionForStatus({ status: "skipped", errorKind: null, artifact: artifactWith(0) }), "");
+  assert.match(renderDerivedSectionForStatus({ status: "error", errorKind: "malformed", artifact: artifactWith(0), inputComplete: false }), /reason: malformed/);
+  assert.match(renderDerivedSectionForStatus({ status: "timeout", errorKind: null, artifact: artifactWith(0), inputComplete: false }), /reason: timeout/);
+  // An `empty` that saw the whole diff stays intentionally silent.
+  assert.equal(renderDerivedSectionForStatus({ status: "empty", errorKind: null, artifact: artifactWith(0), inputComplete: true }), "");
+  // An `empty` over an incomplete input is coverage-unavailable, never a
+  // clean "no obligations" (#1448 review: truncated-diff blinding).
+  assert.match(
+    renderDerivedSectionForStatus({ status: "empty", errorKind: null, artifact: artifactWith(0), inputComplete: false, diffClipped: true }),
+    /did not complete for this run \(reason: input-clipped\)/,
+  );
+  assert.match(
+    renderDerivedSectionForStatus({ status: "empty", errorKind: null, artifact: artifactWith(0), inputComplete: false }),
+    /did not complete for this run \(reason: input-truncated\)/,
+  );
+  // `ok` over an incomplete input keeps its obligations but carries the
+  // visible footer saying they may be missing.
+  const clippedOk = renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: artifactWith(1), inputComplete: false, diffClipped: true });
+  assert.match(clippedOk, new RegExp(`# ${DERIVED_TITLE}`));
+  assert.match(clippedOk, /Obligation 1 /);
+  assert.match(clippedOk, /… derivation input was incomplete \(reason: input-clipped\); obligations may be missing/);
+  assert.equal(renderDerivedSectionForStatus({ status: "skipped", errorKind: null, artifact: artifactWith(0), inputComplete: false }), "");
 });
 
 // ── hostile changed-file names ──────────────────────────────────────────
