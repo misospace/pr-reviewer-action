@@ -45,10 +45,7 @@ no leading zero, fail-closed to `""` — and never trusts its caller, so
 the poller supplies the same `installationId` the webhook carried) and
 the two differ only in `source` (`webhook` vs `poll`) and `kind` — the
 property the webhook/poll dedupe below relies on. `actor` is NOT an
-identity field and may differ between the two observations. The one
-identity field an event never carries is `forgeIntegration`: it is operator
-infrastructure, so the poll receives it from the daemon (`#1444`, below)
-and stamps it through its build options.
+identity field and may differ between the two observations.
 
 ## ReviewJob shape
 
@@ -231,48 +228,45 @@ wires the same fields into both. An UNBOUND daemon stamps nothing; an
 operator serving several installations of one platform supplies the
 identity through its own `resolveEventIdentity` resolver.
 
-**The reconciliation poll (#1444, #1446).** The poll mints its OWN
-generations, so intake stamping cannot reach them, and stamping afterwards
-would leave the job id inconsistent with its identity fields — splitting one
-event's dedupe key in two. The canonical shape is therefore the
-daemon-composed poll: `reconcile.poll` binds only the lister, the
-repositories, and the pass's OTHER build options, and the daemon inserts its
-own `forgeIntegration` — the SAME value the intake stamps (`""` when it
-serves no named integration) — into the `buildOptions` it hands
-`reconcileRepositories`, before `buildReviewJob()` hashes the generation.
-There is then no operator callback between the daemon and the mint site that
-could drop the identity. An operator that composes its own pass
-(`reconcile.run`, the only shape before #1446) is handed a
-`ReconcilePassIdentity` and must stamp it into the `buildOptions` it gives
-`reconcileRepositories`. That is what makes a reconciled head converge with
-the webhook delivery of that head instead of minting a second generation
-against another installation, and it is why the value is handed over rather
-than re-derived from a private copy of the instance config. A bound daemon's
-name always wins over a `buildOptions.forgeIntegration` the operator put
-there; an unbound daemon keeps what the operator supplied, which is how a
-single-installation or per-repository deployment names its installation —
-and, exactly like the intake's own resolver, that operator-supplied name is
-validated when the endpoint is resolved, not at startup.
+**The reconciliation poll’s jobs.** The poll mints its OWN generations,
+so the daemon hands it the identity through the RECONCILE CONTEXT
+(`ReconcileContext`): the daemon’s ledger, the PER-REPOSITORY identity
+resolver (`resolveBuildOptions`), and the queue handoff
+(`context.enqueueJob`). The resolver runs the daemon’s OWN intake
+resolution for the repository — the per-repository config fingerprint
+and adoption epoch, plus the bound forge-integration name — so the poll
+and the intake agree on every identity field the resolver contributes: a
+webhook delivery and a poll of one head collapse into one review. The
+poll’s installation id stays the operator’s own declaration and must
+match the webhook’s, as the poll always required. A STATIC options
+object could not do that: the fingerprint is per-repository, so a poll
+minting from one static value would mint a second generation of the
+same head and buy a second review of it. A resolver that answers `null`
+means the intake mints nothing for that repository (the adoption policy
+refuses it), so the poll mints nothing either — the entry is skipped,
+with no job and no reservation. A poll that ignores the context and
+mints an identity-less job is REFUSED at the enqueue seam on a bound
+daemon, before the queue is mutated: the refusal names the rule and the
+bound identity, the poll’s report records that reason (bounded: control
+characters stripped, capped at 128 characters), and the head is
+re-discovered on the next pass — a refused handoff releases the durable
+reservation before the failure propagates. An unbound daemon keeps the
+permissive behavior: the operator’s own build options decide.
 
-An identity-less job is a coordinate only while exactly one integration of
-its kind exists, so the daemon's `enqueue` handoff refuses one BEFORE any
-queue mutation: always, when the daemon is BOUND to a named integration
-(#1446 — that daemon stamps its name on everything the intake mints, so an
-identity-less handoff came from outside it and would hash to a SECOND
-generation for a head the webhook already claimed), and whenever several
-integrations share the kind, so an unbound daemon never guesses an endpoint
-either. The refusal names what is missing and the remedy for that daemon
-(stamp the identity the pass received or was handed, or bind one), and never
-echoes a job-supplied value. The request builder
-keeps its own refusal as the authority for a record that never passed the
-handoff — a queue snapshot persisted before the deployment gained the
-second integration — so for any job the builder or the queue's rehydration
-produced (both always carry the field, `""` when no integration is named)
-the two fences refuse the SAME job and differ only in how early they say
-it. The INTAKE keeps the request-build refusal
-(#1440, unchanged): there is no pass there to hand an identity to, and a
-delivery already carries its own visible record — the failed run naming the
-identity problem — for the operator to act on.
+**`reconcile.poll` binds that composition in the daemon (#1446).** A
+schedule with an operator callback can still be mis-wired: the pass is told
+to resolve through the context, and a pass that mints from its own options
+instead gets the handoff's refusal rather than a divergent generation.
+`reconcile.poll` removes the callback. The daemon runs
+`reconcileRepositories` itself against the context above and takes only the
+lister, the polled repositories, and the optional listing installation id
+from the operator, so the identity is in the build options before
+`buildReviewJob()` hashes the generation with no operator code in between.
+The schedule binds exactly one of `poll` or `run` (neither is a poll that
+polls nothing, both is two owners of one head's mint site), and a `poll`
+must name its platform itself when there is no `webhook.platform` to
+inherit — a generation that cannot name the forge it was polled against
+converges with nothing.
 
 **How the endpoint is resolved.** Identity first: a job naming an
 integration resolves to that integration's `forgeApiUrl` (a non-secret
@@ -282,13 +276,8 @@ integration of that kind exists; zero keeps the GitHub default and more
 than one is ambiguous and refused. A named integration whose kind
 disagrees with the job's platform is refused, and so is an AMBIGUOUS
 name (several configured integrations sharing one name) — resolution
-never takes the first of several. Every refusal is a `RangeError`. At the
-handoff it propagates to whoever holds the `enqueue` call — a pass that
-wraps its handoff sees the reason, while `reconcileRepositories` reports a
-refused handoff as a skipped head (its own contract), so an operator who
-wants the reason inside the poll report catches it where they bind
-`enqueueJob`. At request build the scheduler turns it into a failed
-outcome. Either way the job never reaches a worker.
+never takes the first of several. Every refusal is a `RangeError` the
+scheduler turns into a failed outcome: the job never reaches a worker.
 
 **Startup screening.** The daemon refuses to start when the bound name
 names no integration or more than one, when the named integration's

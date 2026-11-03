@@ -45,8 +45,11 @@ export interface GenerationIdentity {
 /** Fixed serialization order of the identity fields. The order is part of
  * the id contract: changing it re-keys every job. Appending
  * `adoptionEpoch`/`eventReference`/`forgeIntegration` after `nonce` does
- * exactly that — acceptable while the module has no production callers
- * yet. */
+ * exactly that — and that is the POINT of an identity field: two
+ * generations of the same head that differ in it MUST be separable
+ * generations. The cost of the re-key is one fresh review per open pull
+ * request across the change, never a lost one (the durable queue
+ * rehydrates a pre-field snapshot with the field's sentinel value). */
 const IDENTITY_FIELDS = [
   "platform",
   "installationId",

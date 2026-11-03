@@ -37,6 +37,6 @@ export {
   type ControllerForgeCapability,
   type EventIdentityResolver,
   type ExecutorBindings,
-  type ReconcilePassIdentity,
+  type ReconcileContext,
   type ReconcilePollBinding,
 } from "./daemon.js";

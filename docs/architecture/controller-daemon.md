@@ -136,35 +136,43 @@ a forge-specific CLI.
   same head, and the two would never converge). The daemon refuses to
   start when the poll’s declared platform disagrees with the intake’s
   (fail closed), and the poll’s queue handoff goes through the
-  daemon’s `enqueue`, which releases the durable reservation when the
-  queue refuses the job — so a refused handoff is re-discovered on the
-  next pass instead of staying suppressed.
-- **The poll mints with the daemon’s forge-integration identity (#1444,
-  #1446).** A reconciliation pass mints its own generations, so the intake’s
-  identity stamping (#1440) cannot reach them, and stamping afterwards would
-  leave the job id inconsistent with its identity fields. `reconcile.poll` is
-  the canonical shape: the daemon composes `reconcileRepositories` itself,
-  with its own ledger and queue handoff, and puts its `forgeIntegration`
-  (the value it stamps on intake, `""` when it serves no named integration)
-  into the pass’s build options BEFORE `buildReviewJob()` hashes the
-  generation — there is no callback between the daemon and the mint site that
-  could drop it. One source, so a reconciled head and the webhook delivery of
-  that head land on the same installation and in the same generation. An
-  UNBOUND daemon forwards the name its operator put in the pass’s build
-  options exactly as the intake forwards its resolver’s — startup screens
-  neither, and the resolution rules refuse an unresolvable or cross-kind
-  name at request build.
-  `reconcile.run` (an operator’s own pass, the only shape before #1446) is
-  handed the same `ReconcilePassIdentity` and must stamp it, because
-  `enqueue` refuses a job that does not: ALWAYS on a daemon bound to a named
-  integration — such a job could only have come from outside the intake and
-  would hash to a second generation for one head — and whenever several
-  integrations share the job’s kind, so an unbound daemon never guesses an
-  endpoint either. Both refusals come before any queue mutation and name the
-  remedy; the request builder keeps its own refusal for a record that never
-  passed the handoff (a rehydrated snapshot).
-  `reconcile` binds exactly one of the two, and `poll` refuses construction
-  when neither it nor the intake declares the platform it mints with.
+  `context.enqueueJob` handoff the daemon hands it — which resolves
+  `true` when the daemon accepted the job and REJECTS with the refusal
+  reason when it refused it, and which releases the durable reservation
+  on a refusal, so a refused handoff is re-discovered on the next pass
+  instead of staying suppressed.
+- **The poll mints the same generation the intake mints.** The daemon
+  hands the poll its `ReconcileContext`: the ledger it must dedupe
+  against, the PER-REPOSITORY identity resolver (`resolveBuildOptions`),
+  and the queue handoff. The resolver runs the daemon’s OWN intake
+  resolution for the repository — the per-repository config fingerprint
+  and adoption epoch, plus the daemon’s bound forge-integration identity
+  — so the poll and the intake agree on every identity field the
+  resolver contributes. The poll’s installation id stays the
+  operator’s own declaration and must match the webhook’s, as the poll
+  always required. A static options object could not do that: the
+  fingerprint is per-repository, so a poll minting from one static value
+  would mint a SECOND generation of the same head and buy a second
+  review. A resolver that answers `null` means the intake mints nothing
+  for that repository (the adoption policy refuses it), so the poll mints
+  nothing either — the entry is skipped, with no job and no reservation.
+  A bound daemon REFUSES an identity-less job at the enqueue seam,
+  before the queue is mutated, and the refusal’s reason (bounded:
+  control characters stripped, capped at 128 characters) reaches the
+  operator through the poll’s report. A refused handoff releases the
+  durable reservation BEFORE the failure propagates, so the head is
+  re-discovered instead of staying suppressed for the claim’s horizon.
+- **`reconcile.poll` binds that composition in the daemon (#1446).** The
+  schedule takes exactly one pass: `poll` (the lister, the repositories, and
+  the optional listing installation id) or `run` (the operator’s own pass).
+  With `poll` the daemon calls `reconcileRepositories` itself against the
+  context above, so there is no callback between the daemon and the mint
+  site that could drop the identity, use a private copy of the instance
+  config, or hand the job to another installation — the invariant is
+  un-ignorable rather than merely available. Construction refuses a schedule
+  binding both or neither, and a `poll` with no platform of its own when
+  there is no `webhook.platform` to inherit: generations that cannot name
+  the forge they were polled against converge with nothing.
 
 ## Testing posture
 
