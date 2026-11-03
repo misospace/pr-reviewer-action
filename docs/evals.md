@@ -882,3 +882,18 @@ on the declared inherited MiniMax arm; the #1286 same-model 32/32
 no gate-calibration claim, #1075 stays blocked). Plan, results, and the
 owning report: `evals/confidence-canary/plan.json`,
 `evals/reports/confidence-canary/README.md`.
+
+## Verifier advisory dogfood evidence (#1452)
+
+Ordinary live dogfood telemetry for the merge-safety verifier, collected from
+the repository's own published reviews and adjudicated per #1452's classes.
+Owning report and the bounded per-run evidence file:
+`evals/reports/confidence-dogfood/README.md`,
+`evals/reports/confidence-dogfood/evidence-2026-11-03.json`. Headline
+(2026-10-20 → 2026-11-03, 419 enabled runs / 166 PRs): 1 scored run, 418
+unscored (99.76%; only 2 published causes, both `http_403`), 0 live catches,
+0 false challenges, no usable result on any adjudicated known-miss PR.
+Recommendation recorded 2026-11-03: **remain advisory — do not proceed to
+gate design (#1075 stays blocked); do not remove from the critical path**,
+with re-evaluation conditions in the owning report. Ongoing per-run
+collection is `scripts/confidence_dogfood_evidence.py` (PR #1454).
