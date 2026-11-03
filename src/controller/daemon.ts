@@ -97,7 +97,7 @@ import type { JobRecord } from "../queue/types.js";
 import type { BuildJobOptions, ReviewJob } from "../jobs/types.js";
 import { FORGE_INTEGRATION_PATTERN } from "../jobs/generation.js";
 import { dispatchCanonicalEvent, type GenerationLedger } from "../ingress/dispatch.js";
-import { reconcileRepositories } from "../ingress/reconcile.js";
+import { reconcileRepositories, type ReconcileReport } from "../ingress/reconcile.js";
 import type { ReadResult } from "../ingress/api-client.js";
 import type { MirrorCache } from "../acquisition/index.js";
 import {
@@ -219,9 +219,28 @@ export interface ReconcilePollBinding {
    * never reserves a generation (#1025). */
   readonly repos: readonly string[];
   /** The installation the lister spoke to, when the platform carries one.
-   * It is a LISTING coordinate only: the identity a generation is minted
-   * with comes from the daemon's context, never from here. */
+   * It is a minted identity field, not just a listing coordinate: it is
+   * hashed into the generation id, so it MUST be the same installation the
+   * daemon's intake normalizes its deliveries to — a poll that names another
+   * one mints a second generation of the head the webhook already claimed.
+   * The daemon cannot read the forge's installation id off a delivery, so it
+   * cannot check this for you. */
   readonly installationId?: string | undefined;
+  /** What the daemon does with every pass's report (#1446).
+   *
+   * The composed pass has no operator holding its return value, so WITHOUT
+   * this a permanently broken poll — a lister that fails every tick, a
+   * handoff that refuses — is indistinguishable from a quiet forge. The
+   * daemon hands over the WHOLE report (`discovered`, `skipped`,
+   * `refusals` with the reason each handoff gave, `failedRepositories`) and
+   * decides nothing from it: logging, metrics, and alerting stay the
+   * operator's. Absent → the pass still runs and its refusals still release
+   * their reservations; the operator has simply chosen to see nothing.
+   *
+   * Called once per pass, after the pass settled; a throwing callback is
+   * swallowed, because a broken logger must never stop the reconciliation
+   * schedule. */
+  onReport?(report: ReconcileReport): void | Promise<void>;
 }
 
 export interface ControllerDaemonOptions {
@@ -314,9 +333,12 @@ export interface ControllerDaemonOptions {
      * refusal reason when it refused it). The daemon hands the pass its
      * context — the ledger, the PER-EVENT identity resolver (so the poll
      * mints the SAME generation the daemon's own intake mints, on every
-     * identity field), and the queue handoff. A pass that mints from its own
-     * options instead is refused by the handoff, never silently diverged;
-     * prefer `poll`, where the wiring cannot be mis-stated. */
+     * identity field), and the queue handoff. On a BOUND daemon a pass that
+     * mints from its own options instead is refused by the handoff, never
+     * silently diverged; an UNBOUND daemon keeps its permissive contract (the
+     * operator's own build options decide), so there the two mint sites are
+     * the operator's to keep in step. Prefer `poll`, where the wiring cannot
+     * be mis-stated. */
     run?(context: ReconcileContext): Promise<void>;
   };
   /** The forge webhook ingress binding. The intake is PLATFORM-AWARE: the
@@ -1778,26 +1800,43 @@ export async function startControllerDaemon(
       // in the build options before `buildReviewJob` hashes the generation,
       // and there is no operator callback that could drop it.
       const poll = options.reconcile!.poll;
-      const pass =
-        poll !== undefined
-          ? reconcileRepositories({
-              platform: reconcilePollPlatform!,
-              listOpenPullRequests: poll.listOpenPullRequests,
-              repos: poll.repos,
-              ...(poll.installationId !== undefined
-                ? { installationId: poll.installationId }
-                : {}),
-              ledger: reconcileContext.ledger,
-              resolveBuildOptions: reconcileContext.resolveBuildOptions,
-              // A refusal REJECTS, and `reconcileRepositories` releases the
-              // reservation over it (idempotent — the handoff already
-              // released it) and reports the reason, so the head is
-              // re-discovered on the next pass instead of staying
-              // suppressed until the claim's horizon expires.
-              enqueueJob: reconcileContext.enqueueJob,
-            })
-          : options.reconcile!.run!(reconcileContext);
-      void Promise.resolve(pass).catch(() => undefined);
+      if (poll !== undefined) {
+        // The canonical composition (#1446): the daemon runs the SAME pass an
+        // operator would bind, against its own context, so the per-event
+        // identity (bound integration, config fingerprint, adoption epoch) is
+        // in the build options before `buildReviewJob` hashes the generation,
+        // and there is no operator callback that could drop it.
+        void reconcileRepositories({
+          platform: reconcilePollPlatform!,
+          listOpenPullRequests: poll.listOpenPullRequests,
+          repos: poll.repos,
+          ...(poll.installationId !== undefined ? { installationId: poll.installationId } : {}),
+          ledger: reconcileContext.ledger,
+          resolveBuildOptions: reconcileContext.resolveBuildOptions,
+          // A refusal REJECTS, and `reconcileRepositories` releases the
+          // reservation over it (idempotent — the handoff already released
+          // it) and records the reason, so the head is re-discovered on the
+          // next pass instead of staying suppressed until the claim's
+          // horizon expires.
+          enqueueJob: reconcileContext.enqueueJob,
+        })
+          .then((report) => {
+            // The pass has no operator holding its return value: the report
+            // is the ONLY way a broken poll becomes visible, so it goes to
+            // whoever bound `onReport`. A callback that throws must not stop
+            // the schedule — the next tick reconciles again either way.
+            try {
+              const reported = poll.onReport?.(report);
+              if (reported !== undefined) void Promise.resolve(reported).catch(() => undefined);
+            } catch {
+              // observability only: never fatal, and never a reason to skip
+              // the next pass.
+            }
+          })
+          .catch(() => undefined);
+        return;
+      }
+      void options.reconcile!.run!(reconcileContext).catch(() => undefined);
     }, interval);
   }
 

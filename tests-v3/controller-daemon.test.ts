@@ -2778,3 +2778,65 @@ test("reconcile binds exactly one pass, and poll names the platform it mints wit
     for (const dir of Object.values(dirs)) rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("the daemon-composed poll hands its report to the operator (#1446)", async (t) => {
+  // The composed pass has NO operator holding its return value, so a broken
+  // poll would otherwise look exactly like a quiet forge. The report is the
+  // only channel that makes "every tick failed" distinguishable from
+  // "nothing to review", and reading it must never be able to stop the
+  // schedule.
+  const reports: ReconcileReport[] = [];
+  let healthy = false;
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        forges: [
+          { name: "fj-bound", kind: "forgejo", endpoint: "https://forge-b.example/api/v1", credential: "fj-b" },
+        ],
+      } as InstanceConfig,
+      forgeIntegration: "fj-bound",
+      queueStore: store,
+      reconcile: {
+        intervalMs: 50,
+        platform: "forgejo",
+        poll: {
+          repos: ["owner/repo"],
+          installationId: "12345",
+          listOpenPullRequests: async () =>
+            healthy
+              ? { ok: true, data: [forgejoPrPayload()] }
+              : { ok: false, error: "the forge is not answering" },
+          onReport: (report) => {
+            reports.push(report);
+            // A reporter that blows up is observability failing, not the
+            // reconciliation schedule failing.
+            if (reports.length === 1) throw new Error("the logger is down");
+          },
+        },
+      },
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  await waitFor(() => reports.length > 0);
+  assert.deepEqual(
+    [...reports[0]!.failedRepositories],
+    ["owner/repo"],
+    "the failing repository is reported, not swallowed",
+  );
+  assert.equal(reports[0]!.discovered, 0);
+  // The throwing reporter did not stop the schedule: the next healthy pass
+  // still reconciles the head and the daemon still mints it.
+  healthy = true;
+  await waitFor(() => reports.length >= 2);
+  const last = reports[reports.length - 1]!;
+  assert.equal(last.discovered, 1, "the schedule kept ticking");
+  assert.equal(last.jobs.length, 1, "the head was scheduled once the forge answered");
+  assert.deepEqual([...last.refusals], [], "the composed handoff was not refused");
+  await waitFor(() => store.load().records.length > 0);
+  assert.equal(store.load().records[0]!.job.forgeIntegration, "fj-bound");
+});

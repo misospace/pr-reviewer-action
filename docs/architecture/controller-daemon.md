@@ -169,7 +169,13 @@ a forge-specific CLI.
   context above, so there is no callback between the daemon and the mint
   site that could drop the identity, use a private copy of the instance
   config, or hand the job to another installation — the invariant is
-  un-ignorable rather than merely available. Construction refuses a schedule
+  un-ignorable rather than merely available. `poll.onReport` is the pass’s
+  only audience: the composed pass has no operator holding its return value,
+  so without it a lister that fails every tick looks exactly like a quiet
+  forge. The daemon hands over the whole report (counts, per-repository
+  failures, and each refused handoff with its reason) and decides nothing
+  from it; a reporter that throws cannot stop the schedule. Construction
+  refuses a schedule
   binding both or neither, and a `poll` with no platform of its own when
   there is no `webhook.platform` to inherit: generations that cannot name
   the forge they were polled against converge with nothing.

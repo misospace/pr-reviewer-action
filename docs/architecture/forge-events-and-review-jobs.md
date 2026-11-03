@@ -262,6 +262,10 @@ instead gets the handoff's refusal rather than a divergent generation.
 lister, the polled repositories, and the optional listing installation id
 from the operator, so the identity is in the build options before
 `buildReviewJob()` hashes the generation with no operator code in between.
+That optional id is still a MINTED identity field, not a listing detail: it
+is hashed into the generation id, so it must be the installation the intake
+normalizes its deliveries to — the daemon cannot read a delivery's
+installation id and check it for you.
 The schedule binds exactly one of `poll` or `run` (neither is a poll that
 polls nothing, both is two owners of one head's mint site), and a `poll`
 must name its platform itself when there is no `webhook.platform` to
