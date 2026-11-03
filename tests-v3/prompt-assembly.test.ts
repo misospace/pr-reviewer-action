@@ -235,6 +235,22 @@ test("publicAnalysisEngine strips the base URL but keeps model, format, and rout
   assert.equal(publicAnalysisEngine(MODEL_UNAVAILABLE_ENGINE), MODEL_UNAVAILABLE_ENGINE);
 });
 
+test("publicAnalysisEngine keeps a model identifier that carries an `@` (#1469)", () => {
+  const cases: Array<[string, string]> = [
+    ["claude-sonnet-4@20250514@https://api.example.com (anthropic)", "claude-sonnet-4@20250514 (anthropic)"],
+    [
+      annotateAnalysisEngine(analysisEngineBase("m@20250514", "https://api.example.com", "openai"), "fallback"),
+      "m@20250514 (openai) — fallback (primary failed)",
+    ],
+  ];
+  for (const [engine, expected] of cases) {
+    assert.equal(publicAnalysisEngine(engine), expected);
+  }
+  // The redacted URL never carries an `@` (#1428), so the last `@` in the
+  // leading token is the separator even when the model holds one too.
+  assert.equal(publicAnalysisEngine(analysisEngineBase("m@20250514", "https://user:secret@llm.example.net/v1", "openai")), "m@20250514 (openai)");
+});
+
 test("analysisEngineBase redacts a credential the base URL carries in its userinfo (#1428)", () => {
   assert.equal(analysisEngineBase("m", "https://user:secret@llm.example.net/v1", "openai"), "m@https://llm.example.net/v1 (openai)");
   assert.equal(analysisEngineBase("m", "https://llm.example.net/v1", "openai"), "m@https://llm.example.net/v1 (openai)");
