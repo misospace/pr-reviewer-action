@@ -1,0 +1,88 @@
+name: Charts
+
+# Structural gates for the #738 self-hosted packaging: the Helm chart in
+# deploy/charts/pr-reviewer renders, lints, and its rendered output is
+# kubeconform-clean for both example postures. dist/ is never committed,
+# so this job builds nothing — it validates the chart contract only.
+on:
+  pull_request:
+    paths:
+      - "deploy/**"
+      - ".github/workflows/charts.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-charts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+
+      - name: Build chart dependencies
+        # Chart.lock and vendored charts/ are deliberately not committed
+        # (see the chart README); CI resolves the pinned dependency.
+        run: helm dependency build deploy/charts/pr-reviewer
+
+      - name: Lint (controller-only example)
+        run: helm lint deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml
+
+      - name: Lint (kubernetes-executor example)
+        run: helm lint deploy/charts/pr-reviewer -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml
+
+      - name: Render (controller-only example)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            > /var/tmp/render-controller-only.yaml
+          # Structural assertions: the hardened defaults must actually render.
+          grep -q "kind: Deployment" /var/tmp/render-controller-only.yaml
+          grep -q "runAsNonRoot: true" /var/tmp/render-controller-only.yaml
+          grep -q "readOnlyRootFilesystem: true" /var/tmp/render-controller-only.yaml
+          grep -q "drop:" /var/tmp/render-controller-only.yaml
+          grep -q -- "- ALL" /var/tmp/render-controller-only.yaml
+          grep -q "type: RuntimeDefault" /var/tmp/render-controller-only.yaml
+          grep -q "automountServiceAccountToken: false" /var/tmp/render-controller-only.yaml
+          grep -q "kind: NetworkPolicy" /var/tmp/render-controller-only.yaml
+
+      - name: Render (kubernetes-executor example)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-kubernetes-executor.yaml \
+            > /var/tmp/render-kubernetes-executor.yaml
+          # Worker-executor provisioning: namespace-scoped RBAC over jobs
+          # ONLY (no cluster roles), the worker SA, and the shared claims.
+          grep -q "kind: Role$" /var/tmp/render-kubernetes-executor.yaml
+          if grep -q "kind: ClusterRole" /var/tmp/render-kubernetes-executor.yaml; then
+            echo "forbidden kind: ClusterRole found in rendered output" >&2
+            exit 1
+          fi
+          grep -q 'resources: \["jobs"\]' /var/tmp/render-kubernetes-executor.yaml
+          grep -q "verbs: \[\"create\", \"get\", \"list\", \"delete\"\]" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "automountServiceAccountToken: false" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: PersistentVolumeClaim" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "app.kubernetes.io/managed-by: pr-reviewer-action" /var/tmp/render-kubernetes-executor.yaml
+          grep -q "kind: NetworkPolicy" /var/tmp/render-kubernetes-executor.yaml
+
+      - name: kubeconform rendered output
+        # kubeconform ships no maintained GitHub action; run the pinned
+        # release binary with its CHECKSUMS-verified tarball instead.
+        run: |
+          set -euo pipefail
+          version=v0.8.0
+          checksum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+          cd "$(mktemp -d)"
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          echo "${checksum}  kubeconform.tar.gz" | sha256sum --check --strict
+          tar -xzf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-controller-only.yaml
+          ./kubeconform -strict -skip ServiceMonitor \
+            -summary /var/tmp/render-kubernetes-executor.yaml

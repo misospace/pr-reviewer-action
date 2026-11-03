@@ -8,7 +8,10 @@
  * builds on), the #734 Kubernetes executor (`./kubernetes.js` — one
  * ephemeral Job/Pod per execution over an injected API seam), and the
  * queue-seam adapter (`./queue.js`) that rides the
- * rich `Executor` contract inside the queue's `JobExecutor` seam.
+ * rich `Executor` contract inside the queue's `JobExecutor` seam, and the
+ * production worker entrypoint (`./worker-main.js`) — the process the
+ * envelope protocol launches, wired as the `worker` subcommand of the
+ * runtime bundle.
  * Operator-mode library (like `src/queue/` and `src/acquisition/`): the
  * future controller daemon (#736) imports it — NOT wired into the Action
  * runtime, `action.yml` and the action pipeline are untouched.
@@ -63,6 +66,9 @@ export type {
   ConformanceScenario,
   ConformanceTest,
 } from "./conformance.js";
+
+export { workerMain } from "./worker-main.js";
+export type { WorkerEngineOutcome, WorkerMainDeps } from "./worker-main.js";
 
 export {
   WORKER_IMAGE_CONTRACT_VERSION,

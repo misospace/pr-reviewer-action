@@ -560,7 +560,15 @@ fail-closed, so an unlistable cluster refuses the launch.
   ownerReference; until that binding lands, the store's own TTL/sweeper —
   bounded by `expiresAtMs` — is the material's bound. That is a named
   SEAM obligation (like the operator-applied NetworkPolicy), not an
-  executor guarantee.
+  executor guarantee. The shipped implementation of that obligation is
+  `InClusterCredentialStore` (`src/executor/kubernetes-credential-store.ts`):
+  it records the owning Job's name and the run deadline on the Secret as the
+  annotations `pr-reviewer.io/owner-job` and
+  `pr-reviewer.io/credential-expires-at-ms`, patches the `ownerReference` on
+  once the Job exists, and sweeps its OWN `prv-cred-`-named material past
+  that bound (an unbounded-lifetime Secret of that shape is removed too). The
+  annotations are what make the bound survive a controller restart, because
+  the registry of pending bindings is in-process.
 - **Material is re-resolved per attempt (rotation).** Every attempt
   resolves its references FRESH and projects them with create-or-replace,
   so a rotated credential never rides an older run's Secret: the attempt's

@@ -2504,3 +2504,27 @@ test("a recovered cancellation in an unlistable cluster fails closed when no wor
   rmSync(fixture.root, { recursive: true, force: true });
   rmSync(second.root, { recursive: true, force: true });
 });
+
+test("the file-access suppressions stay standalone directly above their sinks", () => {
+  // CodeQL only recognizes a `codeql[...]` comment that starts its line,
+  // and it covers exactly the FOLLOWING line; a trailing comment or one
+  // placed above the enclosing statement suppresses nothing. Pin the
+  // placement so the in-source justification cannot silently decay.
+  const lines = readFileSync("src/executor/kubernetes-api.ts", "utf8").split("\n");
+  const suppressions = lines
+    .map((line, i) => ({ line, next: lines[i + 1] ?? "" }))
+    .filter(({ line }) => line.includes("codeql[js/"));
+  assert.equal(suppressions.length, 2, "the two intended js/file-access-to-http sinks");
+  for (const { line, next } of suppressions) {
+    assert.match(
+      line,
+      /^\s*\/\/ codeql\[js\/file-access-to-http\]/,
+      "a suppression comment must start its line: CodeQL ignores trailing comments",
+    );
+    assert.match(
+      next,
+      /https?Request\(options\)/,
+      "the suppression must sit directly above the request call it silences",
+    );
+  }
+});
