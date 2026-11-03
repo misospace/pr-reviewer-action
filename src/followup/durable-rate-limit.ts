@@ -162,6 +162,7 @@ import {
 import { randomUUID, createHash } from "node:crypto";
 import { dirname } from "node:path";
 import { MAX_RATE_LIMIT_KEYS, type RateLimitScope, type RateLimitStore } from "./rate-limit.js";
+import { isPlainObject } from "../platform/object.js";
 
 /** The count returned when the budget cannot be proven: `consumeFollowUpBudget`
  * denies once the count reaches the scope's limit, so any count at or above
@@ -197,12 +198,6 @@ const KEY_PATTERN = /^[A-Za-z0-9:._/#-]{1,256}$/;
 
 const SNAPSHOT_KEYS: readonly string[] = ["version", "scopes"];
 const SCOPE_KEYS: readonly string[] = ["key", "events"];
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-}
 
 function isNodeError(err: unknown): err is NodeJS.ErrnoException {
   return (

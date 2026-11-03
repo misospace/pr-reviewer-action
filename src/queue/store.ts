@@ -32,6 +32,7 @@ import { COMMENT_ID_PATTERN, INSTALLATION_ID_PATTERN } from "../events/normalize
 import type { ReviewJob, ReviewJobKind, ReviewTrigger } from "../jobs/types.js";
 import type { JobLifecycleState, JobRecord } from "./types.js";
 import { isActiveState, prIdentityKey } from "./types.js";
+import { isPlainObject } from "../platform/object.js";
 
 /** One durable snapshot: the whole queue as of a commit point. */
 export interface QueueSnapshot {
@@ -106,12 +107,6 @@ const CONFIG_FINGERPRINT_PATTERN = /^[0-9a-f]{8,64}$/;
 
 /** A nonce / adoption epoch: 1–64 chars of `[A-Za-z0-9._-]`. */
 const TOKEN_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;

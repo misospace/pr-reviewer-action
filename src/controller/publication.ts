@@ -73,6 +73,7 @@ import {
   executionRunDir,
 } from "./execution.js";
 import { mirrorRunTransition } from "./run-lifecycle.js";
+import { isPlainObject } from "../platform/object.js";
 
 /** The forge write seam the daemon binds from the platform capability.
  * The payload is the durable canonical JSON the record persisted; the
@@ -104,12 +105,6 @@ export interface DurablePublisherDeps {
 type RawUsageEntry = Record<string, unknown>;
 
 const USAGE_ROLES: readonly string[] = ["primary", "specialist", "tool", "evidence", "judge"];
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-}
 
 function isSafeNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;

@@ -61,6 +61,7 @@ import type { IdentityResolution, TrustedOwnerIdentity } from "../platform/owner
 import { normalizeForgeEvent } from "../events/normalize.js";
 import { authorityReadingFromPayload, type AuthorityReading } from "../precheck/comment-authority.js";
 import { derivePrStateReading, type PrStateReading } from "../platform/pr.js";
+import { isPlainObject } from "../platform/jq.js";
 import { lastManagedBody } from "../precheck/decide.js";
 import { resolveTierProfiles } from "../routing/tiers.js";
 import { CONVERSATION_COMMENTS_SNAPSHOT_CAP } from "../platform/normalize.js";
@@ -127,10 +128,6 @@ export interface ActionFollowUpDeps {
 export type ActionFollowUpResult =
   | { route: "follow-up"; outcome: FollowUpRunOutcome }
   | { route: "pipeline" };
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** The comment body the host already holds (the parsed webhook payload).
  * Action mode never injects a `readComment` dep: the body arrives on the

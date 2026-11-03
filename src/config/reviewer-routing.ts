@@ -34,6 +34,7 @@
 import { execFileSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import { RepositoryConfigError, verifyBaseRef } from "./repository-config.js";
+import { isPlainObject } from "../platform/jq.js";
 
 /** Candidate routing-config paths, in precedence order (mirrors the
  * repository config / requirement-owners file families). */
@@ -70,10 +71,6 @@ export const REVIEWER_ROUTING_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const REVIEWER_ROUTING_USER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 /** A GitHub team slug (lowercase hyphenated). */
 export const REVIEWER_ROUTING_TEAM = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** Read the routing config from a specific ref (the PR's trusted base ref) via
  * `git show <ref>:<path>`. Returns `undefined` only for genuine absence;

@@ -17,6 +17,7 @@
 import { redactText } from "../context/redact.js";
 import { redactSecretShapes } from "../context/secret-shape.js";
 import { MAX_MCP_FINDINGS_PER_REVIEW, MAX_MCP_MESSAGE_CHARS } from "./types.js";
+import { isPlainObject } from "../platform/object.js";
 
 /** One finding exactly as the payload named it, after validation. */
 export interface PayloadFinding {
@@ -53,12 +54,6 @@ function projectUntrustedText(value: unknown): string {
   const cleaned = boundedInput.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim();
   const redacted = redactText(redactSecretShapes(cleaned));
   return redacted.slice(0, MAX_MCP_MESSAGE_CHARS);
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
 }
 
 function isSafeNonNegativeInteger(value: unknown): value is number {
