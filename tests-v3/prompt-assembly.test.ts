@@ -238,6 +238,9 @@ test("publicAnalysisEngine strips the base URL but keeps model, format, and rout
 test("publicAnalysisEngine keeps a model identifier that carries an `@` (#1469)", () => {
   const cases: Array<[string, string]> = [
     ["claude-sonnet-4@20250514@https://api.example.com (anthropic)", "claude-sonnet-4@20250514 (anthropic)"],
+    // A `@<scheme-word>:` inside the model name is not the URL separator
+    // either — only a `scheme://` token opens the endpoint.
+    ["model@v1:tag@https://api.example.com (openai)", "model@v1:tag (openai)"],
     [
       annotateAnalysisEngine(analysisEngineBase("m@20250514", "https://api.example.com", "openai"), "fallback"),
       "m@20250514 (openai) — fallback (primary failed)",

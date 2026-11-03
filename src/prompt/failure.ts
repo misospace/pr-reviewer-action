@@ -90,15 +90,15 @@ export function analysisEngineBase(model: string, baseUrl: string, apiFormat: st
  * separator `@`, keeping the model, API format, and any
  * `annotateAnalysisEngine` route suffix (#832): the endpoint URL is operator
  * configuration, not review content, so it must not leak into a published
- * review body. The separator is the `@` whose token opens with a URL scheme
- * (or the #1428 fail-closed placeholder) — a model identifier may carry an
- * `@` of its own (#1469), so the strip cannot simply take the first or last
- * `@`; the endpoint URL always begins `scheme:` and runs to the first
+ * review body. The separator is the `@` whose token opens `scheme://` (or
+ * the #1428 fail-closed placeholder) — a model identifier may carry an `@`
+ * of its own (#1469), so the strip cannot simply take the first or last
+ * `@`; the endpoint URL always begins `scheme://` and runs to the first
  * whitespace, so a credentialed URL that reached this string unredacted
  * still disappears in full. Callers that need the full string for logs or
  * run artifacts keep using the raw engine value. */
 export function publicAnalysisEngine(engine: string): string {
-  const urlToken = /@(?:[A-Za-z][A-Za-z0-9+.-]*:|<redacted-endpoint-URL>)\S*/;
+  const urlToken = /@(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|<redacted-endpoint-URL>)\S*/;
   const match = urlToken.exec(engine);
   return match === null ? engine : `${engine.slice(0, match.index)}${engine.slice(match.index + match[0].length)}`;
 }
