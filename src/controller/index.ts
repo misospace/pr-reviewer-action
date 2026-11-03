@@ -40,3 +40,17 @@ export {
   type ReconcileContext,
   type ReconcilePollBinding,
 } from "./daemon.js";
+export {
+  controllerMain,
+  credentialEnvName,
+  StartupRefusal,
+  type ControllerMainDeps,
+  type ControllerMainHandle,
+} from "./main.js";
+export {
+  composeForgeCapability,
+  renderDurableResultBody,
+  CONTROLLER_STICKY_MARKER,
+  type ComposedForge,
+  type ForgeCompositionInput,
+} from "./forge-capability.js";
