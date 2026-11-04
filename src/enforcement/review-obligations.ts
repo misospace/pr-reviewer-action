@@ -33,20 +33,23 @@
  *   cannot be extracted from trusted prose: the rows are built by
  *   `src/enforcement/derived-obligations.ts` from the pre-pass artifact and
  *   carry the derivation's declared locations as `anchors`. A derived row is
- *   discharged only by evidence that NAMES one of those locations (#1449),
- *   and an unresolved derived row withholds approval exactly like the other
- *   review-owned rows — it is a coverage statement, never a defect claim.
+ *   discharged only by evidence that NAMES one of those locations (#1449).
+ *   An undischarged derived row is a COVERAGE statement, never a defect
+ *   claim (#1447): it withholds the trusted approval at the publish boundary
+ *   and marks the review partial, but it never manufactures a blocking
+ *   request (see `isForcingObligation`).
  *
  * The deterministic layer enforces presence and shape only (matching the
  * #750 baseline): a disposition discharges an obligation when its identity
  * matches and it carries the rationale its source contract requires (see
  * `foldObligationDispositions`); whether a rationale is semantically
  * grounded is judged elsewhere (eval corpus / review readers).
- * The hard-force gate fires for ANY unresolved row — both sources are
- * review-owned required checks the reviewer was expected and equipped to
- * perform, so the two never carry different approval semantics (#1381
- * review); the strict mapping's anti-relaxation signal remains as the
- * standalone guard for direct callers.
+ * The hard-force gate fires for ANY unresolved FORCING row — the
+ * `must_check` and `trusted_base_guidance` sources are review-owned required
+ * checks the reviewer was expected and equipped to perform, so those two
+ * never carry different approval semantics (#1381 review); the strict
+ * mapping's anti-relaxation signal remains as the standalone guard for
+ * direct callers.
  */
 import type { ReviewArtifact } from "./artifact.js";
 import { forceRequestChanges } from "./enforce.js";
@@ -486,23 +489,49 @@ function derivedObligationAttribution(ids: string[]): string {
 }
 
 /**
- * The hard-force gate (#1381): ANY unresolved obligation row — deterministic
- * `must_check`, extracted `trusted_base_guidance`, or derived `derived` — is a
- * review-owned required check the reviewer was expected and equipped to
- * perform, so it forces request_changes and names every unresolved row with
- * its status and cause. There is deliberately no per-source exemption: two
- * classes of review-owned required rows with different approval semantics
- * would let an unresolved review-owned check certify a native APPROVE
- * through the second class (#1381 review). #750's
+ * #1449: does an undischarged row FORCE a verdict, or is it only COVERAGE?
+ *
+ * The `must_check` and `trusted_base_guidance` sources are the operator's own
+ * required checks (the deterministic checklist and the trusted base's asks):
+ * #1381's gate forces `request_changes` for them, and it must keep doing so.
+ *
+ * A `derived` row is a COVERAGE row, and the difference is the whole point of
+ * #1447's approval semantics: "do not manufacture blocker findings merely
+ * because proof is incomplete" and "preserve the existing distinction between
+ * found defect and review incomplete / abstain". An undischarged derived row
+ * says the review never ESTABLISHED a cross-path relationship — an
+ * incomplete review, never a defect claim — so it must not manufacture a
+ * blocking `request_changes` out of a coverage gap (the false-blocking rate
+ * on clean PRs is a headline metric in #1447).
+ *
+ * The derived rows still withhold TRUSTED APPROVAL, through their own path:
+ * the publish boundary refuses a native approval while the derived state is
+ * not `complete` (`evaluateApprovalGuardrails` in `src/publish/publish.ts`),
+ * and the run's coverage record marks the review partial. So the #1381
+ * anti-relax guarantee still holds — an undischarged derived row can never
+ * certify a native APPROVE — it is simply not enforced as a BLOCK.
+ */
+export function isForcingObligation(obligation: ReviewObligation): boolean {
+  return obligation.source !== "derived";
+}
+
+/**
+ * The hard-force gate (#1381): an unresolved obligation row — deterministic
+ * `must_check` or extracted `trusted_base_guidance` — is a review-owned
+ * required check the reviewer was expected and equipped to perform, so it
+ * forces request_changes and names every unresolved row with its status and
+ * cause. There is deliberately no per-source exemption between those two
+ * sources: two classes of review-owned required rows with different approval
+ * semantics would let an unresolved review-owned check certify a native
+ * APPROVE through the second class (#1381 review). #750's
  * REQUIRED_CHECK_VALIDATION_MODE keeps owning the completeness markdown; it
  * no longer owns whether approval may publish.
  *
- * #1449: unresolved DERIVED rows render in their own section, whose wording
- * names the two classes apart: an `unresolved` row says the review is
- * incomplete and that no defect is claimed, an `unmet` row says the reviewer
- * performed the check and the obligation did not hold (the counterexample is
- * reported as a finding). Trusted approval is withheld until the obligation
- * is discharged. Unresolved non-derived rows keep the #1381 section
+ * #1449: the `derived` source is the ONE class that does not force (see
+ * `isForcingObligation`): an undischarged derived obligation is missing
+ * COVERAGE, not a defect, so it is disclosed in its own section and withholds
+ * the trusted approval at the publish boundary instead of manufacturing a
+ * blocking request. Unresolved non-derived rows keep the #1381 section
  * byte-for-byte, and a run with no unresolved derived row produces exactly
  * today's bytes.
  */
@@ -515,18 +544,16 @@ export function applyReviewObligationEnforcement(
     return { applied: false, reason: "" };
   }
   const derived = unresolved.filter((obligation) => obligation.source === "derived");
-  const required = unresolved.filter((obligation) => obligation.source !== "derived");
-  // The reason names the two classes apart: the derived rows are unresolved
-  // derived architectural obligations, the others unresolved required review
-  // evidence. With no derived row the reason is exactly today's string.
-  const reasonParts: string[] = [];
-  if (required.length > 0) {
-    reasonParts.push(`Required review evidence unresolved: ${required.map((obligation) => obligation.id).join(", ")}`);
-  }
-  if (derived.length > 0) {
-    reasonParts.push(`Derived architectural obligation unresolved: ${derived.map((obligation) => obligation.id).join(", ")}`);
-  }
-  const reason = reasonParts.join("; ");
+  const required = unresolved.filter((obligation) => isForcingObligation(obligation));
+  // #1449: the reason is the BLOCKING reason, so it names the FORCING rows
+  // only. A derived row is a coverage gap, not a block: naming it here would
+  // tell the reader the PR was blocked by an obligation the review never
+  // discharged — the claim this feature must never make. The derived rows are
+  // disclosed in their own section instead. With no derived row the reason is
+  // exactly today's string.
+  const reason = required.length > 0
+    ? `Required review evidence unresolved: ${required.map((obligation) => obligation.id).join(", ")}`
+    : "";
   const sections: string[] = [];
   if (required.length > 0) {
     // Only an `unresolved` row carries an evidence-gathering cause; an
@@ -548,11 +575,16 @@ export function applyReviewObligationEnforcement(
     // #1449: the two classes read APART. An `unresolved` row means the
     // review never established the obligation — the review is incomplete and
     // no defect is claimed. An `unmet` row means the reviewer DID perform
-    // the check and the obligation did NOT hold: the counterexample is a
-    // finding the reviewer reported, so calling it "no defect is claimed"
-    // would be false. The section heading and the general shape stay.
+    // the check and the obligation did NOT hold: the counterexample belongs
+    // in the ordinary findings, so calling it "no defect is claimed" would
+    // be false. The section heading and the general shape stay.
     const unresolved = derived.filter((obligation) => obligation.status === "unresolved");
     const unmet = derived.filter((obligation) => obligation.status === "unmet");
+    // #1449: the synthetic coverage marker is cleared by a DERIVATION that
+    // completes, never by a disposition — so its release condition must not
+    // read like a check the reviewer could discharge, and the undischarged
+    // rows' own release condition must not cover it.
+    const hasCoverageMarker = derived.some((obligation) => obligation.cause === "derivation-incomplete");
     const prose: string[] = [];
     if (unresolved.length > 0) {
       prose.push(
@@ -562,17 +594,35 @@ export function applyReviewObligationEnforcement(
         + "obligation is discharged.",
       );
     }
+    if (hasCoverageMarker) {
+      prose.push(
+        "The derived-obligation coverage marker is cleared by a derivation that completes, not by a "
+        + "disposition: until then the derived coverage stays unknown.",
+      );
+    }
     if (unmet.length > 0) {
       prose.push(
         "The reviewer performed the check for one or more derived architectural obligations and the "
-        + "obligation did NOT hold: the counterexample is reported as a finding under the normal "
-        + "findings rules. Trusted approval is withheld.",
+        + "obligation did NOT hold. A counterexample belongs in the ordinary findings, where the "
+        + "normal findings rules carry it; this row records that the obligation was not discharged. "
+        + "Trusted approval is withheld.",
       );
     }
     sections.push(
       `\n\n## Unresolved Derived Architectural Obligations\n`
       + `${prose.join(" ")}\n${delimiter}text\n${rows}\n${delimiter}\n\n_${derivedObligationAttribution(ids)}._`,
     );
+  }
+  if (required.length === 0) {
+    // #1449: COVERAGE ONLY — no forcing row is unresolved, so nothing here
+    // may manufacture a blocking request out of a coverage gap (#1447:
+    // "preserve the existing distinction between found defect and review
+    // incomplete / abstain"). The derived section is still disclosed in the
+    // review body, and the derived state withholds the trusted approval at
+    // the publish boundary; `applied` stays false so no enforcement banner
+    // claims a verdict was forced.
+    artifact.review_markdown = (artifact.review_markdown || "") + sections.join("");
+    return { applied: false, reason: "" };
   }
   return forceRequestChanges(artifact, sections.join(""), reason);
 }

@@ -131,16 +131,24 @@ test("#1449: a run without the feature publishes byte-identical output", async (
   );
 
   // The additive discipline: enabling the state appends exactly one key and
-  // moves nothing.
+  // moves nothing. The review also reads `partial` (an undischarged derived
+  // obligation is missing coverage, not a defect), so the comparison drops
+  // that one state word — and the recommendation header, which may never
+  // read APPROVE over an unfinished review.
   const enabled = new StickyApi();
   await publishReview(publishInput({ derivedObligationState: "unresolved" }), enabled, { diffText: "" });
   assert.equal(
     markerLine(enabled.sticky[0]!.body).replace(',"derived_obligation_state":"unresolved"', ""),
-    markerLine(without.sticky[0]!.body),
+    markerLine(without.sticky[0]!.body).replace('"review_result":"clean"', '"review_result":"partial"'),
   );
   assert.equal(
-    enabled.sticky[0]!.body.replace(',"derived_obligation_state":"unresolved"', ""),
-    without.sticky[0]!.body,
+    enabled.sticky[0]!.body
+      .replace(',"derived_obligation_state":"unresolved"', "")
+      .replace('"review_result":"clean"', '"review_result":"partial"')
+      .replace("✅ **Automated recommendation: APPROVE**", "🟡 **Automated recommendation: INCOMPLETE — not an approval**"),
+    without.sticky[0]!.body
+      .replace('"review_result":"clean"', '"review_result":"partial"')
+      .replace("✅ **Automated recommendation: APPROVE**", "🟡 **Automated recommendation: INCOMPLETE — not an approval**"),
   );
 });
 
@@ -215,15 +223,15 @@ test("#1449: the standalone publish CLI publishes the state in the marker", asyn
   });
 });
 
-test("#1449: the standalone publish CLI omits the state when the artifact is missing or unusable", async () => {
-  // No artifact at all.
+test("#1449: the standalone publish CLI omits the state when the feature was off", async () => {
+  // No artifact at all: a run without the feature.
   await withRunDir((dir) => {
     assert.equal(
       publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").derivedObligationState,
       undefined,
     );
   });
-  // An unparseable artifact.
+  // An unparseable artifact in a run without the feature.
   await withRunDir((dir) => {
     writeFileSync(join(dir, "review-coverage.json"), "not json");
     assert.equal(
@@ -231,18 +239,6 @@ test("#1449: the standalone publish CLI omits the state when the artifact is mis
       undefined,
     );
   });
-  // A value outside the three closed states is never published — the
-  // disclosure is a closed vocabulary, not free text.
-  for (const unusable of ["unknown", "", "Complete", "unresolved ", 42, null, true, ["unresolved"]]) {
-    await withRunDir((dir) => {
-      writeCoverageArtifact(dir, { derived_obligation_state: unusable });
-      assert.equal(
-        publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").derivedObligationState,
-        undefined,
-        `value ${JSON.stringify(unusable)} was published`,
-      );
-    });
-  }
   // An artifact with no derived field at all (a run without the feature).
   await withRunDir((dir) => {
     writeCoverageArtifact(dir);
@@ -251,6 +247,46 @@ test("#1449: the standalone publish CLI omits the state when the artifact is mis
       undefined,
     );
   });
+});
+
+test("#1449: the standalone publish CLI FAILS CLOSED when a feature-on run's state cannot be read", async () => {
+  // The state is a GATE: it decides whether a native approval may publish, so
+  // an unreadable state in a feature-on run must never read as "no gap".
+  // The engine writes `derived-obligation-state.json` only when the operator
+  // enabled the feature — that file is the run's own sentinel.
+  const unusable: Array<{ label: string; prepare: (dir: string) => void }> = [
+    { label: "no coverage artifact", prepare: (dir) => { writeFileSync(join(dir, "derived-obligation-state.json"), JSON.stringify({ version: 1, enabled: true, coverage: "complete", reason: null, obligations: [] })); } },
+    { label: "unparseable coverage artifact", prepare: (dir) => {
+      writeFileSync(join(dir, "derived-obligation-state.json"), JSON.stringify({ version: 1, enabled: true, coverage: "complete", reason: null, obligations: [] }));
+      writeFileSync(join(dir, "review-coverage.json"), "not json");
+    } },
+    { label: "coverage artifact without the state", prepare: (dir) => {
+      writeFileSync(join(dir, "derived-obligation-state.json"), JSON.stringify({ version: 1, enabled: true, coverage: "complete", reason: null, obligations: [] }));
+      writeCoverageArtifact(dir);
+    } },
+  ];
+  for (const entry of unusable) {
+    await withRunDir((dir) => {
+      entry.prepare(dir);
+      assert.equal(
+        publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").derivedObligationState,
+        "unavailable",
+        entry.label,
+      );
+    });
+  }
+  // A value outside the three closed states is never published as itself —
+  // the disclosure is a closed vocabulary, not free text.
+  for (const unusableValue of ["unknown", "", "Complete", "unresolved ", 42, null, true, ["unresolved"]]) {
+    await withRunDir((dir) => {
+      writeCoverageArtifact(dir, { derived_obligation_state: unusableValue });
+      assert.equal(
+        publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").derivedObligationState,
+        undefined,
+        `value ${JSON.stringify(unusableValue)} was published`,
+      );
+    });
+  }
 });
 
 test("#1449: the standalone publish CLI never reads the checkout for the derived state", () => {

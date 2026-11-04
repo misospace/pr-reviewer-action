@@ -35,6 +35,7 @@ import { workspaceAt } from "../src/prompt/bash.js";
 import { renderDerivedSection } from "../src/derived/index.js";
 import { resolveDerivedObligations } from "../src/enforcement/derived-obligations.js";
 import { applyStrictVerdictPolicy } from "../src/enforcement/verdict-policy.js";
+import { applyReviewObligationEnforcement } from "../src/enforcement/review-obligations.js";
 import { buildRunMetadataMarker } from "../src/metadata/markers.js";
 import { runReviewEngine } from "../src/engine/review.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
@@ -237,30 +238,52 @@ const strictArtifact = (overrides: Record<string, unknown> = {}): Record<string,
   ...overrides,
 });
 
-test("#1449: the strict mapping attributes derived rows distinctly", () => {
+test("#1449: the strict mapping does NOT demote an approve for an undischarged derived row", () => {
   const derived = strictArtifact();
   applyStrictVerdictPolicy(derived as never, {
     modelVerdict: "approve",
     forced: false,
-    unresolvedDerivedObligations: ["derived-1"],
   });
   const markdown = derived.review_markdown as string;
-  assert.match(markdown, /derived architectural obligation unresolved: derived-1 \(#1449\)/);
-  assert.ok(!markdown.includes("required review evidence unresolved"), "a derived row is not required review evidence");
-  // The verdict is still withheld.
-  assert.equal(derived.verdict, "request_changes");
+  // #1447's approval semantics: an undischarged derived obligation is
+  // missing COVERAGE, not a defect — the strict mapping must not manufacture
+  // a blocking request out of it. The trusted approval is withheld at the
+  // publish boundary instead (see the publish-boundary tests).
+  assert.equal(derived.verdict, "approve");
+  assert.ok(!markdown.includes("#1449"), "the strict note never claims a derived obligation");
+});
 
-  // Both classes: the #1381 part keeps its exact text and order, the
-  // derived part follows it.
-  const both = strictArtifact();
-  applyStrictVerdictPolicy(both as never, {
-    modelVerdict: "approve",
-    forced: false,
-    unresolvedReviewObligations: ["obligation-1"],
-    unresolvedDerivedObligations: ["derived-1", "derived-2"],
-  });
-  const bothMarkdown = both.review_markdown as string;
-  assert.match(bothMarkdown, /required review evidence unresolved: obligation-1 \(#1381\); derived architectural obligation unresolved: derived-1, derived-2 \(#1449\)/);
+test("#1449: the derived attribution lives in the enforcement section, apart from required evidence", () => {
+  const artifact = strictArtifact();
+  const outcome = applyReviewObligationEnforcement(artifact as never, [
+    { id: "obligation-1", source: "trusted_base_guidance", text: "check the base guidance", status: "unresolved", cause: null },
+    { id: "derived-1", source: "derived", text: "every producer places the generation identity", status: "unresolved", cause: null, anchors: LOCATIONS },
+  ]);
+  const markdown = artifact.review_markdown as string;
+  assert.match(markdown, /required review evidence unresolved: obligation-1/);
+  assert.match(markdown, /derived architectural obligation unresolved: derived-1 \(derived obligation not discharged; #1449\)/);
+  assert.ok(!markdown.includes("required review evidence unresolved: derived-1"), "a derived row is not required review evidence");
+  // A forcing row is unresolved: the verdict flips and the enforcement
+  // banner names both classes.
+  assert.equal(outcome.applied, true);
+  assert.equal(artifact.verdict, "request_changes");
+});
+
+test("#1449: a derived row alone discloses coverage without forcing a verdict", () => {
+  const artifact = strictArtifact();
+  const outcome = applyReviewObligationEnforcement(artifact as never, [
+    { id: "derived-1", source: "derived", text: "every producer places the generation identity", status: "unresolved", cause: null, anchors: LOCATIONS },
+  ]);
+  const markdown = artifact.review_markdown as string;
+  assert.match(markdown, /## Unresolved Derived Architectural Obligations/);
+  assert.match(markdown, /No defect is claimed here/);
+  assert.match(markdown, /derived architectural obligation unresolved: derived-1/);
+  // No forcing row: the verdict is NOT flipped and no enforcement banner
+  // claims one was.
+  assert.equal(outcome.applied, false);
+  assert.equal(outcome.reason, "");
+  assert.equal(artifact.verdict, "approve");
+  assert.ok(!markdown.includes("## Final Recommendation"), "no enforced-verdict banner");
 });
 
 test("#1449: a run without derived rows keeps today's attribution note byte-for-byte", () => {

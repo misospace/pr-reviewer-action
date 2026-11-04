@@ -378,7 +378,29 @@ export function resolveDerivedObligations(record: unknown, enabled: boolean): De
 }
 
 /**
- * Does `text` (a reviewer's rationale) name the location the derivation
+ * #1449: the basenames that name no particular file.
+ *
+ * The basename fallback in `anchorCoveredBy` exists so a rationale may cite
+ * `reconcile.ts` for the anchor `src/ingress/reconcile.ts` — but a generic
+ * basename ("index.ts", "main.ts", "config.ts") names a file in EVERY
+ * directory, so accepting it would let a rationale that never reached the
+ * flagged file discharge the row.
+ */
+const GENERIC_BASENAMES: ReadonlySet<string> = new Set([
+  "index", "main", "mod", "lib", "util", "utils", "common", "shared", "core",
+  "config", "settings", "app", "server", "client", "api", "types", "constants",
+  "init", "setup", "helper", "helpers", "test", "tests", "spec",
+]);
+
+/** A file name's stem — its name without the extension, lowercased. */
+function fileStem(name: string): string {
+  const lower = name.toLowerCase();
+  const lastDot = lower.lastIndexOf(".");
+  return lastDot <= 0 ? lower : lower.slice(0, lastDot);
+}
+
+/**
+ * #1449: does `text` (a reviewer's rationale) name the location the derivation
  * flagged?
  *
  * An anchor is a derivation location: `src/ingress/reconcile.ts:mintFoundJob`
@@ -393,6 +415,9 @@ export function resolveDerivedObligations(record: unknown, enabled: boolean): De
  * discharge the anchor "src/db.ts:get" — the rationale named a DIFFERENT
  * symbol that merely starts with the flagged one, so the evidence never
  * reached the flagged location.
+ *
+ * WHY the basename fallback is limited: a generic basename ("index.ts") names
+ * a file in every directory, so it never stands in for the flagged path.
  *
  * WHY this rule exists: a derived obligation may only be CLOSED by evidence
  * that names the location the derivation flagged, so "the daemon passed the
@@ -410,7 +435,10 @@ export function anchorCoveredBy(text: string, anchor: string): boolean {
   const symbol = separator === -1 ? "" : trimmed.slice(separator + 1);
   if (path === "") return false;
   const basename = path.split(/[\\/]/).pop() ?? "";
-  const namesPath = mentionsToken(candidate, path) || (basename !== "" && mentionsToken(candidate, basename));
+  // A generic basename names no particular file: it never stands in for the
+  // flagged path.
+  const basenameUsable = basename !== "" && !GENERIC_BASENAMES.has(fileStem(basename));
+  const namesPath = mentionsToken(candidate, path) || (basenameUsable && mentionsToken(candidate, basename));
   // A bare-path anchor (no symbol part) is covered by the path alone.
   if (separator === -1) return namesPath;
   // A degenerate `path:` anchor names no symbol and covers nothing.

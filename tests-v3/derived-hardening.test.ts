@@ -262,11 +262,12 @@ test("#1449: the coverage marker is undischargeable in EVERY status", () => {
     assert.equal(folded[0]!.status, "unresolved", status);
     assert.equal(folded[0]!.cause, "derivation-incomplete", status);
   }
-  // The marker is never a defect claim either: the gate fires, but no
-  // finding is synthesized.
+  // The marker is never a defect claim either: the gate discloses the gap,
+  // but no finding is synthesized and no verdict is forced.
   const artifact = base({ verdict: "approve", review_markdown: "" });
-  applyReviewObligationEnforcement(artifact, rows);
-  assert.equal(artifact.verdict, "request_changes");
+  const enforced = applyReviewObligationEnforcement(artifact, rows);
+  assert.equal(enforced.applied, false);
+  assert.equal(artifact.verdict, "approve");
   assert.deepEqual(artifact.findings, []);
 });
 
@@ -294,13 +295,17 @@ test("#1449: the published derived section says what an unmet row means", () => 
     { id: "derived-1", source: "derived", text: OBLIGATION, status: "unmet", cause: null, anchors: LOCATIONS },
   ];
   const artifact = base({ verdict: "approve", review_markdown: "" });
-  assert.equal(applyReviewObligationEnforcement(artifact, unmet).applied, true);
+  // A derived row is a COVERAGE row: it never forces a verdict (#1447), so
+  // the section discloses the reviewer's negative answer instead.
+  assert.equal(applyReviewObligationEnforcement(artifact, unmet).applied, false);
+  assert.equal(artifact.verdict, "approve");
   const markdown = artifact.review_markdown as string;
   assert.match(markdown, /## Unresolved Derived Architectural Obligations/);
   // The reviewer performed the check and the obligation did not hold — the
-  // counterexample is a finding, so "no defect is claimed" would be false.
+  // counterexample belongs in the ordinary findings, so "no defect is
+  // claimed" would be false.
   assert.match(markdown, /The reviewer performed the check for one or more derived architectural obligations and the obligation did NOT hold/);
-  assert.match(markdown, /the counterexample is reported as a finding under the normal findings rules/);
+  assert.match(markdown, /A counterexample belongs in the ordinary findings/);
   assert.ok(!markdown.includes("No defect is claimed here"), "an unmet row is not a coverage marker");
   assert.ok(!markdown.includes("Derived-obligation coverage is incomplete"));
   // No finding is synthesized for it.
@@ -490,7 +495,17 @@ test("#1449: the anchor's path and symbol match on identifier boundaries", () =>
   assert.equal(anchorCoveredBy("src/a.ts:get places the identity", "src/a.ts:get"), true);
 });
 
-test("#1449: an extension-less repository file is a location", () => {
+test("#1449: a generic basename never stands in for the flagged path", () => {
+  // `index.ts` names a file in EVERY directory: a rationale that cited a
+  // different `index.ts` never reached the flagged location, so the generic
+  // basename must not discharge the row.
+  assert.equal(anchorCoveredBy("web/index.ts:mintFoundJob places the identity", "src/ingress/index.ts:mintFoundJob"), false);
+  assert.equal(anchorCoveredBy("src/ingress/index.ts:mintFoundJob places the identity", "src/ingress/index.ts:mintFoundJob"), true);
+  // A distinctive basename still counts (the reviewer cited the file).
+  assert.equal(anchorCoveredBy("read reconcile.ts:mintFoundJob at head", "src/ingress/reconcile.ts:mintFoundJob"), true);
+});
+
+test("#1449: extension-less repository file is location", () => {
   // A `Makefile`, `LICENSE` or `README` is a real file a reviewer can
   // check, but it carries no extension — so a row whose only anchor was
   // one of them could never be discharged by a rationale citing it.

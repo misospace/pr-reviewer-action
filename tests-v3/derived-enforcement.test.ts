@@ -12,8 +12,9 @@
  *  (b) a rationale that only shows the callback RECEIVING the value does not
  *      discharge the row — the evidence must reach the flagged location;
  *  (c) a rationale naming the production mint site does discharge it;
- *  (d) an unresolved derived row fires the gate, flips the verdict to
- *      request_changes, and synthesizes NO finding;
+ *  (d) an unresolved derived row discloses the coverage gap and synthesizes
+ *      NO finding — it never manufactures a blocking request (#1447: the
+ *      distinction between a found defect and an incomplete review);
  *  (e) every coverage-incomplete answer adds exactly ONE synthetic
  *      `derived-coverage` row and withholds approval;
  *  (f) with the feature off nothing changes at all;
@@ -41,6 +42,7 @@ import {
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../src/enforcement/enforce.js";
 import { applyStrictVerdictPolicy } from "../src/enforcement/verdict-policy.js";
 import { runReviewEngine } from "../src/engine/review.js";
+import { publishReview } from "../src/publish/publish.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { startMockServer } from "./helpers.js";
@@ -201,13 +203,16 @@ test("#1449: a derived row is discharged only by grounded evidence; not_applicab
 
 // ── (d) the gate ───────────────────────────────────────────────────────
 
-test("#1449: an unresolved derived row forces request_changes and synthesizes NO finding", () => {
+test("#1449: an unresolved derived row discloses coverage and synthesizes NO finding", () => {
   const rows = engineRows(resolveDerivedObligations(completeArtifact(), true));
   const artifact = base({ verdict: "approve", review_markdown: "Recommendation: Approve\nlooks fine" });
   const enforced = applyReviewObligationEnforcement(artifact, rows);
-  assert.equal(enforced.applied, true);
-  assert.equal(artifact.verdict, "request_changes");
-  assert.equal(artifact.verdict_source, "enforcement");
+  // #1447's approval semantics: an undischarged derived obligation is missing
+  // COVERAGE, not a defect — the gate discloses it and never manufactures a
+  // blocking request out of it.
+  assert.equal(enforced.applied, false);
+  assert.equal(artifact.verdict, "approve");
+  assert.equal(artifact.verdict_source, undefined);
   // No defect is claimed: the findings array stays empty.
   assert.deepEqual(artifact.findings, []);
   const markdown = artifact.review_markdown as string;
@@ -216,9 +221,9 @@ test("#1449: an unresolved derived row forces request_changes and synthesizes NO
   assert.match(markdown, /Trusted approval is withheld until the obligation is discharged/);
   assert.match(markdown, /derived-1 \(derived, unresolved, cause: unknown\)/);
   // The reason names the derived rows distinctly.
-  assert.match(enforced.reason, /Derived architectural obligation unresolved: derived-1/);
-  assert.ok(!enforced.reason.includes("Required review evidence unresolved"));
-  // The #1381 machinery is the ONLY gate: no second path.
+  assert.equal(enforced.reason, "");
+  // The #1381 machinery is the ONLY gate: no second path, and the derived
+  // row is NOT a forcing condition for it.
   const inputs: EnforcementInputs = {
     evidenceBlockerEnabled: false,
     toolFailureEnabled: false,
@@ -230,15 +235,17 @@ test("#1449: an unresolved derived row forces request_changes and synthesizes NO
     verdictPolicy: "strict",
     reviewObligations: rows,
   };
-  assert.equal(failClosedEnforcementFired(inputs), true);
-  // The full pipeline applies ONE gate and attributes it to the derived row.
+  assert.equal(failClosedEnforcementFired(inputs), false);
+  // The full pipeline applies no forcing gate for a coverage-only row.
   const pipeline = base({ verdict: "approve", review_markdown: "Recommendation: Approve\nlooks fine" });
-  assert.equal(applyAllEnforcement(pipeline, inputs), 1);
-  assert.equal(pipeline.verdict, "request_changes");
-  assert.match(pipeline.review_markdown as string, /## Final Recommendation/);
-  assert.match(pipeline.review_markdown as string, /Derived architectural obligation unresolved: derived-1/);
+  assert.equal(applyAllEnforcement(pipeline, inputs), 0);
+  assert.equal(pipeline.verdict, "approve");
+  assert.ok(!(pipeline.review_markdown as string).includes("## Final Recommendation"), "no enforced-verdict banner");
+  assert.match(pipeline.review_markdown as string, /## Unresolved Derived Architectural Obligations/);
+  // The strict mapping holds the model's own approve too (the trusted
+  // approval is withheld at the publish boundary instead).
   const strict = base({ verdict: "approve" });
-  assert.equal(applyStrictVerdictPolicy(strict, { modelVerdict: "approve", forced: true, unresolvedReviewObligations: ["derived-1"] }).verdict, "request_changes");
+  assert.equal(applyStrictVerdictPolicy(strict, { modelVerdict: "approve", forced: false }).verdict, "approve");
 });
 
 // ── (e) coverage-incomplete states ─────────────────────────────────────
@@ -264,13 +271,14 @@ test("#1449: every coverage-incomplete answer adds exactly one synthetic coverag
     assert.equal(coverage[0]!.cause, "derivation-incomplete", state.name);
     assert.match(coverage[0]!.text, new RegExp(state.reason), state.name);
     assert.match(coverage[0]!.text, /not a defect/, state.name);
-    // The gate fires and withholds approval.
+    // The gate discloses the gap and never manufactures a blocking request.
     const artifact = base({ verdict: "approve" });
     const enforced = applyReviewObligationEnforcement(artifact, rows);
-    assert.equal(enforced.applied, true, state.name);
-    assert.equal(artifact.verdict, "request_changes", state.name);
+    assert.equal(enforced.applied, false, state.name);
+    assert.equal(artifact.verdict, "approve", state.name);
     assert.deepEqual(artifact.findings, [], state.name);
     assert.match(artifact.review_markdown as string, /## Unresolved Derived Architectural Obligations/, state.name);
+    assert.match(artifact.review_markdown as string, /No defect is claimed here/, state.name);
   }
   // A clean `empty` over a complete input is COMPLETE coverage with zero rows.
   const clean = resolveDerivedObligations(completeArtifact({ status: "empty", obligations: [], method: "none" }), true);
@@ -445,9 +453,14 @@ test("#1449: the engine appends the derived rows, withholds the approve, and per
     const req = engineRequest(server.url, f.runDir);
     req.inputs = { ...req.inputs, "derived-obligations": "true" };
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir));
-    // #1449: the derived obligation is unresolved, so the trusted approve is
-    // withheld — through the #1381 machinery, not a second gate.
-    assert.equal(result.outputs.verdict, "request_changes");
+    // #1449: the derived obligation is unresolved, so the review is INCOMPLETE
+    // — it stays an approve verdict with partial coverage, and the trusted
+    // approval is withheld at the publish boundary (never a manufactured
+    // blocking request: an undischarged obligation is a coverage statement,
+    // not a defect claim).
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.reviewResult, "partial");
+    assert.equal(result.derivedObligationState, "unresolved");
     const state = JSON.parse(readFileSync(join(f.runDir, "derived-obligation-state.json"), "utf8")) as {
       version: number; enabled: boolean; coverage: string; reason: string | null;
       obligations: Array<{ id: string; source: string; status: string; cause: string | null }>;
@@ -566,7 +579,11 @@ test("#1449: a satisfied rationale that asserts a failure does not restore the a
     const req = engineRequest(server.url, f.runDir);
     req.inputs = { ...req.inputs, "derived-obligations": "true" };
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir));
-    assert.equal(result.outputs.verdict, "request_changes");
+    // The row stayed undischarged: the review is partial and the trusted
+    // approval is withheld (never a manufactured blocking request).
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.reviewResult, "partial");
+    assert.equal(result.derivedObligationState, "unresolved");
     const persisted = JSON.parse(readFileSync(join(f.runDir, "review-obligations.json"), "utf8")) as {
       obligations: Array<{ id: string; status: string }>;
     };
@@ -577,17 +594,19 @@ test("#1449: a satisfied rationale that asserts a failure does not restore the a
   }
 });
 
-test("#1449: a non-strict verdict policy still refuses an approve with an unresolved derived row", async () => {
+test("#1449: a non-strict verdict policy still withholds the trusted approve with an unresolved derived row", async () => {
   // The `model` policy keeps the model's own verdict — but an unresolved
-  // derived row is a DETERMINISTIC block, so the approve is withheld under
-  // every policy.
+  // derived row makes the review INCOMPLETE, so the trusted approval is
+  // withheld under every policy (at the publish boundary).
   const server = await derivedModelServer(plainReview());
   const f = fixtureDir();
   try {
     const req = engineRequest(server.url, f.runDir);
     req.inputs = { ...req.inputs, "derived-obligations": "true", "verdict-policy": "model" };
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir));
-    assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.reviewResult, "partial");
+    assert.equal(result.derivedObligationState, "unresolved");
     const artifact = JSON.parse(readFileSync(join(f.runDir, "ai-output.json"), "utf8")) as { findings: unknown[]; review_markdown: string };
     assert.deepEqual(artifact.findings, []);
     assert.match(artifact.review_markdown, /## Unresolved Derived Architectural Obligations/);
@@ -655,8 +674,10 @@ test("#1449: a mixed derived row set renders both prose paragraphs and both rows
   ];
   const artifact = base({ verdict: "approve", review_markdown: "" });
   const enforced = applyReviewObligationEnforcement(artifact, rows);
-  assert.equal(enforced.applied, true);
-  assert.equal(artifact.verdict, "request_changes");
+  // Neither derived row is a forcing row: the section discloses both and the
+  // verdict is NOT flipped into a blocking request.
+  assert.equal(enforced.applied, false);
+  assert.equal(artifact.verdict, "approve");
   const markdown = artifact.review_markdown as string;
   assert.match(markdown, /Derived-obligation coverage is incomplete/);
   assert.match(markdown, /No defect is claimed here/);
@@ -715,6 +736,88 @@ test("#1449: a counterexample the reviewer found is an ordinary finding, not a s
     assert.match(artifact.review_markdown, /## Unresolved Derived Architectural Obligations/);
     assert.match(artifact.review_markdown, /The reviewer performed the check for one or more derived architectural obligations and the obligation did NOT hold/);
     assert.ok(!artifact.review_markdown.includes("No defect is claimed here"), "an unmet row is not a coverage marker");
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
+// ── (h) the COMPOSITE path: engine output → published native event ───────
+
+/** A publish seam that records the native review event the run produced. */
+class NativeEventApi {
+  readonly platform = "github" as const;
+  readonly nativeReviewSurface = { supported: true };
+  readonly submitted: Array<{ event: string; body: string }> = [];
+  readonly sticky: { marker: string; body: string }[] = [];
+  async getHeadSha(): Promise<string | null> { return "head-123"; }
+  async listIssueComments() { return []; }
+  async upsertStickyComment(marker: string, body: string) {
+    this.sticky.push({ marker, body });
+    return { ok: true, created: true };
+  }
+  async listReviews() { return []; }
+  async listManagedInlineComments() { return { supported: true, complete: true, comments: [] }; }
+  async retireInlineComment() { return true; }
+  async createReview(request: { event: string; body: string }) {
+    this.submitted.push({ event: request.event, body: request.body });
+    return { ok: true, id: "review-1" };
+  }
+  async dismissReview() { return true; }
+  async minimizeReviewIds() { return []; }
+  async minimizeReview() { return true; }
+  async unresolvedSupersededThreads() { return { ok: true, threads: [] }; }
+  async resolveThread() { return true; }
+  async removeLabel() { return true; }
+  async requestReviewers() { return { ok: true, supported: true, requestedUsers: [], requestedTeams: [], alreadyRequestedUsers: [], alreadyRequestedTeams: [] }; }
+}
+
+test("#1449: an undischarged derived obligation publishes an ADVISORY review, never a native approval or a blocking request", async () => {
+  // The composite path: the engine's own output feeds the publish step. An
+  // undischarged derived obligation makes the review INCOMPLETE, so the
+  // native event is a COMMENT — never an APPROVE (the trusted approval is
+  // withheld) and never a REQUEST_CHANGES (an incomplete review must not
+  // manufacture an issue).
+  const server = await derivedModelServer(plainReview());
+  const f = fixtureDir();
+  try {
+    const req = engineRequest(server.url, f.runDir);
+    req.inputs = { ...req.inputs, "derived-obligations": "true" };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir));
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.reviewResult, "partial");
+    const api = new NativeEventApi();
+    const published = await publishReview({
+      mode: "review_verdict",
+      reviewMarkdown: String(result.outputs.verdict),
+      verdict: String(result.outputs.verdict),
+      analysisEngine: "test-engine",
+      baseSha: "base-1",
+      headSha: "head-123",
+      prNumber: "42",
+      commentMarker: "<!-- ai-pr-review -->",
+      requiredChecks: "complete",
+      reviewRoute: "primary",
+      escalationReason: "",
+      cacheHitRatio: "-",
+      inlineFindings: false,
+      inlineFindingsMax: 10,
+      findings: [],
+      cleanupPreviousNativeReviews: "false",
+      approveForks: false,
+      isForkPr: false,
+      upstreamLinkMode: "inert",
+      conditionalPresence: {
+        linkedIssue: false, evidenceProvider: false, standards: false,
+        toolHarnessFindings: false, toolHarnessResults: false,
+      },
+      forgejoPositions: false,
+      ...(result.derivedObligationState !== undefined ? { derivedObligationState: result.derivedObligationState } : {}),
+    }, api as never, { diffText: "" });
+    assert.equal(published.status, "published");
+    assert.equal(api.submitted.length, 1);
+    assert.equal(api.submitted[0]!.event, "COMMENT");
+    assert.match(api.submitted[0]!.body, /Approval withheld by derived-obligation state/);
   } finally {
     await server.close();
     f.cleanup();

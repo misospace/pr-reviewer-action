@@ -274,8 +274,18 @@ export function markerReviewResult(input: {
   requiredChecks: string;
   partialCoverage?: PartialCoverage | undefined;
   coverageUnknown?: boolean | undefined;
+  /** #1449: the run's derived-obligation state ("complete" | "unresolved" |
+   * "unavailable"). An undischarged derived obligation is missing COVERAGE,
+   * not a defect (#1447), so the review reads `partial` — never `clean`
+   * while a derived obligation stayed open, and never a manufactured
+   * "issues". Absent (the feature is off) changes nothing. */
+  derivedObligationState?: string | undefined;
 }): string {
-  const coverageGap = Boolean(input.partialCoverage) || Boolean(input.coverageUnknown);
+  // #1449: the derived gap is a coverage gap: the review never established
+  // a derived cross-path relationship, so it cannot be published as a clean
+  // review. It is NOT a findings state — the findings list stays untouched.
+  const derivedGap = input.derivedObligationState === "unresolved" || input.derivedObligationState === "unavailable";
+  const coverageGap = Boolean(input.partialCoverage) || Boolean(input.coverageUnknown) || derivedGap;
   const coverageIncomplete = input.requiredChecks === "incomplete" || coverageGap;
   if (input.verdictPolicy !== "strict") {
     if (input.verdict === "request_changes") return "issues";

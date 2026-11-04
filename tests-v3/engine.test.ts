@@ -241,9 +241,12 @@ test("#1448: the derived-obligations pre-pass runs on the primary route and its 
     req.inputs = { ...req.inputs, "derived-obligations": "true" };
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter: mockPlatform() }));
     // #1449: the derived obligation now joins the AUTHORITATIVE enforcement
-    // path — an undisposed derived row withholds the trusted approve
-    // (through the #1381 machinery, without a synthesized finding).
-    assert.equal(result.outputs.verdict, "request_changes");
+    // path — an undisposed derived row makes the review INCOMPLETE, so the
+    // trusted approve is withheld (at the publish boundary) without a
+    // synthesized finding and without a manufactured blocking request.
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.reviewResult, "partial");
+    assert.equal(result.derivedObligationState, "unresolved");
     const deriveRequests = server.requests.filter((r) => r.body.includes("You derive the architectural obligations"));
     assert.equal(deriveRequests.length, 1);
     assert.match(deriveRequests[0]!.body, /untrusted PR content/);
@@ -277,7 +280,9 @@ test("#1448: a failing derivation renders a visible unavailable note in the corp
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter: mockPlatform() }));
     // #1449: a derivation that did not complete is incomplete COVERAGE, so
     // the synthetic coverage-marker row withholds the trusted approve.
-    assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.reviewResult, "partial");
+    assert.equal(result.derivedObligationState, "unavailable");
     const record = JSON.parse(readFileSync(join(f.runDir, "derived-obligations.json"), "utf8")) as { status: string; error_kind: string | null };
     assert.equal(record.status, "error");
     assert.equal(record.error_kind, "malformed");
@@ -375,7 +380,9 @@ test("#1448 review: the derivation is fed the complete diff, not the prioritized
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
     // #1449: the derivation is a review target AND an enforcement input —
     // an undisposed derived obligation withholds the trusted approve.
-    assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.reviewResult, "partial");
+    assert.equal(result.derivedObligationState, "unresolved");
     // The trap is real at this budget: the prioritized slice omitted the hunk…
     const truncated = readFileSync(join(f.runDir, "pr.diff.truncated"), "utf8");
     assert.ok(!truncated.includes("IDENTITY_HUNK_SENTINEL"), "fixture precondition: the sentinel must be outside pr.diff.truncated");
@@ -431,7 +438,9 @@ test("#1448 review: a clipped derivation input renders incomplete coverage, neve
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
     // #1449: the clipped input is incomplete COVERAGE, so the synthetic
     // coverage-marker row withholds the trusted approve.
-    assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.reviewResult, "partial");
+    assert.equal(result.derivedObligationState, "unavailable");
     // The pass clipped its input: the hunk never reached the model.
     const deriveRequests = server.requests.filter((r) => r.body.includes("You derive the architectural obligations"));
     assert.equal(deriveRequests.length, 1);

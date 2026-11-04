@@ -87,7 +87,7 @@ import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
-import { candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
+import { candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
@@ -2036,8 +2036,10 @@ secrets: [profiles.primary.apiKey],
   // inputs so the gate runs inside applyAllEnforcement (with the banner
   // normalization) and the anti-relax signal is computed once, here.
   // #1449: the derived pre-pass output joins the SAME rows — there is no
-  // second enforcement path: an unresolved derived row withholds approval
-  // through the #1381 machinery exactly like the other review-owned rows.
+  // second enforcement path: an unresolved derived row is disclosed by the
+  // same gate, withholds the trusted approval (at the publish boundary) and
+  // makes the review partial, but it never forces a verdict (it is coverage,
+  // not a defect — see `isForcingObligation`).
   const resolvedObligations = resolveReviewObligations(
     classificationArtifact,
     reviewRecord,
@@ -2116,15 +2118,16 @@ secrets: [profiles.primary.apiKey],
       }
       blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
     }
-    // #1449: the attribution names the two classes apart — the derived rows
-    // are unresolved derived architectural obligations, the others unresolved
-    // review-owned required evidence. A run without derived rows keeps the
-    // #1381 text and its order byte-for-byte.
-    const unresolvedDerivedObligations = unresolvedReviewObligations(
-      resolvedObligations.obligations.filter((obligation) => obligation.source === "derived"),
-    );
+    // #1449: the derived rows are COVERAGE rows, so only the FORCING sources
+    // (the operator's `must_check` checklist and the trusted base's
+    // `trusted_base_guidance` asks) reach the strict mapping's anti-relax
+    // signal. An undischarged derived obligation never demotes an approve
+    // into a blocking request (#1447: "preserve the existing distinction
+    // between found defect and review incomplete / abstain"); it withholds
+    // the trusted approval at the publish boundary instead. A run without
+    // derived rows keeps the #1381 text and its order byte-for-byte.
     const unresolvedRequiredObligations = unresolvedReviewObligations(
-      resolvedObligations.obligations.filter((obligation) => obligation.source !== "derived"),
+      resolvedObligations.obligations.filter((obligation) => isForcingObligation(obligation)),
     );
     // The obligation gate (#1381) ran inside applyAllEnforcement and rides
     // failClosedEnforcementFired, so the strict mapping can never relax a
@@ -2140,7 +2143,6 @@ secrets: [profiles.primary.apiKey],
       modelVerdict,
       forced,
       unresolvedReviewObligations: unresolvedRequiredObligations,
-      unresolvedDerivedObligations,
     });
     // The strict mapping can derive an approve after the enforcement banner
     // was written; reconcile the markdown with the final verdict.
@@ -2194,7 +2196,15 @@ secrets: [profiles.primary.apiKey],
     // still-open finding is a verification ask and no independent
     // deterministic gate fired. The overlays above have already run, so
     // their blocks are visible here.
-    const unresolvedObligations = unresolvedReviewObligations(resolvedObligations.obligations);
+    //
+    // #1449: only the FORCING obligation rows gate the relaxation — an
+    // undischarged derived obligation is missing coverage, not a defect, so
+    // it must not keep a relaxed (or relaxed-then-approved) review blocked
+    // on its own. The derived state still withholds the trusted approval at
+    // the publish boundary, so nothing here can certify an approve.
+    const unresolvedObligations = unresolvedReviewObligations(
+      resolvedObligations.obligations.filter((obligation) => isForcingObligation(obligation)),
+    );
     // The obligation gate (#1381) ran inside applyAllEnforcement and rides
     // failClosedEnforcementFired, so the relaxers below refuse when it fired.
     const forced = failClosedEnforcementFired(enforcementInputs)
@@ -2412,6 +2422,10 @@ secrets: [profiles.primary.apiKey],
       findings: reviewRecord.findings,
       requiredChecks: outputRequiredChecks,
       partialCoverage,
+      // #1449: an undischarged derived obligation is missing coverage, so the
+      // review reads `partial` — never `clean`, and never a manufactured
+      // `issues`. Absent when the feature is off.
+      ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
     }),
   };
   const unresolvedProofPins = unresolvedConfidencePins(confidenceProofPins);
@@ -2698,6 +2712,10 @@ secrets: [profiles.primary.apiKey],
       findings: reviewRecord.findings,
       requiredChecks: outputRequiredChecks,
       partialCoverage,
+      // #1449: an undischarged derived obligation is missing coverage, so the
+      // review reads `partial` — never `clean`, and never a manufactured
+      // `issues`. Absent when the feature is off.
+      ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
     }),
     reviewRoute: env.REVIEW_ROUTE ?? "legacy",
     escalationReason: escalationReasons,
