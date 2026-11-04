@@ -1,0 +1,100 @@
+{
+  "schema": "verifier-dogfood-summary/v1",
+  "generated_at": "2026-11-04T21:19:46Z",
+  "repository": "misospace/pr-reviewer-action",
+  "window": {
+    "first_publication": "2026-09-03T13:41:01Z",
+    "last_publication": "2026-11-04T21:10:40Z",
+    "records": 481,
+    "prs": 176
+  },
+  "verifier_status": {
+    "scored": 1,
+    "unscored": 472,
+    "disabled": 8,
+    "unknown": 0
+  },
+  "causes": {
+    "cannot_verify": 4,
+    "dedicated_config_missing": 3,
+    "http_403": 6,
+    "http_429": 11,
+    "malformed_answer": 7
+  },
+  "models": {
+    "MiniMax-M3.1-Flash": 22,
+    "Minimax-M3.1-flash": 444,
+    "glm-5.3-flash": 3,
+    "unset": 12
+  },
+  "primary_review_result": {
+    "clean": 79,
+    "findings": 39,
+    "issues": 168,
+    "partial": 195
+  },
+  "challenges": {
+    "materially_challenged": 0,
+    "clean_unchallenged": 0,
+    "clean_challenged": 0,
+    "not_assessed": 481
+  },
+  "coverage": {
+    "latency_published": 28,
+    "latency_missing": 453,
+    "token_usage_published": 11,
+    "token_usage_missing": 470,
+    "cause_published": 31,
+    "cause_missing": 450
+  },
+  "attempts": {
+    "max_per_pr": 50,
+    "prs_with_multiple_attempts": 92,
+    "mean_per_pr": 2.73
+  },
+  "sources": {
+    "forge-read": 85,
+    "legacy-import": 396
+  },
+  "legacy_reconciliation": {
+    "source_file": "evals/reports/confidence-dogfood/evidence-2026-11-03.json",
+    "source_schema": "confidence-dogfood-evidence/v1",
+    "declared_enabled_runs": 419,
+    "declared_distinct_prs": 166,
+    "runs_read": 419,
+    "records_imported": 419,
+    "records_skipped": 0,
+    "skip_reasons": {},
+    "distinct_prs_imported": 166,
+    "notes": [
+      "the baseline declared 419 enabled runs across 166 pull requests, and 419 records across 166 pull requests were imported: the import reconciles exactly with the baseline's own window.",
+      "the baseline retained the verifier's status, score, risk band, model, latency and concern count, and the head, base, diff and config pins; it retained no published review id, no verifier reason text, no provider token usage, no rubric version and no parser notes, so the legacy vocabulary names each of those and says where the value lives."
+    ]
+  },
+  "unavailable_reasons": {
+    "unscored_cause": "The unscored cause is written into the run-directory artifact confidence-score.json and the runner log; the marker publishes it (confidence_cause) only for an unscored run, and this record carries no published cause.",
+    "latency_ms": "No verifier latency is measured for this run: the marker publishes confidence_latency_ms only when the run's provider attempt was timed (#1455), and this record carries no published latency; the run-directory artifact confidence-score.json records no timing either.",
+    "token_usage": "The provider's usage is normalized by the transport and reaches the published marker only through the scorer's telemetry (confidence_prompt_tokens, confidence_completion_tokens, confidence_total_tokens, #1455); this record carries no published usage, so the raw run-directory artifact confidence-response.json remains the only home for it.",
+    "rubric_version": "The rubric version constant is written only into the run-directory artifact confidence-score.json; it reaches the published record only indirectly, through the config hash in the fingerprint marker.",
+    "deterministic_caps": "The deterministic ceilings are recorded as structured tokens only in the run-directory artifact confidence-score.json; the published reason carries at most the appended note that names them.",
+    "parser_notes": "The action-owned parser notes (a dropped concern, a malformed risk) are recorded in the run-directory artifact confidence-score.json and never reach the published body.",
+    "later_review_linkage": "A later review's finding outcome is recorded only in the run-directory artifact finding-outcomes.json, which carries no reference to the verifier's answer, so nothing published links a later finding to the verifier.",
+    "published_verifier_section": "The published reviewer body carries no '## Independent Confidence' section, so the verifier published nothing for this run.",
+    "published_fingerprint": "The published reviewer body carries no ai-pr-review-fingerprint marker, so it publishes neither the diff fingerprint nor the config hash.",
+    "published_record": "No reviewer comment or review carrying the ai-pr-reviewer marker is published for this pull request, so there is no published record to read.",
+    "legacy_published_record_id": "The baseline retained no published review id for this run, so the attempt's forge id is null and the record is keyed by its immutable publication identity instead.",
+    "legacy_verifier_reason": "The baseline retained the verifier's status, score, risk band, model and concern count, but not the verifier's reason text; the reason lives only in the published review body.",
+    "legacy_verifier_concern_details": "The baseline retained the concern count only; the individual advisory concerns (type, severity, location and evidence) live only in the published review body.",
+    "legacy_model": "The baseline recorded no verifier model for this run; the model lives only in the published review body's confidence section.",
+    "legacy_latency_ms": "The baseline recorded no verifier latency for this run; the latency lives only in the published marker and in the run-directory artifact confidence-score.json.",
+    "legacy_token_usage": "The baseline recorded no provider token usage for this run; the usage lives only in the published marker and in the run-directory artifact confidence-response.json.",
+    "legacy_rubric_version": "The baseline recorded no rubric version for this run; the rubric version constant lives only in the run-directory artifact confidence-score.json.",
+    "legacy_parser_notes": "The baseline recorded no parser notes for this run; the parser notes live only in the run-directory artifact confidence-score.json.",
+    "legacy_unscored_cause": "The baseline recorded no published unscored cause for this run; the cause lives only in the published marker and in the run-directory artifact confidence-score.json."
+  },
+  "notes": [
+    "the summary reports what the retained attempts carry and nothing else: it carries no pass/fail judgment, no score threshold and no gate advice, because the adjudication of the verifier's authority lives in issue #1450.",
+    "the baseline declared 419 enabled runs across 166 pull requests, and 419 records across 166 pull requests were imported: the import reconciles exactly with the baseline's own window.",
+    "the baseline retained the verifier's status, score, risk band, model, latency and concern count, and the head, base, diff and config pins; it retained no published review id, no verifier reason text, no provider token usage, no rubric version and no parser notes, so the legacy vocabulary names each of those and says where the value lives."
+  ]
+}

@@ -935,3 +935,72 @@ records are still written); `2` the collection could not run at all.
 This collector does NOT close #1452: the issue still needs a human adjudicated
 pass over the collected evidence and a written recommendation on whether the
 verifier earns merge-gate authority.
+
+## Verifier dogfood attempt dataset (#1479)
+
+`scripts/confidence_dogfood_dataset.py` keeps EVERY published verifier attempt
+of a pull request, not only the newest one. The #1452 collector above answers
+"what does the verifier say about this pull request now". The dataset answers
+"what did the verifier publish for this pull request", so a later review cannot
+hide the earlier attempts of the same pull request.
+
+Every forge read goes through the configured forge capability
+(`pr_reviewer.forge`). The collector never re-runs the verifier, never scores a
+run, and never writes to the forge.
+
+```bash
+# Import the historical baseline of the #1459 sweep.
+mise exec python@3.14 -- python3 scripts/confidence_dogfood_dataset.py \
+    --repo misospace/pr-reviewer-action \
+    --import-legacy evals/reports/confidence-dogfood/evidence-2026-11-03.json \
+    --dataset evals/reports/confidence-dogfood/dataset-2026-11-04.json \
+    --summary evals/reports/confidence-dogfood/summary-2026-11-04.json
+
+# Fold the pull requests of ordinary traffic into the same dataset.
+mise exec python@3.14 -- python3 scripts/confidence_dogfood_dataset.py \
+    --repo misospace/pr-reviewer-action --all-prs --pr-state all --max-prs 15 \
+    --dataset evals/reports/confidence-dogfood/dataset-2026-11-04.json \
+    --summary evals/reports/confidence-dogfood/summary-2026-11-04.json
+```
+
+Run the second command after each dogfood window, and before every adjudication
+pass. The command is read-only, makes no model call, and reads a bounded number
+of pages and pull requests. The `--max-prs`, `--max-attempts-per-pr`,
+`--max-pages` and `--max-records` bounds refuse to read or write more than the
+run allows. `--max-records` fails the run instead of dropping an attempt.
+
+The dataset file (`verifier-dogfood-dataset/v1`) holds one record per published
+attempt. A record carries the attempt identity, the published pins, the
+verifier's own published answer, the reason for each published value the
+record does not carry, and the provenance of the attempt.
+
+An attempt is keyed by an immutable published-review identity: the repository,
+the pull request, the publication kind, the publication instant, and the head
+and config pins the published body carried. The rules that follow from that
+key:
+
+- A repeated run over unchanged input adds no record and drops no record.
+- A body edited in place keeps the identity of the body it belongs to. It is
+  not a fresh attempt.
+- A body rewritten on a new head is a different attempt, because the head pin
+  is part of the key.
+- A record is never deleted. An attempt a later collection does not observe is
+  kept and marked `absent_in_latest_collection`, because a dismissed, deleted
+  or hidden publication is evidence too.
+- Absence is asserted only where the collection read the whole publication
+  surface of that pull request. A bounded run never marks the attempts it did
+  not look for absent.
+- A dataset file of another schema is refused. The collector never guesses a
+  migration.
+
+The summary file (`verifier-dogfood-summary/v1`) counts what the retained
+attempts carry: the verifier status, the published causes, the models, the
+primary verdicts, the challenge counts, the coverage of the latency and token
+usage, and the attempts per pull request. The summary carries no pass or fail
+judgment, no score threshold, and no gate advice. The adjudication of the
+verifier's authority belongs to #1450.
+
+The import reconciles the baseline against itself: the declared window of the
+baseline (419 enabled runs across 166 pull requests) is compared with the
+records the import actually produced, and every baseline record the import
+cannot support is counted under a skip reason instead of being dropped.

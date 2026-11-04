@@ -305,6 +305,7 @@ class ForgeClient:
         path: str,
         params: Mapping[str, Any] | None = None,
         per_page: int = 100,
+        max_pages: int | None = None,
     ) -> Iterable[Any]:
         """Yield every item across all pages of a GitHub list endpoint.
 
@@ -313,7 +314,37 @@ class ForgeClient:
         per iteration. The generator stops when an empty page is returned
         or a non-list payload is decoded; transport and HTTP failures
         propagate as :class:`ForgeError`.
+
+        ``max_pages`` bounds the walk for a caller that must not page
+        forever: ``None`` (the default) reads every page, a positive count
+        stops after that many pages have been READ, and a count of zero or
+        less reads no page at all. The bound is validated eagerly, before
+        any request goes out, and a non-integer bound is refused with a
+        fixed error string -- a bound that is not a number is a caller
+        bug, not a page count to guess at.
         """
+        limit = self._page_limit(max_pages)
+        return self._iter_pages(path, params, per_page, limit)
+
+    @staticmethod
+    def _page_limit(max_pages: int | None) -> int | None:
+        """The validated page bound, or ``None`` for an unbounded walk."""
+        if max_pages is None:
+            return None
+        if isinstance(max_pages, bool) or not isinstance(max_pages, int):
+            raise ForgeError("invalid max_pages")
+        return max_pages
+
+    def _iter_pages(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None,
+        per_page: int,
+        max_pages: int | None,
+    ) -> Iterable[Any]:
+        """The page walk itself, bounded by an already-validated limit."""
+        if max_pages is not None and max_pages <= 0:
+            return
         merged: dict[str, Any] = dict(params or {})
         merged.setdefault("per_page", per_page)
         page = 1
@@ -324,6 +355,8 @@ class ForgeClient:
                 return
             yield from data
             if len(data) < int(merged["per_page"]):
+                return
+            if max_pages is not None and page >= max_pages:
                 return
             page += 1
 

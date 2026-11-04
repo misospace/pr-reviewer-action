@@ -632,6 +632,52 @@ class TestGetPagesStopsAtShortPage:
             server.server_close()
 
 
+class TestGetPagesHonorsMaxPages:
+    """``max_pages`` bounds the walk for a caller that must not page
+    forever. The stub always answers a FULL page, so the walk would never
+    end on its own -- only the bound ends it, and the bound must be the
+    thing that ends it."""
+
+    def test_the_walk_stops_after_the_bound(self):
+        requested: list[str] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def handle_one_request(self):
+                self.raw_requestline = self.rfile.readline()
+                if not self.raw_requestline:
+                    return
+                if not self.parse_request():
+                    return
+                requested.append(self.path)
+                query = dict(
+                    urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query)
+                )
+                page = int(query.get("page", "1"))
+                body = [{"page": page, "i": n} for n in range(3)]
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode("utf-8"))
+
+            def log_message(self, *_args):  # noqa: ANN001
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            items = list(client.get_pages("/x", per_page=3, max_pages=2))
+            assert [item["page"] for item in items] == [1, 1, 1, 2, 2, 2]
+            assert len(requested) == 2, (
+                "the bound must end the walk: a third page was read"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 # ---------------------------------------------------------------------------
 # DELETE (label removal)
 # ---------------------------------------------------------------------------
