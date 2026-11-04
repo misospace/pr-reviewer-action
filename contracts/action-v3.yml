@@ -306,6 +306,10 @@ inputs:
     required: false
     default: ""
     description: "API key for the confidence verifier's endpoint. Empty inherits the primary API key ONLY when ai-confidence-base-url is also empty (verifier on the same endpoint); with a distinct ai-confidence-base-url the verifier uses only its own key and never reuses the primary credential. An explicitly configured key is always used as-is."
+  - id: ai-confidence-isolation
+    required: false
+    default: "inherit-primary"
+    description: "How the verifier resolves its transport when ai-confidence-base-url is empty. 'inherit-primary' (the default) keeps the same-endpoint convenience: the scorer dials the primary lane's endpoint under the primary lane's credential. 'require-dedicated' refuses that inheritance: a verifier model without its own ai-confidence-base-url is a misconfiguration, so the run publishes confidence-status=unscored with the action-owned cause dedicated_config_missing — no model call, the review itself unaffected — instead of silently scoring on the primary lane. Under 'require-dedicated' a SET ai-confidence-base-url behaves exactly as documented for ai-confidence-base-url/ai-confidence-api-key (a distinct endpoint never inherits the primary credential). Operator-only: never repo-configurable, matching the other ai-confidence-* inputs."
   - id: ai-confidence-reasoning-effort
     required: false
     default: ""

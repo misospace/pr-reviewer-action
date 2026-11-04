@@ -671,6 +671,11 @@ export interface ConfidenceProfile {
    * family) accepts structured output with the scorer's own compact JSON
    * schema. False (the default) keeps the request bytes unchanged. */
   structuredOutputSupported: boolean;
+  /** #1478: set when the resolver REFUSED the resolved configuration itself —
+   * the require-dedicated isolation mode with no dedicated endpoint to
+   * resolve. The scorer publishes `unscored` with exactly this action-owned
+   * cause, pre-wire, and the review is unaffected. "" = nothing refused. */
+  refusalCause: string;
 }
 
 export interface ConfidenceResolution {
@@ -707,6 +712,7 @@ function disabledConfidenceProfile(): ConfidenceProfile {
     credentialSource: "own",
     maxTokens: CONFIDENCE_MAX_TOKENS, promptTokens: CONFIDENCE_PROMPT_TOKENS, modelContextTokens: 0,
     anthropicEffortSupported: false, structuredOutputSupported: false,
+    refusalCause: "",
   };
 }
 
@@ -811,6 +817,34 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   }
 
   const distinctEndpoint = baseUrl !== "";
+  // #1478: the operator-declared isolation mode. Config-load validation
+  // restricts the input to the two vocabulary values (anything else throws at
+  // startup), so here only the exact strict token is special and every other
+  // value — including the default — is the documented inherit-primary
+  // behavior.
+  const requireDedicated = trimmed(env, "AI_CONFIDENCE_ISOLATION") === "require-dedicated";
+  if (requireDedicated && !distinctEndpoint) {
+    // Isolation was requested and the dedicated endpoint does not exist. The
+    // primary lane's endpoint and credential must NOT ride the verifier: the
+    // run keeps the lane ENABLED (the model was configured) but resolves no
+    // transport, and the scorer refuses the call pre-wire with the
+    // action-owned cause — visible as `unscored(dedicated_config_missing)`
+    // while the review itself publishes unchanged. Silence here would be the
+    // exact failure #1478 measured: a verifier silently dialling the primary
+    // backend under the primary credential.
+    warnings.push(
+      "confidence scorer: ai-confidence-isolation=require-dedicated but ai-confidence-base-url is empty — the verifier never inherits the primary lane's endpoint or credential; set ai-confidence-base-url and ai-confidence-api-key to the dedicated verifier endpoint, or drop ai-confidence-isolation to restore the same-endpoint default",
+    );
+    return {
+      profile: {
+        ...disabledConfidenceProfile(),
+        enabled: true,
+        model,
+        refusalCause: "dedicated_config_missing",
+      },
+      warnings,
+    };
+  }
   // An explicitly configured api-format wins; empty inherits the primary
   // lane's resolved format (the contract validates the enum, but ambient
   // overrides or test rigs may not — an unknown value falls back to the
@@ -1002,6 +1036,7 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
       modelContextTokens,
       anthropicEffortSupported,
       structuredOutputSupported,
+      refusalCause: "",
     },
     warnings,
   };

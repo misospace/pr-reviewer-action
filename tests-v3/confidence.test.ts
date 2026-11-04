@@ -40,6 +40,7 @@ function profile(overrides: Partial<ConfidenceProfile> = {}): ConfidenceProfile 
     modelContextTokens: 0,
     anthropicEffortSupported: false,
     structuredOutputSupported: false,
+    refusalCause: "",
     ...overrides,
   };
 }
@@ -607,6 +608,27 @@ test("distinct non-loopback URL with no key refuses before any transport call", 
   assert.equal(outcome.result.cause, "missing_credential");
   assert.equal(called, false);
   assert.equal(outcome.requestPayload, null);
+});
+
+test("#1478: a resolver-refused require-dedicated profile publishes unscored before any transport call", async () => {
+  let called = false;
+  const outcome = await runConfidenceScorer({
+    profile: profile({ refusalCause: "dedicated_config_missing", baseUrl: "", apiKey: "", inheritedTransport: false }),
+    primaryApiKey: "primary-key-ABC",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async () => { called = true; throw new Error("should not be called"); },
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(outcome.result.status, "unscored");
+  assert.equal(outcome.result.cause, "dedicated_config_missing");
+  assert.equal(outcome.result.model, "", "no model audited the review: the refusal happens before any call");
+  assert.equal(called, false);
+  assert.equal(outcome.requestPayload, null);
+  assert.equal(outcome.rawResponse, null);
+  assert.equal(outcome.latencyMs, null, "no provider call happened, so no latency may be claimed");
+  assert.equal(outcome.usage, null, "no provider call happened, so no usage may be claimed");
 });
 
 test("loopback endpoint without a key is allowed", async () => {
@@ -1330,6 +1352,7 @@ test("#1073: the fork gate is default-off, overridable only by explicit operator
     requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false, credentialSource: "own",
     maxTokens: 4096, promptTokens: 98304, modelContextTokens: 0,
     anthropicEffortSupported: false, structuredOutputSupported: false,
+    refusalCause: "",
   });
   assert.ok(gated.warnings.some((warning) => warning.includes("ai-confidence-enable-for-forks")), JSON.stringify(gated.warnings));
 

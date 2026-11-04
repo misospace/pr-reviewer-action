@@ -226,6 +226,13 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   "AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT",
   "AI_CONFIDENCE_API_KEY",
   "AI_CONFIDENCE_ENABLE_FOR_FORKS",
+  // #1478: the isolation mode decides whether a missing dedicated endpoint
+  // silently inherits the primary lane or refuses the call, so it changes
+  // what the scorer does with the very same model/diff; it contributes under
+  // the same enabled gate as the rest of the family. Its contract default
+  // ("inherit-primary") is non-empty and stable, so it adds no upgrade churn
+  // beyond the family's own enabled gate.
+  "AI_CONFIDENCE_ISOLATION",
 ]);
 
 /** #1037: the `ai-extra-headers` surface is hashed by its canonical

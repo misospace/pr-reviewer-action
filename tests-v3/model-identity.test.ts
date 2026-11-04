@@ -29,6 +29,7 @@ function profile(overrides: Partial<ConfidenceProfile> = {}): ConfidenceProfile 
     modelContextTokens: 0,
     anthropicEffortSupported: false,
     structuredOutputSupported: false,
+    refusalCause: "",
     ...overrides,
   };
 }

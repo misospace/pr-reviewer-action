@@ -64,6 +64,11 @@ export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.f
   // #1073: the confidence scorer is its own lane; empty (the default) inherits
   // the primary lane's format rather than defaulting to openai.
   "ai-confidence-api-format": ["openai", "anthropic"],
+  // #1478: how the scorer resolves a transport when ai-confidence-base-url is
+  // empty. An invalid value throws like every other typed input — a workflow
+  // authoring bug fails loudly at startup, never silently relaxes into the
+  // primary-lane inheritance an operator asked to refuse.
+  "ai-confidence-isolation": ["inherit-primary", "require-dedicated"],
   "ai-response-format": ["off", "json_object", "json_schema"],
   "ai-primary-response-format": ["off", "json_object", "json_schema"],
   "ai-smart-response-format": ["off", "json_object", "json_schema"],

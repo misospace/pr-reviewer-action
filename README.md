@@ -88,6 +88,7 @@ Set `ai-confidence-model` and the review runs one extra, bounded model call. It 
 | `ai-confidence-base-url` | Optional scorer endpoint; blank inherits the primary endpoint. |
 | `ai-confidence-api-format` | `openai` (default) or `anthropic`; blank inherits the primary format. |
 | `ai-confidence-api-key` | Scorer endpoint key. A distinct endpoint never inherits the primary key. |
+| `ai-confidence-isolation` | `inherit-primary` (default) or `require-dedicated`. `require-dedicated` refuses the same-endpoint inheritance: a scorer model without its own `ai-confidence-base-url` publishes `confidence-status: unscored` (cause `dedicated_config_missing`) instead of silently dialing the primary endpoint under the primary credential. The review itself is unaffected. |
 | `ai-confidence-timeout-sec` | Wall-clock budget for the scorer call, default 120. |
 | `ai-confidence-reasoning-effort` | Optional effort token; blank omits the field entirely. |
 | `ai-confidence-max-tokens` | Completion budget for the scorer's answer, default 4096. Reasoning models spend part of it thinking, so it must leave room for the hidden reasoning *and* the final JSON answer. |
@@ -103,7 +104,7 @@ Set `ai-confidence-model` and the review runs one extra, bounded model call. It 
 
 **What a score means:** an independent merge-safety verification of *the change*, not a self-assessment of how well the review covered its own conclusions. The verifier reads the PR description and the diff itself. It asks whether the change is safe to merge, from the evidence the review carries. The score answers that question, and it is not a probability that the code is correct. `cannot_verify` fails closed to `unscored`: when the supplied evidence is too incomplete to verify, the verifier declines instead of guessing a score. The score never changes the verdict, the findings, the required checks, or publication. Deterministic caps outrank the model. A blocker finding caps the score at 2. A major finding or incomplete review coverage caps it at 3. A concern the verifier itself raises caps it at 4.
 
-**Independence:** the scorer resolving to the same endpoint and model that wrote the review is correlated self-grading, not independent evidence — the action warns about it. Point `ai-confidence-base-url` at a different backend for a genuine second opinion.
+**Independence:** the scorer resolving to the same endpoint and model that wrote the review is correlated self-grading, not independent evidence — the action warns about it. Point `ai-confidence-base-url` at a different backend for a genuine second opinion. Workflows that REQUIRE that independence set `ai-confidence-isolation: require-dedicated` (#1478): the verifier's endpoint and credential then resolve only from the workflow's own dedicated configuration, and a missing dedicated endpoint fails visibly (`unscored`, cause `dedicated_config_missing`) instead of silently inheriting the primary transport.
 
 **Where results appear:** the five `confidence-*` step outputs, an `Independent confidence` row in the step summary, an advisory section in the published review, the additive confidence keys in the review marker, and the `confidence-score.json` / `confidence-request.json` / `confidence-response.json` run artifacts. Disabled runs keep all of it absent.
 

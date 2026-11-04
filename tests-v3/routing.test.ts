@@ -562,6 +562,8 @@ test("#1073: confidence profile inherits the primary lane when ai-confidence-bas
     modelContextTokens: 0,
     anthropicEffortSupported: false,
     structuredOutputSupported: false,
+    // #1478: the default isolation mode never refuses the resolved transport.
+    refusalCause: "",
   });
   assert.deepEqual(resolved.warnings, []);
 });
@@ -602,6 +604,50 @@ test("#1073: a distinct confidence base URL never inherits the primary credentia
   assert.equal(keyless.warnings.length, 1);
   assert.match(keyless.warnings[0]!, /ai-confidence-base-url is set but ai-confidence-api-key is empty/);
   assert.equal(keyless.warnings[0]!.includes("primary-key"), false);
+});
+
+test("#1478: require-dedicated isolation refuses a missing dedicated endpoint instead of inheriting the primary lane", () => {
+  const refused = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  // The lane stays ENABLED (the model was configured) but resolves no
+  // transport: the scorer must publish the visible unscored cause instead of
+  // silently dialling the primary endpoint under the primary credential.
+  assert.equal(refused.profile.enabled, true);
+  assert.equal(refused.profile.refusalCause, "dedicated_config_missing");
+  assert.equal(refused.profile.baseUrl, "", "no primary endpoint may ride a refused verifier profile");
+  assert.equal(refused.profile.apiKey, "", "no primary credential may ride a refused verifier profile");
+  assert.equal(refused.profile.inheritedTransport, false);
+  assert.equal(refused.profile.credentialSource, "own");
+  assert.ok(refused.warnings.some((message) => message.includes("ai-confidence-isolation=require-dedicated")), JSON.stringify(refused.warnings));
+  assert.ok(!refused.warnings.some((message) => message.includes("primary-key")), "no secret value may appear in a warning");
+
+  // The default mode keeps the documented same-endpoint inheritance, byte for
+  // byte: existing consumers are unaffected.
+  const inherited = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  assert.equal(inherited.profile.refusalCause, "");
+  assert.equal(inherited.profile.baseUrl, "https://primary");
+  assert.equal(inherited.profile.apiKey, "primary-key");
+
+  // A configured dedicated endpoint resolves exactly like the documented
+  // distinct-endpoint shape — the mode changes only the EMPTY-base-url story.
+  const dedicated = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+  });
+  assert.equal(dedicated.profile.refusalCause, "");
+  assert.equal(dedicated.profile.baseUrl, "https://independent");
+  assert.equal(dedicated.profile.apiKey, "scorer-key");
+  assert.equal(dedicated.profile.inheritedTransport, false);
+  assert.equal(dedicated.profile.credentialSource, "own");
+  assert.deepEqual(dedicated.warnings, []);
 });
 
 test("#1073: same-endpoint same-model scoring emits the independence warning", () => {
@@ -645,6 +691,7 @@ test("#1073: confidence profile resolves timeout, effort, and disabled state", (
     credentialSource: "own",
     maxTokens: 4096, promptTokens: 98304, modelContextTokens: 0,
     anthropicEffortSupported: false, structuredOutputSupported: false,
+    refusalCause: "",
   });
   assert.deepEqual(disabled.warnings, []);
 

@@ -92,6 +92,7 @@
       "ai-confidence-base-url",
       "ai-confidence-api-format",
       "ai-confidence-api-key",
+      "ai-confidence-isolation",
       "ai-confidence-reasoning-effort",
       "ai-confidence-timeout-sec",
       "ai-confidence-max-tokens",

@@ -898,6 +898,50 @@ gate design (#1075 stays blocked); do not remove from the critical path**,
 with re-evaluation conditions in the owning report. Ongoing per-run
 collection is `scripts/confidence_dogfood_evidence.py` (PR #1454).
 
+## Verifier lane isolation — dogfood operator config (#1478)
+
+The #1452 measurement above (418/419 unscored) was collected while the
+dogfood workflow enabled the verifier but never wired
+`ai-confidence-base-url`/`ai-confidence-api-key`, so the verifier silently
+inherited the primary LiteLLM endpoint and credential and scored against a
+model namespace that does not serve it. The dogfood workflow now requests
+**isolation** (`ai-confidence-isolation: require-dedicated`, #1478), and its
+verifier transport resolves ONLY from operator-controlled repository
+settings — never from the primary `LITELLM_*` values, never from PR-controlled
+input, and never committed to the workflow file.
+
+Operator-side repository settings this lane reads (trusted repository
+settings only — set them under Settings → Secrets and variables → Actions;
+nothing else may supply them):
+
+| Setting | Kind | Meaning |
+| --- | --- | --- |
+| `CONFIDENCE_BASE_URL` | repository **variable** | The verifier's own endpoint base URL. Must be a backend that is actually distinct from the primary `LITELLM_URL`. |
+| `CONFIDENCE_API_KEY` | repository **secret** | The verifier endpoint's credential. A distinct endpoint never inherits the primary key; write-only, never logged, and never exposed beyond the action's redacted transport path. |
+| `CONFIDENCE_MODEL` | repository **variable** (optional) | The verifier's model identifier, sent to the provider verbatim (opaque, case-sensitive — #1465). Falls back to `SMART_MODEL` when unset. |
+| `CONFIDENCE_FORMAT` | repository **variable** (optional) | The verifier endpoint's wire family (`openai`/`anthropic`). Falls back to `SMART_FORMAT` when unset. |
+
+Recommended safe configuration: a second provider account or proxy virtual
+key that only the verifier may spend (its request is already bounded: one
+shot, 4096 completion / 98304 prompt token budgets, 120 s timeout), so the
+verifier cannot share the primary lane's rate limits, quota, or outage
+domain. Under `require-dedicated`, a missing `CONFIDENCE_BASE_URL` is a
+VISIBLE failure: the run publishes `confidence-status: unscored` with the
+action-owned cause `dedicated_config_missing` (and a WARNING naming the
+inputs) while the authoritative review publishes unchanged — the verifier
+never silently dials the primary lane. Other verifier failures keep their
+existing causes (`missing_credential` for a distinct endpoint without a key,
+`http_*` / `timeout` / `transport_error` for wire failures).
+
+Rollback to the pre-#1478 advisory shape: delete the three
+`ai-confidence-base-url` / `ai-confidence-api-key` /
+`ai-confidence-isolation` lines from `.github/workflows/ai-pr-review.yaml`
+(the verifier then inherits the primary transport again), or disable the
+verifier entirely by removing the `ai-confidence-model` line. The verifier is
+and stays advisory either way: it never affects the verdict, findings,
+approval, or any merge gate, and #1075 remains blocked pending #1450
+qualification evidence.
+
 ## Verifier dogfood evidence collector (#1452)
 
 `scripts/confidence_dogfood_evidence.py` assembles what the merge-safety

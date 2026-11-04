@@ -2340,3 +2340,37 @@ test("#1073: the fork override contributes to the fingerprint only while the sco
   });
   assert.equal(computeConfigHash(sameOverride), computeConfigHash(overrideOn));
 });
+
+test("#1478: the isolation mode contributes to the fingerprint only while the scorer is enabled", () => {
+  const baseline = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
+
+  // Disabled (the default): the isolation mode contributes NOTHING even
+  // though the contract default ("inherit-primary") is non-empty — the family
+  // gate keeps a scorer-less installation byte-identical to pre-#1478.
+  const disabledWithIsolation = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_ISOLATION: "inherit-primary",
+  });
+  assert.deepEqual(disabledWithIsolation, baseline);
+
+  // Enabled: the resolved mode is model-affecting config (require-dedicated
+  // turns a missing endpoint from silent inheritance into a visible refusal),
+  // so it must participate.
+  const inherit = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "inherit-primary",
+  });
+  assert.ok(inherit.includes("AI_CONFIDENCE_ISOLATION=inherit-primary"));
+
+  const requireDedicated = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.ok(requireDedicated.includes("AI_CONFIDENCE_ISOLATION=require-dedicated"));
+  assert.notEqual(computeConfigHash(requireDedicated), computeConfigHash(inherit));
+});

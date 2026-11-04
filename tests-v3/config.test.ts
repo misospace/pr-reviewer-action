@@ -41,7 +41,8 @@ test("current canonical contract validates and maps every input once", () => {
     assert.ok(Object.hasOwn(config, toCamelCase(input.id)), input.id);
     assert.equal(toCamelCase(input.id).includes("_"), false);
   }
-  assert.equal(contract.inputs.length, 176);
+  // #1478: 177 inputs — ai-confidence-isolation joined the confidence family.
+  assert.equal(contract.inputs.length, 177);
   assert.equal(Object.hasOwn(config, "ai_base_url"), false);
 });
 

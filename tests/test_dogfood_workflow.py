@@ -193,6 +193,9 @@ DOGFOOD_OVERRIDES = {
     "ai-smart-reasoning-effort",
     "ai-confidence-model",
     "ai-confidence-api-format",
+    "ai-confidence-base-url",
+    "ai-confidence-api-key",
+    "ai-confidence-isolation",
     "ai-confidence-reasoning-effort",
     "ai-confidence-timeout-sec",
     "ai-confidence-max-tokens",
@@ -259,17 +262,29 @@ def test_dogfood_enables_bounded_advisory_confidence_scoring() -> None:
 
     The optional dedicated model/format may be unset in repository variables:
     falling back to the smart lane keeps dogfood scoring enabled rather than
-    silently turning it off. Credential and endpoint inheritance uses the
-    action's same-origin policy, and forks stay disabled by default.
+    silently turning it off. #1478: the verifier's ENDPOINT and CREDENTIAL are
+    isolated from the primary lane — they resolve only from the operator's
+    dedicated CONFIDENCE_* repository variable/secret, and
+    ai-confidence-isolation=require-dedicated turns a missing dedicated
+    endpoint into a visible `unscored` run instead of a silent primary-lane
+    inheritance. The primary LITELLM_* credential must never appear on a
+    confidence input, and forks stay disabled by default.
     """
     values = _review_step_with(WORKFLOW.read_text(encoding="utf-8"))
     assert values["ai-confidence-model"] == "${{ vars.CONFIDENCE_MODEL || vars.SMART_MODEL }}"
     assert values["ai-confidence-api-format"] == "${{ vars.CONFIDENCE_FORMAT || vars.SMART_FORMAT }}"
+    assert values["ai-confidence-base-url"] == "${{ vars.CONFIDENCE_BASE_URL }}"
+    assert values["ai-confidence-api-key"] == "${{ secrets.CONFIDENCE_API_KEY }}"
+    assert values["ai-confidence-isolation"] == "require-dedicated"
     assert values["ai-confidence-reasoning-effort"] == "${{ vars.CONFIDENCE_REASONING_EFFORT }}"
     assert str(values["ai-confidence-timeout-sec"]) == "120"
-    assert "ai-confidence-base-url" not in values
-    assert "ai-confidence-api-key" not in values
     assert "ai-confidence-enable-for-forks" not in values
+    # The primary lane's credential must never ride a confidence input: the
+    # verifier inherits nothing from the primary transport under
+    # require-dedicated, and the dedicated secret is its own.
+    for key, value in values.items():
+        if key.startswith("ai-confidence"):
+            assert "LITELLM" not in value, f"{key} references the primary lane credential: {value}"
     assert values["publish-mode"] == "review_verdict"
 
 
