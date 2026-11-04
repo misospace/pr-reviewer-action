@@ -235,6 +235,71 @@ test("publicAnalysisEngine strips the base URL but keeps model, format, and rout
   assert.equal(publicAnalysisEngine(MODEL_UNAVAILABLE_ENGINE), MODEL_UNAVAILABLE_ENGINE);
 });
 
+test("publicAnalysisEngine keeps a model identifier that carries an `@` (#1469)", () => {
+  const cases: Array<[string, string]> = [
+    ["claude-sonnet-4@20250514@https://api.example.com (anthropic)", "claude-sonnet-4@20250514 (anthropic)"],
+    // A `@<scheme-word>:` inside the model name is not the URL separator
+    // either — only a `scheme://` token opens the endpoint.
+    ["model@v1:tag@https://api.example.com (openai)", "model@v1:tag (openai)"],
+    [
+      annotateAnalysisEngine(analysisEngineBase("m@20250514", "https://api.example.com", "openai"), "fallback"),
+      "m@20250514 (openai) — fallback (primary failed)",
+    ],
+  ];
+  for (const [engine, expected] of cases) {
+    assert.equal(publicAnalysisEngine(engine), expected);
+  }
+  // The redacted URL never carries an `@` (#1428), so the last `@` in the
+  // leading token is the separator even when the model holds one too.
+  assert.equal(publicAnalysisEngine(analysisEngineBase("m@20250514", "https://user:secret@llm.example.net/v1", "openai")), "m@20250514 (openai)");
+});
+
+test("publicAnalysisEngine keeps a model identifier that carries a `scheme://`-shaped token (#1469 review)", () => {
+  const cases: Array<[string, string]> = [
+    // The model's own `@https://suffix` opens a scheme token, but that
+    // token always carries the real endpoint's `@` inside it; the strip
+    // skips it and anchors on the clean endpoint token instead.
+    ["vendor@https://suffix@https://api.example.com (openai)", "vendor@https://suffix (openai)"],
+    ["m@https://a.com@https://b.com (openai)", "m@https://a.com (openai)"],
+    [
+      annotateAnalysisEngine(analysisEngineBase("m@https://suffix", "https://api.example.com", "openai"), "primary", { reviewRoute: "primary" }),
+      "m@https://suffix (openai) — primary route",
+    ],
+    // The real endpoint still leaves whole when it itself carries an `@`
+    // in its path: the model has no scheme token, so the first candidate
+    // is the separator.
+    ["m@https://llm.example/pa@ss/v1 (openai)", "m (openai)"],
+    // Endpoint URL with a scheme-shaped `@` in its query: the token parses
+    // without userinfo, so the first candidate is the separator and the
+    // endpoint still leaves whole, never torn open.
+    ["m@https://api.example.com/?q=@https://x (openai)", "m (openai)"],
+    // Placeholder arm: the fail-closed placeholder token still leaves
+    // whole, and a model token carrying it resolves to the real one.
+    ["m@<redacted-endpoint-URL> (openai)", "m (openai)"],
+    ["m@<redacted-endpoint-URL>@<redacted-endpoint-URL> (openai)", "m (openai)"],
+    // Accepted failure mode: a model token carrying `/` before its own
+    // `@` parses userinfo-free, so the strip accepts it and over-strips
+    // the model — truncation, never endpoint text left behind.
+    ["m@https://suffix/path@https://api.example.com (openai)", "m (openai)"],
+    // Fallback: no candidate is acceptable (the model token parses with
+    // userinfo and no endpoint candidate follows), so the first candidate
+    // still strips — the endpoint never stays behind.
+    ["m@https://u@h (openai)", "m (openai)"],
+    // A model id with internal whitespace splits the whitespace-free
+    // token run; the boundary check rejects the mid-model candidate so
+    // the endpoint token still leaves whole and the model stays intact.
+    ["m@https://a@b/c d@https://api.example.com/v1 (openai)", "m@https://a@b/c d (openai)"],
+    // A space after a forged placeholder keeps the placeholder out of the
+    // accepted token, so the real endpoint behind it still strips (the
+    // stray space before the format paren stays; the placeholder itself
+    // names no endpoint).
+    ["m@<redacted-endpoint-URL> @https://api.example.com/v1 (openai)", "m@<redacted-endpoint-URL>  (openai)"],
+  ];
+  for (const [engine, expected] of cases) {
+    assert.equal(publicAnalysisEngine(engine), expected);
+  }
+});
+
 test("analysisEngineBase redacts a credential the base URL carries in its userinfo (#1428)", () => {
   assert.equal(analysisEngineBase("m", "https://user:secret@llm.example.net/v1", "openai"), "m@https://llm.example.net/v1 (openai)");
   assert.equal(analysisEngineBase("m", "https://llm.example.net/v1", "openai"), "m@https://llm.example.net/v1 (openai)");
