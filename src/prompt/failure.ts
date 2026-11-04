@@ -56,21 +56,27 @@ export interface EngineRouting {
  * missing here names itself rather than reading as a primary failure. */
 const FIRST_PASS_TIER: ReadonlyMap<string, string> = new Map([["", "primary"], ["legacy", "primary"], ["primary", "primary"]]);
 
+/** The separator between the engine base and the route annotation
+ * `annotateAnalysisEngine` appends. The published strip reads it to tell the
+ * API-format group (which ends the engine base) from a parenthesis group
+ * inside the endpoint token (#1474). */
+const ANNOTATION_SEPARATOR = " — ";
+
 /** Port of `annotate_analysis_engine`: appends why this model produced the
  * review. A legacy (routing off) primary success stays unannotated. */
 export function annotateAnalysisEngine(engine: string, origin: string, routing: EngineRouting = {}): string {
   switch (origin) {
     case "fallback": {
       const route = routing.reviewRoute ?? "";
-      return `${engine} — fallback (${FIRST_PASS_TIER.get(route) ?? route} failed)`;
+      return `${engine}${ANNOTATION_SEPARATOR}fallback (${FIRST_PASS_TIER.get(route) ?? route} failed)`;
     }
     case "escalated":
-      return `${engine} — escalated (${routing.escalationReasons || "unknown"})`;
+      return `${engine}${ANNOTATION_SEPARATOR}escalated (${routing.escalationReasons || "unknown"})`;
     case "primary": {
       const route = routing.reviewRoute || "legacy";
       // #965: there is no direct smart route anymore — the first pass is
       // primary or legacy; a smart second pass reports as "escalated".
-      if (route === "primary") return `${engine} — primary route`;
+      if (route === "primary") return `${engine}${ANNOTATION_SEPARATOR}primary route`;
       return engine;
     }
     default:
@@ -81,9 +87,13 @@ export function annotateAnalysisEngine(engine: string, origin: string, routing: 
 /** `"$AI_MODEL@$AI_BASE_URL ($AI_API_FORMAT)"` — the base engine string.
  * #1428: a credential the endpoint URL carries in its userinfo is
  * structurally redacted, so the engine string (logs, run artifacts) never
- * echoes it; the published body strips the URL token entirely either way. */
+ * echoes it; the published body strips the URL token entirely either way.
+ * #1474: the base URL is trimmed here, exactly as the transport trims it
+ * before the request — a lane base URL carrying edge whitespace would
+ * otherwise compose an engine whose separator no longer opens the endpoint
+ * token, and the whole URL would reach a published surface. */
 export function analysisEngineBase(model: string, baseUrl: string, apiFormat: string): string {
-  return `${model}@${redactEndpointUrlCredential(baseUrl)} (${apiFormat})`;
+  return `${model}@${redactEndpointUrlCredential(baseUrl.trim())} (${apiFormat})`;
 }
 
 /** Strips the `<baseUrl>` token `analysisEngineBase` adds after the model
@@ -96,23 +106,84 @@ export function analysisEngineBase(model: string, baseUrl: string, apiFormat: st
  * `@`. A composed endpoint token always: opens `scheme://` (or is the
  * placeholder), carries no userinfo (redaction removes it, and
  * `splitEndpointUserinfo` refuses any URL whose `@` falls outside the
- * authority, placeholdering the whole token instead), carries no internal
- * whitespace, and is followed by the ` (` that opens the API format. A
- * candidate is accepted only when it meets all of those; a model
- * identifier's own URL-shaped token followed by the real endpoint parses
- * with userinfo (#1469 review) and a candidate whose token ends mid-model
- * fails the boundary, so both are skipped and the scan resumes inside the
- * rejected token, which consumed the candidates nested in it. A model
- * token that carries `/` or `#` before its own `@` can still parse
- * userinfo-free and be accepted, over-stripping the model — the fail-safe
- * direction: truncation, never endpoint text left behind. When no
- * candidate is acceptable the strip falls back to the first candidate for
- * the same reason. Callers that need the full string for logs or run
- * artifacts keep using the raw engine value. */
-const URL_TOKEN = /@(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|<redacted-endpoint-URL>)\S*/;
+ * authority, placeholdering the whole token instead), and ends right before
+ * the API-format group. A candidate is accepted only when it meets all of
+ * those; a model identifier's own URL-shaped token followed by the real
+ * endpoint parses with userinfo (#1469 review), so it is skipped and the
+ * scan resumes inside the rejected token, which consumed the candidates
+ * nested in it. A model token that carries `/` or `#` before its own `@`
+ * can still parse userinfo-free and be accepted, over-stripping the model —
+ * the fail-safe direction: truncation, never endpoint text left behind.
+ * When no candidate is acceptable the strip falls back to the first
+ * candidate for the same reason. Callers that need the full string for
+ * logs or run artifacts keep using the raw engine value.
+ *
+ * #1474: a base URL (or model identifier) that carries internal whitespace
+ * splits the whitespace-free token run, so whitespace alone no longer
+ * delimits the endpoint token — the token reaches the API-format group
+ * instead, and the whole endpoint leaves with it. The group is the first
+ * parenthesis group that ends the engine base, so a ` (` the endpoint (or
+ * the model) carries of its own cannot be mistaken for it. The fail-closed
+ * placeholder is a fixed sentinel token with no internal whitespace, so its
+ * extent stays the whitespace-free run. */
+const URL_TOKEN = /@(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|<redacted-endpoint-URL>)/;
+
+/** The ` (` that opens a parenthesis group. */
+const FORMAT_BOUNDARY = " (";
+
+/** Whitespace ends a whitespace-free token run. */
+const WHITESPACE = /\s/;
+
+/** The end of the whitespace-free token run that starts at `start`: the
+ * extent a composed endpoint token has when it carries no internal
+ * whitespace. */
+function tokenRunEnd(engine: string, start: number): number {
+  let end = start;
+  while (end < engine.length && !WHITESPACE.test(engine[end]!)) end += 1;
+  return end;
+}
+
+/** The index of the `)` that closes the parenthesis group opened before
+ * `from`, or -1 when the group never closes. */
+function closingParen(engine: string, from: number): number {
+  let depth = 1;
+  for (let index = from; index < engine.length; index += 1) {
+    const character = engine[index];
+    if (character === "(") depth += 1;
+    else if (character === ")") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+/** The index of the ` (` that opens the API-format group the endpoint token
+ * ends at: the first parenthesis group whose closing paren ends the engine
+ * base — the string ends there, or the route annotation follows. A base URL
+ * or model identifier that carries a ` (` of its own therefore cannot be
+ * mistaken for the format group (#1474). `-1` when the engine carries no
+ * format group. */
+function formatGroupStart(engine: string, from: number): number {
+  for (let open = engine.indexOf(FORMAT_BOUNDARY, from); open >= 0; open = engine.indexOf(FORMAT_BOUNDARY, open + 1)) {
+    const close = closingParen(engine, open + FORMAT_BOUNDARY.length);
+    if (close < 0) continue;
+    const after = engine.slice(close + 1);
+    if (after === "" || after.startsWith(ANNOTATION_SEPARATOR)) return open;
+  }
+  return -1;
+}
+
+/** The end of the endpoint token: the API-format group opens it, so the
+ * token ends right before that group — or at the end of the engine when it
+ * carries none. */
+function endpointTokenEnd(engine: string, start: number): number {
+  const group = formatGroupStart(engine, start);
+  return group < 0 ? engine.length : group;
+}
 
 function isEndpointToken(token: string, after: string): boolean {
-  if (!after.startsWith(" (") && after !== "") return false;
+  if (!after.startsWith(FORMAT_BOUNDARY) && after !== "") return false;
   const body = token.slice(1);
   if (body.startsWith("<redacted-endpoint-URL>")) return true;
   try {
@@ -125,14 +196,24 @@ function isEndpointToken(token: string, after: string): boolean {
 
 export function publicAnalysisEngine(engine: string): string {
   const scanner = new RegExp(URL_TOKEN.source, "g");
-  let first: { index: number; token: string } | null = null;
+  let first: { index: number; end: number } | null = null;
   for (let match = scanner.exec(engine); match !== null; match = scanner.exec(engine)) {
-    if (first === null) first = { index: match.index, token: match[0] };
-    if (isEndpointToken(match[0], engine.slice(match.index + match[0].length))) {
-      return `${engine.slice(0, match.index)}${engine.slice(match.index + match[0].length)}`;
+    const index = match.index;
+    const runEnd = tokenRunEnd(engine, index);
+    const groupEnd = endpointTokenEnd(engine, index);
+    // The fail-closed placeholder is a fixed sentinel token: it carries no
+    // internal whitespace, so its extent is the whitespace-free run. A
+    // scheme-shaped URL can carry internal whitespace (#1474), so its extent
+    // reaches the API-format group.
+    const end = match[0].startsWith("@<redacted-endpoint-URL>") ? runEnd : groupEnd;
+    // The fallback strips the widest extent: over-stripping the model is the
+    // accepted fail-safe direction, endpoint text left behind is not.
+    if (first === null) first = { index, end: groupEnd };
+    if (isEndpointToken(engine.slice(index, end), engine.slice(end))) {
+      return `${engine.slice(0, index)}${engine.slice(end)}`;
     }
-    scanner.lastIndex = match.index + 1;
+    scanner.lastIndex = index + 1;
   }
   if (first === null) return engine;
-  return `${engine.slice(0, first.index)}${engine.slice(first.index + first.token.length)}`;
+  return `${engine.slice(0, first.index)}${engine.slice(first.end)}`;
 }
