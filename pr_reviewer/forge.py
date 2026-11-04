@@ -68,6 +68,15 @@ _ENV_TOKEN_NAMES = ("GITHUB_TOKEN", "GH_TOKEN")
 # use small fixed budgets; a single default keeps the seam uniform.
 DEFAULT_TIMEOUT_SEC = 30
 
+# Page-walk safety net. The list walk ends only when the forge answers an
+# EMPTY page (#1487: a forge that caps the page size -- Forgejo answers at
+# most ``MAX_RESPONSE_ITEMS``, 50 by default -- answers every full page short,
+# so a short page is never evidence the list ended). That rule needs a bound
+# to stop a forge that never answers an empty page, and the bound is the
+# safety net, not the walk rule. A walk the bound cut short is REPORTED,
+# never silently trusted as complete -- see :meth:`ForgeClient.get_pages_report`.
+DEFAULT_MAX_PAGES = 100
+
 
 class ForgeError(RuntimeError):
     """The forge could not be reached, rejected the request, or returned an
@@ -305,15 +314,92 @@ class ForgeClient:
         path: str,
         params: Mapping[str, Any] | None = None,
         per_page: int = 100,
+        max_pages: int | None = DEFAULT_MAX_PAGES,
     ) -> Iterable[Any]:
-        """Yield every item across all pages of a GitHub list endpoint.
+        """Yield every item across all pages of a forge list endpoint.
+
+        The walk ends when the forge answers an EMPTY page (or decodes a
+        payload that is not a list) -- never on a page that is merely
+        shorter than the requested ``per_page``. GitHub honors
+        ``per_page`` (up to 100), so a short page there is the last page;
+        a forge that caps the page size (Forgejo answers at most
+        ``MAX_RESPONSE_ITEMS``, 50 by default) answers a ``per_page=100``
+        request with 50 items on every full page, so stopping at a short
+        page would hand the caller an incomplete list (#1487).
 
         ``params.setdefault("per_page", per_page)`` is applied so callers
         who already set ``per_page`` keep their setting. ``page`` is set
-        per iteration. The generator stops when an empty page is returned
-        or a non-list payload is decoded; transport and HTTP failures
-        propagate as :class:`ForgeError`.
+        per iteration. Transport and HTTP failures propagate as
+        :class:`ForgeError`.
+
+        ``max_pages`` bounds the walk: the default
+        :data:`DEFAULT_MAX_PAGES` is the safety net against a forge that
+        never answers an empty page; ``None`` opts out and reads until
+        the forge does. A positive count stops after that many pages have
+        been READ, and zero or less reads no page at all. The bound is
+        validated before any request goes out, and a non-integer bound is
+        refused with a fixed error string -- a bound that is not a number
+        is a caller bug, not a page count to guess at. A generator cannot
+        report that the bound cut its walk short; a caller that must tell
+        a complete list from a cut one uses :meth:`get_pages_report`.
         """
+        limit = self._page_limit(max_pages)
+        for page_items, _truncated in self._walk_pages(path, params, per_page, limit):
+            yield from page_items
+
+    def get_pages_report(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        per_page: int = 100,
+        max_pages: int | None = DEFAULT_MAX_PAGES,
+    ) -> tuple[list[Any], bool]:
+        """Every item across all pages, and whether the page bound cut the walk.
+
+        The boolean is ``True`` when the walk stopped because it read
+        ``max_pages`` pages and the last of them was NOT empty: the list
+        may then hold items the walk never saw. A caller that must tell
+        "the forge has nothing more" from "the walk stopped early" needs
+        that difference -- a truncated list is not a complete one, and a
+        caller that treats it as complete will report present items as
+        missing.
+
+        The walk otherwise ends only on an empty page, so a ``False``
+        means the forge itself said the list ended.
+        """
+        limit = self._page_limit(max_pages)
+        items: list[Any] = []
+        truncated = False
+        for page_items, page_truncated in self._walk_pages(path, params, per_page, limit):
+            items.extend(page_items)
+            truncated = truncated or page_truncated
+        return items, truncated
+
+    @staticmethod
+    def _page_limit(max_pages: int | None) -> int | None:
+        """The validated page bound, or ``None`` for an unbounded walk."""
+        if max_pages is None:
+            return None
+        if isinstance(max_pages, bool) or not isinstance(max_pages, int):
+            raise ForgeError("invalid max_pages")
+        return max_pages
+
+    def _walk_pages(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None,
+        per_page: int,
+        max_pages: int | None,
+    ) -> Iterable[tuple[list[Any], bool]]:
+        """The page walk itself, bounded by an already-validated limit.
+
+        Each step yields the items of one page and whether the bound cut
+        the walk short at that page. An empty (or non-list) page ends the
+        walk untruncated; a non-empty page the bound fell on ends it
+        truncated.
+        """
+        if max_pages is not None and max_pages <= 0:
+            return
         merged: dict[str, Any] = dict(params or {})
         merged.setdefault("per_page", per_page)
         page = 1
@@ -321,9 +407,14 @@ class ForgeClient:
             merged["page"] = page
             data = self.get(path, merged)
             if not isinstance(data, list) or not data:
+                # The forge says the list ends here. This is the only
+                # natural end of the walk: a short page is not -- a
+                # page-size-capping forge answers every full page short
+                # (#1487).
                 return
-            yield from data
-            if len(data) < int(merged["per_page"]):
+            truncated = max_pages is not None and page >= max_pages
+            yield data, truncated
+            if truncated:
                 return
             page += 1
 
