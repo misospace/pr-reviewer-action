@@ -3,7 +3,6 @@ import type { ExternalCheck } from "../platform/normalize.js";
 import { ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
 import { deriveDraftState, deriveIsFork, derivePrState, normalizePrIdentity } from "../platform/pr.js";
 import { resolvePlatform } from "../platform/resolve.js";
-import { requireImplementedBackend } from "../platform/tangled.js";
 import type { ManagedComment, ManagedReview, PlatformAdapter } from "../platform/types.js";
 import {
   buildMarkerFingerprint,
@@ -386,7 +385,19 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   }
 
   const resolvedPlatform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
-  requireImplementedBackend(resolvedPlatform);
+  // #590: a resolved `tangled` platform no longer fails loudly here. The read
+  // capability IS now Tangled-aware — the platform seam (`buildPlatformReadAdapter`)
+  // builds a `TangledAdapter` for a DID-resolved environment and never a
+  // GitHub or Forgejo client — so precheck reads whatever `spec.adapter` the
+  // caller configured, exactly as for GitHub and Forgejo. The invariant the
+  // old `requireImplementedBackend` throw protected (a Tangled run must never
+  // drive a GitHub/Forgejo backend) is now enforced at the factory: the only
+  // forge-specific write below (the Forgejo permission preflight) is gated on
+  // `resolvedPlatform === "forgejo"`, and no GitHub URL or client is ever
+  // assembled here. Every adapter method Tangled has not implemented yet
+  // (`getPrDiff`, comment/review reads, …) still fails closed inside the
+  // adapter — routing through the capability weakens none of them. GitHub and
+  // Forgejo resolution are untouched: the guard only ever threw for `tangled`.
   const effectiveForgejoApiUrl = resolvedPlatform === "forgejo" ? env.FORGEJO_API_URL ?? "" : "";
 
   // ── Label-driven re-review (#231) ─────────────────────────────────────

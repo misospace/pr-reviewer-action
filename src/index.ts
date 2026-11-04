@@ -13,6 +13,7 @@ import { workerMain } from "./executor/worker-main.js";
 import { controllerMain } from "./controller/main.js";
 import { publishMain } from "./run/entrypoints.js";
 import { actionMain } from "./run/action.js";
+import { platformActionMain } from "./run/platform-action.js";
 
 // The syntax-provider worker entry (#764). The shipped runtime is a
 // single-file bundle, so the provider's worker thread loads THIS file and
@@ -78,6 +79,22 @@ if (require.main === module) {
       .then(() => { exitAfterFlush(0); })
       .catch((error: unknown) => {
         process.stderr.write(`v3 run error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        exitAfterFlush(error instanceof RunReviewError ? error.exitCode : 1);
+      });
+  } else if (firstArg === "tangled") {
+    // #590: the host-neutral Tangled/Spindle runner. Sequences precheck →
+    // review → publish in one ordinary Node process, driving the SAME v3
+    // engine and platform-capability seams as the Action entry — no GitHub
+    // Actions bookkeeping (no GITHUB_EVENT_PATH / GITHUB_OUTPUT / step
+    // summary), no gh/Python/shell, and no GitHub/Forgejo fallback: the
+    // platform is pinned to `tangled` and every forge read/write goes through
+    // the configured capability. Review failures propagate their exit code,
+    // exactly like the action entry.
+    assertSupportedNode(process.versions.node);
+    platformActionMain(process.env)
+      .then((code) => { exitAfterFlush(code); })
+      .catch((error: unknown) => {
+        process.stderr.write(`v3 tangled error: ${error instanceof Error ? error.message : "unknown error"}\n`);
         exitAfterFlush(error instanceof RunReviewError ? error.exitCode : 1);
       });
   } else if (firstArg === "engine") {

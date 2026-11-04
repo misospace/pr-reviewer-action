@@ -10,7 +10,7 @@ import { requireImplementedBackend } from "../platform/tangled.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { stageEnvFromConfig } from "./env.js";
-import { buildPublishApi, publishInputFromEnv, publishWithOutcome, readEvent, type StepEvent } from "./entrypoints.js";
+import { buildPublishApi, publishEnvFromReview, publishInputFromEnv, publishWithOutcome, readEvent, reviewDerivedPublishFields, type StepEvent } from "./entrypoints.js";
 import { runActionFollowUp } from "./followup-action.js";
 import { publishStepRuns } from "../publish/publish.js";
 import { buildReviewBundle, type ReviewBundleInput, type ReviewBundleState } from "../publish/bundle.js";
@@ -447,97 +447,17 @@ async function runActionPipeline(
   let publishFailed = false;
   let publishStatus: "published" | "superseded" | "failed" | undefined;
   if (shouldPublish(stage)) {
-    const publishEnv: Env = {
-      ...stage,
-      // #726: the folded engine values — the reviewed head is the explicit
-      // pin (reviewedHeadSha, else the event's head or admission's resolved
-      // head), BASE_SHA/BROAD_FINGERPRINT are admission's, and IS_FORK_PR is
-      // the final fork flag the review stages ran with (publish's approval
-      // guardrail fails closed on an unknown fork state), exactly as the
-      // pre-#726 fold produced them.
-      HEAD_SHA: review.reviewedHeadSha || eventHeadSha || pre.head_sha,
-      BASE_SHA: pre.base_sha,
-      IS_FORK_PR: review.isForkPr,
-      BROAD_FINGERPRINT: pre.diff_fingerprint,
-      VERDICT: review.outputs.verdict,
-      REQUIRED_CHECKS: review.outputs.requiredChecks,
-      REVIEW_ROUTE: review.outputs.reviewRoute,
-      ESCALATION_REASON: review.outputs.escalationReason,
-      // #1003: both empty when review-triage is disabled ("did not run"),
-      // distinct from the fail-closed "unknown" answer.
-      REVIEW_TRIAGE_DECISION: review.outputs.reviewTriageDecision,
-      REVIEW_TRIAGE_REASON: review.outputs.reviewTriageReason,
-      REVIEW_MARKDOWN: review.outputs.reviewMarkdown,
-      FINDINGS: review.outputs.findings,
-      ANALYSIS_ENGINE: review.outputs.analysisEngine,
-      CACHE_HIT_RATIO: review.outputs.cacheHitRatio,
-      DEGRADED_GATE_BYPASS: review.outputs.degradedGateBypass ? "true" : "false",
-      VERDICT_POLICY: review.verdictPolicy,
-      // #1073: the confidence scorer's results, all empty when disabled.
-      CONFIDENCE_STATUS: review.outputs.confidenceStatus ?? "",
-      CONFIDENCE_SCORE: review.outputs.confidenceScore ?? "",
-      CONFIDENCE_RISK: review.outputs.confidenceRisk ?? "",
-      CONFIDENCE_REASON: review.outputs.confidenceReason ?? "",
-      CONFIDENCE_MODEL: review.outputs.confidenceModel ?? "",
-      ...(review.confidenceConcerns !== undefined
-        ? { CONFIDENCE_CONCERNS: JSON.stringify(review.confidenceConcerns) }
-        : {}),
-    };
+    // #590: the review→publish-environment mapping and the per-run evidence
+    // fields are shared with the host-neutral platform runner (entrypoints.ts),
+    // so a Tangled run publishes exactly the same record this Action would for
+    // the identical engine result — the two hosts can never drift.
+    const publishEnv: Env = publishEnvFromReview(stage, review, eventHeadSha);
     const seam = buildPublishApi(publishEnv as NodeJS.ProcessEnv);
     // The event-gated maybeClearRereviewLabel below owns label cleanup here;
     // publish's own rerunLabel strip would fire on every run, not just
     // label-triggered ones.
     const { rerunLabel: _rerunLabel, ...publishInput } = publishInputFromEnv(publishEnv as NodeJS.ProcessEnv, seam.platform);
-    const input = {
-      ...publishInput,
-      // The #810 coverage notice and the #812 CI conclusion reach the
-      // published marker and body only through these.
-      ...(review.partialCoverage ? { partialCoverage: review.partialCoverage } : {}),
-      ...(review.ciState !== undefined ? { ciState: review.ciState } : {}),
-      // #1449: the run's derived-obligation state reaches the PUBLISHED
-      // marker only through this, in process — same as partialCoverage/
-      // ciState above. It is a GATE as well as disclosure: the publish
-      // boundary refuses a native approval while the state is not
-      // `complete`, so an undischarged derived obligation can never certify a
-      // trusted approval. Absent when the feature is off, so the published
-      // marker keeps its pre-#1449 bytes exactly.
-      ...(review.derivedObligationState !== undefined ? { derivedObligationState: review.derivedObligationState } : {}),
-      // #1455: the verifier's telemetry (the unscored cause, the measured
-      // latency, the provider's token counts) reaches the published marker
-      // only through this, in process — same as partialCoverage/ciState
-      // above. Advisory only: it never touches the verdict, the findings, or
-      // the required checks. The standalone `publish` CLI reads the SAME
-      // values from the run dir's own artifact, so both paths publish one
-      // record.
-      ...(review.confidenceTelemetry !== undefined ? { confidenceTelemetry: review.confidenceTelemetry } : {}),
-      // #847: the #810/#702 tool-budget provenance reaches the published
-      // marker only through these, same as partialCoverage/ciState above.
-      ...(review.toolBudget !== undefined ? { toolBudget: review.toolBudget } : {}),
-      ...(review.toolBudgetSource !== undefined ? { toolBudgetSource: review.toolBudgetSource } : {}),
-      ...(review.toolCallsUsed !== undefined ? { toolCalls: review.toolCallsUsed } : {}),
-      ...(review.toolRoundsUsed !== undefined ? { toolRounds: review.toolRoundsUsed } : {}),
-      ...(review.toolMaxRounds !== undefined ? { maxRounds: review.toolMaxRounds } : {}),
-      ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),
-      ...(review.contextPeak !== undefined ? { contextPeak: review.contextPeak } : {}),
-      ...(review.toolStopReason !== undefined ? { toolStopReason: review.toolStopReason } : {}),
-      // #1027: the prior published head reaches publish through the managed
-      // sticky comment's metadata marker (read in readFeedbackState); it is
-      // NOT the precheck's head_sha, which is the CURRENT head and would
-      // make every thread resolution read as a same-head dismissal.
-      // #1003: the human-review triage answer reaches the published body
-      // only when triage ran (the decision output is "" when the input is
-      // off), so a disabled run's published review is byte-identical to
-      // pre-#1003. Triage grants no capability: this thread changes the
-      // comment text only, never fork/tool/evidence gating or the verdict.
-      ...(review.outputs.reviewTriageDecision !== ""
-        ? {
-          reviewTriage: {
-            decision: review.outputs.reviewTriageDecision,
-            reason: review.outputs.reviewTriageReason,
-          },
-        }
-        : {}),
-    };
+    const input = { ...publishInput, ...reviewDerivedPublishFields(review) };
     const publish = await publishWithOutcome(input, seam, runDir);
     // #1257: the review-step outputs describe the review this run PRODUCED;
     // a superseded publication exits 0 exactly like a published one, so this

@@ -2,6 +2,7 @@ import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { isSecretValue, type RuntimeConfig } from "../config/types.js";
 import type { EnvLike } from "../tools/budget.js";
 import { isRepositorySkillPath } from "../context/repository-skills.js";
+import { resolvePlatform } from "../platform/resolve.js";
 
 /**
  * The resolved review environment (#809). The v3 public contract is
@@ -148,7 +149,16 @@ export function validateStageEnv(env: StageEnv): string | null {
   if (!env.PR_NUMBER) return "Missing required environment variables: PR_NUMBER";
   if (!env.AI_BASE_URL) return "Missing required environment variables: AI_BASE_URL";
   if (!env.AI_MODEL) return "Missing required environment variables: AI_MODEL";
-  if (!env.GH_TOKEN) return "Missing GitHub token in GH_TOKEN or GITHUB_TOKEN";
+  // A GitHub token is required to READ the pull and PUBLISH the review on
+  // GitHub, and (via its fallback) on Forgejo. A Tangled run does neither with
+  // a GitHub token: its reads are public/unauthenticated through the Tangled
+  // adapter, and its publication authenticates through AT-Proto, validated at
+  // the publish seam (`atprotoConfigFromEnv`). #590: require the token for the
+  // token-authenticated backends only — a DID-resolved Tangled run is not
+  // gated on a credential it never uses. GitHub/Forgejo resolution is
+  // unchanged (the guard was always satisfied by their token).
+  const resolved = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
+  if (resolved !== "tangled" && !env.GH_TOKEN) return "Missing GitHub token in GH_TOKEN or GITHUB_TOKEN";
   if (env.REPOSITORY_SKILLS_PATHS !== undefined) {
     try {
       const paths: unknown = JSON.parse(env.REPOSITORY_SKILLS_PATHS);
