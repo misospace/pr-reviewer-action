@@ -262,6 +262,7 @@ test("#1449: every coverage-incomplete answer adds exactly one synthetic coverag
     { name: "obligation set truncated", record: completeArtifact({ truncated: true }), reason: "obligation-set-truncated" },
     { name: "malformed entries discarded", record: completeArtifact({ errors: ["obligations[1]: not an object"] }), reason: "derivation-malformed" },
     { name: "errors ledger unusable", record: completeArtifact({ errors: "not an array" }), reason: "derivation-malformed" },
+    { name: "errors ledger null", record: completeArtifact({ errors: null }), reason: "derivation-malformed" },
   ];
   for (const state of states) {
     const resolution = resolveDerivedObligations(state.record, true);
