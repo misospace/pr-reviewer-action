@@ -361,7 +361,9 @@ function obligationRows(value: unknown): DerivedObligationRow[] {
  *   DISCARD (a malformed obligation is never repaired), so a nonempty list
  *   means at least one derived obligation was dropped and the surviving rows
  *   are a PARTIAL answer, never complete coverage (#1449: malformed
- *   derivation output fails toward partial, not native APPROVE).
+ *   derivation output fails toward partial, not native APPROVE). A ledger
+ *   that is present but not an array is uncertain discard state and fails
+ *   the same way; an absent ledger is the pre-ledger artifact shape.
  *
  * Otherwise the coverage is `complete` — including a clean `empty` over a
  * complete input, which is complete coverage with ZERO rows.
@@ -386,8 +388,13 @@ export function resolveDerivedObligations(record: unknown, enabled: boolean): De
   // complete coverage here would let a partially malformed derivation that
   // lost an obligation publish a native APPROVE once the survivors were
   // discharged (#1449) — so any recorded error makes the coverage
-  // incomplete, with the surviving rows still carried for disclosure.
-  if (Array.isArray(record.errors) && record.errors.length > 0) {
+  // incomplete, with the surviving rows still carried for disclosure. A
+  // ledger that is PRESENT but not an array is uncertain discard state and
+  // fails the same way (the resolver never reads a shape it cannot verify
+  // as clean); an absent ledger is the pre-ledger artifact shape and is not
+  // evidence of a discard.
+  if (record.errors !== undefined && record.errors !== null
+    && (!Array.isArray(record.errors) || record.errors.length > 0)) {
     return { enabled: true, coverage: "incomplete", reason: "derivation-malformed", rows };
   }
   return { enabled: true, coverage: "complete", reason: null, rows };
