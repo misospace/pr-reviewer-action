@@ -193,7 +193,7 @@ Fork PRs never get a review from this path: the action replies to the comment po
 
 Set `rereview-command` to an empty string to disable comment-triggered re-reviews. v1 scope is the bare command only — it takes no arguments.
 
-> **SECURITY:** Comment-triggered runs carry base-repo secrets, and the `issue_comment` payload has no head SHA. Resolve the PR through the API *before* any checkout — the dogfood workflow's `pr-gate` step (`.github/workflows/ai-pr-review.yaml`) is the pattern to mirror — and never check out or build a fork PR's head in such a run: compare the PR head's repository id against `github.repository_id` and route fork comments to a base-repo checkout.
+> **SECURITY:** Comment-triggered runs carry base-repo secrets, and the `issue_comment` payload has no head SHA. Resolve the PR through the configured forge capability *before* the PR-head checkout — the dogfood workflow's `pr-gate` step (`.github/workflows/ai-pr-review.yaml`) is the pattern to mirror — and never check out or build a fork PR's head in such a run: compare the PR head's repository id against `github.repository_id` and route fork comments to a base-repo checkout. The capability is repo code, so the dogfood workflow checks out the base repository's own default-branch tip first (never the PR head, and with `persist-credentials: false`) and reads the PR through `scripts/forge_cli.py`, so the token rides only the `Authorization` header and never a raw HTTP client.
 
 ### The unchanged-diff skip
 

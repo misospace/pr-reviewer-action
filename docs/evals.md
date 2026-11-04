@@ -897,3 +897,41 @@ Recommendation recorded 2026-11-03: **remain advisory — do not proceed to
 gate design (#1075 stays blocked); do not remove from the critical path**,
 with re-evaluation conditions in the owning report. Ongoing per-run
 collection is `scripts/confidence_dogfood_evidence.py` (PR #1454).
+
+## Verifier dogfood evidence collector (#1452)
+
+`scripts/confidence_dogfood_evidence.py` assembles what the merge-safety
+verifier (#1369) actually PUBLISHED for one or more dogfood pull requests into
+a single bounded, redacted evidence file, so the adjudication pass reads the
+published record instead of the run directory (which dies with the runner). It
+reads the forge only through the configured forge capability
+(`pr_reviewer.forge` — never a raw HTTP client, never a forge CLI), never
+re-runs the verifier, never recomputes a score, and never touches a verdict,
+a marker, or a comment.
+
+```bash
+mise exec python@3.14 -- python3 scripts/confidence_dogfood_evidence.py \
+    --repo OWNER/NAME --pr 123 --pr 124 --out /tmp/verifier-evidence.json
+```
+
+The evidence file (`verifier-dogfood-evidence/v1`) carries, per pull request:
+the published pins (`head_sha`, `base_sha`), the primary verdict
+(`review_result`, `required_checks`), the diff and config fingerprints the
+published fingerprint marker carries, the verifier's own published answer
+(status, score, risk band, reason, model, and every published advisory
+concern), which published body the evidence came from (`published_body`:
+kind, id, timestamps — the dogfood publishes native reviews, which
+accumulate, so the NEWEST body is the current run's evidence and the oldest
+one would be silently stale), and an `unavailable` block naming, one short
+sentence each, every piece of evidence the published record does not carry
+(the unscored cause, the verifier token usage, the rubric version, the
+deterministic ceilings, the parser notes, the linkage to a later review) and
+where each one actually lives — the run-directory artifacts
+`confidence-score.json`, `confidence-response.json` and
+`finding-outcomes.json`. Exit codes: `0` every requested pull request
+produced a record; `1` at least one pull request was unreadable (the other
+records are still written); `2` the collection could not run at all.
+
+This collector does NOT close #1452: the issue still needs a human adjudicated
+pass over the collected evidence and a written recommendation on whether the
+verifier earns merge-gate authority.
