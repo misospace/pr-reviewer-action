@@ -263,6 +263,14 @@ test("#1449: every coverage-incomplete answer adds exactly one synthetic coverag
     { name: "malformed entries discarded", record: completeArtifact({ errors: ["obligations[1]: not an object"] }), reason: "derivation-malformed" },
     { name: "errors ledger unusable", record: completeArtifact({ errors: "not an array" }), reason: "derivation-malformed" },
     { name: "errors ledger null", record: completeArtifact({ errors: null }), reason: "derivation-malformed" },
+    {
+      name: "errors ledger absent",
+      record: (() => {
+        const { errors: _errors, ...withoutLedger } = completeArtifact();
+        return withoutLedger;
+      })(),
+      reason: "derivation-malformed",
+    },
   ];
   for (const state of states) {
     const resolution = resolveDerivedObligations(state.record, true);
@@ -290,11 +298,13 @@ test("#1449: every coverage-incomplete answer adds exactly one synthetic coverag
   assert.equal(clean.reason, null);
   assert.deepEqual(clean.rows, []);
   assert.equal(derivedCoverageRow(clean), null);
-  // An ABSENT errors ledger is the pre-ledger artifact shape, not evidence
-  // of a discard: it stays complete (only a recorded or unusable ledger
-  // fails closed).
-  const { errors: _errors, ...preLedger } = completeArtifact();
-  assert.equal(resolveDerivedObligations(preLedger, true).coverage, "complete");
+  // The inverted absent-ledger pin: every shipped writer of the artifact
+  // serializes `errors` (an empty one when clean), so a MISSING ledger is a
+  // corrupt artifact and must fail closed — deleting the field cannot
+  // restore native APPROVE eligibility. The ledger-absent case in the matrix
+  // above pins `derivation-malformed`.
+  const { errors: _errors, ...withoutLedger } = completeArtifact();
+  assert.equal(resolveDerivedObligations(withoutLedger, true).coverage, "incomplete");
 });
 
 test("#1449: a mixed valid+malformed derivation fails toward incomplete coverage, never complete", () => {
