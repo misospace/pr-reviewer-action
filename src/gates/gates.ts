@@ -92,6 +92,12 @@ export interface RunConcurrentGatesOptions {
   /** Ambient environment the allowlists draw from. Defaults to `process.env`. */
   ambientEnv?: NodeJS.ProcessEnv;
   onLog?: (message: string) => void;
+  /** Invoked (and awaited) once every enabled branch has reached its launch
+   * state — the spawn attempt completed and no launch refusal was detected —
+   * before the joins start. A returned promise is awaited. Lets a caller
+   * cancel from a known mid-flight state instead of racing the async pgrep
+   * preflight with a wall-clock delay. */
+  onLaunched?: () => void | Promise<void>;
 }
 
 function notLaunched(gate: GateName): GateOutcome {
@@ -233,6 +239,8 @@ export async function runConcurrentGates(
       throw new GateLaunchError(branch.gate, refusal);
     }
   }
+
+  if (options.onLaunched) await options.onLaunched();
 
   const [ciResult, specialistResult] = await Promise.all([
     ciHandle ? ciHandle.result : null,
