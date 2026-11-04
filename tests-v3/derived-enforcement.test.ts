@@ -718,6 +718,12 @@ test("#1449: a counterexample the reviewer found is an ordinary finding, not a s
     const req = engineRequest(server.url, f.runDir);
     req.inputs = { ...req.inputs, "derived-obligations": "true" };
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir));
+    // The verdict is the MODEL'S OWN request_changes: the derived row never
+    // forced it (a forced verdict records `verdict_source=enforcement`), and
+    // the derived row itself stays open rather than being discharged.
+    assert.equal(result.outputs.verdict, "request_changes");
+    assert.equal(result.outputs.verdictSource, "model");
+    assert.equal(result.derivedObligationState, "unresolved");
     const artifact = JSON.parse(readFileSync(join(f.runDir, "ai-output.json"), "utf8")) as {
       findings: Array<{ severity: string; message: string; file?: string }>;
       review_markdown: string;
