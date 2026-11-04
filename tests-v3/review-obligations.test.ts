@@ -209,6 +209,9 @@ test("unresolved cause precedence is deterministic and a planning failure is not
   // attempted").
   assert.equal(deriveUnresolvedCause({ stopReason: "max-rounds", harnessError: null, planningError: null, degraded: false }), "budget-exhausted");
   assert.equal(deriveUnresolvedCause({ stopReason: "wall-clock-exceeded", harnessError: null, planningError: null, degraded: false }), "budget-exhausted");
+  // #1464: the verdict-reserve wall-clock stop is a budget-shaped stop too —
+  // the loop stopped early to hold wall clock for the closing verdict.
+  assert.equal(deriveUnresolvedCause({ stopReason: "wall-clock-verdict-reserve", harnessError: null, planningError: null, degraded: false }), "budget-exhausted");
   // A degraded harness that never executed a request stays tool-capability
   // even when the loop finally stopped on a budget-shaped ceiling.
   assert.equal(deriveUnresolvedCause({ stopReason: "max-rounds", harnessError: null, planningError: null, degraded: true }), "tool-capability");

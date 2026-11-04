@@ -572,12 +572,14 @@ test("#1145/#1198: a verdict turn consuming the remaining wall-clock budget leav
   const { root, deps } = workspace();
   seedWorkspace(root);
   // A controllable clock: every timeFn call pre-advances 1s, and the scripted
-  // transport adds an 87s jump on the FIRST verdict turn. The whole-exchange
+  // transport adds an 85s jump on the FIRST verdict turn. The whole-exchange
   // deadline (#1198) is taken before the loop, so the verdict turn must land
   // strictly inside it (99s into a 100s exchange) — while its measured spend
-  // (loop 7s + verdict 90s) exhausts the 10s budget: the repair-gate tick
+  // (loop 7s + verdict 88s) exhausts the 10s budget: the repair-gate tick
   // (100s) is past the deadline, so no repair round and no refresh run and
-  // the standing verdict is kept.
+  // the standing verdict is kept. #1464: the two extra between-rounds
+  // reserve reads shave 2s off the pre-verdict spend, so the jump is sized to
+  // keep the acceptance read at 99s.
   let now = 0;
   const scripted = baseScripted([
     openAiCall("c2", "read_file", '{"path":"notes.md"}'),
@@ -591,7 +593,7 @@ test("#1145/#1198: a verdict turn consuming the remaining wall-clock budget leav
         transport: async () => {
           // Two loop rounds, then the FIRST verdict turn consumes the rest of
           // the wall-clock budget.
-          now += calls === 2 ? 87 : 0;
+          now += calls === 2 ? 85 : 0;
           return scripted[calls++];
         },
         env: { SYSTEM_PROMPT: "You are the reviewer.", TOOL_LOOP_WALL_CLOCK_SEC: "100" },
@@ -829,18 +831,21 @@ test("#1226: a gh_api call inside a near-exhausted exchange is clamped to the re
     env: {
       SYSTEM_PROMPT: "You are the reviewer.",
       TOOL_REQUEST_TIMEOUT_SEC: "300",
-      TOOL_LOOP_WALL_CLOCK_SEC: "10",
+      TOOL_LOOP_WALL_CLOCK_SEC: "20",
     },
     ghApi: async (_endpoint: string, opts?: { timeoutMs: number }) => {
       seamTimeouts.push(opts?.timeoutMs ?? -1);
       return { data: { number: 1, title: "the pull" } };
     },
   }));
-  // Remaining budget = 10s exactly, so the 300s per-call bound is clamped
-  // down to it: min(300, max(1, trunc(10))).
+  // #1464 review: the executor clamps to the EXPLORATION boundary, not the
+  // whole deadline — the constant clock reads 0 everywhere, so the remaining
+  // exploration budget is the boundary itself: wall clock 20 → reserve 10 →
+  // boundary 10, and the 300s per-call bound is clamped down to it:
+  // min(300, max(1, trunc(10))).
   assert.equal(result.native_loop_verdict_produced, true);
   assert.deepEqual(seamTimeouts, [10000]);
-  assert.ok(seamTimeouts[0]! <= 10 * 1000, "the per-call timeout must not exceed the remaining wall-clock budget");
+  assert.ok(seamTimeouts[0]! <= 10 * 1000, "the per-call timeout must not exceed the remaining exploration budget");
   assert.ok(seamTimeouts[0]! < 300 * 1000, "the unclamped TOOL_REQUEST_TIMEOUT_SEC must not reach the seam");
   const toolCall = (result.tool_results as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
   assert.equal(toolCall.status, "ok");
@@ -878,23 +883,30 @@ test("#1226: a tool call against a sub-second remaining budget gets the 1s floor
   seedWorkspace(root);
   const scripted = [
     openAiCall("c1", "gh_api", '{"endpoint":"repos/o/r/pulls/1"}'),
-    openAiText("evidence gathered"),
     openAiVerdict("done"),
   ];
   let calls = 0;
-  let firstTurnServed = false;
+  let readCount = 0;
   const seamTimeouts: number[] = [];
   const { result } = await runToolHarness(deps({
     transport: async () => {
       const response = scripted[calls++];
-      firstTurnServed = true;
       return response;
     },
     timeFn: () => {
-      // Deadline capture reads 0 (deadline = 0 + 10); from the first tool
-      // execution onward the clock sits at 9.5, so remaining reads 0.5s:
-      // trunc(0.5) is 0 and the clamp must floor that to 1s, not 0.
-      if (!firstTurnServed) return 0;
+      // Deadline capture reads 0 (deadline = 0 + 10; the #1464 exploration
+      // boundary is 10 - 5 = 5). Reads up to the model wait sit at 1; the
+      // executed call's two executor reads sit at 4.5 — inside the boundary
+      // with 0.5s remaining, so trunc(0.5) is 0 and the clamp must floor
+      // that to 1s, not zero. #1464 review: from the next read on the clock
+      // sits at 9.5 — past the boundary — so the between-rounds reserve
+      // check (5s of a 10s wall clock) stops the loop after the first round;
+      // the scripted verdict rides the SECOND transport call, and the
+      // closing verdict turn itself is clamped through the same 1s floor.
+      readCount += 1;
+      if (readCount === 1) return 0;
+      if (readCount <= 5) return 1;
+      if (readCount <= 7) return 4.5;
       return 9.5;
     },
     env: {

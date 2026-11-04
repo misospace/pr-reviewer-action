@@ -662,7 +662,7 @@ function ciChecksBytes(env: StageEnv): Uint8Array | null {
 // ---------------------------------------------------------------------------
 
 export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): HarnessTransport {
-  return async (baseUrl, apiFormat, payload, apiKey, timeoutSec) => {
+  return async (baseUrl, apiFormat, payload, apiKey, timeoutSec, maxRetryAttempts, attemptBudgetSec) => {
     // #1037: the tool-harness transport is a provider call like any other.
     // Parsed per request INSIDE the closure (as pre-fix) so a malformed set
     // stays fail-soft per request; unset config yields `undefined` and the
@@ -690,6 +690,8 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
       // #726 (engine cancellation): the harness's model turns bind to the
       // run's cancellation scope; unset signal keeps the request unchanged.
       ...(signal !== undefined ? { signal } : {}),
+      ...(maxRetryAttempts !== undefined ? { maxRetryAttempts } : {}),
+      ...(attemptBudgetSec !== undefined ? { attemptBudgetSec } : {}),
       onWireCall: () => { wireCalls += 1; },
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the

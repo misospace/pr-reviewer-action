@@ -27,10 +27,30 @@ export interface ChatRequestInput {
   /** #1037 (`ai-extra-headers`): carried verbatim to every attempt of this
    * request, including clamp/strip retries (they spread this input). */
   extraHeaders?: Readonly<Record<string, string>>;
+  /** #1464 (review): maximum same-request 429/5xx attempts. Unset keeps
+   * `HTTP_RETRY_ATTEMPTS` (3). The cap is PER loop invocation: the #824
+   * clamp and #1047 strip recursions copy this input, so they inherit the
+   * cap but run their own budget — the honest residual bound for a capped
+   * request is one retry tree per clamp/strip hop, not one tree for the
+   * whole request. Exploration-clamped callers pass 1 so a rate-limited
+   * round cannot burn its backoff into the verdict's reserved slice. */
+  maxRetryAttempts?: number;
   /** #726 (engine cancellation): caller-owned abort, propagated to every
    * attempt of this request (including clamp/strip retries). Once aborted,
    * the loop makes no further attempt and returns the `cancelled` failure. */
   signal?: AbortSignal;
+  /** #1464 (review): optional per-attempt budget hook, in seconds. Consulted
+   * before EVERY wire attempt this loop may fire — the initial request, each
+   * 429/5xx retry, and the #824/#1047 clamp/strip repair recursions — so an
+   * attempt's effective `requestTimeoutSec` never exceeds the budget the
+   * hook reports (bounded 1s floor once it is spent), and no follow-up
+   * attempt (retry or repair hop) is fired at all once it reports no budget
+   * left: the caller's outcome or failure is returned unchanged. This makes
+   * the caller's deadline a boundary of the WHOLE transport retry tree, not
+   * just the 429/5xx branch — an exploration-clamped wait can no longer
+   * spend the verdict's reserved slice on a slow 400 clamp/strip repair
+   * hop. */
+  attemptBudgetSec?: () => number;
   /** #1200: observation hook for per-attempt retry telemetry, optional for
    * every caller that does not consume it. The loop reports ONE event per
    * actual wire call — at its decision point, after the call finished and
@@ -137,6 +157,13 @@ async function runChatRequestLoop(
   attemptBase = 0,
 ): Promise<ChatRequestOutcome> {
   const sleep = input.sleep ?? defaultSleep;
+  const attemptTimeoutSec = (): number => {
+    if (input.attemptBudgetSec === undefined) return input.requestTimeoutSec;
+    const remaining = input.attemptBudgetSec();
+    if (remaining <= 0) return 1;
+    return Math.min(input.requestTimeoutSec, Math.max(1, Math.trunc(remaining)));
+  };
+  const followUpAllowed = (): boolean => input.attemptBudgetSec === undefined || input.attemptBudgetSec() > 0;
   for (let attempt = 1; ; attempt++) {
     // #726: checked before every attempt, so an abort landing during a retry
     // backoff (or a clamp/strip retry) ends the request instead of firing a
@@ -150,7 +177,7 @@ async function runChatRequestLoop(
     // recursions and the nested strip loop carry this hook with their copied
     // input, so the whole retry tree reports through it.
     const callStart = Date.now();
-    const outcome = await runChatRequestOnce(input);
+    const outcome = await runChatRequestOnce({ ...input, requestTimeoutSec: attemptTimeoutSec() });
     const report = (discarded: boolean): void => {
       // #1466: the report carries the attempt's own index and timing, so a
       // consumer can account the discarded wire attempts exactly once and
@@ -183,21 +210,21 @@ async function runChatRequestLoop(
       const clamp = clampRemaining
         ? tokenClampRetry(input, outcome.failure)
         : null;
-      if (clamp !== null) {
+      if (clamp !== null && followUpAllowed()) {
         report(true);
         process.stderr.write(`clamped ${clamp.field} ${clamp.from} -> ${clamp.to} (${clamp.reason})\n`);
         // #1466: the follow-up call continues the attempt numbering, so
         // the wire calls of one request are numbered 1..N across the whole
         // retry tree.
-        return runChatRequestLoop(clamp.input, false, stripRemaining, attemptBase + attempt);
+        return runChatRequestLoop({ ...clamp.input, requestTimeoutSec: attemptTimeoutSec() }, false, stripRemaining, attemptBase + attempt);
       }
       const strip = stripRemaining
         ? structuredOutputStripRetry(input, outcome.failure)
         : null;
-      if (strip !== null) {
+      if (strip !== null && followUpAllowed()) {
         report(true);
         process.stderr.write(`removed ${strip.surface} for one retry (HTTP 400 body named it)\n`);
-        const retryOutcome = await runChatRequestLoop(strip.input, clampRemaining, false, attemptBase + attempt);
+        const retryOutcome = await runChatRequestLoop({ ...strip.input, requestTimeoutSec: attemptTimeoutSec() }, clampRemaining, false, attemptBase + attempt);
         // #1047 (review): a successful strip retry is tagged with the surface
         // it dropped, so callers can report the EFFECTIVE request rather than
         // the configuration; a failed one returns unchanged. The nested loop
@@ -211,11 +238,20 @@ async function runChatRequestLoop(
         outcome.failure.kind === "http_status"
         && outcome.failure.status !== undefined
         && RETRYABLE_HTTP_STATUSES.has(outcome.failure.status)
-        && attempt < HTTP_RETRY_ATTEMPTS
+        && attempt < (input.maxRetryAttempts ?? HTTP_RETRY_ATTEMPTS)
+        && followUpAllowed()
       ) {
         report(true);
         const delaySec = outcome.failure.retryAfterSec ?? 2 ** (attempt - 1);
-        await sleep(Math.max(0, Math.min(delaySec, HTTP_RETRY_MAX_DELAY_SEC)) * 1000);
+        // #1464 (review): with the budget hook set, the backoff sleep rides
+        // the same boundary — it cannot consume the whole remaining budget,
+        // or the post-sleep attempt would only have the 1s floor left (the
+        // retry tree still cannot cross the boundary by more than that floor
+        // either way). Unhooked callers keep the documented 30s cap.
+        const delayCapSec = input.attemptBudgetSec !== undefined
+          ? Math.min(HTTP_RETRY_MAX_DELAY_SEC, Math.max(0, attemptTimeoutSec() - 1))
+          : HTTP_RETRY_MAX_DELAY_SEC;
+        await sleep(Math.max(0, Math.min(delaySec, delayCapSec)) * 1000);
         continue;
       }
       report(false);
