@@ -1,6 +1,6 @@
 {
   "schema": "verifier-dogfood-summary/v1",
-  "generated_at": "2026-11-04T21:19:46Z",
+  "generated_at": "2026-11-04T21:43:02Z",
   "repository": "misospace/pr-reviewer-action",
   "window": {
     "first_publication": "2026-09-03T13:41:01Z",
@@ -94,6 +94,7 @@
   },
   "notes": [
     "the summary reports what the retained attempts carry and nothing else: it carries no pass/fail judgment, no score threshold and no gate advice, because the adjudication of the verifier's authority lives in issue #1450.",
+    "the sources histogram counts every record by the source of its LAST observation: a record the historical baseline imported and a later live read re-observed counts as a live read, and the imported baseline it came from is reported by the reconciliation.",
     "the baseline declared 419 enabled runs across 166 pull requests, and 419 records across 166 pull requests were imported: the import reconciles exactly with the baseline's own window.",
     "the baseline retained the verifier's status, score, risk band, model, latency and concern count, and the head, base, diff and config pins; it retained no published review id, no verifier reason text, no provider token usage, no rubric version and no parser notes, so the legacy vocabulary names each of those and says where the value lives."
   ]

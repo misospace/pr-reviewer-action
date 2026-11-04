@@ -693,3 +693,18 @@ def list_items(
     else:
         pages = forge.get_pages(path, max_pages=max_pages)
     return [item for item in pages if isinstance(item, dict)]
+
+
+def list_items_report(
+    forge: ForgeClient, path: str, max_pages: int | None = None
+) -> tuple[list[dict[str, Any]], bool]:
+    """The items of one forge list endpoint, and whether the walk was cut.
+
+    The boolean is ``True`` when the page bound ended the walk on a full
+    page, so the list may hold items the walk never saw. A caller that must
+    tell "the forge has nothing more" from "the walk stopped early" needs
+    that difference: a truncated list is not a complete one, and a caller
+    that treats it as complete reports published items as missing.
+    """
+    items, truncated = forge.get_pages_report(path, max_pages=max_pages)
+    return [item for item in items if isinstance(item, dict)], truncated

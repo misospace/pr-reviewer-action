@@ -362,6 +362,33 @@ def _publish(
 
 
 class TestEveryAttemptIsRetained:
+    def test_two_native_reviews_published_in_the_same_second_are_two_records(
+        self, collector, forge
+    ):
+        # The forge's id is what tells two publications of the same second
+        # apart. Without it in the key, one of the two attempts would be lost.
+        _publish(
+            forge,
+            7,
+            _scored_body(score=2),
+            as_review=True,
+            item_id=11,
+            submitted_at="2026-01-01T00:00:00Z",
+        )
+        _publish(
+            forge,
+            7,
+            _scored_body(score=4),
+            as_review=True,
+            item_id=12,
+            submitted_at="2026-01-01T00:00:00Z",
+        )
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "7")
+        assert code == 0, err
+        payload = document(out)
+        assert len(payload["records"]) == 2
+        assert sorted(record["attempt"]["id"] for record in payload["records"]) == [11, 12]
+
     def test_two_native_reviews_on_one_pull_request_are_two_records(
         self, collector, forge
     ):
@@ -544,6 +571,40 @@ class TestIncrementalAndIdempotent:
         statuses = sorted(record["verifier"]["status"] for record in payload["records"])
         assert statuses == ["scored", "unscored"]
 
+    def test_the_newest_observation_of_an_attempt_wins_its_content(
+        self, collector, forge, tmp_path
+    ):
+        # A managed comment is rewritten in place, so the same comment id
+        # carries a newer body over time. The record must hold the newest
+        # body, not the oldest one the collection happened to read first.
+        dataset = tmp_path / "dataset.json"
+        _publish(
+            forge,
+            7,
+            _scored_body(score=2),
+            as_review=False,
+            item_id=11,
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        run(collector, "--repo", "o/r", "--pr", "7", "--dataset", str(dataset))
+        forge.comments["7"] = [
+            {
+                "id": 11,
+                "body": _scored_body(score=5),
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-03-01T00:00:00Z",
+            }
+        ]
+        code, _out, err = run(
+            collector, "--repo", "o/r", "--pr", "7", "--dataset", str(dataset)
+        )
+        assert code == 0, err
+        payload = json.loads(dataset.read_text(encoding="utf-8"))
+        assert len(payload["records"]) == 1
+        assert payload["records"][0]["verifier"]["score"] == 5
+        assert payload["records"][0]["attempt"]["edited"] is True
+
     def test_an_attempt_that_is_no_longer_observed_is_kept_and_marked_absent(
         self, collector, forge, tmp_path
     ):
@@ -566,6 +627,91 @@ class TestIncrementalAndIdempotent:
         assert len(payload["records"]) == 1
         assert payload["records"][0]["attempt"]["absent_in_latest_collection"] is True
         assert payload["collections"][-1]["records_absent"] == 1
+
+    def test_a_partly_read_pull_request_never_marks_its_attempts_absent(
+        self, collector, forge, tmp_path
+    ):
+        _publish(
+            forge,
+            7,
+            _scored_body(score=4),
+            as_review=True,
+            item_id=11,
+            submitted_at="2026-01-01T00:00:00Z",
+        )
+        dataset = tmp_path / "dataset.json"
+        run(collector, "--repo", "o/r", "--pr", "7", "--dataset", str(dataset))
+        # The reviews surface is refused while the comments surface still
+        # answers. The collection therefore never read the reviews, and it
+        # cannot say that the review it retained is gone.
+        forge.fail_reviews.add("7")
+        _publish(
+            forge,
+            7,
+            _scored_body(score=2),
+            as_review=False,
+            item_id=21,
+            created_at="2026-02-01T00:00:00Z",
+        )
+        code, _out, err = run(
+            collector, "--repo", "o/r", "--pr", "7", "--dataset", str(dataset)
+        )
+        assert code == 1, err
+        payload = json.loads(dataset.read_text(encoding="utf-8"))
+        by_id = {record["attempt"]["id"]: record for record in payload["records"]}
+        assert by_id[11]["attempt"]["absent_in_latest_collection"] is False
+        assert payload["collections"][-1]["records_absent"] == 0
+
+    def test_a_read_the_page_bound_cut_short_never_marks_absent(
+        self, collector, forge, tmp_path
+    ):
+        # A hundred reviews make the first page full, so the walk that the
+        # page bound cuts short looks exactly like a walk that saw a full
+        # page: the collection cannot say it saw everything the forge holds.
+        for index in range(100):
+            _publish(
+                forge,
+                7,
+                _scored_body(score=4),
+                as_review=True,
+                item_id=index + 1,
+                submitted_at="2026-01-01T00:00:00Z",
+            )
+        dataset = tmp_path / "dataset.json"
+        code, _out, err = run(
+            collector,
+            "--repo",
+            "o/r",
+            "--pr",
+            "7",
+            "--dataset",
+            str(dataset),
+            "--max-attempts-per-pr",
+            "200",
+        )
+        assert code == 0, err
+        code, _out, err = run(
+            collector,
+            "--repo",
+            "o/r",
+            "--pr",
+            "7",
+            "--dataset",
+            str(dataset),
+            "--max-pages",
+            "1",
+        )
+        assert code == 0, err
+        payload = json.loads(dataset.read_text(encoding="utf-8"))
+        assert payload["records"]
+        assert all(
+            record["attempt"]["absent_in_latest_collection"] is False
+            for record in payload["records"]
+        )
+        assert payload["collections"][-1]["records_absent"] == 0
+        assert any(
+            "page bound" in note for note in payload["collections"][-1]["notes"]
+        )
 
     def test_a_pull_request_the_collection_did_not_read_is_never_marked_absent(
         self, collector, forge, tmp_path
@@ -1193,6 +1339,14 @@ class TestBounds:
             item_id=11,
             submitted_at="2026-01-01T00:00:00Z",
         )
+        _publish(
+            forge,
+            7,
+            _scored_body(score=2),
+            as_review=True,
+            item_id=12,
+            submitted_at="2026-02-01T00:00:00Z",
+        )
         dataset = tmp_path / "dataset.json"
         code, _out, err = run(
             collector,
@@ -1203,7 +1357,7 @@ class TestBounds:
             "--dataset",
             str(dataset),
             "--max-records",
-            "0",
+            "1",
         )
         assert code == 2
         assert "max-records" in err
@@ -1519,6 +1673,57 @@ class TestLegacyImport:
         assert code == 0, err
         assert forge.requests == []
 
+    def test_the_import_never_marks_a_live_attempt_absent(
+        self, collector, tmp_path, forge
+    ):
+        # The import reads a FILE. It never read the forge, so it cannot say
+        # that a published attempt is gone.
+        _publish(
+            forge,
+            9,
+            _scored_body(score=4),
+            as_review=True,
+            item_id=31,
+            submitted_at="2026-03-01T00:00:00Z",
+        )
+        dataset = tmp_path / "dataset.json"
+        code, _out, err = run(
+            collector, "--repo", "o/r", "--pr", "9", "--dataset", str(dataset)
+        )
+        assert code == 0, err
+        path = _legacy_file(tmp_path, [_legacy_run(1175)])
+        code, _out, err = run(
+            collector,
+            "--repo",
+            "o/r",
+            "--import-legacy",
+            str(path),
+            "--dataset",
+            str(dataset),
+        )
+        assert code == 0, err
+        payload = json.loads(dataset.read_text(encoding="utf-8"))
+        live = [
+            record for record in payload["records"] if record["pr_number"] == 9
+        ]
+        assert len(live) == 1
+        assert live[0]["attempt"]["absent_in_latest_collection"] is False
+        assert payload["collections"][-1]["records_absent"] == 0
+
+    def test_a_baseline_value_carrying_the_token_is_refused(
+        self, collector, tmp_path, forge
+    ):
+        run_record = _legacy_run(1175)
+        run_record["verifier"]["model"] = SECRET
+        path = _legacy_file(tmp_path, [run_record])
+        code, out, err = run(
+            collector, "--repo", "o/r", "--import-legacy", str(path)
+        )
+        assert code == 0, err
+        payload = document(out)
+        assert payload["records"][0]["verifier"]["model"] == "[REDACTED]"
+        assert SECRET not in out
+
     def test_the_reconciliation_survives_a_later_live_collection(
         self, collector, tmp_path, forge
     ):
@@ -1569,8 +1774,9 @@ class TestBaselineAndLiveReadAgree:
     """A baseline import and a later live read are ONE record.
 
     The identity is anchored on the publication instant and the run pins,
-    not on the forge's id -- so an imported baseline run and the live
-    published review it describes resolve to the same attempt instead of two.
+    and the forge's id settles two publications of the same second -- so an
+    imported baseline run and the live published review it describes resolve
+    to the same attempt instead of two.
     """
 
     def test_an_imported_baseline_and_a_live_read_are_one_record(
@@ -1616,6 +1822,10 @@ class TestBaselineAndLiveReadAgree:
         assert record["legacy"] is not None, (
             "the baseline provenance survives the live read"
         )
+        assert record["attempt"]["absent_in_latest_collection"] is False, (
+            "the live read observed this publication: it is not absent"
+        )
+        assert merged["collections"][-1]["records_absent"] == 0
 
 
 # ---------------------------------------------------------------------------

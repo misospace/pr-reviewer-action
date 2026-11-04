@@ -95,7 +95,7 @@ pull request, and folds each collection into the dataset file in place.
 Three known limits of the retained data:
 
 - The published model name is spelled in two ways (`Minimax-M3.1-flash` and `MiniMax-M3.1-Flash`). The dataset counts them as the forge published them, so the model histogram in the summary shows both.
-- A managed comment is rewritten in place, so only its newest body is observable. The dataset keys such an attempt on the comment's creation time and records the observation count, and it never counts an edit as a fresh attempt.
+- A managed comment is rewritten in place, so only its newest body is observable. The dataset keys such an attempt on the comment's creation time and records the observation count. An edit of a body keeps the identity of that body, and it is never counted as a fresh attempt. A body republished on a new head is a different attempt, because the head pin is part of the identity.
 - One pull request (#1287) published more attempts than the per-pull-request bound of 50 allows, so 19 of its older attempts are not in this dataset. The collection log names the pull request and the number. Raise `--max-attempts-per-pr` to fold them in.
 
 Runbook and update cadence: `docs/evals.md`, section "Verifier dogfood attempt

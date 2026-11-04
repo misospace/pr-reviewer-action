@@ -105,6 +105,11 @@ from pr_reviewer.metadata import parse_metadata  # noqa: E402
 
 SCHEMA = "verifier-dogfood-evidence/v1"
 
+# The page bound on one list endpoint. A forge that always answers a full
+# page would page forever without it, and this collector reads a pull
+# request's comments and reviews only to read its newest published body.
+MAX_PAGES = 20
+
 EXIT_OK = 0
 EXIT_PARTIAL = 1
 EXIT_ERROR = 2
@@ -154,7 +159,6 @@ def list_items(
 ) -> list[dict[str, Any]]:
     """Every item across all pages of one forge list endpoint."""
     return confidence_evidence.list_items(forge, path, max_pages)
-
 
 def newest_published_body(
     comments: list[dict[str, Any]], reviews: list[dict[str, Any]]
@@ -216,8 +220,12 @@ def collect_record(forge: ForgeClient, repo: str, number: int) -> dict[str, Any]
     aborts the run.
     """
     token = getattr(forge, "token", "") or ""
-    comments = list_items(forge, f"/repos/{repo}/issues/{number}/comments")
-    reviews = list_items(forge, f"/repos/{repo}/pulls/{number}/reviews")
+    comments = list_items(
+        forge, f"/repos/{repo}/issues/{number}/comments", MAX_PAGES
+    )
+    reviews = list_items(
+        forge, f"/repos/{repo}/pulls/{number}/reviews", MAX_PAGES
+    )
     selected = newest_published_body(comments, reviews)
     if selected is None:
         unavailable = dict(UNAVAILABLE_REASONS)

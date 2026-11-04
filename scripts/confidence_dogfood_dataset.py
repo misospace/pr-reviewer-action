@@ -86,11 +86,17 @@ from pr_reviewer.confidence_evidence import (  # noqa: E402
     UNAVAILABLE_REASONS,
     extract_published_evidence,
     list_items,
+    list_items_report,
     published_body_descriptor,
     published_id,
     safe_text,
 )
-from pr_reviewer.forge import ForgeClient, ForgeError, default_forge  # noqa: E402
+from pr_reviewer.forge import (  # noqa: E402
+    ForgeClient,
+    ForgeError,
+    configured_token,
+    default_forge,
+)
 from pr_reviewer.metadata import parse_metadata  # noqa: E402
 
 SCHEMA = "verifier-dogfood-dataset/v1"
@@ -219,6 +225,10 @@ SUMMARY_NOTES: tuple[str, ...] = (
     "it carries no pass/fail judgment, no score threshold and no gate "
     "advice, because the adjudication of the verifier's authority lives in "
     "issue #1450.",
+    "the sources histogram counts every record by the source of its LAST "
+    "observation: a record the historical baseline imported and a later live "
+    "read re-observed counts as a live read, and the imported baseline it "
+    "came from is reported by the reconciliation.",
 )
 
 
@@ -352,16 +362,21 @@ def attempt_identity(
     discriminator: str,
     head_sha: str | None,
     config_fingerprint: str | None,
+    identifier: int | None = None,
 ) -> str:
     """The immutable identity of one published attempt.
 
     The digest covers the material that cannot change for a published body:
     the repository, the pull request, the publication kind, the publication
-    instant and the two run provenance pins the body carried. The forge's
-    own id is deliberately NOT part of the key -- the id is recorded on the
-    attempt so a reader can check it, but the key must survive a body that
-    was rewritten in place, and the pins are what make a rewritten body a
-    DIFFERENT attempt.
+    instant, the two run provenance pins the body carried, and the forge's
+    own id when the body has one.
+
+    The forge's id is part of the key because it is the one identifier the
+    forge itself calls immutable: two native reviews published in the same
+    second on the same pull request are two publications, and only their ids
+    tell them apart. A body WITHOUT an id (an imported baseline record) falls
+    back to the publication instant, and :func:`same_publication` is what
+    reconciles such a record with the live read of the same body.
     """
     material = "\x00".join(
         [
@@ -371,6 +386,7 @@ def attempt_identity(
             discriminator,
             head_sha or "",
             config_fingerprint or "",
+            str(identifier) if identifier is not None else "",
         ]
     )
     return "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -401,6 +417,41 @@ def discriminator_for(
     if identifier is not None:
         return str(identifier)
     return ""
+
+
+def same_publication(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """True when two records describe the same published body.
+
+    A published body is named by its pull request, its publication kind, its
+    publication instant and the two run provenance pins it carried. Two
+    publications that share all of those are the same body, UNLESS the forge
+    gave them different ids: two native reviews published in the same second
+    on the same pull request are two publications, and only their ids tell
+    them apart.
+
+    The rule exists for the historical baseline, which retained no ids: the
+    imported record and a later live read of the same publication share the
+    instant and the pins, so they are one attempt and not two. The pins are
+    part of the rule on purpose: a body republished on a new head is a
+    DIFFERENT attempt, and no id is needed to say so.
+    """
+    if left.get("pr_number") != right.get("pr_number"):
+        return False
+    if left.get("head_sha") != right.get("head_sha"):
+        return False
+    if left.get("config_fingerprint") != right.get("config_fingerprint"):
+        return False
+    left_attempt = left.get("attempt") or {}
+    right_attempt = right.get("attempt") or {}
+    if left_attempt.get("kind") != right_attempt.get("kind"):
+        return False
+    if left_attempt.get("published_at") != right_attempt.get("published_at"):
+        return False
+    left_id = left_attempt.get("id")
+    right_id = right_attempt.get("id")
+    if left_id is not None and right_id is not None:
+        return left_id == right_id
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +507,7 @@ def build_live_record(
         discriminator_for(instant, identifier),
         head_sha,
         config_fingerprint,
+        identifier,
     )
     attempt = empty_attempt()
     attempt.update(
@@ -507,17 +559,19 @@ def review_state(item: dict[str, Any], token: str) -> str | None:
     return safe_text(value, MAX_TIMESTAMP, token)
 
 
-def legacy_string(value: object) -> str | None:
+def legacy_string(value: object, token: str) -> str | None:
     """One bounded legacy string, or ``None``.
 
     The baseline is a local file, but its values are still capped: a
     baseline that carried an enormous string must not be able to blow the
     dataset up. The URL redactor runs too, so a legacy value that carries
-    a credential in its userinfo is masked.
+    a credential in its userinfo is masked, and a legacy value that carries
+    the configured credential itself is refused outright: the token is the
+    only proof, because a token is an arbitrary string.
     """
     if not isinstance(value, str) or value == "":
         return None
-    return safe_text(value, MAX_LEGACY_CHARS, "")
+    return safe_text(value, MAX_LEGACY_CHARS, token)
 
 
 def legacy_unavailable_keys(run: dict[str, Any]) -> list[str]:
@@ -564,7 +618,7 @@ def legacy_unavailable_keys(run: dict[str, Any]) -> list[str]:
     return sorted(keys)
 
 
-def legacy_verifier_block(verifier: dict[str, Any]) -> dict[str, Any]:
+def legacy_verifier_block(verifier: dict[str, Any], token: str) -> dict[str, Any]:
     """The verifier block of one imported baseline run.
 
     The baseline retained a status, a score, a risk band, a model, a latency
@@ -588,7 +642,7 @@ def legacy_verifier_block(verifier: dict[str, Any]) -> dict[str, Any]:
         risk = "unknown"
     model = verifier.get("model")
     model = model if isinstance(model, str) else ""
-    model = safe_text(model, MAX_MODEL, "")
+    model = safe_text(model, MAX_MODEL, token)
     latency = verifier.get("latency_ms")
     if not isinstance(latency, int) or isinstance(latency, bool) or latency < 0:
         latency = None
@@ -618,6 +672,7 @@ def build_legacy_record(
     run: dict[str, Any],
     source_issue: str | None,
     now: str,
+    token: str,
 ) -> dict[str, Any]:
     """The record of one imported baseline run.
 
@@ -626,6 +681,9 @@ def build_legacy_record(
     the provenance the live path does not publish. Its body digest is
     ``None``: the baseline retained no body, and a digest of a body nobody
     holds would be a fiction.
+
+    The token is the configured one: a baseline value that carries the
+    credential is refused exactly as a published value would be.
     """
     published_body = run.get("published_body")
     published_body = published_body if isinstance(published_body, dict) else {}
@@ -640,9 +698,20 @@ def build_legacy_record(
     identifier = published_body.get("id")
     if not isinstance(identifier, int) or isinstance(identifier, bool):
         identifier = None
-    instant = normalize_instant(published_body.get("submitted_at"))
-    head_sha = legacy_string(pins.get("head_sha"))
-    config_fingerprint = legacy_string(pins.get("config_fingerprint"))
+    # The publication instant is anchored the way the live path anchors it:
+    # a native review by its submission time, a managed comment by its
+    # creation time. A baseline record that names a comment therefore lands
+    # on the same instant a live read of that comment would, and the two are
+    # one publication rather than two.
+    instant = normalize_instant(
+        published_body.get("created_at")
+        if kind == "comment"
+        else published_body.get("submitted_at")
+    )
+    if instant is None:
+        instant = normalize_instant(published_body.get("submitted_at"))
+    head_sha = legacy_string(pins.get("head_sha"), token)
+    config_fingerprint = legacy_string(pins.get("config_fingerprint"), token)
     identity = attempt_identity(
         repository,
         int(run["pr"]),
@@ -650,6 +719,7 @@ def build_legacy_record(
         discriminator_for(instant, identifier),
         head_sha,
         config_fingerprint,
+        identifier,
     )
     concern_count = verifier.get("concern_count")
     if not isinstance(concern_count, int) or isinstance(concern_count, bool):
@@ -659,10 +729,10 @@ def build_legacy_record(
         {
             "kind": kind,
             "id": identifier,
-            "state": legacy_string(published_body.get("native_state")),
-            "submitted_at": legacy_string(published_body.get("submitted_at")),
-            "created_at": None,
-            "updated_at": None,
+            "state": legacy_string(published_body.get("native_state"), token),
+            "submitted_at": legacy_string(published_body.get("submitted_at"), token),
+            "created_at": legacy_string(published_body.get("created_at"), token),
+            "updated_at": legacy_string(published_body.get("updated_at"), token),
             "published_at": instant,
             "edited": None,
             "body_digest": None,
@@ -679,21 +749,21 @@ def build_legacy_record(
         "source": "legacy-import",
         "attempt": attempt,
         "head_sha": head_sha,
-        "base_sha": legacy_string(pins.get("base_sha")),
-        "review_result": legacy_string(primary.get("review_result")),
-        "required_checks": legacy_string(primary.get("required_checks")),
-        "diff_fingerprint": legacy_string(pins.get("diff_fingerprint")),
+        "base_sha": legacy_string(pins.get("base_sha"), token),
+        "review_result": legacy_string(primary.get("review_result"), token),
+        "required_checks": legacy_string(primary.get("required_checks"), token),
+        "diff_fingerprint": legacy_string(pins.get("diff_fingerprint"), token),
         "config_fingerprint": config_fingerprint,
-        "verifier": legacy_verifier_block(verifier),
+        "verifier": legacy_verifier_block(verifier, token),
         "unavailable": legacy_unavailable_keys(run),
         "legacy": {
-            "action_version": legacy_string(pins.get("action_version")),
-            "native_state": legacy_string(published_body.get("native_state")),
-            "tool_stop_reason": legacy_string(primary.get("tool_stop_reason")),
-            "review_route": legacy_string(primary.get("review_route")),
-            "incomplete_reason": legacy_string(primary.get("incomplete_reason")),
+            "action_version": legacy_string(pins.get("action_version"), token),
+            "native_state": legacy_string(published_body.get("native_state"), token),
+            "tool_stop_reason": legacy_string(primary.get("tool_stop_reason"), token),
+            "review_route": legacy_string(primary.get("review_route"), token),
+            "incomplete_reason": legacy_string(primary.get("incomplete_reason"), token),
             "concern_count": concern_count,
-            "source_issue": legacy_string(source_issue),
+            "source_issue": legacy_string(source_issue, token),
         },
         "read_error": None,
     }
@@ -735,6 +805,41 @@ def merged_edited(previous: dict[str, Any], observation: dict[str, Any]) -> bool
     if isinstance(previous_digest, str) and isinstance(observed_digest, str):
         return False
     return previous["attempt"].get("edited")
+
+
+def observation_sort_key(observation: dict[str, Any]) -> tuple[Any, ...]:
+    """The order the observations are merged in: oldest first.
+
+    The merge lets the LAST observation of an attempt win its content
+    fields, because the publication is the authority on what it published.
+    Applying the observations oldest first therefore keeps the newest body,
+    and on an exact tie (two publications in the same second) the higher
+    forge id wins, the same rule the #1452 collector uses.
+    """
+    attempt = observation.get("attempt") or {}
+    identifier = attempt.get("id")
+    return (
+        attempt.get("published_at") or "",
+        identifier if isinstance(identifier, int) else -1,
+    )
+
+
+def find_by_publication(
+    indexed: dict[str, dict[str, Any]], observation: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The known record of the PUBLICATION this observation names, if any.
+
+    A record imported from the historical baseline carries no forge id, so it
+    is keyed by its publication instant. The live read of that same body is
+    keyed by the forge's id. They are one attempt, and this is the rule that
+    says so: the two are one publication when they share the pull request,
+    the kind and the publication instant, and the forge did not give them
+    different ids.
+    """
+    for _, record in sorted(indexed.items(), key=lambda entry: record_sort_key(entry[1])):
+        if same_publication(record, observation):
+            return record
+    return None
 
 
 def merge_observation(
@@ -816,13 +921,18 @@ def collect_pull_request(
     repository: str,
     number: int,
     max_pages: int,
-) -> tuple[list[tuple[str, dict[str, Any], str]], list[str]]:
-    """Every published attempt of one pull request, and its read errors.
+) -> tuple[list[tuple[str, dict[str, Any], str]], list[str], bool]:
+    """Every published attempt of one pull request, its read errors, and whether
+    the read was complete.
 
     The two list endpoints are read independently: a forge that answers the
     comments but refuses the reviews still yields the attempts the comments
     carry, and the refusal is recorded on those attempts instead of
     throwing the whole pull request away.
+
+    The third value says whether the read was WHOLE: both endpoints answered
+    and neither page bound cut a walk short. Only a whole read can assert
+    that a publication is gone.
 
     Only a MARKER-BEARING body is an attempt. The marker is the
     repository's own (``pr_reviewer.metadata.parse_metadata``), never a
@@ -832,16 +942,19 @@ def collect_pull_request(
     comments: list[dict[str, Any]] = []
     reviews: list[dict[str, Any]] = []
     errors: list[str] = []
+    truncated = False
     try:
-        comments = list_items(
+        comments, cut = list_items_report(
             forge, f"/repos/{repository}/issues/{number}/comments", max_pages
         )
+        truncated = truncated or cut
     except ForgeError as exc:
         errors.append(str(exc))
     try:
-        reviews = list_items(
+        reviews, cut = list_items_report(
             forge, f"/repos/{repository}/pulls/{number}/reviews", max_pages
         )
+        truncated = truncated or cut
     except ForgeError as exc:
         errors.append(str(exc))
     attempts: list[tuple[str, dict[str, Any], str]] = []
@@ -854,7 +967,7 @@ def collect_pull_request(
                 continue
             attempts.append((kind, item, body))
     attempts.sort(key=_attempt_sort_key, reverse=True)
-    return attempts, errors
+    return attempts, errors, not errors and not truncated
 
 
 def _attempt_sort_key(attempt: tuple[str, dict[str, Any], str]) -> tuple[Any, ...]:
@@ -932,15 +1045,22 @@ def collect_from_forge(
     failed = False
     covered: set[int] = set()
     for number in numbers:
-        attempts, errors = collect_pull_request(forge, repository, number, max_pages)
+        attempts, errors, whole = collect_pull_request(
+            forge, repository, number, max_pages
+        )
         read_error = "; ".join(errors) if errors else None
         if errors:
             failed = True
             notes.append(
                 f"pull request {number}: the forge read failed ({read_error})"
             )
+        elif not whole:
+            notes.append(
+                f"pull request {number}: the page bound cut the read short, so "
+                "this collection cannot say which published attempts are gone"
+            )
         if not attempts:
-            if not errors:
+            if whole:
                 # The surface was read and it carries no published attempt:
                 # that is an observation, and it can assert the absence of
                 # the publications the dataset retains for this pull request.
@@ -956,7 +1076,7 @@ def collect_from_forge(
             # The surface was read but not wholly: the attempts that were
             # left out are still published, so this pull request cannot
             # assert that any of its attempts is gone.
-        else:
+        elif whole:
             covered.add(number)
         for kind, item, body in kept:
             observations.append(
@@ -983,7 +1103,8 @@ def import_legacy(
     path: Path,
     repository: str,
     now: str,
-) -> tuple[list[dict[str, Any]], dict[str, Any], list[str], set[int]]:
+    token: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
     """Read the historical baseline file and turn its runs into observations.
 
     The baseline's own schema is checked before anything is read out of it:
@@ -991,9 +1112,14 @@ def import_legacy(
     silent reinterpretation produces a dataset that looks complete and is
     not.
 
-    The pull requests the baseline covers come back with the observations:
-    the import read the whole file, so it can speak about the publications of
-    those pull requests, and about nothing else.
+    The import reads a FILE, not the forge, so it covers nothing: it cannot
+    say that a publication is gone, and the run never marks an attempt absent
+    on the strength of it.
+
+    The token is the configured one, even though the import talks to no
+    forge: a baseline value that carries the credential must be refused
+    before it reaches the dataset, and only the configured token can be
+    recognised.
     """
     try:
         raw = path.read_text(encoding="utf-8")
@@ -1037,7 +1163,9 @@ def import_legacy(
             )
             continue
         prs.add(number)
-        observations.append(build_legacy_record(repository, run, source_issue, now))
+        observations.append(
+            build_legacy_record(repository, run, source_issue, now, token)
+        )
 
     declared_runs = window.get("enabled_runs")
     declared_prs = window.get("distinct_prs")
@@ -1063,7 +1191,7 @@ def import_legacy(
             f"{skipped} of {len(runs)} baseline runs were skipped and counted, "
             f"never dropped: {detail}."
         )
-    return observations, reconciliation, notes, prs
+    return observations, reconciliation, notes
 
 
 def reconciliation_notes(reconciliation: dict[str, Any]) -> list[str]:
@@ -1592,8 +1720,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.import_legacy is not None:
         try:
-            observations, reconciliation, notes, covered_prs = import_legacy(
-                args.import_legacy, repository, now
+            observations, reconciliation, notes = import_legacy(
+                args.import_legacy, repository, now, configured_token()
             )
         except CliError as exc:
             print(f"confidence_dogfood_dataset: {exc}", file=sys.stderr)
@@ -1647,23 +1775,39 @@ def main(argv: list[str] | None = None) -> int:
 
     # The merge: an observed attempt is inserted when it is new and updated
     # in place when it is known. Nothing is ever deleted.
-    observed_identities: set[str] = set()
+    #
+    # The observations are applied OLDEST FIRST, so the newest observation of
+    # an attempt is the one that lands last and wins the content fields: a
+    # publication that was replaced keeps the newest body, not the oldest.
+    observed_records: set[str] = set()
     added = 0
     updated = 0
-    for observation in observations:
+    for observation in sorted(observations, key=observation_sort_key):
         identity = observation["identity"]
-        observed_identities.add(identity)
         previous = indexed.get(identity)
         if previous is None:
-            indexed[identity] = observation
-            added += 1
-        else:
-            indexed[identity] = merge_observation(previous, observation, now)
-            updated += 1
+            # The identity does not name a known attempt. It may still name a
+            # known PUBLICATION: a record imported from the historical
+            # baseline carries no forge id, so it is keyed by its publication
+            # instant, and the live read of that same body is keyed by the
+            # forge's id. The two are one attempt.
+            previous = find_by_publication(indexed, observation)
+            if previous is None:
+                indexed[identity] = observation
+                observed_records.add(identity)
+                added += 1
+                continue
+        merged = merge_observation(previous, observation, now)
+        # The record keeps the identity it was first filed under, so a reader
+        # who saw the record before the merge sees the same record after it.
+        key = merged["identity"]
+        indexed[key] = merged
+        observed_records.add(key)
+        updated += 1
 
     absent = 0
     for identity, record in indexed.items():
-        if identity in observed_identities:
+        if identity in observed_records:
             continue
         # Absence is asserted only where this collection actually read the
         # pull request's publication surface. A run that covered other pull

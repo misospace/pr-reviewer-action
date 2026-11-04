@@ -677,6 +677,52 @@ class TestGetPagesHonorsMaxPages:
             server.shutdown()
             server.server_close()
 
+    def test_the_report_says_the_walk_was_cut_short(self):
+        """A caller must be able to tell a complete list from a cut one."""
+        pages = [[{"i": 1}, {"i": 2}, {"i": 3}], [{"i": 4}]]
+
+        class Handler(BaseHTTPRequestHandler):
+            def handle_one_request(self):
+                self.raw_requestline = self.rfile.readline()
+                if not self.raw_requestline:
+                    return
+                if not self.parse_request():
+                    return
+                query = dict(
+                    urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query)
+                )
+                page = int(query.get("page", "1"))
+                index = page - 1
+                body = pages[index] if 0 <= index < len(pages) else []
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode("utf-8"))
+
+            def log_message(self, *_args):  # noqa: ANN001
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            # The bound ends the walk on the first page, and that page was
+            # full: the list may hold items the walk never saw.
+            items, truncated = client.get_pages_report(
+                "/x", per_page=3, max_pages=1
+            )
+            assert len(items) == 3
+            assert truncated is True
+            # The walk ends on the short second page: it saw everything.
+            items, truncated = client.get_pages_report("/x", per_page=3)
+            assert len(items) == 4
+            assert truncated is False
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 # ---------------------------------------------------------------------------
 # DELETE (label removal)

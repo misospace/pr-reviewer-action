@@ -324,7 +324,35 @@ class ForgeClient:
         bug, not a page count to guess at.
         """
         limit = self._page_limit(max_pages)
-        return self._iter_pages(path, params, per_page, limit)
+        for page_items, _truncated in self._walk_pages(path, params, per_page, limit):
+            yield from page_items
+
+    def get_pages_report(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        per_page: int = 100,
+        max_pages: int | None = None,
+    ) -> tuple[list[Any], bool]:
+        """Every item across all pages, and whether the page bound cut the walk.
+
+        The boolean is ``True`` when the walk stopped because it read
+        ``max_pages`` pages and the last of them was full: the list may then
+        hold items the walk never saw. A caller that must tell "the forge has
+        nothing more" from "the walk stopped early" needs that difference --
+        a truncated list is not a complete one, and a caller that treats it as
+        complete will report published items as missing.
+
+        The default is an unbounded walk, so the boolean is ``False`` unless
+        a bound was given.
+        """
+        limit = self._page_limit(max_pages)
+        items: list[Any] = []
+        truncated = False
+        for page_items, page_truncated in self._walk_pages(path, params, per_page, limit):
+            items.extend(page_items)
+            truncated = truncated or page_truncated
+        return items, truncated
 
     @staticmethod
     def _page_limit(max_pages: int | None) -> int | None:
@@ -335,14 +363,18 @@ class ForgeClient:
             raise ForgeError("invalid max_pages")
         return max_pages
 
-    def _iter_pages(
+    def _walk_pages(
         self,
         path: str,
         params: Mapping[str, Any] | None,
         per_page: int,
         max_pages: int | None,
-    ) -> Iterable[Any]:
-        """The page walk itself, bounded by an already-validated limit."""
+    ) -> Iterable[tuple[list[Any], bool]]:
+        """The page walk itself, bounded by an already-validated limit.
+
+        Each step yields the items of one page and whether the walk was cut
+        short at that page.
+        """
         if max_pages is not None and max_pages <= 0:
             return
         merged: dict[str, Any] = dict(params or {})
@@ -353,10 +385,15 @@ class ForgeClient:
             data = self.get(path, merged)
             if not isinstance(data, list) or not data:
                 return
-            yield from data
+            truncated = False
+            if max_pages is not None and page >= max_pages:
+                # The bound ended the walk. A full page means there may be
+                # more items the walk never saw.
+                truncated = len(data) >= int(merged["per_page"])
+            yield data, truncated
             if len(data) < int(merged["per_page"]):
                 return
-            if max_pages is not None and page >= max_pages:
+            if truncated:
                 return
             page += 1
 
@@ -440,3 +477,15 @@ def default_forge() -> ForgeClient:
     move on.
     """
     return ForgeClient()
+
+
+def configured_token() -> str:
+    """The configured bearer token, read from the environment only.
+
+    A caller that redacts a value it read from a FILE (a retained evidence
+    artifact, for example) still has to refuse a value that carries the
+    configured credential, and it must do so without reading the forge. This
+    is that token, resolved exactly as :class:`ForgeClient` resolves it: the
+    token never comes from argv, never from a URL and never from a body.
+    """
+    return _resolve_token(None)

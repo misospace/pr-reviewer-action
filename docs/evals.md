@@ -975,11 +975,13 @@ verifier's own published answer, the reason for each published value the
 record does not carry, and the provenance of the attempt.
 
 An attempt is keyed by an immutable published-review identity: the repository,
-the pull request, the publication kind, the publication instant, and the head
-and config pins the published body carried. The rules that follow from that
-key:
+the pull request, the publication kind, the publication instant, the forge's own
+id when the body has one, and the head and config pins the published body
+carried. The rules that follow from that key:
 
 - A repeated run over unchanged input adds no record and drops no record.
+- Two native reviews published in the same second are two attempts. Only
+  their ids tell them apart.
 - A body edited in place keeps the identity of the body it belongs to. It is
   not a fresh attempt.
 - A body rewritten on a new head is a different attempt, because the head pin
@@ -988,8 +990,9 @@ key:
   kept and marked `absent_in_latest_collection`, because a dismissed, deleted
   or hidden publication is evidence too.
 - Absence is asserted only where the collection read the whole publication
-  surface of that pull request. A bounded run never marks the attempts it did
-  not look for absent.
+  surface of that pull request. A partly read pull request, a read the page
+  bound cut short, and a pull request the collection did not look for never
+  mark an attempt absent.
 - A dataset file of another schema is refused. The collector never guesses a
   migration.
 
@@ -1000,7 +1003,13 @@ usage, and the attempts per pull request. The summary carries no pass or fail
 judgment, no score threshold, and no gate advice. The adjudication of the
 verifier's authority belongs to #1450.
 
+The sources histogram of the summary counts every record by the source of its
+last observation. A record the baseline imported and a later live read
+re-observed counts as a live read, and the imported baseline it came from is
+reported by the reconciliation.
+
 The import reconciles the baseline against itself: the declared window of the
 baseline (419 enabled runs across 166 pull requests) is compared with the
 records the import actually produced, and every baseline record the import
-cannot support is counted under a skip reason instead of being dropped.
+cannot support is counted under a skip reason instead of being dropped. The
+import reads a file, not the forge, so it never marks an attempt absent.
