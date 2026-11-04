@@ -164,6 +164,19 @@ function incompleteFooter(diffClipped: boolean): string {
   return `… derivation input was incomplete (reason: ${diffClipped ? "input-clipped" : "input-truncated"}); obligations may be missing\n`;
 }
 
+/** Static footer appended to an `ok` section whose normalization ledger is
+ * nonempty: the listed obligations are real targets, but the normalizer
+ * DISCARDED at least one malformed entry, so the list is a partial answer.
+ * The enforcement half withholds the trusted approval on the same ledger
+ * (#1449); without this footer the reviewer would see a clean-looking list
+ * and never be told an obligation was dropped. Static text only — the
+ * ledger's own (untrusted) messages are never rendered. */
+function discardedEntriesFooter(errors: unknown): string {
+  if (!Array.isArray(errors) || errors.length === 0) return "";
+  const n = errors.length;
+  return `… ${n} malformed obligation ${n === 1 ? "entry" : "entries"} discarded by normalization; this list is incomplete\n`;
+}
+
 /** Map a pass result to the corpus section for the engine: derived targets on
  * `ok`, the visible unavailable note on `error`/`timeout`, and `""` only for
  * a genuinely clean `empty` — one that saw the COMPLETE diff. An `empty`
@@ -196,7 +209,8 @@ export function renderDerivedSectionForStatus(
     return renderDerivedUnavailable(result.diffClipped === true ? "input-clipped" : "input-truncated");
   }
   if (result.status !== "ok") return "";
-  const footer = result.inputComplete === false ? incompleteFooter(result.diffClipped === true) : "";
+  const footer = (result.inputComplete === false ? incompleteFooter(result.diffClipped === true) : "")
+    + discardedEntriesFooter(result.artifact.errors);
   const section = renderDerivedSection(result.artifact, maxBytes, footer);
   if (section === "" && result.artifact.obligations.length > 0) return renderDerivedUnavailable("section-cap");
   return section;
