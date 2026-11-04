@@ -260,18 +260,26 @@ def test_dogfood_overrides_only_what_is_ours() -> None:
 def test_dogfood_enables_bounded_advisory_confidence_scoring() -> None:
     """Score with a usable configured model, without weakening review authority.
 
-    The optional dedicated model/format may be unset in repository variables:
-    falling back to the smart lane keeps dogfood scoring enabled rather than
-    silently turning it off. #1478: the verifier's ENDPOINT and CREDENTIAL are
-    isolated from the primary lane — they resolve only from the operator's
-    dedicated CONFIDENCE_* repository variable/secret, and
+    The optional dedicated format may be unset in repository variables:
+    falling back to the smart FORMAT pre-fills only the wire family. #1478:
+    the verifier's ENDPOINT, CREDENTIAL, and MODEL are isolated from the
+    primary lane — they resolve only from the operator's dedicated
+    CONFIDENCE_* repository variables/secret, and
     ai-confidence-isolation=require-dedicated turns a missing dedicated
-    endpoint into a visible `unscored` run instead of a silent primary-lane
-    inheritance. The primary LITELLM_* credential must never appear on a
-    confidence input, and forks stay disabled by default.
+    endpoint (or a missing dedicated model) into a visible `unscored` run
+    instead of a silent primary-lane inheritance. The workflow therefore
+    pre-fills the model with NOTHING: a `SMART_MODEL` substitution here would
+    put the primary lane's own model on the verifier, the exact same-model
+    correlation isolation exists to prevent (the resolver refuses the missing
+    model as `unscored(dedicated_model_missing)` — #1481). The primary
+    LITELLM_* credential must never appear on a confidence input, and forks
+    stay disabled by default.
     """
     values = _review_step_with(WORKFLOW.read_text(encoding="utf-8"))
-    assert values["ai-confidence-model"] == "${{ vars.CONFIDENCE_MODEL || vars.SMART_MODEL }}"
+    assert values["ai-confidence-model"] == "${{ vars.CONFIDENCE_MODEL }}"
+    # The regression this pins: the static workflow must never pre-fill the
+    # confidence model with a primary-derived value (no SMART_MODEL fallback).
+    assert "SMART_MODEL" not in values["ai-confidence-model"]
     assert values["ai-confidence-api-format"] == "${{ vars.CONFIDENCE_FORMAT || vars.SMART_FORMAT }}"
     assert values["ai-confidence-base-url"] == "${{ vars.CONFIDENCE_BASE_URL }}"
     assert values["ai-confidence-api-key"] == "${{ secrets.CONFIDENCE_API_KEY }}"

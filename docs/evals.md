@@ -918,7 +918,7 @@ nothing else may supply them):
 | --- | --- | --- |
 | `CONFIDENCE_BASE_URL` | repository **variable** | The verifier's own endpoint base URL. Must be a backend that is actually distinct from the primary `LITELLM_URL`. |
 | `CONFIDENCE_API_KEY` | repository **secret** | The verifier endpoint's credential. A distinct endpoint never inherits the primary key; write-only, never logged, and never exposed beyond the action's redacted transport path. |
-| `CONFIDENCE_MODEL` | repository **variable** (optional) | The verifier's model identifier, sent to the provider verbatim (opaque, case-sensitive — #1465). Falls back to `SMART_MODEL` when unset. |
+| `CONFIDENCE_MODEL` | repository **variable** (optional) | The verifier's model identifier, sent to the provider verbatim (opaque, case-sensitive — #1465). Under `ai-confidence-isolation: require-dedicated` there is NO fallback: when unset the verifier publishes `confidence-status: unscored` (cause `dedicated_model_missing`) instead of substituting a primary/smart lane model. |
 | `CONFIDENCE_FORMAT` | repository **variable** (optional) | The verifier endpoint's wire family (`openai`/`anthropic`). Falls back to `SMART_FORMAT` when unset. |
 
 Recommended safe configuration: set ALL FOUR settings above — the distinct
@@ -929,13 +929,17 @@ family (`CONFIDENCE_FORMAT`). A second provider account or proxy virtual key
 that only the verifier may spend keeps it off the primary lane's rate
 limits, quota, and outage domain (the verifier's request is already bounded:
 one shot, 4096 completion / 98304 prompt token budgets, 120 s timeout). The
-`SMART_MODEL`/`SMART_FORMAT` fallbacks exist only to keep the lane ENABLED
-while the dedicated settings are missing, so the refusal below is visible —
-they are not a recommendation to run the verifier on a model the dedicated
-endpoint does not serve; that shape fails visibly at the provider
-(`confidence-status: unscored`, cause `http_*`). Under
-`require-dedicated`, a missing `CONFIDENCE_BASE_URL` is a VISIBLE failure:
-the run publishes `confidence-status: unscored` with the
+`CONFIDENCE_FORMAT` fallback to `SMART_FORMAT` only pre-fills the wire
+family while that variable is unset; the MODEL has no fallback — under
+`require-dedicated` an unset `CONFIDENCE_MODEL` is itself a VISIBLE failure:
+the run publishes `confidence-status: unscored` with the action-owned cause
+`dedicated_model_missing` (and a WARNING naming the inputs) instead of
+substituting `SMART_MODEL`, because the reviewing model grading its own work
+is the exact same-model correlation the isolation contract exists to
+prevent. A model the dedicated endpoint does not serve still fails visibly
+at the provider (`confidence-status: unscored`, cause `http_*`). Under
+`require-dedicated`, a missing `CONFIDENCE_BASE_URL` is the other VISIBLE
+failure: the run publishes `confidence-status: unscored` with the
 action-owned cause `dedicated_config_missing` (and a WARNING naming the
 inputs) while the authoritative review publishes unchanged — the verifier
 never silently dials the primary lane. Other verifier failures keep their

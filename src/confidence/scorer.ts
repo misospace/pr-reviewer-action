@@ -5,8 +5,9 @@
  * - exactly ONE wire attempt (the transport's single-shot path — no 429/5xx
  *   backoff loop, no fallback lane, no second review);
  * - a configuration the resolver itself refused (`ConfidenceProfile.refusalCause`,
- *   #1478: the require-dedicated isolation mode without a dedicated endpoint)
- *   publishes `unscored` with that action-owned cause before the wire;
+ *   #1478: the require-dedicated isolation mode without its dedicated
+ *   endpoint or without a dedicated model) publishes `unscored` with that
+ *   action-owned cause before the wire;
  * - credential isolation: the scorer's resolved `ConfidenceProfile` is the
  *   ONLY credential source; a distinct endpoint without its own key may only
  *   be a loopback address, and the primary lane's key must never ride a
@@ -168,10 +169,11 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     return { result: disabledResult(), requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "", usage: null, latencyMs: null };
   }
   // #1478: a configuration the RESOLVER itself refused (the require-dedicated
-  // isolation mode with no dedicated endpoint configured). Same contract as
-  // the refusals below: no wire attempt, no request artifact, an action-owned
-  // cause, and the review unaffected. The model identity stays empty on the
-  // result — nothing audited the review.
+  // isolation mode with no dedicated endpoint configured, or with no
+  // dedicated model configured). Same contract as the refusals below: no
+  // wire attempt, no request artifact, an action-owned cause, and the review
+  // unaffected. The model identity stays empty on the result — nothing
+  // audited the review.
   if (profile.refusalCause !== "") {
     return {
       result: unscoredConfidenceResult(profile.refusalCause),

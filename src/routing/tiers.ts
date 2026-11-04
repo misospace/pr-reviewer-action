@@ -672,9 +672,11 @@ export interface ConfidenceProfile {
    * schema. False (the default) keeps the request bytes unchanged. */
   structuredOutputSupported: boolean;
   /** #1478: set when the resolver REFUSED the resolved configuration itself —
-   * the require-dedicated isolation mode with no dedicated endpoint to
-   * resolve. The scorer publishes `unscored` with exactly this action-owned
-   * cause, pre-wire, and the review is unaffected. "" = nothing refused. */
+   * the require-dedicated isolation mode without the dedicated configuration
+   * it requires (no dedicated model: `dedicated_model_missing`; no dedicated
+   * endpoint: `dedicated_config_missing`). The scorer publishes `unscored`
+   * with exactly this action-owned cause, pre-wire, and the review is
+   * unaffected. "" = nothing refused. */
   refusalCause: string;
 }
 
@@ -782,13 +784,22 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   const baseUrl = trimmed(env, "AI_CONFIDENCE_BASE_URL");
   const apiFormatRaw = trimmed(env, "AI_CONFIDENCE_API_FORMAT");
   const apiKey = trimmed(env, "AI_CONFIDENCE_API_KEY");
+  // #1478: the operator-declared isolation mode. Config-load validation
+  // restricts the input to the two vocabulary values (anything else throws at
+  // startup), so here only the exact strict token is special and every other
+  // value — including the default — is the documented inherit-primary
+  // behavior.
+  const requireDedicated = trimmed(env, "AI_CONFIDENCE_ISOLATION") === "require-dedicated";
   // #1465: a whitespace-only model value carries no name, so the lane treats
-  // it as unset. The lane reports it instead of dropping it silently.
-  if (isBlankModelValue(env.AI_CONFIDENCE_MODEL)) {
+  // it as unset. The lane reports it instead of dropping it silently. Under
+  // require-dedicated the unset model is not merely disabling — it is a
+  // REFUSED configuration (below), and the refusal warning is the accurate
+  // notice; this disabled-shape notice would contradict it.
+  if (isBlankModelValue(env.AI_CONFIDENCE_MODEL) && !requireDedicated) {
     warnings.push("ai-confidence-model holds only whitespace, so it is treated as unset and the verifier stays disabled");
   }
 
-  if (!enabled) {
+  if (!enabled && !requireDedicated) {
     // Disabled is the default: a transport configured without a model is a
     // likely typo, reported the same way the specialist lane reports orphan
     // transport fields — loudly, but never fatal.
@@ -816,13 +827,31 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
     return { profile: disabledConfidenceProfile(), warnings };
   }
 
+  // #1478: under require-dedicated the verifier's MODEL is dedicated too. The
+  // mode's contract is that nothing primary-derived rides the verifier lane —
+  // endpoint, credential, AND model — so an unset `ai-confidence-model` must
+  // NOT fall back to the primary or smart lane's model (the exact same-model
+  // correlation isolation exists to prevent). Mirror the missing-endpoint
+  // refusal: the lane stays ENABLED (the operator asked for it) but resolves
+  // no transport, and the scorer refuses the call pre-wire with the
+  // action-owned cause — visible as `unscored(dedicated_model_missing)` while
+  // the review itself publishes unchanged. No provider call, no wire
+  // artifacts, no substitution.
+  if (!enabled) {
+    warnings.push(
+      "confidence scorer: ai-confidence-isolation=require-dedicated but ai-confidence-model is empty — the verifier never inherits the primary or smart lane's model; set ai-confidence-model to a model the dedicated verifier endpoint serves, or drop ai-confidence-isolation to restore the inherit-primary default",
+    );
+    return {
+      profile: {
+        ...disabledConfidenceProfile(),
+        enabled: true,
+        refusalCause: "dedicated_model_missing",
+      },
+      warnings,
+    };
+  }
+
   const distinctEndpoint = baseUrl !== "";
-  // #1478: the operator-declared isolation mode. Config-load validation
-  // restricts the input to the two vocabulary values (anything else throws at
-  // startup), so here only the exact strict token is special and every other
-  // value — including the default — is the documented inherit-primary
-  // behavior.
-  const requireDedicated = trimmed(env, "AI_CONFIDENCE_ISOLATION") === "require-dedicated";
   if (requireDedicated && !distinctEndpoint) {
     // Isolation was requested and the dedicated endpoint does not exist. The
     // primary lane's endpoint and credential must NOT ride the verifier: the

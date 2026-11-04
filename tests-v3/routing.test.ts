@@ -636,18 +636,88 @@ test("#1478: require-dedicated isolation refuses a missing dedicated endpoint in
 
   // A configured dedicated endpoint resolves exactly like the documented
   // distinct-endpoint shape — the mode changes only the EMPTY-base-url story.
+  // The model is carried VERBATIM: opaque and case-sensitive (#1465), never
+  // case-normalized and never substituted with a primary-derived name.
   const dedicated = resolveConfidenceProfile({
     AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
-    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_MODEL: "Scorer-Model-Cased",
     AI_CONFIDENCE_ISOLATION: "require-dedicated",
     AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
   });
   assert.equal(dedicated.profile.refusalCause, "");
+  assert.equal(dedicated.profile.model, "Scorer-Model-Cased", "the configured model name is used verbatim under require-dedicated");
   assert.equal(dedicated.profile.baseUrl, "https://independent");
   assert.equal(dedicated.profile.apiKey, "scorer-key");
   assert.equal(dedicated.profile.inheritedTransport, false);
   assert.equal(dedicated.profile.credentialSource, "own");
   assert.deepEqual(dedicated.warnings, []);
+});
+
+test("#1478/#1481: require-dedicated refuses a missing dedicated model instead of inheriting the primary or smart model", () => {
+  // The workflow no longer pre-fills ai-confidence-model with SMART_MODEL,
+  // so an unset CONFIDENCE_MODEL reaches the resolver EMPTY. Under
+  // require-dedicated that is a refused configuration, not a disabled lane:
+  // inheriting the reviewing model would be the exact same-model correlation
+  // isolation exists to prevent.
+  const refused = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_SMART_MODEL: "smart-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  // The lane stays ENABLED (the operator asked for the mode) but resolves no
+  // transport and no inherited model: the scorer must publish the visible
+  // unscored cause instead of silently scoring with a primary-derived model.
+  assert.equal(refused.profile.enabled, true);
+  assert.equal(refused.profile.refusalCause, "dedicated_model_missing");
+  assert.equal(refused.profile.model, "", "no primary-derived model may ride a refused verifier profile");
+  assert.equal(refused.profile.baseUrl, "", "no primary endpoint may ride a refused verifier profile");
+  assert.equal(refused.profile.apiKey, "", "no primary credential may ride a refused verifier profile");
+  assert.equal(refused.profile.inheritedTransport, false);
+  assert.equal(refused.profile.credentialSource, "own");
+  assert.ok(
+    refused.warnings.some((message) => message.includes("ai-confidence-isolation=require-dedicated") && message.includes("ai-confidence-model is empty")),
+    JSON.stringify(refused.warnings),
+  );
+  assert.ok(!refused.warnings.some((message) => message.includes("primary-key")), "no secret value may appear in a warning");
+
+  // A whitespace-only model value carries no name either: the same refusal,
+  // and the disabled-shape "treated as unset" notice is replaced by the
+  // accurate refusal warning.
+  const blank = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "   ",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.equal(blank.profile.enabled, true);
+  assert.equal(blank.profile.refusalCause, "dedicated_model_missing");
+  assert.equal(blank.profile.baseUrl, "");
+  assert.ok(blank.warnings.some((message) => message.includes("ai-confidence-model is empty")), JSON.stringify(blank.warnings));
+  assert.ok(!blank.warnings.some((message) => message.includes("stays disabled")), JSON.stringify(blank.warnings));
+
+  // The model gate comes first: even a CONFIGURED dedicated endpoint without
+  // a dedicated model is refused by model, not silently enabled.
+  const withEndpoint = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+  });
+  assert.equal(withEndpoint.profile.refusalCause, "dedicated_model_missing");
+  assert.equal(withEndpoint.profile.model, "");
+  assert.equal(withEndpoint.profile.baseUrl, "", "a refused profile carries no transport");
+
+  // The default mode keeps the documented disabled shape byte for byte: an
+  // unset ai-confidence-model still just disables the verifier (no refusal,
+  // no transport, orphan notice only) — existing consumers are unaffected.
+  const inheritDisabled = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_SMART_MODEL: "smart-model",
+  });
+  assert.equal(inheritDisabled.profile.enabled, false);
+  assert.equal(inheritDisabled.profile.refusalCause, "");
+  assert.equal(inheritDisabled.profile.model, "");
+  assert.equal(inheritDisabled.profile.baseUrl, "");
+  assert.equal(inheritDisabled.profile.apiKey, "");
+  assert.deepEqual(inheritDisabled.warnings, []);
 });
 
 test("#1073: same-endpoint same-model scoring emits the independence warning", () => {

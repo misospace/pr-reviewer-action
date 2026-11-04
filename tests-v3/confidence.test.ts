@@ -631,6 +631,32 @@ test("#1478: a resolver-refused require-dedicated profile publishes unscored bef
   assert.equal(outcome.usage, null, "no provider call happened, so no usage may be claimed");
 });
 
+test("#1478/#1481: a require-dedicated profile refused for a missing dedicated model publishes unscored before any transport call", async () => {
+  // The resolver's dedicated_model_missing shape: the lane is ENABLED (the
+  // operator asked for the mode) but carries no model and no transport. The
+  // scorer must refuse pre-wire with the action-owned cause — never dial a
+  // provider, never substitute a primary-derived model, never leave a wire
+  // artifact behind.
+  let called = false;
+  const outcome = await runConfidenceScorer({
+    profile: profile({ model: "", refusalCause: "dedicated_model_missing", baseUrl: "", apiKey: "", inheritedTransport: false }),
+    primaryApiKey: "primary-key-ABC",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async () => { called = true; throw new Error("should not be called"); },
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(outcome.result.status, "unscored");
+  assert.equal(outcome.result.cause, "dedicated_model_missing");
+  assert.equal(outcome.result.model, "", "no model audited the review: nothing was configured and nothing was substituted");
+  assert.equal(called, false, "a refused verifier never reaches the transport");
+  assert.equal(outcome.requestPayload, null);
+  assert.equal(outcome.rawResponse, null);
+  assert.equal(outcome.latencyMs, null, "no provider call happened, so no latency may be claimed");
+  assert.equal(outcome.usage, null, "no provider call happened, so no usage may be claimed");
+});
+
 test("loopback endpoint without a key is allowed", async () => {
   const server = await startMockServer((_req, _body, res) => {
     res.statusCode = 200;
