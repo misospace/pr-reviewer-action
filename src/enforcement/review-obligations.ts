@@ -338,7 +338,7 @@ export function deriveUnresolvedCause(input: {
   // before the obligation was closed (including a loop that spent its rounds
   // on refused optional calls inside the reserved window). A degraded loop
   // that never executed anything stays tool-capability above.
-  if (input.stopReason === "max-rounds" || input.stopReason === "wall-clock-exceeded") return "budget-exhausted";
+  if (input.stopReason === "max-rounds" || input.stopReason === "wall-clock-exceeded" || input.stopReason === "wall-clock-verdict-reserve") return "budget-exhausted";
   // A planning failure (missing corpus, missing model configuration) is not
   // a provider failure: no evidence gathering was even attempted, which is
   // the missing-source-evidence state.

@@ -9,6 +9,7 @@ import {
   STOP_NO_TOOL_CALLS,
   STOP_REQUEST_ERROR,
   STOP_WALL_CLOCK,
+  STOP_WALL_CLOCK_RESERVE,
   TOOL_LOOP_ROUNDS_CEILING,
   adaptiveLoopBudgets,
   DEPENDENCY_EVIDENCE_OBLIGATIONS,
@@ -413,6 +414,190 @@ test("#1198: without a finite absolute deadline the elapsed-since-start check st
     const outcome = await driveToolLoop(conversation, postFn, executeFn, options);
     assert.equal(outcome.stopReason, STOP_WALL_CLOCK, String(deadline));
     assert.equal(outcome.rounds, 1, String(deadline));
+  }
+});
+
+// #1464: the wall-clock verdict reserve. When `wallClockReserveSec` is finite
+// and > 0, the between-rounds check stops starting exploratory rounds once the
+// remaining wall clock falls to or below the reserve, so the closing
+// in-conversation verdict always has budget left. The exceeded check keeps its
+// exact boundary form; the reserve branch fires AFTER it, so a clock already
+// at/past the deadline still reports `wall-clock-exceeded`. The reserve check
+// reads the clock once per round on top of the exceeded check's own read —
+// every scripted sequence below accounts for both reads.
+
+test("#1464: the verdict reserve stops exploratory rounds before the deadline", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  let postCalls = 0;
+  const postFn = async () => {
+    postCalls++;
+    return openAiCall(`c${postCalls}`, "t", "{}");
+  };
+  const executeFn = async () => ({ tool: "t", status: "ok", result: {} });
+  // Deadline = 100, reserve = 30. Reads: started=0; r1 exceeded=0, r1
+  // reserve=0 (remaining 100 > 30 → round 1 runs); r2 exceeded=90 (90 < 100,
+  // so the exceeded check alone would NOT stop), r2 reserve=75 (remaining 25
+  // <= 30 → stop). Clock value 105 sits past the deadline: if the reserve
+  // branch failed to stop here, round 3's exceeded check would read it and
+  // report `wall-clock-exceeded` instead — the assertion below distinguishes
+  // the two stops.
+  const clock = [0, 0, 0, 90, 75, 105];
+  let clockIndex = 0;
+  const timeFn = () => clock[clockIndex++] ?? Number.MAX_SAFE_INTEGER / 2;
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 10, 120),
+    wallClockDeadline: 100,
+    wallClockReserveSec: 30,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_WALL_CLOCK_RESERVE);
+  assert.equal(outcome.rounds, 1);
+  assert.equal(postCalls, 1, "no exploratory round starts at or inside the reserve");
+  // Reads after the stop: exactly the loop-end elapsedSec read. The 105 slot
+  // fed that read, not another round's checks.
+  assert.equal(clockIndex, 6);
+});
+
+test("#1464: the reserve boundary is inclusive — remaining == reserve stops, remaining just above runs another round", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  // Remaining exactly == reserve: r2 reserve read leaves 100 - 70 = 30 → stop.
+  {
+    let postCalls = 0;
+    const postFn = async () => {
+      postCalls++;
+      return openAiCall(`c${postCalls}`, "t", "{}");
+    };
+    const executeFn = async () => ({ tool: "t", status: "ok", result: {} });
+    const clock = [0, 0, 0, 80, 70];
+    let clockIndex = 0;
+    const timeFn = () => clock[clockIndex++] ?? Number.MAX_SAFE_INTEGER / 2;
+    const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+      apiFormat: "openai",
+      model: "m",
+      budgets: adaptiveLoopBudgets(4, 10, 120),
+      wallClockDeadline: 100,
+      wallClockReserveSec: 30,
+      timeFn,
+    });
+    assert.equal(outcome.stopReason, STOP_WALL_CLOCK_RESERVE);
+    assert.equal(outcome.rounds, 1);
+    assert.equal(postCalls, 1);
+  }
+  // Remaining just above the reserve: r2 reserve read leaves 100 - 69 = 31 →
+  // round 2 runs; r3's reserve read leaves 5 → stop there.
+  {
+    let postCalls = 0;
+    const postFn = async () => {
+      postCalls++;
+      return openAiCall(`c${postCalls}`, "t", "{}");
+    };
+    const executeFn = async () => ({ tool: "t", status: "ok", result: {} });
+    const clock = [0, 0, 0, 80, 69, 95, 95];
+    let clockIndex = 0;
+    const timeFn = () => clock[clockIndex++] ?? Number.MAX_SAFE_INTEGER / 2;
+    const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+      apiFormat: "openai",
+      model: "m",
+      budgets: adaptiveLoopBudgets(4, 10, 120),
+      wallClockDeadline: 100,
+      wallClockReserveSec: 30,
+      timeFn,
+    });
+    assert.equal(outcome.stopReason, STOP_WALL_CLOCK_RESERVE);
+    assert.equal(outcome.rounds, 2);
+    assert.equal(postCalls, 2);
+  }
+});
+
+test("#1464: a clock already at the deadline still reports wall-clock-exceeded, never the reserve", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  let postCalls = 0;
+  const postFn = async () => {
+    postCalls++;
+    return openAiCall(`c${postCalls}`, "t", "{}");
+  };
+  const executeFn = async () => ({ tool: "t", status: "ok", result: {} });
+  // Reads: started=0; r1 exceeded=0, r1 reserve=0 (round 1 runs); r2
+  // exceeded=100 — AT the deadline (`>=`) → the exceeded branch stops before
+  // the reserve branch is ever reached.
+  const clock = [0, 0, 0, 100];
+  let clockIndex = 0;
+  const timeFn = () => clock[clockIndex++] ?? Number.MAX_SAFE_INTEGER / 2;
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 10, 120),
+    wallClockDeadline: 100,
+    wallClockReserveSec: 30,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_WALL_CLOCK);
+  assert.equal(outcome.rounds, 1);
+  assert.equal(postCalls, 1);
+});
+
+test("#1464: the reserve works against the legacy elapsed-since-start check too", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  let postCalls = 0;
+  const postFn = async () => {
+    postCalls++;
+    return openAiCall(`c${postCalls}`, "t", "{}");
+  };
+  const executeFn = async () => ({ tool: "t", status: "ok", result: {} });
+  // No deadline: remaining = started + wallClockSec - now = 0 + 120 - now.
+  // Reads: started=0; r1 exceeded=0 (elapsed 0), r1 reserve=0 (remaining 120
+  // > 30 → run); r2 exceeded=95 (elapsed 95 <= 120 → run), r2 reserve=91
+  // (remaining 29 <= 30 → stop).
+  const clock = [0, 0, 0, 95, 91];
+  let clockIndex = 0;
+  const timeFn = () => clock[clockIndex++] ?? Number.MAX_SAFE_INTEGER / 2;
+  const outcome = await driveToolLoop(conversation, postFn, executeFn, {
+    apiFormat: "openai",
+    model: "m",
+    budgets: adaptiveLoopBudgets(4, 10, 120),
+    wallClockReserveSec: 30,
+    timeFn,
+  });
+  assert.equal(outcome.stopReason, STOP_WALL_CLOCK_RESERVE);
+  assert.equal(outcome.rounds, 1);
+  assert.equal(postCalls, 1);
+});
+
+test("#1464: an unset/zero reserve keeps legacy behavior byte-identical (one clock read per round)", async () => {
+  const conversation = new Conversation();
+  conversation.addUser("corpus");
+  for (const reserve of [undefined, null, 0, Number.POSITIVE_INFINITY] as const) {
+    let postCalls = 0;
+    const postFn = async () => {
+      postCalls++;
+      return openAiCall(`c${postCalls}`, "t", "{}");
+    };
+    const executeFn = async () => ({ tool: "t", status: "ok", result: {} });
+    // Same script as the pre-#1464 deadline test: started=0, r1 check=0, r2
+    // check=100 (at the deadline → stop). With no reserve the round loop must
+    // consume exactly one clock read per round, exactly as before.
+    const clock = [0, 0, 100];
+    let clockIndex = 0;
+    const timeFn = () => clock[clockIndex++] ?? Number.MAX_SAFE_INTEGER / 2;
+    const options: DriveToolLoopOptions = {
+      apiFormat: "openai",
+      model: "m",
+      budgets: adaptiveLoopBudgets(4, 10, 120),
+      wallClockDeadline: 100,
+      timeFn,
+    };
+    if (reserve !== undefined) options.wallClockReserveSec = reserve;
+    const outcome = await driveToolLoop(conversation, postFn, executeFn, options);
+    assert.equal(outcome.stopReason, STOP_WALL_CLOCK, String(reserve));
+    assert.equal(outcome.rounds, 1, String(reserve));
+    assert.equal(postCalls, 1, String(reserve));
+    assert.equal(clockIndex, 4, `exactly one read per round (started, r1, r2, elapsed) (${reserve})`);
   }
 });
 

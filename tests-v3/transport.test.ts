@@ -1099,6 +1099,188 @@ test("a persistent 429 gives up after three attempts with the status preserved",
   }
 });
 
+test("#1464 review: maxRetryAttempts 1 makes a retryable 429 return after ONE wire attempt; unset keeps the three attempts", async () => {
+  // #1464 review: an exploration-clamped model wait passes 1 so a
+  // rate-limited round cannot multiply its wait (attempts × backoff) into
+  // the verdict's reserved slice. With the cap, the first 429 is returned
+  // immediately — no retry, no backoff sleep.
+  const { server, count } = await retryServer([429, 200], "0");
+  const slept: number[] = [];
+  try {
+    const outcome = await runChatRequest({ ...retryInput(server.url, slept), maxRetryAttempts: 1 });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status !== "failure") return;
+    assert.equal(outcome.failure.kind, "http_status");
+    assert.equal(outcome.failure.status, 429);
+    assert.equal(count(), 1, "the cap stops the same-request retry before a second wire attempt");
+    assert.deepEqual(slept, [], "no backoff sleep runs under the cap");
+  } finally {
+    await server.close();
+  }
+  // Omitting the field keeps the default three-attempt budget.
+  const defaultRun = await retryServer([429], "0");
+  const defaultSlept: number[] = [];
+  try {
+    const outcome = await runChatRequest(retryInput(defaultRun.server.url, defaultSlept));
+    assert.equal(outcome.status, "failure");
+    assert.equal(defaultRun.count(), 3, "unset maxRetryAttempts keeps the default retry budget");
+  } finally {
+    await defaultRun.server.close();
+  }
+});
+
+// #1464 review (AI blocker): the same-request retry cap only bounds the
+// 429/5xx branch — the #824/#1047 clamp/strip repair recursions each fired a
+// fresh full-timeout request, so an exploration-clamped wait could spend the
+// verdict's reserved slice on a slow 400 repair hop. The `attemptBudgetSec`
+// hook makes the caller's deadline a boundary of the WHOLE transport retry
+// tree: every attempt's timeout is capped at the remaining budget and no
+// follow-up attempt fires once it is spent.
+
+test("#1464 review: the clamp repair hop is refused once the attempt budget is spent", async () => {
+  const { server, requests } = await cappedServer(8192, (requested) =>
+    `max_tokens: ${requested} > 8192, which is the maximum allowed number of output tokens for <model>`);
+  const slept: number[] = [];
+  const stderr = captureStderr();
+  let hookReads = 0;
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      payload: payload({ model: "m", stream: false, max_tokens: 16384, messages: [] }),
+      attemptBudgetSec: () => ++hookReads <= 1 ? 30 : 0,
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status !== "failure") return;
+    assert.equal(outcome.failure.kind, "http_status");
+    assert.equal(outcome.failure.status, 400, "the original 400 is returned unchanged, not a repair outcome");
+    assert.equal(requests.length, 1, "no clamp repair request fires past the boundary");
+    assert.deepEqual(stderr.lines.filter((line) => line.includes("clamped")), [], "no clamp repair is even announced");
+  } finally {
+    stderr.restore();
+    await server.close();
+  }
+});
+
+test("#1464 review: the clamp repair hop's timeout is capped at the remaining budget", async () => {
+  // Request 1 answers 400 immediately; the clamp repair (request 2) never
+  // responds. With the hook reporting 2s left, the repair must time out in
+  // ~2s instead of riding the full 30s request timeout past the boundary.
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests++;
+    if (requests === 1) {
+      const sent = JSON.parse(body) as Record<string, unknown>;
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: `max_tokens: ${sent.max_tokens} > 8192, which is the maximum allowed number of output tokens for <model>` } }));
+      return;
+    }
+    // Never respond: only the capped timeout can end this attempt.
+  });
+  const slept: number[] = [];
+  let hookReads = 0;
+  const started = Date.now();
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      requestTimeoutSec: 30,
+      connectTimeoutSec: 5,
+      payload: payload({ model: "m", stream: false, max_tokens: 16384, messages: [] }),
+      attemptBudgetSec: () => ++hookReads <= 1 ? 30 : 2,
+    });
+    assert.equal(outcome.status, "failure");
+    const elapsedSec = (Date.now() - started) / 1000;
+    assert.ok(elapsedSec < 10, `the repair hop timed out at the budgeted ~2s, not the 30s request timeout (took ${elapsedSec.toFixed(1)}s)`);
+    assert.equal(requests, 2, "the repair hop fired once, bounded by the hook");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1464 review: the strip repair hop is refused once the attempt budget is spent", async () => {
+  let requests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    requests++;
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "response_format is not supported by this model" } }));
+  });
+  const slept: number[] = [];
+  let hookReads = 0;
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      payload: payload({ model: "m", stream: false, max_tokens: 900, response_format: { type: "json_object" }, messages: [] }),
+      attemptBudgetSec: () => ++hookReads <= 1 ? 30 : 0,
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status !== "failure") return;
+    assert.equal(outcome.failure.status, 400, "the original 400 is returned unchanged");
+    assert.equal(requests, 1, "no strip repair request fires past the boundary");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1464 review: a 429 retry is refused once the attempt budget is spent", async () => {
+  const { server, count } = await retryServer([429, 200], "0");
+  const slept: number[] = [];
+  let hookReads = 0;
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      attemptBudgetSec: () => ++hookReads <= 1 ? 30 : 0,
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status !== "failure") return;
+    assert.equal(outcome.failure.status, 429);
+    assert.equal(count(), 1, "no same-request retry fires past the boundary");
+    assert.deepEqual(slept, [], "no backoff sleep runs past the boundary");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1464 review: with the budget hook set, the 429 backoff sleep is capped at the remaining budget", async () => {
+  // Retry-After 600 would ride the 30s maximum unhooked; the hook reports 5s
+  // of remaining budget, so the sleep is capped at 4s (remaining − 1s) and
+  // the follow-up attempt cannot cross the boundary.
+  const { server, count } = await retryServer([429, 200], "600");
+  const slept: number[] = [];
+  let hookReads = 0;
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      maxRetryAttempts: 3,
+      attemptBudgetSec: () => ++hookReads <= 1 ? 30 : 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(count(), 2);
+    assert.deepEqual(slept, [4000], "the backoff sleep is capped at the remaining budget minus the 1s floor");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1464 review: a successful clamp repair still works with the budget hook present", async () => {
+  // Regression pin: the hook caps and gates follow-ups without breaking the
+  // ordinary clamp path when budget remains.
+  const { server, requests } = await cappedServer(8192, (requested) =>
+    `max_tokens: ${requested} > 8192, which is the maximum allowed number of output tokens for <model>`);
+  const slept: number[] = [];
+  const stderr = captureStderr();
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      payload: payload({ model: "m", stream: false, max_tokens: 16384, messages: [] }),
+      attemptBudgetSec: () => 30,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.deepEqual(requests.map((call) => call.requested), [16384, 8192]);
+  } finally {
+    stderr.restore();
+    await server.close();
+  }
+});
+
 test("client errors are never retried", async () => {
   const { server, count } = await retryServer([400]);
   const slept: number[] = [];

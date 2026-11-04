@@ -42,6 +42,7 @@ export const STOP_NO_TOOL_CALLS = "no-tool-calls";
 export const STOP_MAX_ROUNDS = "max-rounds";
 export const STOP_BUDGET = "tool-call-budget-exhausted";
 export const STOP_WALL_CLOCK = "wall-clock-exceeded";
+export const STOP_WALL_CLOCK_RESERVE = "wall-clock-verdict-reserve";
 export const STOP_REQUEST_ERROR = "request-error";
 
 // Synthetic result bodies. These are model-facing: they must explain the
@@ -968,6 +969,13 @@ export interface DriveToolLoopOptions {
    * it; unset/null/non-finite preserves the legacy elapsed-since-loop-start check.
    */
   wallClockDeadline?: number | null;
+  /**
+   * #1464: wall-clock seconds reserved for the closing in-conversation verdict.
+   * When finite and > 0, the between-rounds check stops starting exploratory
+   * rounds once the remaining wall clock falls to or below the reserve;
+   * 0/undefined/non-finite keeps legacy behavior byte-identical.
+   */
+  wallClockReserveSec?: number | null;
   /** #1199: injectable telemetry clock (seconds) for per-round latency. It is
    * kept separate from `timeFn` so per-round measurement never perturbs the
    * budget clock's scripted sequences; the harness passes a dedicated monotonic
@@ -1061,6 +1069,12 @@ export async function driveToolLoop(
     typeof options.wallClockDeadline === "number" && Number.isFinite(options.wallClockDeadline)
       ? options.wallClockDeadline
       : null;
+  // #1464: reserve for the closing in-conversation verdict; 0 disables the
+  // reserve check entirely (legacy behavior).
+  const wallClockReserve =
+    typeof options.wallClockReserveSec === "number" && Number.isFinite(options.wallClockReserveSec) && options.wallClockReserveSec > 0
+      ? options.wallClockReserveSec
+      : 0;
   // #1199: per-round latency rides a monotonic telemetry clock, deliberately
   // distinct from the budget `timeFn` so adding latency measurement never
   // shifts the scripted budget-clock sequences the reliability tests pin.
@@ -1248,6 +1262,27 @@ export async function driveToolLoop(
       outcome.stopReason = STOP_WALL_CLOCK;
       broke = true;
       break;
+    }
+
+    // #1464: stop starting exploratory rounds once the remaining wall clock
+    // has fallen to (or below) the reserve held for the closing in-conversation
+    // verdict. Fires AFTER the exceeded check above, so a deadline already
+    // reached still reports `wall-clock-exceeded`. The reserve is off by
+    // default (0): when enabled it adds ONE timeFn read per round on top of
+    // the exceeded check's own read — scripted test clocks must account for
+    // both. #1464 note: this gate is time-based and independent of the
+    // #1379/#1396 required-evidence window (reserved in rounds/requests); a
+    // reserve stop can end a run while that window is still open, and the
+    // downstream machinery records that honestly (open window →
+    // `deriveUnresolvedCause` "budget-exhausted", partial coverage via
+    // `isIncompleteInvestigationStopReason`, #1338 gap preservation).
+    if (wallClockReserve > 0) {
+      const remaining = wallClockDeadline !== null ? wallClockDeadline - timeFn() : started + budgets.wallClockSec - timeFn();
+      if (remaining <= wallClockReserve) {
+        outcome.stopReason = STOP_WALL_CLOCK_RESERVE;
+        broke = true;
+        break;
+      }
     }
 
     // Keep the next request within the advisory context budget by compacting
