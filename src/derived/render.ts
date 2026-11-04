@@ -6,7 +6,7 @@
  * obligations (never a partial line) with a visible footer. */
 
 import { redactText } from "../context/redact.js";
-import type { DerivedObligation, DerivedObligationsArtifact } from "./types.js";
+import { derivedObligationId, type DerivedObligation, type DerivedObligationsArtifact } from "./types.js";
 
 export const DERIVED_TITLE = "Derived Architectural Obligations";
 
@@ -22,6 +22,10 @@ export const DERIVED_FRAMING =
   "does not prove every mint or use site actually places it.\n" +
   "- A location that violates an obligation is a counterexample: report it as a finding under " +
   "the normal findings rules, at the file and line of the violating site.\n" +
+  "- Emit one structured disposition per obligation in 'required_check_dispositions', echoing the " +
+  "row id (derived-<n>) as the check; a satisfied obligation's rationale must name one of that " +
+  "row's listed locations — the evidence must reach the flagged site (receiving a value is not " +
+  "placing it).\n" +
   "- In review_markdown, state for each obligation whether it held, failed, or could not be " +
   "checked. An obligation you could not check is unresolved, not held; a review that cannot " +
   "resolve an obligation says so instead of staying silent.";
@@ -68,9 +72,18 @@ function renderValue(value: string): string {
   return escapeControlChars(redactText(value));
 }
 
-function obligationLines(number: number, obligation: DerivedObligation): string[] {
+/**
+ * The enforcement row id of one derived obligation: `derived-<n>`, n being
+ * the obligation's 1-based index in the artifact's own `obligations` array.
+ *
+ * #1449: the id lives in the shared vocabulary module
+ * (`src/derived/types.ts`), so the corpus section and the enforcement
+ * contract name the SAME row — the reviewer echoes what it saw.
+ */
+
+function obligationLines(id: string, obligation: DerivedObligation): string[] {
   const topology = obligation.topology || "other";
-  const lines = [`Obligation ${number} [topology: ${renderValue(topology)}]: ${renderValue(obligation.obligation)}`];
+  const lines = [`Obligation ${id} [topology: ${renderValue(topology)}]: ${renderValue(obligation.obligation)}`];
   if (obligation.change) lines.push(`  Change: ${renderValue(obligation.change)}`);
   if (obligation.basis) lines.push(`  Basis: ${renderValue(obligation.basis)}`);
   const paths = obligation.paths ?? [];
@@ -84,11 +97,17 @@ function obligationLines(number: number, obligation: DerivedObligation): string[
   return lines;
 }
 
-function buildSection(obligations: DerivedObligation[], omitted: number): string {
+/** One rendered obligation, with the enforcement row id it carries. */
+interface RenderedObligation {
+  id: string;
+  obligation: DerivedObligation;
+}
+
+function buildSection(obligations: RenderedObligation[], omitted: number): string {
   const bodyLines: string[] = [];
-  obligations.forEach((obligation, index) => {
+  obligations.forEach((entry) => {
     if (bodyLines.length > 0) bodyLines.push("");
-    bodyLines.push(...obligationLines(index + 1, obligation));
+    bodyLines.push(...obligationLines(entry.id, entry.obligation));
   });
   const [body, fence] = safeFence(bodyLines.join("\n"));
   let doc = `# ${DERIVED_TITLE}\n\n${DERIVED_FRAMING}\n\n${fence}text\n${body}\n${fence}\n`;
@@ -108,7 +127,12 @@ export function renderDerivedSection(
   footer = "",
 ): string {
   if (!artifact || !Array.isArray(artifact.obligations)) return "";
-  let obligations = artifact.obligations.filter((o) => typeof o?.obligation === "string" && o.obligation.trim());
+  // #1449: the id is the obligation's index in the artifact's own array, so
+  // an unusable entry skipped here still leaves the later ids aligned with
+  // the enforcement contract (which numbers the same array).
+  let obligations: RenderedObligation[] = artifact.obligations
+    .map((obligation, index) => ({ id: derivedObligationId(index), obligation }))
+    .filter((entry) => typeof entry.obligation?.obligation === "string" && entry.obligation.obligation.trim());
   let omitted = 0;
   while (obligations.length > 0) {
     const doc = buildSection(obligations, omitted) + footer;

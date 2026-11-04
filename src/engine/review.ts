@@ -87,7 +87,8 @@ import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
-import { candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
+import { candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
+import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { createTraceGapProbe, traceGapContinuationSummary } from "../requirements/trace-gap-probe.js";
@@ -172,6 +173,14 @@ export interface RunReviewResult {
   verdictPolicy: string;
   partialCoverage?: PartialCoverage;
   ciState?: string;
+  /** #1449: the run's derived-obligation state ("complete" | "unresolved" |
+   * "unavailable"), present ONLY when the derived-obligation feature is
+   * enabled — a disabled run has no state at all and keeps its pre-#1449
+   * published bytes exactly. The publish step carries it into the PUBLISHED
+   * metadata marker, so a reader of the review (not only of the run's own
+   * artifacts) can tell that a trusted approve was withheld because a
+   * derived architectural obligation stayed undischarged. */
+  derivedObligationState?: DerivedObligationState;
   /** #847: the #810/#702 tool-loop budget the marker recorded (mirrors the
    * harness's `tool_request_budget` for the route the marker was built
    * from); undefined when no tool harness ran. */
@@ -440,6 +449,16 @@ export function createRunCancellation(request: ReviewRequest): RunCancellation {
  * `VALIDATE_REQUIRED_CHECKS=false` removes must_check rows from the contract
  * at both layers (harness presentation and engine enforcement), so an
  * operator who disabled #750 validation does not get #1381 forcing instead.
+ *
+ * #1449: the #1448 derived pre-pass output joins the SAME contract — the
+ * derived rows are appended BEFORE the dispositions are folded, so one fold
+ * covers every source. The derived rows are the engine's own (the pre-pass
+ * output is not harness-authored), and they are built by the pure resolver in
+ * `src/enforcement/derived-obligations.ts` from the artifact the pre-pass
+ * wrote. When the derived coverage is incomplete, exactly ONE synthetic
+ * coverage-marker row is added: it states that coverage is unavailable and
+ * why, it is never a defect claim, and it carries the `derivation-incomplete`
+ * cause (never the harness cause).
  */
 function resolveReviewObligations(
   classification: Record<string, unknown>,
@@ -447,17 +466,42 @@ function resolveReviewObligations(
   ws: RunWorkspace,
   harnessArtifactName: string,
   validateRequiredChecks: string | undefined,
-) {
+  derivedEnabled: boolean,
+): { obligations: ReviewObligation[]; derived: DerivedObligationResolution } {
   const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
   const includeMustCheck = mustCheckObligationsEnabled(validateRequiredChecks);
   const candidateRows = (candidates?.injected === true && Array.isArray(candidates.obligations)
     ? candidates.obligations as unknown[]
     : []).filter((row) => includeMustCheck || (row as { source?: unknown } | null)?.source !== "must_check");
   const obligations = candidateRowsToObligations(candidateRows, includeMustCheck ? stringList(classification.must_check) : []);
+  // #1449: the derived rows join the contract before the fold. The feature
+  // gate is the operator-only `derived-obligations` input — off means no
+  // rows, no coverage claim, and byte-identical behavior.
+  const derived = resolveDerivedObligations(safeJson(ws.read("derived-obligations.json")), derivedEnabled);
+  const derivedRows: ReviewObligation[] = derived.rows.map((row) => ({
+    id: row.id,
+    source: "derived",
+    text: row.text,
+    status: "unresolved",
+    cause: null,
+    anchors: row.anchors,
+  }));
+  if (derived.coverage === "incomplete") {
+    const coverageRow = derivedCoverageRow(derived);
+    if (coverageRow !== null) {
+      derivedRows.push({
+        id: coverageRow.id,
+        source: "derived",
+        text: coverageRow.text,
+        status: "unresolved",
+        cause: coverageRow.cause,
+      });
+    }
+  }
   const dispositions = Array.isArray(review.required_check_dispositions)
     ? review.required_check_dispositions as Array<{ check: string; status: string; rationale?: string | null }>
     : null;
-  const folded = foldObligationDispositions(obligations, dispositions);
+  const folded = foldObligationDispositions([...obligations, ...derivedRows], dispositions);
   const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; executed_request_count?: unknown } | null;
   const cause = deriveUnresolvedCause({
     stopReason: typeof harness?.stop_reason === "string" ? harness.stop_reason : null,
@@ -467,9 +511,15 @@ function resolveReviewObligations(
   });
   // Only an `unresolved` row carries the evidence-gathering cause; a
   // `satisfied` row was resolved positively and an `unmet` row negatively.
-  return folded.map((obligation) => (
-    obligation.status === "unresolved" ? { ...obligation, cause } : obligation
-  ));
+  // #1449: a row that already carries its own cause (the synthetic derived
+  // coverage marker) keeps it — the harness cause never describes a
+  // derivation that never ran.
+  return {
+    obligations: folded.map((obligation) => (
+      obligation.status === "unresolved" ? { ...obligation, cause: obligation.cause ?? cause } : obligation
+    )),
+    derived,
+  };
 }
 
 function persistReviewObligations(ws: RunWorkspace, obligations: ReviewObligation[], log: (line: string) => void): void {
@@ -480,7 +530,71 @@ function persistReviewObligations(ws: RunWorkspace, obligations: ReviewObligatio
   const satisfied = obligations.filter((item) => item.status === "satisfied").length;
   const notClean = [...unmet, ...unresolved];
   const detail = notClean.length > 0 ? ` (${notClean.join(", ")})` : "";
-  log(`Review obligations: ${obligations.length} total, ${satisfied} satisfied, ${unmet.length} unmet, ${unresolved.length} unresolved${detail}`);
+  // #1449: the derived counts ride the same line, and only when derived rows
+  // exist — a run without them keeps the #1381 line byte-for-byte.
+  const derived = obligations.filter((item) => item.source === "derived");
+  const derivedDetail = derived.length > 0
+    ? ` | derived: ${derived.length} total, ${derived.filter((item) => item.status === "satisfied").length} satisfied, ${derived.filter((item) => item.status === "unmet").length} unmet, ${derived.filter((item) => item.status === "unresolved").length} unresolved`
+    : "";
+  log(`Review obligations: ${obligations.length} total, ${satisfied} satisfied, ${unmet.length} unmet, ${unresolved.length} unresolved${detail}${derivedDetail}`);
+}
+
+/**
+ * #1449: the derived-obligation state artifact. Written ONLY when the
+ * feature is enabled (a disabled run must not create the file), and it
+ * records the coverage answer next to the rows that carry it — so an
+ * operator can tell "the derivation found nothing" from "the derivation
+ * never completed" without reading the pre-pass artifact.
+ *
+ * The `reason` field is the reason for the DISCLOSED state (see
+ * `derivedObligationStateReason`): the closed coverage reason when the
+ * derivation never completed, `not-discharged` when the coverage is
+ * complete but a row stayed open, and null when every row was discharged.
+ */
+function persistDerivedObligationState(
+  ws: RunWorkspace,
+  derived: DerivedObligationResolution,
+  obligations: readonly ReviewObligation[],
+  reason: string | null,
+): void {
+  if (!derived.enabled) return;
+  const rows = obligations
+    .filter((obligation) => obligation.source === "derived")
+    .map(({ id, source, text, status, cause }) => ({ id, source, text, status, cause }));
+  ws.write("derived-obligation-state.json", `${pyJsonDumps({
+    version: 1,
+    enabled: derived.enabled,
+    coverage: derived.coverage,
+    reason,
+    obligations: rows,
+  })}\n`);
+}
+
+/**
+ * #1449: the run's derived-obligation state — the one word a reader needs
+ * to tell WHY a trusted approve was withheld.
+ *
+ * - "unavailable": the derivation never completed (or never ran), so the
+ *   derived-obligation coverage is unknown — the synthetic coverage-marker
+ *   row is what withheld the approval;
+ * - "unresolved": the derivation completed, but at least one derived row
+ *   stayed undischarged;
+ * - "complete": the derivation completed and every derived row was
+ *   discharged — including the clean "no obligations" answer.
+ *
+ * A DISABLED run has no state at all (""): the marker and the coverage
+ * record then keep their pre-#1449 bytes exactly.
+ */
+export type DerivedObligationState = "complete" | "unresolved" | "unavailable";
+
+function derivedObligationState(
+  derived: DerivedObligationResolution,
+  obligations: readonly ReviewObligation[],
+): DerivedObligationState | "" {
+  if (!derived.enabled) return "";
+  if (derived.coverage === "incomplete") return "unavailable";
+  const rows = obligations.filter((obligation) => obligation.source === "derived");
+  return rows.every((obligation) => obligation.status === "satisfied") ? "complete" : "unresolved";
 }
 
 function mergeBlockerVerificationPasses(
@@ -1263,6 +1377,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   }
 
   // ── Derived architectural-obligation pre-pass (#1448) ──────────────────
+  // #1449: the operator-only feature gate, read ONCE — the pre-pass below
+  // and the enforcement half (#1449) must never disagree about whether the
+  // feature is on. The value is parsed EXACTLY like the harness parses it
+  // (`trim().toLowerCase()`), so the two readers can never disagree about
+  // a padded or mixed-case value.
+  const derivedObligationsEnabled = (env.DERIVED_OBLIGATIONS ?? "false").trim().toLowerCase() === "true";
   // Fail-soft like the claims pre-pass above, but NOT silent on failure: a
   // derivation that did not complete renders a visible "coverage
   // unavailable" note, because this pass exists to surface obligations the
@@ -1293,7 +1413,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const derivedDiff = derivedDiffFull ?? ws.readText("pr.diff.truncated") ?? "";
   ws.write("derived-obligations.md", new Uint8Array(0));
   let derivedPromise: Promise<void> = Promise.resolve();
-  if ((env.DERIVED_OBLIGATIONS ?? "false").toLowerCase() === "true") {
+  if (derivedObligationsEnabled) {
     const rawDerivedTemp = (env.AI_TEMPERATURE ?? "").trim();
     const derivedTemperature = rawDerivedTemp === "" || Number.isNaN(Number(rawDerivedTemp)) ? null : Number(rawDerivedTemp);
     const derivedTimeoutSec = Math.min(
@@ -1915,9 +2035,31 @@ secrets: [profiles.primary.apiKey],
   // #1381: the folded review-owned obligation rows ride the enforcement
   // inputs so the gate runs inside applyAllEnforcement (with the banner
   // normalization) and the anti-relax signal is computed once, here.
-  const reviewObligations = resolveReviewObligations(classificationArtifact, reviewRecord, ws, enforcementHarness, env.VALIDATE_REQUIRED_CHECKS);
-  enforcementInputs.reviewObligations = reviewObligations;
-  persistReviewObligations(ws, reviewObligations, log);
+  // #1449: the derived pre-pass output joins the SAME rows — there is no
+  // second enforcement path: an unresolved derived row is disclosed by the
+  // same gate, withholds the trusted approval (at the publish boundary) and
+  // makes the review partial, but it never forces a verdict (it is coverage,
+  // not a defect — see `isForcingObligation`).
+  const resolvedObligations = resolveReviewObligations(
+    classificationArtifact,
+    reviewRecord,
+    ws,
+    enforcementHarness,
+    env.VALIDATE_REQUIRED_CHECKS,
+    derivedObligationsEnabled,
+  );
+  enforcementInputs.reviewObligations = resolvedObligations.obligations;
+  persistReviewObligations(ws, resolvedObligations.obligations, log);
+  // #1449: the run's derived-obligation state — "" when the feature is off,
+  // so a disabled run's coverage record and marker keep their pre-#1449
+  // bytes exactly.
+  const derivedState = derivedObligationState(resolvedObligations.derived, resolvedObligations.obligations);
+  // #1449: the reason that EXPLAINS the state: the closed coverage reason
+  // when the derivation never completed, `not-discharged` when the coverage
+  // is complete but a derived row stayed open, null when every row was
+  // discharged. The state alone never said why.
+  const derivedReason = derivedObligationStateReason(resolvedObligations.derived, resolvedObligations.obligations);
+  persistDerivedObligationState(ws, resolvedObligations.derived, resolvedObligations.obligations, derivedReason);
   // #874: the ledger (read above for the #959 trace scope) feeds the trace
   // escalation, which must be visible to the verdict mapping, not just
   // recorded afterward.
@@ -1976,7 +2118,17 @@ secrets: [profiles.primary.apiKey],
       }
       blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
     }
-    const unresolvedObligations = unresolvedReviewObligations(reviewObligations);
+    // #1449: the derived rows are COVERAGE rows, so only the FORCING sources
+    // (the operator's `must_check` checklist and the trusted base's
+    // `trusted_base_guidance` asks) reach the strict mapping's anti-relax
+    // signal. An undischarged derived obligation never demotes an approve
+    // into a blocking request (#1447: "preserve the existing distinction
+    // between found defect and review incomplete / abstain"); it withholds
+    // the trusted approval at the publish boundary instead. A run without
+    // derived rows keeps the #1381 text and its order byte-for-byte.
+    const unresolvedRequiredObligations = unresolvedReviewObligations(
+      resolvedObligations.obligations.filter((obligation) => isForcingObligation(obligation)),
+    );
     // The obligation gate (#1381) ran inside applyAllEnforcement and rides
     // failClosedEnforcementFired, so the strict mapping can never relax a
     // verdict it forced.
@@ -1987,7 +2139,11 @@ secrets: [profiles.primary.apiKey],
     // demoted finding with `grounding_status === "unverified"` forces
     // `request_changes` with a #1016 attribution note so an approve cannot
     // silently certify a claim the verifier never checked.
-    applyStrictVerdictPolicy(reviewRecord as never, { modelVerdict, forced, unresolvedReviewObligations: unresolvedObligations });
+    applyStrictVerdictPolicy(reviewRecord as never, {
+      modelVerdict,
+      forced,
+      unresolvedReviewObligations: unresolvedRequiredObligations,
+    });
     // The strict mapping can derive an approve after the enforcement banner
     // was written; reconcile the markdown with the final verdict.
     reconcileEnforcedReviewMarkdown(reviewRecord as never);
@@ -2040,7 +2196,15 @@ secrets: [profiles.primary.apiKey],
     // still-open finding is a verification ask and no independent
     // deterministic gate fired. The overlays above have already run, so
     // their blocks are visible here.
-    const unresolvedObligations = unresolvedReviewObligations(reviewObligations);
+    //
+    // #1449: only the FORCING obligation rows gate the relaxation — an
+    // undischarged derived obligation is missing coverage, not a defect, so
+    // it must not keep a relaxed (or relaxed-then-approved) review blocked
+    // on its own. The derived state still withholds the trusted approval at
+    // the publish boundary, so nothing here can certify an approve.
+    const unresolvedObligations = unresolvedReviewObligations(
+      resolvedObligations.obligations.filter((obligation) => isForcingObligation(obligation)),
+    );
     // The obligation gate (#1381) ran inside applyAllEnforcement and rides
     // failClosedEnforcementFired, so the relaxers below refuse when it fired.
     const forced = failClosedEnforcementFired(enforcementInputs)
@@ -2172,6 +2336,16 @@ secrets: [profiles.primary.apiKey],
     partial_coverage: partialCoverage ?? null,
     required_checks: outputRequiredChecks,
     ...(incompleteReason !== "none" ? { incomplete_reason: incompleteReason } : {}),
+    // #1449: the derived-obligation state of THIS run — present only when
+    // the feature is enabled (a disabled run keeps the record
+    // byte-identical). The reason is the closed reason token that explains
+    // the state (the coverage reason when the derivation never completed,
+    // `not-discharged` when a row stayed open, null when all were
+    // discharged).
+    ...(derivedState !== "" ? {
+      derived_obligation_state: derivedState,
+      derived_obligation_reason: derivedReason,
+    } : {}),
     // #1145: the native loop's own bounded evidence-repair continuation
     // record (its outcome enum distinguishes a run continuation from
     // skipped_no_budget), when the probe fired or was skipped.
@@ -2248,6 +2422,10 @@ secrets: [profiles.primary.apiKey],
       findings: reviewRecord.findings,
       requiredChecks: outputRequiredChecks,
       partialCoverage,
+      // #1449: an undischarged derived obligation is missing coverage, so the
+      // review reads `partial` — never `clean`, and never a manufactured
+      // `issues`. Absent when the feature is off.
+      ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
     }),
   };
   const unresolvedProofPins = unresolvedConfidencePins(confidenceProofPins);
@@ -2534,6 +2712,10 @@ secrets: [profiles.primary.apiKey],
       findings: reviewRecord.findings,
       requiredChecks: outputRequiredChecks,
       partialCoverage,
+      // #1449: an undischarged derived obligation is missing coverage, so the
+      // review reads `partial` — never `clean`, and never a manufactured
+      // `issues`. Absent when the feature is off.
+      ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
     }),
     reviewRoute: env.REVIEW_ROUTE ?? "legacy",
     escalationReason: escalationReasons,
@@ -2619,6 +2801,11 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
 ...(outputs.dependencyCoverageStatus === "complete" || outputs.dependencyCoverageStatus === "partial" || outputs.dependencyCoverageStatus === "unavailable"
   ? { dependencyCoverage: outputs.dependencyCoverageStatus }
   : {}),
+    // #1449: the derived-obligation state, only when the feature is enabled
+    // — a disabled run keeps the pre-#1449 marker bytes exactly. The value
+    // is the run's own state, resolved once above from the coverage answer
+    // and the folded rows.
+    ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
     // #1455: the verifier's telemetry, only when the run measured it — a
     // disabled verifier, or a call with no usage, keeps the pre-#1455
     // marker bytes exactly.
@@ -2650,6 +2837,12 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     verdictPolicy,
     ...(partialCoverage ? { partialCoverage } : {}),
     ...(ciState !== undefined ? { ciState } : {}),
+    // #1449: the run's derived-obligation state, only when the feature is
+    // enabled — a disabled run keeps its pre-#1449 published bytes exactly.
+    // The value is the run's own state, resolved once above from the
+    // derivation's coverage answer and the folded rows; it is never
+    // recomputed here.
+    ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCallsUsed: toolBudgetTelemetry.calls } : {}),

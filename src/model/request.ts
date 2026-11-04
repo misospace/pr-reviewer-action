@@ -108,9 +108,16 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
         // parser/coverage layers validate it against the supplied list, so
         // the model cannot invent, omit, duplicate, or reword mandatory
         // checks. `not_applicable` and `unmet` (#1381: a confirmed negative)
-        // must each carry a grounded rationale.
+        // must each carry a grounded rationale. When a Required Review Evidence section is present, emit one disposition per listed obligation, echoing `obligation-<n>` or the exact text as `check`, with a grounded rationale.
         required_check_dispositions: {
           type: ["array", "null"],
+          // #1449: the derived architectural obligation rows are disposed by
+          // their row id (`derived-<n>`), and a satisfied derived row's
+          // rationale must name one of that row's listed locations. Prose
+          // only — the schema's shape (properties, enum, required) is
+          // unchanged.
+          description:
+            "One disposition per listed obligation: must_check rows by the exact check text, trusted_base_guidance rows by 'obligation-<n>' or the exact text, and derived architectural obligation rows by their row id ('derived-<n>') — a satisfied derived row's rationale must name one of that row's listed locations.",
           items: {
             type: "object",
             properties: {

@@ -328,6 +328,59 @@ test("#1161: review_verdict publishes a request_changes verdict as a native REQU
   assert.ok(result.messages.includes("Submitting blocking findings for #42"));
 });
 
+test("#1449: a native approval cannot bypass the derived-obligation state", async () => {
+  // The publish boundary: an `unresolved` or `unavailable` derived state
+  // withholds the native APPROVE. The run stays ADVISORY — the native
+  // event is a COMMENT, never a blocking REQUEST_CHANGES, because an
+  // incomplete review must not invent an issue.
+  for (const state of ["unresolved", "unavailable"]) {
+    const api = new MockPublishApi();
+    const result = await publishReview(
+      input({ mode: "review_verdict", verdict: "approve", derivedObligationState: state }),
+      api,
+      { diffText: "" },
+    );
+    assert.equal(result.status, "published", state);
+    assert.equal(api.submitted.length, 1, state);
+    assert.equal(api.submitted[0]!.event, "COMMENT", state);
+    assert.ok(
+      result.messages.some((message) => message.includes("Withholding native approval") && message.includes(state)),
+      result.messages.join("; "),
+    );
+    // The published body names the reason.
+    assert.match(api.submitted[0]!.body, /Approval withheld by derived-obligation state/);
+    // Never a blocking request.
+    assert.ok(!api.submitted.some((review) => review.event === "REQUEST_CHANGES"), state);
+  }
+  // A complete derived state approves exactly like a run without the
+  // feature.
+  const complete = new MockPublishApi();
+  await publishReview(
+    input({ mode: "review_verdict", verdict: "approve", derivedObligationState: "complete" }),
+    complete,
+    { diffText: "" },
+  );
+  assert.equal(complete.submitted[0]!.event, "APPROVE");
+});
+
+test("#1449: the approval guardrails withhold an approval for an unresolved derived state", () => {
+  const check = (overrides: Partial<Parameters<typeof evaluateApprovalGuardrails>[0]>) => evaluateApprovalGuardrails({
+    verdict: "approve", approveForks: false, isForkPr: false, ...overrides,
+  });
+  assert.equal(check({ derivedObligationState: "unresolved" }).canApprove, false);
+  assert.equal(check({ derivedObligationState: "unavailable" }).canApprove, false);
+  assert.equal(check({ derivedObligationState: "complete" }).canApprove, true);
+  // A verdict that is not an approve never allows an approval.
+  assert.equal(check({ verdict: "request_changes", derivedObligationState: "unresolved" }).canApprove, false);
+  // The state absent: the result is byte-identical to the pre-#1449 shape.
+  assert.deepEqual(check({}), {
+    canApprove: true,
+    scopeBlocked: false,
+    verdictAllowsApproval: true,
+    isForkPr: false,
+  });
+});
+
 test("#1161: a fork PR without approve-forks never approves and states the scope policy", async () => {
   const api = new MockPublishApi();
   const result = await publishReview(input({ mode: "review_verdict", isForkPr: true, approveForks: false }), api, { diffText: "" });

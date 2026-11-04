@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
@@ -326,6 +326,41 @@ function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
   return { partialCoverage: partialCoverageOf(harness), unknown: false, requiredChecks, incompleteReason };
 }
 
+/** #1449: the run's derived-obligation state, read from the run dir's own
+ * `review-coverage.json` artifact (never cwd, never ambient env).
+ *
+ * This is the ONE seam the standalone `publish` CLI reads the state through,
+ * so the composite action and the standalone CLI publish the SAME record from
+ * the SAME run — neither path re-derives the state.
+ *
+ * The state IS a gate, not only disclosure: it decides whether a native
+ * approval may publish. So an UNCERTAIN state must fail CLOSED, never open:
+ * the engine writes `derived-obligation-state.json` ONLY when the operator
+ * enabled the feature, so that file is the run's own "the feature was on"
+ * sentinel. When the sentinel is present but the coverage record's state is
+ * missing, unreadable, or unrecognized, the state is `unavailable` — the
+ * derived coverage is unknown, so the approval is withheld. When the sentinel
+ * is absent the feature was off and the state stays absent (the published
+ * bytes are exactly the pre-#1449 ones).
+ *
+ * A run dir that carries neither file is a run without the feature: the
+ * state is simply not published, and the publish step's own guardrail sees
+ * no derived state. */
+function derivedObligationStateFromRunDir(env: NodeJS.ProcessEnv): string | undefined {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return undefined;
+  const record = readJsonObject(join(runDir, "review-coverage.json"));
+  const state = record === null ? undefined : record.derived_obligation_state;
+  if (state === "complete" || state === "unresolved" || state === "unavailable") {
+    return state;
+  }
+  // #1449: fail closed when the run says the feature was on but the state
+  // cannot be read — an unknown derived coverage must never certify an
+  // approval. The sentinel exists only in a feature-on run.
+  const featureEnabled = existsSync(join(runDir, "derived-obligation-state.json"));
+  return featureEnabled ? "unavailable" : undefined;
+}
+
 /** #1005: read the persisted reviewer-routing plan from the run dir (never
  * cwd). A missing, unparseable, or structurally unrecognizable plan yields
  * `undefined` (no routing) so an uncertain plan can never mutate the forge. */
@@ -429,6 +464,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
   const coverage = partialCoverageFromRunDir(env);
   const reviewRouting = reviewRoutingFromRunDir(env);
   const confidenceTelemetry = confidenceTelemetryFromRunDir(env);
+  const derivedObligationState = derivedObligationStateFromRunDir(env);
   return {
     mode: publishMode(env.PUBLISH_MODE),
     reviewMarkdown: env.REVIEW_MARKDOWN ?? "",
@@ -526,6 +562,14 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     // artifact so the standalone `publish` CLI publishes the SAME values the
     // composite action does. Absent when the run measured none of them.
     ...(confidenceTelemetry !== undefined ? { confidenceTelemetry } : {}),
+    // #1449: the run's derived-obligation state, read back from the run
+    // dir's own artifact so the standalone `publish` CLI publishes the SAME
+    // record the composite action does. It is a GATE as well as disclosure:
+    // the publish boundary refuses a native approval while the state is not
+    // `complete`, and an unreadable state in a feature-on run reads
+    // `unavailable` (fail closed) so a coverage gap can never certify an
+    // approval. Absent when the feature was off.
+    ...(derivedObligationState !== undefined ? { derivedObligationState } : {}),
     // #1005: the deterministic reviewer-routing plan the review step persisted
     // (read from the run dir, never cwd). Absent when routing did not run.
     ...(reviewRouting ? { reviewRouting } : {}),

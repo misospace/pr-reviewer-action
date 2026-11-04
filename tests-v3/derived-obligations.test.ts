@@ -313,7 +313,7 @@ test("#1448: renderDerivedSection renders topology, change, basis, and paths", (
   });
   const section = renderDerivedSection(artifact);
   assert.ok(section.startsWith(`# ${DERIVED_TITLE}\n`));
-  assert.ok(section.includes("Obligation 1 [topology: identity]:"), section);
+  assert.ok(section.includes("Obligation derived-1 [topology: identity]:"), section);
   assert.ok(section.includes("  Change: added tenantId to the HTTP producer only"));
   assert.ok(section.includes("  Basis: hash at src/hash.ts:12 reads tenantId"));
   assert.ok(section.includes("  Check (2 listed):"));
@@ -567,7 +567,7 @@ test("#1448 review: status→section mapping keeps every outcome visible or inte
   // visible footer saying they may be missing.
   const clippedOk = renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: artifactWith(1), inputComplete: false, diffClipped: true });
   assert.match(clippedOk, new RegExp(`# ${DERIVED_TITLE}`));
-  assert.match(clippedOk, /Obligation 1 /);
+  assert.match(clippedOk, /Obligation derived-1 /);
   assert.match(clippedOk, /… derivation input was incomplete \(reason: input-clipped\); obligations may be missing/);
   assert.equal(renderDerivedSectionForStatus({ status: "skipped", errorKind: null, artifact: artifactWith(0), inputComplete: false }), "");
 });

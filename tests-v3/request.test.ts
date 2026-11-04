@@ -407,9 +407,10 @@ test("the strict verdict schema matches the frozen v2 bash literal plus only the
   // #1337 adds the `dependency_coverage` accounting array alongside them.
   // Strip every `review_triage_*` property and required entry, the
   // #1337 array, and — #1381 — the `unmet` disposition status (the one
-  // v3 vocabulary addition inside a v2-carried enum), and the pin is
-  // byte-for-byte the v2 snapshot again, so a future drift in anything
-  // else still fails here.
+  // v3 vocabulary addition inside a v2-carried enum), and — #1449 — the
+  // `required_check_dispositions` description (a prose annotation, not a
+  // shape change), and the pin is byte-for-byte the v2 snapshot again, so a
+  // future drift in anything else still fails here.
   const live = structuredClone(OPENAI_VERDICT_JSON_SCHEMA) as {
     json_schema: { schema: { properties: Record<string, unknown>; required: string[] } };
   };
@@ -418,9 +419,12 @@ test("the strict verdict schema matches the frozen v2 bash literal plus only the
     if (key.startsWith("review_triage_") || key === "dependency_coverage") delete schema.properties[key];
   }
   schema.required = schema.required.filter((name) => !name.startsWith("review_triage_") && name !== "dependency_coverage");
-  const dispositionStatus = (schema.properties.required_check_dispositions as {
+  const dispositions = schema.properties.required_check_dispositions as {
+    description?: string;
     items: { properties: { status: { enum: string[] } } };
-  }).items.properties.status;
+  };
+  delete dispositions.description;
+  const dispositionStatus = dispositions.items.properties.status;
   dispositionStatus.enum = dispositionStatus.enum.filter((value) => value !== "unmet");
   assert.deepEqual(live, JSON.parse(V2_RF_JSON_SCHEMA_LITERAL));
 });

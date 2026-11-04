@@ -547,13 +547,23 @@ function strictRequestChangesDetail(input: {
  */
 export function applyStrictVerdictPolicy(
   artifact: ReviewArtifact,
-  options: { modelVerdict: string; forced: boolean; unresolvedReviewObligations?: readonly string[] },
+  options: {
+    modelVerdict: string;
+    forced: boolean;
+    unresolvedReviewObligations?: readonly string[];
+  },
 ): StrictVerdictOutcome {
   const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
   const modelVerdict = options.modelVerdict;
   const counts = severityCounts(findings);
   const unverifiedGrounding = findings.some(isUnverifiedBlockingGrounding);
   const unresolvedObligations = options.unresolvedReviewObligations ?? [];
+  const detail = (): string => strictRequestChangesDetail({
+    counts,
+    unverifiedGrounding,
+    forced: options.forced,
+    obligations: unresolvedObligations,
+  });
 
   let verdict: VerdictValue;
   let overridden: boolean;
@@ -565,7 +575,7 @@ export function applyStrictVerdictPolicy(
     if (overridden) {
       appendStrictNote(
         artifact,
-        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
+        detail(),
         modelVerdict,
       );
     }
@@ -598,7 +608,7 @@ export function applyStrictVerdictPolicy(
     if (overridden) {
       appendStrictNote(
         artifact,
-        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
+        detail(),
         modelVerdict,
       );
     }
@@ -611,12 +621,18 @@ export function applyStrictVerdictPolicy(
     // `failClosedEnforcementFired`, so the forced branch above owns it; this
     // branch is the standalone guarantee for direct callers of the mapping
     // (and holds the model's own request_changes with `overridden: false`).
+    //
+    // #1449: the `derived` source is deliberately NOT in this branch. An
+    // undischarged derived obligation is missing coverage, not a defect
+    // (#1447), so it never demotes an approve into a blocking
+    // `request_changes` here; it withholds the trusted approval at the
+    // publish boundary instead.
     verdict = "request_changes";
     overridden = modelVerdict !== "request_changes";
     source = overridden ? "enforcement" : "model";
     appendStrictNote(
       artifact,
-      strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
+      detail(),
       modelVerdict,
     );
   } else {

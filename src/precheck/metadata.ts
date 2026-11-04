@@ -117,6 +117,11 @@ export interface MetadataOptions {
   /** #1455: the total tokens the verifier's call used; omitted when the
    * provider reported none. */
   confidence_total_tokens?: number | null;
+  /** #1449: the run's derived-obligation state ("complete" |
+   * "unresolved" | "unavailable"), only when the derived-obligation
+   * feature is enabled; omitted otherwise so pre-#1449 marker bytes are
+   * preserved. */
+  derived_obligation_state?: string | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -232,6 +237,12 @@ data.confidence_completion_tokens = options.confidence_completion_tokens;
 if (options.confidence_total_tokens !== null && options.confidence_total_tokens !== undefined
   && Number.isInteger(options.confidence_total_tokens) && options.confidence_total_tokens >= 0) {
 data.confidence_total_tokens = options.confidence_total_tokens;
+}
+// #1449 additive key: appended last, same discipline every key above — a
+// run without the derived-obligation feature serializes byte-identical
+// pre-#1449 marker, and older parsers ignore keys they do not know.
+if (options.derived_obligation_state !== null && options.derived_obligation_state !== undefined && options.derived_obligation_state !== "") {
+data.derived_obligation_state = options.derived_obligation_state;
 }
 return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }
