@@ -680,6 +680,47 @@ test("distinct URL never carries the primary key in payload or diagnostics", asy
   }
 });
 
+test("#1478: under require-dedicated the wire carries the distinct endpoint, the own credential, and the configured model verbatim", async () => {
+  // The COMPLETE configured path, end to end: the mock server IS the
+  // dedicated endpoint (a call to the primary URL could never reach it), so
+  // the handler firing proves the request targeted the distinct endpoint.
+  // The Authorization header must carry the scorer's OWN credential, the body
+  // must carry the configured model name byte-identically (#1465: opaque,
+  // case-sensitive), and the primary credential must appear nowhere.
+  let sawRequest = false;
+  const server = await startMockServer((req, body, res) => {
+    sawRequest = true;
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(okOpenAiResponse('{"score": 4, "risk": "low"}')));
+    assert.equal(req.headers.authorization, "Bearer distinct-key-XYZ");
+    const payload = JSON.parse(body) as { model?: string };
+    assert.equal(payload.model, "Scorer-Model-Cased", "the configured model name must reach the wire byte-identically");
+    assert.ok(!body.includes("primary-key-ABC"), "the primary credential must never ride the verifier request");
+  });
+  try {
+    const outcome = await runConfidenceScorer({
+      profile: profile({
+        apiKey: "distinct-key-XYZ",
+        inheritedTransport: false,
+        baseUrl: server.url,
+        model: "Scorer-Model-Cased",
+        credentialSource: "own",
+        refusalCause: "",
+      }),
+      primaryApiKey: "primary-key-ABC",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(outcome.result.status, "scored");
+    assert.equal(sawRequest, true, "the scorer must have dialed the dedicated endpoint");
+  } finally {
+    await server.close();
+  }
+});
+
 test("distinct URL with resolver-provided primary credential (wiring regression) fails closed", async () => {
   let called = false;
   const outcome = await runConfidenceScorer({

@@ -921,17 +921,30 @@ nothing else may supply them):
 | `CONFIDENCE_MODEL` | repository **variable** (optional) | The verifier's model identifier, sent to the provider verbatim (opaque, case-sensitive — #1465). Falls back to `SMART_MODEL` when unset. |
 | `CONFIDENCE_FORMAT` | repository **variable** (optional) | The verifier endpoint's wire family (`openai`/`anthropic`). Falls back to `SMART_FORMAT` when unset. |
 
-Recommended safe configuration: a second provider account or proxy virtual
-key that only the verifier may spend (its request is already bounded: one
-shot, 4096 completion / 98304 prompt token budgets, 120 s timeout), so the
-verifier cannot share the primary lane's rate limits, quota, or outage
-domain. Under `require-dedicated`, a missing `CONFIDENCE_BASE_URL` is a
-VISIBLE failure: the run publishes `confidence-status: unscored` with the
+Recommended safe configuration: set ALL FOUR settings above — the distinct
+endpoint (`CONFIDENCE_BASE_URL`), its own bounded credential
+(`CONFIDENCE_API_KEY`), a model the dedicated endpoint actually serves
+(`CONFIDENCE_MODEL`, sent verbatim, case-sensitive), and the endpoint's wire
+family (`CONFIDENCE_FORMAT`). A second provider account or proxy virtual key
+that only the verifier may spend keeps it off the primary lane's rate
+limits, quota, and outage domain (the verifier's request is already bounded:
+one shot, 4096 completion / 98304 prompt token budgets, 120 s timeout). The
+`SMART_MODEL`/`SMART_FORMAT` fallbacks exist only to keep the lane ENABLED
+while the dedicated settings are missing, so the refusal below is visible —
+they are not a recommendation to run the verifier on a model the dedicated
+endpoint does not serve; that shape fails visibly at the provider
+(`confidence-status: unscored`, cause `http_*`). Under
+`require-dedicated`, a missing `CONFIDENCE_BASE_URL` is a VISIBLE failure:
+the run publishes `confidence-status: unscored` with the
 action-owned cause `dedicated_config_missing` (and a WARNING naming the
 inputs) while the authoritative review publishes unchanged — the verifier
 never silently dials the primary lane. Other verifier failures keep their
 existing causes (`missing_credential` for a distinct endpoint without a key,
-`http_*` / `timeout` / `transport_error` for wire failures).
+`http_*` / `timeout` / `transport_error` for wire failures). First live
+receipt of the visible-refusal shape (PR #1481's own dogfood run, exact head
+pinned, no provider call claimed): the #1478 addendum in
+`evals/reports/confidence-dogfood/README.md` and its evidence file
+`evals/reports/confidence-dogfood/evidence-2026-11-04-1478-isolation.json`.
 
 Rollback to the pre-#1478 advisory shape: delete the three
 `ai-confidence-base-url` / `ai-confidence-api-key` /

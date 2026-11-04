@@ -313,6 +313,14 @@ jobs:
           # scorer then inherits the primary lane again). Forks remain
           # disabled by the action's default policy.
           ai-confidence-model: ${{ vars.CONFIDENCE_MODEL || vars.SMART_MODEL }}
+          # CONFIDENCE_MODEL must name a model the DEDICATED endpoint serves —
+          # the verifier sends it verbatim (opaque, case-sensitive, #1465).
+          # The SMART_MODEL fallback only exists to keep the lane ENABLED
+          # while the dedicated endpoint is missing, so the refusal above is
+          # visible; once CONFIDENCE_BASE_URL/CONFIDENCE_API_KEY are set, set
+          # CONFIDENCE_MODEL too — a model name the dedicated endpoint does
+          # not serve fails visibly at the provider (confidence-status=unscored,
+          # cause http_*) and never inherits anything from the primary lane.
           ai-confidence-api-format: ${{ vars.CONFIDENCE_FORMAT || vars.SMART_FORMAT }}
           ai-confidence-base-url: ${{ vars.CONFIDENCE_BASE_URL }}
           ai-confidence-api-key: ${{ secrets.CONFIDENCE_API_KEY }}
