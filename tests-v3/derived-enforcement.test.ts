@@ -41,6 +41,7 @@ import {
 } from "../src/enforcement/derived-obligations.js";
 import { applyAllEnforcement, failClosedEnforcementFired, type EnforcementInputs } from "../src/enforcement/enforce.js";
 import { applyStrictVerdictPolicy } from "../src/enforcement/verdict-policy.js";
+import { normalizeDerivedPayload } from "../src/derived/model.js";
 import { runReviewEngine } from "../src/engine/review.js";
 import { publishReview } from "../src/publish/publish.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
@@ -286,6 +287,53 @@ test("#1449: every coverage-incomplete answer adds exactly one synthetic coverag
   assert.equal(clean.reason, null);
   assert.deepEqual(clean.rows, []);
   assert.equal(derivedCoverageRow(clean), null);
+});
+
+test("#1449: a mixed valid+malformed derivation fails toward incomplete coverage, never complete", () => {
+  // The fail-open shape the resolver must close: `normalizeDerivedPayload`
+  // keeps the usable obligation and RECORDS the entry it discarded in
+  // `errors` (a malformed entry is never repaired), and the model pass
+  // reports `ok` because a row survived. Exactly the terminal record that
+  // produces (`status: ok`, `input_complete: true`, `truncated: false`,
+  // nonempty `errors`) must never read as complete coverage — a surviving
+  // row that gets discharged would otherwise publish a native APPROVE even
+  // though a derived obligation was thrown away.
+  const artifact = normalizeDerivedPayload({
+    obligations: [
+      { obligation: "the mint site places the identity before hashing", paths: ["src/a.ts:mint"] },
+      { obligation: 123 },
+    ],
+  });
+  assert.equal(artifact.obligations.length, 1, "the valid row survives");
+  assert.equal(artifact.errors.length, 1, "the discarded entry is recorded, not repaired");
+  const record = {
+    status: "ok",
+    error_kind: null,
+    error: null,
+    diff_source: "full",
+    diff_clipped: false,
+    input_complete: true,
+    method: artifact.method,
+    obligations: artifact.obligations,
+    truncated: artifact.truncated,
+    errors: artifact.errors,
+    section_bytes: 0,
+  };
+  const resolution = resolveDerivedObligations(record, true);
+  assert.equal(resolution.coverage, "incomplete");
+  assert.equal(resolution.reason, "derivation-malformed");
+  // The surviving row is still carried for disclosure.
+  assert.equal(resolution.rows.length, 1);
+  assert.equal(resolution.rows[0]!.id, "derived-1");
+  // Exactly ONE synthetic coverage marker joins the contract, and no
+  // disposition can discharge it (it carries no anchors).
+  const rows = engineRows(resolution);
+  assert.equal(rows.filter((row) => row.id === "derived-coverage").length, 1);
+  const folded = foldObligationDispositions(rows, [
+    { check: "derived-coverage", status: "satisfied", rationale: "src/a.ts:mint places the identity before the hash" },
+  ]);
+  assert.equal(folded[folded.length - 1]!.status, "unresolved");
+  assert.equal(folded[folded.length - 1]!.cause, "derivation-incomplete");
 });
 
 test("#1449: the coverage marker cannot be discharged by a disposition", () => {
@@ -792,6 +840,99 @@ test("#1449: an undischarged derived obligation publishes an ADVISORY review, ne
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir));
     assert.equal(result.outputs.verdict, "approve");
     assert.equal(result.outputs.reviewResult, "partial");
+    const api = new NativeEventApi();
+    const published = await publishReview({
+      mode: "review_verdict",
+      reviewMarkdown: String(result.outputs.verdict),
+      verdict: String(result.outputs.verdict),
+      analysisEngine: "test-engine",
+      baseSha: "base-1",
+      headSha: "head-123",
+      prNumber: "42",
+      commentMarker: "<!-- ai-pr-review -->",
+      requiredChecks: "complete",
+      reviewRoute: "primary",
+      escalationReason: "",
+      cacheHitRatio: "-",
+      inlineFindings: false,
+      inlineFindingsMax: 10,
+      findings: [],
+      cleanupPreviousNativeReviews: "false",
+      approveForks: false,
+      isForkPr: false,
+      upstreamLinkMode: "inert",
+      conditionalPresence: {
+        linkedIssue: false, evidenceProvider: false, standards: false,
+        toolHarnessFindings: false, toolHarnessResults: false,
+      },
+      forgejoPositions: false,
+      ...(result.derivedObligationState !== undefined ? { derivedObligationState: result.derivedObligationState } : {}),
+    }, api as never, { diffText: "" });
+    assert.equal(published.status, "published");
+    assert.equal(api.submitted.length, 1);
+    assert.equal(api.submitted[0]!.event, "COMMENT");
+    assert.match(api.submitted[0]!.body, /Approval withheld by derived-obligation state/);
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
+test("#1449: a partially malformed derivation withholds the native approval even when the surviving row is discharged", async () => {
+  // The composite fail-open regression, all the way to the publish boundary:
+  // the derivation returns one usable obligation AND one malformed entry, so
+  // the normalizer keeps `derived-1` and records the discarded entry in
+  // `errors`, and the model pass reports `ok` because a row survived. The
+  // reviewer then grounds the surviving row — without the resolver's errors
+  // check this exact run declared complete coverage and published a native
+  // APPROVE. With it, the discarded entry fails the run toward `unavailable`
+  // and the native event is a COMMENT.
+  const server = await derivedModelServer(
+    plainReview({
+      required_check_dispositions: [
+        {
+          check: "derived-1",
+          status: "satisfied",
+          rationale: "src/ingress/reconcile.ts:mintFoundJob places forgeIntegration into buildOptions before buildReviewJob hashes the generation id",
+        },
+      ],
+    }),
+    {
+      obligations: [
+        {
+          obligation: FIXTURE_OBLIGATION.obligation,
+          topology: "identity",
+          paths: ["src/ingress/reconcile.ts:mintFoundJob"],
+        },
+        { obligation: 123 },
+      ],
+    },
+  );
+  const f = fixtureDir();
+  try {
+    const req = engineRequest(server.url, f.runDir);
+    req.inputs = { ...req.inputs, "derived-obligations": "true" };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir));
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(result.outputs.reviewResult, "partial");
+    assert.equal(result.derivedObligationState, "unavailable");
+    const state = JSON.parse(readFileSync(join(f.runDir, "derived-obligation-state.json"), "utf8")) as {
+      coverage: string; reason: string | null;
+    };
+    assert.equal(state.coverage, "incomplete");
+    assert.equal(state.reason, "derivation-malformed");
+    // The surviving row really was discharged (so the counterfactual — no
+    // errors check → complete coverage → native APPROVE — is pinned), yet the
+    // discarded malformed entry still keeps the coverage marker unresolved.
+    const persisted = JSON.parse(readFileSync(join(f.runDir, "review-obligations.json"), "utf8")) as {
+      obligations: Array<{ id: string; status: string }>;
+    };
+    assert.deepEqual(
+      persisted.obligations.map((row) => [row.id, row.status]),
+      [["derived-1", "satisfied"], ["derived-coverage", "unresolved"]],
+    );
+    // The publish boundary withholds the trusted approval: COMMENT, never an
+    // APPROVE and never a blocking REQUEST_CHANGES.
     const api = new NativeEventApi();
     const published = await publishReview({
       mode: "review_verdict",

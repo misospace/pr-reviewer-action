@@ -355,7 +355,13 @@ function obligationRows(value: unknown): DerivedObligationRow[] {
  *   `derivation-error`, `derivation-timeout`, `derivation-skipped`);
  * - `input_complete` is not exactly `true` (`input-incomplete`) — a
  *   derivation that never saw the whole change cannot claim coverage;
- * - the obligation set was truncated (`obligation-set-truncated`).
+ * - the obligation set was truncated (`obligation-set-truncated`);
+ * - the artifact carries nonempty normalization `errors`
+ *   (`derivation-malformed`) — the normalizer records every entry it had to
+ *   DISCARD (a malformed obligation is never repaired), so a nonempty list
+ *   means at least one derived obligation was dropped and the surviving rows
+ *   are a PARTIAL answer, never complete coverage (#1449: malformed
+ *   derivation output fails toward partial, not native APPROVE).
  *
  * Otherwise the coverage is `complete` — including a clean `empty` over a
  * complete input, which is complete coverage with ZERO rows.
@@ -373,6 +379,16 @@ export function resolveDerivedObligations(record: unknown, enabled: boolean): De
   }
   if (record.truncated === true) {
     return { enabled: true, coverage: "incomplete", reason: "obligation-set-truncated", rows };
+  }
+  // Fail closed on DISCARDED entries: the normalizer keeps the usable rows
+  // and records what it dropped in `errors`, so a nonempty list means the
+  // surviving rows do not cover the derivation's full answer. Declaring
+  // complete coverage here would let a partially malformed derivation that
+  // lost an obligation publish a native APPROVE once the survivors were
+  // discharged (#1449) — so any recorded error makes the coverage
+  // incomplete, with the surviving rows still carried for disclosure.
+  if (Array.isArray(record.errors) && record.errors.length > 0) {
+    return { enabled: true, coverage: "incomplete", reason: "derivation-malformed", rows };
   }
   return { enabled: true, coverage: "complete", reason: null, rows };
 }
@@ -495,8 +511,9 @@ export function derivedCoverageRow(resolution: DerivedObligationResolution): Der
  *   derived row was discharged (the state speaks for itself);
  * - the resolver's closed COVERAGE reason (`artifact-missing`,
  *   `derivation-error`, `derivation-timeout`, `derivation-skipped`,
- *   `input-incomplete`, `obligation-set-truncated`) — the derivation never
- *   completed, so the coverage is unknown;
+ *   `derivation-malformed`, `input-incomplete`, `obligation-set-truncated`)
+ *   — the derivation never completed (or dropped a malformed entry), so the
+ *   coverage is unknown;
  * - `not-discharged` — the coverage is complete but at least one derived row
  *   was not satisfied, so the coverage is known AND the obligation is open.
  *
