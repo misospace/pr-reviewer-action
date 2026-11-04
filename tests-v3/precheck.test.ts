@@ -2341,7 +2341,7 @@ test("#1073: the fork override contributes to the fingerprint only while the sco
   assert.equal(computeConfigHash(sameOverride), computeConfigHash(overrideOn));
 });
 
-test("#1478: the isolation mode contributes to the fingerprint only while the scorer is enabled", () => {
+test("#1478: the isolation mode contributes to the fingerprint only while the confidence family is active", () => {
   const baseline = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
 
   // Disabled (the default): the isolation mode contributes NOTHING even
@@ -2373,4 +2373,106 @@ test("#1478: the isolation mode contributes to the fingerprint only while the sc
   });
   assert.ok(requireDedicated.includes("AI_CONFIDENCE_ISOLATION=require-dedicated"));
   assert.notEqual(computeConfigHash(requireDedicated), computeConfigHash(inherit));
+});
+
+test("#1481: a missing model under require-dedicated keeps the confidence family in the config hash", () => {
+  const baselineEnv = { AI_MODEL: "m", AI_BASE_URL: "https://primary" };
+  const baseline = collectConfigLines(baselineEnv);
+  const baselineHash = computeConfigHash(baseline);
+
+  // 1. Baseline: no confidence config at all contributes no family lines,
+  // so the hash stays byte-identical to a build without the feature.
+  assert.ok(baseline.every((line) => !line.startsWith("AI_CONFIDENCE_") && !line.startsWith("SCORER_")));
+  assert.equal(computeConfigHash(collectConfigLines({ ...baselineEnv, UNRELATED: "x" })), baselineHash);
+
+  // 2. No model + inherit-primary (the default) remains fingerprint-NEUTRAL:
+  // the resolver disables the lane (no model, no dedicated refusal), so the
+  // hash must equal the baseline and the default value must not churn it.
+  const disabledInherit = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_ISOLATION: "inherit-primary",
+  });
+  assert.deepEqual(disabledInherit, baseline);
+  assert.equal(computeConfigHash(disabledInherit), baselineHash);
+
+  // 3. No model + require-dedicated: the resolver keeps the lane logically
+  // active and publishes `unscored(dedicated_model_missing)`, so the family
+  // is behavior-relevant WITHOUT a model. The isolation line contributes and
+  // the hash moves off the baseline. The refused configuration makes no
+  // provider call, so the release/rubric version lines stay off too — their
+  // only consumer is the request body, and a refused run never builds one;
+  // reusing a cached review across an action upgrade is correct for this
+  // configuration because its published outcome is version-independent.
+  const refused = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.ok(refused.includes("AI_CONFIDENCE_ISOLATION=require-dedicated"));
+  assert.ok(!refused.some((line) => line.startsWith("AI_CONFIDENCE_MODEL")));
+  assert.ok(!refused.some((line) => line.startsWith("SCORER_")));
+  assert.notEqual(computeConfigHash(refused), baselineHash);
+
+  // 4. Model + require-dedicated keeps the established enabled shape: model
+  // line, isolation line, and the release/rubric version lines all
+  // contribute, and the hash differs from both the inherit-primary and the
+  // refused variants.
+  const enabledDedicated = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.ok(enabledDedicated.includes("AI_CONFIDENCE_MODEL=scorer-model"));
+  assert.ok(enabledDedicated.includes("AI_CONFIDENCE_ISOLATION=require-dedicated"));
+  assert.ok(enabledDedicated.some((line) => line.startsWith("SCORER_ACTION_VERSION=")));
+  assert.ok(enabledDedicated.some((line) => line.startsWith("SCORER_RUBRIC_VERSION=")));
+  const enabledInherit = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "inherit-primary",
+  });
+  assert.notEqual(computeConfigHash(enabledDedicated), computeConfigHash(enabledInherit));
+  assert.notEqual(computeConfigHash(enabledDedicated), computeConfigHash(refused));
+
+  // 5. Canonicalization matches the RESOLVED semantics, not a broader fold.
+  // The resolver consumes the trimmed, case-sensitive token
+  // (`trimmed(env, ...) === "require-dedicated"`, src/routing/tiers.ts), and
+  // config-load validation is case-sensitive over the two-token vocabulary
+  // (ENUM_INPUTS throws on anything else), so:
+  //   - surrounding whitespace activates the family and emits the canonical
+  //     trimmed line — identical bytes, identical hash;
+  //   - a case variant does NOT activate the family: the resolver treats any
+  //     non-vocabulary value as inherit-primary (and config load rejects it
+  //     outright), so fingerprinting it would model behavior that never
+  //     resolves.
+  const whitespaceIsolation = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_ISOLATION: "  require-dedicated  ",
+  });
+  assert.ok(whitespaceIsolation.includes("AI_CONFIDENCE_ISOLATION=require-dedicated"));
+  assert.equal(computeConfigHash(whitespaceIsolation), computeConfigHash(refused));
+
+  const wrongCase = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_ISOLATION: "Require-Dedicated",
+  });
+  assert.deepEqual(wrongCase, baseline);
+  assert.equal(computeConfigHash(wrongCase), baselineHash);
+
+  const whitespaceOnlyIsolation = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_ISOLATION: "   ",
+  });
+  assert.deepEqual(whitespaceOnlyIsolation, baseline);
+
+  // The same trim rule governs the model side: a whitespace-only model is
+  // unset for the resolver, but under require-dedicated the isolation value
+  // alone keeps the family active (the refused configuration).
+  const blankModelDedicated = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "   ",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.ok(blankModelDedicated.includes("AI_CONFIDENCE_ISOLATION=require-dedicated"));
+  assert.ok(!blankModelDedicated.some((line) => line.startsWith("AI_CONFIDENCE_MODEL")));
+  assert.equal(computeConfigHash(blankModelDedicated), computeConfigHash(refused));
 });
