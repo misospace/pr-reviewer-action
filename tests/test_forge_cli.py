@@ -12,8 +12,9 @@ forge. These tests pin the properties every caller depends on:
 - malformed input is rejected before any request goes out (fail closed);
 - the CLI never spawns a subprocess and never shells out to a forge CLI
   binary, even when one is on ``PATH``;
-- no forge CLI invocation survives anywhere in the operational tooling
-  (the guard test at the end of this file pins that going forward).
+- no forge CLI invocation survives anywhere in the operational tooling,
+  and no raw HTTP client (curl/wget) reaches the forge API there either
+  (the guard tests at the end of this file pin that going forward).
 
 No real network: the requests go to an in-process stub server
 (``tests/_lib/forge_stub_server.py``).
@@ -30,7 +31,10 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import tokenize
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -85,6 +89,182 @@ def run(cli, *args: str) -> tuple[int, str, str]:
 def only_request(stub: ForgeStubServer) -> dict:
     assert len(stub.requests) == 1, stub.requests
     return stub.requests[0]
+
+
+# ---------------------------------------------------------------------------
+# pr-details
+# ---------------------------------------------------------------------------
+
+
+def _pr_payload(*, sha: str = "a" * 40, repo_id: int = 1234, draft: bool = False) -> dict:
+    """The shape of the pull-request read the capability answers with."""
+    return {
+        "number": 42,
+        "draft": draft,
+        "head": {"sha": sha, "repo": {"id": repo_id}},
+    }
+
+
+class _PullRequestForge:
+    """A one-endpoint forge stub for the pull-request read.
+
+    The shared stub (``tests/_lib/forge_stub_server.py``) serves the
+    commit, label, release and ref endpoints only, so the pull-request
+    read gets its own tiny server: it answers
+    ``GET /repos/{owner}/{repo}/pulls/{number}`` with a configurable
+    payload and records the request it saw (method, path, query, headers).
+    """
+
+    def __init__(self, payload: dict, *, status: int = 200) -> None:
+        self.payload = payload
+        self.status = status
+        self.requests: list[dict] = []
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> "_PullRequestForge":
+        forge = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_args) -> None:  # noqa: ANN001
+                """Keep the stub quiet."""
+
+            def do_GET(self) -> None:  # noqa: N802
+                parsed = urllib.parse.urlsplit(self.path)
+                forge.requests.append({
+                    "method": "GET",
+                    "path": parsed.path,
+                    "query": parsed.query,
+                    "headers": {k.lower(): v for k, v in self.headers.items()},
+                })
+                body = json.dumps(forge.payload).encode("utf-8")
+                self.send_response(forge.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    @property
+    def base_url(self) -> str:
+        if self._server is None:
+            raise RuntimeError("the stub server is not running")
+        return f"http://127.0.0.1:{self._server.server_port}"
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+
+@pytest.fixture()
+def pr_forge(monkeypatch):
+    """A one-endpoint forge that answers the pull-request read."""
+    forge = _PullRequestForge(_pr_payload()).start()
+    monkeypatch.setenv("GITHUB_API_URL", forge.base_url)
+    monkeypatch.setenv("GITHUB_TOKEN", SECRET)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    try:
+        yield forge
+    finally:
+        forge.stop()
+
+
+class TestPrDetails:
+    def test_prints_the_three_documented_lines(self, cli, pr_forge):
+        pr_forge.payload = _pr_payload()
+        code, out, err = run(cli, "pr-details", "--repo", "o/r", "--number", "42")
+        assert code == 0
+        assert out == f"head_sha={'a' * 40}\nhead_repo_id=1234\nis_draft=false\n"
+        assert err == ""
+        assert len(pr_forge.requests) == 1
+        request = pr_forge.requests[0]
+        assert request["method"] == "GET"
+        assert request["path"] == "/repos/o/r/pulls/42"
+        assert request["query"] == ""
+
+    def test_the_token_rides_only_the_authorization_header(self, cli, pr_forge):
+        pr_forge.payload = _pr_payload()
+        run(cli, "pr-details", "--repo", "o/r", "--number", "42")
+        request = pr_forge.requests[0]
+        assert request["headers"].get("authorization") == f"Bearer {SECRET}"
+        assert SECRET not in request["path"]
+        assert SECRET not in request["query"]
+
+    def test_a_draft_pull_request_is_reported(self, cli, pr_forge):
+        pr_forge.payload = _pr_payload(draft=True)
+        code, out, err = run(cli, "pr-details", "--repo", "o/r", "--number", "42")
+        assert code == 0
+        assert out.endswith("is_draft=true\n")
+
+    def test_a_fork_head_reports_the_head_repository_id(self, cli, pr_forge):
+        # The caller compares the head repository id with the base
+        # repository id to tell a fork from a same-repository pull request.
+        pr_forge.payload = _pr_payload(repo_id=999)
+        code, out, err = run(cli, "pr-details", "--repo", "o/r", "--number", "42")
+        assert code == 0
+        assert "head_repo_id=999" in out
+
+    def test_an_absent_pull_request_is_exit_one(self, cli, pr_forge):
+        pr_forge.payload = {"message": "Not Found"}
+        pr_forge.status = 404
+        code, out, err = run(cli, "pr-details", "--repo", "o/r", "--number", "42")
+        assert code == 1
+        assert out == ""
+        assert err == ""
+
+    def test_a_forge_failure_is_exit_two(self, cli, pr_forge):
+        pr_forge.payload = {"message": "boom"}
+        pr_forge.status = 500
+        code, out, err = run(cli, "pr-details", "--repo", "o/r", "--number", "42")
+        assert code == 2
+        assert out == ""
+        assert SECRET not in err
+
+    def test_an_unusable_response_is_exit_two(self, cli, pr_forge):
+        # No head at all: the read fails closed instead of guessing.
+        pr_forge.payload = {"number": 42, "draft": False}
+        code, out, err = run(cli, "pr-details", "--repo", "o/r", "--number", "42")
+        assert code == 2
+        assert out == ""
+        assert SECRET not in err
+
+    def test_a_forged_head_sha_is_refused(self, cli, pr_forge):
+        pr_forge.payload = _pr_payload(sha="not-a-sha")
+        code, out, err = run(cli, "pr-details", "--repo", "o/r", "--number", "42")
+        assert code == 2
+        assert out == ""
+
+    def test_a_hostile_forge_cannot_reflect_the_token_into_the_output(self, cli, pr_forge, monkeypatch):
+        # The head sha is shape-validated, so a hex token passes the shape
+        # check: the credential gate is what refuses it.
+        token = "d" * 40
+        monkeypatch.setenv("GITHUB_TOKEN", token)
+        pr_forge.payload = _pr_payload(sha=token)
+        code, out, err = run(cli, "pr-details", "--repo", "o/r", "--number", "42")
+        assert code == 2
+        assert out == ""
+        assert token not in err
+
+    def test_a_numeric_token_reflected_as_the_head_repo_id_is_refused(self, cli, pr_forge, monkeypatch):
+        # The head repository id is an integer, so a numeric token is the
+        # only shape a hostile forge can reflect through it.
+        monkeypatch.setenv("GITHUB_TOKEN", "1234")
+        pr_forge.payload = _pr_payload(repo_id=1234)
+        code, out, err = run(cli, "pr-details", "--repo", "o/r", "--number", "42")
+        assert code == 2
+        assert out == ""
+        assert "1234" not in err
 
 
 # ---------------------------------------------------------------------------
@@ -709,6 +889,13 @@ class TestInputValidation:
             ("pr-number-for-commit", "--repo", "o/r", "--sha", "A" * 40),
             ("pr-number-for-commit", "--repo", "o/r", "--sha", "a" * 41),
             ("commit-parent-sha", "--repo", "o/r", "--sha", "a" * 39),
+            ("pr-details", "--repo", "o/r/extra", "--number", "42"),
+            ("pr-details", "--repo", "no-slash", "--number", "42"),
+            ("pr-details", "--repo", "o/r", "--number", "0"),
+            ("pr-details", "--repo", "o/r", "--number", "-1"),
+            ("pr-details", "--repo", "o/r", "--number", "abc"),
+            ("pr-details", "--repo", "o/r", "--number", "42\n"),
+            ("pr-details", "--repo", "o/r", "--number", "9" * 21),
         ],
     )
     def test_malformed_input_is_rejected_without_a_request(self, cli, stub, args):
@@ -973,6 +1160,200 @@ def test_each_allow_listed_call_appears_exactly_once():
         )
 
 
+# ---------------------------------------------------------------------------
+# Guard: no raw HTTP client reaches the forge API
+# ---------------------------------------------------------------------------
+#
+# The forge CLI guard above closes the "forge-specific CLI" bypass. A raw
+# HTTP client aimed at the forge API is the same bypass wearing a
+# different hat: it would put the bearer token in argv, in the URL, or in
+# a shell string, and it would bypass every guarantee the capability
+# makes (validated base URL, HTTPS for non-loopback, refused redirects,
+# credential-free errors). The detection is forge-shaped, not "any curl":
+# fetching the mise installer from mise.jdx.dev is not a forge call.
+
+# A raw HTTP client: the binary name, not part of a longer word. A path
+# prefix is the SAME binary ("/usr/bin/curl"), so it is matched too -- a
+# bypass that spells the binary with its full path must not slip through.
+_RAW_HTTP_RE = re.compile(r"(?<![\w-])(curl|wget)(?![\w-])")
+
+# The forge API shapes a request target can name. A raw client is flagged
+# only when its target names one of them.
+_FORGE_API_TARGETS = (
+    "api.github.com",
+    "GITHUB_API_URL",
+    "GITHUB_REPOSITORY",
+    "/repos/",
+    "/pulls/",
+    "/issues/",
+)
+
+# Files exempt from the raw-HTTP guard, each with a non-empty reason. The
+# exemption style mirrors tests/test_forge.py: an exemption is visible and
+# reasoned, never silent. The capability itself is exempt because it IS
+# the configured forge capability -- the one place a forge request may be
+# built, and the one place the credential rules are enforced.
+RAW_HTTP_EXEMPT_FILES: dict[str, str] = {
+    "pr_reviewer/forge.py": (
+        "it IS the configured forge capability: the one place a forge "
+        "request may be built"
+    ),
+    "pr_reviewer/http_safe.py": (
+        "it IS the configured capability's transport (the no-redirect opener)"
+    ),
+}
+
+# The retained raw HTTP calls against a forge API: none today. Every entry
+# carries the reason it is retained and must appear exactly once.
+ALLOWED_RAW_HTTP_CALLS: dict[tuple[str, str], str] = {}
+
+
+def _relative_to_root(path: Path) -> str:
+    """The repo-relative path of a scanned file."""
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _joined_command(lines: list[str], index: int) -> str:
+    """The command starting at ``index``, with its continuations joined.
+
+    A raw HTTP client invocation is often wrapped over several lines (a
+    trailing backslash), and the URL can sit on the next line: the target
+    must be seen as a whole, so the continuation is joined here.
+    """
+    parts = [lines[index].rstrip()]
+    while parts[-1].endswith("\\"):
+        parts[-1] = parts[-1][:-1].rstrip()
+        index += 1
+        if index >= len(lines):
+            break
+        parts.append(lines[index].strip())
+    return " ".join(parts)
+
+
+def _raw_http_invocations(path: Path) -> list[tuple[int, str]]:
+    """Every raw HTTP client aimed at a forge API, as (line number, line)."""
+    if _relative_to_root(path) in RAW_HTTP_EXEMPT_FILES:
+        return []
+    prose = _prose_lines(path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    hits: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        number = index + 1
+        if number in prose:
+            continue
+        if path.suffix in (".sh", ".yml", ".yaml") and line.strip().startswith("#"):
+            continue
+        match = _RAW_HTTP_RE.search(line)
+        if not match:
+            continue
+        target = _joined_command(lines, index)[match.end():]
+        if any(marker in target for marker in _FORGE_API_TARGETS):
+            hits.append((number, line))
+    return hits
+
+
+def test_no_raw_http_client_reaches_a_forge_api_in_the_operational_tooling():
+    offenders: list[str] = []
+    for path in _guard_files():
+        relative = _relative_to_root(path)
+        for number, line in _raw_http_invocations(path):
+            if (relative, line.strip()) in ALLOWED_RAW_HTTP_CALLS:
+                continue
+            offenders.append(f"{relative}:{number}: {line.strip()}")
+    assert not offenders, (
+        "forge API reads and writes must go through the configured forge "
+        "capability (scripts/forge_cli.py), never a raw HTTP client:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_the_raw_http_allow_list_covers_exactly_the_retained_calls():
+    retained: set[tuple[str, str]] = set()
+    for path in _guard_files():
+        relative = _relative_to_root(path)
+        for _number, line in _raw_http_invocations(path):
+            retained.add((relative, line.strip()))
+    assert retained == set(ALLOWED_RAW_HTTP_CALLS), (
+        "every retained raw HTTP call against a forge API must be explicitly "
+        "allow-listed (with the reason), and the allow-list must not name "
+        "anything else:\n"
+        f"retained: {sorted(retained)}\n"
+        f"allow-listed: {sorted(ALLOWED_RAW_HTTP_CALLS)}"
+    )
+
+
+def test_each_raw_http_allow_listed_call_appears_exactly_once():
+    for (relative, allowed_line), reason in ALLOWED_RAW_HTTP_CALLS.items():
+        assert reason.strip(), (
+            f"{relative} is allow-listed against the raw-HTTP guard without "
+            "a reason"
+        )
+        lines = [
+            line.strip()
+            for line in (ROOT / relative).read_text(encoding="utf-8").splitlines()
+            if line.strip() == allowed_line
+        ]
+        assert lines == [allowed_line], (
+            f"{relative} must contain exactly one {allowed_line!r} line"
+        )
+
+
+def test_every_raw_http_exemption_carries_a_reason():
+    for relative, reason in RAW_HTTP_EXEMPT_FILES.items():
+        assert reason.strip(), (
+            f"{relative} is exempt from the raw-HTTP guard without a reason"
+        )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'curl -fsS -H "Authorization: Bearer $TOKEN" "$GITHUB_API_URL/repos/o/r/pulls/1"',
+        'curl -fsS "https://api.github.com/repos/o/r/pulls/1"',
+        'wget -q -O- https://api.github.com/repos/o/r/issues/1',
+        'curl -fsS "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/1"',
+        'curl -fsS -o /dev/null "https://api.github.com/repos/o/r/pulls/1"',
+        '/usr/bin/curl -fsS "https://api.github.com/repos/o/r/pulls/1"',
+        './wget -q -O- "https://api.github.com/repos/o/r/issues/1"',
+    ],
+)
+def test_the_raw_http_guard_flags_a_forge_api_target(tmp_path, line):
+    script = tmp_path / "call.sh"
+    script.write_text(line + "\n", encoding="utf-8")
+    assert _raw_http_invocations(script), f"must be flagged: {line}"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "curl --fail --silent --show-error --location https://mise.jdx.dev/install.sh",
+        'wget --quiet --tries=3 --output-document="$dest" "$url"',
+        "curl --version",
+    ],
+)
+def test_the_raw_http_guard_ignores_a_non_forge_download(tmp_path, line):
+    script = tmp_path / "download.sh"
+    script.write_text(line + "\n", encoding="utf-8")
+    assert not _raw_http_invocations(script), f"must not be flagged: {line}"
+
+
+def test_the_dogfood_workflow_reads_the_pr_through_the_capability():
+    """The dogfood PR read goes through the capability, not a raw client."""
+    path = ROOT / ".github" / "workflows" / "ai-pr-review.yaml"
+    text = path.read_text(encoding="utf-8")
+    assert "scripts/forge_cli.py pr-details" in text, (
+        "the dogfood pr-gate must read the pull request through the "
+        "configured forge capability"
+    )
+    assert not _raw_http_invocations(path), (
+        "the dogfood workflow must not reach the forge API with a raw HTTP "
+        "client"
+    )
+
+
 def test_the_guard_scans_the_files_it_claims_to():
     scanned = {path.relative_to(ROOT).as_posix() for path in _guard_files()}
     assert "scripts/release/converge.sh" in scanned
@@ -981,3 +1362,6 @@ def test_the_guard_scans_the_files_it_claims_to():
     assert ".github/workflows/manual-release.yml" in scanned
     assert ".github/workflows/release-please.yaml" in scanned
     assert ".github/workflows/harvest-human-findings.yaml" in scanned
+    assert ".github/workflows/ai-pr-review.yaml" in scanned
+    assert "pr_reviewer/forge.py" in scanned
+    assert "pr_reviewer/http_safe.py" in scanned
