@@ -1828,8 +1828,60 @@ class TestBaselineAndLiveReadAgree:
         assert merged["collections"][-1]["records_absent"] == 0
 
 
+    def test_a_later_import_never_erases_the_live_evidence(
+        self, collector, forge, tmp_path
+    ):
+        # The baseline carries less than a live read (no body digest, no
+        # review id, no verifier reason). A later baseline refresh must not
+        # wipe the evidence the live read brought.
+        submitted_at = "2026-10-20T15:29:40Z"
+        _publish(
+            forge,
+            1175,
+            _scored_body(score=3),
+            as_review=True,
+            item_id=4242,
+            submitted_at=submitted_at,
+        )
+        baseline_run = _legacy_run(
+            1175, submitted_at=submitted_at, status="unscored", score=None
+        )
+        path = _legacy_file(tmp_path, [baseline_run])
+        dataset = tmp_path / "dataset.json"
+        run(
+            collector,
+            "--repo",
+            "o/r",
+            "--import-legacy",
+            str(path),
+            "--dataset",
+            str(dataset),
+        )
+        run(collector, "--repo", "o/r", "--pr", "1175", "--dataset", str(dataset))
+        live = json.loads(dataset.read_text(encoding="utf-8"))["records"][0]
+        assert live["attempt"]["id"] == 4242
+        assert live["attempt"]["body_digest"] is not None
+        assert live["verifier"]["score"] == 3
+
+        run(
+            collector,
+            "--repo",
+            "o/r",
+            "--import-legacy",
+            str(path),
+            "--dataset",
+            str(dataset),
+        )
+        merged = json.loads(dataset.read_text(encoding="utf-8"))["records"][0]
+        assert len(json.loads(dataset.read_text(encoding="utf-8"))["records"]) == 1
+        assert merged["attempt"]["id"] == 4242
+        assert merged["attempt"]["body_digest"] == live["attempt"]["body_digest"]
+        assert merged["verifier"]["score"] == 3
+        assert merged["legacy"] is not None
+
+
 # ---------------------------------------------------------------------------
-# The dataset file
+# dataset file
 # ---------------------------------------------------------------------------
 
 

@@ -1293,6 +1293,28 @@ class TestInputValidation:
 
 
 class TestForgeSeam:
+    def test_a_read_the_page_bound_cut_short_is_reported(
+        self, collector, forge, monkeypatch
+    ):
+        # A hundred published bodies make the page full, so a walk the bound
+        # cuts short looks like a walk that saw a full page: the recorded
+        # body may not be the newest published one, and the run says so.
+        monkeypatch.setattr(collector, "MAX_PAGES", 1)
+        for index in range(100):
+            _publish(
+                forge,
+                7,
+                _scored_body(),
+                as_review=False,
+                item_id=index + 1,
+                created_at="2026-01-01T00:00:00Z",
+            )
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "7")
+        assert code == 1
+        assert "page bound" in err
+        payload = document(out)
+        assert len(payload["records"]) == 1
+
     def test_the_collector_reads_only_the_two_documented_endpoints(self, collector, forge):
         _publish(forge, 7, _scored_body())
         run(collector, "--repo", "o/r", "--pr", "7")

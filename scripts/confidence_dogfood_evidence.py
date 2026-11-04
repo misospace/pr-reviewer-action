@@ -95,6 +95,7 @@ from pr_reviewer.confidence_evidence import (  # noqa: E402, F401
     empty_verifier,
     extract_confidence_section,
     extract_published_evidence,
+    list_items_report,
     published_body_descriptor,
     published_id,
     published_instant,
@@ -108,7 +109,10 @@ SCHEMA = "verifier-dogfood-evidence/v1"
 # The page bound on one list endpoint. A forge that always answers a full
 # page would page forever without it, and this collector reads a pull
 # request's comments and reviews only to read its newest published body.
-MAX_PAGES = 20
+# The bound is generous: a pull request with more comments than this carries
+# more published bodies than any human reads, and a walk the bound cuts
+# short is reported as an incomplete read.
+MAX_PAGES = 100
 
 EXIT_OK = 0
 EXIT_PARTIAL = 1
@@ -160,6 +164,7 @@ def list_items(
     """Every item across all pages of one forge list endpoint."""
     return confidence_evidence.list_items(forge, path, max_pages)
 
+
 def newest_published_body(
     comments: list[dict[str, Any]], reviews: list[dict[str, Any]]
 ) -> tuple[str, str, dict[str, Any]] | None:
@@ -209,8 +214,10 @@ def newest_published_body(
 # ---------------------------------------------------------------------------
 
 
-def collect_record(forge: ForgeClient, repo: str, number: int) -> dict[str, Any]:
-    """The evidence record for one pull request.
+def collect_record(
+    forge: ForgeClient, repo: str, number: int
+) -> tuple[dict[str, Any], bool]:
+    """The evidence record for one pull request, and whether the read was whole.
 
     Reads the pull request's issue comments and reviews through the forge
     capability and assembles what the verifier published. A pull request
@@ -218,25 +225,32 @@ def collect_record(forge: ForgeClient, repo: str, number: int) -> dict[str, Any]
     :class:`pr_reviewer.forge.ForgeError`; the caller turns that into a
     record with ``read_error`` set, so one unreadable pull request never
     aborts the run.
+
+    A walk the page bound cut short still yields the record: it carries what
+    was read. The second value says the read was incomplete, because the
+    newest published body may then be newer than the one the record names.
     """
     token = getattr(forge, "token", "") or ""
-    comments = list_items(
+    comments, cut = list_items_report(
         forge, f"/repos/{repo}/issues/{number}/comments", MAX_PAGES
     )
-    reviews = list_items(
+    reviews, cut_reviews = list_items_report(
         forge, f"/repos/{repo}/pulls/{number}/reviews", MAX_PAGES
     )
     selected = newest_published_body(comments, reviews)
     if selected is None:
         unavailable = dict(UNAVAILABLE_REASONS)
         unavailable["published_record"] = NO_PUBLISHED_RECORD_REASON
-        return build_record(number, unavailable=unavailable)
+        return build_record(number, unavailable=unavailable), not (cut or cut_reviews)
     body, kind, item = selected
     published = extract_published_evidence(body, token)
-    return build_record(
-        number,
-        published_body=published_body_descriptor(kind, item, token),
-        **published,
+    return (
+        build_record(
+            number,
+            published_body=published_body_descriptor(kind, item, token),
+            **published,
+        ),
+        not (cut or cut_reviews),
     )
 
 
@@ -376,7 +390,19 @@ def main(argv: list[str] | None = None) -> int:
     failed = False
     for number in numbers:
         try:
-            records.append(collect_record(forge, args.repo, number))
+            record, whole = collect_record(forge, args.repo, number)
+            records.append(record)
+            if not whole:
+                # The page bound cut the walk, so the newest published body
+                # may be newer than the one this record names. The record is
+                # still written, and the run reports the incomplete read.
+                failed = True
+                print(
+                    f"confidence_dogfood_evidence: pull request {number}: the "
+                    "page bound cut the read short, so the recorded body may "
+                    "not be the newest published body",
+                    file=sys.stderr,
+                )
         except ForgeError as exc:
             # One unreadable pull request never aborts the run: the other
             # records are still collected and written.

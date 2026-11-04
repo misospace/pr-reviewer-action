@@ -853,40 +853,53 @@ def merge_observation(
     survives: the first observation time is kept, the observation counter
     grows, and the legacy block the baseline carried is not thrown away by a
     later live read.
+
+    An IMPORTED baseline observation is the exception: it carries less than
+    a live read (no body digest, no review id, no verifier reason), so it
+    never overwrites the content a live read brought. It contributes its
+    baseline provenance and nothing else, which keeps a later baseline
+    refresh from erasing the evidence the dataset already holds.
     """
     merged = dict(previous)
     attempt = dict(previous["attempt"])
     observed_attempt = observation["attempt"]
-    for field in (
-        "kind",
-        "id",
-        "state",
-        "submitted_at",
-        "created_at",
-        "updated_at",
-        "published_at",
-        "body_digest",
-    ):
-        attempt[field] = observed_attempt.get(field)
-    attempt["edited"] = merged_edited(previous, observation)
+    # An imported baseline record carries LESS than a live read: it has no
+    # body digest, no review id and no verifier reason. Letting it overwrite
+    # a live record would erase the evidence the live read brought. It
+    # contributes its baseline provenance and nothing else.
+    imported = observation.get("source") == "legacy-import"
+    if not imported:
+        for field in (
+            "kind",
+            "id",
+            "state",
+            "submitted_at",
+            "created_at",
+            "updated_at",
+            "published_at",
+            "body_digest",
+        ):
+            attempt[field] = observed_attempt.get(field)
+        attempt["edited"] = merged_edited(previous, observation)
     attempt["observations"] = int(previous["attempt"].get("observations") or 0) + 1
     attempt["first_seen_at"] = previous["attempt"].get("first_seen_at") or now
     attempt["last_seen_at"] = now
     attempt["absent_in_latest_collection"] = False
     merged["attempt"] = attempt
-    for field in (
-        "source",
-        "head_sha",
-        "base_sha",
-        "review_result",
-        "required_checks",
-        "diff_fingerprint",
-        "config_fingerprint",
-        "verifier",
-        "unavailable",
-        "read_error",
-    ):
-        merged[field] = observation.get(field)
+    if not imported:
+        for field in (
+            "source",
+            "head_sha",
+            "base_sha",
+            "review_result",
+            "required_checks",
+            "diff_fingerprint",
+            "config_fingerprint",
+            "verifier",
+            "unavailable",
+            "read_error",
+        ):
+            merged[field] = observation.get(field)
     if observation.get("legacy") is not None:
         merged["legacy"] = observation["legacy"]
     return merged

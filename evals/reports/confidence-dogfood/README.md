@@ -85,11 +85,11 @@ review replaces the attempt it describes. The retained dataset
 (`scripts/confidence_dogfood_dataset.py`) keeps every published attempt of every
 pull request, and folds each collection into the dataset file in place.
 
-- **Dataset file:** `evals/reports/confidence-dogfood/dataset-2026-11-04.json` (`verifier-dogfood-dataset/v1`), 481 retained attempts across 176 pull requests. 419 attempts are the imported #1459 baseline of 2026-11-03; 85 attempts come from a live read of the 15 pull requests with the most recent traffic (2026-11-04), of which 62 were new and 23 were the baseline attempts the live read re-observed.
+- **Dataset file:** `evals/reports/confidence-dogfood/dataset-2026-11-04.json` (`verifier-dogfood-dataset/v1`), 480 retained attempts across 175 pull requests. 419 attempts are the imported #1459 baseline of 2026-11-03; 84 attempts come from a live read of the pull requests with the most recent traffic on 2026-11-04, of which 61 were new and 23 were the baseline attempts the live read re-observed.
 - **Summary file:** `evals/reports/confidence-dogfood/summary-2026-11-04.json` (`verifier-dogfood-summary/v1`).
 - **Reconciliation:** the baseline declared 419 enabled runs across 166 pull requests, and the import produced 419 records across 166 pull requests with no skipped record. The dataset holds the whole baseline.
-- **Why the per-pull-request count matters:** 92 of the 176 pull requests carry more than one retained attempt, and the largest carries 50. Under the #1452 collector those earlier attempts were never visible.
-- **What the newer attempts add:** the dataset now holds 31 published causes (`http_429` 11, `malformed_answer` 7, `http_403` 6, `cannot_verify` 4, `dedicated_config_missing` 3), 28 published latencies and 11 published token-usage records. The baseline file itself carries only 2 causes and no token usage, because that telemetry was not published before #1457.
+- **Why the per-pull-request count matters:** 92 of the 175 pull requests carry more than one retained attempt, and the largest carries 50. Under the #1452 collector those earlier attempts were never visible.
+- **What the newer attempts add:** the dataset now holds 30 published causes (`http_429` 10, `malformed_answer` 7, `http_403` 6, `cannot_verify` 4, `dedicated_config_missing` 3), 27 published latencies and 11 published token-usage records. The baseline file itself carries only 2 causes and no token usage, because that telemetry was not published before #1457.
 - **What the dataset does NOT settle:** the baseline retained the concern count of each run but not the concern details, so the clean-versus-challenged question stays open for the 419 imported attempts. The summary reports them as not assessed rather than as clean.
 
 Three known limits of the retained data:

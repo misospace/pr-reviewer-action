@@ -993,6 +993,9 @@ carried. The rules that follow from that key:
   surface of that pull request. A partly read pull request, a read the page
   bound cut short, and a pull request the collection did not look for never
   mark an attempt absent.
+- A forge that caps the page size below the requested page size can end the
+  walk early, and the collector then reads fewer items than the forge holds.
+  That defect lives in the shared capability and is tracked in #1487.
 - A dataset file of another schema is refused. The collector never guesses a
   migration.
 
