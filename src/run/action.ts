@@ -494,6 +494,13 @@ async function runActionPipeline(
       // published marker and body only through these.
       ...(review.partialCoverage ? { partialCoverage: review.partialCoverage } : {}),
       ...(review.ciState !== undefined ? { ciState: review.ciState } : {}),
+      // #1449: the run's derived-obligation state reaches the PUBLISHED
+      // marker only through this, in process — same as partialCoverage/
+      // ciState above. It is disclosure, not a gate: the approval decision
+      // already ran in the review step, so this value only tells a reader
+      // why a trusted approve was withheld. Absent when the feature is off,
+      // so the published marker keeps its pre-#1449 bytes exactly.
+      ...(review.derivedObligationState !== undefined ? { derivedObligationState: review.derivedObligationState } : {}),
       // #1455: the verifier's telemetry (the unscored cause, the measured
       // latency, the provider's token counts) reaches the published marker
       // only through this, in process — same as partialCoverage/ciState

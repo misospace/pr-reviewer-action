@@ -486,6 +486,11 @@ function strictRequestChangesDetail(input: {
   unverifiedGrounding: boolean;
   forced: boolean;
   obligations?: readonly string[];
+  /** #1449: the unresolved DERIVED rows. They are attributed apart from the
+   * review-owned required evidence: a derived row is an unresolved
+   * architectural obligation, not a missing required check, and the note
+   * must not read as a defect claim. */
+  derivedObligations?: readonly string[];
 }): string {
   const parts: string[] = [];
   if (input.counts.blocking > 0) {
@@ -499,6 +504,12 @@ function strictRequestChangesDetail(input: {
   }
   if (input.obligations && input.obligations.length > 0) {
     parts.push(`required review evidence unresolved: ${input.obligations.join(", ")} (#1381)`);
+  }
+  // #1449: the derived rows get their own part — same shape, own
+  // attribution. A run without derived rows keeps the note byte-identical
+  // to the pre-#1449 text.
+  if (input.derivedObligations && input.derivedObligations.length > 0) {
+    parts.push(`derived architectural obligation unresolved: ${input.derivedObligations.join(", ")} (#1449)`);
   }
   if (parts.length === 0) {
     // No findings, no unverified, no forced — the reviewer would be a
@@ -547,13 +558,30 @@ function strictRequestChangesDetail(input: {
  */
 export function applyStrictVerdictPolicy(
   artifact: ReviewArtifact,
-  options: { modelVerdict: string; forced: boolean; unresolvedReviewObligations?: readonly string[] },
+  options: {
+    modelVerdict: string;
+    forced: boolean;
+    unresolvedReviewObligations?: readonly string[];
+    /** #1449: the unresolved DERIVED rows, attributed apart from the
+     * review-owned required evidence. They hold the same approval
+     * semantics — an unresolved row never certifies an approve — but the
+     * published note names them as derived architectural obligations. */
+    unresolvedDerivedObligations?: readonly string[];
+  },
 ): StrictVerdictOutcome {
   const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
   const modelVerdict = options.modelVerdict;
   const counts = severityCounts(findings);
   const unverifiedGrounding = findings.some(isUnverifiedBlockingGrounding);
   const unresolvedObligations = options.unresolvedReviewObligations ?? [];
+  const unresolvedDerivedObligations = options.unresolvedDerivedObligations ?? [];
+  const detail = (): string => strictRequestChangesDetail({
+    counts,
+    unverifiedGrounding,
+    forced: options.forced,
+    obligations: unresolvedObligations,
+    derivedObligations: unresolvedDerivedObligations,
+  });
 
   let verdict: VerdictValue;
   let overridden: boolean;
@@ -565,7 +593,7 @@ export function applyStrictVerdictPolicy(
     if (overridden) {
       appendStrictNote(
         artifact,
-        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
+        detail(),
         modelVerdict,
       );
     }
@@ -598,11 +626,11 @@ export function applyStrictVerdictPolicy(
     if (overridden) {
       appendStrictNote(
         artifact,
-        strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
+        detail(),
         modelVerdict,
       );
     }
-  } else if (unresolvedObligations.length > 0) {
+  } else if (unresolvedObligations.length > 0 || unresolvedDerivedObligations.length > 0) {
     // #1381: the ANTI-RELAX half of the review-obligation contract. A review-
     // owned obligation is unresolved: this mapping never publishes approve,
     // whichever verdict the model recommended, and the attribution note names
@@ -611,12 +639,15 @@ export function applyStrictVerdictPolicy(
     // `failClosedEnforcementFired`, so the forced branch above owns it; this
     // branch is the standalone guarantee for direct callers of the mapping
     // (and holds the model's own request_changes with `overridden: false`).
+    // #1449: an unresolved DERIVED row holds the same semantics — it is a
+    // review-owned row the reviewer was equipped to discharge — so it
+    // withholds an approve here too, under its own attribution.
     verdict = "request_changes";
     overridden = modelVerdict !== "request_changes";
     source = overridden ? "enforcement" : "model";
     appendStrictNote(
       artifact,
-      strictRequestChangesDetail({ counts, unverifiedGrounding, forced: options.forced, obligations: unresolvedObligations }),
+      detail(),
       modelVerdict,
     );
   } else {

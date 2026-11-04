@@ -111,6 +111,13 @@ export interface PublishInput {
    * skip can tell a stale carried request_changes from a live one. Omitted
    * when the caller did not read CI. */
   ciState?: string;
+  /** #1449: the run's derived-obligation state ("complete" | "unresolved" |
+   * "unavailable"), present ONLY when the derived-obligation feature is
+   * enabled. It rides the published metadata marker so a reader of the
+   * review can tell that a trusted approve was withheld because a derived
+   * architectural obligation stayed undischarged. Absent when the run has
+   * no state — the marker then keeps its pre-#1449 bytes exactly. */
+  derivedObligationState?: string;
   /** Forgejo inline-comment position backend. */
   forgejoPositions: boolean;
   /** #810: deterministic partial-coverage record from the tool harness.
@@ -1208,20 +1215,42 @@ function renderStrictStateBlock(options: {
  * approve_forks). A clean verdict withheld by the scope policy stays
  * advisory — a blocking REQUEST_CHANGES would invent an issue the model
  * did not find.
+ *
+ * #1449: the run's derived-obligation state joins the guardrails. An
+ * `unresolved` or `unavailable` state means a derived architectural
+ * obligation was never discharged, so a native approval must not
+ * certify this review — the publish boundary cannot be a way around the
+ * obligation contract. The withholding stays ADVISORY (the native event
+ * becomes a COMMENT, never a blocking REQUEST_CHANGES), exactly like the
+ * scope-blocked case: an incomplete review must not invent an issue.
+ * With the state absent (the common case) the result is byte-identical to
+ * the pre-#1449 one.
  */
 export function evaluateApprovalGuardrails(options: {
   verdict: string;
   approveForks: boolean;
   isForkPr: boolean | null;
-}): { canApprove: boolean; scopeBlocked: boolean; verdictAllowsApproval: boolean; isForkPr: boolean | null } {
+  /** #1449: the run's derived-obligation state, when the feature is on. */
+  derivedObligationState?: string;
+}): {
+  canApprove: boolean;
+  scopeBlocked: boolean;
+  verdictAllowsApproval: boolean;
+  isForkPr: boolean | null;
+  /** #1449: present only when the derived state withheld the approval. */
+  derivedBlocked?: boolean;
+} {
   const verdictAllowsApproval = options.verdict === "approve";
   const isFork = options.isForkPr ?? true;
   const scopeBlocked = verdictAllowsApproval && isFork && !options.approveForks;
+  const derivedBlocked = verdictAllowsApproval
+    && (options.derivedObligationState === "unresolved" || options.derivedObligationState === "unavailable");
   return {
-    canApprove: verdictAllowsApproval && !scopeBlocked,
+    canApprove: verdictAllowsApproval && !scopeBlocked && !derivedBlocked,
     scopeBlocked,
     verdictAllowsApproval,
     isForkPr: options.isForkPr,
+    ...(derivedBlocked ? { derivedBlocked: true } : {}),
   };
 }
 
@@ -1523,6 +1552,12 @@ export async function publishReview(
     // marker keeps its pre-#1455 bytes when the verifier was disabled, or
     // when a call reported no usage.
     ...(input.confidenceTelemetry !== undefined ? { confidenceTelemetry: input.confidenceTelemetry } : {}),
+    // #1449: the run's derived-obligation state, only when the run has one
+    // (the feature is enabled) — the marker keeps its pre-#1449 bytes when
+    // the run has no state. The marker builder validates the value against
+    // the three closed states and omits the key otherwise, so an unknown
+    // value is never published.
+    ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
     actionVersion: ACTION_VERSION,
   };
   if (input.partialCoverage) {
@@ -1830,6 +1865,7 @@ export async function publishReview(
         verdict: input.verdict,
         approveForks: input.approveForks,
         isForkPr: input.isForkPr,
+        ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
       });
       // #1145: the publish mode is authoritative — a valid final verdict maps
       // to its native event. Coverage/requirement-trace incompleteness does
@@ -1892,6 +1928,26 @@ export async function publishReview(
         body += `\n> **Approval withheld by scope policy**: ${scope} and native approvals for fork pull requests are disabled (\`approve-forks: ${input.approveForks}\`), so ${advisory}.\n`;
         messages.push(
           `Withholding native approval for #${input.prNumber} (cross-repository PR, approve_forks=${input.approveForks}, is_fork=${guardrails.isForkPr ?? "unknown"})`,
+        );
+      } else if (input.mode === "review_verdict" && input.verdict === "approve" && guardrails.derivedBlocked === true) {
+        // #1449: the derived-obligation state withholds the native approval
+        // at the publish boundary too — a native `review_verdict` approval
+        // must not be a way around the obligation contract. The withholding
+        // stays ADVISORY, exactly like the scope-policy case above: the
+        // native event becomes a COMMENT, never a blocking REQUEST_CHANGES,
+        // because an incomplete review must not invent an issue.
+        const state = input.derivedObligationState ?? "unresolved";
+        const gap = state === "unavailable"
+          ? "the derived architectural obligations could not be fully derived, so their verification coverage is unknown"
+          : "a derived architectural obligation was not discharged by this review";
+        // #752: a review with open findings or a coverage gap must not
+        // call itself clean, even when its verdict is an approve.
+        const advisory = reviewResult === "clean"
+          ? "this clean review is advisory"
+          : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
+        body += `\n> **Approval withheld by derived-obligation state**: ${gap}, so ${advisory}.\n`;
+        messages.push(
+          `Withholding native approval for #${input.prNumber} (derived obligation state: ${state})`,
         );
       } else if (input.mode === "review_verdict" && input.verdict === "approve" && coverageIncomplete && nativeSurface.supported) {
         // #1145: the verdict still publishes as a native approval, but never

@@ -326,6 +326,29 @@ function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
   return { partialCoverage: partialCoverageOf(harness), unknown: false, requiredChecks, incompleteReason };
 }
 
+/** #1449: the run's derived-obligation state, read from the run dir's own
+ * `review-coverage.json` artifact (never cwd, never ambient env).
+ *
+ * This is the ONE seam the standalone `publish` CLI reads the state through,
+ * so the composite action and the standalone CLI publish the SAME record from
+ * the SAME run — neither path re-derives the state.
+ *
+ * Unlike the coverage record, this is DISCLOSURE, not a gate: the approval
+ * decision already ran in the review step, so an unreadable artifact must
+ * never change a verdict. A missing, unreadable, or structurally
+ * unrecognized artifact therefore yields `undefined` (the key is simply not
+ * published), and only the three closed states are ever carried. */
+function derivedObligationStateFromRunDir(env: NodeJS.ProcessEnv): string | undefined {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return undefined;
+  const record = readJsonObject(join(runDir, "review-coverage.json"));
+  if (record === null) return undefined;
+  const state = record.derived_obligation_state;
+  return state === "complete" || state === "unresolved" || state === "unavailable"
+    ? state
+    : undefined;
+}
+
 /** #1005: read the persisted reviewer-routing plan from the run dir (never
  * cwd). A missing, unparseable, or structurally unrecognizable plan yields
  * `undefined` (no routing) so an uncertain plan can never mutate the forge. */
@@ -429,6 +452,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
   const coverage = partialCoverageFromRunDir(env);
   const reviewRouting = reviewRoutingFromRunDir(env);
   const confidenceTelemetry = confidenceTelemetryFromRunDir(env);
+  const derivedObligationState = derivedObligationStateFromRunDir(env);
   return {
     mode: publishMode(env.PUBLISH_MODE),
     reviewMarkdown: env.REVIEW_MARKDOWN ?? "",
@@ -526,6 +550,12 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     // artifact so the standalone `publish` CLI publishes the SAME values the
     // composite action does. Absent when the run measured none of them.
     ...(confidenceTelemetry !== undefined ? { confidenceTelemetry } : {}),
+    // #1449: the run's derived-obligation state, read back from the run
+    // dir's own artifact so the standalone `publish` CLI publishes the SAME
+    // record the composite action does. Disclosure only: an unreadable
+    // artifact omits the value (it never changes a verdict — the approval
+    // decision already ran in the review step).
+    ...(derivedObligationState !== undefined ? { derivedObligationState } : {}),
     // #1005: the deterministic reviewer-routing plan the review step persisted
     // (read from the run dir, never cwd). Absent when routing did not run.
     ...(reviewRouting ? { reviewRouting } : {}),
