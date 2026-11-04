@@ -674,9 +674,21 @@ test("#1003: enabling triage changes no tool, fork, evidence or routing capabili
     // latency fields (and the verdict-turn latency) while keeping every
     // deterministic field (round number, token usage, tool-disposition counts),
     // so triage still cannot change the tool/budget/evidence surface.
+    // #1466: the transport measurements (first byte, first content, decode
+    // rate) are run-to-run timing too — the same reason the latency fields
+    // above are stripped. The deterministic transport facts (attempt count,
+    // wire-call count, stop reason, cache breakdown) stay compared.
     const stripRoundLatency = (r: unknown): unknown =>
       r && typeof r === "object"
-        ? { ...r, model_sec: undefined, tool_elapsed_sec: undefined, wall_clock_remaining_sec: undefined }
+        ? {
+            ...r,
+            model_sec: undefined,
+            tool_elapsed_sec: undefined,
+            wall_clock_remaining_sec: undefined,
+            ttft_sec: undefined,
+            first_event_sec: undefined,
+            decode_tokens_per_sec: undefined,
+          }
         : r;
     return {
       ...harness,
@@ -698,6 +710,12 @@ test("#1003: enabling triage changes no tool, fork, evidence or routing capabili
             ? {
               ...(tel.verdict as Record<string, unknown>),
               model_sec: undefined,
+              // #1466: the verdict turn's transport timings are run-to-run
+              // measurements too — stripped for the same reason as the
+              // latency fields above.
+              ttft_sec: undefined,
+              first_event_sec: undefined,
+              decode_tokens_per_sec: undefined,
               // #1199: superseded verdict records (a #1145 refresh that
               // replaced the standing verdict) carry run-to-run latency too —
               // strip it the same way while keeping the token fields.

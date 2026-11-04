@@ -57,13 +57,27 @@ function flushTool(state: { id: string; name: string; argsParts: string[] } | nu
   return call;
 }
 
-/** #910: attach cache counts only when the provider reported any, so a
- * cache-less response keeps the exact v2 usage shape. */
+/** #910: the OpenAI path attaches the cache counts only when they are
+ * greater than zero, so a cache-less response keeps the exact v2 usage
+ * shape. */
 function withCache(usage: NormalizedUsage, cacheReadTokens: number, cacheWriteTokens: number): NormalizedUsage {
   return {
     ...usage,
     ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
     ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
+  };
+}
+
+/** #1466: the Anthropic path attaches a cache counter the provider
+ * REPORTED even when its value is zero — a reported zero is a measurement
+ * ("nothing was cached"), so the streamed turn must publish the same value
+ * the identical non-streamed body publishes. A counter the provider never
+ * reported stays absent (`null` here), exactly as before. */
+function withReportedCache(usage: NormalizedUsage, cacheReadTokens: number | null, cacheWriteTokens: number | null): NormalizedUsage {
+  return {
+    ...usage,
+    ...(cacheReadTokens !== null ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== null ? { cacheWriteTokens } : {}),
   };
 }
 
@@ -189,15 +203,87 @@ interface AnthropicToolBlock {
   index: number | null;
 }
 
+/**
+ * #1466: the Anthropic usage fields, tracked PER FIELD.
+ *
+ * Anthropic's `message_delta.usage.output_tokens` is the CUMULATIVE output
+ * count of the turn, not a delta, and MiniMax/LiteLLM report the
+ * authoritative input and cache counters in that same `message_delta` —
+ * while their `message_start` carries only a `{input_tokens: 0,
+ * output_tokens: 0}` placeholder. So the counters are read per field and
+ * never added up: adding them would double count the same turn (the
+ * placeholder plus the real count).
+ *
+ * WHICH report of a field wins is decided by the zero rule. Anthropic's
+ * counters are cumulative and never decrease, so a zero report that
+ * follows a non-zero one is a PLACEHOLDER, not a measurement: taking it
+ * would lose the real counters and reproduce the #1459 symptom
+ * (`prompt=0 cached=-`) in the opposite order. So a non-zero report
+ * replaces the earlier value, a zero report never replaces a non-zero
+ * value, a field only ever reported as zero keeps its zero (the provider
+ * DID report it), and a field that was never reported stays unreported.
+ */
+interface AnthropicUsageField {
+  /** The last NON-ZERO report of this field. */
+  lastNonZero: number | null;
+  /** True once the provider reported this field at all — a zero counts. */
+  reported: boolean;
+}
+
+interface AnthropicUsageState {
+  inputTokens: AnthropicUsageField;
+  outputTokens: AnthropicUsageField;
+  cacheReadTokens: AnthropicUsageField;
+  cacheWriteTokens: AnthropicUsageField;
+}
+
+/** #1466: a usage field the provider has not reported yet. */
+function unreportedUsageField(): AnthropicUsageField {
+  return { lastNonZero: null, reported: false };
+}
+
+/** #1466: read one reported counter into a field. A non-zero report is
+ * authoritative and replaces the earlier value; a zero report is recorded
+ * as reported but never displaces a non-zero value. */
+function readUsageField(field: AnthropicUsageField, value: unknown): void {
+  if (typeof value !== "number") return;
+  field.reported = true;
+  if (value !== 0) field.lastNonZero = value;
+}
+
+/** #1466: the value a field carries — its last non-zero report, the zero it
+ * was only ever reported as, or null when the provider never reported it. */
+function resolvedUsageField(field: AnthropicUsageField): number | null {
+  if (field.lastNonZero !== null) return field.lastNonZero;
+  return field.reported ? 0 : null;
+}
+
+/** #1466: read one Anthropic usage object into the per-field state. A
+ * field the event does not report keeps its earlier value (a cache
+ * counter reported only in `message_start` survives a `message_delta`
+ * that carries none); a field the event reports is read under the zero
+ * rule (see `AnthropicUsageField`). */
+function readAnthropicUsage(usage: Record<string, unknown>, state: AnthropicUsageState): void {
+  readUsageField(state.inputTokens, usage.input_tokens);
+  readUsageField(state.outputTokens, usage.output_tokens);
+  readUsageField(state.cacheReadTokens, usage.cache_read_input_tokens);
+  readUsageField(state.cacheWriteTokens, usage.cache_creation_input_tokens);
+}
+
 function reassembleAnthropic(text: string): NormalizedModelResponse {
   const contentParts: string[] = [];
   const toolCalls: NormalizedToolCall[] = [];
   let id = "";
   let model = "";
-  let promptTokens = 0;
-  let cacheReadTokens = 0;
-  let cacheWriteTokens = 0;
-  let completionTokens = 0;
+  // #1466: the usage counters are tracked per field (the last non-zero
+  // report wins) — see `AnthropicUsageState` for why they must never be
+  // summed.
+  const usageState: AnthropicUsageState = {
+    inputTokens: unreportedUsageField(),
+    outputTokens: unreportedUsageField(),
+    cacheReadTokens: unreportedUsageField(),
+    cacheWriteTokens: unreportedUsageField(),
+  };
   let stopReason = "";
   let error: unknown;
   let openBlock: AnthropicToolBlock | null = null;
@@ -234,10 +320,7 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
       id = asString(message.id) ?? id;
       model = asString(message.model) ?? model;
       const usage = isRecord(message.usage) ? message.usage : {};
-      if (typeof usage.input_tokens === "number") promptTokens += usage.input_tokens;
-      if (typeof usage.output_tokens === "number") completionTokens += usage.output_tokens;
-      if (typeof usage.cache_read_input_tokens === "number") cacheReadTokens += usage.cache_read_input_tokens;
-      if (typeof usage.cache_creation_input_tokens === "number") cacheWriteTokens += usage.cache_creation_input_tokens;
+      readAnthropicUsage(usage, usageState);
       continue;
     }
     if (event.type === "content_block_start") {
@@ -282,7 +365,7 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
       const reason = asString(delta.stop_reason);
       if (reason) stopReason = reason;
       const usage = isRecord(event.usage) ? event.usage : {};
-      if (typeof usage.output_tokens === "number") completionTokens += usage.output_tokens;
+      readAnthropicUsage(usage, usageState);
       continue;
     }
     if (event.type === "message_stop") {
@@ -293,7 +376,17 @@ function reassembleAnthropic(text: string): NormalizedModelResponse {
 
   let finishReason = stopReason || "stop";
   if (toolCalls.length > 0 && finishReason === "tool_use") finishReason = "tool_calls";
-  const usage = withCache({ promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }, cacheReadTokens, cacheWriteTokens);
+  // #1466: the reported counters, per field — never summed across events.
+  // `promptTokens` is the UNCACHED input count under Anthropic semantics
+  // (the cache counters are reported outside it); the #910 accounting in
+  // `normalizeUsageTelemetry` adds the cache tokens to it.
+  const promptTokens = resolvedUsageField(usageState.inputTokens) ?? 0;
+  const completionTokens = resolvedUsageField(usageState.outputTokens) ?? 0;
+  // #1466: a cache counter the provider reported rides the usage even when
+  // its value is zero; a counter it never reported stays absent.
+  const cacheReadTokens = resolvedUsageField(usageState.cacheReadTokens);
+  const cacheWriteTokens = resolvedUsageField(usageState.cacheWriteTokens);
+  const usage = withReportedCache({ promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }, cacheReadTokens, cacheWriteTokens);
   return withBlockCounts(
     baseResponse(id, model, contentParts.join(""), toolCalls, finishReason, usage, error),
     thinkingBlocks,
@@ -324,4 +417,52 @@ function adoptPlainErrorBody(text: string, response: NormalizedModelResponse): N
 export function reassembleSse(text: string, apiFormat: string): NormalizedModelResponse {
   const response = apiFormat === "anthropic" ? reassembleAnthropic(text) : reassembleOpenai(text);
   return adoptPlainErrorBody(text, response);
+}
+
+/**
+ * #1466: does this SSE payload carry CONTENT?
+ *
+ * The transport's timing probe needs to know when the provider's answer
+ * actually started arriving, and the reassembler is the module that
+ * already knows what "content" means for each wire format — so the
+ * definition lives here and the transport calls it, and the two can
+ * never disagree.
+ *
+ * - OpenAI: a choice whose `delta` carries a non-empty text `content`, a
+ *   non-empty `reasoning_content`/`reasoning` string, or a `tool_calls`
+ *   value. An empty `tool_calls` array carries nothing, so it does not
+ *   count as content.
+ * - Anthropic: a `content_block_start` or `content_block_delta` event.
+ *
+ * A payload that is not valid JSON carries nothing: it cannot be
+ * classified, so it is never reported as content.
+ */
+export function isContentBearingSseFrame(payload: string, apiFormat: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return false;
+  }
+  if (!isRecord(parsed)) return false;
+  if (apiFormat === "anthropic") {
+    return parsed.type === "content_block_start" || parsed.type === "content_block_delta";
+  }
+  const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
+  for (const choice of choices) {
+    if (!isRecord(choice)) continue;
+    const delta = isRecord(choice.delta) ? choice.delta : {};
+    const content = asString(delta.content);
+    if (content !== null && content !== "") return true;
+    // The two reasoning spellings are read INDEPENDENTLY: a frame that
+    // carries an empty `reasoning_content` beside a filled `reasoning`
+    // still carries content.
+    const reasoningContent = asString(delta.reasoning_content);
+    if (reasoningContent !== null && reasoningContent !== "") return true;
+    const reasoning = asString(delta.reasoning);
+    if (reasoning !== null && reasoning !== "") return true;
+    const toolCalls = delta.tool_calls;
+    if (Array.isArray(toolCalls) ? toolCalls.length > 0 : isRecord(toolCalls)) return true;
+  }
+  return false;
 }

@@ -1,9 +1,12 @@
 import http from "node:http";
 import https from "node:https";
+import { StringDecoder } from "node:string_decoder";
 import { URL } from "node:url";
 import type { ApiFormat } from "../model/types.js";
 import { maskKnownSecrets, redactText } from "../context/redact.js";
 import { applyExtraHeaders, basicAuthorizationHeaderValue } from "./headers.js";
+import { isContentBearingSseFrame } from "./sse.js";
+import type { TransportTiming } from "./timing.js";
 
 /**
  * Typed HTTP transport for model calls (#677). Replaces the v2 curl/jq wire
@@ -237,6 +240,187 @@ export interface HttpCallInput {
 export interface HttpCallResult {
   status: number;
   body: string;
+  /** #1466: when this wire call was answered — the dispatch-to-first-byte,
+   * dispatch-to-first-content, and dispatch-to-end measurements. Numbers
+   * only; never prompt, response, or tool-argument content. */
+  timing: TransportTiming;
+}
+
+/**
+ * #1466: the streamed-body scan state. The scan is OBSERVATION ONLY: the
+ * response body itself is buffered separately (under the response-byte
+ * ceiling, #745) and reassembled by `reassembleSse` exactly as before, so
+ * nothing in here can change WHAT the model answered — only WHEN its
+ * bytes arrived.
+ */
+interface SseScanState {
+  /** The decoded text not yet consumed by a complete line. */
+  pending: string;
+  /** Set when the pending buffer overflowed its ceiling: the scan stops,
+   * the body is still buffered and reassembled in full. */
+  disabled: boolean;
+  /** The `data:` payloads of the frame currently being read. SSE joins
+   * them with a newline into ONE payload, so they are collected until the
+   * frame's blank line ends it. */
+  frameData: string[];
+  /** The UTF-8 byte size of the collected `data:` payloads — the bound that
+   * actually caps the accumulator's memory. */
+  frameBytes: number;
+  /** Set when a frame exceeded a join bound (its line count or its byte
+   * size): the frame is no longer joined (a partial join could parse as a
+   * payload the provider never sent). */
+  frameOverflow: boolean;
+  /** The monotonic timestamp of the first content-bearing event, or null
+   * when the stream carried none. */
+  firstContentAt: number | null;
+}
+
+/**
+ * #1466: the scan buffer's ceiling. A provider that streams a body with
+ * no line terminator at all would otherwise grow this buffer without
+ * bound; at the ceiling the pending buffer is dropped and the scan stops.
+ * Nothing is lost by giving up on the probe: the response body is bounded
+ * by the response-byte ceiling (#745) and is reassembled in full either
+ * way.
+ */
+const MAX_SSE_SCAN_PENDING_CHARS = 1024 * 1024;
+
+/**
+ * #1466: the bound on the `data:` lines one frame may contribute to the
+ * joined payload — a LINE count and a BYTE count.
+ *
+ * The byte bound is the one that caps the memory: a single `data:` line can
+ * be as long as the scan's pending buffer allows (up to 1 MiB), so a
+ * line-count bound alone still lets a hostile stream pin tens of megabytes
+ * of joined payload. The line bound stays as a cheap second gate.
+ *
+ * Past either bound the frame's joined payload is dropped — a partial join
+ * could parse as a payload the provider never sent — and the scan carries
+ * on with the next frame.
+ *
+ * The scan's real memory bound is the response-byte ceiling (#745) plus
+ * these frame bounds: the response body itself is buffered under #745 and
+ * reassembled in full either way, so nothing is lost by giving up on the
+ * probe.
+ */
+const MAX_SSE_FRAME_DATA_LINES = 64;
+
+/** #1466: the byte ceiling for ONE frame's joined `data:` payload. */
+const MAX_SSE_FRAME_DATA_BYTES = 64 * 1024;
+
+/**
+ * #1466: one SSE payload counts as content when the wire format says so.
+ * The classification itself lives in the SSE module, so the transport and
+ * the reassembler agree on what "content" means.
+ */
+function noteSseDataPayload(state: SseScanState, payload: string, apiFormat: string): void {
+  if (state.firstContentAt !== null) return;
+  if (payload === "" || payload === "[DONE]") return;
+  if (!isContentBearingSseFrame(payload, apiFormat)) return;
+  state.firstContentAt = performance.now();
+}
+
+/**
+ * #1466: collect one frame's `data:` payload.
+ *
+ * The byte ceiling is the bound that caps the memory and the line count is
+ * a cheap second gate. Past either the frame's joined payload is dropped —
+ * a partial join could parse as a payload the provider never sent — and the
+ * scan carries on with the next frame.
+ */
+function pushFrameData(state: SseScanState, payload: string): void {
+  if (state.frameOverflow) return;
+  const bytes = Buffer.byteLength(payload, "utf8");
+  if (state.frameData.length >= MAX_SSE_FRAME_DATA_LINES || state.frameBytes + bytes > MAX_SSE_FRAME_DATA_BYTES) {
+    state.frameOverflow = true;
+    state.frameData = [];
+    state.frameBytes = 0;
+    return;
+  }
+  state.frameData.push(payload);
+  state.frameBytes += bytes;
+}
+
+/**
+ * #1466: the end of an SSE frame (its blank line). The frame's `data:`
+ * lines form ONE payload — joined with a newline, as SSE prescribes — so
+ * the joined form is inspected too: a provider whose data field spans
+ * several lines carries a payload no single line holds.
+ */
+function flushSseFrame(state: SseScanState, apiFormat: string): void {
+  const lines = state.frameData;
+  const overflowed = state.frameOverflow;
+  state.frameData = [];
+  state.frameBytes = 0;
+  state.frameOverflow = false;
+  if (overflowed || lines.length === 0) return;
+  if (lines.length === 1) {
+    // A single-line frame's payload was already inspected when the line
+    // was read.
+    return;
+  }
+  noteSseDataPayload(state, lines.join("\n"), apiFormat);
+}
+
+/**
+ * #1466: consume one decoded chunk of a streamed body.
+ *
+ * The scanner walks the text LINE by line — the SSE blank line is the
+ * frame boundary and a `data:` line inside a frame is one payload — which
+ * is exactly how the reassembler in `sse.ts` reads the same bytes, so the
+ * two agree on what a content-bearing event is. Each `data:` line is
+ * inspected as it arrives (a provider that ends its event lines with a
+ * single LF never reaches a frame boundary), and the frame's joined
+ * payload is inspected when the frame ends.
+ */
+function scanSseChunk(state: SseScanState, text: string, apiFormat: string): void {
+  if (state.disabled) return;
+  state.pending += text;
+  if (state.pending.length > MAX_SSE_SCAN_PENDING_CHARS) {
+    state.disabled = true;
+    state.pending = "";
+    state.frameData = [];
+    state.frameBytes = 0;
+    state.frameOverflow = false;
+    return;
+  }
+  let cursor = 0;
+  while (cursor < state.pending.length) {
+    const newline = state.pending.indexOf("\n", cursor);
+    if (newline === -1) break;
+    const line = state.pending.slice(cursor, newline).trim();
+    cursor = newline + 1;
+    if (line === "") {
+      // The frame boundary.
+      flushSseFrame(state, apiFormat);
+      continue;
+    }
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (payload === "") continue;
+    pushFrameData(state, payload);
+    noteSseDataPayload(state, payload, apiFormat);
+  }
+  state.pending = state.pending.slice(cursor);
+}
+
+/**
+ * #1466: the end-of-response flush. The decoder may still hold bytes and
+ * the last line may arrive without its terminator; both are inspected
+ * once, at the end, so a trailing event is not missed.
+ */
+function flushSseScan(state: SseScanState, apiFormat: string, tail: string): void {
+  if (state.disabled) return;
+  const rest = `${state.pending}${tail}`.trim();
+  state.pending = "";
+  if (rest !== "" && rest.startsWith("data:")) {
+    const payload = rest.slice(5).trim();
+    if (payload !== "") {
+      pushFrameData(state, payload);
+      noteSseDataPayload(state, payload, apiFormat);
+    }
+  }
+  flushSseFrame(state, apiFormat);
 }
 
 /**
@@ -431,6 +615,11 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
     let timedOut = false;
     let connectTimedOut = false;
     let cancelListener: (() => void) | null = null;
+    // #1466: the dispatch instant every timing measurement is measured
+    // FROM — set where the request body is actually sent (below). It is a
+    // monotonic clock, so a wall-clock adjustment mid-call cannot make a
+    // duration negative or absurd.
+    let dispatchedAt = 0;
 
     const settle = (fn: () => void): void => {
       if (settled) return;
@@ -466,9 +655,22 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
         let prefixBytes = 0;
         let received = 0;
         let abandoned = false;
+        // #1466: the timing probe's own state. `firstByteAt` is the first
+        // response body byte; the scan state carries the first
+        // content-bearing event's instant. Both are null until they
+        // happen — a null never stands in for a zero.
+        let firstByteAt: number | null = null;
+        const scanState: SseScanState = { pending: "", disabled: false, frameData: [], frameBytes: 0, frameOverflow: false, firstContentAt: null };
+        // #1466: the multi-byte-safe decoder for the observation scan — a
+        // chunk boundary must never split a character.
+        const decoder = new StringDecoder("utf8");
 
         response.on("data", (chunk: Buffer) => {
           if (abandoned) return;
+          if (firstByteAt === null) firstByteAt = performance.now();
+          // #1466: the scan is observation only — the body is buffered
+          // below exactly as before, and the reassembly is unchanged.
+          if (input.stream) scanSseChunk(scanState, decoder.write(chunk), input.apiFormat);
           // Bounded diagnostic prefix first: it is capped at
           // OVERSIZE_ERROR_BODY_PREFIX_BYTES regardless of outcome, so it is
           // always safe to retain — including from the chunk that crosses
@@ -499,6 +701,21 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
         });
         response.on("end", () => {
           const body = Buffer.concat(chunks).toString("utf8");
+          // #1466: the end instant is captured AFTER the end-of-response
+          // flush: the flush can discover the first content event (a last
+          // frame that arrived without its blank line), and a content event
+          // stamped after the response end would make `firstContentSec`
+          // exceed `totalSec`.
+          if (input.stream) flushSseScan(scanState, input.apiFormat, decoder.end());
+          const endedAt = performance.now();
+          // #1466: the timing of THIS wire call, measured from the
+          // dispatch. A non-streamed call has no content event on the
+          // wire, so its `firstContentSec` stays null.
+          const timing: TransportTiming = {
+            firstEventSec: firstByteAt === null ? null : (firstByteAt - dispatchedAt) / 1000,
+            firstContentSec: scanState.firstContentAt === null ? null : (scanState.firstContentAt - dispatchedAt) / 1000,
+            totalSec: (endedAt - dispatchedAt) / 1000,
+          };
           if (status < 200 || status >= 300) {
             const retryAfterSec = parseRetryAfter(response.headers["retry-after"]);
             settle(() => reject(new TransportFailure("http_status", `model endpoint returned HTTP ${status}`, {
@@ -508,7 +725,7 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
             })));
             return;
           }
-          settle(() => resolve({ status, body }));
+          settle(() => resolve({ status, body, timing }));
         });
         response.on("error", (error: unknown) => settle(() => reject(classifySocketError(error))));
       },
@@ -564,6 +781,9 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
       request.destroy(new TransportFailure("request_timeout", "model request timed out"));
     }, Math.max(0, input.requestTimeoutSec * 1000));
 
+    // #1466: the dispatch instant — the request body goes out here, so
+    // every timing measurement is measured from here.
+    dispatchedAt = performance.now();
     request.end(input.bodyText);
   });
 }

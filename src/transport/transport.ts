@@ -3,6 +3,7 @@ import { reassembleSse } from "./sse.js";
 import { runHttpRequest, endpointUrlCredentialOrEmpty, TransportFailure } from "./http.js";
 import { callKnownSecrets } from "./headers.js";
 import { classifyTerminalProviderFailure, terminalProviderFailureLine } from "./terminal.js";
+import { attachTransportTiming, type TransportTiming } from "./timing.js";
 
 /**
  * The transport seam between request building and the wire (#677): serializes
@@ -54,6 +55,17 @@ export interface WireCallReport {
    * carries neither field. Repeated per call so a clamped retry's lowered
    * budget is observable per attempt. */
   maxTokens: number | null;
+  /** #1466: the 1-based index of THIS wire call within the request. The
+   * index counts every actual wire call the request made — including the
+   * ones a #824 clamp or a #1047 strip discarded, whose follow-up calls
+   * continue the same numbering — so a consumer can count retries without
+   * re-deriving the request's attempt tree. Optional so a report literal
+   * built by hand still compiles; the transport's own paths always set it. */
+  attempt?: number;
+  /** #1466: the timing of THIS wire call, when it produced a response.
+   * Absent when the call failed before a response body arrived: there is
+   * no timing to report, and a fabricated one would be worse than none. */
+  timing?: TransportTiming;
 }
 
 /** #1047: the structured-output surface a strip retry removed from the wire:
@@ -63,6 +75,10 @@ export type StructuredOutputSurface = "response_format" | "output_config.format"
 
 export type ChatRequestOutcome =
   | { status: "ok"; response: NormalizedModelResponse; raw: unknown;
+      /** #1466: the timing of the wire call that produced this response.
+       * Optional so an outcome a caller constructed by hand still
+       * compiles; the transport's own paths always set it. */
+      timing?: TransportTiming;
       /** #1047 (review): set only when THIS successful response came from the
        * one-shot strip retry — the request that produced it did NOT carry the
        * named parameter, so "what was enforced" reporting must reflect the
@@ -114,7 +130,12 @@ export async function runChatRequest(input: ChatRequestInput): Promise<ChatReque
  * with one bounded redacted stderr line, instead of burning the same-request
  * retry budget. Nothing else about this loop's budgets, backoff, or statuses
  * changes. */
-async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boolean, stripRemaining = true): Promise<ChatRequestOutcome> {
+async function runChatRequestLoop(
+  input: ChatRequestInput,
+  clampRemaining: boolean,
+  stripRemaining = true,
+  attemptBase = 0,
+): Promise<ChatRequestOutcome> {
   const sleep = input.sleep ?? defaultSleep;
   for (let attempt = 1; ; attempt++) {
     // #726: checked before every attempt, so an abort landing during a retry
@@ -131,10 +152,16 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
     const callStart = Date.now();
     const outcome = await runChatRequestOnce(input);
     const report = (discarded: boolean): void => {
+      // #1466: the report carries the attempt's own index and timing, so a
+      // consumer can account the discarded wire attempts exactly once and
+      // see when each of them was answered.
+      const timing = outcome.status === "ok" ? outcome.timing : undefined;
       input.onWireCall?.({
         discarded,
         elapsedSec: (Date.now() - callStart) / 1000,
         maxTokens: tokenFieldAndValue(input.payload.body)?.value ?? null,
+        attempt: attemptBase + attempt,
+        ...(timing !== undefined ? { timing } : {}),
       });
     };
     if (outcome.status === "failure") {
@@ -159,7 +186,10 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
       if (clamp !== null) {
         report(true);
         process.stderr.write(`clamped ${clamp.field} ${clamp.from} -> ${clamp.to} (${clamp.reason})\n`);
-        return runChatRequestLoop(clamp.input, false, stripRemaining);
+        // #1466: the follow-up call continues the attempt numbering, so
+        // the wire calls of one request are numbered 1..N across the whole
+        // retry tree.
+        return runChatRequestLoop(clamp.input, false, stripRemaining, attemptBase + attempt);
       }
       const strip = stripRemaining
         ? structuredOutputStripRetry(input, outcome.failure)
@@ -167,7 +197,7 @@ async function runChatRequestLoop(input: ChatRequestInput, clampRemaining: boole
       if (strip !== null) {
         report(true);
         process.stderr.write(`removed ${strip.surface} for one retry (HTTP 400 body named it)\n`);
-        const retryOutcome = await runChatRequestLoop(strip.input, clampRemaining, false);
+        const retryOutcome = await runChatRequestLoop(strip.input, clampRemaining, false, attemptBase + attempt);
         // #1047 (review): a successful strip retry is tagged with the surface
         // it dropped, so callers can report the EFFECTIVE request rather than
         // the configuration; a failed one returns unchanged. The nested loop
@@ -388,10 +418,16 @@ export async function runChatRequestOnce(input: ChatRequestInput): Promise<ChatR
           failure: new TransportFailure("network", "model endpoint returned a non-JSON body"),
         };
       }
-      return { status: "ok", response: normalizeNonStreamedResponse(parsed), raw: parsed };
+      // #1466: the timing rides the objects the caller receives — the
+      // parsed provider body (when it is an object) and the normalized
+      // projection alike. The property is non-enumerable, so the persisted
+      // response body stays byte-identical to what the provider sent.
+      if (parsed !== null && typeof parsed === "object") attachTransportTiming(parsed, result.timing);
+      const response = attachTransportTiming(normalizeNonStreamedResponse(parsed), result.timing);
+      return { status: "ok", response, raw: parsed, timing: result.timing };
     }
-    const response = reassembleSse(result.body, input.apiFormat);
-    return { status: "ok", response, raw: response };
+    const response = attachTransportTiming(reassembleSse(result.body, input.apiFormat), result.timing);
+    return { status: "ok", response, raw: response, timing: result.timing };
   } catch (error) {
     if (error instanceof TransportFailure) return { status: "failure", failure: error };
     throw error;

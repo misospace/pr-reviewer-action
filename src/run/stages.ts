@@ -55,6 +55,7 @@ import { runToolHarness, type HarnessDeps, type HarnessTransport, type TraceGapP
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
 import { extraHeadersForEnv } from "../transport/headers.js";
+import { attachTransportTiming, type TransportTiming } from "../transport/timing.js";
 import type { NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { TierBudgets } from "../corpus/budgets.js";
 import type { StageEnv } from "./env.js";
@@ -667,6 +668,11 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     // stays fail-soft per request; unset config yields `undefined` and the
     // key is omitted entirely (byte-identical request, nothing to merge).
     const extra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
+    // #1466: count the request's ACTUAL wire calls. The #1200 hook fires once
+    // per wire call — including the ones a 429/5xx backoff, a #824 clamp or a
+    // #1047 strip discarded — so the count is the HTTP attempts the request
+    // really made, not the number of calls the loop believes it made.
+    let wireCalls = 0;
     const outcome = await runChatRequest({
       baseUrl,
       apiFormat: apiFormat === "anthropic" ? "anthropic" : "openai",
@@ -684,6 +690,7 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
       // #726 (engine cancellation): the harness's model turns bind to the
       // run's cancellation scope; unset signal keeps the request unchanged.
       ...(signal !== undefined ? { signal } : {}),
+      onWireCall: () => { wireCalls += 1; },
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the
     // ai-api-format hint on a 404) instead of the bare "model endpoint
@@ -696,7 +703,17 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     // provider JSON. The loop's tool-call extraction and usage accounting
     // read the OpenAI chat shape (as v2's reassembler produced), so project
     // it; a non-streamed turn's raw provider JSON passes through untouched.
-    return (payload as Record<string, unknown>).stream === true ? normalizedToOpenAiChat(outcome.response) : outcome.raw;
+    const body = (payload as Record<string, unknown>).stream === true ? normalizedToOpenAiChat(outcome.response) : outcome.raw;
+    // #1466: the transport probe rides the body the caller receives, on BOTH
+    // paths. The streamed projection is a NEW object, so the probe the
+    // transport attached to the reassembled response would be lost here —
+    // and a probe that never reaches the caller is a measurement nobody can
+    // attribute. The wire-call count is added on the way out: the transport
+    // measures ONE HTTP turn and does not know how many attempts its caller
+    // made.
+    const timing: TransportTiming | undefined = outcome.timing;
+    if (timing === undefined) return body;
+    return attachTransportTiming(body, { ...timing, wireCalls });
   };
 }
 

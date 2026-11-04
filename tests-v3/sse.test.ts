@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { reassembleSse } from "../src/transport/sse.js";
+import { isContentBearingSseFrame, reassembleSse } from "../src/transport/sse.js";
 
 const data = (obj: unknown): string => `data: ${JSON.stringify(obj)}`;
 
@@ -110,7 +110,11 @@ test("truncated stream flushes what it has", () => {
   assert.equal(response.finishReason, "stop");
 });
 
-test("anthropic streamed text and message_delta usage addition", () => {
+test("anthropic streamed usage: the last NON-ZERO report of a field wins (message_delta's output_tokens is cumulative)", () => {
+  // #1466: Anthropic's `message_delta.usage.output_tokens` is the CUMULATIVE
+  // output count of the turn, not a delta — so it REPLACES the earlier
+  // `message_start` value instead of adding to it. Adding them would count
+  // the same turn twice (the placeholder plus the real count).
   const text = [
     data({ type: "message_start", message: { id: "msg_1", model: "claude-x", usage: { input_tokens: 11, output_tokens: 1 } } }),
     data({ type: "content_block_delta", delta: { type: "text_delta", text: "Hi" } }),
@@ -122,7 +126,7 @@ test("anthropic streamed text and message_delta usage addition", () => {
   assert.equal(response.id, "msg_1");
   assert.equal(response.model, "claude-x");
   assert.equal(response.finishReason, "end_turn");
-  assert.deepEqual(response.usage, { promptTokens: 11, completionTokens: 6, totalTokens: 17 });
+  assert.deepEqual(response.usage, { promptTokens: 11, completionTokens: 5, totalTokens: 16 });
 });
 
 test("anthropic tool_use blocks accumulate input_json_delta fragments", () => {
@@ -188,6 +192,189 @@ test("plain JSON success body without SSE framing is not misread", () => {
   // No SSE data lines: nothing reassembles, and no error key exists on the body.
   assert.equal(response.content, "");
   assert.equal(response.error, undefined);
+});
+
+// ── #1466: the Anthropic usage counters are per field, last non-zero report
+// wins ──────────────────────────────────────────────────────────────────────
+// MiniMax/LiteLLM report a `{input_tokens: 0, output_tokens: 0}` placeholder
+// in `message_start` and the REAL counters in `message_delta`. Reading the
+// usage only from `message_start` made the Action log `prompt=0 cached=-`
+// for a turn the provider billed ~190k prompt tokens with ~190k cache reads.
+
+test("#1466: the real MiniMax/LiteLLM Anthropic usage shape counts the counters message_delta carries", () => {
+  const text = [
+    data({ type: "message_start", message: { id: "m1", model: "minimax", usage: { input_tokens: 0, output_tokens: 0 } } }),
+    data({ type: "content_block_delta", delta: { type: "text_delta", text: "ok" } }),
+    data({
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: {
+        input_tokens: 447,
+        cache_read_input_tokens: 189952,
+        output_tokens: 1330,
+        output_tokens_details: { thinking_tokens: 512 },
+      },
+    }),
+    data({ type: "message_stop" }),
+  ].join("\n");
+  const response = reassembleSse(text, "anthropic");
+  assert.equal(response.usage?.promptTokens, 447);
+  assert.equal(response.usage?.cacheReadTokens, 189952);
+  assert.equal(response.usage?.completionTokens, 1330);
+  assert.equal(response.usage?.totalTokens, 1777);
+  // No cache write was reported, so no cache-write field appears at all.
+  assert.equal(response.usage?.cacheWriteTokens, undefined);
+});
+
+test("#1466: a field reported by both events counts once — the later report replaces the earlier one", () => {
+  const text = [
+    data({
+      type: "message_start",
+      message: { id: "m1", usage: { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 50, cache_creation_input_tokens: 5 } },
+    }),
+    data({ type: "content_block_delta", delta: { type: "text_delta", text: "x" } }),
+    data({
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { input_tokens: 447, output_tokens: 1330, cache_read_input_tokens: 189952 },
+    }),
+    data({ type: "message_stop" }),
+  ].join("\n");
+  const response = reassembleSse(text, "anthropic");
+  // Never the sum of the two reports of the same field.
+  assert.equal(response.usage?.promptTokens, 447);
+  assert.equal(response.usage?.completionTokens, 1330);
+  // The cache READ was reported by both events and counts once — the later
+  // non-zero report wins, so the turn is not billed twice.
+  assert.equal(response.usage?.cacheReadTokens, 189952);
+  // The cache WRITE was reported only by `message_start` and survives.
+  assert.equal(response.usage?.cacheWriteTokens, 5);
+});
+
+test("#1466: cache counters reported only in message_start survive a message_delta that carries none", () => {
+  const text = [
+    data({
+      type: "message_start",
+      message: {
+        id: "m1",
+        usage: { input_tokens: 447, output_tokens: 0, cache_read_input_tokens: 189952, cache_creation_input_tokens: 2048 },
+      },
+    }),
+    data({ type: "content_block_delta", delta: { type: "text_delta", text: "x" } }),
+    data({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1330 } }),
+    data({ type: "message_stop" }),
+  ].join("\n");
+  const response = reassembleSse(text, "anthropic");
+  assert.equal(response.usage?.promptTokens, 447);
+  assert.equal(response.usage?.cacheReadTokens, 189952);
+  assert.equal(response.usage?.cacheWriteTokens, 2048);
+  assert.equal(response.usage?.completionTokens, 1330);
+});
+
+test("#1466: a zero placeholder in the LATER event never replaces the real counters of the earlier one", () => {
+  // The INVERSE of the MiniMax shape: the real counters arrive in
+  // `message_start` and the later `message_delta` carries a zero
+  // placeholder. Anthropic's counters are cumulative and never decrease, so
+  // the zero is a placeholder — taking it would reproduce the #1459 symptom
+  // (`prompt=0 cached=-`) in the opposite order.
+  const text = [
+    data({
+      type: "message_start",
+      message: {
+        id: "m1",
+        model: "minimax",
+        usage: { input_tokens: 447, output_tokens: 0, cache_read_input_tokens: 189952, cache_creation_input_tokens: 2048 },
+      },
+    }),
+    data({ type: "content_block_delta", delta: { type: "text_delta", text: "x" } }),
+    data({
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { input_tokens: 0, output_tokens: 1330, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    }),
+    data({ type: "message_stop" }),
+  ].join("\n");
+  const response = reassembleSse(text, "anthropic");
+  // The real counters survive the zero placeholder.
+  assert.equal(response.usage?.promptTokens, 447);
+  assert.equal(response.usage?.cacheReadTokens, 189952);
+  assert.equal(response.usage?.cacheWriteTokens, 2048);
+  // The one field the later event reported a NON-ZERO count for wins.
+  assert.equal(response.usage?.completionTokens, 1330);
+});
+
+test("#1466: a cache counter the provider reported as zero rides the usage as a reported zero", () => {
+  // A reported zero is a measurement ("nothing was cached"), so the streamed
+  // turn publishes the same value the identical non-streamed body publishes.
+  const text = [
+    data({
+      type: "message_start",
+      message: { id: "m1", usage: { input_tokens: 447, output_tokens: 0, cache_read_input_tokens: 0 } },
+    }),
+    data({ type: "content_block_delta", delta: { type: "text_delta", text: "x" } }),
+    data({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 12 } }),
+    data({ type: "message_stop" }),
+  ].join("\n");
+  const response = reassembleSse(text, "anthropic");
+  assert.equal(response.usage?.cacheReadTokens, 0);
+  assert.equal(response.usage?.promptTokens, 447);
+  // The cache WRITE was never reported, so it stays absent.
+  assert.equal(response.usage?.cacheWriteTokens, undefined);
+});
+
+test("#1466: a cache counter the provider never reported stays absent", () => {
+  const text = [
+    data({ type: "message_start", message: { id: "m1", usage: { input_tokens: 447, output_tokens: 0 } } }),
+    data({ type: "content_block_delta", delta: { type: "text_delta", text: "x" } }),
+    data({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 12 } }),
+    data({ type: "message_stop" }),
+  ].join("\n");
+  const response = reassembleSse(text, "anthropic");
+  assert.equal(response.usage?.cacheReadTokens, undefined);
+  assert.equal(response.usage?.cacheWriteTokens, undefined);
+});
+
+// ── #1466: what counts as a content-bearing stream event ───────────────────
+
+test("#1466: isContentBearingSseFrame: an OpenAI text, reasoning, or tool-call delta is content", () => {
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ choices: [{ delta: { content: "hi" } }] }), "openai"), true);
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ choices: [{ delta: { reasoning_content: "chain" } }] }), "openai"), true);
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ choices: [{ delta: { reasoning: "chain" } }] }), "openai"), true);
+  // The two reasoning spellings are read independently: an empty
+  // `reasoning_content` beside a filled `reasoning` still carries content.
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ choices: [{ delta: { reasoning_content: "", reasoning: "chain" } }] }), "openai"), true);
+  assert.equal(
+    isContentBearingSseFrame(JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "t", function: { name: "f", arguments: "{}" } }] } }] }), "openai"),
+    true,
+  );
+  // The LiteLLM single-object `tool_calls` shape is content too.
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ choices: [{ delta: { tool_calls: { index: 0, id: "t" } } }] }), "openai"), true);
+});
+
+test("#1466: isContentBearingSseFrame: an OpenAI frame without content is not content", () => {
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ choices: [{ delta: {} }] }), "openai"), false);
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ choices: [{ delta: { content: "" } }] }), "openai"), false);
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ choices: [{ delta: { reasoning_content: "" } }] }), "openai"), false);
+  // An empty `tool_calls` array carries nothing.
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ choices: [{ delta: { tool_calls: [] } }] }), "openai"), false);
+  // A frame with no choices at all (a usage-only chunk) is not content.
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ usage: { prompt_tokens: 1 } }), "openai"), false);
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ id: "c1" }), "openai"), false);
+});
+
+test("#1466: isContentBearingSseFrame: an Anthropic content block event is content, the envelope events are not", () => {
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }), "anthropic"), true);
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: "hi" } }), "anthropic"), true);
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ type: "message_start", message: { id: "m1", usage: { input_tokens: 1 } } }), "anthropic"), false);
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ type: "ping" }), "anthropic"), false);
+  assert.equal(isContentBearingSseFrame(JSON.stringify({ type: "message_stop" }), "anthropic"), false);
+});
+
+test("#1466: isContentBearingSseFrame: a malformed payload is never content", () => {
+  assert.equal(isContentBearingSseFrame("not json", "openai"), false);
+  assert.equal(isContentBearingSseFrame("not json", "anthropic"), false);
+  assert.equal(isContentBearingSseFrame("", "openai"), false);
+  assert.equal(isContentBearingSseFrame("[1,2,3]", "openai"), false);
 });
 
 // ── #1047: block-shape counters for failure diagnostics ──────────────────

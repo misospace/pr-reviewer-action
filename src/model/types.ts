@@ -111,9 +111,11 @@ export interface NormalizedUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
-  /** #910: prompt-cache reads/writes as the provider reported them, set only
-   * when non-zero. OpenAI-style providers count reads inside promptTokens;
-   * Anthropic reports them outside input_tokens. */
+  /** #910: prompt-cache reads/writes as the provider reported them.
+   * OpenAI-style providers count reads inside promptTokens; Anthropic reports
+   * them outside input_tokens. The OpenAI path sets them only when non-zero;
+   * the Anthropic path (#1466) sets a counter the provider REPORTED even when
+   * its value is zero, and leaves an unreported counter absent. */
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
 }

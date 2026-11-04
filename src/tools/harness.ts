@@ -70,9 +70,14 @@ import {
   STOP_REQUEST_ERROR,
   STOP_WALL_CLOCK,
   adaptiveLoopBudgets,
+  decodeTokensPerSec,
   dependencyObligationForCheckText,
   driveToolLoop,
   extractToolCalls,
+  sanitizeFinishReasonToken,
+  sanitizedFinishReason,
+  summarizeTransportProbes,
+  type AcceptedAttemptTiming,
   type LoopOutcome,
   type NativeLoopRoundTelemetry,
   type RequiredEvidenceRow,
@@ -80,6 +85,7 @@ import {
 } from "./loop.js";
 import { DEPENDENCY_EVIDENCE_KINDS } from "../classification/classify.js";
 import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
+import { readTransportTiming, type TransportTiming } from "../transport/timing.js";
 import {
   COVERAGE_NOTICE_MAX_ITEMS,
   computePartialCoverage,
@@ -770,6 +776,17 @@ export interface NativeVerdictOutcome {
    * synthesized from elapsed time. Without this fold a retried verdict turn
    * under-reported its usage (only the final attempt's body was read). */
   usageTotals: UsageTelemetry;
+  /** #1466: the verdict turn's transport measurements, taken from the
+   * ACCEPTED attempt (the last attempt the turn made): when the provider
+   * answered, how fast it decoded, how many transport calls (and actual HTTP
+   * attempts) the turn needed, and the sanitized stop reason. Null timings
+   * mean "not measured" — never a fabricated zero.
+   *
+   * The two token fields it carries describe that ONE attempt. The verdict
+   * RECORD publishes the billed sums over the turn's attempts instead (see
+   * `usageTotals`), so the record's token counts and its durations never
+   * mix two aggregation scopes. */
+  timing: AcceptedAttemptTiming;
   /** #1037/#1094: the ONE known-secret list this verdict turn was evaluated
    * against (the lane key plus the configured extra-header VALUES this call
    * sent). The caller persists the verdict artifact through it, so the
@@ -834,8 +851,17 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
       const remaining = input.deadline - timeFn();
       if (remaining <= 0) throw new Error("tool-loop wall-clock budget exhausted");
       const timeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(remaining)));
-      return { response: await transport(input.baseUrl, input.apiFormat, payload, input.apiKey, timeout), transportError: null };
+      const response = await transport(input.baseUrl, input.apiFormat, payload, input.apiKey, timeout);
+      // #1466: the transport probe of THIS attempt, read off the body the
+      // transport returned. One entry per attempt, in call order — the last
+      // one is the accepted attempt's (see `summarizeTransportProbes`).
+      attemptProbes.push(readTransportTiming(response));
+      return { response, transportError: null };
     } catch (exc) {
+      // #1466: the attempt reached the wire and produced no body, so it has
+      // no timing to report — but it WAS a transport call, and the attempt
+      // count must include it.
+      attemptProbes.push(null);
       return { response: null, transportError: exc instanceof Error ? exc.message : String(exc) };
     }
   };
@@ -852,6 +878,10 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   let reason: NativeVerdictOutcome["reason"];
   let detail = "";
   let finalBudgetRaisedTo: number | null = null;
+  // #1466: the transport probes of this verdict turn's attempts, one entry
+  // per attempt in call order (null when the attempt produced no body). The
+  // LAST entry is the accepted attempt's — the retry is the last call.
+  const attemptProbes: Array<TransportTiming | null> = [];
 
   // #1199: fold EVERY attempt's response at exactly the sites the aggregate
   // `usageAcc` folds it, and maintain the same fold locally so the verdict
@@ -860,7 +890,17 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   // tokens). Per field: the sum of the attempts' reported integers, `null`
   // when every attempt's field was null — the same provider-reported
   // normalizer the round records use; never synthesized from elapsed time.
-  const usageTotals: UsageTelemetry = { promptTokens: null, completionTokens: null, cachedTokens: null, totalTokens: null };
+  // #1466: the cache breakdown rides the SAME sum, so the verdict record's
+  // token counts all describe the same scope (the billed sum over the
+  // turn's attempts) and can never contradict each other.
+  const usageTotals: UsageTelemetry = {
+    promptTokens: null,
+    completionTokens: null,
+    cachedTokens: null,
+    totalTokens: null,
+    uncachedPromptTokens: null,
+    cacheWriteTokens: null,
+  };
   const foldAttemptUsage = (attemptResponse: unknown): void => {
     accumulateUsage(input.usageAcc, attemptResponse, input.apiFormat);
     if (input.unrecordedAcc !== undefined) accumulateUsage(input.unrecordedAcc, attemptResponse, input.apiFormat);
@@ -870,13 +910,10 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
         : null,
       input.apiFormat,
     );
-    for (const field of ["promptTokens", "completionTokens", "cachedTokens", "totalTokens"] as const) {
-      usageTotals[field] =
-        usageTotals[field] === null
-          ? usage[field]
-          : usage[field] === null
-            ? usageTotals[field]
-            : usageTotals[field]! + usage[field]!;
+    for (const field of ["promptTokens", "completionTokens", "cachedTokens", "totalTokens", "uncachedPromptTokens", "cacheWriteTokens"] as const) {
+      const reported = usage[field] ?? null;
+      const current = usageTotals[field] ?? null;
+      usageTotals[field] = current === null ? reported : reported === null ? current : current + reported;
     }
   };
 
@@ -961,6 +998,35 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
         failureKind: reason === "transport" ? "network" : reason === "empty" ? "empty_completion" : "not_object",
       });
 
+  // #1466: the verdict turn's transport measurements, taken from the
+  // ACCEPTED attempt (the last attempt this turn made). The attempt count is
+  // the transport-call count and the wire-call count the HTTP attempts those
+  // calls needed; the timings are null when the accepted attempt carried no
+  // probe (a non-streamed answer has no content event on the wire).
+  //
+  // The accepted attempt's usage is read off the response the turn RETURNED
+  // (the last attempt's body) — unlike `usageTotals`, which is the billed sum
+  // over every attempt, this describes ONE attempt, exactly like the
+  // per-round records describe one turn.
+  const acceptedUsage = normalizeUsageTelemetry(
+    response !== null && typeof response === "object"
+      ? (response as Record<string, unknown>).usage ?? null
+      : null,
+    input.apiFormat,
+  );
+  const probeSummary = summarizeTransportProbes(attemptProbes, attempts);
+  const acceptedProbe = probeSummary.accepted;
+  const timing: AcceptedAttemptTiming = {
+    ttft_sec: acceptedProbe === null || acceptedProbe.firstContentSec === null ? null : roundSeconds(acceptedProbe.firstContentSec),
+    first_event_sec: acceptedProbe === null || acceptedProbe.firstEventSec === null ? null : roundSeconds(acceptedProbe.firstEventSec),
+    cache_write_tokens: acceptedUsage?.cacheWriteTokens ?? null,
+    uncached_prompt_tokens: acceptedUsage?.uncachedPromptTokens ?? null,
+    decode_tokens_per_sec: decodeTokensPerSec(acceptedUsage?.completionTokens ?? null, acceptedProbe),
+    attempts: probeSummary.attempts,
+    wire_calls: probeSummary.wire_calls,
+    finish_reason: sanitizedFinishReason(response),
+  };
+
   return {
     response,
     ok,
@@ -973,6 +1039,7 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
     streamFailureDetail,
     usageTotals,
     knownSecrets,
+    timing,
     ...(finalDiagnostics !== null ? { diagnostics: finalDiagnostics } : {}),
     ...(finalBudgetRaisedTo !== null ? { budgetRaisedTo: finalBudgetRaisedTo } : {}),
   };
@@ -1579,6 +1646,11 @@ function preLoopFailureKind(result: HarnessResult): string | null {
  * malformed —, nullable provider-reported token counts, a boolean). snake_case:
  * persisted verbatim in the harness artifact.
  *
+ * #1466: the record also carries the ACCEPTED attempt's transport
+ * measurements (`AcceptedAttemptTiming`) — the same fields the per-round
+ * records carry, so the verdict turn is as explainable as an investigation
+ * round.
+ *
  * A TYPE ALIAS deliberately, not an interface: an object-literal type is
  * assignable to `Record<string, unknown>` (implicit index signatures) while an
  * interface with the same members is NOT — which is exactly what this shape's
@@ -1590,7 +1662,7 @@ export type NativeLoopVerdictTelemetry = {
   completion_tokens: number | null;
   cached_tokens: number | null;
   streamed_fallback: boolean;
-};
+} & AcceptedAttemptTiming;
 
 export type HarnessResult = Record<string, unknown> & {
   mode?: string;
@@ -1763,6 +1835,18 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         completion_tokens: vTel.completion_tokens,
         cached_tokens: vTel.cached_tokens,
         streamed_fallback: vTel.streamed_fallback,
+        // #1466: the accepted attempt's transport measurements — when the
+        // provider answered, how fast it decoded, how many transport calls
+        // (and HTTP attempts) the verdict turn needed, and its sanitized stop
+        // reason. Null timings mean "not measured".
+        ttft_sec: vTel.ttft_sec,
+        first_event_sec: vTel.first_event_sec,
+        cache_write_tokens: vTel.cache_write_tokens,
+        uncached_prompt_tokens: vTel.uncached_prompt_tokens,
+        decode_tokens_per_sec: vTel.decode_tokens_per_sec,
+        attempts: vTel.attempts,
+        wire_calls: vTel.wire_calls,
+        finish_reason: vTel.finish_reason,
         superseded: supersededTel,
       },
     };
@@ -1812,18 +1896,27 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
  * Reads `result.native_loop_verdict_telemetry` (set by the verdict turn) with
  * safe defaults so a run that never produced a verdict turn reports nulls
  * rather than fabricating a number. Never content: numbers and a boolean only. */
-function verdictTurnTelemetry(result: HarnessResult): {
-  model_sec: number | null;
-  prompt_tokens: number | null;
-  completion_tokens: number | null;
-  cached_tokens: number | null;
-  streamed_fallback: boolean;
-} {
+function verdictTurnTelemetry(result: HarnessResult): NativeLoopVerdictTelemetry {
   const vt = result.native_loop_verdict_telemetry;
   const numOrNull = (x: unknown): number | null =>
     typeof x === "number" && Number.isFinite(x) ? x : null;
   if (vt === null || typeof vt !== "object") {
-    return { model_sec: null, prompt_tokens: null, completion_tokens: null, cached_tokens: null, streamed_fallback: false };
+    return {
+      model_sec: null,
+      prompt_tokens: null,
+      completion_tokens: null,
+      cached_tokens: null,
+      streamed_fallback: false,
+      // #1466: no record means no measurement — nulls, never zeros.
+      ttft_sec: null,
+      first_event_sec: null,
+      cache_write_tokens: null,
+      uncached_prompt_tokens: null,
+      decode_tokens_per_sec: null,
+      attempts: 0,
+      wire_calls: 0,
+      finish_reason: "",
+    };
   }
   const v = vt as Record<string, unknown>;
   return {
@@ -1832,7 +1925,27 @@ function verdictTurnTelemetry(result: HarnessResult): {
     completion_tokens: numOrNull(v.completion_tokens),
     cached_tokens: numOrNull(v.cached_tokens),
     streamed_fallback: v.streamed_fallback === true,
+    // #1466: the accepted attempt's transport measurements, projected with the
+    // same defensive rules as the rest of the record.
+    ttft_sec: numOrNull(v.ttft_sec),
+    first_event_sec: numOrNull(v.first_event_sec),
+    cache_write_tokens: numOrNull(v.cache_write_tokens),
+    uncached_prompt_tokens: numOrNull(v.uncached_prompt_tokens),
+    decode_tokens_per_sec: numOrNull(v.decode_tokens_per_sec),
+    attempts: countOrZero(v.attempts),
+    wire_calls: countOrZero(v.wire_calls),
+    // The finish reason is provider-controlled free text: it is re-sanitized
+    // on the way out, so a hand-written or tampered record can never smuggle
+    // prose into the artifact.
+    finish_reason: sanitizeFinishReasonToken(v.finish_reason),
   };
+}
+
+/** #1466: a call count, or zero when the persisted record carries none. A
+ * count is never negative and never fractional. */
+function countOrZero(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return 0;
+  return Math.trunc(value);
 }
 
 /** #1199: the superseded verdict record(s) — a successful #1145 refresh moves
@@ -1855,6 +1968,15 @@ function supersededVerdictTelemetry(result: HarnessResult): NativeLoopVerdictTel
       completion_tokens: numOrNull(r.completion_tokens),
       cached_tokens: numOrNull(r.cached_tokens),
       streamed_fallback: r.streamed_fallback === true,
+      // #1466: the same transport projection as the standing verdict record.
+      ttft_sec: numOrNull(r.ttft_sec),
+      first_event_sec: numOrNull(r.first_event_sec),
+      cache_write_tokens: numOrNull(r.cache_write_tokens),
+      uncached_prompt_tokens: numOrNull(r.uncached_prompt_tokens),
+      decode_tokens_per_sec: numOrNull(r.decode_tokens_per_sec),
+      attempts: countOrZero(r.attempts),
+      wire_calls: countOrZero(r.wire_calls),
+      finish_reason: sanitizeFinishReasonToken(r.finish_reason),
     });
   }
   return projected;
@@ -1890,6 +2012,47 @@ function unrecordedUsageTotals(result: HarnessResult): Record<string, Record<str
 const fmtUsageTokens = (v: number | null): string => (v === null ? "-" : String(v));
 const fmtLatencySec = (v: number): string => `${v.toFixed(1)}s`;
 const fmtWholeSec = (v: number): string => `${Math.round(v)}s`;
+/** #1466: a measured instant, rounded to the same precision the round
+ * records use for their durations (milliseconds). */
+const roundSeconds = (v: number): number => Number(Math.max(0, v).toFixed(3));
+/** #1466: a measured instant — null prints as `-` (never a zero standing in
+ * for a measurement the transport never made). */
+const fmtOptionalSec = (v: number | null): string => (v === null ? "-" : `${v.toFixed(1)}s`);
+/** #1466: a measured rate — null prints as `-`. */
+const fmtOptionalRate = (v: number | null): string => (v === null ? "-" : `${v.toFixed(1)}tok/s`);
+/** #1466: the sanitized stop reason — an empty token prints as `-`. */
+const fmtFinishReason = (v: string): string => (v === "" ? "-" : v);
+
+/**
+ * #1466: the transport half of a record's heartbeat line — the accepted
+ * attempt's timings, the cache breakdown, the call counts, and the sanitized
+ * stop reason.
+ *
+ * Appended AFTER the pre-#1466 prefix, which stays byte-identical: a log
+ * consumer that already reads `model=… prompt=… completion=… cached=…` keeps
+ * working, and the new figures are simply there to be read.
+ *
+ * Content-free by construction: numbers, a bounded enum token, and `-` for
+ * "not reported" — never prompt text, response text, tool arguments,
+ * credentials, or provider error bodies.
+ */
+const transportTail = (rec: {
+  ttft_sec: number | null;
+  first_event_sec: number | null;
+  cache_write_tokens: number | null;
+  uncached_prompt_tokens: number | null;
+  decode_tokens_per_sec: number | null;
+  attempts: number;
+  wire_calls: number;
+  finish_reason: string;
+}): string =>
+  ` ttft=${fmtOptionalSec(rec.ttft_sec)}` +
+  ` first_event=${fmtOptionalSec(rec.first_event_sec)}` +
+  ` cache_write=${fmtUsageTokens(rec.cache_write_tokens)}` +
+  ` uncached=${fmtUsageTokens(rec.uncached_prompt_tokens)}` +
+  ` decode=${fmtOptionalRate(rec.decode_tokens_per_sec)}` +
+  ` attempts=${rec.attempts} wire_calls=${rec.wire_calls}` +
+  ` finish=${fmtFinishReason(rec.finish_reason)}`;
 
 /** #1199: the concise per-round heartbeat lines for normal workflow logs. Two
  * lines (a model line and a tools line), content-free: numbers and enums only,
@@ -1906,7 +2069,9 @@ export function nativeLoopRoundLogLines(
   const modelLine =
     `  native_loop ${label} ${rec.round}: model=${fmtLatencySec(rec.model_sec)}` +
     ` prompt=${fmtUsageTokens(rec.prompt_tokens)} completion=${fmtUsageTokens(rec.completion_tokens)}` +
-    ` cached=${fmtUsageTokens(rec.cached_tokens)}`;
+    ` cached=${fmtUsageTokens(rec.cached_tokens)}` +
+    // #1466: the transport measurements ride AFTER the pre-#1466 prefix.
+    transportTail(rec);
   const toolsLine =
     `  native_loop ${label} ${rec.round}: tools requested=${rec.tools_requested}` +
     ` executed=${rec.tools_executed} refused=${rec.tools_refused} dedup=${rec.tools_deduplicated}` +
@@ -1917,18 +2082,31 @@ export function nativeLoopRoundLogLines(
 }
 
 /** #1199: the one-line heartbeat for the closing in-conversation verdict turn,
- * kept distinct from the investigation-round lines above. Content-free. */
+ * kept distinct from the investigation-round lines above. Content-free.
+ *
+ * #1466: the same transport tail as the round lines — the verdict turn's
+ * accepted attempt is as explainable as an investigation round. */
 export function nativeLoopVerdictLogLine(rec: {
   model_sec: number;
   prompt_tokens: number | null;
   completion_tokens: number | null;
   cached_tokens: number | null;
   streamed_fallback: boolean;
+  ttft_sec: number | null;
+  first_event_sec: number | null;
+  cache_write_tokens: number | null;
+  uncached_prompt_tokens: number | null;
+  decode_tokens_per_sec: number | null;
+  attempts: number;
+  wire_calls: number;
+  finish_reason: string;
 }): string {
   return (
     `  native_loop verdict: model=${fmtLatencySec(rec.model_sec)}` +
     ` prompt=${fmtUsageTokens(rec.prompt_tokens)} completion=${fmtUsageTokens(rec.completion_tokens)}` +
     ` cached=${fmtUsageTokens(rec.cached_tokens)}` +
+    // #1466: the transport measurements ride AFTER the pre-#1466 prefix.
+    transportTail(rec) +
     (rec.streamed_fallback ? " (streamed→non-streamed)" : "")
   );
 }
@@ -2340,7 +2518,16 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     try {
       response = await deps.transport(input.baseUrl, input.apiFormat, payload, input.apiKey, timeout);
       usable = !(payload.stream === true && (response as Record<string, unknown>)?.error);
+      // #1466: report this call's transport probe to the loop. The probe
+      // rides the body the transport returned (the production adapter
+      // attaches it to BOTH the streamed projection and the non-streamed
+      // raw body); a body without one reports `null` — the call happened, it
+      // carried no measurement.
+      turn?.reportTiming?.(readTransportTiming(response));
     } catch (exc) {
+      // #1466: the failed attempt was still a transport call (it reached the
+      // wire), so the turn's call count includes it.
+      turn?.reportTiming?.(null);
       if (payload.stream !== true) throw exc;
       usable = false;
     }
@@ -2356,7 +2543,15 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       }
       fallback.stream = false;
       const retryTimeout = remainingCheck();
-      response = await deps.transport(input.baseUrl, input.apiFormat, fallback, input.apiKey, retryTimeout);
+      try {
+        response = await deps.transport(input.baseUrl, input.apiFormat, fallback, input.apiKey, retryTimeout);
+        // #1466: the fallback's own probe — the ACCEPTED attempt's, because
+        // the fallback is the last call of the turn.
+        turn?.reportTiming?.(readTransportTiming(response));
+      } catch (exc) {
+        turn?.reportTiming?.(null);
+        throw exc;
+      }
     }
     accumulateUsage(usageAcc, response, input.apiFormat);
     if (sidecar !== undefined) accumulateUsage(sidecar, response, input.apiFormat);
@@ -2884,10 +3079,30 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           }
           const verdictTelemetry = {
             model_sec: Number(Math.max(0, telemetryTimeFn() - verdictModelStart).toFixed(3)),
+            // #1466: the verdict record has exactly TWO scopes, and it says
+            // so here. The TOKEN counts are the billed sums over the turn's
+            // attempts (`usageTotals` folds every attempt, the streamed one
+            // included) — one scope for every token field, so the record
+            // cannot contradict itself. The TIMING fields describe the
+            // ACCEPTED attempt only: a duration belongs to one attempt, and
+            // summing durations over attempts would measure nothing.
             prompt_tokens: verdict.usageTotals.promptTokens,
             completion_tokens: verdict.usageTotals.completionTokens,
             cached_tokens: verdict.usageTotals.cachedTokens,
+            uncached_prompt_tokens: verdict.usageTotals.uncachedPromptTokens ?? null,
+            cache_write_tokens: verdict.usageTotals.cacheWriteTokens ?? null,
             streamed_fallback: verdict.retried,
+            // #1466: the ACCEPTED attempt's transport measurements — when the
+            // provider answered, how fast it decoded, how many transport calls
+            // (and HTTP attempts) the verdict turn needed, and its sanitized
+            // stop reason. Null timings mean "not measured", never a
+            // fabricated zero.
+            ttft_sec: verdict.timing.ttft_sec,
+            first_event_sec: verdict.timing.first_event_sec,
+            decode_tokens_per_sec: verdict.timing.decode_tokens_per_sec,
+            attempts: verdict.timing.attempts,
+            wire_calls: verdict.timing.wire_calls,
+            finish_reason: verdict.timing.finish_reason,
           };
           input.result.native_loop_verdict_telemetry = verdictTelemetry;
           // Heartbeat only for a verdict actually produced; a failed verdict turn
