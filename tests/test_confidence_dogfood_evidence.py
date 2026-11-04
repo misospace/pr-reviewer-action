@@ -13,7 +13,12 @@ pin the properties that adjudication depends on:
   separator lines, the `` at {location}`` concern form, and an UNQUOTED
   closing advisory note;
 - the evidence comes from the NEWEST published body (native reviews
-  accumulate), and the record names the body it read;
+  accumulate, and a review is timed by the ``submitted_at`` its real
+  payload carries), and the record names the body it read;
+- the verifier telemetry the marker publishes (#1455 -- the unscored
+  cause, the latency and the token usage) is recorded when it is
+  published, and the corresponding unavailable reasons are removed only
+  then; older bodies keep the old unavailable behavior;
 - a scored run reports its score, risk, reason, model and every published
   advisory concern, and says whether it materially challenges the primary
   review;
@@ -319,13 +324,21 @@ def _publish(
     item_id: int = 1,
     created_at: str | None = None,
     updated_at: str | None = None,
+    submitted_at: str | None = None,
 ) -> None:
-    """Publish one reviewer body for a pull request."""
+    """Publish one reviewer body for a pull request.
+
+    A native review is timed by ``submitted_at`` (the only timestamp a
+    GitHub review object carries); a comment carries ``created_at`` and
+    ``updated_at``.
+    """
     entry: dict = {"id": item_id, "body": body, "user": {"login": "its-saffron[bot]"}}
     if created_at is not None:
         entry["created_at"] = created_at
     if updated_at is not None:
         entry["updated_at"] = updated_at
+    if submitted_at is not None:
+        entry["submitted_at"] = submitted_at
     target = forge.reviews if as_review else forge.comments
     target.setdefault(str(number), []).append(entry)
 
@@ -553,7 +566,7 @@ class TestNewestPublishedBody:
             _scored_body(score=4),
             as_review=True,
             item_id=2,
-            updated_at="2026-03-01T00:00:00Z",
+            submitted_at="2026-03-01T00:00:00Z",
         )
         code, out, err = run(collector, "--repo", "o/r", "--pr", "7")
         assert code == 0, err
@@ -602,7 +615,7 @@ class TestNewestPublishedBody:
             _scored_body(score=4),
             as_review=True,
             item_id=3,
-            updated_at="2026-01-01T00:00:00Z",
+            submitted_at="2026-01-01T00:00:00Z",
         )
         code, out, err = run(collector, "--repo", "o/r", "--pr", "7")
         assert code == 0, err
@@ -627,7 +640,75 @@ class TestNewestPublishedBody:
             "id": 42,
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-02T03:04:05Z",
+            "submitted_at": None,
         }
+
+    def test_a_review_is_timed_by_the_real_review_payload(self, collector, forge):
+        """The review fixture is the exact shape GitHub's review list returns.
+
+        A real review object carries ``submitted_at`` and NO ``updated_at``
+        and NO ``created_at``; the collector must select the review on that
+        timestamp alone and report it in the descriptor.
+        """
+        review = {
+            "id": 3171,
+            "node_id": "MDE3OlB1bGxSZXF1ZXN0UmV2aWV3MzE3MQ==",
+            "user": {"login": "its-saffron[bot]", "id": 1, "type": "Bot"},
+            "body": _scored_body(score=5),
+            "commit_id": HEAD_SHA,
+            "state": "CHANGES_REQUESTED",
+            "html_url": "https://example.invalid/o/r/pull/7#pullrequestreview-3171",
+            "pull_request_url": "https://example.invalid/repos/o/r/pulls/7",
+            "author_association": "CONTRIBUTOR",
+            "_links": {
+                "html": {
+                    "href": "https://example.invalid/o/r/pull/7#pullrequestreview-3171"
+                },
+                "pull_request": {"href": "https://example.invalid/repos/o/r/pulls/7"},
+            },
+            "submitted_at": "2026-03-04T05:06:07Z",
+        }
+        forge.reviews.setdefault("7", []).append(review)
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "7")
+        assert code == 0, err
+        record = document(out)["records"][0]
+        assert "updated_at" not in review and "created_at" not in review
+        assert record["published_body"] == {
+            "kind": "review",
+            "id": 3171,
+            "created_at": None,
+            "updated_at": None,
+            "submitted_at": "2026-03-04T05:06:07Z",
+        }
+        assert record["verifier"]["score"] == 5
+
+    def test_a_comment_timestamp_never_times_a_review(self, collector, forge):
+        """The old fixture shape -- ``updated_at`` on a review -- times nothing.
+
+        GitHub review objects carry no ``updated_at``, so a review without
+        ``submitted_at`` has no provable time and must never outrank a
+        comment that has one, no matter what id it carries.
+        """
+        _publish(
+            forge,
+            7,
+            _scored_body(score=2),
+            item_id=1,
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        _publish(
+            forge,
+            7,
+            _scored_body(score=5),
+            as_review=True,
+            item_id=900,
+            updated_at="2026-06-01T00:00:00Z",
+        )
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "7")
+        assert code == 0, err
+        record = document(out)["records"][0]
+        assert record["published_body"]["kind"] == "comment"
+        assert record["verifier"]["score"] == 2
 
     def test_the_oldest_body_is_never_the_one_read(self, collector, forge):
         """Native reviews accumulate, so the first one is the oldest run."""
@@ -637,7 +718,7 @@ class TestNewestPublishedBody:
             _scored_body(score=1),
             as_review=True,
             item_id=1,
-            updated_at="2025-01-01T00:00:00Z",
+            submitted_at="2025-01-01T00:00:00Z",
         )
         _publish(
             forge,
@@ -645,7 +726,7 @@ class TestNewestPublishedBody:
             _scored_body(score=5),
             as_review=True,
             item_id=2,
-            updated_at="2026-05-01T00:00:00Z",
+            submitted_at="2026-05-01T00:00:00Z",
         )
         code, out, err = run(collector, "--repo", "o/r", "--pr", "7")
         assert code == 0, err
@@ -784,6 +865,167 @@ class TestUnscoredRun:
             "later_review_linkage",
         ):
             assert unavailable[field].strip(), f"{field} must name where it lives"
+
+
+class TestPublishedTelemetry:
+    """The verifier telemetry the marker publishes (#1455).
+
+    The publisher appends ``confidence_cause``, ``confidence_latency_ms``
+    and the three ``confidence_*_tokens`` keys to the marker when the run
+    measured them; the collector records each valid published value and
+    removes the corresponding unavailable reason only then, so a body
+    published by an older action keeps the old unavailable behavior and a
+    published value is never called unavailable.
+    """
+
+    def _unscored_telemetry_body(self, **telemetry) -> str:
+        extra = {"confidence_status": "unscored"}
+        extra.update(telemetry)
+        return _body(
+            _marker(extra=extra),
+            _section(
+                "**Independent confidence: unscored — the verifier did not "
+                "produce a usable result** (model: verifier-model)"
+            ),
+            _fingerprint(),
+        )
+
+    def test_the_full_telemetry_set_is_recorded(self, collector, forge):
+        _publish(
+            forge,
+            11,
+            self._unscored_telemetry_body(
+                confidence_cause="timeout",
+                confidence_latency_ms=8123,
+                confidence_prompt_tokens=1200,
+                confidence_completion_tokens=340,
+                confidence_total_tokens=1540,
+            ),
+        )
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "11")
+        assert code == 0, err
+        record = document(out)["records"][0]
+        verifier = record["verifier"]
+        assert verifier["status"] == "unscored"
+        assert verifier["cause"] == "timeout"
+        assert verifier["latency_ms"] == 8123
+        assert verifier["token_usage"] == {
+            "prompt_tokens": 1200,
+            "completion_tokens": 340,
+            "total_tokens": 1540,
+        }
+        for field in ("unscored_cause", "latency_ms", "token_usage"):
+            assert field not in record["unavailable"]
+
+    def test_an_older_body_keeps_the_old_unavailable_behavior(self, collector, forge):
+        _publish(forge, 11, _unscored_body())
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "11")
+        assert code == 0, err
+        record = document(out)["records"][0]
+        assert record["verifier"]["cause"] is None
+        assert record["verifier"]["latency_ms"] is None
+        assert record["verifier"]["token_usage"] is None
+        for field in ("unscored_cause", "latency_ms", "token_usage"):
+            assert record["unavailable"][field].strip()
+
+    def test_a_scored_run_is_never_read_as_carrying_a_cause(self, collector, forge):
+        body = _scored_body(
+            marker=_marker(
+                extra={
+                    "confidence_status": "scored",
+                    "confidence_score": 4,
+                    "confidence_cause": "timeout",
+                }
+            )
+        )
+        _publish(forge, 7, body)
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "7")
+        assert code == 0, err
+        record = document(out)["records"][0]
+        assert record["verifier"]["status"] == "scored"
+        assert record["verifier"]["cause"] is None
+        assert "unscored_cause" in record["unavailable"]
+
+    def test_a_cause_outside_the_token_vocabulary_is_never_recorded(self, collector, forge):
+        _publish(
+            forge,
+            11,
+            self._unscored_telemetry_body(confidence_cause="gateway said 429"),
+        )
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "11")
+        assert code == 0, err
+        record = document(out)["records"][0]
+        assert record["verifier"]["cause"] is None
+        assert "unscored_cause" in record["unavailable"]
+
+    @pytest.mark.parametrize("latency", ["soon", -5, True])
+    def test_a_latency_that_is_not_a_non_negative_integer_is_never_recorded(
+        self, collector, forge, latency
+    ):
+        _publish(
+            forge,
+            11,
+            self._unscored_telemetry_body(confidence_latency_ms=latency),
+        )
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "11")
+        assert code == 0, err
+        record = document(out)["records"][0]
+        assert record["verifier"]["latency_ms"] is None
+        assert "latency_ms" in record["unavailable"]
+
+    def test_partial_token_usage_records_only_the_published_counts(self, collector, forge):
+        _publish(
+            forge,
+            11,
+            self._unscored_telemetry_body(
+                confidence_prompt_tokens=1200,
+                confidence_completion_tokens="many",
+                confidence_total_tokens=1540,
+            ),
+        )
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "11")
+        assert code == 0, err
+        record = document(out)["records"][0]
+        assert record["verifier"]["token_usage"] == {
+            "prompt_tokens": 1200,
+            "total_tokens": 1540,
+        }
+        assert "token_usage" not in record["unavailable"]
+
+    def test_a_negative_token_count_is_never_recorded(self, collector, forge):
+        _publish(
+            forge,
+            11,
+            self._unscored_telemetry_body(confidence_prompt_tokens=-1),
+        )
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "11")
+        assert code == 0, err
+        record = document(out)["records"][0]
+        assert record["verifier"]["token_usage"] is None
+        assert "token_usage" in record["unavailable"]
+
+    def test_the_telemetry_is_also_read_from_a_marker_only_body(self, collector, forge):
+        """A body with no confidence section still publishes the telemetry."""
+        body = _body(
+            _marker(
+                extra={
+                    "confidence_status": "unscored",
+                    "confidence_cause": "http_403",
+                    "confidence_latency_ms": 99,
+                }
+            ),
+            None,
+            _fingerprint(),
+        )
+        _publish(forge, 11, body)
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "11")
+        assert code == 0, err
+        record = document(out)["records"][0]
+        assert record["verifier"]["status"] == "unscored"
+        assert record["verifier"]["cause"] == "http_403"
+        assert record["verifier"]["latency_ms"] == 99
+        assert "unscored_cause" not in record["unavailable"]
+        assert "latency_ms" not in record["unavailable"]
 
 
 class TestUnavailableReasonsAreTrue:
@@ -1000,12 +1242,16 @@ class TestBoundedAndRedacted:
             "model",
             "concerns",
             "materially_challenges_primary",
+            "cause",
+            "latency_ms",
+            "token_usage",
         }
         assert set(record["published_body"]) == {
             "kind",
             "id",
             "created_at",
             "updated_at",
+            "submitted_at",
         }
 
 

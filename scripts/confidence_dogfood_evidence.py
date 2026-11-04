@@ -4,15 +4,20 @@
 The independent merge-safety verifier (#1369) publishes exactly one thing a
 human can read after an ordinary dogfood run: the metadata marker, the
 sibling fingerprint marker, and the ``## Independent Confidence`` section
-inside the review body it posted. Everything else it produces -- the
-unscored cause, the token usage, the rubric version, the deterministic
-ceilings, the parser notes, the linkage to a later review -- is written into
-the RUN DIRECTORY (``confidence-score.json``, ``confidence-request.json``,
+inside the review body it posted. Most of what else it produces -- the
+rubric version, the deterministic ceilings, the parser notes, the linkage
+to a later review -- is written into the RUN DIRECTORY
+(``confidence-score.json``, ``confidence-request.json``,
 ``confidence-response.json``, ``finding-outcomes.json``) and dies with the
-runner. This script assembles what IS published into one bounded, redacted
-evidence file, so a human can adjudicate whether the verifier earns
-merge-gate authority and can see, per run, exactly which evidence the
-published record does not carry.
+runner. Since #1455 the metadata marker also carries the verifier's own
+telemetry when the run measured it: the unscored cause
+(``confidence_cause``), the provider latency (``confidence_latency_ms``)
+and the provider token usage (``confidence_prompt_tokens``,
+``confidence_completion_tokens``, ``confidence_total_tokens``). This
+script assembles what IS published into one bounded, redacted evidence
+file, so a human can adjudicate whether the verifier earns merge-gate
+authority and can see, per run, exactly which evidence the published
+record does not carry.
 
 The collector READS ONLY what is already published: it never re-runs the
 verifier, never recomputes a score, never changes a verdict, and never
@@ -138,6 +143,14 @@ RISK_VALUES = ("low", "medium", "high", "critical", "unknown")
 CONCERN_TYPES = ("missed_issue", "unsupported_finding")
 CONCERN_SEVERITIES = ("blocker", "major")
 
+# The machine-token grammar the marker's own unscored-cause key obeys
+# (``src/confidence/telemetry.ts``'s CONFIDENCE_CAUSE_TOKEN_PATTERN): a
+# published cause is a short lowercase token like ``timeout`` or
+# ``http_429``, never provider text. The grammar is enforced again at the
+# published surface (``src/metadata/markers.ts``), and the collector
+# re-checks it so nothing outside the vocabulary is ever recorded.
+CAUSE_TOKEN_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+
 # The published section shows at most 8 advisory concerns; the collector
 # keeps that bound.
 MAX_CONCERNS = 8
@@ -158,28 +171,34 @@ MAX_TIMESTAMP = 64
 REDACTED = "[REDACTED]"
 
 # What the PUBLISHED record does not carry, and where each value actually
-# lives today. Every sentence below was checked against the code: a
-# published value is never called unavailable, and an artifact that does
-# not exist is never named.
+# lives. Every sentence below is TRUE whenever it appears: a reason is
+# removed exactly when a valid published value is recorded in its place, so
+# a published value is never called unavailable, and an artifact that does
+# not exist is never named. Since #1455 the marker publishes the unscored
+# cause, the verifier latency and the token usage when the run measured
+# them; a body published by an older action (or a run that measured none of
+# it) keeps the old explanation.
 UNAVAILABLE_REASONS: dict[str, str] = {
     "unscored_cause": (
         "The unscored cause is written into the run-directory artifact "
-        "confidence-score.json and the runner log, and neither the published "
-        "body nor the marker carries it."
+        "confidence-score.json and the runner log; the marker publishes it "
+        "(confidence_cause) only for an unscored run, and this record "
+        "carries no published cause."
     ),
     "latency_ms": (
-        "No verifier latency is measured at all: the scorer's outcome "
-        "carries no duration and the run-directory artifact "
-        "confidence-score.json records no timing, so there is no verifier "
-        "latency to publish; the review's own whole-run duration is not "
-        "published either."
+        "No verifier latency is measured for this run: the marker publishes "
+        "confidence_latency_ms only when the run's provider attempt was "
+        "timed (#1455), and this record carries no published latency; the "
+        "run-directory artifact confidence-score.json records no timing "
+        "either."
     ),
     "token_usage": (
-        "The provider's usage is normalized by the transport and then "
-        "dropped by the scorer, so no token count reaches the verifier's "
-        "result or confidence-score.json; a provider's own usage object "
-        "survives only in the raw run-directory artifact "
-        "confidence-response.json, and is never published."
+        "The provider's usage is normalized by the transport and reaches "
+        "the published marker only through the scorer's telemetry "
+        "(confidence_prompt_tokens, confidence_completion_tokens, "
+        "confidence_total_tokens, #1455); this record carries no published "
+        "usage, so the raw run-directory artifact confidence-response.json "
+        "remains the only home for it."
     ),
     "rubric_version": (
         "The rubric version constant is written only into the run-directory "
@@ -442,6 +461,9 @@ def empty_verifier(status: str = "unknown") -> dict[str, Any]:
         "model": "",
         "concerns": [],
         "materially_challenges_primary": None,
+        "cause": None,
+        "latency_ms": None,
+        "token_usage": None,
     }
 
 
@@ -531,6 +553,60 @@ def verifier_from_marker(marker: dict[str, Any]) -> dict[str, Any]:
     return verifier
 
 
+def consume_marker_telemetry(
+    marker: dict[str, Any],
+    verifier: dict[str, Any],
+    unavailable: dict[str, str],
+) -> dict[str, Any]:
+    """The verifier telemetry the metadata marker publishes (#1455).
+
+    The marker carries ``confidence_cause``, ``confidence_latency_ms`` and
+    the three ``confidence_*_tokens`` keys when the run measured them; each
+    corresponding unavailable reason is removed only when a valid published
+    value is recorded in its place, so a body published by an older action
+    keeps the old unavailable behavior.
+
+    The published grammar is enforced again here -- nothing outside it is
+    ever recorded: a cause must match the machine-token vocabulary
+    (:data:`CAUSE_TOKEN_RE`), and the latency and the token counts must be
+    non-negative integers. A cause additionally rides the score's coupling
+    the publisher enforces (``src/confidence/telemetry.ts``:
+    ``confidenceTelemetryOf``) -- a cause explains a MISSING score -- so it
+    is consumed only when the marker's own ``confidence_status`` claims
+    ``unscored`` and the collected answer does not claim ``scored``; a
+    scored run is never read as carrying a cause.
+    """
+    cause = marker.get("confidence_cause")
+    if (
+        isinstance(cause, str)
+        and CAUSE_TOKEN_RE.match(cause) is not None
+        and marker.get("confidence_status") == "unscored"
+        and verifier.get("status") != "scored"
+    ):
+        verifier["cause"] = cause
+        unavailable.pop("unscored_cause", None)
+
+    latency = marker.get("confidence_latency_ms")
+    if isinstance(latency, int) and not isinstance(latency, bool) and latency >= 0:
+        verifier["latency_ms"] = latency
+        unavailable.pop("latency_ms", None)
+
+    usage: dict[str, int] = {}
+    for key, field in (
+        ("confidence_prompt_tokens", "prompt_tokens"),
+        ("confidence_completion_tokens", "completion_tokens"),
+        ("confidence_total_tokens", "total_tokens"),
+    ):
+        value = marker.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            usage[field] = value
+    if usage:
+        verifier["token_usage"] = usage
+        unavailable.pop("token_usage", None)
+
+    return verifier
+
+
 def parse_published_fingerprint(body: str) -> str | None:
     """The published fingerprint marker's value, or ``None``.
 
@@ -570,15 +646,21 @@ def list_items(forge: ForgeClient, path: str) -> list[dict[str, Any]]:
     return [item for item in forge.get_pages(path) if isinstance(item, dict)]
 
 
-def _published_instant(item: dict[str, Any]) -> datetime:
-    """When one published body was last written.
+def _published_instant(item: dict[str, Any], kind: str) -> datetime:
+    """When one published body was submitted.
 
-    ``updated_at`` wins over ``created_at``: a managed comment is rewritten
-    in place, so its update time is the run that wrote it. An unparsable or
-    absent timestamp sorts oldest, so a body with no provable time never
+    A native review carries only ``submitted_at`` -- the GitHub review
+    object has no ``updated_at`` and no ``created_at`` -- so a review is
+    timed by the timestamp its submission wrote and by nothing else. A
+    managed comment is rewritten in place, so ``updated_at`` wins over
+    ``created_at``: its update time is the run that wrote it. An unparsable
+    or absent timestamp sorts oldest, so a body with no provable time never
     outranks one with a provable newer time.
     """
-    raw = item.get("updated_at") or item.get("created_at")
+    if kind == "review":
+        raw = item.get("submitted_at")
+    else:
+        raw = item.get("updated_at") or item.get("created_at")
     if not isinstance(raw, str) or raw.strip() == "":
         return datetime.min.replace(tzinfo=timezone.utc)
     text = raw.strip()
@@ -613,7 +695,8 @@ def newest_published_body(
     ``publish-mode: review_verdict`` submits the body as a native review,
     and native reviews ACCUMULATE (one per run), so the FIRST marker-bearing
     body is the OLDEST run's evidence -- silently stale. The newest body is
-    the one with the newest timestamp (``updated_at``, else ``created_at``);
+    the one with the newest timestamp (a review's ``submitted_at``; a
+    comment's ``updated_at``, else ``created_at``);
     on an exact tie the higher id wins, and ids are only ever compared
     WITHIN one id space: a comment id and a review id are different
     sequences, so a tie across the two is broken by kind (the native review
@@ -638,7 +721,7 @@ def newest_published_body(
                 continue
             identifier = _published_id(item)
             key = (
-                _published_instant(item),
+                _published_instant(item, kind),
                 rank,
                 identifier if identifier is not None else -1,
             )
@@ -655,14 +738,17 @@ def published_body_descriptor(
 
     A reader has to be able to tell which run a record describes: the
     managed comment is rewritten in place, while a native review is one
-    more review in an accumulating sequence. Every value is bounded and
-    redacted like every other collected string.
+    more review in an accumulating sequence -- and is timed by its
+    ``submitted_at``, the only timestamp a GitHub review object carries.
+    Every value is bounded and redacted like every other collected string;
+    a timestamp the body's kind does not carry stays ``None``.
     """
     return {
         "kind": kind,
         "id": _published_id(item),
         "created_at": _published_text(item.get("created_at"), MAX_TIMESTAMP, token),
         "updated_at": _published_text(item.get("updated_at"), MAX_TIMESTAMP, token),
+        "submitted_at": _published_text(item.get("submitted_at"), MAX_TIMESTAMP, token),
     }
 
 
@@ -697,6 +783,7 @@ def collect_record(forge: ForgeClient, repo: str, number: int) -> dict[str, Any]
         verifier = verifier_from_marker(marker)
     else:
         verifier = parse_confidence_section(quoted, token)
+    verifier = consume_marker_telemetry(marker, verifier, unavailable)
     fingerprint = parse_published_fingerprint(body)
     diff_fingerprint: str | None = None
     config_fingerprint: str | None = None
