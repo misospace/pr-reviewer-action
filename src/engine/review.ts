@@ -17,7 +17,7 @@ import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
 import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, renderSkillCatalog, repositorySkillsAllowed } from "../context/repository-skills.js";
-import { loopContextLimits, normalizeApiFormat, type HarnessDeps } from "../tools/harness.js";
+import { loopContextLimits, type HarnessDeps } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import {
@@ -61,7 +61,6 @@ import { renderClaimsSection } from "../claims/render.js";
 import { runDerivedObligationsPass } from "../derived/pass.js";
 import { renderDerivedSectionForStatus, renderDerivedUnavailable } from "../derived/render.js";
 import { buildModelRequest } from "../model/request.js";
-import { opaqueModelId } from "../model/identity.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
 import { maskDiagnostic, maskKnownSecrets, redactTextDeep } from "../context/redact.js";
@@ -3643,26 +3642,30 @@ async function producePrimaryReview(input: ReviewCallInput & {
     if (responseBytes !== null && responseBytes.length > 0) {
       log("native_loop produced an in-conversation verdict; using it and skipping the separate review call");
       try {
-        // The native loop calls the route-bound AI_* environment, which can
-        // differ from an explicit primary profile override, so mask every key
-        // AND every configured extra-header value (#1094: the same list the
-        // writing lane masked the persisted envelope against — a gateway can
-        // quote either straight back into this re-parse's thrown messages).
+        // The native loop dials the RESOLVED primary lane's transport
+        // (#1507 — the harness resolves the same `profiles.primary` this
+        // review call uses), whose values can differ from the route-bound
+        // AI_* environment, so mask every key AND every configured
+        // extra-header value (#1094: the same list the writing lane masked
+        // the persisted envelope against — a gateway can quote either
+        // straight back into this re-parse's thrown messages).
         const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredKnownSecrets(env, profiles));
         const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
         ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
         return {
           artifact,
           analysisEngine: annotateAnalysisEngine(
-            // #1465: the native loop calls the route-bound AI_* environment,
-            // and the harness trims that model name before it sends it. Name
-            // the trimmed name here, so the published engine names the model
-            // the provider actually saw.
-            // #1474 review round 3: name the family the harness actually
-            // dials — it formats the verdict request through
-            // `normalizeApiFormat` (trim + lowercase + enum), so trim-only
-            // here published `(openai)` for `AI_API_FORMAT: Anthropic`.
-            analysisEngineBase(opaqueModelId(env.AI_MODEL), (env.AI_BASE_URL ?? "").trim(), normalizeApiFormat(env.AI_API_FORMAT)),
+            // #1507: name the lane the harness actually dialed — the resolved
+            // primary profile, not the raw AI_* base env, which in the
+            // default routing mode (off) can differ from the lane an
+            // ai-primary-* override selected.
+            // #1465: the profile's model is already the trimmed opaque id the
+            // harness sends, so the published engine names the model the
+            // provider actually saw.
+            // #1474 review round 3: the profile's apiFormat is the checked
+            // wire family (#1493), so the published family is exactly the
+            // one the verdict request was formatted for.
+            analysisEngineBase(profiles.primary.model, profiles.primary.baseUrl.trim(), profiles.primary.apiFormat),
             "primary",
             {
               ...(env.REVIEW_ROUTE !== undefined ? { reviewRoute: env.REVIEW_ROUTE } : {}),
