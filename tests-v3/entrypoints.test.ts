@@ -522,7 +522,7 @@ test("#873/#838: no explicit PR_REVIEWER_RUN_DIR (absent or empty) fails closed,
   }
 });
 
-test("#873/#1145: the CLI publish path (publishInputFromEnv + publishReview) publishes the approve with the partial-coverage gap stated", async () => {
+test("#873/#1447: the CLI publish path (publishInputFromEnv + publishReview) withholds the approve when partial coverage is persisted", async () => {
   await withRunDirAsync(async (dir) => {
     writeCoverageArtifact(dir, { tool_loop_ran: true, enforcement_harness: "tool-harness.json", partial_coverage: PARTIAL_COVERAGE });
     const head = "a".repeat(40);
@@ -545,11 +545,10 @@ test("#873/#1145: the CLI publish path (publishInputFromEnv + publishReview) pub
     const result = await publishReview(input, api, { diffText: "" });
     assert.equal(result.status, "published");
     assert.equal(api.submitted.length, 1);
-    // #1145: the fail-closed STATE resolution above is the invariant; the
-    // publish mode is authoritative, so the verdict's native event stands
-    // with the gap stated on the body.
-    assert.equal(api.submitted[0]!.event, "APPROVE");
-    assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/);
+    // #1447: the persisted fail-closed state is authoritative; incomplete
+    // coverage withholds the native approval.
+    assert.equal(api.submitted[0]!.event, "COMMENT");
+    assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/);
   });
 });
 
@@ -602,8 +601,8 @@ test("#873/#838 regression: a partial primary harness is never hidden by an omit
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published", JSON.stringify(toolModeOverride));
-      assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify(toolModeOverride));  // #1145
-      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/, JSON.stringify(toolModeOverride));
+      assert.equal(api.submitted[0]!.event, "COMMENT", JSON.stringify(toolModeOverride));  // #1447: incomplete/unknown coverage withholds trusted approval
+      assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/, JSON.stringify(toolModeOverride));
     });
   }
 });
@@ -628,8 +627,8 @@ test("#873/#838 regression: a complete primary harness never hides a partial sma
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published", JSON.stringify(routeOverride));
-      assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify(routeOverride));  // #1145
-      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/, JSON.stringify(routeOverride));
+      assert.equal(api.submitted[0]!.event, "COMMENT", JSON.stringify(routeOverride));  // #1447: incomplete/unknown coverage withholds trusted approval
+      assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/, JSON.stringify(routeOverride));
     });
   }
 });
@@ -650,8 +649,8 @@ test("#873/#838 regression: an incomplete required_checks is never hidden by an 
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published", JSON.stringify(requiredChecksOverride));
-      assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify(requiredChecksOverride));  // #1145
-      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/, JSON.stringify(requiredChecksOverride));
+      assert.equal(api.submitted[0]!.event, "COMMENT", JSON.stringify(requiredChecksOverride));  // #1447: incomplete/unknown coverage withholds trusted approval
+      assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/, JSON.stringify(requiredChecksOverride));
     });
   }
 });
@@ -666,7 +665,7 @@ test("#873/#838 regression: tool_loop_ran:true with an unrecognized enforcement_
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published", JSON.stringify(enforcementHarness));
-      assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify(enforcementHarness));  // #1145: fail-closed STATE, verdict publishes
+      assert.equal(api.submitted[0]!.event, "COMMENT", JSON.stringify(enforcementHarness));  // #1447: incomplete/unknown coverage withholds trusted approval
       assert.match(api.submitted[0]!.body, /could not be verified/, JSON.stringify(enforcementHarness));
     });
   }
@@ -684,7 +683,7 @@ test("#873/#838 regression: tool_loop_ran:true naming a missing enforcement_harn
     const api = new MinimalPublishApi("a".repeat(40));
     const result = await publishReview(input, api, { diffText: "" });
     assert.equal(result.status, "published");
-    assert.equal(api.submitted[0]!.event, "APPROVE");  // #1145
+    assert.equal(api.submitted[0]!.event, "COMMENT");  // #1447: incomplete/unknown coverage withholds trusted approval
     assert.match(api.submitted[0]!.body, /could not be verified/);
   });
 });
@@ -711,7 +710,7 @@ test("#873/#838 regression: an absent or invalid persisted required_checks is co
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published", JSON.stringify(artifact));
-      assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify(artifact));  // #1145: fail-closed state, verdict publishes
+      assert.equal(api.submitted[0]!.event, "COMMENT", JSON.stringify(artifact));  // #1447: incomplete/unknown coverage withholds trusted approval
       assert.match(api.submitted[0]!.body, /could not be verified/, JSON.stringify(artifact));
     });
   }
@@ -744,7 +743,7 @@ test("#873/#838 regression: a traversal-looking enforcement_harness value is nev
     const api = new MinimalPublishApi("a".repeat(40));
     const result = await publishReview(input, api, { diffText: "" });
     assert.equal(result.status, "published");
-    assert.equal(api.submitted[0]!.event, "APPROVE");  // #1145: the forged file never resolved as complete (asserted above)
+    assert.equal(api.submitted[0]!.event, "COMMENT");  // #1447: incomplete/unknown coverage withholds trusted approval
     assert.match(api.submitted[0]!.body, /could not be verified/);
   } finally {
     rmSync(parentDir, { recursive: true, force: true });
@@ -772,7 +771,7 @@ test("#873/#838 regression: a missing review-coverage.json resolves fail-closed 
     const api = new MinimalPublishApi("a".repeat(40));
     const result = await publishReview(input, api, { diffText: "" });
     assert.equal(result.status, "published");
-    assert.equal(api.submitted[0]!.event, "APPROVE");  // #1145
+    assert.equal(api.submitted[0]!.event, "COMMENT");  // #1447: incomplete/unknown coverage withholds trusted approval
     assert.match(api.submitted[0]!.body, /could not be verified/);
   });
 });
@@ -799,8 +798,7 @@ test("#873/#838 cross-process regression: publish reads the real state from an e
     process.chdir(checkoutDir);
 
     // 1. Explicit PR_REVIEWER_RUN_DIR: publish reads the REAL (partial)
-    // state (#1145: that fail-closed state resolution is the invariant; the
-    // verdict's native event publishes with the gap stated).
+    // state (#1447: persisted partial coverage withholds trusted approval).
     {
       const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: runDir }), "github");
       assert.ok(input.partialCoverage);
@@ -808,8 +806,8 @@ test("#873/#838 cross-process regression: publish reads the real state from an e
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published");
-      assert.equal(api.submitted[0]!.event, "APPROVE");  // #1145
-      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/);
+      assert.equal(api.submitted[0]!.event, "COMMENT");  // #1447: incomplete/unknown coverage withholds trusted approval
+      assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/);
     }
 
     // 2. No explicit PR_REVIEWER_RUN_DIR (absent, and the empty-string
@@ -825,7 +823,7 @@ test("#873/#838 cross-process regression: publish reads the real state from an e
         const api = new MinimalPublishApi("a".repeat(40));
         const result = await publishReview(input, api, { diffText: "" });
         assert.equal(result.status, "published", variant.name);
-        assert.equal(api.submitted[0]!.event, "APPROVE", variant.name);  // #1145: fail-closed state, verdict publishes
+        assert.equal(api.submitted[0]!.event, "COMMENT", variant.name);  // #1447: incomplete/unknown coverage withholds trusted approval
         assert.match(api.submitted[0]!.body, /could not be verified/, variant.name);
       }
     }
