@@ -566,11 +566,11 @@ inputs:
     required: false
     default: "512"
   tool-max-requests:
-    description: Maximum number of tool requests the harness executes when tool_mode is enabled. Empty (the default) resolves a tier-aware budget from the review route (#701) — ~24 for the primary route, ~32 for the smart route, up to 40 for the escalated (deep) path — scaled for the PR size (#810) from changed files, changed lines and specialist leads, floored at the tier default (small PRs keep the tier budget) and capped at the hard ceiling of 50; wall-clock and round budgets still bind. An explicit value overrides every tier and the scaling and is bounded to 1..50.
+    description: Maximum number of tool requests the harness executes when tool_mode is enabled. Empty resolves a tier-aware budget from the review route (#701) — 40 for primary, 45 for smart, 50 for escalated — then scales upward for PR size (#810) up to the hard ceiling of 50. Explicit route-specific inputs outrank tool-max-requests; tool-max-requests otherwise overrides the derived tier budget. Wall-clock and round limits still bind.
     required: false
     default: ""
   primary-tool-max-requests:
-    description: Request budget for the primary route only, bounded to 1..50. Outranks tool_max_requests on that route and leaves the smart/escalated tiers untouched. Empty (the default) keeps the tier default.
+    description: Request budget for the primary route only, bounded to 1..50. Outranks tool_max_requests on that route and leaves the smart/escalated tiers untouched. Empty keeps the primary tier default (40).
     required: false
     default: ""
   smart-tool-max-requests:

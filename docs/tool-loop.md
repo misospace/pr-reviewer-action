@@ -91,19 +91,24 @@ and JSON-RPC body are never forwarded to an unconfigured origin, and the
 
 ### Tool-call budget (tier defaults, size scaling)
 
-`tool-max-requests` bounds the total tool calls the harness executes. Left
-empty (the default), the effective budget is **tier-aware** by review route:
+The ordinary exploration ceiling is tier-aware before route-specific
+overrides:
 
-| Route | Tier default |
+| Route | Tier floor |
 | --- | --- |
-| primary | 24 |
-| smart | 32 |
-| escalated (smart under post-review escalation) | 40 |
+| primary | 40 |
+| smart | 45 |
+| escalated (smart under post-review escalation) | 50 |
 
-Hard ceiling in all cases: 50. `primary-tool-max-requests` /
-`smart-tool-max-requests` override the budget for their own route only;
-`tool-max-requests` overrides every route; any explicit value is bounded to
-1..50.
+These are the default floors when the operator leaves the route-specific
+inputs empty. `primary-tool-max-requests` / `smart-tool-max-requests` can
+override their own route, while `tool-max-requests` overrides the derived
+tier budget when no route-specific value is set. The hard ceiling remains 50.
+
+When primary requirement-trace is active, its one post-verdict repair round
+also has a bounded four-request closure allowance. The published effective
+tool budget includes that allowance, so a default 40-call primary review with
+trace enabled can execute at most 44 read-only tool calls.
 
 When no explicit override wins, the default is further scaled by PR size
 (#810): one request per 4 changed files, one per 400 changed lines, and 2
@@ -276,9 +281,12 @@ rounds/requests): a reserve stop can end a run with that window still open.
 
 When requirement-trace validation is on and the primary native loop accepts a
 verdict while in-scope requirements are still unproven — no claim, an invalid
-citation, an unmapped distributed seam — and at least one tool request remains
-in the loop's budget, the harness asks the same conversation for one bounded
-repair round before writing outputs. A probe (requirements side:
+citation, an unmapped distributed seam — the harness asks the same conversation
+for one bounded repair round before writing outputs. #1447 gives that repair
+round up to four targeted requests even when ordinary exploration consumed its
+entire ceiling. This is still the same authoritative reviewer and conversation,
+not a second reviewer or confidence call, and it remains inside the same
+whole-run wall-clock deadline. A probe (requirements side:
 `createTraceGapProbe`) re-validates the accepted verdict with the exact
 deterministic validator the publication path uses; on a genuine gap it returns
 a fenced instruction listing the unresolved requirements with their
@@ -309,16 +317,16 @@ requirement-trace with a non-empty scope, and budget left over. Without it
 `unverifiable`, the run keeps reporting partial coverage, and it never reads
 as clean.
 
-Three budget facts bound the repair round exactly. It runs only inside what
-is LEFT of the original run's totals: its wall-clock allowance is the run's
-total wall-clock budget minus the original loop's elapsed time **and** the
-first verdict turn's elapsed time; its tool-call allowance is the loop's
-remaining request budget; and it starts only when the loop has a round left
-(`rounds < maxRounds`). A loop that stopped on any budget stop has by
-definition exhausted at least one of the three — a `max-rounds` stop has no
-round left, a call-budget stop has no request left, a wall-clock stop has no
-time left — so the repair is recorded `skipped_no_budget` and the run's
-budgets are never exceeded. The refreshed verdict
+The repair round shares the original run's whole-exchange wall-clock deadline,
+but it has a deliberately separate closure allowance: the ordinary loop's
+remaining requests plus at most four additional targeted requests, and exactly
+one repair round. That means a `tool-call-budget-exhausted` or `max-rounds`
+exploration stop no longer mechanically prevents requirement-trace from
+checking the evidence it just discovered it still needs. A wall-clock stop can
+still leave no safe repair capacity and records `skipped_no_budget`. After a
+repair round, deterministic changed-file/specialist coverage is recomputed over
+the combined original + repair call log, so new reads can close a real gap but
+can never erase one they did not inspect. The refreshed verdict
 is re-requested from the SAME conversation and does **not** re-append the
 review corpus: the conversation already carries it verbatim from the first
 verdict turn, so a second copy would double the corpus in the request (200KB
