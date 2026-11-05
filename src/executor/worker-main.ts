@@ -192,12 +192,20 @@ function failedResult(
 /** The completed outcome: the publication artifact the engine persisted
  * in the run directory. A completed result is only ever built for a run
  * that left that artifact on disk (the caller checks); a completed result
- * pointing at a missing file would be refused by publication forever. */
+ * pointing at a missing file would be refused by publication forever.
+ *
+ * `resultHeadSha` is the engine's verified reviewed head, VERBATIM — never
+ * the envelope's head pin. An engine outcome that names no verified head
+ * (`reviewedHeadSha === ""`) builds a completed candidate the executor's
+ * own contract refuses (`validateExecutionResult` requires a non-empty
+ * `resultHeadSha` when completed), so `settleResult` fails the run closed
+ * as a `worker_error` instead of publishing a "verified at head X" claim
+ * the engine never made (#1500). */
 function completedResult(context: TerminalContext, reviewedHeadSha: string): ExecutionResult {
   return Object.freeze({
     ...terminalBase(context),
     status: "completed" as const,
-    resultHeadSha: reviewedHeadSha !== "" ? reviewedHeadSha : context.request.headSha,
+    resultHeadSha: reviewedHeadSha,
     failureCategory: "" as const,
     failureMessage: "" as const,
     resultArtifactPath: join(context.request.runDir, ENGINE_ARTIFACT_NAME),
@@ -205,8 +213,9 @@ function completedResult(context: TerminalContext, reviewedHeadSha: string): Exe
 }
 
 /** Validate the candidate result against the executor's own contract
- * BEFORE writing it; a candidate that cannot validate (never expected —
- * the shapes above are contract-shaped by construction) fails closed to a
+ * BEFORE writing it; a candidate that cannot validate (possible only when
+ * the engine violates its own contract — e.g. completing without
+ * reporting a verified reviewed head, #1500) fails closed to a
  * `worker_error` failure instead of writing a result the executor would
  * refuse. Returns null only when even the fallback cannot validate, in
  * which case no result file is written at all. */

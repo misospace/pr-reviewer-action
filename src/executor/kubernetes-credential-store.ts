@@ -13,7 +13,11 @@
  * closed `KubernetesCredentialSecret` shape: no unknown key can ride
  * into the API, and the created object is exactly what
  * `deploy/admission/worker-secret-policy.yaml` admits (Opaque, labels
- * verbatim, credential-name `data` keys only).
+ * verbatim, credential-name `data` keys only). The 409 replace path is
+ * identity-gated: an object at the deterministic name is replaced only
+ * when it carries the managed-by identity, so a foreign Secret is never
+ * overwritten or adopted (the sweeper's rule, mirrored on the write
+ * path).
  *
  * The cluster-side backstop this store owes the executor (see
  * `KubernetesCredentialStore`): the owning Job's UID is resolved when
@@ -261,6 +265,26 @@ export class InClusterCredentialStore implements KubernetesCredentialStore {
           && existingObject.metadata !== null
           ? existingObject.metadata
           : {}) as Record<string, unknown>;
+        // Identity gate before the replace: the 409 proves only that
+        // SOMETHING sits at this deterministic name (a pure function of
+        // the run id), not that it is ours. Replacing a foreign object
+        // would destroy its data/labels/annotations and adopt its uid
+        // into our ownerReferences — the exact inverse of the sweeper's
+        // rule ("a foreign Secret carrying our managed-by label is NOT
+        // ours to touch"). So the replace proceeds only when the fetched
+        // object carries the managed-by identity; anything else (a
+        // foreign object, a wrong value, an unparseable body) fails
+        // closed. The message is a fixed phrase: no object contents, no
+        // credential names.
+        const existingLabels = (typeof metadata.labels === "object" && metadata.labels !== null
+          ? metadata.labels
+          : {}) as Record<string, unknown>;
+        if (existingLabels[LABEL_MANAGED_BY] !== WORKER_IDENTITY_VALUE) {
+          throw new KubernetesApiError(
+            "refusing to replace the credential Secret: the object at the name is not verified as this controller's own managed material",
+            409,
+          );
+        }
         const replaceBody = secretBodyOf(secret, ownerJobUid, {
           uid: typeof metadata.uid === "string" && metadata.uid !== "" ? metadata.uid : null,
           resourceVersion: typeof metadata.resourceVersion === "string"

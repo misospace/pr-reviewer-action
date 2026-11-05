@@ -333,6 +333,81 @@ test("putSecret replaces on 409 with the existing uid/resourceVersion and fresh 
   assert.notEqual(after, stored, "the stored object was replaced");
 });
 
+test("putSecret refuses to 409-replace a same-named Secret without the managed-by identity", async (t) => {
+  const { fake, store } = await makeStore(t);
+  const foreignData = Buffer.from("not-our-material-value", "utf8").toString("base64");
+  const seedForeign = (name: string, labels: Record<string, unknown>): void => {
+    fake.secrets.set(`review-workers/${name}`, {
+      apiVersion: "v1",
+      kind: "Secret",
+      type: "Opaque",
+      metadata: {
+        name,
+        namespace: "review-workers",
+        labels,
+        annotations: { "team.example.com/owner": "another-principal" },
+      },
+      data: { "api-key": foreignData },
+    });
+  };
+
+  // Two flavors of foreign object at the deterministic name: no labels
+  // at all, and the managed-by label with a foreign value. Neither is
+  // ours to replace, whatever the name grammar says.
+  const unlabeled = kubernetesCredentialSecretName("run-foreign-unlabeled");
+  seedForeign(unlabeled, {});
+  const wrongIdentity = kubernetesCredentialSecretName("run-foreign-wrong");
+  seedForeign(wrongIdentity, { "app.kubernetes.io/managed-by": "someone-else" });
+
+  for (const name of [unlabeled, wrongIdentity]) {
+    const before = fake.secrets.get(`review-workers/${name}`);
+    const err = await store.putSecret(sampleSecret({ name })).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    assert.ok(err instanceof KubernetesApiError, "a KubernetesApiError is thrown");
+    const failure = err as KubernetesApiError;
+    assert.equal(failure.status, 409);
+    assert.equal(
+      failure.message,
+      "refusing to replace the credential Secret: the object at the name is not verified as this controller's own managed material",
+      "the refusal is a fixed phrase",
+    );
+    assert.ok(!failure.message.includes(MATERIAL_A), "no credential material rides the message");
+    assert.ok(!failure.message.includes(MATERIAL_B), "no credential material rides the message");
+    assert.ok(!failure.message.includes("api-key"), "no credential name rides the message");
+    // The foreign object is untouched: same object, its own data, none
+    // of ours.
+    const after = fake.secrets.get(`review-workers/${name}`);
+    assert.equal(after, before, "the stored object was not replaced");
+    assert.deepEqual(
+      (after as Record<string, unknown>).data,
+      { "api-key": foreignData },
+      "the foreign data survives intact",
+    );
+    assert.ok(
+      !JSON.stringify(after).includes(Buffer.from(MATERIAL_A, "utf8").toString("base64")),
+      "no credential value was written into the object",
+    );
+  }
+
+  // The test exercised the real collision path: the POST hit 409 and the
+  // conflicting object was fetched, but no PUT ever left the store.
+  assert.ok(
+    fake.requests.some((entry) => entry.method === "POST" && entry.path === "/api/v1/namespaces/review-workers/secrets"),
+    "the create attempt happened",
+  );
+  assert.ok(
+    fake.requests.some((entry) => entry.method === "GET" && entry.path.includes("/secrets/prv-cred-")),
+    "the conflicting object was fetched",
+  );
+  assert.equal(
+    fake.requests.some((entry) => entry.method === "PUT"),
+    false,
+    "no PUT was issued for a foreign object",
+  );
+});
+
 test("an unknown owning Job leaves the Secret unbound and the sweeper patches the ownerReference exactly once", async (t) => {
   const failures: string[] = [];
   const { fake, store } = await makeStore(t, { sweepIntervalMs: 5, onSweepFailure: (m) => failures.push(m) });

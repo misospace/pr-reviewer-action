@@ -431,3 +431,32 @@ test("a completed engine run without the publication artifact is a worker_error,
     cleanup(fixture);
   }
 });
+
+test("an engine that reports no verified head settles a worker_error, never a completed result at the envelope's head (#1500)", async () => {
+  const fixture = makeRequest();
+  try {
+    const { deps } = fakeRunner(async (_request, dependencies) => {
+      // The fake mirrors a contract-violating engine: it leaves the
+      // publication artifact on disk (so the artifact check passes and the
+      // completion path is reached) but names no verified reviewed head.
+      writeFileSync(path.join(dependencies.runDir, "ai-output.json"), "{}", "utf8");
+      return { reviewedHeadSha: "" };
+    });
+    const exit = await workerMain([fixture.request.requestPath], {}, deps);
+    assert.equal(exit, 0);
+    // The result file is the only thing writeFileNoFollow ever writes, and
+    // its settled shape is a failed worker_error with no head: no completed
+    // result — least of one carrying the envelope's head pin the engine
+    // never verified — can reach the result protocol.
+    const result = assertConformingResult(fixture.request, {
+      status: "failed",
+      resultHeadSha: "",
+      failureCategory: "worker_error",
+      resultArtifactPath: "",
+    });
+    assert.equal(result.resultHeadSha, "");
+    assert.match(result.failureMessage, /resultHeadSha/);
+  } finally {
+    cleanup(fixture);
+  }
+});

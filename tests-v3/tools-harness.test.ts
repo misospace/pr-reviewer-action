@@ -93,6 +93,87 @@ test("missing model config aborts pre-loop as missing-config", async () => {
   assert.equal(buildToolLoopTelemetry(result as HarnessResult)!.failure, "missing-config");
 });
 
+test("#1507: the loop speaks the resolved primary lane's wire when an ai-primary-* override is set", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ x");
+  const anthropicNoToolCalls = {
+    content: [{ type: "text", text: "no tools needed" }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 10, output_tokens: 3 },
+  };
+  const seen: Array<{ baseUrl: string; apiFormat: string; apiKey: string }> = [];
+  // The issue's exact mismatch: the base lane stays on the OpenAI wire while
+  // the primary lane override dials Anthropic. The review call follows the
+  // lane; the loop's verdict turn IS the review's verdict, so the loop must
+  // follow the lane too — in the default routing mode (off) included, where
+  // the engine never copies the lane into the AI_* keys.
+  const { result } = await runToolHarness(deps({
+    env: {
+      AI_API_FORMAT: "openai",
+      AI_PRIMARY_BASE_URL: "http://lane.test/v1",
+      AI_PRIMARY_API_FORMAT: "anthropic",
+      AI_PRIMARY_MODEL: "lane-m",
+      AI_PRIMARY_API_KEY: "lane-k",
+    },
+    transport: async (baseUrl, apiFormat, _payload, apiKey) => {
+      seen.push({ baseUrl, apiFormat, apiKey });
+      return anthropicNoToolCalls;
+    },
+  }));
+  assert.equal(result.mode, "native_loop");
+  assert.equal(result.native_loop_degraded, "no-tool-calls");
+  assert.ok(seen.length >= 1, "the loop must have called the transport");
+  assert.equal(seen[0]!.baseUrl, "http://lane.test/v1");
+  assert.equal(seen[0]!.apiFormat, "anthropic");
+  assert.equal(seen[0]!.apiKey, "lane-k");
+});
+
+test("#1507: without a lane override the loop keeps the base AI_* transport", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ x");
+  const seen: Array<{ baseUrl: string; apiFormat: string; apiKey: string }> = [];
+  const { result } = await runToolHarness(deps({
+    env: { AI_API_FORMAT: "openai" },
+    transport: async (baseUrl, apiFormat, _payload, apiKey) => {
+      seen.push({ baseUrl, apiFormat, apiKey });
+      return openAiText("no tools needed here");
+    },
+  }));
+  assert.equal(result.mode, "native_loop");
+  assert.equal(result.native_loop_degraded, "no-tool-calls");
+  assert.equal(seen[0]!.baseUrl, "http://model.test/v1");
+  assert.equal(seen[0]!.apiFormat, "openai");
+  assert.equal(seen[0]!.apiKey, "k");
+});
+
+test("#1507: the smart tier keeps reading the SMART_* keys", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ x");
+  const seen: Array<{ baseUrl: string; apiFormat: string; apiKey: string }> = [];
+  const { result } = await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "smart",
+      SMART_BASE_URL: "http://smart.test/v1",
+      SMART_API_FORMAT: "anthropic",
+      SMART_MODEL: "smart-m",
+      SMART_API_KEY: "smart-k",
+    },
+    transport: async (baseUrl, apiFormat, _payload, apiKey) => {
+      seen.push({ baseUrl, apiFormat, apiKey });
+      return {
+        content: [{ type: "text", text: "no tools needed" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 10, output_tokens: 3 },
+      };
+    },
+  }));
+  assert.equal(result.tier, "smart");
+  assert.equal(result.mode, "native_loop");
+  assert.equal(seen[0]!.baseUrl, "http://smart.test/v1");
+  assert.equal(seen[0]!.apiFormat, "anthropic");
+  assert.equal(seen[0]!.apiKey, "smart-k");
+});
+
 test("no tool calls degrades to a corpus-only review without a verdict turn", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ x");
