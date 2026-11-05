@@ -898,48 +898,19 @@ gate design (#1075 stays blocked); do not remove from the critical path**,
 with re-evaluation conditions in the owning report. Ongoing per-run
 collection is `scripts/confidence_dogfood_evidence.py` (PR #1454).
 
-## Verifier dogfood transport policy (#1478 / #1481 follow-up)
+## Confidence verifier status after trusted-approval simplification (#1447)
 
-The #1452 measurement above (418/419 unscored) happened while the verifier
-implicitly shared the primary LiteLLM transport but targeted a model namespace
-that the route did not successfully serve. The lesson is to make the verifier
-**model choice explicit**, not to require a second copy of the same gateway URL
-and API credential.
+The confidence verifier remains available as an optional public feature for
+operators who want advisory second-model telemetry. It is **not** part of
+trusted-approval authority and is no longer enabled by this repository's
+dogfood workflow.
 
-This repository intentionally runs one trusted model gateway
-(LiteLLM/Bifrost/AgentGateway shape), one gateway credential, and many models.
-The dogfood workflow therefore uses
-`ai-confidence-isolation: inherit-primary`:
-
-- `CONFIDENCE_MODEL` is the verifier model and never falls back to the primary
-  or smart model. Empty disables the verifier.
-- `CONFIDENCE_BASE_URL` is an optional override. Empty inherits the primary
-  lane's resolved endpoint.
-- `CONFIDENCE_API_KEY` is an optional override. When the confidence endpoint
-  is inherited, empty inherits the primary lane's resolved credential. The
-  workflow does not duplicate the primary secret into a second input.
-- `CONFIDENCE_FORMAT` is an optional wire-family override. Empty inherits the
-  primary lane's resolved format.
-- `CONFIDENCE_REASONING_EFFORT` remains a confidence-lane tuning override.
-
-The existing cross-endpoint credential boundary is unchanged: when an operator
-sets a distinct `CONFIDENCE_BASE_URL`, that endpoint never inherits the primary
-API key. It must have its own `CONFIDENCE_API_KEY` (or URL credential under the
-existing one-credential rule). Operators who truly require a completely
-separate verifier transport can still opt into
-`ai-confidence-isolation: require-dedicated`; the public action contract keeps
-that strict mode unchanged.
-
-For trusted-approval qualification, independence is about the model that
-actually produced the authoritative review versus the verifier model. Sharing a
-trusted gateway or gateway credential is not, by itself, same-model
-self-grading. A confidence result produced by the same model that authored the
-review remains correlated evidence and must not qualify a trusted approval.
-
-The verifier remains advisory here: it never changes the review verdict,
-findings, approval, or merge gate. Disable it entirely by unsetting
-`CONFIDENCE_MODEL`. #1075 remains blocked pending #1450 qualification
-evidence.
+PRA dogfood therefore supplies no `ai-confidence-*` inputs and makes no
+confidence model call. A native APPROVE is certified entirely by the
+authoritative review plus deterministic completion/coverage guardrails at the
+publication boundary. Historical confidence reports below remain retained as
+research evidence; no new manual canary, operator smoke test, or incremental
+confidence dataset is required for the trusted-approval contract.
 
 ## Verifier dogfood evidence collector (#1452)
 

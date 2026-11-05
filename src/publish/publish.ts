@@ -295,14 +295,13 @@ export function markerReviewResult(input: {
   return coverageGap && result !== "issues" ? "partial" : result;
 }
 
-/** (#873) True when the review's own coverage signals say it did not
- * finish: `review_result` (the marker state computed by
- * `markerReviewResult`, above) is `partial`. #1145 changed what this gates:
- * in `review_verdict` it no longer downgrades a valid verdict's native event
- * — the publish mode is authoritative. It still drives the comment-mode
- * header (an approve recommendation never headers as APPROVE over an
- * unfinished review) and the #1145 approval-with-gaps body note, and it keeps
- * marking the marker/telemetry `partial` for every consumer. */
+/** (#873 / #1447) True when the review's own coverage signals say it did
+ * not finish: `review_result` (the marker state computed by
+ * `markerReviewResult`, above) is `partial`. A partial review is an
+ * abstention, not a trusted approval: comment mode renders an incomplete
+ * recommendation and review_verdict withholds the native APPROVE event as a
+ * non-blocking COMMENT. Concrete blocker/major findings still own
+ * REQUEST_CHANGES; incomplete coverage never manufactures one. */
 export function reviewCoverageIncomplete(reviewResult: string): boolean {
   return reviewResult === "partial";
 }
@@ -1877,17 +1876,17 @@ export async function publishReview(
         isForkPr: input.isForkPr,
         ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
       });
-      // #1145: the publish mode is authoritative — a valid final verdict maps
-      // to its native event. Coverage/requirement-trace incompleteness does
-      // NOT gate the approval: the shortfall stays visible in the marker
-      // (`review_result: partial`), the #810 coverage notice, and the
-      // explicit body note below, never by downgrading the verdict. Only the
-      // operator's own guardrails (approve_forks / fork-ness fail-closed)
-      // still withhold.
+      // #1447: a native APPROVE is a trusted-approval certificate, not merely
+      // a rendering of the model's approve verdict. It therefore requires
+      // complete, known review-owned coverage in addition to the existing
+      // scope/derived guardrails. The verdict output itself remains
+      // `approve`: an incomplete approve candidate is an abstention and
+      // publishes as a non-blocking COMMENT, never a manufactured
+      // REQUEST_CHANGES.
       // #1161: `review_blockers` publishes blocking findings only — it never
       // approves, under any verdict, input, or pull-request scope.
       const coverageIncomplete = reviewCoverageIncomplete(reviewResult);
-      const canApprove = input.mode === "review_verdict" && guardrails.canApprove;
+      const canApprove = input.mode === "review_verdict" && guardrails.canApprove && completeCoverage;
       // #588: on a platform without a native review surface there is no
       // native event to carry the recommendation, so the body states it —
       // BEFORE the untrusted review text, so no model content can swallow it
@@ -1959,16 +1958,12 @@ export async function publishReview(
         messages.push(
           `Withholding native approval for #${input.prNumber} (derived obligation state: ${state})`,
         );
-      } else if (input.mode === "review_verdict" && input.verdict === "approve" && coverageIncomplete && nativeSurface.supported) {
-        // #1145: the verdict still publishes as a native approval, but never
-        // silently — the marker keeps reading `review_result: partial`,
-        // the #810 notice (when present) names the tool-loop gap, and this
-        // line names the trace/coverage shortfall on the approved review.
-        // #588: on a platform WITHOUT a native review surface no approval is
-        // published at all — the platform notice above already states that
-        // degradation, so a note about a PUBLISHED approval is not rendered
-        // there (the coverage gap is still disclosed by the #810 notice and
-        // the marker).
+      } else if (input.mode === "review_verdict" && input.verdict === "approve" && coverageIncomplete) {
+        // #1447: incomplete or unprovable review coverage is an abstention.
+        // Keep the authoritative verdict output as `approve`, but withhold the
+        // native APPROVE event. The event below becomes COMMENT on platforms
+        // that support native reviews; platforms without that surface already
+        // publish a managed advisory record.
         const gap = incompleteReason === "requirement_trace"
           ? "an in-scope requirement lacks fully verified enforcement or test evidence"
             : incompleteReason === "both"
@@ -1976,9 +1971,9 @@ export async function publishReview(
             : input.coverageUnknown
               ? "this review's tool-loop coverage could not be verified (the run directory or its coverage artifact was unavailable to confirm it)"
               : "required-check coverage or the tool-loop investigation did not finish";
-        body += `\n> **Approval published with incomplete coverage**: ${gap}. The verdict above is the review's final verdict; the coverage notes remain informational.\n`;
+        body += `\n> **Approval withheld by incomplete review coverage**: ${gap}. This run needs review; no native approval is certified.\n`;
         messages.push(
-          `Publishing native approval for #${input.prNumber} with incomplete coverage (#1145; reason=${incompleteReason})`,
+          `Withholding native approval for #${input.prNumber} (incomplete review coverage; reason=${incompleteReason})`,
         );
       }
       if (input.mode === "review_blockers" && input.verdict === "approve") {
@@ -2009,11 +2004,10 @@ export async function publishReview(
         stickyBody = body;
         messages.push(`Published the review as a managed top-level review record (no native review surface: ${surfaceReason}); no native approval or blocking request was submitted`);
       } else {
-        // #1145: every valid final verdict maps to its native event. COMMENT
-        // is reachable here only when an operator guardrail (approve_forks /
-        // fork fail-closed) blocks an approve, or when the blockers-only mode
-        // publishes its advisory output — never from a requirement-trace or
-        // coverage downgrade branch.
+        // #1447: REQUEST_CHANGES remains the concrete-defect event. APPROVE
+        // is emitted only when trusted-approval eligibility is complete;
+        // COMMENT is the explicit abstention for incomplete/unknown coverage,
+        // scope/derived withholding, or blockers-only advisory output.
         const event: NativeReviewEvent = input.verdict === "request_changes"
           ? "REQUEST_CHANGES"
           : canApprove ? "APPROVE" : "COMMENT";
