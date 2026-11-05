@@ -191,18 +191,6 @@ DOGFOOD_OVERRIDES = {
     "ai-reasoning-effort",
     "ai-primary-reasoning-effort",
     "ai-smart-reasoning-effort",
-    "ai-confidence-model",
-    "ai-confidence-api-format",
-    "ai-confidence-base-url",
-    "ai-confidence-api-key",
-    "ai-confidence-isolation",
-    "ai-confidence-reasoning-effort",
-    "ai-confidence-timeout-sec",
-    "ai-confidence-max-tokens",
-    "ai-confidence-prompt-tokens",
-    "ai-confidence-model-context-tokens",
-    "ai-confidence-anthropic-effort-support",
-    "ai-confidence-structured-output-support",
     "ai-fallback-base-url",
     "ai-fallback-api-format",
     "ai-fallback-model",
@@ -257,50 +245,21 @@ def test_dogfood_overrides_only_what_is_ours() -> None:
     assert "allow-approve" not in values
 
 
-def test_dogfood_enables_bounded_advisory_confidence_scoring() -> None:
-    """Score with a usable configured model, without weakening review authority.
+def test_dogfood_does_not_run_the_optional_confidence_verifier() -> None:
+    """Trusted approval must not require a second model call.
 
-    #1478: the verifier's ENDPOINT, CREDENTIAL, and MODEL are isolated from
-    the primary lane — they resolve only from the operator's dedicated
-    CONFIDENCE_* repository variables/secret, and
-    ai-confidence-isolation=require-dedicated turns a missing dedicated
-    endpoint (or a missing dedicated model) into a visible `unscored` run
-    instead of a silent primary-lane inheritance. The workflow therefore
-    pre-fills the model with NOTHING: a `SMART_MODEL` substitution here would
-    put the primary lane's own model on the verifier, the exact same-model
-    correlation isolation exists to prevent (the resolver refuses the missing
-    model as `unscored(dedicated_model_missing)` — #1481). #1481 extends the
-    same no-fallback rule to the WIRE FAMILY: no `SMART_FORMAT` substitution
-    either — a dedicated endpoint's format is the dedicated endpoint's own
-    property, and an unset `CONFIDENCE_FORMAT` is a visible
-    `unscored(dedicated_format_missing)`, never a review-lane guess. The
-    primary LITELLM_* credential must never appear on a confidence input, and
-    forks stay disabled by default.
+    #1447 makes native APPROVE depend on deterministic completion state around
+    the authoritative review. Confidence remains a public opt-in feature, but
+    PRA's own dogfood workflow must not spend another model call or make
+    trusted approval depend on verifier availability.
     """
     values = _review_step_with(WORKFLOW.read_text(encoding="utf-8"))
-    assert values["ai-confidence-model"] == "${{ vars.CONFIDENCE_MODEL }}"
-    # The regression this pins: the static workflow must never pre-fill the
-    # confidence model with a primary-derived value (no SMART_MODEL fallback).
-    assert "SMART_MODEL" not in values["ai-confidence-model"]
-    # #1481 pins the same rule for the WIRE FAMILY: no SMART_FORMAT fallback.
-    # A smart-derived format is still a review-lane value riding the verifier's
-    # protocol surface; unset CONFIDENCE_FORMAT now resolves to a visible
-    # unscored(dedicated_format_missing) inside the action instead.
-    assert values["ai-confidence-api-format"] == "${{ vars.CONFIDENCE_FORMAT }}"
-    assert "SMART_FORMAT" not in values["ai-confidence-api-format"]
-    assert values["ai-confidence-base-url"] == "${{ vars.CONFIDENCE_BASE_URL }}"
-    assert values["ai-confidence-api-key"] == "${{ secrets.CONFIDENCE_API_KEY }}"
-    assert values["ai-confidence-isolation"] == "require-dedicated"
-    assert values["ai-confidence-reasoning-effort"] == "${{ vars.CONFIDENCE_REASONING_EFFORT }}"
-    assert str(values["ai-confidence-timeout-sec"]) == "120"
-    assert "ai-confidence-enable-for-forks" not in values
-    # The primary lane's credential must never ride a confidence input: the
-    # verifier inherits nothing from the primary transport under
-    # require-dedicated, and the dedicated secret is its own.
-    for key, value in values.items():
-        if key.startswith("ai-confidence"):
-            assert "LITELLM" not in value, f"{key} references the primary lane credential: {value}"
+    confidence_inputs = sorted(key for key in values if key.startswith("ai-confidence"))
+    assert confidence_inputs == [], f"dogfood unexpectedly enables confidence inputs: {confidence_inputs}"
     assert values["publish-mode"] == "review_verdict"
+    # #1447: PRA intentionally exercises requirement trace as part of the
+    # trusted-approval contract even though the public action keeps it opt-in.
+    assert values["requirement-trace"] == "true"
 
 
 def test_public_action_defaults_are_the_recommended_setup() -> None:
@@ -318,8 +277,10 @@ def test_public_action_defaults_are_the_recommended_setup() -> None:
         "publish-mode": "review_comment",
         "inline-findings": "true",
         "verdict-policy": "strict",
+        "requirement-trace": "false",
         "allow-approve": "false",
         "tool-max-requests": "",
+        "primary-tool-max-requests": "",
         "tool-max-rounds": "",
         "tool-loop-wall-clock-sec": "600",
         "tool-corpus-max-bytes": "",

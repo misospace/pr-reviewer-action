@@ -563,12 +563,30 @@ class TestForgeClientRefusesMalformedResponses:
 # ---------------------------------------------------------------------------
 
 
-class TestGetPagesStopsAtShortPage:
-    """``get_pages`` walks the ``per_page`` boundary correctly: it stops
-    when the server returns fewer than the requested per_page items, and
-    threads ``page`` through successive calls."""
+class TestGetPagesWalksUntilEmptyPage:
+    """``get_pages`` walks until the FORGE answers an EMPTY page. A page
+    shorter than ``per_page`` never ends the walk by itself: GitHub honors
+    ``per_page``, but a forge that caps the page size (Forgejo answers at
+    most ``MAX_RESPONSE_ITEMS``, 50 by default) answers every full page
+    short, and a walk that stopped at a short page handed the caller an
+    incomplete list while looking whole (#1487)."""
 
-    def _make_paginated(self, pages: list[list[dict]]) -> HTTPServer:
+    def _make_paginated(
+        self,
+        pages: list[list[dict]],
+        page_size: int | None = None,
+    ) -> HTTPServer:
+        """A stub list endpoint.
+
+        It answers ``page`` with that slice of ``pages`` and an empty page
+        past the end, and records the ``page`` number of every request on
+        ``server.requested_pages``. ``page_size`` caps the STRIDE the stub
+        uses to slice, regardless of the requested ``per_page`` -- the
+        Forgejo ``MAX_RESPONSE_ITEMS`` behavior the walk must survive.
+        """
+        requested: list[int] = []
+        stride = page_size
+
         class Handler(BaseHTTPRequestHandler):
             def handle_one_request(self):
                 self.raw_requestline = self.rfile.readline()
@@ -579,11 +597,14 @@ class TestGetPagesStopsAtShortPage:
                 query = urllib.parse.urlparse(self.path).query
                 params = dict(urllib.parse.parse_qsl(query))
                 page = int(params.get("page", "1"))
-                index = page - 1
-                if 0 <= index < len(pages):
-                    body = pages[index]
+                requested.append(page)
+                if stride is None:
+                    index = page - 1
+                    body = pages[index] if 0 <= index < len(pages) else []
                 else:
-                    body = []
+                    items = [item for one_page in pages for item in one_page]
+                    start = (page - 1) * stride
+                    body = items[start : start + stride]
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -593,6 +614,7 @@ class TestGetPagesStopsAtShortPage:
                 pass
 
         server = HTTPServer(("127.0.0.1", 0), Handler)
+        server.requested_pages = requested  # type: ignore[attr-defined]
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
 
@@ -609,14 +631,17 @@ class TestGetPagesStopsAtShortPage:
             )
             items = list(client.get_pages("/x", per_page=3))
             assert items == [{"i": 1}, {"i": 2}, {"i": 3}, {"i": 4}]
+            # The short final page does not end the walk: the walk asks
+            # for one page more and stops on the empty answer.
+            assert server.requested_pages == [1, 2, 3]  # type: ignore[attr-defined]
         finally:
             server.shutdown()
             server.server_close()
 
-    def test_stops_when_a_page_is_shorter_than_per_page(self):
+    def test_a_short_page_does_not_end_the_walk(self):
         server = self._make_paginated(
             [
-                [{"i": 1}, {"i": 2}],
+                [{"i": 1}, {"i": 2}],  # short page
                 [{"i": 3}, {"i": 4}, {"i": 5}, {"i": 6}],  # full page
             ]
         )
@@ -624,9 +649,267 @@ class TestGetPagesStopsAtShortPage:
             client = forge.ForgeClient(
                 base_url=f"http://127.0.0.1:{server.server_port}",
             )
-            # per_page=4, page 1 returns 2 items (short), so we stop.
+            # per_page=4, page 1 answers 2 items: short, NOT last. The
+            # old rule stopped here and lost the rest of the list.
             items = list(client.get_pages("/x", per_page=4))
+            assert items == [
+                {"i": 1},
+                {"i": 2},
+                {"i": 3},
+                {"i": 4},
+                {"i": 5},
+                {"i": 6},
+            ]
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_the_forgejo_page_size_cap_still_yields_the_whole_list(self):
+        """The #1487 regression: a forge that caps every answer below the
+        requested ``per_page`` must not end the walk early."""
+        pages = [
+            [{"i": n} for n in range(page * 50, page * 50 + 50)]
+            for page in range(3)
+        ]
+        server = self._make_paginated(pages, page_size=50)
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            items = list(client.get_pages("/x", per_page=100))
+            assert len(items) == 150
+            assert server.requested_pages == [1, 2, 3, 4]  # type: ignore[attr-defined]
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_string_per_page_param_walks_the_same_rule(self):
+        server = self._make_paginated(
+            [
+                [{"i": 1}, {"i": 2}],
+                [{"i": 3}],
+            ]
+        )
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            # A caller that hands ``per_page`` in params as a string gets
+            # the same walk: the rule compares pages against emptiness,
+            # not against the requested size.
+            items = list(client.get_pages("/x", params={"per_page": "2"}))
+            assert items == [{"i": 1}, {"i": 2}, {"i": 3}]
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class TestGetPagesHonorsMaxPages:
+    """``max_pages`` bounds the walk. It is the SAFETY NET against a forge
+    that never answers an empty page -- not the walk rule -- and a walk it
+    cuts short must be reported, because a truncated list is not a
+    complete one."""
+
+    def _make_endless(self, page_items: list[dict]) -> HTTPServer:
+        """A stub that answers EVERY page with ``page_items``: the walk
+        would never end on its own; only the bound ends it."""
+        requested: list[int] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def handle_one_request(self):
+                self.raw_requestline = self.rfile.readline()
+                if not self.raw_requestline:
+                    return
+                if not self.parse_request():
+                    return
+                query = urllib.parse.urlparse(self.path).query
+                requested.append(
+                    int(dict(urllib.parse.parse_qsl(query)).get("page", "1"))
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(page_items).encode("utf-8"))
+
+            def log_message(self, *_args):  # noqa: ANN001
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        server.requested_pages = requested  # type: ignore[attr-defined]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def _make_pages(self, pages: list[object]) -> HTTPServer:
+        """A stub that answers each page with the given payload (a list,
+        or any non-list value the forge was not supposed to send) and an
+        empty page past the end."""
+
+        class Handler(BaseHTTPRequestHandler):
+            def handle_one_request(self):
+                self.raw_requestline = self.rfile.readline()
+                if not self.raw_requestline:
+                    return
+                if not self.parse_request():
+                    return
+                query = urllib.parse.urlparse(self.path).query
+                page = int(dict(urllib.parse.parse_qsl(query)).get("page", "1"))
+                index = page - 1
+                body = pages[index] if 0 <= index < len(pages) else []
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode("utf-8"))
+
+            def log_message(self, *_args):  # noqa: ANN001
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def test_the_bound_stops_a_walk_that_never_terminates(self):
+        server = self._make_endless([{"i": 1}, {"i": 2}, {"i": 3}])
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            items = list(client.get_pages("/x", per_page=3, max_pages=2))
+            assert items == [{"i": 1}, {"i": 2}, {"i": 3}] * 2
+            assert server.requested_pages == [1, 2]  # type: ignore[attr-defined]
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_the_default_bound_is_the_safety_net(self):
+        server = self._make_endless([{"i": 1}, {"i": 2}])
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            items = list(client.get_pages("/x", per_page=2))
+            assert len(items) == 2 * forge.DEFAULT_MAX_PAGES
+            assert len(server.requested_pages) == forge.DEFAULT_MAX_PAGES  # type: ignore[attr-defined]
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_the_report_says_the_walk_was_cut_short(self):
+        """A caller must be able to tell a complete list from a cut one."""
+        server = self._make_pages(
+            [
+                [{"i": 1}, {"i": 2}, {"i": 3}],
+                [{"i": 4}],
+            ]
+        )
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            # The bound ends the walk on the first page, and that page was
+            # not empty: the list may hold items the walk never saw.
+            items, truncated = client.get_pages_report("/x", per_page=3, max_pages=1)
+            assert len(items) == 3
+            assert truncated is True
+            # The walk ends on the forge's own empty answer: whole list.
+            items, truncated = client.get_pages_report("/x", per_page=3)
+            assert len(items) == 4
+            assert truncated is False
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_the_bound_cut_on_an_endless_forge_is_reported(self):
+        """The acceptance pairing: a forge that never answers an empty
+        page is stopped by the bound, and the report says so."""
+        server = self._make_endless([{"i": 1}, {"i": 2}, {"i": 3}])
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            items, truncated = client.get_pages_report("/x", per_page=3, max_pages=2)
+            assert len(items) == 6
+            assert truncated is True
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_non_list_payload_ends_the_walk_but_is_not_a_bound_cut(self):
+        """A payload that is not a list (an error envelope where a page
+        was expected) ends the walk without the bound ever firing."""
+        server = self._make_pages(
+            [
+                [{"i": 1}, {"i": 2}, {"i": 3}],
+                {"message": "not a list"},
+            ]
+        )
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            items, truncated = client.get_pages_report("/x", per_page=3, max_pages=10)
+            assert items == [{"i": 1}, {"i": 2}, {"i": 3}]
+            assert truncated is False
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_bound_never_reached_is_not_reported_as_cut(self):
+        """A walk that ends on the forge's empty page before the bound is
+        complete even when the pages it read were short."""
+        server = self._make_pages([[{"i": 1}], [{"i": 2}], []])
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            items, truncated = client.get_pages_report("/x", per_page=3, max_pages=10)
             assert items == [{"i": 1}, {"i": 2}]
+            assert truncated is False
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_an_unbounded_walk_is_never_reported_as_cut(self):
+        server = self._make_endless([{"i": 1}])
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            walk = client.get_pages("/x", per_page=1, max_pages=None)
+            first = [next(walk) for _ in range(3)]
+            assert first == [{"i": 1}] * 3
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_zero_or_negative_bound_reads_no_page(self):
+        server = self._make_endless([{"i": 1}])
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            assert list(client.get_pages("/x", max_pages=0)) == []
+            items, truncated = client.get_pages_report("/x", max_pages=-1)
+            assert items == []
+            assert truncated is False
+            assert server.requested_pages == []  # type: ignore[attr-defined]
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_an_invalid_bound_is_refused_before_any_request(self):
+        server = self._make_endless([{"i": 1}])
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            with pytest.raises(forge.ForgeError, match="invalid max_pages"):
+                client.get_pages_report("/x", max_pages="2")
+            with pytest.raises(forge.ForgeError, match="invalid max_pages"):
+                # ``True`` is an int by type but never a page count.
+                client.get_pages_report("/x", max_pages=True)
+            with pytest.raises(forge.ForgeError, match="invalid max_pages"):
+                next(client.get_pages("/x", max_pages=1.5))
+            assert server.requested_pages == []  # type: ignore[attr-defined]
         finally:
             server.shutdown()
             server.server_close()

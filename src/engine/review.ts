@@ -2422,6 +2422,7 @@ secrets: [profiles.primary.apiKey],
       findings: reviewRecord.findings,
       requiredChecks: outputRequiredChecks,
       partialCoverage,
+      degradedGateBypass,
       // #1449: an undischarged derived obligation is missing coverage, so the
       // review reads `partial` — never `clean`, and never a manufactured
       // `issues`. Absent when the feature is off.
@@ -2715,6 +2716,7 @@ secrets: [profiles.primary.apiKey],
       findings: reviewRecord.findings,
       requiredChecks: outputRequiredChecks,
       partialCoverage,
+      degradedGateBypass,
       // #1449: an undischarged derived obligation is missing coverage, so the
       // review reads `partial` — never `clean`, and never a manufactured
       // `issues`. Absent when the feature is off.

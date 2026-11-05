@@ -873,13 +873,12 @@ test("#847: without a tool harness the marker stays byte-identical to the pre-#8
 });
 
 // ---------------------------------------------------------------------------
-// #873 — required-check coverage incomplete (or a #810 tool-loop coverage
-// gap) must never let a run READ as clean: the marker stays `partial` under
-// every verdict policy. #1145 restated the event rule: in `review_verdict`
-// the valid verdict publishes its native event with the gap stated (no
-// COMMENT downgrade); comment-only modes still never header as an approval.
-// Evidence: PR #854 published APPROVE with
-// "review_result":"partial","required_checks":"incomplete" in its marker.
+// #873 / #1447 — required-check coverage incomplete (or a #810 tool-loop
+// coverage gap) must never let a run READ as clean OR certify a native
+// APPROVE: the marker stays `partial` under every verdict policy and
+// review_verdict publishes a non-blocking COMMENT abstention.
+// Evidence: PR #854 demonstrated why the old shape was unsafe by publishing
+// APPROVE with "review_result":"partial","required_checks":"incomplete".
 // ---------------------------------------------------------------------------
 
 const VERDICT_POLICIES = [undefined, "model", "findings_severity_gated", "strict"] as const;
@@ -921,7 +920,7 @@ const INCOMPLETE_STATES: Array<{ name: string; requiredChecks: string; partialCo
 
 for (const state of INCOMPLETE_STATES) {
   for (const verdictPolicy of VERDICT_POLICIES) {
-    test(`review_verdict: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) publishes APPROVE with an explicit gaps note (#1145)`, async () => {
+    test(`review_verdict: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) withholds APPROVE as COMMENT when coverage is incomplete (#1447)`, async () => {
       const api = new MockPublishApi();
       const result = await publishReview(input({
         mode: "review_verdict", allowApprove: true, verdict: "approve",
@@ -931,12 +930,12 @@ for (const state of INCOMPLETE_STATES) {
       }), api, { diffText: "" });
       assert.equal(result.status, "published");
       assert.equal(api.submitted.length, 1);
-      // #1145: the publish mode is authoritative — the verdict's native event
-      // is never downgraded by a coverage/trace shortfall...
-      assert.equal(api.submitted[0]!.event, "APPROVE", `policy=${verdictPolicy}`);
-      // ...but the shortfall stays machine- and human-readable: partial
-      // marker + explicit note on the approved review.
-      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/);
+      // #1447: incomplete coverage is an abstention, so the model's approve
+      // verdict is published as a non-blocking COMMENT, not a trusted APPROVE.
+      assert.equal(api.submitted[0]!.event, "COMMENT", `policy=${verdictPolicy}`);
+      // The shortfall stays machine- and human-readable: partial marker plus
+      // an explicit approval-withheld note.
+      assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/);
       assert.match(api.submitted[0]!.body, /"review_result":"partial"/);
     });
 
@@ -982,6 +981,20 @@ test("review_verdict: complete coverage + approve still publishes APPROVE (no re
   }
 });
 
+test("review_verdict: degraded approve candidate withholds trusted APPROVE", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(input({
+    mode: "review_verdict",
+    verdict: "approve",
+    requiredChecks: "complete",
+    degradedGateBypass: true,
+  }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "COMMENT");
+  assert.match(api.submitted[0]!.body, /Approval withheld by degraded review state/);
+  assert.match(api.submitted[0]!.body, /"review_result":"partial"/);
+});
+
 test("review_verdict: request_changes stays REQUEST_CHANGES even with incomplete coverage", async () => {
   const api = new MockPublishApi();
   const result = await publishReview(input({
@@ -991,7 +1004,7 @@ test("review_verdict: request_changes stays REQUEST_CHANGES even with incomplete
   assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
 });
 
-test("review_verdict: an unknown coverage state names BOTH possible causes in the approval note", async () => {
+test("review_verdict: an unknown coverage state withholds approval and names BOTH possible causes", async () => {
   // #1145: coverage can be unknown because the run directory was missing OR
   // because the run directory's coverage artifact was unreadable or
   // unrecognized. The note must not claim the run directory was absent —
@@ -1002,9 +1015,9 @@ test("review_verdict: an unknown coverage state names BOTH possible causes in th
     coverageUnknown: true,
   }), api, { diffText: "" });
   assert.equal(result.status, "published");
-  assert.equal(api.submitted[0]!.event, "APPROVE");
+  assert.equal(api.submitted[0]!.event, "COMMENT");
   const body = api.submitted[0]!.body;
-  assert.match(body, /Approval published with incomplete coverage/);
+  assert.match(body, /Approval withheld by incomplete review coverage/);
   assert.ok(body.includes("tool-loop coverage could not be verified"), "the stable phrase is kept");
   assert.ok(
     body.includes("(the run directory or its coverage artifact was unavailable to confirm it)"),
