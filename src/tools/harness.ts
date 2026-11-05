@@ -3555,16 +3555,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           .filter((id): id is string => typeof id === "string")
           .map((id) => traceGapIdLabel(id));
         const instruction = typeof continuation.instruction === "string" ? continuation.instruction.trim() : "";
-        // #1145: the allowance covers what is LEFT of the original run's
-        // budgets: the original loop's elapsed wall-clock AND the first
-        // verdict turn's elapsed time, the loop's remaining tool requests,
-        // and the loop's remaining rounds. The continuation never exceeds
-        // the original run's totals: a loop that stopped on max-rounds has
-        // no round left (an extra repair round would exceed the configured
-        // round cap), a loop that spent its request budget has no call left,
-        // and a verdict turn that consumed the remaining wall-clock leaves
-        // nothing for the repair round — every one of those is recorded as
-        // `skipped_no_budget`.
+        // #1447: trace closure no longer depends on accidental leftovers.
+        // It keeps the original whole-run wall-clock deadline, but receives
+        // one dedicated repair round with the ordinary loop's remaining
+        // requests plus a bounded four-request allowance. Thus exploration
+        // may legitimately stop on its request/round ceiling and still close
+        // a newly discovered trace gap; only exhausted wall-clock (or an
+        // otherwise empty repair allowance) records skipped_no_budget.
         const wallClockLeft = budgets.wallClockSec - outcome.elapsedSec - verdictElapsedSec;
         const repairRequestBudget = outcome.requestsRemaining + traceRepairExtraRequests;
         const deadlineLeft = timeFn() < deadline;
