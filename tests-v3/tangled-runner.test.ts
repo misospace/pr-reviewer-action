@@ -11,7 +11,8 @@
  *
  * Coverage of the issue's acceptance list:
  *   - a mocked Tangled context completes precheck → review → publish;
- *   - skip / no-review behavior is preserved (and publishes nothing);
+ *   - skip / no-review behavior is preserved (and publishes nothing, and the
+ *     skip reason is named on stderr);
  *   - review failures propagate (the process rejects);
  *   - publish failures propagate as a non-zero exit (and a superseded head
  *     exits 0, exactly like the Action);
@@ -20,10 +21,13 @@
  *     seam (no gh/python/shell, no GitHub/Forgejo fallback);
  *   - an explicitly configured GitHub/Forgejo platform is refused rather than
  *     routed to that forge (the config input cannot re-resolve the platform
- *     behind the runner's Tangled pin).
+ *     behind the runner's Tangled pin);
+ *   - the shipped bundle dispatches the `tangled` command and maps its exit
+ *     code (the public entry, not only the library call).
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -171,6 +175,18 @@ async function withTemp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   }
 }
 
+/** Swallows and records stderr while an expected log line is asserted (the
+ * same pattern as the re-review comment test). */
+function captureStderr(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const original = process.stderr.write;
+  process.stderr.write = ((chunk: unknown): boolean => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  return { lines, restore: (): void => { process.stderr.write = original; } };
+}
+
 /** Removes `//` line comments and `/* ... *\/` block comments from a source
  * string, so the source-text scans below read CODE only. A commented-out
  * import must not satisfy an import assertion, and a commented-out helper
@@ -245,12 +261,24 @@ test("#590: a skipped run (closed pull) is a clean no-op and publishes nothing",
           title: "Closed", body: "",
         }),
       });
-      const code = await platformActionMain(tangledEnv(model.url, workspace), {
-        platformAdapter: closed,
-        publishApi,
-      });
+      const stderr = captureStderr();
+      let code: number;
+      try {
+        code = await platformActionMain(tangledEnv(model.url, workspace), {
+          platformAdapter: closed,
+          publishApi,
+        });
+      } finally {
+        stderr.restore();
+      }
       assert.equal(code, 0, "a skip exits green");
       assert.equal(publishApi.upserts, 0, "a skip never publishes");
+      // The runner NAMES the skip reason on stderr, so an operator can tell a
+      // closed pull from a failed run. The reason is the precheck's
+      // `pr-closed` state gate, not an empty placeholder.
+      const skipped = stderr.lines.join("");
+      assert.match(skipped, /Review skipped/);
+      assert.match(skipped, /pr-closed/);
     });
   } finally {
     await model.close();
@@ -636,5 +664,42 @@ test("#590: the Action entry and the Tangled runner share one publish mapping", 
   for (const [name, source] of hosts) {
     assert.deepEqual(definitionsOf(source, "publishEnvFromReview"), [], `${name} defines no publishEnvFromReview of its own`);
     assert.deepEqual(definitionsOf(source, "reviewDerivedPublishFields"), [], `${name} defines no reviewDerivedPublishFields of its own`);
+  }
+});
+
+test("#590: the shipped bundle dispatches the 'tangled' command and refuses a non-Tangled platform", async () => {
+  // The runner's public entry is `node dist/index.js tangled`. The other cases
+  // in this file call `platformActionMain` directly, so they prove the library
+  // path but NOT the shipped dispatch or its exit-code mapping. This drives the
+  // BUILT bundle, in a workspace with no GitHub Actions bookkeeping, and asks
+  // for a platform the runner must refuse.
+  const bundle = resolve(ROOT, "dist", "index.js");
+  assert.ok(existsSync(bundle), "the built bundle is the runner's entry point");
+  const forge = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify([]));
+  });
+  try {
+    await withTemp(async (workspace) => {
+      const result = spawnSync(process.execPath, [bundle, "tangled"], {
+        cwd: workspace,
+        encoding: "utf8",
+        env: {
+          ...tangledEnv("http://127.0.0.1:1", workspace),
+          INPUT_PLATFORM: "github",
+          // A GitHub token and API URL are present on purpose: a run that
+          // reached a GitHub client would use them, and the mock server would
+          // record the request.
+          GITHUB_TOKEN: "token-that-must-never-be-used",
+          GH_TOKEN: "token-that-must-never-be-used",
+          GITHUB_API_URL: forge.url,
+        },
+      });
+      assert.equal(result.status, 1, `the bundle exits non-zero: ${result.stderr}`);
+      assert.match(result.stderr, /refuses platform 'github'/);
+      assert.equal(forge.requests.length, 0, "no GitHub request was ever issued");
+    });
+  } finally {
+    await forge.close();
   }
 });
