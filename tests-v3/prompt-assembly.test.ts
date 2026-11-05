@@ -346,6 +346,35 @@ test("publicAnalysisEngine removes the endpoint token whole when the composed en
       annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 x", "openai"), "fallback"),
       "m (openai) — fallback (primary failed)",
     ],
+    // An endpoint path carrying a parenthesis group followed by the route
+    // annotation separator: the separator alone does not mark the format
+    // group, so the whole endpoint leaves and no `(x) — y` fragment survives
+    // (#1474 review).
+    [analysisEngineBase("m", "https://api.example.com/v1 (x) — y", "openai"), "m (openai)"],
+    // The annotated forms of the same endpoint leave whole too.
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (x) — y", "openai"), "fallback"),
+      "m (openai) — fallback (primary failed)",
+    ],
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (x) — y", "openai"), "primary", { reviewRoute: "primary" }),
+      "m (openai) — primary route",
+    ],
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (x) — y", "openai"), "escalated", { escalationReasons: "primary_requested" }),
+      "m (openai) — escalated (primary_requested)",
+    ],
+    // An endpoint path carrying annotation-SHAPED text after its parenthesis
+    // group: the whole suffix must match the closed annotation grammar, so
+    // the real format group still ends the endpoint token.
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback (b)", "openai"), "m (openai)"],
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback (b)", "openai"), "fallback"),
+      "m (openai) — fallback (primary failed)",
+    ],
+    // A model identifier carrying the same shape stays intact and the
+    // endpoint leaves whole.
+    [analysisEngineBase("m (x) — y", "https://api.example.com/v1", "openai"), "m (x) — y (openai)"],
   ];
   for (const [engine, expected] of cases) {
     assert.equal(publicAnalysisEngine(engine), expected);

@@ -57,10 +57,24 @@ export interface EngineRouting {
 const FIRST_PASS_TIER: ReadonlyMap<string, string> = new Map([["", "primary"], ["legacy", "primary"], ["primary", "primary"]]);
 
 /** The separator between the engine base and the route annotation
- * `annotateAnalysisEngine` appends. The published strip reads it to tell the
- * API-format group (which ends the engine base) from a parenthesis group
- * inside the endpoint token (#1474). */
+ * `annotateAnalysisEngine` appends. The published strip reads the annotation
+ * grammar built from it to tell the API-format group (which ends the engine
+ * base) from a parenthesis group inside the endpoint token (#1474). */
 const ANNOTATION_SEPARATOR = " — ";
+
+/** The closed grammar of the route annotations `annotateAnalysisEngine`
+ * appends after the API-format group: the primary-route tag, or a
+ * fallback/escalated tag whose parenthesis group carries no nesting (the
+ * tier names and escalation reasons are whitespace-free, parenthesis-free
+ * slugs). The published strip requires the text after a candidate format
+ * group to be empty or match this whole, so a ` (` the endpoint carries of
+ * its own — even one followed by ` — ` inside the endpoint path — cannot be
+ * mistaken for the format boundary (#1474): the bare separator prefix was
+ * ambiguous exactly when the endpoint token carried an em-dash of its own.
+ * If a future annotation reason carries parentheses or whitespace, this
+ * grammar must grow with it; if it drifts, the strip fails safe by removing
+ * everything after the model, never leaving endpoint text behind. */
+const ROUTE_ANNOTATION = /^ — (?:primary route|(?:fallback|escalated) \([^()]*\))$/;
 
 /** Port of `annotate_analysis_engine`: appends why this model produced the
  * review. A legacy (routing off) primary success stays unannotated. */
@@ -160,16 +174,18 @@ function closingParen(engine: string, from: number): number {
 
 /** The index of the ` (` that opens the API-format group the endpoint token
  * ends at: the first parenthesis group whose closing paren ends the engine
- * base — the string ends there, or the route annotation follows. A base URL
- * or model identifier that carries a ` (` of its own therefore cannot be
- * mistaken for the format group (#1474). `-1` when the engine carries no
- * format group. */
+ * base — the string ends there, or a whole route annotation follows. A base
+ * URL or model identifier that carries a ` (` of its own therefore cannot be
+ * mistaken for the format group (#1474), not even when the endpoint path
+ * carries an ` — ` after a parenthesis group: the suffix must match the
+ * closed annotation grammar, not merely open with the separator. `-1` when
+ * the engine carries no format group. */
 function formatGroupStart(engine: string, from: number): number {
   for (let open = engine.indexOf(FORMAT_BOUNDARY, from); open >= 0; open = engine.indexOf(FORMAT_BOUNDARY, open + 1)) {
     const close = closingParen(engine, open + FORMAT_BOUNDARY.length);
     if (close < 0) continue;
     const after = engine.slice(close + 1);
-    if (after === "" || after.startsWith(ANNOTATION_SEPARATOR)) return open;
+    if (after === "" || ROUTE_ANNOTATION.test(after)) return open;
   }
   return -1;
 }
