@@ -912,14 +912,14 @@ publication boundary. Historical confidence reports below remain retained as
 research evidence; no new manual canary, operator smoke test, or incremental
 confidence dataset is required for the trusted-approval contract.
 
-The dogfood workflow also leaves `requirement-trace` at the public default
-(`false`). This is deliberate: recent self-review markers repeatedly showed
-the same failure shape — primary route, tier-default 24-call budget, all 24
-calls consumed, then `incomplete_reason=requirement_trace`. The #1145
-evidence-repair continuation can run only from budget left after the first
-verdict, so a call-budget stop leaves it nothing to spend. Requirement trace
-remains an explicit opt-in for operators who want that stricter contract; it
-is not a prerequisite for PRA's trusted-approval dogfood.
+Requirement trace remains **enabled** in PRA dogfood because it is part of
+the trusted-approval contract exercised here. Recent self-review markers
+exposed a concrete starvation bug: primary runs repeatedly consumed the old
+24-call ceiling, then the #1145 evidence-repair continuation had no request
+capacity left to close a repairable trace gap. #1447 raises PRA's primary
+ceiling to 40 and gives the same authoritative reviewer a bounded four-request
+post-verdict trace-closure allowance. No second reviewer or confidence call is
+added.
 
 ## Verifier dogfood evidence collector (#1452)
 
