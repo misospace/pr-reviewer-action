@@ -2606,12 +2606,47 @@ def test_canary_plan_rejects_credential_and_shape_errors(tmp_path: Path) -> None
                                                  "AI_CONFIDENCE_BASE_URL": "https://example.invalid/v1"}}),
         "bad_rubric": lambda plan: plan.update({"rubric": {"id": "confidence-rubric-v1"}}),
         "unblinded": lambda plan: plan.update({"blinded": False}),
+        # #1481: the declared require-dedicated shape must be COMPLETE, and
+        # enum-valued declared keys carry production's vocabulary — a typo'd
+        # mode would quietly resolve to something the plan never declared.
+        "dedicated_without_endpoint": lambda plan: plan["conditions"][0]["confidence_env"].update(
+            {"AI_CONFIDENCE_ISOLATION": "require-dedicated", "AI_CONFIDENCE_API_FORMAT": "openai"}),
+        "dedicated_without_format": lambda plan: (
+            plan["conditions"][0].update({"key_env": "DEDICATED_CANARY_TEST_KEY"}),
+            plan["conditions"][0]["confidence_env"].update({
+                "AI_CONFIDENCE_ISOLATION": "require-dedicated",
+                "AI_CONFIDENCE_BASE_URL": "https://example.invalid/v1",
+            })),
+        "bad_isolation_vocabulary": lambda plan: plan["conditions"][0]["confidence_env"].update(
+            {"AI_CONFIDENCE_ISOLATION": "dedicate-or-die"}),
+        "bad_confidence_tokens_param": lambda plan: plan["conditions"][0]["confidence_env"].update(
+            {"AI_CONFIDENCE_TOKENS_PARAM": "max_tokens_maybe"}),
     }
     for name, mutate in cases.items():
         plan = json.loads(json.dumps(base))
         mutate(plan)
         errors = confidence_calibration._validate_canary_plan(plan, corpus)
         assert errors, f"case {name} must produce plan errors"
+
+
+def test_canary_plan_accepts_require_dedicated_condition() -> None:
+    """#1481: a condition replaying the dogfood require-dedicated shape —
+    declared isolation, dedicated endpoint + key_env, dedicated model,
+    dedicated wire family, and the verifier-owned token-limit field —
+    validates clean, $-references included, so the retained canary can qualify
+    the lane exactly as the production workflow runs it."""
+    corpus = load_corpus_entries(REPO_ROOT / "evals" / "corpus-real-prs.json")
+    plan = json.loads((REPO_ROOT / "evals" / "confidence-canary" / "plan.json").read_text(encoding="utf-8"))
+    condition = plan["conditions"][0]
+    condition["key_env"] = "DEDICATED_CANARY_TEST_KEY"
+    condition["confidence_env"] = {
+        "AI_CONFIDENCE_MODEL": "$DEDICATED_MODEL_TEST",
+        "AI_CONFIDENCE_BASE_URL": "$DEDICATED_BASE_URL_TEST",
+        "AI_CONFIDENCE_API_FORMAT": "openai",
+        "AI_CONFIDENCE_ISOLATION": "require-dedicated",
+        "AI_CONFIDENCE_TOKENS_PARAM": "max_completion_tokens",
+    }
+    assert confidence_calibration._validate_canary_plan(plan, corpus) == []
 
 
 def test_canary_plan_requires_corpus_pins() -> None:
@@ -2683,6 +2718,222 @@ def test_bridge_live_scorer_openai_production_shape(tmp_path: Path, monkeypatch:
         assert result["prompt_bytes"] is not None
     finally:
         server.shutdown()
+
+
+def test_bridge_live_scorer_require_dedicated_replays_the_production_isolation_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1481: the canary can replay the DOGFOOD require-dedicated shape.
+
+    The declared-confidence allowlists now carry AI_CONFIDENCE_ISOLATION and
+    AI_CONFIDENCE_TOKENS_PARAM, so a plan condition reaches the production
+    resolver as the dogfood workflow runs it. The bridge strips every ambient
+    AI_CONFIDENCE_* before applying the declared config: the inherit-primary
+    shell state set here must be invisible, and the dedicated key must be the
+    only credential on the wire — the primary AI_API_KEY never rides.
+
+    It also pins the #1481 token-field ownership THROUGH the bridge: with the
+    ambient (review-lane) AI_TOKENS_PARAM convention set to
+    max_completion_tokens, a require-dedicated condition that leaves
+    AI_CONFIDENCE_TOKENS_PARAM unset still sends max_tokens — resolved by the
+    production ConfidenceProfile, with no bridge-local ambient fallback.
+    """
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 3210, "completion_tokens": 777},
+    }))
+    server, base_url = serve(pilot)
+    secret = "canary-dedicated-key-41"
+    monkeypatch.setenv("AI_API_KEY", "primary-lane-key-must-not-ride-8c")
+    monkeypatch.setenv("AI_BASE_URL", "https://primary.example.invalid/v1")
+    monkeypatch.setenv("AI_CONFIDENCE_ISOLATION", "inherit-primary")  # ambient: must be stripped
+    monkeypatch.setenv("AI_TOKENS_PARAM", "max_completion_tokens")  # review-lane convention
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", secret)
+    try:
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40,
+                "diff": "+func observeState() {}",
+                "pr_title": "t", "pr_body": "b",
+                "findings": [], "review_summary": "s",
+                "required_checks": "complete", "coverage": {"partial_coverage": None},
+                "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "dedicated-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+                "AI_CONFIDENCE_ISOLATION": "require-dedicated",
+                "AI_CONFIDENCE_MAX_TOKENS": "4096",
+                "AI_CONFIDENCE_TIMEOUT_SEC": "20",
+            },
+            "confidence_key_env": "CONFIDENCE_CANARY_TEST_KEY",
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert len(pilot.requests) == 1
+        request = json.loads(pilot.requests[0]["body"])
+        assert request["model"] == "dedicated-model"
+        # The token field is verifier-owned: the ambient review-lane
+        # max_completion_tokens convention must NOT ride the dedicated wire.
+        assert request["max_tokens"] == 4096
+        assert "max_completion_tokens" not in request
+        assert result["profile"]["tokens_param"] == "max_tokens"
+        assert result["profile"]["inherited_transport"] is False
+        assert result["profile"]["credential_source"] == "own"
+        assert pilot.requests[0]["auth"] == f"Bearer {secret}"
+        assert "primary-lane-key-must-not-ride-8c" not in pilot.requests[0]["body"]
+        assert result["result"]["status"] == "scored"
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_require_dedicated_declared_tokens_param_reaches_the_wire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit AI_CONFIDENCE_TOKENS_PARAM in the declared condition flips
+    the dedicated verifier's wire field (the other field never appears),
+    resolved through the production ConfidenceProfile — the bridge carries no
+    request-shape override of its own."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-lane-key-9")
+    monkeypatch.setenv("AI_TOKENS_PARAM", "max_tokens")  # ambient: irrelevant under dedicated
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "canary-dedicated-key-42")
+    try:
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+                "pr_title": "t", "pr_body": "b",
+                "findings": [], "review_summary": "s",
+                "required_checks": "complete", "coverage": {},
+                "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "dedicated-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+                "AI_CONFIDENCE_ISOLATION": "require-dedicated",
+                "AI_CONFIDENCE_TOKENS_PARAM": "max_completion_tokens",
+            },
+            "confidence_key_env": "CONFIDENCE_CANARY_TEST_KEY",
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert len(pilot.requests) == 1
+        request = json.loads(pilot.requests[0]["body"])
+        assert request["max_completion_tokens"] == 4096
+        assert "max_tokens" not in request
+        assert result["profile"]["tokens_param"] == "max_completion_tokens"
+        assert result["result"]["status"] == "scored"
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_require_dedicated_missing_format_refuses_pre_wire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The visible-refusal replay the qualification path needs: a declared
+    require-dedicated condition WITHOUT AI_CONFIDENCE_API_FORMAT resolves
+    unscored(dedicated_format_missing) before any provider call — the
+    resolver never inherits the primary lane's wire family, and the bridge
+    reaches the same conclusion through the production code alone."""
+    pilot = LoopbackProvider(lambda _handler: (200, {"choices": []}))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-anthropic-lane-key")
+    monkeypatch.setenv("AI_PRIMARY_API_FORMAT", "anthropic")  # must NOT reach the verifier
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "canary-dedicated-key-43")
+    try:
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+                "pr_title": "t", "pr_body": "b",
+                "findings": [], "review_summary": "s",
+                "required_checks": "complete", "coverage": {},
+                "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "dedicated-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_ISOLATION": "require-dedicated",
+            },
+            "confidence_key_env": "CONFIDENCE_CANARY_TEST_KEY",
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert result["enabled"] is True
+        assert result["result"]["status"] == "unscored"
+        assert result["result"]["cause"] == "dedicated_format_missing"
+        assert len(pilot.requests) == 0, "the refusal happens before the wire"
+        assert result["request_payload_masked"] is None
+        assert result["raw_response_masked"] is None
+        assert any("ai-confidence-api-format" in warning for warning in result["warnings"])
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_inherit_primary_keeps_the_ambient_token_convention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backward compatibility THROUGH the bridge: an inherit-primary
+    condition with the ambient AI_TOKENS_PARAM convention still inherits it
+    (today's behavior), proving the #1481 verifier-ownership change is scoped
+    to require-dedicated and the resolver — not a bridge-side hard-coding."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-lane-key-inherited-5")
+    monkeypatch.setenv("AI_BASE_URL", base_url)  # INHERITED endpoint
+    monkeypatch.setenv("AI_TOKENS_PARAM", "max_completion_tokens")
+    monkeypatch.delenv("AI_CONNECT_TIMEOUT_SEC", raising=False)
+    try:
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+                "pr_title": "t", "pr_body": "b",
+                "findings": [], "review_summary": "s",
+                "required_checks": "complete", "coverage": {},
+                "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+            },
+            "secret_env_names": ["AI_API_KEY"],
+        }, tmp_path, 60)
+        assert len(pilot.requests) == 1
+        request = json.loads(pilot.requests[0]["body"])
+        assert request["max_completion_tokens"] == 4096, "inherit-primary keeps today's AI_TOKENS_PARAM inheritance"
+        assert "max_tokens" not in request
+        assert result["profile"]["tokens_param"] == "max_completion_tokens"
+        assert result["profile"]["inherited_transport"] is True
+    finally:
+        server.shutdown()
+
+
+def test_bridge_allowlist_matches_the_calibration_canary_mirror() -> None:
+    """#1481 parity: the bridge's CONFIDENCE_ENV_KEYS and the driver's
+    CANARY_CONFIDENCE_ENV_KEYS are one declared-confidence surface kept in
+    lockstep — a key admitted on one side but not the other would let a plan
+    declare config the bridge strips (or reject config the bridge honors).
+    Includes the #1481 additions: isolation mode and the verifier-owned
+    token-limit field."""
+    bridge_source = (SCRIPTS_DIR / "confidence_bridge.ts").read_text(encoding="utf-8")
+    match = re.search(
+        r"const CONFIDENCE_ENV_KEYS: ReadonlySet<string> = new Set\(\[(.*?)\]\);",
+        bridge_source, re.DOTALL,
+    )
+    assert match, "confidence_bridge.ts must declare CONFIDENCE_ENV_KEYS"
+    bridge_keys = set(re.findall(r'"(AI_CONFIDENCE_[A-Z_]+)"', match.group(1)))
+    assert bridge_keys == set(confidence_calibration.CANARY_CONFIDENCE_ENV_KEYS)
+    assert "AI_CONFIDENCE_ISOLATION" in bridge_keys
+    assert "AI_CONFIDENCE_TOKENS_PARAM" in bridge_keys
 
 
 def test_bridge_live_scorer_anthropic_production_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

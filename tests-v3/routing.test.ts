@@ -562,6 +562,12 @@ test("#1073: confidence profile inherits the primary lane when ai-confidence-bas
     modelContextTokens: 0,
     anthropicEffortSupported: false,
     structuredOutputSupported: false,
+    // #1481: unset confidence token-param under the default mode inherits
+    // the run's convention; no AI_TOKENS_PARAM here, so the documented
+    // max_tokens default rides the profile.
+    tokensParam: "max_tokens",
+    // #1478: the default isolation mode never refuses the resolved transport.
+    refusalCause: "",
   });
   assert.deepEqual(resolved.warnings, []);
 });
@@ -602,6 +608,282 @@ test("#1073: a distinct confidence base URL never inherits the primary credentia
   assert.equal(keyless.warnings.length, 1);
   assert.match(keyless.warnings[0]!, /ai-confidence-base-url is set but ai-confidence-api-key is empty/);
   assert.equal(keyless.warnings[0]!.includes("primary-key"), false);
+});
+
+test("#1478: require-dedicated isolation refuses a missing dedicated endpoint instead of inheriting the primary lane", () => {
+  const refused = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  // The lane stays ENABLED (the model was configured) but resolves no
+  // transport: the scorer must publish the visible unscored cause instead of
+  // silently dialling the primary endpoint under the primary credential.
+  assert.equal(refused.profile.enabled, true);
+  assert.equal(refused.profile.refusalCause, "dedicated_config_missing");
+  assert.equal(refused.profile.baseUrl, "", "no primary endpoint may ride a refused verifier profile");
+  assert.equal(refused.profile.apiKey, "", "no primary credential may ride a refused verifier profile");
+  assert.equal(refused.profile.inheritedTransport, false);
+  assert.equal(refused.profile.credentialSource, "own");
+  assert.ok(refused.warnings.some((message) => message.includes("ai-confidence-isolation=require-dedicated")), JSON.stringify(refused.warnings));
+  assert.ok(!refused.warnings.some((message) => message.includes("primary-key")), "no secret value may appear in a warning");
+
+  // The default mode keeps the documented same-endpoint inheritance, byte for
+  // byte: existing consumers are unaffected.
+  const inherited = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  assert.equal(inherited.profile.refusalCause, "");
+  assert.equal(inherited.profile.baseUrl, "https://primary");
+  assert.equal(inherited.profile.apiKey, "primary-key");
+
+  // A configured dedicated endpoint resolves exactly like the documented
+  // distinct-endpoint shape — the mode changes only the EMPTY-base-url story.
+  // The model is carried VERBATIM: opaque and case-sensitive (#1465), never
+  // case-normalized and never substituted with a primary-derived name.
+  const dedicated = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "Scorer-Model-Cased",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    // #1481: the format is declared here because an UNSET one is now its own
+    // visible refusal (dedicated_format_missing, pinned by its own tests).
+    AI_CONFIDENCE_API_FORMAT: "openai",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+  });
+  assert.equal(dedicated.profile.refusalCause, "");
+  assert.equal(dedicated.profile.model, "Scorer-Model-Cased", "the configured model name is used verbatim under require-dedicated");
+  assert.equal(dedicated.profile.baseUrl, "https://independent");
+  assert.equal(dedicated.profile.apiKey, "scorer-key");
+  assert.equal(dedicated.profile.inheritedTransport, false);
+  assert.equal(dedicated.profile.credentialSource, "own");
+  assert.deepEqual(dedicated.warnings, []);
+});
+
+test("#1478/#1481: require-dedicated refuses a missing dedicated model instead of inheriting the primary or smart model", () => {
+  // The workflow no longer pre-fills ai-confidence-model with SMART_MODEL,
+  // so an unset CONFIDENCE_MODEL reaches the resolver EMPTY. Under
+  // require-dedicated that is a refused configuration, not a disabled lane:
+  // inheriting the reviewing model would be the exact same-model correlation
+  // isolation exists to prevent.
+  const refused = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_SMART_MODEL: "smart-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  // The lane stays ENABLED (the operator asked for the mode) but resolves no
+  // transport and no inherited model: the scorer must publish the visible
+  // unscored cause instead of silently scoring with a primary-derived model.
+  assert.equal(refused.profile.enabled, true);
+  assert.equal(refused.profile.refusalCause, "dedicated_model_missing");
+  assert.equal(refused.profile.model, "", "no primary-derived model may ride a refused verifier profile");
+  assert.equal(refused.profile.baseUrl, "", "no primary endpoint may ride a refused verifier profile");
+  assert.equal(refused.profile.apiKey, "", "no primary credential may ride a refused verifier profile");
+  assert.equal(refused.profile.inheritedTransport, false);
+  assert.equal(refused.profile.credentialSource, "own");
+  assert.ok(
+    refused.warnings.some((message) => message.includes("ai-confidence-isolation=require-dedicated") && message.includes("ai-confidence-model is empty")),
+    JSON.stringify(refused.warnings),
+  );
+  assert.ok(!refused.warnings.some((message) => message.includes("primary-key")), "no secret value may appear in a warning");
+
+  // A whitespace-only model value carries no name either: the same refusal,
+  // and the disabled-shape "treated as unset" notice is replaced by the
+  // accurate refusal warning.
+  const blank = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "   ",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.equal(blank.profile.enabled, true);
+  assert.equal(blank.profile.refusalCause, "dedicated_model_missing");
+  assert.equal(blank.profile.baseUrl, "");
+  assert.ok(blank.warnings.some((message) => message.includes("ai-confidence-model is empty")), JSON.stringify(blank.warnings));
+  assert.ok(!blank.warnings.some((message) => message.includes("stays disabled")), JSON.stringify(blank.warnings));
+
+  // The model gate comes first: even a CONFIGURED dedicated endpoint without
+  // a dedicated model is refused by model, not silently enabled.
+  const withEndpoint = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+  });
+  assert.equal(withEndpoint.profile.refusalCause, "dedicated_model_missing");
+  assert.equal(withEndpoint.profile.model, "");
+  assert.equal(withEndpoint.profile.baseUrl, "", "a refused profile carries no transport");
+
+  // The default mode keeps the documented disabled shape byte for byte: an
+  // unset ai-confidence-model still just disables the verifier (no refusal,
+  // no transport, orphan notice only) — existing consumers are unaffected.
+  const inheritDisabled = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_SMART_MODEL: "smart-model",
+  });
+  assert.equal(inheritDisabled.profile.enabled, false);
+  assert.equal(inheritDisabled.profile.refusalCause, "");
+  assert.equal(inheritDisabled.profile.model, "");
+  assert.equal(inheritDisabled.profile.baseUrl, "");
+  assert.equal(inheritDisabled.profile.apiKey, "");
+  assert.deepEqual(inheritDisabled.warnings, []);
+});
+
+test("#1481: require-dedicated refuses a missing dedicated API format instead inheriting the primary lane", () => {
+  // The workflow no longer pre-fills ai-confidence-api-format with
+  // SMART_FORMAT, so an unset CONFIDENCE_FORMAT reaches the resolver EMPTY.
+  // Under require-dedicated the wire family is dedicated configuration like
+  // the endpoint, credential, and model: inheriting the primary (or a
+  // smart-derived) family onto a possibly-different dedicated backend is the
+  // same silent primary leakage the mode exists to prevent.
+  const refused = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_PRIMARY_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  // The lane stays ENABLED (the operator asked for it) but resolves no
+  // transport and no inherited family.
+  assert.equal(refused.profile.enabled, true);
+  assert.equal(refused.profile.refusalCause, "dedicated_format_missing");
+  assert.equal(refused.profile.apiFormat, "", "no primary-derived wire family may ride the refused verifier profile");
+  assert.equal(refused.profile.baseUrl, "", "a refused profile carries no transport");
+  assert.equal(refused.profile.apiKey, "", "a refused profile carries no credential");
+  assert.equal(refused.profile.inheritedTransport, false);
+  assert.equal(refused.profile.credentialSource, "own");
+  assert.ok(
+    refused.warnings.some((message) => message.includes("ai-confidence-isolation=require-dedicated") && message.includes("ai-confidence-api-format is empty")),
+    JSON.stringify(refused.warnings),
+  );
+  assert.ok(!refused.warnings.some((message) => message.includes("primary-key")), "no secret value may appear in the warning");
+
+  // An explicitly configured dedicated format always wins, even when it
+  // DIFFERS from the primary lane — that is the point of a dedicated
+  // endpoint — and a fully dedicated configuration resolves clean.
+  const anthropicDedicated = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_PRIMARY_API_FORMAT: "openai",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_API_FORMAT: " anthropic ",
+  });
+  assert.equal(anthropicDedicated.profile.refusalCause, "");
+  assert.equal(anthropicDedicated.profile.apiFormat, "anthropic");
+  assert.deepEqual(anthropicDedicated.warnings, []);
+
+  // The gate also refuses an UNRESOLVABLE family, not only an empty one: a
+  // non-empty value outside the vocabulary (reachable via raw-env override or
+  // a canary $-reference) must still fail closed rather than fall back to the
+  // primary format the way inherit-primary mode does for the same value.
+  const invalidDedicated = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_PRIMARY_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_API_FORMAT: "openai-compatible",
+  });
+  assert.equal(invalidDedicated.profile.refusalCause, "dedicated_format_missing");
+  assert.equal(invalidDedicated.profile.apiFormat, "");
+  // A whitespace-only format carries no family either: same refusal.
+  const blankDedicated = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_API_FORMAT: "   ",
+  });
+  assert.equal(blankDedicated.profile.refusalCause, "dedicated_format_missing");
+  // inherit-primary keeps treating both classes as unset inheritance (the
+  // documented fallback for values the ambient path smuggled past the enum).
+  const invalidInherit = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_PRIMARY_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_API_FORMAT: "openai-compatible",
+  });
+  assert.equal(invalidInherit.profile.refusalCause, "");
+  assert.equal(invalidInherit.profile.apiFormat, "anthropic");
+
+  // Refusal precedence: a missing MODEL is refused before the family is even
+  // consulted (the established model gate stays first), and a missing
+  // ENDPOINT stays ahead of the family gate.
+  const modelFirst = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.equal(modelFirst.profile.refusalCause, "dedicated_model_missing");
+  const endpointBeforeFormat = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.equal(endpointBeforeFormat.profile.refusalCause, "dedicated_config_missing");
+
+  // inherit-primary (the default) keeps the documented inheritance byte for
+  // byte: an empty confidence format still inherits the resolved primary
+  // format — backward compatibility is untouched.
+  const inherited = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_PRIMARY_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  assert.equal(inherited.profile.refusalCause, "");
+  assert.equal(inherited.profile.apiFormat, "anthropic");
+  assert.deepEqual(inherited.warnings, []);
+});
+
+test("#1481: the confidence token-limit field resolves lane-owned, never ambient under require-dedicated", () => {
+  // require-dedicated + UNSET confidence token-param: the primary lane's
+  // max_completion_tokens convention must NOT ride the dedicated verifier.
+  const dedicatedUnset = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_TOKENS_PARAM: "max_completion_tokens",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_API_FORMAT: "openai",
+  });
+  assert.equal(dedicatedUnset.profile.tokensParam, "max_tokens", "a dedicated verifier never inherits the review lane's token-field convention");
+
+  // An explicit confidence value always wins — in BOTH modes.
+  const dedicatedExplicit = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_TOKENS_PARAM: "max_tokens",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_API_FORMAT: "openai",
+    AI_CONFIDENCE_TOKENS_PARAM: " max_completion_tokens ",
+  });
+  assert.equal(dedicatedExplicit.profile.refusalCause, "");
+  assert.equal(dedicatedExplicit.profile.tokensParam, "max_completion_tokens");
+
+  // inherit-primary + UNSET confidence token-param preserves today's
+  // inheritance of the run's AI_TOKENS_PARAM convention exactly.
+  const inheritMct = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_TOKENS_PARAM: "max_completion_tokens",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  assert.equal(inheritMct.profile.tokensParam, "max_completion_tokens");
+  const inheritDefault = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  assert.equal(inheritDefault.profile.tokensParam, "max_tokens");
+
+  // inherit-primary: the explicit confidence value still wins over the
+  // inherited convention (both directions).
+  const inheritOwnWins = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_TOKENS_PARAM: "max_completion_tokens",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TOKENS_PARAM: "max_tokens",
+  });
+  assert.equal(inheritOwnWins.profile.tokensParam, "max_tokens");
+
+  // The disabled profile carries the documented default shape.
+  const disabled = resolveConfidenceProfile({});
+  assert.equal(disabled.profile.tokensParam, "max_tokens");
 });
 
 test("#1073: same-endpoint same-model scoring emits the independence warning", () => {
@@ -645,6 +927,8 @@ test("#1073: confidence profile resolves timeout, effort, and disabled state", (
     credentialSource: "own",
     maxTokens: 4096, promptTokens: 98304, modelContextTokens: 0,
     anthropicEffortSupported: false, structuredOutputSupported: false,
+    tokensParam: "max_tokens",
+    refusalCause: "",
   });
   assert.deepEqual(disabled.warnings, []);
 

@@ -30,6 +30,7 @@ function profile(overrides: Partial<ConfidenceProfile> = {}): ConfidenceProfile 
     baseUrl: "https://api.example.com",
     model: "scorer-model",
     apiFormat: "openai",
+    tokensParam: "max_tokens",
     apiKey: "scorer-key",
     requestTimeoutSec: 10,
     reasoningEffort: "",
@@ -40,6 +41,7 @@ function profile(overrides: Partial<ConfidenceProfile> = {}): ConfidenceProfile 
     modelContextTokens: 0,
     anthropicEffortSupported: false,
     structuredOutputSupported: false,
+    refusalCause: "",
     ...overrides,
   };
 }
@@ -609,6 +611,125 @@ test("distinct non-loopback URL with no key refuses before any transport call", 
   assert.equal(outcome.requestPayload, null);
 });
 
+test("#1478: a resolver-refused require-dedicated profile publishes unscored before any transport call", async () => {
+  let called = false;
+  const outcome = await runConfidenceScorer({
+    profile: profile({ refusalCause: "dedicated_config_missing", baseUrl: "", apiKey: "", inheritedTransport: false }),
+    primaryApiKey: "primary-key-ABC",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async () => { called = true; throw new Error("should not be called"); },
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(outcome.result.status, "unscored");
+  assert.equal(outcome.result.cause, "dedicated_config_missing");
+  assert.equal(outcome.result.model, "", "no model audited the review: the refusal happens before any call");
+  assert.equal(called, false);
+  assert.equal(outcome.requestPayload, null);
+  assert.equal(outcome.rawResponse, null);
+  assert.equal(outcome.latencyMs, null, "no provider call happened, so no latency may be claimed");
+  assert.equal(outcome.usage, null, "no provider call happened, so no usage may be claimed");
+});
+
+test("#1478/#1481: a require-dedicated profile refused for a missing dedicated model publishes unscored before any transport call", async () => {
+  // The resolver's dedicated_model_missing shape: the lane is ENABLED (the
+  // operator asked for the mode) but carries no model and no transport. The
+  // scorer must refuse pre-wire with the action-owned cause — never dial a
+  // provider, never substitute a primary-derived model, never leave a wire
+  // artifact behind.
+  let called = false;
+  const outcome = await runConfidenceScorer({
+    profile: profile({ model: "", refusalCause: "dedicated_model_missing", baseUrl: "", apiKey: "", inheritedTransport: false }),
+    primaryApiKey: "primary-key-ABC",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async () => { called = true; throw new Error("should not be called"); },
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(outcome.result.status, "unscored");
+  assert.equal(outcome.result.cause, "dedicated_model_missing");
+  assert.equal(outcome.result.model, "", "no model audited the review: nothing was configured and nothing was substituted");
+  assert.equal(called, false, "a refused verifier never reaches the transport");
+  assert.equal(outcome.requestPayload, null);
+  assert.equal(outcome.rawResponse, null);
+  assert.equal(outcome.latencyMs, null, "no provider call happened, so no latency may be claimed");
+  assert.equal(outcome.usage, null, "no provider call happened, so no usage may be claimed");
+});
+
+test("#1481: a require-dedicated profile refused for a missing dedicated format publishes unscored before any transport call", async () => {
+  // The resolver's dedicated_format_missing shape: the lane is ENABLED (the
+  // operator asked for the mode) with model and endpoint configured, but the
+  // wire family is unset — and unset does NOT mean the primary lane's family.
+  // The scorer refuses pre-wire with the action-owned cause: no provider
+  // call, no request/response artifacts, no latency or usage claim, review
+  // unaffected.
+  let called = false;
+  const outcome = await runConfidenceScorer({
+    profile: profile({ apiFormat: "", refusalCause: "dedicated_format_missing", baseUrl: "", apiKey: "", inheritedTransport: false }),
+    primaryApiKey: "primary-key-ABC",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async () => { called = true; throw new Error("should not be called"); },
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(outcome.result.status, "unscored");
+  assert.equal(outcome.result.cause, "dedicated_format_missing");
+  assert.equal(outcome.result.model, "", "no model audited the review: the refusal happens before any call");
+  assert.equal(called, false, "a refused verifier never reaches the transport");
+  assert.equal(outcome.requestPayload, null);
+  assert.equal(outcome.rawResponse, null);
+  assert.equal(outcome.latencyMs, null, "no provider call happened, so no latency may be claimed");
+  assert.equal(outcome.usage, null, "no provider call happened, so no usage may be claimed");
+});
+
+test("#1481: the scorer sends the token field RESOLVED INTO the profile, not an ambient convention", async () => {
+  // The scorer's only token-field source is now ConfidenceProfile.tokensParam:
+  // an explicit verifier-owned max_completion_tokens reaches the OpenAI wire
+  // wholesale (the field flips, the other never appears), and the Anthropic
+  // wire keeps sending max_tokens exactly as always, ignoring the setting.
+  const captured: Array<{ endpointPath: string; body: Record<string, unknown> }> = [];
+  const transport = async (input: { payload: { endpointPath: string; body: unknown } }) => {
+    captured.push({ endpointPath: input.payload.endpointPath, body: input.payload.body as Record<string, unknown> });
+    return {
+      status: "ok" as const,
+      raw: okOpenAiResponse('{"score": 4, "risk": "low", "reason": "ok"}'),
+      response: {
+        id: "", object: "chat.completion", model: "scorer-model",
+        content: '{"score": 4, "risk": "low", "reason": "ok"}', toolCalls: [], finishReason: "stop", usage: null, error: undefined,
+      },
+    };
+  };
+  await runConfidenceScorer({
+    profile: profile({ tokensParam: "max_completion_tokens" }),
+    primaryApiKey: "",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: transport as never,
+    findings: [],
+    coverage: {},
+  });
+  await runConfidenceScorer({
+    profile: profile({ apiFormat: "anthropic", tokensParam: "max_completion_tokens" }),
+    primaryApiKey: "",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: transport as never,
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(captured.length, 2);
+  const openai = captured[0]!.body;
+  assert.equal(openai.max_completion_tokens, 4096, "the profile-owned max_completion_tokens reaches the OpenAI verifier wire");
+  assert.equal(openai.max_tokens, undefined, "never both token fields");
+  const anthropic = captured[1]!.body;
+  assert.equal(captured[1]!.endpointPath, "/messages");
+  assert.equal(anthropic.max_tokens, 4096, "the Anthropic wire always sends max_tokens and ignores tokensParam");
+  assert.equal(anthropic.max_completion_tokens, undefined, "Anthropic never carries the OpenAI-only field");
+});
+
 test("loopback endpoint without a key is allowed", async () => {
   const server = await startMockServer((_req, _body, res) => {
     res.statusCode = 200;
@@ -653,6 +774,47 @@ test("distinct URL never carries the primary key in payload or diagnostics", asy
     const serialized = JSON.stringify(outcome);
     assert.ok(!serialized.includes("primary-key-ABC"), "primary key leaked into persisted outcome");
     assert.ok(!serialized.includes("scorer-key"), "scorer key leaked into persisted outcome");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1478: under require-dedicated the wire carries the distinct endpoint, the own credential, and the configured model verbatim", async () => {
+  // The COMPLETE configured path, end to end: the mock server IS the
+  // dedicated endpoint (a call to the primary URL could never reach it), so
+  // the handler firing proves the request targeted the distinct endpoint.
+  // The Authorization header must carry the scorer's OWN credential, the body
+  // must carry the configured model name byte-identically (#1465: opaque,
+  // case-sensitive), and the primary credential must appear nowhere.
+  let sawRequest = false;
+  const server = await startMockServer((req, body, res) => {
+    sawRequest = true;
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(okOpenAiResponse('{"score": 4, "risk": "low"}')));
+    assert.equal(req.headers.authorization, "Bearer distinct-key-XYZ");
+    const payload = JSON.parse(body) as { model?: string };
+    assert.equal(payload.model, "Scorer-Model-Cased", "the configured model name must reach the wire byte-identically");
+    assert.ok(!body.includes("primary-key-ABC"), "the primary credential must never ride the verifier request");
+  });
+  try {
+    const outcome = await runConfidenceScorer({
+      profile: profile({
+        apiKey: "distinct-key-XYZ",
+        inheritedTransport: false,
+        baseUrl: server.url,
+        model: "Scorer-Model-Cased",
+        credentialSource: "own",
+        refusalCause: "",
+      }),
+      primaryApiKey: "primary-key-ABC",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      findings: [],
+      coverage: {},
+    });
+    assert.equal(outcome.result.status, "scored");
+    assert.equal(sawRequest, true, "the scorer must have dialed the dedicated endpoint");
   } finally {
     await server.close();
   }
@@ -1330,6 +1492,8 @@ test("#1073: the fork gate is default-off, overridable only by explicit operator
     requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false, credentialSource: "own",
     maxTokens: 4096, promptTokens: 98304, modelContextTokens: 0,
     anthropicEffortSupported: false, structuredOutputSupported: false,
+    tokensParam: "max_tokens",
+    refusalCause: "",
   });
   assert.ok(gated.warnings.some((warning) => warning.includes("ai-confidence-enable-for-forks")), JSON.stringify(gated.warnings));
 

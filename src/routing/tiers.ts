@@ -3,6 +3,7 @@ import { REASONING_EFFORT_PATTERN } from "../config/load-config.js";
 import { CONFIDENCE_MINIMUM_PROMPT_TOKENS } from "../confidence/prompt.js";
 import { CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS } from "../confidence/scorer.js";
 import { differsOnlyByCase, isBlankModelValue, modelNameForNotice, opaqueModelId } from "../model/identity.js";
+import type { TokensParam } from "../model/types.js";
 import { endpointUrlCredential } from "../transport/http.js";
 
 /**
@@ -634,7 +635,21 @@ export interface ConfidenceProfile {
   enabled: boolean;
   baseUrl: string;
   model: string;
+  /** Verifier's own wire family. Under `inherit-primary` an empty
+   * `ai-confidence-api-format` inherits the primary lane's resolved format;
+   * under `require-dedicated` the family is endpoint-owned, and an unset
+   * format REFUSES the lane (#1481: `refusalCause:
+   * dedicated_format_missing`) rather silently inheriting the primary's. */
   apiFormat: string;
+  /** #1481: the OpenAI token-limit field this lane's requests use — an
+   * endpoint protocol setting like the wire family, never ambient review-lane
+   * state. An explicit `ai-confidence-tokens-param` always wins; under
+   * `inherit-primary` an unset value keeps the run's historical convention
+   * (`AI_TOKENS_PARAM`, defaulting to `max_tokens`); under `require-dedicated`
+   * an unset value resolves to verifier-owned `max_tokens` and never inherits
+   * the primary lane's `AI_TOKENS_PARAM`. Ignored on the Anthropic wire,
+   * which always sends `max_tokens`. */
+  tokensParam: TokensParam;
   apiKey: string;
   requestTimeoutSec: number;
   /** #998-style free-form effort, "" = omit the field. Unlike the review
@@ -671,6 +686,14 @@ export interface ConfidenceProfile {
    * family) accepts structured output with the scorer's own compact JSON
    * schema. False (the default) keeps the request bytes unchanged. */
   structuredOutputSupported: boolean;
+  /** #1478: set when the resolver REFUSED the resolved configuration itself —
+   * the require-dedicated isolation mode without the dedicated configuration
+   * it requires (no dedicated model: `dedicated_model_missing`; no dedicated
+   * endpoint: `dedicated_config_missing`; no dedicated wire family:
+   * `dedicated_format_missing`, #1481). The scorer publishes `unscored`
+   * with exactly this action-owned cause, pre-wire, and the review is
+   * unaffected. "" = nothing refused. */
+  refusalCause: string;
 }
 
 export interface ConfidenceResolution {
@@ -707,6 +730,8 @@ function disabledConfidenceProfile(): ConfidenceProfile {
     credentialSource: "own",
     maxTokens: CONFIDENCE_MAX_TOKENS, promptTokens: CONFIDENCE_PROMPT_TOKENS, modelContextTokens: 0,
     anthropicEffortSupported: false, structuredOutputSupported: false,
+    tokensParam: "max_tokens",
+    refusalCause: "",
   };
 }
 
@@ -738,6 +763,22 @@ function positiveIntFrom(env: EnvLike, key: string, fallback: number, warnings: 
  * accident (malformed values are off, never an opt-in). */
 function confidenceCapabilityFlag(env: EnvLike, key: string): boolean {
   return (env[key] ?? "").trim().toLowerCase() === "true";
+}
+
+/** #1481: resolve the confidence lane's OpenAI token-limit field. An explicit
+ * ai-confidence-tokens-param (trimmed, lowercased; the contract validates the
+ * enum) always wins. Unset: under inherit-primary the lane keeps the run's
+ * historical convention — AI_TOKENS_PARAM exactly as the review engine reads
+ * it, defaulting to max_tokens — while under require-dedicated the value is
+ * verifier-owned `max_tokens`, never the primary lane's setting (the same
+ * "nothing primary-derived rides the verifier" contract as endpoint,
+ * credential, model, and wire family). An unset/unknown AI_TOKENS_PARAM is
+ * max_tokens in both modes, matching every other consumer of that key. */
+function confidenceTokensParamFrom(env: EnvLike, requireDedicated: boolean): TokensParam {
+  const own = trimmed(env, "AI_CONFIDENCE_TOKENS_PARAM").toLowerCase();
+  if (own === "max_tokens" || own === "max_completion_tokens") return own;
+  if (requireDedicated) return "max_tokens";
+  return trimmed(env, "AI_TOKENS_PARAM").toLowerCase() === "max_completion_tokens" ? "max_completion_tokens" : "max_tokens";
 }
 
 /** #1465: the public input name for an env key (`AI_PRIMARY_MODEL` becomes
@@ -776,13 +817,22 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   const baseUrl = trimmed(env, "AI_CONFIDENCE_BASE_URL");
   const apiFormatRaw = trimmed(env, "AI_CONFIDENCE_API_FORMAT");
   const apiKey = trimmed(env, "AI_CONFIDENCE_API_KEY");
+  // #1478: the operator-declared isolation mode. Config-load validation
+  // restricts the input to the two vocabulary values (anything else throws at
+  // startup), so here only the exact strict token is special and every other
+  // value — including the default — is the documented inherit-primary
+  // behavior.
+  const requireDedicated = trimmed(env, "AI_CONFIDENCE_ISOLATION") === "require-dedicated";
   // #1465: a whitespace-only model value carries no name, so the lane treats
-  // it as unset. The lane reports it instead of dropping it silently.
-  if (isBlankModelValue(env.AI_CONFIDENCE_MODEL)) {
+  // it as unset. The lane reports it instead of dropping it silently. Under
+  // require-dedicated the unset model is not merely disabling — it is a
+  // REFUSED configuration (below), and the refusal warning is the accurate
+  // notice; this disabled-shape notice would contradict it.
+  if (isBlankModelValue(env.AI_CONFIDENCE_MODEL) && !requireDedicated) {
     warnings.push("ai-confidence-model holds only whitespace, so it is treated as unset and the verifier stays disabled");
   }
 
-  if (!enabled) {
+  if (!enabled && !requireDedicated) {
     // Disabled is the default: a transport configured without a model is a
     // likely typo, reported the same way the specialist lane reports orphan
     // transport fields — loudly, but never fatal.
@@ -810,15 +860,94 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
     return { profile: disabledConfidenceProfile(), warnings };
   }
 
+  // #1478: under require-dedicated the verifier's MODEL is dedicated too. The
+  // mode's contract is that nothing primary-derived rides the verifier lane —
+  // endpoint, credential, AND model — so an unset `ai-confidence-model` must
+  // NOT fall back to the primary or smart lane's model (the exact same-model
+  // correlation isolation exists to prevent). Mirror the missing-endpoint
+  // refusal: the lane stays ENABLED (the operator asked for it) but resolves
+  // no transport, and the scorer refuses the call pre-wire with the
+  // action-owned cause — visible as `unscored(dedicated_model_missing)` while
+  // the review itself publishes unchanged. No provider call, no wire
+  // artifacts, no substitution.
+  if (!enabled) {
+    warnings.push(
+      "confidence scorer: ai-confidence-isolation=require-dedicated but ai-confidence-model is empty — the verifier never inherits the primary or smart lane's model; set ai-confidence-model to a model the dedicated verifier endpoint serves, or drop ai-confidence-isolation to restore the inherit-primary default",
+    );
+    return {
+      profile: {
+        ...disabledConfidenceProfile(),
+        enabled: true,
+        refusalCause: "dedicated_model_missing",
+      },
+      warnings,
+    };
+  }
+
   const distinctEndpoint = baseUrl !== "";
-  // An explicitly configured api-format wins; empty inherits the primary
-  // lane's resolved format (the contract validates the enum, but ambient
-  // overrides or test rigs may not — an unknown value falls back to the
-  // primary format rather than crashing the run).
+  if (requireDedicated && !distinctEndpoint) {
+    // Isolation was requested and the dedicated endpoint does not exist. The
+    // primary lane's endpoint and credential must NOT ride the verifier: the
+    // run keeps the lane ENABLED (the model was configured) but resolves no
+    // transport, and the scorer refuses the call pre-wire with the
+    // action-owned cause — visible as `unscored(dedicated_config_missing)`
+    // while the review itself publishes unchanged. Silence here would be the
+    // exact failure #1478 measured: a verifier silently dialling the primary
+    // backend under the primary credential.
+    warnings.push(
+      "confidence scorer: ai-confidence-isolation=require-dedicated but ai-confidence-base-url is empty — the verifier never inherits the primary lane's endpoint or credential; set ai-confidence-base-url and ai-confidence-api-key to the dedicated verifier endpoint, or drop ai-confidence-isolation to restore the same-endpoint default",
+    );
+    return {
+      profile: {
+        ...disabledConfidenceProfile(),
+        enabled: true,
+        model,
+        refusalCause: "dedicated_config_missing",
+      },
+      warnings,
+    };
+  }
+  // An explicitly configured api-format wins; under inherit-primary an empty
+  // value inherits the primary lane's resolved format (the contract validates
+  // the enum, but ambient overrides or test rigs may not — an unknown value
+  // falls back to the primary format rather than crashing the run).
+  // #1481: the wire family is an ENDPOINT property, so under require-dedicated
+  // it is dedicated configuration like the endpoint, credential, and model:
+  // a blank (or unresolvable) ai-confidence-api-format REFUSES the lane with
+  // the action-owned cause `dedicated_format_missing` — enabled profile, no
+  // transport, no provider call — instead of silently inheriting the primary
+  // (or a workflow's smart-derived) format onto a verifier that may speak a
+  // different family.
   const configuredFormat = apiFormatRaw.toLowerCase();
+  const dedicatedFormat = configuredFormat === "openai" || configuredFormat === "anthropic";
+  if (requireDedicated && !dedicatedFormat) {
+    warnings.push(
+      "confidence scorer: ai-confidence-isolation=require-dedicated but ai-confidence-api-format is empty or not openai/anthropic — the verifier never inherits the primary lane's wire family; set ai-confidence-api-format to the format the dedicated verifier endpoint speaks (openai or anthropic), or drop ai-confidence-isolation to restore the inherit-primary default",
+    );
+    return {
+      profile: {
+        ...disabledConfidenceProfile(),
+        enabled: true,
+        model,
+        refusalCause: "dedicated_format_missing",
+      },
+      warnings,
+    };
+  }
   const apiFormat = apiFormatRaw !== ""
     ? (configuredFormat === "openai" || configuredFormat === "anthropic" ? configuredFormat : primary.apiFormat)
     : primary.apiFormat;
+  // #1481: the OpenAI token-limit field (`max_tokens` vs
+  // `max_completion_tokens`) is the SAME class of endpoint protocol setting as
+  // the wire family, so it resolves verifier-side: an explicit
+  // ai-confidence-tokens-param always wins; under inherit-primary an unset
+  // value keeps today's inheritance of the run's AI_TOKENS_PARAM convention;
+  // under require-dedicated an unset value resolves the verifier-owned
+  // `max_tokens` default and NEVER the primary lane's AI_TOKENS_PARAM (a
+  // dedicated OpenAI-compatible verifier that needs the other field says so
+  // with its own input). The Anthropic wire always sends max_tokens and
+  // ignores this value.
+  const confidenceTokensParam = confidenceTokensParamFrom(env, requireDedicated);
 
   // Credential rule (#1073): an explicitly configured scorer key is ALWAYS
   // used as-is — including on the same endpoint, where the operator named the
@@ -992,6 +1121,7 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
       baseUrl: resolvedBaseUrl,
       model,
       apiFormat,
+      tokensParam: confidenceTokensParam,
       apiKey: apiKeyResolved,
       requestTimeoutSec: numberValue(env, "AI_CONFIDENCE_TIMEOUT_SEC", 120),
       reasoningEffort: effort.value,
@@ -1002,6 +1132,7 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
       modelContextTokens,
       anthropicEffortSupported,
       structuredOutputSupported,
+      refusalCause: "",
     },
     warnings,
   };

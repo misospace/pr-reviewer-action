@@ -4,6 +4,10 @@
  * Boundaries enforced here, not negotiated:
  * - exactly ONE wire attempt (the transport's single-shot path — no 429/5xx
  *   backoff loop, no fallback lane, no second review);
+ * - a configuration the resolver itself refused (`ConfidenceProfile.refusalCause`,
+ *   #1478: the require-dedicated isolation mode without its dedicated
+ *   endpoint or without a dedicated model) publishes `unscored` with that
+ *   action-owned cause before the wire;
  * - credential isolation: the scorer's resolved `ConfidenceProfile` is the
  *   ONLY credential source; a distinct endpoint without its own key may only
  *   be a loopback address, and the primary lane's key must never ride a
@@ -23,7 +27,6 @@ import type { TransportFailureKind } from "../transport/http.js";
 import { basicAuthorizationHeaderValue } from "../transport/headers.js";
 import { maskDiagnostic } from "../context/redact.js";
 import { buildModelRequest, wireEffortOf } from "../model/request.js";
-import type { TokensParam } from "../model/types.js";
 import type { ConfidenceProfile } from "../routing/tiers.js";
 import { confidenceUsageFromProviderBody, type ConfidenceUsageTelemetry } from "./telemetry.js";
 import {
@@ -83,9 +86,6 @@ export interface ConfidenceScorerInput {
   primaryApiKey: string;
   prompt: { system: string; user: string };
   connectTimeoutSec: number;
-  /** The primary lane's token-field convention, so self-hosted OpenAI
-   * proxies that only accept one field keep working. */
-  tokensParam?: TokensParam;
   transport?: (input: ChatRequestInput) => Promise<ChatRequestOutcome>;
   /** #726 (engine cancellation): caller-owned abort, propagated into the
    * transport so an aborted run tears the scorer's in-flight provider
@@ -164,6 +164,19 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   if (!profile.enabled) {
     return { result: disabledResult(), requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "", usage: null, latencyMs: null };
   }
+  // #1478: a configuration the RESOLVER itself refused (the require-dedicated
+  // isolation mode with no dedicated endpoint configured, or with no
+  // dedicated model configured). Same contract as the refusals below: no
+  // wire attempt, no request artifact, an action-owned cause, and the review
+  // unaffected. The model identity stays empty on the result — nothing
+  // audited the review.
+  if (profile.refusalCause !== "") {
+    return {
+      result: unscoredConfidenceResult(profile.refusalCause),
+      requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",
+      usage: null, latencyMs: null,
+    };
+  }
   // Credential isolation, asserted at call time (the resolver already
   // guarantees both, but this boundary fails closed rather than trusting
   // any upstream wiring):
@@ -235,7 +248,11 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     // scorer's OWN compact schema rides the wire (never the verdict schema).
     responseFormat: profile.structuredOutputSupported ? "json_schema" : "off",
     responseSchema: CONFIDENCE_ANSWER_JSON_SCHEMA,
-    tokensParam: input.tokensParam ?? "max_tokens",
+    // #1481: the token-limit field is the RESOLVED profile's own — the engine
+    // no longer feeds this lane the primary/global AI_TOKENS_PARAM state, so a
+    // require-dedicated verifier can never silently inherit the review lane's
+    // convention.
+    tokensParam: profile.tokensParam,
     reasoningEffort: profile.reasoningEffort,
     // #1368: the scorer's OWN capability assertions — never another lane's.
     // Unasserted, the Anthropic wire carries no effort/format at all.
