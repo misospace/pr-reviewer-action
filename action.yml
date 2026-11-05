@@ -566,13 +566,13 @@ inputs:
     required: false
     default: "512"
   tool-max-requests:
-    description: Maximum number of tool requests the harness executes when tool_mode is enabled. Empty resolves a tier-aware base budget from the review route (#701), scaled for PR size (#810) and capped at 50. The public action defaults primary-tool-max-requests to 40, which outranks this base on ordinary primary reviews; smart/escalated routes keep their tier-aware defaults unless explicitly overridden. Wall-clock and round limits still bind. An explicit tool-max-requests value overrides the tier base but remains lower precedence than a route-specific override.
+    description: Maximum number of tool requests the harness executes when tool_mode is enabled. Empty resolves a tier-aware budget from the review route (#701) — 40 for primary, 45 for smart, 50 for escalated — then scales upward for PR size (#810) up to the hard ceiling of 50. Explicit route-specific inputs outrank tool-max-requests; tool-max-requests otherwise overrides the derived tier budget. Wall-clock and round limits still bind.
     required: false
     default: ""
   primary-tool-max-requests:
-    description: Request ceiling for the primary route only, bounded to 1..50. Outranks tool_max_requests on that route and leaves the smart/escalated tiers untouched. Defaults to 40 so ordinary reviews have enough room to finish evidence gathering before requirement-trace closure.
+    description: Request budget for the primary route only, bounded to 1..50. Outranks tool_max_requests on that route and leaves the smart/escalated tiers untouched. Empty keeps the primary tier default (40).
     required: false
-    default: "40"
+    default: ""
   smart-tool-max-requests:
     description: Request budget for the smart and escalated routes only, bounded to 1..50. Outranks tool_max_requests on those routes and leaves the primary tier untouched. Empty (the default) keeps the tier defaults.
     required: false
