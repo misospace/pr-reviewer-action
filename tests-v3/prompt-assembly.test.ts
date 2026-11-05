@@ -300,6 +300,131 @@ test("publicAnalysisEngine keeps a model identifier that carries a `scheme://`-s
   }
 });
 
+test("publicAnalysisEngine removes the endpoint token whole when the composed engine carries internal whitespace (#1474)", () => {
+  const cases: Array<[string, string]> = [
+    // A base URL with internal whitespace splits the whitespace-free token
+    // run: the endpoint token now reaches the API-format group, so the
+    // whole URL leaves and no fragment of it survives (#1474).
+    [analysisEngineBase("m", "https://api.example.com/v1 x", "openai"), "m (openai)"],
+    // A trailing space in the base URL leaves the same way.
+    [analysisEngineBase("m", "https://api.example.com/v1 ", "openai"), "m (openai)"],
+    // A base URL whose whitespace makes the URL unparseable still leaves
+    // whole: no candidate is acceptable, so the fallback strips the first
+    // candidate's whole extent.
+    [analysisEngineBase("m", "https://api example.com/v1", "openai"), "m (openai)"],
+    // A tab or a non-breaking space splits the token run the same way.
+    [analysisEngineBase("m", "https://api.example.com/v1\tx", "openai"), "m (openai)"],
+    [analysisEngineBase("m", "https://api.example.com/v1\u00a0x", "openai"), "m (openai)"],
+    // A base URL with edge whitespace composes the URL the transport will
+    // actually use (it trims too), so the separator still opens the
+    // endpoint token and the whole URL leaves the published engine.
+    [analysisEngineBase("m", " https://api.example.com/v1", "openai"), "m (openai)"],
+    // A model identifier with internal whitespace stays intact and the
+    // endpoint still leaves whole.
+    [analysisEngineBase("my model", "https://api.example.com/v1", "openai"), "my model (openai)"],
+    // A model identifier that carries internal whitespace AND a URL-shaped
+    // token of its own: that token parses with userinfo, so the strip skips
+    // it and anchors on the clean endpoint token — the model stays intact.
+    [analysisEngineBase("m@https://a@b/c d", "https://api.example.com/v1", "openai"), "m@https://a@b/c d (openai)"],
+    // A base URL that carries a parenthesis group of its own: the API-format
+    // group is the group that ends the engine base, so the endpoint token
+    // reaches it and leaves whole (#1474).
+    [analysisEngineBase("m", "https://api.example.com/v1 (x)", "openai"), "m (openai)"],
+    // A model identifier that carries a parenthesis group AND a URL-shaped
+    // token of its own: the model token no longer ends at the format
+    // boundary, so the strip skips it and anchors on the clean endpoint
+    // token — the model stays intact and the endpoint leaves whole.
+    [analysisEngineBase("m@https://a.com (x)", "https://api.example.com/v1", "openai"), "m@https://a.com (x) (openai)"],
+    // Both sides whitespace-bearing: the endpoint still leaves whole and the
+    // model identifier stays intact.
+    [analysisEngineBase("my model", "https://api.example.com/v1 x", "openai"), "my model (openai)"],
+    // The published engine still names the exact model the provider saw,
+    // including any `@` in the name (#1469).
+    [analysisEngineBase("m@20250514", "https://api.example.com/v1 x", "openai"), "m@20250514 (openai)"],
+    // The route suffix stays and the endpoint leaves whole.
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 x", "openai"), "fallback"),
+      "m (openai) — fallback (primary failed)",
+    ],
+    // An endpoint path carrying a parenthesis group followed by the route
+    // annotation separator: the separator alone does not mark the format
+    // group, so the whole endpoint leaves and no `(x) — y` fragment survives
+    // (#1474 review).
+    [analysisEngineBase("m", "https://api.example.com/v1 (x) — y", "openai"), "m (openai)"],
+    // The annotated forms of the same endpoint leave whole too.
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (x) — y", "openai"), "fallback"),
+      "m (openai) — fallback (primary failed)",
+    ],
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (x) — y", "openai"), "primary", { reviewRoute: "primary" }),
+      "m (openai) — primary route",
+    ],
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (x) — y", "openai"), "escalated", { escalationReasons: "primary_requested" }),
+      "m (openai) — escalated (primary_requested)",
+    ],
+    // An endpoint path carrying annotation-SHAPED text after its parenthesis
+    // group: the whole suffix must match the closed annotation grammar, so
+    // the real format group still ends the endpoint token.
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback (b)", "openai"), "m (openai)"],
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback (b)", "openai"), "fallback"),
+      "m (openai) — fallback (primary failed)",
+    ],
+    // A model identifier carrying the same shape stays intact and the
+    // endpoint leaves whole.
+    [analysisEngineBase("m (x) — y", "https://api.example.com/v1", "openai"), "m (x) — y (openai)"],
+    // An endpoint ending in an annotation-shaped tail: a grammar arm ending
+    // in a bare `\)$` would let such a tail borrow the real format group's
+    // own parentheses, so every arm ends in a literal ` (openai)` cannot
+    // supply (#1474 review round 2).
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback", "openai"), "m (openai)"],
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — escalated", "openai"), "m (openai)"],
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — primary route", "openai"), "m (openai)"],
+    // The same annotation-shaped tails with a real annotation appended: the
+    // real route suffix survives and the endpoint leaves whole.
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback", "openai"), "fallback"),
+      "m (openai) — fallback (primary failed)",
+    ],
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (a) — escalated", "openai"), "escalated", { escalationReasons: "primary_requested" }),
+      "m (openai) — escalated (primary_requested)",
+    ],
+    // An unvalidated lane `apiFormat` cannot complete an annotation arm by
+    // borrowing the format group's parentheses either: the composed group
+    // is always the wire family the transport dials (#1474 review round 2).
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — escalated", "unknown"), "m (openai)"],
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — escalated", "primary_requested"), "m (openai)"],
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback", "openai failed"), "m (openai)"],
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback", "anthropic failed"), "m (openai)"],
+  ];
+  for (const [engine, expected] of cases) {
+    assert.equal(publicAnalysisEngine(engine), expected);
+  }
+});
+
+test("publicAnalysisEngine strips the whole endpoint token when no candidate is acceptable (#1474)", () => {
+  // The endpoint token carries userinfo, so no candidate is acceptable and
+  // the fallback strips the first candidate's whole extent: the endpoint
+  // leaves whole instead of a fragment of it.
+  assert.equal(publicAnalysisEngine("m@https://u@h (openai)"), "m (openai)");
+  // A fail-closed placeholder the endpoint left behind does not shorten the
+  // fallback either: the endpoint behind it leaves whole too.
+  assert.equal(publicAnalysisEngine("m@<redacted-endpoint-URL>@ https://api.example.com/v1 (openai)"), "m (openai)");
+});
+
+test("analysisEngineBase names the wire family the transport dials (#1474 review round 2)", () => {
+  assert.equal(analysisEngineBase("m", "https://h", "openai"), "m@https://h (openai)");
+  assert.equal(analysisEngineBase("m", "https://h", "anthropic"), "m@https://h (anthropic)");
+  // Anything the transport does not dial as Anthropic composes the openai
+  // family: the lane inputs beyond `ai-api-format` are not enum-validated,
+  // and the published engine must not name a family no request used.
+  assert.equal(analysisEngineBase("m", "https://h", "bogus"), "m@https://h (openai)");
+  assert.equal(analysisEngineBase("m", "https://h", "Anthropic"), "m@https://h (openai)");
+});
+
 test("analysisEngineBase redacts a credential the base URL carries in its userinfo (#1428)", () => {
   assert.equal(analysisEngineBase("m", "https://user:secret@llm.example.net/v1", "openai"), "m@https://llm.example.net/v1 (openai)");
   assert.equal(analysisEngineBase("m", "https://llm.example.net/v1", "openai"), "m@https://llm.example.net/v1 (openai)");
