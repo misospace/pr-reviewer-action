@@ -282,6 +282,7 @@ def test_public_action_defaults_are_the_recommended_setup() -> None:
         "requirement-trace": "false",
         "allow-approve": "false",
         "tool-max-requests": "",
+        "primary-tool-max-requests": "40",
         "tool-max-rounds": "",
         "tool-loop-wall-clock-sec": "600",
         "tool-corpus-max-bytes": "",
