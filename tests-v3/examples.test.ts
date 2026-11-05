@@ -10,7 +10,11 @@ interface JobStep {
 }
 
 interface Workflow {
-  jobs: Record<string, { steps: JobStep[] }>;
+  jobs?: Record<string, { steps: JobStep[] }>;
+  /** Spindle workflows (Tangled CI) carry a top-level `when:` and `steps:`
+   * instead of GitHub Actions `jobs:`. See examples/tangled-workflow.yml. */
+  when?: unknown;
+  steps?: { command?: string }[];
 }
 
 function loadContractInputIds(): Set<string> {
@@ -23,12 +27,24 @@ function loadContractInputIds(): Set<string> {
 const examplesDir = "examples";
 const exampleFiles = readdirSync(examplesDir).filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"));
 
-test("examples/*.yml pin @v3 and use only current kebab-case contract inputs", () => {
+test("examples/*.yml pin @v3 (Actions) or the host-neutral Node entry (Spindle) and use current inputs", () => {
   assert.ok(exampleFiles.length > 0, "expected at least one example workflow file");
   const contractInputIds = loadContractInputIds();
 
   for (const file of exampleFiles) {
     const workflow = parse(readFileSync(join(examplesDir, file), "utf8")) as Workflow;
+
+    if (workflow.jobs === undefined) {
+      // Spindle shape: the Tangled example must invoke the host-neutral
+      // Node runner (#590), never `action.yml` or a GitHub Action step.
+      assert.ok(Array.isArray(workflow.when), `${file}: neither GitHub Actions jobs nor a Spindle when:`);
+      const commands = (workflow.steps ?? []).map((step) => step.command ?? "").join("\n");
+      assert.match(commands, /dist\/index\.js[^\n]*\btangled\b/,
+        `${file}: Spindle example must run the host-neutral "node dist/index.js tangled" entrypoint`);
+      assert.doesNotMatch(commands, /action\.yml/, `${file}: Spindle example must not invoke action.yml`);
+      continue;
+    }
+
     let sawActionStep = false;
 
     for (const job of Object.values(workflow.jobs)) {
