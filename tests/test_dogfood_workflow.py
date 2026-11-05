@@ -258,48 +258,46 @@ def test_dogfood_overrides_only_what_is_ours() -> None:
 
 
 def test_dogfood_enables_bounded_advisory_confidence_scoring() -> None:
-    """Score with a usable configured model, without weakening review authority.
+    """Use an explicit verifier model on the repository's shared model gateway.
 
-    #1478: the verifier's ENDPOINT, CREDENTIAL, and MODEL are isolated from
-    the primary lane — they resolve only from the operator's dedicated
-    CONFIDENCE_* repository variables/secret, and
-    ai-confidence-isolation=require-dedicated turns a missing dedicated
-    endpoint (or a missing dedicated model) into a visible `unscored` run
-    instead of a silent primary-lane inheritance. The workflow therefore
-    pre-fills the model with NOTHING: a `SMART_MODEL` substitution here would
-    put the primary lane's own model on the verifier, the exact same-model
-    correlation isolation exists to prevent (the resolver refuses the missing
-    model as `unscored(dedicated_model_missing)` — #1481). #1481 extends the
-    same no-fallback rule to the WIRE FAMILY: no `SMART_FORMAT` substitution
-    either — a dedicated endpoint's format is the dedicated endpoint's own
-    property, and an unset `CONFIDENCE_FORMAT` is a visible
-    `unscored(dedicated_format_missing)`, never a review-lane guess. The
-    primary LITELLM_* credential must never appear on a confidence input, and
-    forks stay disabled by default.
+    The verifier MODEL never falls back to SMART_MODEL or the primary model.
+    Transport intentionally does: this repository runs one trusted model
+    gateway/credential for many models, so an unset CONFIDENCE_BASE_URL and
+    CONFIDENCE_API_KEY must inherit the primary lane's resolved endpoint and
+    credential instead of requiring the same URL/key to be configured twice.
+
+    Explicit confidence transport overrides remain supported for operators
+    that actually use a separate verifier backend. The resolver's existing
+    boundary still requires an explicit confidence key when a distinct
+    confidence base URL is supplied, so this shared-gateway policy does not
+    weaken the cross-endpoint credential rule.
     """
     values = _review_step_with(WORKFLOW.read_text(encoding="utf-8"))
     assert values["ai-confidence-model"] == "${{ vars.CONFIDENCE_MODEL }}"
-    # The regression this pins: the static workflow must never pre-fill the
-    # confidence model with a primary-derived value (no SMART_MODEL fallback).
+    # Model independence stays explicit: no primary/smart model substitution.
     assert "SMART_MODEL" not in values["ai-confidence-model"]
-    # #1481 pins the same rule for the WIRE FAMILY: no SMART_FORMAT fallback.
-    # A smart-derived format is still a review-lane value riding the verifier's
-    # protocol surface; unset CONFIDENCE_FORMAT now resolves to a visible
-    # unscored(dedicated_format_missing) inside the action instead.
-    assert values["ai-confidence-api-format"] == "${{ vars.CONFIDENCE_FORMAT }}"
-    assert "SMART_FORMAT" not in values["ai-confidence-api-format"]
+
+    # These are OPTIONAL overrides. Empty values reach the resolver as empty
+    # and inherit the primary gateway/credential under inherit-primary.
     assert values["ai-confidence-base-url"] == "${{ vars.CONFIDENCE_BASE_URL }}"
     assert values["ai-confidence-api-key"] == "${{ secrets.CONFIDENCE_API_KEY }}"
-    assert values["ai-confidence-isolation"] == "require-dedicated"
+    assert values["ai-confidence-isolation"] == "inherit-primary"
+
+    # Format may be overridden for a confidence model that needs a different
+    # wire family; empty inherits the primary format. Never guess SMART_FORMAT.
+    assert values["ai-confidence-api-format"] == "${{ vars.CONFIDENCE_FORMAT }}"
+    assert "SMART_FORMAT" not in values["ai-confidence-api-format"]
+
     assert values["ai-confidence-reasoning-effort"] == "${{ vars.CONFIDENCE_REASONING_EFFORT }}"
     assert str(values["ai-confidence-timeout-sec"]) == "120"
     assert "ai-confidence-enable-for-forks" not in values
-    # The primary lane's credential must never ride a confidence input: the
-    # verifier inherits nothing from the primary transport under
-    # require-dedicated, and the dedicated secret is its own.
+
+    # Do not duplicate the primary gateway secret into another workflow input.
+    # Inheritance happens inside the action's resolver; the workflow only names
+    # a CONFIDENCE_* secret when an operator deliberately provides an override.
     for key, value in values.items():
         if key.startswith("ai-confidence"):
-            assert "LITELLM" not in value, f"{key} references the primary lane credential: {value}"
+            assert "LITELLM" not in value, f"{key} directly references the primary lane credential: {value}"
     assert values["publish-mode"] == "review_verdict"
 
 

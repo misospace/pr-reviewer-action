@@ -322,20 +322,21 @@ jobs:
           # inherits the primary lane's transport again). Forks remain
           # disabled by the action's default policy.
           ai-confidence-model: ${{ vars.CONFIDENCE_MODEL }}
-          # CONFIDENCE_MODEL must name a model the DEDICATED endpoint serves —
-          # the verifier sends it verbatim (opaque, case-sensitive, #1465).
-          # A model name the dedicated endpoint does not serve fails visibly
-          # at the provider (confidence-status=unscored, cause http_*) and
-          # never inherits anything from the primary lane.
-          # #1481: CONFIDENCE_FORMAT names the DEDICATED endpoint's own wire
-          # family. No SMART_FORMAT fallback: the family is endpoint-owned, so
-          # an unset CONFIDENCE_FORMAT under require-dedicated resolves to a
-          # visible unscored(dedicated_format_missing), never a review- or
-          # smart-lane-derived format on the verifier's wire.
+          # The verifier MODEL is always explicit: there is no SMART_MODEL or
+          # primary-model fallback. Transport is different. This repository
+          # intentionally uses one trusted model gateway/credential for many
+          # models, so an unset CONFIDENCE_BASE_URL / CONFIDENCE_API_KEY
+          # inherits the primary lane's resolved endpoint and credential,
+          # exactly like the smart/fallback lanes. Operators that really use a
+          # separate verifier backend can still set both overrides; a distinct
+          # endpoint never inherits the primary key.
+          #
+          # CONFIDENCE_FORMAT is an optional lane override. Empty under
+          # inherit-primary uses the primary lane's resolved wire family.
           ai-confidence-api-format: ${{ vars.CONFIDENCE_FORMAT }}
           ai-confidence-base-url: ${{ vars.CONFIDENCE_BASE_URL }}
           ai-confidence-api-key: ${{ secrets.CONFIDENCE_API_KEY }}
-          ai-confidence-isolation: require-dedicated
+          ai-confidence-isolation: inherit-primary
           ai-confidence-reasoning-effort: ${{ vars.CONFIDENCE_REASONING_EFFORT }}
           # #1368: the scorer's budgets and capability assertions are explicit
           # and observable — never silently advertised on a wire format that
