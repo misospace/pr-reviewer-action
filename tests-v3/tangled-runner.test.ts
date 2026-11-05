@@ -24,7 +24,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { platformActionMain, PlatformActionError } from "../src/run/platform-action.js";
@@ -356,5 +356,38 @@ test("#590: an explicit 'auto' platform still resolves to Tangled through the DI
           && !/GitHub|GH_TOKEN|GITHUB_TOKEN|Forgejo/i.test(error.message),
       );
     });
+  }
+});
+
+test("#590: the runner forces the CI gate off, so no gate child is ever launched", async () => {
+  // Tangled has no pipeline-status seam, so CI waiting stays unsupported. The
+  // runner forces `ci-status-check` off even when the host asks for it: a
+  // gate child would resolve the platform to tangled and fail there
+  // (`requireImplementedBackend`), so the review must not launch one. The
+  // fake bundle writes a marker when a child starts, which proves the gate
+  // stayed off.
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictResponse());
+  });
+  const publishApi = new FakeTangledPublishApi(HEAD);
+  try {
+    await withTemp(async (workspace) => {
+      const marker = join(workspace, "gate-child-ran.txt");
+      const entry = join(workspace, "fake-bundle.cjs");
+      writeFileSync(entry, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "gate-ran");\n`, "utf8");
+      const env = tangledEnv(model.url, workspace);
+      env["INPUT_CI-STATUS-CHECK"] = "true";
+      env.PR_REVIEWER_ENTRY = entry;
+      const code = await platformActionMain(env, {
+        platformAdapter: tangledReadCapability(),
+        publishApi,
+      });
+      assert.equal(code, 0, "the run completes without a CI gate");
+      assert.equal(existsSync(marker), false, "no CI gate child was launched");
+      assert.equal(publishApi.upserts, 1, "the review still published");
+    });
+  } finally {
+    await model.close();
   }
 });
