@@ -126,23 +126,31 @@ flowchart LR
 
 ## 🖥️ Platform support
 
-The action works on **GitHub** and **Forgejo** (1.4.x), with **Tangled** resolvable as a platform. Set `platform: auto` (default) to detect automatically from `TANGLED_REPO_DID` (the Tangled repository owner DID, checked first), `GITHUB_SERVER_URL`, and `FORGEJO_API_URL`, or set explicitly to `forgejo` / `github` / `tangled` (explicit `tangled` requires `TANGLED_REPO_DID`). Tangled is resolution-only for now: its backend operations are not implemented yet and fail loudly until follow-up work lands.
+The action works on **GitHub** and **Forgejo** (1.4.x). **Tangled** support is experimental. Set `platform: auto` (default) to detect the platform from `TANGLED_REPO_DID` (the Tangled repository owner DID, checked first), `GITHUB_SERVER_URL` and `FORGEJO_API_URL`, or set it explicitly to `github` / `forgejo` / `tangled`. An explicit `tangled` requires `TANGLED_REPO_DID`.
 
-| Feature | GitHub | Forgejo |
-|---|---|---|
-| PR diff, files, metadata | ✅ Full | ✅ Full (REST backend) |
-| Managed sticky comment | ✅ Full | ✅ Full |
-| Native review comments (`review_comment`) | ✅ Full | ⚠️ Degraded — REST-based; no inline line anchors |
-| Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST |
-| Native blocking reviews (`review_blockers`) | ✅ Full | ⚠️ Degraded — request_changes/comment via REST |
-| Cleanup: dismiss stale reviews | ✅ Full | ✅ Full (REST) |
-| Cleanup: minimizeComment (hide outdated) | ✅ Full | ⚠️ Incomplete-replacement path: author-side deletion of superseded non-verdict (COMMENTED/DISMISSED) non-official reviews that carry no inline findings (REST); verdict reviews degrade to dismissal and are never deleted (verdict deletion could reactivate a stale verdict upstream); findings-bearing reviews stay visible (no GraphQL) |
-| CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST; own single-job status auto-discovered by run-jobs API) |
-| Evidence providers | ✅ Full | ✅ Full |
-| Tool harness | ✅ Full | ✅ Full |
-| Reviewer-requested smart escalation | ✅ Full | ✅ Full |
+| Feature | GitHub | Forgejo | Tangled (experimental) |
+|---|---|---|---|
+| PR diff, files, metadata | ✅ Full | ✅ Full (REST backend) | ⚠️ Degraded — the metadata read works, the diff read stops the run |
+| Managed sticky comment | ✅ Full | ✅ Full | ⚠️ Degraded — one managed AT-Proto review record, published after the diff read and the current-head proof land |
+| Native review comments (`review_comment`) | ✅ Full | ⚠️ Degraded — REST-based; no inline line anchors | ❌ Unsupported — Tangled has no inline review object |
+| Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST | ❌ Unsupported — Tangled has no native verdict object |
+| Native blocking reviews (`review_blockers`) | ✅ Full | ⚠️ Degraded — request_changes/comment via REST | ❌ Unsupported — the verdict stays in the review body |
+| Cleanup: dismiss stale reviews | ✅ Full | ✅ Full (REST) | ❌ Unsupported — the managed record is updated in place |
+| Cleanup: minimizeComment (hide outdated) | ✅ Full | ⚠️ Incomplete-replacement path: author-side deletion of superseded non-verdict (COMMENTED/DISMISSED) non-official reviews that carry no inline findings (REST); verdict reviews degrade to dismissal and are never deleted (verdict deletion could reactivate a stale verdict upstream); findings-bearing reviews stay visible (no GraphQL) | ❌ Unsupported — Tangled has no review cleanup surface |
+| CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST; own single-job status auto-discovered by run-jobs API) | ❌ Unsupported — the runner turns the CI gate off |
+| Evidence providers | ✅ Full | ✅ Full | ⚠️ Degraded — the provider commands read the checkout. A provider that calls the GitHub API does not work |
+| Tool harness | ✅ Full | ✅ Full | ⚠️ Degraded — the `gh_api` and `repo_contents` tools fail |
+| Reviewer-requested smart escalation | ✅ Full | ✅ Full | ⚠️ Degraded — the engine path is shared, but a Tangled run reaches no verdict |
 
 Forgejo Authorized Integrations can reuse managed sticky comments with repository and issue permissions; `read:user` is not required. The action matches the integration owner's ID from its Forgejo-generated audience against comment author IDs. If a prior managed comment has no usable author ID and ownership cannot be established, publication fails closed.
+
+### 🧪 Tangled (experimental)
+
+Tangled is not GitHub Actions, so `action.yml` is not the Tangled entry point. A Tangled review runs on the host-neutral runner, `node dist/index.js tangled`, in one plain Node process. The runner pins the platform to `tangled` and refuses a `github` or `forgejo` platform instead of falling back to another forge.
+
+A Tangled run does not complete today. The metadata read works, and the run stops at the diff read. After that, the publication step fails closed until a trustworthy current-head read exists ([#1165](https://github.com/misospace/pr-reviewer-action/issues/1165)), because a review that cannot prove the pull did not advance is never published.
+
+Read [Tangled (experimental)](docs/tangled.md) for the setup, the configuration, the identity model and the full support matrix. The copyable Spindle workflow example is [`examples/tangled-workflow.yml`](examples/tangled-workflow.yml).
 
 **PR reviewability metadata is capability-checked, not version-guessed.** A successfully read PR must explicitly report a boolean `draft` value to be reviewable: `draft: true` skips as `pr-draft`, while a readable payload with a missing or malformed draft bit fails closed as `pr-draft-unknown`. A failed PR metadata lookup on the ordinary shared-admission path is an operational failure and fails the run rather than producing a green skip; the human-triggered re-review command keeps its retriable `comment-pr-lookup-failed` behavior. We intentionally do not claim a Forgejo version floor for the `draft` field: deployments and API compatibility layers vary, and the runtime checks the capability directly. If an instance repeatedly reports `pr-draft-unknown`, its pull-request endpoint must be upgraded or configured to return an explicit boolean `draft`.
 
@@ -191,6 +199,7 @@ No Action input controls this: the signatures are a fixed allowlist. Every failu
 | Default-off experimental features | [Opt-in features](docs/opt-in-features.md) |
 | Local model issues and common misconfigurations | [Troubleshooting](docs/troubleshooting.md) |
 | Repository-owned config file | [Repository config](docs/repository-config.md) |
+| Reviewing on Tangled (experimental) | [Tangled](docs/tangled.md) |
 | Reviewing pull requests from forks | [Fork reviews](docs/fork-review.md) |
 | Upgrading from v2 | [v2 → v3 migration](docs/v3-migration.md) |
 

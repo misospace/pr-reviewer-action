@@ -8,10 +8,10 @@ This file is the durable standards context injected into every agent and reviewe
 
 `pr-reviewer-action` must remain:
 
-- **Forge agnostic** — GitHub and Forgejo behind the platform seam (`src/platform/`). No forge-specific logic outside the adapters.
+- **Forge agnostic** — GitHub, Forgejo and (experimental) Tangled behind the platform seam (`src/platform/`). No forge-specific logic outside the adapters.
 - **Repository agnostic** — product behavior never special-cases this repository's identity, paths, or metadata.
 - **Provider/model agnostic** — OpenAI `POST /chat/completions` and Anthropic `POST /messages` wire formats; cloud and local/self-hosted endpoints are both first-class.
-- **Deployment/runtime compatible** — GitHub Actions and qualified Forgejo Actions runners use the native JavaScript Action (`runs.using: node24`). `dist/` is built by CI and packaged on release-tag commits, not committed to `main`.
+- **Deployment/runtime compatible** — GitHub Actions and qualified Forgejo Actions runners use the native JavaScript Action (`runs.using: node24`); the experimental Tangled host uses the host-neutral runner `node dist/index.js tangled`. `dist/` is built by CI and packaged on release-tag commits, not committed to `main`.
 - **Independent of the maintainer's infrastructure** — no dependency on the homelab, LiteLLM topology, Kubernetes, Flux, Courier, Dispatch, or home-ops.
 
 Do not freeze temporary v2 implementation details into permanent product rules. The completed v2→v3 migration is historical context, not policy — see `docs/v3-migration.md`.
@@ -41,6 +41,7 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 | `action.yml` | Shipped action definition, generated from `contracts/action-v3.yml` (`node24` JavaScript action; precheck → review → publish run in one process) |
 | `docs/inputs.md` | Inputs/outputs reference, generated from `contracts/action-v3.yml` + `scripts/docs/input-groups.json` by `node scripts/generate-inputs-doc.mjs` (a test fails when stale; add new inputs to a group) |
 | `src/` | The TypeScript runtime — the shipped production path (`node dist/index.js`, entry `src/run/action.ts`): `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
+| `src/platform/tangled*.ts`, `src/run/platform-action.ts` | Experimental Tangled boundary (#583–#591): Bobbin pull resolution, AT-Proto review records, and the host-neutral runner `node dist/index.js tangled`. Not `action.yml`. Every pull read and write goes through the platform seam, a missing capability fails closed, and no run falls back to GitHub or Forgejo. Setup and support matrix: `docs/tangled.md` |
 | `scripts/` | Repository tooling (eval, harvest, fork gate, judge, release, v3 build assets); not part of the action |
 | `pr_reviewer/` | Python modules for the semantic-eval and judge tooling; not part of the action |
 | `tests/`, `tests-v3/` | node:test for the shipped v3 runtime; pytest + shell for retained Python auxiliary tooling (eval, harvest, judge, fork gate) and repo/workflow structural gates; shared JSON fixtures under `tests/fixtures/` |
@@ -121,6 +122,7 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/architecture/source-evidence-provenance.md`](docs/architecture/source-evidence-provenance.md) — #1015 source-evidence provenance: committed vs sanitized representations, exact-revision authority, safe span verification
 - [`docs/architecture/syntax-aware-context.md`](docs/architecture/syntax-aware-context.md) — #764 optional syntax-aware context stage: provider seam, budgets, provenance, measured recall/noise
 - [`docs/fork-review.md`](docs/fork-review.md) — fork PR privilege separation, threat model, `FORK_*` configuration
+- [`docs/tangled.md`](docs/tangled.md) — #592 experimental Tangled support: setup, configuration, identity model, support matrix, guardrails
 - [`docs/v3-migration.md`](docs/v3-migration.md) — v2→v3 migration state and contract mapping
 - [`docs/repository-config.md`](docs/repository-config.md) — v3 repository config file: keys, base-side trust, narrowing precedence
 - [`docs/architecture/operator-config-and-adoption.md`](docs/architecture/operator-config-and-adoption.md) — #727 operator-mode contract: instance schema, repository config extension keys, adoption policy, effective-config fingerprint
