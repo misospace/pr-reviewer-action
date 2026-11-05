@@ -274,6 +274,10 @@ export function markerReviewResult(input: {
   requiredChecks: string;
   partialCoverage?: PartialCoverage | undefined;
   coverageUnknown?: boolean | undefined;
+  /** #1447: a degraded-gate bypass means normal review completeness was not
+   * established, so the marker must read partial even when the surviving
+   * required-check/coverage fields happen to look complete. */
+  degradedGateBypass?: boolean | undefined;
   /** #1449: the run's derived-obligation state ("complete" | "unresolved" |
    * "unavailable"). An undischarged derived obligation is missing COVERAGE,
    * not a defect (#1447), so the review reads `partial` — never `clean`
@@ -285,7 +289,11 @@ export function markerReviewResult(input: {
   // a derived cross-path relationship, so it cannot be published as a clean
   // review. It is NOT a findings state — the findings list stays untouched.
   const derivedGap = input.derivedObligationState === "unresolved" || input.derivedObligationState === "unavailable";
-  const coverageGap = Boolean(input.partialCoverage) || Boolean(input.coverageUnknown) || derivedGap;
+  const coverageGap =
+    Boolean(input.partialCoverage)
+    || Boolean(input.coverageUnknown)
+    || input.degradedGateBypass === true
+    || derivedGap;
   const coverageIncomplete = input.requiredChecks === "incomplete" || coverageGap;
   if (input.verdictPolicy !== "strict") {
     if (input.verdict === "request_changes") return "issues";
