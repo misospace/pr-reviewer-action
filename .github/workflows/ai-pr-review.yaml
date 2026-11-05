@@ -307,7 +307,6 @@ jobs:
           fallback-model-context-tokens: ${{ vars.FALLBACK_CONTEXT_TOKENS }}
           github-token: ${{ steps.app-token.outputs.token }}
           primary-model-context-tokens: ${{ vars.PRIMARY_CONTEXT_TOKENS }}
-          primary-tool-max-requests: "40"
           publish-mode: review_verdict
           requirement-trace: "true"
           review-routing-mode: auto
