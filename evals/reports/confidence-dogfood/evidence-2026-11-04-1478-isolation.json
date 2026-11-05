@@ -1,0 +1,44 @@
+{
+  "schema": "verifier-dogfood-evidence/v1",
+  "generated_at": "2026-11-04T20:09:39Z",
+  "repository": "misospace/pr-reviewer-action",
+  "records": [
+    {
+      "pr_number": 1481,
+      "head_sha": "0f532c92e26a98a01462fc75cf403a18832e4426",
+      "base_sha": "5e68e787c18cd8c7e84d5c8adb41d3f8ea70485e",
+      "review_result": "issues",
+      "required_checks": "incomplete",
+      "diff_fingerprint": "75cc9177951e59bce10b2bc145b04cea00ce86f467ddc145894b66cde192dcdd",
+      "config_fingerprint": "4925647f5b11e2efb9204ce65f2dbee81d2ea8f9c0436ca9f85ccb6276dd91d9",
+      "verifier": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "model": "",
+        "concerns": [],
+        "materially_challenges_primary": null,
+        "cause": "dedicated_config_missing",
+        "latency_ms": null,
+        "token_usage": null
+      },
+      "published_body": {
+        "kind": "review",
+        "id": 5774955398,
+        "created_at": null,
+        "updated_at": null,
+        "submitted_at": "2026-11-04T20:02:52Z"
+      },
+      "unavailable": {
+        "latency_ms": "No verifier latency is measured for this run: the marker publishes confidence_latency_ms only when the run's provider attempt was timed (#1455), and this record carries no published latency; the run-directory artifact confidence-score.json records no timing either.",
+        "token_usage": "The provider's usage is normalized by the transport and reaches the published marker only through the scorer's telemetry (confidence_prompt_tokens, confidence_completion_tokens, confidence_total_tokens, #1455); this record carries no published usage, so the raw run-directory artifact confidence-response.json remains the only home for it.",
+        "rubric_version": "The rubric version constant is written only into the run-directory artifact confidence-score.json; it reaches the published record only indirectly, through the config hash in the fingerprint marker.",
+        "deterministic_caps": "The deterministic ceilings are recorded as structured tokens only in the run-directory artifact confidence-score.json; the published reason carries at most the appended note that names them.",
+        "parser_notes": "The action-owned parser notes (a dropped concern, a malformed risk) are recorded in the run-directory artifact confidence-score.json and never reach the published body.",
+        "later_review_linkage": "A later review's finding outcome is recorded only in the run-directory artifact finding-outcomes.json, which carries no reference to the verifier's answer, so nothing published links a later finding to the verifier."
+      },
+      "read_error": null
+    }
+  ]
+}

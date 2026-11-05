@@ -2516,7 +2516,10 @@ secrets: [profiles.primary.apiKey],
         laneSecrets: confidenceSecrets,
         prompt: confidencePrompt,
         connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
-        tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as "max_tokens" | "max_completion_tokens",
+        // #1481: no tokensParam here — the token-limit field is resolved INTO
+        // the profile (routing/tiers.ts), so the scorer never receives the
+        // primary lane's/global AI_TOKENS_PARAM convention on a dedicated
+        // verifier.
         findings: reviewRecord.findings,
         coverage: reviewCoverage,
         // Cancellation rides the scorer call too: an aborted run tears the

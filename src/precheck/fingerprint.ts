@@ -214,8 +214,9 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   "AI_CONFIDENCE_TIMEOUT_SEC",
   // #1368: the scorer's token budgets and capability assertions are
   // non-secret config that changes the request bytes, so they contribute
-  // exactly like the rest of the family: only while the scorer is enabled
-  // (`AI_CONFIDENCE_MODEL` non-empty), and only when non-empty. The boolean
+  // exactly like the rest of the family: only while the family gate below is
+  // active (#1481: a configured model, or require-dedicated isolation), and
+  // only when non-empty. The boolean
   // assertions' contract default is "false" (non-empty and stable), so they
   // add no upgrade churn and never touch the ANTHROPIC_EFFORT_SUPPORT_KEYS
   // sweep above — the confidence-family gate below owns them.
@@ -226,6 +227,25 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   "AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT",
   "AI_CONFIDENCE_API_KEY",
   "AI_CONFIDENCE_ENABLE_FOR_FORKS",
+  // #1478: the isolation mode decides whether a missing dedicated endpoint
+  // silently inherits the primary lane or refuses the call, so it changes
+  // what the scorer does with the very same model/diff; it contributes under
+  // the family gate below. Its contract default ("inherit-primary") is
+  // non-empty and stable, so it adds no upgrade churn beyond that gate.
+  // #1481: the gate is family-ACTIVE, not merely model-enabled —
+  // require-dedicated with a MISSING model keeps the lane logically active
+  // (it publishes `unscored(dedicated_model_missing)`), so the isolation
+  // value must be able to turn the family's own gate on.
+  "AI_CONFIDENCE_ISOLATION",
+  // #1481: the verifier's own OpenAI token-limit field changes the request's
+  // token field name, so it is behavior-relevant while the family gate is
+  // active. Its contract default is EMPTY, so an unset configuration — the
+  // disabled/default shape included — emits nothing and existing baseline
+  // fingerprints stay byte-identical. Under require-dedicated the RESOLVED
+  // behavior no longer depends on AI_TOKENS_PARAM at all (the review lane's
+  // own AI_TOKENS_PARAM still contributes through the sweep, because it
+  // changes the review request itself).
+  "AI_CONFIDENCE_TOKENS_PARAM",
 ]);
 
 /** #1037: the `ai-extra-headers` surface is hashed by its canonical
@@ -413,14 +433,31 @@ export function collectConfigLines(env: Record<string, string>): string[] {
       if ((env[key] ?? "").trim().toLowerCase() === "true") lines.push(`${key}=true`);
       continue;
     }
-    // #1073: the confidence-scorer family contributes only while the scorer
-    // is enabled (`AI_CONFIDENCE_MODEL` non-empty). Disabled — the default —
-    // emits nothing, so `AI_CONFIDENCE_TIMEOUT_SEC=120` (a non-empty contract
-    // default) never invalidates an existing cached review on upgrade.
+    // #1073: the confidence-scorer family contributes only while it is
+    // behavior-relevant. Disabled — the default — emits nothing, so
+    // `AI_CONFIDENCE_TIMEOUT_SEC=120` (a non-empty contract default) never
+    // invalidates an existing cached review on upgrade.
+    // #1481: behavior-relevant is the RESOLVER's own gate
+    // (`routing/tiers.ts` resolveConfidenceProfile): a configured model, OR
+    // require-dedicated isolation with no model — which keeps the lane
+    // logically active and publishes `unscored(dedicated_model_missing)`
+    // instead of silently disabling. Under the old model-only gate that
+    // configuration hashed identically to a scorer-less build, so an
+    // unchanged-diff skip could carry a cached review across two
+    // configurations that publish different confidence behavior. The
+    // isolation comparison mirrors the resolver exactly — trim,
+    // CASE-SENSITIVE: config-load validation rejects anything outside the
+    // two-token vocabulary (src/config/schema.ts ENUM_INPUTS), so folding
+    // case here would fingerprint a mode the resolver never resolves. While
+    // the family is active every non-empty family key contributes, exactly
+    // like under the old enabled gate — the over-eager direction only ever
+    // costs a fresh review.
     if (key.startsWith("AI_CONFIDENCE_")) {
-      const scorerEnabled = (env.AI_CONFIDENCE_MODEL ?? "").trim() !== "";
+      const confidenceFamilyActive =
+        (env.AI_CONFIDENCE_MODEL ?? "").trim() !== ""
+        || (env.AI_CONFIDENCE_ISOLATION ?? "").trim() === "require-dedicated";
       const value = (env[key] ?? "").trim();
-      if (!scorerEnabled || value === "") continue;
+      if (!confidenceFamilyActive || value === "") continue;
       // The credential is the one model-affecting setting the raw-value rule
       // cannot cover: it is secret, but a rotation changes the answer, so it
       // contributes as a domain-separated one-way digest — the same shape

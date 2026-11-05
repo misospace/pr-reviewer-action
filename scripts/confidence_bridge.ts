@@ -505,6 +505,16 @@ const CONFIDENCE_ENV_KEYS: ReadonlySet<string> = new Set([
   "AI_CONFIDENCE_MODEL",
   "AI_CONFIDENCE_BASE_URL",
   "AI_CONFIDENCE_API_FORMAT",
+  // #1481: the declared-confidence surface must be able to replay the
+  // production require-dedicated shape — isolation mode and the verifier's
+  // own token-limit field are part of that shape. Before these two, a plan
+  // declaring them failed the bridge outright (bad_confidence_env_key), and
+  // because the ambient-strip below removes every shell-side AI_CONFIDENCE_*
+  // first, the only way a condition ever reached the resolver was
+  // inherit-primary — so the clean-control / known-miss qualification paths
+  // could never exercise the lane as the dogfood workflow runs it.
+  "AI_CONFIDENCE_ISOLATION",
+  "AI_CONFIDENCE_TOKENS_PARAM",
   "AI_CONFIDENCE_REASONING_EFFORT",
   "AI_CONFIDENCE_MAX_TOKENS",
   "AI_CONFIDENCE_PROMPT_TOKENS",
@@ -603,8 +613,12 @@ async function liveScorer(argv: string[]): Promise<void> {
   // connect timeout (AI_CONNECT_TIMEOUT_SEC), exactly as the engine passes
   // them. The driver's ceiling only bounds the bridge SUBPROCESS.
   const connectTimeoutSec = Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30;
-  const tokensParamRaw = (env.AI_TOKENS_PARAM ?? "max_tokens").trim();
-  const tokensParam = tokensParamRaw === "max_completion_tokens" ? "max_completion_tokens" : "max_tokens";
+  // #1481: no bridge-local AI_TOKENS_PARAM fallback here. The token-limit
+  // field is resolved INTO the ConfidenceProfile by the production resolver
+  // (inherit-primary keeps the AI_TOKENS_PARAM convention; require-dedicated
+  // resolves the verifier-owned max_tokens and never the ambient one), and
+  // runConfidenceScorer consumes profile.tokensParam — the same semantics the
+  // engine gets.
   const reviewResult = markerReviewResultLocal({
     verdictPolicy: typeof row.verdict_policy === "string" ? row.verdict_policy : "strict",
     verdict: typeof row.verdict === "string" ? row.verdict : "",
@@ -623,6 +637,11 @@ async function liveScorer(argv: string[]): Promise<void> {
     model: profile.model,
     base_url: profile.baseUrl,
     api_format: profile.apiFormat,
+    // #1481: the resolved token-limit field is part of the observable
+    // production shape (require-dedicated resolves verifier-owned
+    // max_tokens; inherit-primary keeps the run's AI_TOKENS_PARAM
+    // convention), so the canary can prove which field the wire carried.
+    tokens_param: profile.tokensParam,
     inherited_transport: profile.inheritedTransport,
     credential_source: profile.credentialSource,
     request_timeout_sec: profile.requestTimeoutSec,
@@ -706,7 +725,6 @@ async function liveScorer(argv: string[]): Promise<void> {
       primaryApiKey,
       prompt,
       connectTimeoutSec,
-      tokensParam,
       laneSecrets,
       findings: Array.isArray(row.findings) ? row.findings : [],
       coverage: isRecord(row.coverage) ? row.coverage : {},

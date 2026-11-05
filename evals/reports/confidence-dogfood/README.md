@@ -71,6 +71,33 @@ Human/second-review findings in the window, adjudicated per #1452's classes. "Un
 
 Linked: recorded on #1452 (adjudication comment); #1075 stays blocked; #1447/#1450 reference this report for the verifier prong of their metrics.
 
+## Addendum 2026-11-04 — first receipt under the isolated verifier lane (#1478)
+
+Re-evaluation condition 1 above is now WIRED, pending operator settings:
+#1478 isolates the verifier's transport from the primary lane
+(`ai-confidence-isolation: require-dedicated` in the dogfood workflow; the
+verifier dials only `CONFIDENCE_BASE_URL`/`CONFIDENCE_API_KEY`). The
+`dogfood-inherited` same-arm shape is retired in the workflow — until the
+operator sets the dedicated repository variable/secret, the lane is enabled
+but refuses the transport, so every run publishes a VISIBLE cause instead of
+silently dialing the primary backend.
+
+First live receipt under that shape (evidence file
+`evidence-2026-11-04-1478-isolation.json`, `verifier-dogfood-evidence/v1`,
+collected with `scripts/confidence_dogfood_evidence.py`): PR #1481's run on
+exact head `0f532c92e26a98a01462fc75cf403a18832e4426` (base
+`5e68e787c18cd8c7e84d5c8adb41d3f8ea70485e`) published
+`confidence_status: unscored`, cause **`dedicated_config_missing`**, no
+latency, no token usage — a pre-wire refusal, so no provider call happened
+and none is claimed — while the authoritative review published unchanged
+(native review 5774955398). This is the observable half of the #1478
+acceptance (missing dedicated config fails visibly without affecting the
+review); the scored-on-the-independent-arm half still requires the operator
+to set `CONFIDENCE_BASE_URL`/`CONFIDENCE_API_KEY` (+`CONFIDENCE_MODEL`) in
+trusted repository settings, and the #1450 qualification probes (clean
+control + `courier-46-61`) remain to be re-run on that arm. #1075 stays
+blocked; this addendum changes no recommendation above.
+
 ## Limitations
 
 - 416 of 418 unscored causes are permanently unmeasurable (run-directory telemetry died with the runners; cause publication merged only today). This window can never explain its own unscored rate beyond the two `http_403` samples plus the primary-route instability corroboration.
