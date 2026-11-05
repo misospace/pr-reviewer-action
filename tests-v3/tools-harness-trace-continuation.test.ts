@@ -759,6 +759,7 @@ test("#1145 wiring: runToolHarness forwards deps.traceGapProbe to the native loo
   assert.equal(probeRuns, 1);
   assert.equal(result.trace_repair_continuation?.outcome, "continued");
   assert.equal(result.trace_repair_continuation?.verdict_refreshed, true);
+  assert.equal(result.tool_request_budget, 28, "24 exploration + 4 bounded trace-closure requests");
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8")) as Record<string, unknown>;
   assert.deepEqual(artifact.trace_repair_continuation, result.trace_repair_continuation);
 });
