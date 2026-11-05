@@ -17,7 +17,7 @@ import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
 import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, renderSkillCatalog, repositorySkillsAllowed } from "../context/repository-skills.js";
-import { loopContextLimits, type HarnessDeps } from "../tools/harness.js";
+import { loopContextLimits, normalizeApiFormat, type HarnessDeps } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import {
@@ -3658,7 +3658,11 @@ async function producePrimaryReview(input: ReviewCallInput & {
             // and the harness trims that model name before it sends it. Name
             // the trimmed name here, so the published engine names the model
             // the provider actually saw.
-            analysisEngineBase(opaqueModelId(env.AI_MODEL), (env.AI_BASE_URL ?? "").trim(), (env.AI_API_FORMAT ?? "").trim() || "openai"),
+            // #1474 review round 3: name the family the harness actually
+            // dials — it formats the verdict request through
+            // `normalizeApiFormat` (trim + lowercase + enum), so trim-only
+            // here published `(openai)` for `AI_API_FORMAT: Anthropic`.
+            analysisEngineBase(opaqueModelId(env.AI_MODEL), (env.AI_BASE_URL ?? "").trim(), normalizeApiFormat(env.AI_API_FORMAT)),
             "primary",
             {
               ...(env.REVIEW_ROUTE !== undefined ? { reviewRoute: env.REVIEW_ROUTE } : {}),
