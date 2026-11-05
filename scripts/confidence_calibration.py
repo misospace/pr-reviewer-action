@@ -1724,6 +1724,12 @@ CANARY_CONFIDENCE_ENV_KEYS = {
     "AI_CONFIDENCE_MODEL",
     "AI_CONFIDENCE_BASE_URL",
     "AI_CONFIDENCE_API_FORMAT",
+    # Parity with the bridge's CONFIDENCE_ENV_KEYS (scripts/confidence_bridge.ts,
+    # #1481): a declared condition must be able to replay the production
+    # require-dedicated shape, so isolation mode and the verifier's own
+    # token-limit field are declared-confidence surface like the rest.
+    "AI_CONFIDENCE_ISOLATION",
+    "AI_CONFIDENCE_TOKENS_PARAM",
     "AI_CONFIDENCE_REASONING_EFFORT",
     "AI_CONFIDENCE_MAX_TOKENS",
     "AI_CONFIDENCE_PROMPT_TOKENS",
@@ -1879,6 +1885,44 @@ def _validate_canary_plan(plan: Any, corpus: dict[str, dict[str, Any]]) -> list[
                     )
             except (TypeError, ValueError):
                 errors.append(f"condition {cid}: AI_CONFIDENCE_TIMEOUT_SEC must be an integer")
+        # #1481: enum-valued declared keys carry production's typed vocabulary.
+        # In production a value outside the contract enum throws at config-load;
+        # in the bridge the declared value reaches resolveConfidenceProfile
+        # directly, where an out-of-vocabulary isolation/token-param/format would
+        # silently resolve to something the plan never declared (e.g. a typo'd
+        # isolation mode quietly meaning inherit-primary). A production-shape
+        # canary rejects the plan instead — literal values only; a "$NAME"
+        # reference resolves from the operator environment at run time and is
+        # shape-checked where it is written.
+        _enum_vocabulary = {
+            "AI_CONFIDENCE_API_FORMAT": ("openai", "anthropic"),
+            "AI_CONFIDENCE_ISOLATION": ("inherit-primary", "require-dedicated"),
+            "AI_CONFIDENCE_TOKENS_PARAM": ("max_tokens", "max_completion_tokens"),
+        }
+        for enum_key, vocabulary in _enum_vocabulary.items():
+            declared = confidence_env.get(enum_key)
+            if isinstance(declared, str) and declared and not declared.startswith("$") and declared not in vocabulary:
+                errors.append(
+                    f"condition {cid}: declared {enum_key} must be one of {vocabulary}, got {declared!r}"
+                )
+        # A require-dedicated condition replays the dogfood production shape,
+        # whose whole point is that NOTHING primary-derived rides the verifier.
+        # Declaring the mode without the endpoint/format the refusal contract
+        # requires would only ever produce unscored(dedicated_*_missing) rows —
+        # visible, but never the scored probe the canary exists to run — so the
+        # plan must declare the complete dedicated set up front. (The model is
+        # already required above; a declared BASE_URL already requires key_env.)
+        if confidence_env.get("AI_CONFIDENCE_ISOLATION") == "require-dedicated":
+            if not str(confidence_env.get("AI_CONFIDENCE_BASE_URL", "")):
+                errors.append(
+                    f"condition {cid}: AI_CONFIDENCE_ISOLATION=require-dedicated must declare "
+                    "AI_CONFIDENCE_BASE_URL (the verifier never inherits the primary endpoint)"
+                )
+            if not str(confidence_env.get("AI_CONFIDENCE_API_FORMAT", "")):
+                errors.append(
+                    f"condition {cid}: AI_CONFIDENCE_ISOLATION=require-dedicated must declare "
+                    "AI_CONFIDENCE_API_FORMAT (the verifier never inherits the primary wire family, #1481)"
+                )
         key_env = condition.get("key_env")
         if key_env is not None:
             if not (isinstance(key_env, str) and ENV_VAR_NAME_RE.fullmatch(key_env)):

@@ -313,7 +313,7 @@ test("#1448: renderDerivedSection renders topology, change, basis, and paths", (
   });
   const section = renderDerivedSection(artifact);
   assert.ok(section.startsWith(`# ${DERIVED_TITLE}\n`));
-  assert.ok(section.includes("Obligation 1 [topology: identity]:"), section);
+  assert.ok(section.includes("Obligation derived-1 [topology: identity]:"), section);
   assert.ok(section.includes("  Change: added tenantId to the HTTP producer only"));
   assert.ok(section.includes("  Basis: hash at src/hash.ts:12 reads tenantId"));
   assert.ok(section.includes("  Check (2 listed):"));
@@ -567,9 +567,32 @@ test("#1448 review: status→section mapping keeps every outcome visible or inte
   // visible footer saying they may be missing.
   const clippedOk = renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: artifactWith(1), inputComplete: false, diffClipped: true });
   assert.match(clippedOk, new RegExp(`# ${DERIVED_TITLE}`));
-  assert.match(clippedOk, /Obligation 1 /);
+  assert.match(clippedOk, /Obligation derived-1 /);
   assert.match(clippedOk, /… derivation input was incomplete \(reason: input-clipped\); obligations may be missing/);
   assert.equal(renderDerivedSectionForStatus({ status: "skipped", errorKind: null, artifact: artifactWith(0), inputComplete: false }), "");
+});
+
+test("#1449: an ok section over a nonempty discard ledger tells the reviewer entries were dropped", () => {
+  // The enforcement half fails the coverage closed on a nonempty ledger; the
+  // corpus must not read as a clean full list. Static footer, and the ledger
+  // messages themselves (untrusted) are never rendered.
+  const dropped = { ...artifactWith(1), errors: ["obligations[1]: not an object"] };
+  const withFooter = renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: dropped, inputComplete: true });
+  assert.match(withFooter, /Obligation derived-1 /);
+  assert.match(withFooter, /… 1 malformed obligation entry discarded by normalization; this list is incomplete/);
+  assert.ok(!withFooter.includes("obligations[1]"), "the untrusted ledger message is not rendered");
+  // A clean ledger keeps the section byte-identical (no footer).
+  assert.equal(
+    renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: artifactWith(1), inputComplete: true }),
+    renderDerivedSection(artifactWith(1)),
+  );
+  // Multiple discards pluralize; an unusable ledger renders no footer text
+  // (the enforcement layer still fails closed).
+  assert.match(
+    renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: { ...dropped, errors: ["a", "b"] }, inputComplete: true }),
+    /… 2 malformed obligation entries discarded by normalization/,
+  );
+  assert.ok(!renderDerivedSectionForStatus({ status: "ok", errorKind: null, artifact: { ...dropped, errors: "not an array" as unknown as string[] }, inputComplete: true }).includes("discarded by normalization"));
 });
 
 // ── hostile changed-file names ──────────────────────────────────────────

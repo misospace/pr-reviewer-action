@@ -47,7 +47,7 @@
 
 import { SPECIALIST_ROLES_ORDER } from "../specialists/types.js";
 import { splitChunks } from "../corpus/diff-priority.js";
-import { STOP_BUDGET, STOP_MAX_ROUNDS, STOP_REQUEST_ERROR, STOP_WALL_CLOCK, type LoopOutcome } from "./loop.js";
+import { STOP_BUDGET, STOP_MAX_ROUNDS, STOP_REQUEST_ERROR, STOP_WALL_CLOCK, STOP_WALL_CLOCK_RESERVE, type LoopOutcome } from "./loop.js";
 
 /** The loop stopped on one of its budgets rather than by choice or failure. */
 export function isBudgetStopReason(stopReason: string): boolean {
@@ -63,7 +63,10 @@ export function isBudgetStopReason(stopReason: string): boolean {
  * timeout after all required evidence was collected stays clean-eligible.
  */
 export function isIncompleteInvestigationStopReason(stopReason: string): boolean {
-  return isBudgetStopReason(stopReason) || stopReason === STOP_REQUEST_ERROR;
+  // #1464: a `wall-clock-verdict-reserve` stop is a budget stop too — the loop
+  // stopped early to hold wall clock for the verdict, so the investigation
+  // did not run to the model's own choice.
+  return isBudgetStopReason(stopReason) || stopReason === STOP_REQUEST_ERROR || stopReason === STOP_WALL_CLOCK_RESERVE;
 }
 
 /** One specialist lead, identified by role plus its own fields. */

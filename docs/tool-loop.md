@@ -207,10 +207,12 @@ unresolved blocker hypotheses and verdict evidence.
 | `max-rounds` | The round cap (above) was reached before the model stopped on its own. |
 | `tool-call-budget-exhausted` | The resolved tool-call budget was spent. |
 | `wall-clock-exceeded` | `tool-loop-wall-clock-sec` elapsed. |
+| `wall-clock-verdict-reserve` | Exploration stopped at the verdict reserve (#1464): the remaining wall clock fell to the slice reserved for the closing verdict, so no further exploratory round starts. The round that started before the threshold is clamped to the exploration boundary — its model wait (including the transport's retry and repair hops) and its tool execution cannot spend the reserved slice. |
 | `request-error` | A transport error ended the loop mid-exchange. |
 
-`max-rounds`, `tool-call-budget-exhausted`, and `wall-clock-exceeded` are
-budget stops — the investigation was cut off, not finished by choice. On any
+`max-rounds`, `tool-call-budget-exhausted`, `wall-clock-exceeded`, and
+`wall-clock-verdict-reserve` are budget stops — the investigation was cut
+off, not finished by choice. On any
 budget stop, the harness folds its own call log against the changed-file
 manifest and the specialist-lead artifacts to compute which changed files
 were never read and which specialist leads were never resolved. If that gap
@@ -236,6 +238,39 @@ read) publishes `coverage: "unknown"` with no stop reason (#873/#838).
 **Partial coverage never approves.** `review-result: partial` means the
 review's own coverage is incomplete; gate merges on both the verdict and the
 review result, never on the verdict alone.
+
+## Verdict wall-clock reserve (#1464)
+
+A deterministic slice of the wall-clock budget is reserved for the closing
+in-conversation verdict, so a slow provider cannot spend the whole budget on
+investigation and leave the verdict turn to fail the pre-request deadline
+check. The reserve is `verdictWallClockReserveSec`'s deterministic function
+of the resolved budget — 25% of it, floored at 30s, capped at half the
+budget, so at least half the clock always remains for investigation — with
+no new Action input. For the default 600s budget the reserve is 150s.
+
+The reserve is actually reserved, not merely checked between rounds: the
+harness derives an exploration boundary (`deadline − reserve`) and the MAIN
+investigation loop's model waits (round calls, their streamed→non-streamed
+retry, compaction digest calls) and tool execution clamp to it, so a round
+that started before the threshold cannot consume the reserved slice. The
+same boundary is threaded to the transport seam as a per-attempt budget
+hook, so the transport's own retry tree — same-request 429/5xx retries and
+the #824/#1047 clamp/strip repair hops — cannot cross it either;
+exploration-clamped waits additionally cap their same-request retries at
+one. The closing verdict turn and its refresh keep the whole-run deadline.
+The #1145 trace-gap repair continuation deliberately does not carry the
+reserve: it runs against the whole-run deadline under its own clamped share.
+
+The resolved reserve is logged at loop start, recorded as
+`verdict_reserve_sec` in `tool_loop_meta` and the telemetry marker (see
+[`docs/telemetry.md`](telemetry.md)), and a reserve stop logs an explicit
+"stopped exploratory rounds at the verdict reserve" line. A reserve stop
+joins the #1338 honesty surfaces: the verdict findings body carries the
+interrupted-investigation note, coverage is accounted as partial, and the
+unresolved cause maps to `budget-exhausted`. The reserve is time-based and
+independent of the #1379/#1396 required-evidence window (reserved in
+rounds/requests): a reserve stop can end a run with that window still open.
 
 ## Evidence-repair continuation (#1145)
 

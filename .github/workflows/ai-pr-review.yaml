@@ -50,25 +50,19 @@ jobs:
     # `issue_comment` runs only when the comment is on a PR (the
     # `issue.pull_request` relation is present); a plain-issue comment is a
     # no-op. Fork PRs do pass this gate, but the pr-gate step below resolves
-    # the PR through the API and routes them to a base-repo checkout — the
-    # action then replies and no-ops on fork comments.
+    # the PR through the forge capability and routes them to a base-repo
+    # checkout — the action then replies and no-ops on fork comments.
     if: ${{ github.event_name != 'pull_request' && github.event_name != 'issue_comment' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.id == github.repository_id && !github.event.pull_request.draft) || (github.event_name == 'issue_comment' && github.event.issue.pull_request) }}
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve PR through the API (pr-gate)
-        id: pr-gate
-        # SECURITY: this must run BEFORE any checkout or build. The
-        # issue_comment payload carries no head SHA, so the action fetches the
-        # PR itself. For a fork PR we must never check out or build its head
-        # code in this privileged (base-repo-secrets) run — resolving the PR
-        # through the API first lets us read the head repo id and route a fork
-        # to a base-repo checkout. The action replies and no-ops on fork
-        # comments, so the base-repo checkout is safe for that path.
+      - name: Prefilter re-review command
+        id: comment-prefilter
+        # SECURITY: this step performs NO forge call and NO checkout. It only
+        # decides whether the comment body can be the re-review command, and
+        # it does so with the action's own matcher, so a skip only ever
+        # happens on a body the action itself would not accept.
         if: github.event_name == 'issue_comment'
         env:
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          REPO_ID: ${{ github.repository_id }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Untrusted DATA: the comment body is only ever read by node via
           # env, never interpolated into shell text, logged, or written to
           # output.
@@ -98,33 +92,121 @@ jobs:
             echo "may_trigger=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "may_trigger=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout trusted base ref for the forge capability
+        # SECURITY: this is BASE-repo code at the base repo's default-branch
+        # tip (github.sha) — never the PR head. A fork head must never be
+        # checked out in this privileged (base-repo-secrets) run.
+        # It exists because the capability IS repo code: scripts/forge_cli.py
+        # must be present before it can be invoked, so the PR can be read
+        # before anything untrusted is checked out. The PR head is checked
+        # out later, and only after the gate proved the PR is same-repo.
+        # persist-credentials: false keeps the job token out of the
+        # checkout's git config.
+        if: github.event_name == 'issue_comment' && steps.comment-prefilter.outputs.may_trigger == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        # scripts/forge_cli.py -- the adapter over the configured forge
+        # capability -- is stdlib-only, but the release workflows pin the
+        # interpreter before they call it, so the capability never depends on
+        # whatever python3 the runner image happens to ship.
+        if: github.event_name == 'issue_comment' && steps.comment-prefilter.outputs.may_trigger == 'true'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Resolve PR through the forge capability (pr-gate)
+        id: pr-gate
+        # SECURITY: this must run BEFORE the PR-head checkout. The
+        # issue_comment payload carries no head SHA, so the action fetches the
+        # PR itself. For a fork PR we must never check out or build its head
+        # code in this privileged (base-repo-secrets) run — resolving the PR
+        # through the forge capability first lets us read the head repo id and
+        # route a fork to a base-repo checkout. The action replies and no-ops
+        # on fork comments, so the base-repo checkout is safe for that path.
+        #
+        # The lookup goes through the repository's configured forge capability
+        # (scripts/forge_cli.py), never a raw HTTP client: the bearer token
+        # rides the capability's Authorization header and never reaches argv,
+        # the request URL, or this script.
+        if: github.event_name == 'issue_comment' && steps.comment-prefilter.outputs.may_trigger == 'true'
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO_ID: ${{ github.repository_id }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # No `set -e`: every failure below must reach the soft-fail
+          # branch instead of aborting the step, so a forge-API outage
+          # never turns every command comment into a red job.
+          set -uo pipefail
           # A forge-API outage must not turn every command comment into a red
           # job: retry the lookup, then fail SOFT with a clean skip. The
           # trigger is dropped (recoverable by re-commenting or the ai-review
           # label), which can never grant a review — the fail-safe direction.
           # Only fixed-constant text reaches the summary: no payload, id, or
           # token value.
-          if ! pr_json="$(curl -fsS --retry 3 --retry-all-errors --retry-delay 2 \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${ISSUE_NUMBER}")"; then
+          max_attempts=3
+          retry_delay_sec=2
+          details=""
+          attempt=1
+          while [ "$attempt" -le "$max_attempts" ]; do
+            details="$(python3 scripts/forge_cli.py pr-details --repo "$GITHUB_REPOSITORY" --number "$ISSUE_NUMBER")"
+            lookup_status=$?
+            if [ "$lookup_status" -eq 0 ]; then
+              break
+            fi
+            details=""
+            # Exit 1 is the capability's "this pull request does not exist":
+            # a definitive answer, not an outage, so it is not retried.
+            if [ "$lookup_status" -eq 1 ]; then
+              break
+            fi
+            attempt=$((attempt + 1))
+            if [ "$attempt" -le "$max_attempts" ]; then
+              sleep "$retry_delay_sec"
+            fi
+          done
+          # The capability prints exactly three lines, each validated by the
+          # capability itself: head_sha, head_repo_id, is_draft.
+          head_sha=""
+          head_repo_id=""
+          is_draft=""
+          if [ -n "$details" ]; then
+            while IFS='=' read -r key value; do
+              case "$key" in
+                head_sha) head_sha="$value" ;;
+                head_repo_id) head_repo_id="$value" ;;
+                is_draft) is_draft="$value" ;;
+              esac
+            done <<<"$details"
+          fi
+          if [ -z "$head_sha" ] || [ -z "$head_repo_id" ] || [ -z "$is_draft" ]; then
             echo "may_trigger=false" >> "$GITHUB_OUTPUT"
             echo 'pr-gate: pull request lookup failed after retries; skipping this comment-triggered re-review. Add the ai-review label to force a review.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           echo "may_trigger=true" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$(jq -r '.head.sha' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
-          head_repo_id="$(jq -r '.head.repo.id' <<<"$pr_json")"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
           if [ "$head_repo_id" != "$REPO_ID" ]; then
             echo "is_fork=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_fork=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "is_draft=$(jq -r '.draft' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
+          echo "is_draft=$is_draft" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
         # Draft exclusion mirrors the later steps: a comment-triggered run on a
-        # draft PR must not even check out or mint a token (#914 review).
+        # draft PR must not check out the PR HEAD and must not mint a token
+        # (#914 review). The trusted base checkout above is exempt: it is
+        # base-repo code at the base repo's default-branch tip, never the PR
+        # head, and it persists no credential.
         if: github.event_name != 'issue_comment' || (steps.pr-gate.outputs.may_trigger == 'true' && steps.pr-gate.outputs.is_draft != 'true')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -140,8 +222,8 @@ jobs:
 
       - name: Generate bot token
         id: app-token
-        # Draft exclusion mirrors the later steps: a comment-triggered run on a
-        # draft PR must not even check out or mint a token (#914 review).
+        # Draft exclusion mirrors the earlier steps: a comment-triggered run on
+        # a draft PR must not mint a token (#914 review).
         if: github.event_name != 'issue_comment' || (steps.pr-gate.outputs.may_trigger == 'true' && steps.pr-gate.outputs.is_draft != 'true')
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
@@ -207,18 +289,53 @@ jobs:
           ai-fallback-base-url: ${{ vars.LITELLM_URL }}
           ai-fallback-model: ${{ vars.FALLBACK_MODEL }}
           ai-model: ${{ vars.PRIMARY_MODEL }}
-          # #1073: dogfood the advisory post-review confidence scorer. A
-          # dedicated CONFIDENCE_MODEL/FORMAT takes precedence when configured;
-          # otherwise reuse the already-configured SMART_MODEL/FORMAT so the
-          # scorer is actually enabled without new repo variables or secrets.
-          # This is a separate bounded model call after the final verdict,
-          # not a second approval or a merge gate. When the smart reviewer
-          # produced the final review, its model may also be the scorer:
-          # this is useful dogfood telemetry, not model-diverse assurance.
-          # Empty scorer URL/key safely inherit the primary LiteLLM transport;
-          # forks remain disabled by the action's default policy.
-          ai-confidence-model: ${{ vars.CONFIDENCE_MODEL || vars.SMART_MODEL }}
-          ai-confidence-api-format: ${{ vars.CONFIDENCE_FORMAT || vars.SMART_FORMAT }}
+          # #1073: dogfood the advisory post-review confidence scorer. This is
+          # a separate bounded model call after the final verdict, not a
+          # second approval or a merge gate.
+          # #1478: the verifier lane is ISOLATED from the primary lane. Its
+          # endpoint, credential, model, AND wire family come only from the
+          # operator-controlled CONFIDENCE_BASE_URL repository variable,
+          # CONFIDENCE_API_KEY repository secret, CONFIDENCE_MODEL
+          # repository variable, and CONFIDENCE_FORMAT repository variable —
+          # never the primary LITELLM_*/SMART_* values, never PR-controlled
+          # input, and never committed here. There is deliberately NO model
+          # fallback: substituting SMART_MODEL here would put the primary
+          # lane's own model on the verifier, the exact same-model correlation
+          # the isolation contract exists to prevent. There is equally NO
+          # format fallback (#1481): a SMART_FORMAT-derived family on a
+          # dedicated endpoint is still a primary/smart-lane value riding the
+          # verifier's protocol surface — if CONFIDENCE_FORMAT is unset the
+          # action now refuses the lane instead of guessing.
+          # ai-confidence-isolation=require-dedicated makes the
+          # missing-config case VISIBLE: without a dedicated endpoint the run
+          # publishes confidence-status=unscored (cause
+          # dedicated_config_missing), without a dedicated model it publishes
+          # confidence-status=unscored (cause dedicated_model_missing), and
+          # without a dedicated format it publishes confidence-status=unscored
+          # (cause dedicated_format_missing, #1481) — in every case the
+          # authoritative review publishes unchanged and the verifier never
+          # silently dials the primary transport (the shape that left 418/419
+          # dogfood runs unscored on the inherited endpoint). Rollback to the
+          # pre-#1478 advisory shape: delete the three ai-confidence-base-url/
+          # ai-confidence-api-key/ai-confidence-isolation lines below AND
+          # give ai-confidence-model a fallback model (the scorer then
+          # inherits the primary lane's transport again). Forks remain
+          # disabled by the action's default policy.
+          ai-confidence-model: ${{ vars.CONFIDENCE_MODEL }}
+          # CONFIDENCE_MODEL must name a model the DEDICATED endpoint serves —
+          # the verifier sends it verbatim (opaque, case-sensitive, #1465).
+          # A model name the dedicated endpoint does not serve fails visibly
+          # at the provider (confidence-status=unscored, cause http_*) and
+          # never inherits anything from the primary lane.
+          # #1481: CONFIDENCE_FORMAT names the DEDICATED endpoint's own wire
+          # family. No SMART_FORMAT fallback: the family is endpoint-owned, so
+          # an unset CONFIDENCE_FORMAT under require-dedicated resolves to a
+          # visible unscored(dedicated_format_missing), never a review- or
+          # smart-lane-derived format on the verifier's wire.
+          ai-confidence-api-format: ${{ vars.CONFIDENCE_FORMAT }}
+          ai-confidence-base-url: ${{ vars.CONFIDENCE_BASE_URL }}
+          ai-confidence-api-key: ${{ secrets.CONFIDENCE_API_KEY }}
+          ai-confidence-isolation: require-dedicated
           ai-confidence-reasoning-effort: ${{ vars.CONFIDENCE_REASONING_EFFORT }}
           # #1368: the scorer's budgets and capability assertions are explicit
           # and observable — never silently advertised on a wire format that

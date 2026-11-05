@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, dependencyEvidenceReserveFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, verdictWallClockReserveSec, dependencyEvidenceReserveFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
+import { STOP_WALL_CLOCK_RESERVE } from "../src/tools/loop.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
 import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
@@ -481,9 +482,18 @@ test("#1198 primary: a near-deadline loop turn gets the remaining budget and the
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
-  // Deadline = 18 + 100 = 118. The first turn's request starts with 46s left
-  // (clamped below the 60s turn timeout); the SECOND between-rounds check
-  // (126) is past the deadline, so no second model request is ever opened.
+  // Deadline = 18 + 100 = 118; the #1464 exploration boundary is 118 - 30
+  // (reserve) = 88. #1464 review: the budget clock is read at the deadline
+  // anchor, the loop start, and TWICE per between-rounds check (the exceeded
+  // check plus the verdict-reserve check), so round 1's reserve read (72)
+  // leaves 46s — above the reserve, the round runs. Its model wait read (90)
+  // is already past the exploration boundary, so the clamped wait takes the
+  // bounded 1s floor instead of the whole-deadline remaining (28), and the
+  // executor's entry check (108) is past the boundary too, so the tool result
+  // is the exploration-deadline error (one executor read). Round 2's exceeded
+  // check (126) is past the deadline, so no second model request is ever
+  // opened. The reserve gate itself never fires here: round 2 stops on the
+  // exceeded check first.
   let clock = 0;
   const timeouts: number[] = [];
   let transportCalls = 0;
@@ -502,7 +512,7 @@ test("#1198 primary: a near-deadline loop turn gets the remaining budget and the
       return clock;
     },
   }));
-  assert.deepEqual(timeouts, [46], "the turn must be clamped to the remaining exchange budget");
+  assert.deepEqual(timeouts, [1], "the exploration-clamped wait past the reserve boundary takes the 1s floor");
   assert.ok(timeouts[0]! < 60, "strictly below the configured turn timeout");
   assert.equal(result.mode, "native_loop");
   assert.equal(result.stop_reason, "wall-clock-exceeded");
@@ -517,9 +527,14 @@ test("#1198 primary: a near-deadline verdict turn is clamped to the remaining bu
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
-  // Deadline = 10 + 150 = 160. The loop spends two rounds, then the verdict
-  // turn's request is clamped from 60s to the 40s that remain and its
-  // acceptance check (tick 130) lands strictly inside the exchange.
+  // Deadline = 10 + 150 = 160; the #1464 exploration boundary is 160 - 38
+  // (reserve) = 122. #1464: the between-rounds check reads the clock twice
+  // (exceeded + verdict-reserve), so round 2's reserve read (90) leaves 70s —
+  // the round runs, but its model wait read (100) clamps to the exploration
+  // boundary: 22s instead of the whole-deadline 60s. The verdict turn is NOT
+  // exploration-clamped: its request rides the whole deadline (read 140 → 20s
+  // remain) and its acceptance check (tick 150) lands strictly inside the
+  // exchange.
   let clock = 0;
   const timeouts: number[] = [];
   let transportCalls = 0;
@@ -539,7 +554,8 @@ test("#1198 primary: a near-deadline verdict turn is clamped to the remaining bu
       return clock;
     },
   }));
-  assert.deepEqual(timeouts, [60, 60, 40]);
+  assert.deepEqual(timeouts, [60, 22, 20]);
+  assert.ok(timeouts[1]! < 60, "the exploratory wait clamps to the exploration boundary, not the whole deadline");
   assert.ok(timeouts[2]! < 60, "the verdict turn must be clamped below the per-turn timeout");
   assert.equal(result.native_loop_verdict_produced, true);
   assert.equal(result.native_loop_verdict_status, "accepted");
@@ -549,9 +565,13 @@ test("#1198 primary: a verdict turn landing past the exchange deadline is fallba
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
-  // Deadline = 10 + 115 = 125. The verdict turn still gets its clamped
-  // request (5s left) and a VALID body, but the acceptance check (tick 130)
-  // is past the deadline — smart-tier parity: fallback, reason "deadline".
+  // Deadline = 10 + 135 = 145; the #1464 exploration boundary is 145 - 34
+  // (reserve) = 111. #1464: the between-rounds check reads the clock twice
+  // (exceeded + verdict-reserve), so the wall clock is sized so the verdict
+  // turn's request still OPENS (5s left after the 140th tick) while its
+  // acceptance check (tick 150) lands past the deadline — the acceptance-gate
+  // fallback under test. Round 2's model wait read (100) clamps to the
+  // exploration boundary: 11s instead of the whole-deadline 45s.
   let clock = 0;
   const timeouts: number[] = [];
   let transportCalls = 0;
@@ -561,7 +581,7 @@ test("#1198 primary: a verdict turn landing past the exchange deadline is fallba
     validVerdict(),
   ];
   const { result } = await runToolHarness(deps({
-    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "115" },
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "135" },
     transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
       timeouts.push(timeout);
       return scripted[transportCalls++];
@@ -571,10 +591,421 @@ test("#1198 primary: a verdict turn landing past the exchange deadline is fallba
       return clock;
     },
   }));
-  assert.deepEqual(timeouts, [60, 45, 5]);
+  assert.deepEqual(timeouts, [60, 11, 5]);
   assert.equal(result.native_loop_verdict_produced, undefined);
   assert.equal(result.native_loop_verdict_status, "fallback");
   assert.equal(result.native_loop_verdict_reason, "deadline");
+});
+
+// #1464: a slow native loop can no longer spend the whole wall-clock budget on
+// investigation rounds — the harness reserves a deterministic slice for the
+// closing in-conversation verdict, the between-rounds check stops starting
+// exploratory rounds once the remaining wall clock falls to or below it, and
+// the verdict turn runs on the SAME conversation inside that slice.
+
+test("#1464 review: the exploration boundary is threaded to the transport seam as an absolute per-attempt budget hook", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Same scripted shape as the #1198 clamp test above: deadline = 10 + 150 =
+  // 160, reserve 38, exploration boundary 122. The AI-review blocker this
+  // pins: the transport's OWN retry tree (429/5xx retries and the
+  // #824/#1047 clamp/strip repair hops) must be bounded by the same
+  // boundary, so the harness threads a per-attempt budget hook to every
+  // transport call — the boundary itself for exploration-clamped waits, the
+  // whole-run deadline for the closing verdict.
+  let clock = 0;
+  let transportCalls = 0;
+  // A real clock read costs nothing, so the mock freezes the scripted clock
+  // around the hook read — otherwise the extra reads would shift the whole
+  // read sequence the neighboring tests pin.
+  let frozen = false;
+  const timeouts: number[] = [];
+  const retryCaps: Array<number | undefined> = [];
+  const hookClockAt: number[] = [];
+  const hookRemaining: Array<number | null> = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "150" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout, cap, attemptBudgetSec) => {
+      timeouts.push(timeout);
+      retryCaps.push(cap);
+      frozen = true;
+      hookClockAt.push(clock);
+      hookRemaining.push(attemptBudgetSec ? attemptBudgetSec() : null);
+      frozen = false;
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      if (frozen) return clock;
+      clock += 10;
+      return clock;
+    },
+  }));
+  assert.deepEqual(timeouts, [60, 22, 20]);
+  assert.deepEqual(retryCaps, [1, 1, undefined], "the exploration-clamped rounds carry the retry cap; the verdict turn does not");
+  // The reported remaining budget is the exploration boundary (122) minus the
+  // clock at the hook read, for every exploration-clamped round; the closing
+  // verdict turn is not exploration-clamped and carries no hook.
+  assert.deepEqual(
+    hookRemaining,
+    hookClockAt.map((at, i) => (retryCaps[i] === 1 ? 122 - at : null)),
+  );
+  const clampedHookRemaining = hookRemaining[1];
+  const clampedHookClock = hookClockAt[1]!;
+  assert.ok(typeof clampedHookRemaining === "number" && clampedHookRemaining === 122 - clampedHookClock, "the round's hook reports the exploration boundary");
+  assert.ok(clampedHookRemaining! < 160 - clampedHookClock, "the hook rides the exploration boundary, not the whole-run remainder");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+});
+
+test("#1464: a slow loop stops at the verdict reserve and the closing verdict still runs in-conversation", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Wall clock 40s → reserve = min(max(30, 10), 20) = 20s. #1464 review: the
+  // exploration boundary is deadline - 20, so the scripted clock must keep the
+  // round's own reads inside it while the NEXT round's reserve read lands at
+  // or below the reserve. The clock advances 3s per read and saturates at 27:
+  // deadline = 3 + 40 = 43, exploration boundary = 23. Round 1's reads: anchor
+  // 3, loop start 6, exceeded 9, reserve 12 (leaves 31s — above the reserve,
+  // the round runs), model wait 15 (clamped to the boundary: 8s, not the
+  // whole-deadline 28s), executor entry 18 and executor remaining 21 (both
+  // inside the boundary, so the read_file executes with a 2s timeout). From
+  // the saturation point on, every read is 27: round 2's exceeded check (27 <
+  // 43) passes and its reserve read leaves 16s ≤ 20 → the loop stops for the
+  // verdict with 16s of its slice left, and the whole-deadline verdict reads
+  // (all 27) stay inside the exchange.
+  let clock = 0;
+  let transportCalls = 0;
+  const timeouts: number[] = [];
+  const logs: string[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "40" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock = Math.min(clock + 3, 27);
+      return clock;
+    },
+    log: (line) => { logs.push(line); },
+  }));
+  assert.equal(result.stop_reason, STOP_WALL_CLOCK_RESERVE);
+  assert.equal(result.rounds, 1);
+  assert.equal(transportCalls, 2, "exactly one exploratory round, then the closing verdict turn");
+  // The exploratory round's wait rode the exploration boundary (8s); the
+  // verdict turn rode the whole deadline (16s left at its request).
+  assert.deepEqual(timeouts, [8, 16]);
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.equal(result.native_loop_verdict_reason, undefined, "no standard-review fallback ran");
+  // The reserve is announced and the stop explained; the reserve's size rides
+  // the telemetry meta (consumed into the artifact's budget block at write
+  // time).
+  const joined = logs.join("\n");
+  assert.match(joined, /native_loop: verdict reserve 20s of 40s wall clock \(#1464\)/);
+  assert.match(joined, /exploratory model waits and tool execution clamp to the reserve boundary/);
+  assert.match(joined, /native_loop: stopped exploratory rounds at the verdict reserve \(16s left\); running the closing verdict in-conversation/);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
+  assert.equal((telemetry.budget as Record<string, unknown>).verdict_reserve_sec, 20);
+});
+
+// #1464 review: the reserve is not only gated BETWEEN rounds — the round that
+// is allowed to start above the reserve cannot spend the reserved slice
+// either. The tests below pin the three clamp surfaces (exploratory model
+// wait, exploratory tool execution, the transport-seam stop mapping) and the
+// #1145 repair continuation's whole-deadline parity. Clock maps follow the
+// #1198 tests: the budget `timeFn` is read at the deadline anchor, the loop
+// start, TWICE at each between-rounds check (exceeded + verdict-reserve),
+// once per postFn remaining check, and twice per executed tool call.
+
+test("#1464 review: an exploratory round starting above the reserve gets a boundary-clamped model wait and the verdict keeps the reserve", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Wall clock 100 → reserve 30. The clock advances 10s per read and
+  // saturates at 80 — exactly the exploration boundary (deadline 110 minus
+  // the 30s reserve). Reads: anchor 10, loop start 20, round 1's exceeded 30
+  // and reserve 40 (leaves 70s — the round runs), model wait 50 → clamped to
+  // the boundary: 30s, where the whole-deadline clamp would grant 60s. The
+  // executor's reads (60, 70) stay inside the boundary so the read_file
+  // executes. Every read from the saturation on is 80: round 2's exceeded
+  // check (80 < 110) passes and its reserve read leaves exactly the 30s
+  // reserve → the loop stops for the verdict, whose whole-deadline reads (all
+  // 80) grant the full reserved slice and stay inside the exchange.
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const logs: string[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "100" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock = Math.min(clock + 10, 80);
+      return clock;
+    },
+    log: (line) => { logs.push(line); },
+  }));
+  assert.deepEqual(timeouts, [30, 30]);
+  assert.ok(timeouts[0]! < 60, "strictly below what the whole-deadline clamp would grant");
+  assert.equal(result.stop_reason, STOP_WALL_CLOCK_RESERVE);
+  assert.equal(result.rounds, 1);
+  assert.equal(transportCalls, 2, "one exploratory round, then the closing verdict turn");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.match(logs.join("\n"), /native_loop: stopped exploratory rounds at the verdict reserve \(30s left\); running the closing verdict in-conversation/);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
+  assert.equal((telemetry.budget as Record<string, unknown>).verdict_reserve_sec, 30);
+});
+
+test("#1464 review: #1459 shape — the last allowed round cannot push the remaining below the reserve and the verdict gets the full slice", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // The reviewer's #1459 numbers scaled: a long investigation whose last
+  // allowed round starts with remaining just above the reserve. Wall clock
+  // 400 → reserve 100; deadline = 10 + 400 = 410, exploration boundary 310.
+  // The clock advances 45s per read and saturates at 310 (the boundary):
+  // reads are anchor 10, loop start 55, round 1's exceeded 100 and reserve
+  // 145 (leaves 265s — the round runs, the #1459 "round 14" shape), model
+  // wait 190 → clamped to the boundary: 120s, where the whole-deadline clamp
+  // (TOOL_TURN_TIMEOUT_SEC 400, so no per-turn ceiling) would grant 220s. The
+  // executor reads (235, 280 → 30s window) stay inside the boundary, so the
+  // wait + execution together cannot cross it. From the saturation on every
+  // read is 310: round 2's exceeded check (310 < 410) passes and its reserve
+  // read leaves exactly the 100s reserve → reserve stop, and the verdict
+  // turn's whole-deadline reads grant exactly 100s — the reserve, intact.
+  let clock = -35;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const logs: string[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "400", TOOL_TURN_TIMEOUT_SEC: "400" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock = Math.min(clock + 45, 310);
+      return clock;
+    },
+    log: (line) => { logs.push(line); },
+  }));
+  assert.deepEqual(timeouts, [120, 100]);
+  assert.ok(timeouts[0]! < 220, "the exploratory wait is clamped below the whole-deadline remaining");
+  assert.ok(timeouts[1]! >= 100 - 1, "the verdict turn keeps at least the reserved slice (1s floor slack)");
+  assert.equal(result.stop_reason, STOP_WALL_CLOCK_RESERVE);
+  assert.equal(result.rounds, 1);
+  assert.equal(transportCalls, 2);
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.match(logs.join("\n"), /native_loop: stopped exploratory rounds at the verdict reserve \(100s left\); running the closing verdict in-conversation/);
+});
+
+test("#1464 review: a round whose model wait ends past the exploration boundary executes its tool against the boundary error and still stops at the reserve", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Wall clock 100 → reserve 30; deadline = 12 + 100 = 112, exploration
+  // boundary 82. The clock advances 12s per read and saturates at 85 (between
+  // the boundary and the deadline): reads are anchor 12, loop start 24, round
+  // 1's exceeded 36 and reserve 48 (leaves 64s — the round runs), model wait
+  // 60 → 22s inside the boundary. The transport call then burns 40s (to 100),
+  // so the executor's entry check (saturated read 85) is past the boundary →
+  // the executed tool result carries the exploration-deadline error (one
+  // executor read). Round 2's exceeded check (85 < 112) passes and its
+  // reserve read leaves 27s ≤ 30 → reserve stop; the whole-deadline verdict
+  // reads (all 85) run the closing verdict inside the exchange.
+  let clock = 0;
+  let transportCalls = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "100" },
+    transport: async () => {
+      transportCalls++;
+      if (transportCalls === 1) {
+        clock += 40;
+        return scripted[0]!;
+      }
+      return scripted[1]!;
+    },
+    timeFn: () => {
+      clock = Math.min(clock + 12, 85);
+      return clock;
+    },
+  }));
+  assert.equal(transportCalls, 2, "one exploratory round, then the closing verdict turn");
+  const toolResults = result.tool_results as Array<{ status: string; result: { error?: string } }>;
+  assert.equal(toolResults.length, 1);
+  assert.equal(toolResults[0]!.status, "error");
+  assert.equal(toolResults[0]!.result.error, "tool-loop exploration deadline exceeded");
+  assert.equal(result.stop_reason, STOP_WALL_CLOCK_RESERVE);
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+});
+
+test("#1464 review: smart tier — boundary tool errors alone do not trigger the tool-error fallback; the reserved verdict still runs", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Same clock shape as the primary boundary-error test above (wall clock
+  // 100 → reserve 30; deadline 112, exploration boundary 82; 12s steps
+  // saturating at 85), but on the smart tier: the round's only tool error IS
+  // the boundary marker, so the tool-error fallback trigger must ignore it
+  // and the closing verdict must run in the reserved slice — the #1459
+  // shape the reserve exists to prevent would otherwise degrade the run to
+  // standard review and waste the verdict.
+  let clock = 0;
+  let transportCalls = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "smart",
+      SMART_BASE_URL: "http://smart.test/v1",
+      SMART_MODEL: "smart1",
+      SMART_API_KEY: "k",
+      TOOL_LOOP_WALL_CLOCK_SEC: "100",
+    },
+    transport: async () => {
+      transportCalls++;
+      if (transportCalls === 1) {
+        clock += 40;
+        return scripted[0]!;
+      }
+      return scripted[1]!;
+    },
+    timeFn: () => {
+      clock = Math.min(clock + 12, 85);
+      return clock;
+    },
+  }));
+  const toolResults = result.tool_results as Array<{ status: string; result: { error?: string } }>;
+  assert.equal(toolResults.length, 1);
+  assert.equal(toolResults[0]!.status, "error");
+  assert.equal(toolResults[0]!.result.error, "tool-loop exploration deadline exceeded");
+  assert.equal(result.stop_reason, STOP_WALL_CLOCK_RESERVE);
+  assert.equal(transportCalls, 2, "one exploratory round, then the closing verdict turn");
+  assert.equal(result.native_loop_verdict_status, "accepted", "no tool-error fallback ran");
+  assert.notEqual(result.native_loop_verdict_reason, "tool-error");
+  assert.equal(result.native_loop_verdict_produced, true);
+});
+
+test("#1464 review: the #1145 repair continuation keeps the whole-run deadline after a reserve stop", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "notes.md"), "evidence note\n");
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    validVerdict(),
+    // The #1145 continuation's own native-loop turn, then the refreshed
+    // verdict turn it justifies.
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    validVerdict(),
+  ];
+  // Wall clock 100 → reserve 30; deadline = 20 + 100 = 120, exploration
+  // boundary 90. The clock advances 20s per read and saturates at 90: the
+  // investigation round's reads are anchor 20, loop start 40, exceeded 60,
+  // reserve 80 (leaves 40s — the round runs), model wait 90 → at the
+  // boundary → 1s floor, executor entry 90 → at the boundary → the
+  // exploration-deadline tool error (one executor read); round 2's exceeded
+  // (90 < 120) passes and its reserve read leaves 30s ≤ 30 → reserve stop.
+  // The first verdict's reads (all 90) accept inside the exchange. The repair
+  // continuation then runs with the RAW postFn: its model wait read (90) is
+  // at the exploration boundary but 30s inside the WHOLE deadline, so the
+  // repair round's timeout is 30s — a clamped postFn would have returned the
+  // 1s floor.
+  let clock = 0;
+  const timeouts: number[] = [];
+  let n = 0;
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "100" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[n++];
+    },
+    traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    timeFn: () => {
+      clock = Math.min(clock + 20, 90);
+      return clock;
+    },
+  }));
+  assert.equal(result.stop_reason, STOP_WALL_CLOCK_RESERVE);
+  // Investigation round (boundary-clamped floor), first verdict, repair
+  // round, refresh verdict.
+  assert.deepEqual(timeouts, [1, 30, 30, 30]);
+  assert.ok(timeouts[2]! > 1, "the repair round's wait is computed against the WHOLE-run deadline, not the 1s floor");
+  // The raw/clamped split holds on the executor seam too: the investigation
+  // round's call failed on the boundary marker, and the repair round's call
+  // (RAW executor, whole deadline) executed for real.
+  const toolResults = result.tool_results as Array<{ status: string }>;
+  assert.deepEqual(toolResults.map((r) => r.status), ["error", "ok"]);
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  assert.equal(result.trace_repair_continuation?.verdict_refreshed, true);
+  assert.equal(n, 4);
+});
+
+test("#1464 review: a transport failure past the exploration boundary maps to the reserve stop, not request-error", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  // Wall clock 100 → reserve 30; deadline = 10 + 100 = 110, exploration
+  // boundary 80. The clock advances 20s per read and saturates at 90: reads
+  // are anchor 10, loop start 30, round 1's exceeded 50 and reserve 70
+  // (leaves 40s — the round runs), model wait 90 → past the boundary → the
+  // clamped wait takes the 1s floor (no throw), and the scripted transport
+  // fails anyway. The loop records a request error; the harness's mapping
+  // reclassifies it: the whole-deadline check (90 < 110) does not fire, the
+  // exploration-boundary check (90 ≥ 80) does → the reserve stop semantics.
+  let clock = 0;
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    env: { TOOL_LOOP_WALL_CLOCK_SEC: "100" },
+    transport: async () => {
+      transportCalls++;
+      throw new Error("provider 503");
+    },
+    timeFn: () => {
+      clock = Math.min(clock + 20, 90);
+      return clock;
+    },
+  }));
+  assert.equal(transportCalls, 1, "the failing round is the only model request");
+  assert.equal(result.stop_reason, STOP_WALL_CLOCK_RESERVE);
+  assert.notEqual(result.stop_reason, "request-error");
+  assert.notEqual(result.stop_reason, "wall-clock-exceeded");
+  // The remap does not scrub the honesty trail: the underlying provider
+  // error stays on the record.
+  assert.match(String(result.native_loop_error), /503/);
 });
 
 // #1338: a loop that ended without the model choosing to stop (a wall-clock
@@ -582,9 +1013,10 @@ test("#1198 primary: a verdict turn landing past the exchange deadline is fallba
 // must get the same deterministic coverage accounting as a budget stop, and
 // its synthesis fallback must carry the interrupted-investigation note and the
 // outstanding-evidence list. Clock maps below follow the #1198 tests: the
-// budget `timeFn` is read at the deadline anchor, the loop start, each
-// between-rounds check, each postFn remaining check, and twice per executed
-// tool call (the executor's own deadline checks).
+// budget `timeFn` is read at the deadline anchor, the loop start, TWICE at
+// each between-rounds check (the exceeded check plus #1464's verdict-reserve
+// check), each postFn remaining check, and twice per executed tool call (the
+// executor's own deadline checks).
 
 test("#1338: a request error at the exchange deadline records wall-clock-exceeded and the coverage gap", async () => {
   const { root, deps } = workspace();
@@ -594,15 +1026,17 @@ test("#1338: a request error at the exchange deadline records wall-clock-exceede
     path.join(root, "pr-files.json"),
     JSON.stringify({ files: [{ filename: "src.ts", status: "modified" }, { filename: "unread.ts", status: "modified" }] }),
   );
-  // Deadline = 0 + 400. The first round completes (reads 80/120/160/200 all
-  // inside); the second round's transport call burns the rest of the budget
-  // and then fails with the seam's deadline error. Every timeFn read after
-  // that is past the deadline, so the harness reclassifies the loop's
-  // request-error stop to wall-clock-exceeded, and the verdict turn's
-  // remaining-budget check throws the same error before any request.
-  let clock = -40;
+  // Deadline = 0 + 400 (reserve 100s of 400s). The first round completes
+  // (reads 60..180 all inside, and round 2's reserve read at 240 leaves 160s
+  // — above the reserve — so round 2 opens); the second round's transport
+  // call burns the rest of the budget and then fails with the seam's deadline
+  // error. Every timeFn read after that is past the deadline, so the harness
+  // reclassifies the loop's request-error stop to wall-clock-exceeded, and
+  // the verdict turn's remaining-budget check throws the same error before
+  // any request.
+  let clock = -30;
   const timeFn = () => {
-    clock += 40;
+    clock += 30;
     return clock;
   };
   let transportCalls = 0;
@@ -765,20 +1199,29 @@ test("#1338: a wall-clock stop after the evidence was gathered leaves no gap rec
     path.join(root, "pr-files.json"),
     JSON.stringify({ files: [{ filename: "src.ts", status: "modified" }] }),
   );
-  // Deadline = 20 + 110 = 130. Round 1 completes its read (executor checks at
-  // 100/120 stay inside); the SECOND between-rounds check (140) is the first
-  // read past the deadline, so the loop stops on its own wall-clock check —
-  // no transport error involved. The only changed file was read, so the fold
-  // leaves nothing unread: no gap record, and the synthesized review stays
-  // clean-eligible (no blanket timeout block).
+  // Deadline = 14 + 130 = 144 (#1464 review: the exploration boundary is
+  // 144 - 33 = 111, so the round's own reads must stay inside it while the
+  // NEXT round's exceeded check lands past the whole deadline — impossible
+  // with one uniform step, since the six reads before the round's executor
+  // remaining check and the one read to the exceeded check must straddle the
+  // 33s reserve). The clock therefore advances 14s per read up to 98 — the
+  // deadline anchor (14), loop start (28), round 1's exceeded (42) and
+  // reserve (56, leaves 88s — above the 33s reserve) checks, the round's
+  // model wait (70, clamped to the boundary: 41s), and the executed call's
+  // executor checks (84 entry, 98 remaining → 13s timeout, so the read
+  // executes) — then jumps 50s per read: round 2's exceeded check (148) is
+  // the first read past the deadline, so the loop stops on its own
+  // wall-clock check — no transport error involved. The only changed file
+  // was read, so the fold leaves nothing unread: no gap record, and the
+  // synthesized review stays clean-eligible (no blanket timeout block).
   let clock = 0;
   const timeFn = () => {
-    clock += 20;
+    clock += clock < 98 ? 14 : 50;
     return clock;
   };
   let transportCalls = 0;
   const { result } = await runToolHarness(deps({
-    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "110" },
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "130" },
     timeFn,
     transport: async () => {
       transportCalls++;
@@ -859,18 +1302,20 @@ test("#1338: a 23-round deadline exhaustion with missing security evidence can n
     path.join(root, "specialist-security.json"),
     JSON.stringify({ leads: [{ file: missing, message: "token verification can be bypassed" }] }),
   );
-  // The scripted clock advances 6s per read. The harness reads it at the
-  // deadline anchor, at the loop start, once per between-rounds check, once
-  // per postFn remaining check, and twice per executed tool call — four
-  // reads per round. With TOOL_LOOP_WALL_CLOCK_SEC=576 the deadline (576)
-  // lands just AFTER round 24's remaining-budget check (570), so round 24's
-  // request is actually IN FLIGHT when the budget runs out — #11591's shape
-  // ("round 24 took ~110s"), where the deadline surfaces through the
+  // The scripted clock advances 3s per read. #1464: the harness reads it at
+  // the deadline anchor, at the loop start, TWICE per between-rounds check
+  // (the exceeded check plus the verdict-reserve check), once per postFn
+  // remaining check, and twice per executed tool call — five reads per round.
+  // With TOOL_LOOP_WALL_CLOCK_SEC=576 the deadline (582) stays far ahead of
+  // every reserve read (round 24's leaves 225s, above the 144s reserve), so
+  // the reserve never fires; round 24's request is IN FLIGHT when the budget
+  // runs out — #11591's shape ("round 24 took ~110s"), where the final request
+  // hangs until long past the deadline and the deadline surfaces through the
   // transport seam as a thrown request error. Rounds 1..23 each execute one
   // tool call; round 24's request is aborted mid-flight.
-  let clock = -6;
+  let clock = -3;
   const timeFn = () => {
-    clock += 6;
+    clock += 3;
     return clock;
   };
   let transportCalls = 0;
@@ -880,9 +1325,10 @@ test("#1338: a 23-round deadline exhaustion with missing security evidence can n
     transport: async () => {
       transportCalls++;
       if (transportCalls === 24) {
-        // The request was in flight when the wall-clock budget expired: the
-        // transport aborts it and the loop records the request error.
-        clock += 12;
+        // The request was in flight when the wall-clock budget expired: it
+        // hangs until long past the deadline, the transport aborts it, and
+        // the loop records the request error.
+        clock += 300;
         throw new Error("request aborted: tool-loop wall-clock budget exhausted");
       }
       const file = readFiles[transportCalls - 1];
@@ -1004,9 +1450,13 @@ test("#1198 smart: a near-deadline verdict turn is clamped to the remaining budg
   fs.writeFileSync(path.join(root, "review-corpus.smart.truncated.md"), "# PR Diff\n+ change\n");
   fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
   // Same tick map as the primary accepted-verdict test plus one tick for the
-  // smart degradation gate: deadline = 10 + 160 = 170, verdict request
-  // clamped to the 40s that remain, accepted inside the exchange, and the
-  // post-verdict telemetry gate (tick 160) still inside the deadline too.
+  // smart degradation gate: deadline = 10 + 180 = 190, #1464's doubled
+  // between-rounds reads included. The #1464 exploration boundary is
+  // 190 - 45 (reserve) = 145, so round 2's model wait read (100) clamps to
+  // 45s instead of the whole-deadline 60s. The verdict turn is NOT
+  // exploration-clamped — its request rides the whole deadline (read 150 →
+  // 40s remain) — accepted inside the exchange, with the post-verdict
+  // acceptance read (tick 160) still inside the deadline too.
   let clock = 0;
   const timeouts: number[] = [];
   let transportCalls = 0;
@@ -1023,7 +1473,7 @@ test("#1198 smart: a near-deadline verdict turn is clamped to the remaining budg
       SMART_MODEL: "smart1",
       SMART_API_KEY: "k",
       AI_STREAM: "false",
-      TOOL_LOOP_WALL_CLOCK_SEC: "160",
+      TOOL_LOOP_WALL_CLOCK_SEC: "180",
     },
     transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
       timeouts.push(timeout);
@@ -1034,7 +1484,8 @@ test("#1198 smart: a near-deadline verdict turn is clamped to the remaining budg
       return clock;
     },
   }));
-  assert.deepEqual(timeouts, [60, 60, 40]);
+  assert.deepEqual(timeouts, [60, 45, 40]);
+  assert.ok(timeouts[1]! < 60, "the exploratory wait clamps to the exploration boundary, not the whole deadline");
   assert.ok(timeouts[2]! < 60, "the verdict turn must be clamped below the per-turn timeout");
   assert.equal(result.native_loop_verdict_produced, true);
   assert.equal(result.native_loop_verdict_status, "accepted");
@@ -1071,6 +1522,20 @@ test("harness-findings section substitution and tool-request normalization helpe
     args: { pattern: "x", max_results: 5 },
   });
   assert.deepEqual(normalizeToolRequest("junk"), { tool: "", args: {}
+});
+
+test("#1464: verdict findings body keeps the interrupted-investigation honesty note on a verdict-reserve stop", () => {
+  const outcome = {
+    executed: [{ tool: "read_file", args: { path: "a.ts" }, result: { status: "ok", result: {} } }],
+    rounds: 3,
+    toolCallsIssued: 4,
+    stopReason: STOP_WALL_CLOCK_RESERVE,
+  } as unknown as LoopOutcome;
+  const body = verdictHarnessFindingsBody(outcome);
+  // Same #1338 honesty rule as wall-clock-exceeded: the loop stopped before
+  // the investigation finished, so the verdict must not read it as complete.
+  assert.match(body, /The tool loop stopped on `wall-clock-verdict-reserve` before the/);
+  assert.match(body, /Treat paths you could not verify as/);
 });
 
 test("#1094: reusableVerdictEnvelope keeps the finish reason where the parser reads it, and drops a numeric secret's echo", () => {
@@ -1378,6 +1843,17 @@ test("resolveLoopLimits: #895 roundsExplicit is false for an unset/unparsable va
   // On the smart tier, an unset SMART_TOOL_MAX_ROUNDS still inherits an
   // explicit TOOL_MAX_ROUNDS as the override signal.
   assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "2" }, "smart"), [2, 600, true]);
+});
+
+// #1464: the deterministic wall-clock reserve for the closing in-conversation
+// verdict — a quarter of the loop budget floored at 30s, capped at half the
+// budget so at least half the wall clock always remains for investigation.
+test("#1464: verdictWallClockReserveSec sizes the verdict slice deterministically", () => {
+  assert.equal(verdictWallClockReserveSec(600), 150);
+  assert.equal(verdictWallClockReserveSec(120), 30);
+  assert.equal(verdictWallClockReserveSec(100), 30);
+  assert.equal(verdictWallClockReserveSec(50), 25);
+  assert.equal(verdictWallClockReserveSec(10), 5);
 });
 
 // ---------------------------------------------------------------------------
@@ -2137,12 +2613,25 @@ test("#1199: a streamed→non-streamed loop turn is flagged once and never split
   ];
   let n = 0;
   const logs: string[] = [];
+  const payloads: Array<Record<string, unknown>> = [];
   const { result } = await runToolHarness(deps({
     env: { ...withPrompt.env, AI_STREAM: "true" },
-    transport: async () => scripted[n++],
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      payloads.push(structuredClone(payload) as Record<string, unknown>);
+      return scripted[n++];
+    },
     log: (line) => { logs.push(line); },
   }));
   assert.equal(result.native_loop_verdict_produced, true);
+  // #1464: the non-streamed fallback of the streamed turn preserves the full
+  // request payload — same `messages`, `stream` flipped false, and no
+  // `stream_options` key left behind.
+  const streamedTurn = payloads[0]!;
+  const fallbackTurn = payloads[1]!;
+  assert.equal(streamedTurn.stream, true);
+  assert.equal(fallbackTurn.stream, false);
+  assert.equal("stream_options" in fallbackTurn, false);
+  assert.deepEqual(fallbackTurn.messages, streamedTurn.messages);
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
   const rounds = artifact.tool_loop_telemetry.rounds;
   // the fallback turn is ONE round record, flagged, not two; the retried
@@ -2405,19 +2894,22 @@ test("#1199: an unaccepted #1145 refresh (deadline expired) keeps the standing v
     withUsage(validVerdict(), { prompt_tokens: 33000, completion_tokens: 500 }),
   ];
   // Scripted budget-clock reads, 1:1 with this scenario (enumerated with a
-  // logging clock; 26 reads exactly). `deadline` = first read + 10
-  // (TOOL_LOOP_WALL_CLOCK_SEC). The indices:
-  //   0 harness deadline · 1 loop start · 2-8 loop rounds (wall checks, per-turn
-  //   remaining checks, per-executed-call gate+remaining, loop elapsed) ·
-  //   9 pre-verdict smart gate · 10 verdictStartedAt · 11-12 first-verdict
-  //   budget checks · 13 FIRST verdict's acceptance read (< deadline →
-  //   accepted) · 14 verdictElapsedSec · 15 pre-repair deadlineLeft ·
-  //   16-21 repair round (start/wall/remaining/exec gate+remaining/elapsed) ·
-  //   22-23 refresh budget checks · 24 refresh ACCEPTANCE read landing at/after
-  //   the deadline — the race under test · 25 teardown gate (pre-deadline, so
-  //   the standing verdict keeps `native_loop_verdict_produced`).
+  // logging clock; 28 reads exactly). `deadline` = first read + 10
+  // (TOOL_LOOP_WALL_CLOCK_SEC). The indices (#1464: each between-rounds check
+  // reads the clock twice — exceeded plus verdict-reserve — so the loop
+  // rounds carry two extra reads):
+  //   0 harness deadline · 1 loop start · 2-10 loop rounds (exceeded+reserve
+  //   checks, per-turn remaining checks, per-executed-call gate+remaining,
+  //   loop elapsed) · 11 pre-verdict smart gate · 12 verdictStartedAt ·
+  //   13-14 first-verdict budget checks · 15 FIRST verdict's acceptance read
+  //   (< deadline → accepted) · 16 verdictElapsedSec · 17 pre-repair
+  //   deadlineLeft · 18-23 repair round
+  //   (start/wall/remaining/exec gate+remaining/elapsed) · 24-25 refresh
+  //   budget checks · 26 refresh ACCEPTANCE read landing at/after the
+  //   deadline — the race under test · 27 teardown gate (pre-deadline, so the
+  //   standing verdict keeps `native_loop_verdict_produced`).
   const vals = [
-    0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9,
+    0.1, 0.2, 0.3, 0.35, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9,
     1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3, 2.4,
     10.2, 2.6,
   ];
@@ -2449,10 +2941,11 @@ test("#1199: an unaccepted #1145 refresh (deadline expired) keeps the standing v
   assert.equal(result.trace_repair_continuation?.verdict_refreshed, false);
   assert.equal(result.native_loop_verdict_produced, true);
   assert.equal(result.native_loop_verdict_status, "accepted");
-  // the acceptance decision is computed once: 26 budget-clock reads, exactly
-  // as enumerated (no extra read introduced by the race fix).
-  assert.equal(logged.length, 26);
-  assert.equal(logged[24], 10.2);
+  // the acceptance decision is computed once: 28 budget-clock reads, exactly
+  // as enumerated (no extra read introduced by the race fix; the two extra
+  // reads over the pre-#1464 count are the reserve checks).
+  assert.equal(logged.length, 28);
+  assert.equal(logged[26], 10.2);
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.smart.json"), "utf8"));
   const telemetry = artifact.tool_loop_telemetry;
   // `verdict` still describes the FIRST verdict, and nothing was superseded:
@@ -2503,6 +2996,102 @@ test("#1216: produceNativeVerdict's exhausted-budget failure is tier-neutral —
   assert.equal(outcome.reason, "transport");
   assert.equal(outcome.detail, "tool-loop wall-clock budget exhausted");
   assert.equal(transportCalls, 0);
+});
+
+// ── #1464: the streamed→non-streamed verdict retry must provably preserve the
+// full request payload (`messages`), and a payload that lost them is never
+// sent. These pin the retry path of `produceNativeVerdict` directly.
+
+test("#1464: the non-streamed verdict retry preserves the full request payload's messages", async () => {
+  const messages = [{ role: "user", content: "the whole tool-loop conversation" }];
+  const calls: Array<Record<string, unknown>> = [];
+  const outcome = await produceNativeVerdict({
+    verdictPayload: { messages, stream: true, max_tokens: 512, stream_options: { include_usage: true } },
+    baseUrl: "http://model.test/v1",
+    apiFormat: "openai",
+    apiKey: "k",
+    turnTimeout: 5,
+    usageAcc: { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 },
+    deadline: 100,
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      calls.push(structuredClone(payload) as Record<string, unknown>);
+      if (calls.length === 1) throw new Error("stream truncated mid-body");
+      return validVerdict();
+    },
+    timeFn: () => 1,
+    tier: "primary",
+  });
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.retried, true);
+  assert.equal(outcome.transport, "non-streamed-retry");
+  assert.equal(calls.length, 2);
+  const first = calls[0]!;
+  const retry = calls[1]!;
+  assert.equal(retry.stream, false, "the retry is non-streamed");
+  assert.equal("stream_options" in retry, false, "the retry drops stream_options");
+  assert.deepEqual(retry.messages, first.messages, "the retry carries the identical messages");
+  assert.deepEqual(retry.messages, messages);
+  assert.equal(retry.max_tokens, first.max_tokens, "the token budget is unchanged without the raise evidence");
+});
+
+test("#1464: the non-streamed verdict retry's budget raise leaves the messages intact", async () => {
+  const messages = [{ role: "user", content: "the whole tool-loop conversation" }];
+  const calls: Array<Record<string, unknown>> = [];
+  const outcome = await produceNativeVerdict({
+    verdictPayload: { messages, stream: true, max_tokens: 512 },
+    baseUrl: "http://model.test/v1",
+    apiFormat: "openai",
+    apiKey: "k",
+    turnTimeout: 5,
+    usageAcc: { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 },
+    deadline: 100,
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      calls.push(structuredClone(payload) as Record<string, unknown>);
+      if (calls.length === 1) {
+        // A token-cap-truncated streamed body: non-empty text that parses no
+        // verdict, finish_reason "length" — the raise's exact evidence shape.
+        return { choices: [{ message: { content: "not a verdict body" }, finish_reason: "length" }] };
+      }
+      return validVerdict();
+    },
+    timeFn: () => 1,
+    tier: "primary",
+  });
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.retried, true);
+  assert.equal(outcome.budgetRaisedTo, 2048);
+  assert.equal(calls.length, 2);
+  const retry = calls[1]!;
+  assert.equal(retry.stream, false);
+  assert.equal("stream_options" in retry, false);
+  assert.equal(retry.max_tokens, 2048, "the raise applies to the retry's token budget");
+  assert.deepEqual(retry.messages, calls[0]!.messages, "the raise never touches the messages");
+});
+
+test("#1464: the non-streamed verdict retry fails closed — a payload without messages is never sent", async () => {
+  let transportCalls = 0;
+  const outcome = await produceNativeVerdict({
+    // A payload that carries no `messages` at all: the retry must refuse to
+    // put a conversation-less request on the wire.
+    verdictPayload: { stream: true, max_tokens: 512 },
+    baseUrl: "http://model.test/v1",
+    apiFormat: "openai",
+    apiKey: "k",
+    turnTimeout: 5,
+    usageAcc: { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 },
+    deadline: 100,
+    transport: async () => {
+      transportCalls += 1;
+      throw new Error("stream truncated mid-body");
+    },
+    timeFn: () => 1,
+    tier: "primary",
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reason, "transport");
+  assert.equal(outcome.detail, "non-streamed retry payload carries no messages — not sent");
+  assert.equal(transportCalls, 1, "only the streamed first attempt reached the transport");
+  assert.equal(outcome.budgetRaisedTo, undefined, "no raise is reported for a request that was never sent");
 });
 
 test("#1258: the planner's diff-head excerpt adapts its fence to the diff's backtick runs", () => {

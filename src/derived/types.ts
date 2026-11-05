@@ -11,6 +11,25 @@
 
 export const ARTIFACT_VERSION = 1;
 
+/**
+ * The enforcement row id of one derived obligation: `derived-<n>`, n being
+ * the obligation's 1-based index in the artifact's own `obligations` array.
+ *
+ * #1449: ONE id derivation for the whole feature. The corpus rendering
+ * (`src/derived/render.ts`) and the enforcement contract
+ * (`src/enforcement/derived-obligations.ts`) both call this, so the id the
+ * reviewer is shown in the corpus section IS the id the reviewer echoes in
+ * `required_check_dispositions` — the two layers can never drift apart.
+ *
+ * The index is the obligation's POSITION in the artifact array, never text
+ * read from the artifact (which is untrusted model output), so a row id can
+ * never be forged. An entry an earlier unusable one skipped keeps its own
+ * index, so the ids never renumber.
+ */
+export function derivedObligationId(index: number): string {
+  return `derived-${index + 1}`;
+}
+
 export const MAX_DERIVED_OBLIGATIONS = 4;
 export const MAX_PATHS_PER_OBLIGATION = 8;
 export const MAX_OBLIGATION_CHARS = 400;

@@ -12,7 +12,7 @@ import {
   type CoverageLeadRef,
 } from "../src/tools/coverage.js";
 import { prioritizeDiff } from "../src/corpus/diff-priority.js";
-import { STOP_BUDGET, STOP_MAX_ROUNDS, STOP_MODEL_DONE, STOP_NO_TOOL_CALLS, STOP_REQUEST_ERROR, STOP_WALL_CLOCK, type LoopOutcome } from "../src/tools/loop.js";
+import { STOP_BUDGET, STOP_MAX_ROUNDS, STOP_MODEL_DONE, STOP_NO_TOOL_CALLS, STOP_REQUEST_ERROR, STOP_WALL_CLOCK, STOP_WALL_CLOCK_RESERVE, type LoopOutcome } from "../src/tools/loop.js";
 
 function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
   return {
@@ -65,8 +65,16 @@ test("#1338: budget stops and request errors count as incomplete investigations;
   assert.ok(isIncompleteInvestigationStopReason(STOP_MAX_ROUNDS));
   assert.ok(isIncompleteInvestigationStopReason(STOP_WALL_CLOCK));
   assert.ok(isIncompleteInvestigationStopReason(STOP_REQUEST_ERROR));
+  // #1464: the verdict-reserve stop is a budget-shaped stop too — the loop
+  // stopped early to hold wall clock for the verdict, so coverage honesty
+  // applies.
+  assert.ok(isIncompleteInvestigationStopReason(STOP_WALL_CLOCK_RESERVE));
   assert.ok(!isIncompleteInvestigationStopReason(STOP_MODEL_DONE));
   assert.ok(!isIncompleteInvestigationStopReason(STOP_NO_TOOL_CALLS));
+});
+
+test("#1464: the verdict-reserve stop is not a budget stop for the budget-stop-only surfaces", () => {
+  assert.ok(!isBudgetStopReason(STOP_WALL_CLOCK_RESERVE));
 });
 
 test("#1338: a request-error stop produces coverage too; one with nothing left unread stays complete", () => {

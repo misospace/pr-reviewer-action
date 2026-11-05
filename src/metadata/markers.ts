@@ -473,6 +473,13 @@ export interface RunMarkerContext {
    * "unavailable"), only when the model emitted a `dependency_coverage`
    * answer; omitted otherwise so pre-#1337 marker bytes are preserved. */
   dependencyCoverage?: string;
+  /** #1449: the run's derived-obligation state ("complete" |
+   * "unresolved" | "unavailable"), only when the derived-obligation
+   * feature is enabled; omitted otherwise so pre-#1449 marker bytes are
+   * preserved. "unresolved" is the state a reader needs to see to know a
+   * trusted approve was withheld because a derived architectural
+   * obligation stayed undischarged. */
+  derivedObligationState?: string;
   /** #1455: the verifier's own telemetry — the unscored cause, the measured
    * latency and the provider's token counts — published so a later collector
    * can read them from the published record. Omitted when the run measured
@@ -601,6 +608,13 @@ confidence_score: confidenceScore,
     confidence_prompt_tokens: confidenceUsage === null ? null : confidenceUsage.promptTokens,
     confidence_completion_tokens: confidenceUsage === null ? null : confidenceUsage.completionTokens,
     confidence_total_tokens: confidenceUsage === null ? null : confidenceUsage.totalTokens,
+    // #1449: the derived-obligation state, appended last under the same
+    // additive-key discipline — present only when the feature is enabled
+    // and the value is one of the three closed states, so a disabled run
+    // serializes byte-identically to the pre-#1449 marker.
+    ...(context.derivedObligationState === "complete" || context.derivedObligationState === "unresolved" || context.derivedObligationState === "unavailable"
+      ? { derived_obligation_state: context.derivedObligationState }
+      : {}),
   });
 }
 
