@@ -57,6 +57,7 @@ import {
   laneAnthropicEffortSupported,
   laneAnthropicStructuredOutputSupported,
   normalizeReasoningEffort,
+  resolveTierProfiles,
   tierReasoningEffort,
   tierResponseFormat,
 } from "../routing/tiers.js";
@@ -4091,11 +4092,31 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   }
 
   const repo = (env.REPO ?? "").trim();
+  // #1507: tier primary speaks the RESOLVED review lane's transport — the same
+  // `profiles.primary` (src/routing/tiers.ts) the review's own model call dials
+  // — not the raw AI_* base keys. The engine copies the primary lane's values
+  // into the AI_* keys only for the auto mode's 'primary' route
+  // (src/engine/review.ts), so in the default routing mode (off) a per-lane
+  // ai-primary-base-url / ai-primary-api-format / ai-primary-model /
+  // ai-primary-api-key override reached the review but not this loop — and the
+  // loop's verdict turn IS the review's verdict, so the run could fail on a
+  // wire the operator never configured (the transport dials the Anthropic wire
+  // only for the exact 'anthropic' family, so the mismatch shows up as a 404
+  // or endpoint parse failure, not as a visible bad value). Resolution through
+  // the shared resolver is idempotent on the engine's route-bound AI_* copies
+  // (the lane keys still win), so every routing mode resolves the same lane
+  // here. The smart tier keeps reading the SMART_* keys, which the escalation
+  // binds from profiles.smart (src/engine/review.ts). An unusable api-format
+  // value fails closed here exactly like the engine's #1493 resolution — a run
+  // that reaches this harness has already resolved the same profiles
+  // successfully, so the refusal can only name what the engine would have
+  // refused first.
+  const lane = tier === "smart" ? null : resolveTierProfiles(env).primary;
   const prefix = tier === "smart" ? "SMART" : "AI";
-  const baseUrl = (env[`${prefix}_BASE_URL`] ?? "").trim();
-  const apiFormat = normalizeApiFormat(env[`${prefix}_API_FORMAT`]);
-  const model = (env[`${prefix}_MODEL`] ?? "").trim();
-  const apiKey = (env[`${prefix}_API_KEY`] ?? "").trim();
+  const baseUrl = ((lane ? lane.baseUrl : env[`${prefix}_BASE_URL`]) ?? "").trim();
+  const apiFormat = lane ? lane.apiFormat : normalizeApiFormat(env[`${prefix}_API_FORMAT`]);
+  const model = ((lane ? lane.model : env[`${prefix}_MODEL`]) ?? "").trim();
+  const apiKey = ((lane ? lane.apiKey : env[`${prefix}_API_KEY`]) ?? "").trim();
 
   if (!repo || !baseUrl || !model) {
     result.error = "Missing REPO, AI_BASE_URL, or AI_MODEL";

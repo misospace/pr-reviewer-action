@@ -1441,6 +1441,75 @@ test("#978: native-loop fallback request_changes without deterministic blockers 
   }
 });
 
+test("#1507: routing off — the tool loop dials the primary lane's wire, not the base's", async () => {
+  // The issue's exact scenario: the base lane stays OpenAI, the primary lane
+  // override dials Anthropic. The loop's verdict turn IS the review's verdict,
+  // so every model call — the native loop's included — must go to the lane
+  // endpoint on the lane's wire; the base endpoint must never be dialed.
+  const baseServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "base lane must not be dialed" }));
+  });
+  const lanePaths: string[] = [];
+  const laneServer = await startMockServer((req, body, res) => {
+    lanePaths.push(req.url ?? "");
+    const request = JSON.parse(body) as { tools?: unknown[]; system?: unknown };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      // The native loop's planning turn: no tool calls → corpus-only degrade.
+      res.end(JSON.stringify({
+        content: [{ type: "text", text: "no tools needed" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 10, output_tokens: 3 },
+      }));
+      return;
+    }
+    // The standard review call.
+    res.end(JSON.stringify({
+      id: "msg_1", model: "m", role: "assistant",
+      content: [{ type: "text", text: JSON.stringify(baseVerdict()) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": baseServer.url, "ai-model": "base-m", "ai-api-key": "base-key",
+        "ai-api-format": "openai",
+        "ai-primary-base-url": laneServer.url, "ai-primary-model": "lane-m",
+        "ai-primary-api-key": "lane-key", "ai-primary-api-format": "anthropic",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "deep-review": "false",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+    assert.equal(baseServer.requests.length, 0, "the base lane must never be dialed");
+    assert.equal(laneServer.requests.length, 2, "the lane serves the loop's planning turn and the review call");
+    // Both lane calls spoke the Anthropic wire endpoint.
+    assert.deepEqual(lanePaths, ["/messages", "/messages"]);
+    // The loop's planning turn named the lane's model.
+    const loopBody = JSON.parse(laneServer.requests[0]!.body) as Record<string, unknown>;
+    assert.equal(loopBody.model, "lane-m", "the loop must send the lane's model");
+    assert.equal(result.outputs.verdict, "approve");
+    // The published engine line names the lane the loop actually dialed.
+    assert.match(result.outputs.analysisEngine, /lane-m@/);
+    assert.match(result.outputs.analysisEngine, /\(anthropic\)/);
+  } finally {
+    await baseServer.close();
+    await laneServer.close();
+    cleanup();
+  }
+});
+
 test("#978: primary no-evidence review does not qualify for the fallback gate bypass", async () => {
   const server = await startMockServer((_req, body, res) => {
     const request = JSON.parse(body) as { tools?: unknown[] };
@@ -1921,22 +1990,24 @@ test("#965: auto native loop starts on primary with the primary context window",
 
 test("legacy native-loop verdict reports the routed model when a primary override differs", async () => {
   let toolCallSent = false;
-  const baseServer = await startMockServer((_req, body, res) => {
+  const baseServer = await startMockServer((_req, _body, res) => {
+    // #1507: the base lane must never be dialed — the loop speaks the
+    // resolved primary lane's transport in every routing mode, off included.
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "base lane must not be dialed" }));
+  });
+  const primaryServer = await startMockServer((_req, body, res) => {
     const request = JSON.parse(body) as { tools?: unknown[] };
     res.setHeader("Content-Type", "application/json");
     if (!toolCallSent && Array.isArray(request.tools) && request.tools.length > 0) {
       toolCallSent = true;
       res.end(JSON.stringify({
-        id: "c0", object: "chat.completion", model: "base-m",
+        id: "c0", object: "chat.completion", model: "primary-m",
         choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "read_file", arguments: '{"path":"README.md"}' } }] } }],
         usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
       }));
       return;
     }
-    res.end(verdictBody(baseVerdict()));
-  });
-  const primaryServer = await startMockServer((_req, _body, res) => {
-    res.setHeader("Content-Type", "application/json");
     res.end(verdictBody(baseVerdict()));
   });
   const { runDir, cleanup } = withRunDir();
@@ -1957,10 +2028,13 @@ test("legacy native-loop verdict reports the routed model when a primary overrid
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_verdict_produced?: boolean };
     assert.equal(harness.native_loop_verdict_produced, true, "the native verdict path must be exercised");
     assert.equal(result.outputs.reviewRoute, "legacy");
-    assert.equal(result.outputs.analysisEngine, `base-m@${baseServer.url} (openai)`);
-    assert.equal(primaryServer.requests.length, 0);
-    assert.ok(baseServer.requests.length >= 2);
-    assert.ok(baseServer.requests.every((request) => request.headers.authorization === "Bearer base-key"));
+    // #1507: the loop's verdict turn IS the review's verdict, and the loop
+    // dials the resolved primary lane — so the reuse path names the lane the
+    // loop actually dialed, not the raw AI_* base env.
+    assert.equal(result.outputs.analysisEngine, `primary-m@${primaryServer.url} (openai)`);
+    assert.equal(baseServer.requests.length, 0);
+    assert.ok(primaryServer.requests.length >= 2);
+    assert.ok(primaryServer.requests.every((request) => request.headers.authorization === "Bearer primary-key"));
   } finally {
     await baseServer.close();
     await primaryServer.close();
