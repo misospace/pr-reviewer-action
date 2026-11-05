@@ -27,9 +27,12 @@ import { rawInputsFromEnv, runReview } from "./review.js";
  * carries no event payload — so the review runs with manual (full-review)
  * semantics and the pull itself is resolved from the `TANGLED_*` context
  * through the typed Tangled modules. There is no gh/Python/shell orchestration
- * and no GitHub/Forgejo fallback: the platform is pinned to `tangled`, and
- * every forge read goes through the platform read adapter and every write
- * through the publish API the seam selects.
+ * and no GitHub/Forgejo fallback: the platform is pinned to `tangled` — in the
+ * stage env AND in the contract config input, because the engine rebuilds its
+ * stage from that config — and an explicitly configured GitHub/Forgejo
+ * platform is refused rather than silently ignored. Every forge read goes
+ * through the platform read adapter and every write through the publish API
+ * the seam selects.
  *
   * The Tangled MVP deliberately leaves CI-waiting unsupported (no real Tangled
   * pipeline-status seam exists): the CI gate is forced off here rather than
@@ -100,6 +103,41 @@ export async function platformActionMain(
   // ambient context and never requires a GitHub event file (it defaults the
   // event to none when `GITHUB_EVENT_PATH` is absent, which is the Tangled
   // case).
+  //
+  // The inputs are read from the ORIGINAL environment (kebab `INPUT_*` and
+  // their v2 fallbacks), BEFORE the Tangled identity is written into the
+  // stage. The contract's `pr-number` input is integer-typed; a Tangled pull
+  // has no numeric number, so the derived locator must never be re-read as
+  // that input. Passing these explicit inputs to `runReview` keeps the engine's
+  // `loadConfig` on exactly the values `actionStageEnv` used — while the
+  // non-numeric identity reaches precheck only through the ambient PR_NUMBER.
+  const inputs = rawInputsFromEnv(validateContract(V3_CONTRACT), env);
+
+  // #590: the runner IS the Tangled host, so the platform config input is
+  // PINNED here — and an explicitly configured GitHub/Forgejo platform is
+  // REFUSED rather than silently ignored.
+  //
+  // Pinning the INPUT (not just the stage) is what holds the no-fallback
+  // invariant. The engine rebuilds its stage from the contract config
+  // (`admissionStageEnv` → `stageEnvFromConfig`), so an operator's
+  // `INPUT_PLATFORM=github` would otherwise re-resolve the platform during
+  // admission and route this run's forge reads through a GitHub client — the
+  // fallback #590 forbids. With the input pinned, EVERY downstream resolution
+  // — the admission stage env, the config stage, the repository-config
+  // narrowing — reads `tangled`, and a missing DID fails closed
+  // (`resolvePlatform("tangled", …)` throws) instead of defaulting to GitHub.
+  //
+  // The refusal is the honest half of the pin: an explicit `github`/`forgejo`
+  // platform on this runner is a contradictory configuration, and silently
+  // reviewing a Tangled pull under it would hide the operator's mistake.
+  const requestedPlatform = (inputs["platform"] ?? "").trim().toLowerCase();
+  if (requestedPlatform !== "" && requestedPlatform !== "auto" && requestedPlatform !== "tangled") {
+    throw new PlatformActionError(
+      `the tangled runner reviews Tangled pulls only and refuses platform '${requestedPlatform}': it never falls back to GitHub or Forgejo`,
+    );
+  }
+  inputs["platform"] = "tangled";
+
   const stage = actionStageEnv(env);
 
   // Pin the platform to the Tangled/Spindle host. This is what guarantees no
@@ -136,17 +174,9 @@ export async function platformActionMain(
   // gate decision; the stage write is kept for any ambient reader.
   stage.CI_STATUS_CHECK = "false";
 
-  // The config inputs are read from the ORIGINAL environment (kebab `INPUT_*`
-  // and their v2 fallbacks), BEFORE the Tangled identity is written into the
-  // stage. The contract's `pr-number` input is integer-typed; a Tangled pull
-  // has no numeric number, so the derived locator must never be re-read as
-  // that input. Passing these explicit inputs to `runReview` keeps the engine's
-  // `loadConfig` on exactly the values `actionStageEnv` used — while the
-  // non-numeric identity reaches precheck only through the ambient PR_NUMBER.
   // The `repo` input is fed the DID identity so it survives the engine's
   // config-driven stage rebuild (which would otherwise reset it to the empty
   // default); a host that set an integer `pr-number` input keeps it.
-  const inputs = rawInputsFromEnv(validateContract(V3_CONTRACT), env);
   if (nonEmpty(inputs["repo"]) === undefined) {
     inputs["repo"] = repoIdentity;
   }

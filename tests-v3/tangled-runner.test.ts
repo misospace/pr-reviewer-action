@@ -17,14 +17,17 @@
  *     exits 0, exactly like the Action);
  *   - no GitHub Actions bookkeeping variables are required;
  *   - the runner drives the SAME `runReview` engine and the Tangled publish
- *     seam (no gh/python/shell, no GitHub/Forgejo fallback).
+ *     seam (no gh/python/shell, no GitHub/Forgejo fallback);
+ *   - an explicitly configured GitHub/Forgejo platform is refused rather than
+ *     routed to that forge (the config input cannot re-resolve the platform
+ *     behind the runner's Tangled pin).
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { platformActionMain } from "../src/run/platform-action.js";
+import { platformActionMain, PlatformActionError } from "../src/run/platform-action.js";
 import { startMockServer } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import {
@@ -283,11 +286,12 @@ test("#590: the runner refuses a non-Tangled environment rather than falling bac
 });
 
 test("#590: with no injected seams the engine still routes to the Tangled read capability", async () => {
-  // Locks the production no-seam path: the engine rebuilds its stage from the
-  // contract config (where `platform` defaults to `auto`) and reaches Tangled
-  // only through the resolved DID. The real `TangledAdapter` then fails closed
-  // at its own unimplemented read (#586) — it never constructs or reads through
-  // a GitHub or Forgejo client, and never dies on a missing GitHub token.
+  // Locks the production no-seam path: the engine rebuilds its stage from
+  // the contract config (where the runner pinned `platform` to `tangled`) and
+  // reaches Tangled only through the resolved DID. The real `TangledAdapter`
+  // then fails closed at its own unimplemented read (#586) — it never
+  // constructs or reads through a GitHub or Forgejo client, and never dies on a
+  // missing GitHub token.
   await withTemp(async (workspace) => {
     await assert.rejects(
       platformActionMain(tangledEnv("http://127.0.0.1:1", workspace), {}),
@@ -297,4 +301,60 @@ test("#590: with no injected seams the engine still routes to the Tangled read c
         && !/GitHub|GH_TOKEN|GITHUB_TOKEN|Forgejo/i.test(error.message),
     );
   });
+});
+
+test("#590: an explicitly configured GitHub/Forgejo platform is refused, never routed to that forge", async () => {
+  // The engine rebuilds its stage from the CONTRACT CONFIG, so an operator's
+  // `INPUT_PLATFORM=github` (or `forgejo`) used to re-resolve the platform
+  // during admission and drive a GitHub/Forgejo client — the fallback #590
+  // forbids. The runner pins the platform input to `tangled` and refuses a
+  // contradictory explicit platform instead of silently ignoring it.
+  const forge = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify([]));
+  });
+  try {
+    for (const platform of ["github", "forgejo"]) {
+      await withTemp(async (workspace) => {
+        const publishApi = new FakeTangledPublishApi(HEAD);
+        const env = tangledEnv("http://127.0.0.1:1", workspace);
+        env["INPUT_PLATFORM"] = platform;
+        // A GitHub token and API URL are present on purpose: a run that
+        // reached a GitHub client would use them, and the mock server would
+        // record the request.
+        env.GITHUB_TOKEN = "token-that-must-never-be-used";
+        env.GH_TOKEN = "token-that-must-never-be-used";
+        env.GITHUB_API_URL = forge.url;
+        await assert.rejects(
+          platformActionMain(env, { publishApi }),
+          (error: unknown) =>
+            error instanceof PlatformActionError
+            && new RegExp(`platform '${platform}'`).test(error.message),
+        );
+        assert.equal(forge.requests.length, 0, `no ${platform} request was ever issued`);
+        assert.equal(publishApi.upserts, 0, "a refused platform publishes nothing");
+      });
+    }
+  } finally {
+    await forge.close();
+  }
+});
+
+test("#590: an explicit 'auto' platform still resolves to Tangled through the DID", async () => {
+  // `auto` is the contract default and is compatible with the Tangled host:
+  // the DID decides, so the run stays on the Tangled capability. The same
+  // holds for an explicit `tangled`.
+  for (const platform of ["auto", "tangled"]) {
+    await withTemp(async (workspace) => {
+      const env = tangledEnv("http://127.0.0.1:1", workspace);
+      env["INPUT_PLATFORM"] = platform;
+      await assert.rejects(
+        platformActionMain(env, {}),
+        (error: unknown) =>
+          error instanceof Error
+          && /tangled|Bobbin/i.test(error.message)
+          && !/GitHub|GH_TOKEN|GITHUB_TOKEN|Forgejo/i.test(error.message),
+      );
+    });
+  }
 });
