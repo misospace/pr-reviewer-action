@@ -4,6 +4,7 @@ import { isLowConfidence, reviewerRequestedEscalation } from "../src/routing/esc
 import { CONFIDENCE_MINIMUM_PROMPT_TOKENS } from "../src/confidence/prompt.js";
 import { CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS } from "../src/confidence/scorer.js";
 import { anthropicEffortInactiveWarning, anthropicEffortSupported, anthropicEffortSupportInput, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, anthropicStructuredOutputSupportInput, effectiveWireEffort, effectiveWireResponseFormat, laneAnthropicEffortSupported, laneAnthropicStructuredOutputSupported, normalizeReasoningEffort, resolveConfidenceProfile, resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierReasoningEffort, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
+import { API_FORMAT_VALUES, ENUM_INPUTS } from "../src/config/schema.js";
 
 const longReview = "The change is reviewed carefully and the behavior appears correct. No concerns identified in the touched paths.";
 
@@ -157,6 +158,89 @@ test("#1251: the fallback lane's raw-env inheritance mirrors the config loader's
   assert.equal(explicit.fallback.apiKey, "fk");
   assert.equal(explicit.fallback.resolved, true);
   assert.equal(resolveTierProfiles({ AI_BASE_URL: "https://b", AI_API_KEY: "k", AI_FALLBACK_BASE_URL: "", AI_FALLBACK_MODEL: "fm" }).fallback.baseUrl, "https://b");
+});
+
+test("#1493: a lane api-format outside the wire-family vocabulary fails closed", () => {
+  // The config loader rejects an api-format outside the vocabulary for every
+  // action input (`ENUM_INPUTS`); the raw-environment resolution refuses the
+  // same values, because the transport dials the Anthropic wire only for the
+  // exact `anthropic` family and treats every other string as the OpenAI
+  // wire — a typo would silently review on a protocol the operator never
+  // asked for, and the request would still look successful.
+  const base = { AI_BASE_URL: "https://primary", AI_MODEL: "main" };
+  const lanes = [
+    ["AI_PRIMARY_API_FORMAT", "ai-primary-api-format"],
+    ["AI_SMART_API_FORMAT", "ai-smart-api-format"],
+    ["AI_FALLBACK_API_FORMAT", "ai-fallback-api-format"],
+  ] as const;
+  for (const [key, input] of lanes) {
+    for (const value of ["Anthropic", "OPENAI", "openai-compatible", " anthropic"]) {
+      assert.throws(
+        () => resolveTierProfiles({ ...base, [key]: value }),
+        (error: unknown) => error instanceof Error
+          && error.message === `${key} (${input}) must be one of: openai, anthropic`,
+        `${key}=${value} must fail closed`,
+      );
+    }
+  }
+  // The rejected value never rides the message: the operator's value is free
+  // text, and a log line is not the place to repeat it.
+  assert.throws(
+    () => resolveTierProfiles({ ...base, AI_PRIMARY_API_FORMAT: "totally-bogus-format" }),
+    (error: unknown) => error instanceof Error
+      && error.message === "AI_PRIMARY_API_FORMAT (ai-primary-api-format) must be one of: openai, anthropic"
+      && error.message.includes("totally-bogus-format") === false,
+  );
+  // The base value is the lanes' inherited value, so an unusable base is
+  // refused too — by the key the operator has to fix.
+  assert.throws(
+    () => resolveTierProfiles({ ...base, AI_API_FORMAT: "provider" }),
+    (error: unknown) => error instanceof Error
+      && error.message === "AI_API_FORMAT (ai-api-format) must be one of: openai, anthropic",
+  );
+  // The base is refused even when every lane shadows it: the specialist lane
+  // reads the base directly, so an unusable base must not survive profile
+  // resolution to be coerced into a wire family there.
+  assert.throws(
+    () => resolveTierProfiles({
+      ...base,
+      AI_API_FORMAT: "Anthropic",
+      AI_PRIMARY_API_FORMAT: "openai",
+      AI_SMART_API_FORMAT: "openai",
+      AI_FALLBACK_API_FORMAT: "openai",
+    }),
+    (error: unknown) => error instanceof Error
+      && error.message === "AI_API_FORMAT (ai-api-format) must be one of: openai, anthropic",
+  );
+});
+
+test("#1493: a lane api-format inside the wire-family vocabulary still resolves", () => {
+  const base = { AI_BASE_URL: "https://primary", AI_MODEL: "main" };
+  const resolved = resolveTierProfiles({
+    ...base,
+    AI_API_FORMAT: "anthropic",
+    AI_PRIMARY_API_FORMAT: "openai",
+  });
+  assert.equal(resolved.primary.apiFormat, "openai", "the lane's own value wins over the base");
+  assert.equal(resolved.smart.apiFormat, "anthropic", "an unset lane inherits the base");
+  assert.equal(resolved.fallback.apiFormat, "anthropic", "an unset lane inherits the base");
+  // An unset base is the documented `openai` default; an empty lane value is
+  // unset, not an invalid format.
+  assert.equal(resolveTierProfiles(base).primary.apiFormat, "openai");
+  assert.equal(resolveTierProfiles({ ...base, AI_PRIMARY_API_FORMAT: "" }).primary.apiFormat, "openai");
+  assert.equal(resolveTierProfiles({ ...base, AI_API_FORMAT: "anthropic", AI_PRIMARY_API_FORMAT: "" }).primary.apiFormat, "anthropic");
+});
+
+test("#1493: the raw-environment check and the contract enum share one vocabulary", () => {
+  assert.deepEqual(API_FORMAT_VALUES, ["openai", "anthropic"]);
+  for (const id of ["ai-api-format", "ai-primary-api-format", "ai-smart-api-format", "ai-fallback-api-format", "ai-confidence-api-format"]) {
+    assert.deepEqual(ENUM_INPUTS[id], API_FORMAT_VALUES, `${id} validates against the shared vocabulary`);
+  }
+  // The specialist and confidence lanes keep their own never-fatal contracts
+  // for an unusable format (pinned in tests-v3/specialists-gate.test.ts and
+  // in the confidence tests above): the specialist profile is turned off with
+  // a warning, and the scorer falls back to the primary format. This change
+  // covers the review lanes' wire family only.
 });
 
 test("#1009: tierResponseFormat inherits the base setting when the lane override is empty", () => {

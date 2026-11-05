@@ -1,5 +1,6 @@
 import type { EnvLike } from "../tools/budget.js";
 import { REASONING_EFFORT_PATTERN } from "../config/load-config.js";
+import { API_FORMAT_VALUES } from "../config/schema.js";
 import { CONFIDENCE_MINIMUM_PROMPT_TOKENS } from "../confidence/prompt.js";
 import { CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS } from "../confidence/scorer.js";
 import { differsOnlyByCase, isBlankModelValue, modelNameForNotice, opaqueModelId } from "../model/identity.js";
@@ -493,12 +494,52 @@ function effectiveKey(env: EnvLike, laneKey: string, baseKey: string): string {
   return (env[laneKey] ?? "") !== "" ? laneKey : baseKey;
 }
 
+/** #1493: the fail-closed check behind `laneApiFormat`. The message names the
+ * environment variable that must be fixed and the input id the operator
+ * edits, and never echoes the rejected value. */
+function checkedApiFormat(envKey: string, value: string): string {
+  if (API_FORMAT_VALUES.includes(value)) return value;
+  throw new Error(
+    `${envKey} (${inputName(envKey)}) must be one of: ${API_FORMAT_VALUES.join(", ")}`,
+  );
+}
+
+/** #1493: the base wire family, checked even when every review lane shadows
+ * it. The specialist lane reads the base directly, so an unusable base value
+ * must not survive profile resolution to be coerced into a wire family
+ * there. */
+function baseApiFormat(env: EnvLike): string {
+  const base = env.AI_API_FORMAT ?? "";
+  return base === "" ? "openai" : checkedApiFormat("AI_API_FORMAT", base);
+}
+
+/** #1493: the wire family a review lane dials, resolved from the raw
+ * environment. The lane's own value wins; an empty lane value inherits the
+ * base value; an empty base value is the documented `openai` default.
+ *
+ * Every non-empty value is checked against the shared vocabulary and a value
+ * outside it FAILS CLOSED. The transport dials the Anthropic wire only for
+ * the exact `anthropic` family and treats every other string as the OpenAI
+ * wire, so an unvalidated value (`Anthropic`, `openai-compatible`, …) would
+ * silently review on a protocol the operator never asked for — a wrong-wire
+ * request that still looks successful. The config loader validates the same
+ * vocabulary for the action inputs (`ENUM_INPUTS`); this check closes the
+ * raw-environment path, where the value arrives from the ambient process
+ * environment and the contract never validated it. */
+function laneApiFormat(env: EnvLike, laneKey: string, base: string): string {
+  const lane = env[laneKey] ?? "";
+  return lane === "" ? base : checkedApiFormat(laneKey, lane);
+}
+
 export function resolveTierProfiles(env: EnvLike): TierProfiles {
   // #1465: a configured model value that holds nothing but whitespace carries
   // no name, so every lane treats it as unset. The lane reports it instead of
   // dropping it silently: the operator has to know that a value they set is
   // not the model the lane will call.
   const warnings: string[] = [];
+  // #1493: the base wire family is resolved and checked once, before the
+  // lanes, so an unusable base is refused even when every lane shadows it.
+  const baseFormat = baseApiFormat(env);
   const blankModelNotices: Array<[string, string]> = [
     ["AI_MODEL", "ai-model holds only whitespace, so it is treated as unset and the review lanes have no model to call"],
     ["AI_PRIMARY_MODEL", "ai-primary-model holds only whitespace, so it is treated as unset and the primary lane falls back to ai-model"],
@@ -514,7 +555,7 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
     // through the one shared place (`opaqueModelId`) — trimmed, never
     // case-folded. An empty lane override still inherits the base model.
     model: opaqueModelId(env.AI_PRIMARY_MODEL) || opaqueModelId(env.AI_MODEL),
-    apiFormat: value(env, "AI_PRIMARY_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
+    apiFormat: laneApiFormat(env, "AI_PRIMARY_API_FORMAT", baseFormat),
     apiKey: value(env, "AI_PRIMARY_API_KEY", value(env, "AI_API_KEY")),
   };
   refuseConflictingCredentialChannels(
@@ -528,7 +569,7 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
   const smart = {
     baseUrl: value(env, "AI_SMART_BASE_URL", value(env, "AI_BASE_URL")),
     model: smartModel,
-    apiFormat: value(env, "AI_SMART_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
+    apiFormat: laneApiFormat(env, "AI_SMART_API_FORMAT", baseFormat),
     apiKey: value(env, "AI_SMART_API_KEY", value(env, "AI_API_KEY")),
   };
   refuseConflictingCredentialChannels(
@@ -543,7 +584,7 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
     // the base model; the config loader deliberately leaves that unset).
     baseUrl: value(env, "AI_FALLBACK_BASE_URL", value(env, "AI_BASE_URL")),
     model: opaqueModelId(env.AI_FALLBACK_MODEL),
-    apiFormat: value(env, "AI_FALLBACK_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
+    apiFormat: laneApiFormat(env, "AI_FALLBACK_API_FORMAT", baseFormat),
     apiKey: value(env, "AI_FALLBACK_API_KEY", value(env, "AI_API_KEY")),
   };
   refuseConflictingCredentialChannels(
