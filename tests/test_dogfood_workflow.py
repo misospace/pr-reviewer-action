@@ -178,6 +178,7 @@ DOGFOOD_OVERRIDES = {
     "tool-allowed-gh-api-repos",
     "claim-falsification",
     "equivalent-paths",
+    "requirement-trace",
     "repository-skills",
     "review-verbosity",
     "ai-base-url",
@@ -256,11 +257,9 @@ def test_dogfood_does_not_run_the_optional_confidence_verifier() -> None:
     confidence_inputs = sorted(key for key in values if key.startswith("ai-confidence"))
     assert confidence_inputs == [], f"dogfood unexpectedly enables confidence inputs: {confidence_inputs}"
     assert values["publish-mode"] == "review_verdict"
-    # Requirement trace is an optional research/strictness feature whose
-    # public default is false. PRA dogfood must not silently promote it into
-    # trusted-approval authority: recent dogfood partials repeatedly exhausted
-    # the 24-call primary budget before its repair continuation could run.
-    assert "requirement-trace" not in values
+    # #1447: PRA intentionally exercises requirement trace as part of the
+    # trusted-approval contract even though the public action keeps it opt-in.
+    assert values["requirement-trace"] == "true"
 
 
 def test_public_action_defaults_are_the_recommended_setup() -> None:
