@@ -2506,9 +2506,10 @@ test("#810: a large PR gets a size-scaled tool budget through the run entry", as
   try {
     writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
     gitInit(runDir);
-    // 54 files, +4346/-181: the #806 shape.
-    const files = Array.from({ length: 54 }, (_, i) => ({
-      filename: `src/f${i}.ts`, status: "modified", additions: i === 0 ? 4346 - 53 * 80 : 80, deletions: i === 0 ? 181 - 53 * 3 : 3, changes: 0,
+    // 100 files / 8,000 changed lines derive 45 calls, above the new
+    // primary floor of 40 but still below the hard ceiling.
+    const files = Array.from({ length: 100 }, (_, i) => ({
+      filename: `src/f${i}.ts`, status: "modified", additions: 80, deletions: 0, changes: 80,
     }));
     const result = await runReview({
       env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
@@ -2524,18 +2525,18 @@ test("#810: a large PR gets a size-scaled tool budget through the run entry", as
       },
       runDir,
       workspace: runDir,
-      platformAdapter: mockPlatform({ files, additions: 4346, deletions: 181 }),
+      platformAdapter: mockPlatform({ files, additions: 8000, deletions: 0 }),
       persistArtifacts: true,
       quiet: true,
     });
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
-    assert.deepEqual(harness.tool_budget_size, { changed_files: 54, changed_lines: 4527, specialist_leads: 0 });
-    // ceil(54/4) + ceil(4527/400) = 14 + 12 = 26, above the primary floor of 16.
-    assert.equal(harness.tool_request_budget, 26);
+    assert.deepEqual(harness.tool_budget_size, { changed_files: 100, changed_lines: 8000, specialist_leads: 0 });
+    // ceil(100/4) + ceil(8000/400) = 25 + 20 = 45.
+    assert.equal(harness.tool_request_budget, 45);
     assert.equal(harness.tool_budget_source, "size-scaled");
     // #847: the same provenance reaches the published metadata marker, so the
     // size-scaled default is measurable from real reviews without artifacts.
-    assert.match(result.marker, /"tool_budget":26/);
+    assert.match(result.marker, /"tool_budget":45/);
     assert.match(result.marker, /"tool_budget_source":"size-scaled"/);
     assert.match(result.marker, /"tool_calls":\d+/);
     // #847: the loop's stop reason rides along for the size-scaled-vs-tier
