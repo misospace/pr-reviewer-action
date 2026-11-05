@@ -1886,7 +1886,7 @@ export async function publishReview(
       // #1161: `review_blockers` publishes blocking findings only — it never
       // approves, under any verdict, input, or pull-request scope.
       const coverageIncomplete = reviewCoverageIncomplete(reviewResult);
-      const canApprove = input.mode === "review_verdict" && guardrails.canApprove && completeCoverage;
+      const canApprove = input.mode === "review_verdict" && guardrails.canApprove && completeCoverage && input.degradedGateBypass !== true;
       // #588: on a platform without a native review surface there is no
       // native event to carry the recommendation, so the body states it —
       // BEFORE the untrusted review text, so no model content can swallow it
@@ -1957,6 +1957,13 @@ export async function publishReview(
         body += `\n> **Approval withheld by derived-obligation state**: ${gap}, so ${advisory}.\n`;
         messages.push(
           `Withholding native approval for #${input.prNumber} (derived obligation state: ${state})`,
+        );
+      } else if (input.mode === "review_verdict" && input.verdict === "approve" && input.degradedGateBypass === true) {
+        // #1447: degraded review state is an abstention, never a trusted
+        // native approval, even if the surviving coverage fields look clean.
+        body += "\n> **Approval withheld by degraded review state**: this run bypassed a normal review gate, so it needs review; no native approval is certified.\n";
+        messages.push(
+          `Withholding native approval for #${input.prNumber} (degraded review state)`,
         );
       } else if (input.mode === "review_verdict" && input.verdict === "approve" && coverageIncomplete) {
         // #1447: incomplete or unprovable review coverage is an abstention.
