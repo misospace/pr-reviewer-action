@@ -226,6 +226,14 @@ class _DogfoodForge:
     comments and reviews with configurable payloads, can fail either
     endpoint per pull request, and records every request it saw (method,
     path, query, headers).
+
+    It paginates like a real forge: a request for ``page`` answers that
+    slice of the stored payload and pages past the end answer EMPTY, so a
+    caller walking the list stops on the stub's own empty answer.
+    ``page_cap`` models a forge that caps the page size below the
+    requested ``per_page`` (Forgejo's ``MAX_RESPONSE_ITEMS``): every
+    answer carries at most that many items however large the request
+    asked (#1487).
     """
 
     def __init__(self) -> None:
@@ -233,6 +241,7 @@ class _DogfoodForge:
         self.reviews: dict[str, list[dict]] = {}
         self.fail_comments: set[str] = set()
         self.fail_reviews: set[str] = set()
+        self.page_cap: int | None = None
         self.requests: list[dict] = []
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -254,6 +263,16 @@ class _DogfoodForge:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _page(self, items: list[dict], query: str) -> None:
+                """Answer one page of ``items`` like a paginating forge."""
+                params = dict(urllib.parse.parse_qsl(query))
+                per_page = int(params.get("per_page") or "100")
+                page = int(params.get("page") or "1")
+                if forge.page_cap is not None:
+                    per_page = min(per_page, forge.page_cap)
+                start = (page - 1) * per_page
+                self._send(200, items[start : start + per_page])
+
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urllib.parse.urlsplit(self.path)
                 forge.requests.append({
@@ -268,7 +287,7 @@ class _DogfoodForge:
                     if number in forge.fail_comments:
                         self._send(500, {"message": "stub failure"})
                         return
-                    self._send(200, forge.comments.get(number, []))
+                    self._page(forge.comments.get(number, []), parsed.query)
                     return
                 reviews = _REVIEWS_RE.match(parsed.path)
                 if reviews is not None:
@@ -276,7 +295,7 @@ class _DogfoodForge:
                     if number in forge.fail_reviews:
                         self._send(500, {"message": "stub failure"})
                         return
-                    self._send(200, forge.reviews.get(number, []))
+                    self._page(forge.reviews.get(number, []), parsed.query)
                     return
                 self._send(404, {"message": "Not Found"})
 
@@ -1296,12 +1315,16 @@ class TestForgeSeam:
     def test_the_collector_reads_only_the_two_documented_endpoints(self, collector, forge):
         _publish(forge, 7, _scored_body())
         run(collector, "--repo", "o/r", "--pr", "7")
-        assert [
+        # A list walk re-reads the same path for later pages and asks one
+        # page past the end, which the forge answers empty (#1487): the
+        # invariant is that NO endpoint other than the two documented
+        # list endpoints is ever touched.
+        assert {
             (request["method"], request["path"]) for request in forge.requests
-        ] == [
+        } == {
             ("GET", "/repos/o/r/issues/7/comments"),
             ("GET", "/repos/o/r/pulls/7/reviews"),
-        ]
+        }
 
     def test_the_token_rides_only_the_authorization_header(self, collector, forge):
         _publish(forge, 7, _scored_body())
@@ -1328,3 +1351,32 @@ class TestForgeSeam:
             "forge capability is the only transport"
         )
         assert "pr_reviewer.forge" in source
+
+    def test_a_page_size_cap_does_not_hide_the_newest_publication(
+        self, collector, forge
+    ):
+        """The #1487 collector case: a forge that caps every answer below
+        the requested ``per_page`` must not leave the collector naming an
+        older published body as the newest one."""
+        forge.page_cap = 1
+        _publish(
+            forge,
+            7,
+            _scored_body(score=2),
+            item_id=1,
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        _publish(
+            forge,
+            7,
+            _scored_body(score=4),
+            item_id=2,
+            updated_at="2026-02-01T00:00:00Z",
+        )
+        code, out, err = run(collector, "--repo", "o/r", "--pr", "7")
+        assert code == 0, err
+        record = document(out)["records"][0]
+        # The capped first page alone would have shown only the older
+        # body; the walk keeps reading until the stub's empty page.
+        assert record["verifier"]["score"] == 4
+        assert record["published_body"]["id"] == 2
