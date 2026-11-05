@@ -732,8 +732,8 @@ inputs:
   - id: primary-tool-max-requests
     v2_id: primary_tool_max_requests
     required: false
-    default: ""
-    description: "Request budget for the primary route only, bounded to 1..50. Outranks tool_max_requests on that route and leaves the smart/escalated tiers untouched. Empty (the default) keeps the tier default."
+    default: "40"
+    description: "Request ceiling for the primary route only, bounded to 1..50. Outranks tool_max_requests on that route and leaves the smart/escalated tiers untouched. Defaults to 40 so ordinary reviews have enough room to finish evidence gathering before requirement-trace closure."
   - id: smart-tool-max-requests
     v2_id: smart_tool_max_requests
     required: false
