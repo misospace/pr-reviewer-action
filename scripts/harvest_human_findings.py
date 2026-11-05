@@ -116,19 +116,15 @@ class GitHubClient:
             raise GitHubAPIError(str(exc)) from None
 
     def get_pages(self, path: str, params: dict[str, str] | None = None) -> Iterator[Any]:
-        """Yield every item across all pages of a GitHub list endpoint."""
-        coerced: dict[str, Any] = dict(params or {})
-        coerced.setdefault("per_page", "100")
-        page = 1
-        while True:
-            coerced["page"] = str(page)
-            data = self._forge.get(path, coerced)
-            if not isinstance(data, list) or not data:
-                return
-            yield from data
-            if len(data) < int(coerced["per_page"]):
-                return
-            page += 1
+        """Yield every item across all pages of a forge list endpoint.
+
+        The walk rule lives in the forge capability, not in a copy here:
+        the duplicate stopped at a short page, which a forge that caps the
+        page size answers before the end of the list (#1487). Delegating
+        gives every list read the same walk and the same page-bound
+        safety net.
+        """
+        yield from self._forge.get_pages(path, params)
 
     def list_pulls(self, repo: str, since: str | None = None) -> list[dict[str, Any]]:
         """PRs in ``repo``, newest-updated first, stopping once older than ``since``."""
