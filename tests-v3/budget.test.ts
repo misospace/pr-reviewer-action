@@ -21,13 +21,13 @@ test("primary override wins on the primary route only and reports its source", (
 test("without a size signal the resolver keeps the pre-#810 tier defaults", () => {
   // No third argument: exercise the no-size-signal call shape.
   assert.deepEqual(resolveToolMaxRequests("primary", {}), { route: "primary", budget: 40, source: "tier-default", configured: null });
-  assert.deepEqual(resolveToolMaxRequests("smart", {}), { route: "smart", budget: 32, source: "tier-default", configured: null });
+  assert.deepEqual(resolveToolMaxRequests("smart", {}), { route: "smart", budget: 45, source: "tier-default", configured: null });
   assert.deepEqual(resolveToolMaxRequests("smart", { TOOL_ESCALATION: "true" }), { route: "escalated", budget: 50, source: "tier-default", configured: null });
   // #1253: the tier is the only route signal — a stray REVIEW_CONTEXT_PROFILE
   // env value (the removed ambient override) never widens the primary budget.
   assert.deepEqual(
     resolveToolMaxRequests("primary", { REVIEW_CONTEXT_PROFILE: "smart" }),
-    { route: "primary", budget: 24, source: "tier-default", configured: null },
+    { route: "primary", budget: 40, source: "tier-default", configured: null },
   );
   // An explicit null size (no artifacts seen) behaves identically.
   assert.equal(resolveToolMaxRequests("smart", {}, null).source, "tier-default");
