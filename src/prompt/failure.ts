@@ -73,14 +73,15 @@ const ANNOTATION_SEPARATOR = " — ";
  * when the endpoint path carried an em-dash, and a loose `\([^()]*\)$` arm
  * was ambiguous too, because an endpoint ending in ` (a) — fallback` borrows
  * the real format group's own parentheses to complete the arm. Every arm
- * therefore ends in a literal no API-format group can supply: the format is
- * validated to `openai`/`anthropic` at the configuration seam, which is
- * disjoint from ` failed)`, from the closed reason set, and from
- * `primary route` (the ` — primary route` and empty-suffix arms can never
- * be completed at all, because the real format group still follows the
- * endpoint-internal group). A new escalation reason in `src/engine/review.ts`
- * must be added here; if the grammar drifts, the strip fails safe by
- * removing everything after the model, never leaving endpoint text behind. */
+ * therefore ends in a literal no API-format group can supply:
+ * `analysisEngineBase` renders the group as the wire family the transport
+ * dials — `openai` or `anthropic` — which is disjoint from ` failed)`, from
+ * the closed reason set, and from `primary route` (the ` — primary route`
+ * and empty-suffix arms can never be completed at all, because the real
+ * format group still follows the endpoint-internal group). A new escalation
+ * reason in `src/engine/review.ts` must be added here; if the grammar
+ * drifts, the strip fails safe by removing everything after the model,
+ * never leaving endpoint text behind. */
 const ROUTE_ANNOTATION = /^ — (?:primary route|fallback \([^()]* failed\)|escalated \((?:primary_requested|unknown)\))$/;
 
 /** Port of `annotate_analysis_engine`: appends why this model produced the
@@ -112,9 +113,19 @@ export function annotateAnalysisEngine(engine: string, origin: string, routing: 
  * #1474: the base URL is trimmed here, exactly as the transport trims it
  * before the request — a lane base URL carrying edge whitespace would
  * otherwise compose an engine whose separator no longer opens the endpoint
- * token, and the whole URL would reach a published surface. */
+ * token, and the whole URL would reach a published surface.
+ * #1474 review round 2: the format group renders the wire family the
+ * transport actually dials (`apiFormat === "anthropic"` → anthropic,
+ * anything else → openai, exactly the transport's own decision). The raw
+ * lane value is not enum-validated on every path (only the base
+ * `ai-api-format` input fails closed, and `resolveTierProfiles` passes the
+ * lanes' through), so an unvalidated ` (x)` format group could otherwise be
+ * completed as an annotation arm by an endpoint ending in ` — escalated` or
+ * ` — fallback`, and the published engine would name a family no request
+ * ever used. */
 export function analysisEngineBase(model: string, baseUrl: string, apiFormat: string): string {
-  return `${model}@${redactEndpointUrlCredential(baseUrl.trim())} (${apiFormat})`;
+  const wireFamily = apiFormat === "anthropic" ? "anthropic" : "openai";
+  return `${model}@${redactEndpointUrlCredential(baseUrl.trim())} (${wireFamily})`;
 }
 
 /** Strips the `<baseUrl>` token `analysisEngineBase` adds after the model

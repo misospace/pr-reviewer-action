@@ -392,6 +392,13 @@ test("publicAnalysisEngine removes the endpoint token whole when the composed en
       annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (a) — escalated", "openai"), "escalated", { escalationReasons: "primary_requested" }),
       "m (openai) — escalated (primary_requested)",
     ],
+    // An unvalidated lane `apiFormat` cannot complete an annotation arm by
+    // borrowing the format group's parentheses either: the composed group
+    // is always the wire family the transport dials (#1474 review round 2).
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — escalated", "unknown"), "m (openai)"],
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — escalated", "primary_requested"), "m (openai)"],
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback", "openai failed"), "m (openai)"],
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback", "anthropic failed"), "m (openai)"],
   ];
   for (const [engine, expected] of cases) {
     assert.equal(publicAnalysisEngine(engine), expected);
@@ -406,6 +413,16 @@ test("publicAnalysisEngine strips the whole endpoint token when no candidate is 
   // A fail-closed placeholder the endpoint left behind does not shorten the
   // fallback either: the endpoint behind it leaves whole too.
   assert.equal(publicAnalysisEngine("m@<redacted-endpoint-URL>@ https://api.example.com/v1 (openai)"), "m (openai)");
+});
+
+test("analysisEngineBase names the wire family the transport dials (#1474 review round 2)", () => {
+  assert.equal(analysisEngineBase("m", "https://h", "openai"), "m@https://h (openai)");
+  assert.equal(analysisEngineBase("m", "https://h", "anthropic"), "m@https://h (anthropic)");
+  // Anything the transport does not dial as Anthropic composes the openai
+  // family: the lane inputs beyond `ai-api-format` are not enum-validated,
+  // and the published engine must not name a family no request used.
+  assert.equal(analysisEngineBase("m", "https://h", "bogus"), "m@https://h (openai)");
+  assert.equal(analysisEngineBase("m", "https://h", "Anthropic"), "m@https://h (openai)");
 });
 
 test("analysisEngineBase redacts a credential the base URL carries in its userinfo (#1428)", () => {
