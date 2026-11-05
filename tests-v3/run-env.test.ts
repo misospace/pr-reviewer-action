@@ -231,7 +231,7 @@ test("#1020: smart-tier round and wall-clock inputs reach resolveLoopLimits from
     {
       name: "runner default: smart inputs exported empty",
       inputs: { "smart-tool-max-rounds": "", "smart-tool-loop-wall-clock-sec": "" },
-      smart: [4, 600, false], smartCap: 45, primary: [4, 600, false], primaryCap: 40,
+      smart: [4, 600, false], smartCap: 32, primary: [4, 600, false], primaryCap: 32,
     },
     {
       name: "smart inherits an explicit primary pair",
@@ -241,7 +241,7 @@ test("#1020: smart-tier round and wall-clock inputs reach resolveLoopLimits from
     {
       name: "smart override with the primary pair unset",
       inputs: { "smart-tool-max-rounds": "5", "smart-tool-loop-wall-clock-sec": "120" },
-      smart: [5, 120, true], smartCap: 10, primary: [4, 600, false], primaryCap: 40,
+      smart: [5, 120, true], smartCap: 10, primary: [4, 600, false], primaryCap: 32,
     },
     {
       name: "smart override beats an explicit primary pair",
@@ -255,7 +255,7 @@ test("#1020: smart-tier round and wall-clock inputs reach resolveLoopLimits from
       name: "ambient SCREAMING_SNAKE env is not a route",
       inputs: {},
       ambient: { SMART_TOOL_MAX_ROUNDS: "6", SMART_TOOL_LOOP_WALL_CLOCK_SEC: "120" },
-      smart: [4, 600, false], smartCap: 45, primary: [4, 600, false], primaryCap: 40,
+      smart: [4, 600, false], smartCap: 32, primary: [4, 600, false], primaryCap: 32,
     },
   ];
   for (const entry of cases) {
