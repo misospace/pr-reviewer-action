@@ -196,6 +196,7 @@ DOGFOOD_OVERRIDES = {
     "ai-fallback-model",
     "ai-fallback-api-key",
     "primary-model-context-tokens",
+    "primary-tool-max-requests",
     "fallback-model-context-tokens",
     "smart-model-context-tokens",
     "review-routing-mode",
@@ -260,6 +261,7 @@ def test_dogfood_does_not_run_the_optional_confidence_verifier() -> None:
     # #1447: PRA intentionally exercises requirement trace as part of the
     # trusted-approval contract even though the public action keeps it opt-in.
     assert values["requirement-trace"] == "true"
+    assert values["primary-tool-max-requests"] == "40"
 
 
 def test_public_action_defaults_are_the_recommended_setup() -> None:
