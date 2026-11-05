@@ -912,6 +912,15 @@ publication boundary. Historical confidence reports below remain retained as
 research evidence; no new manual canary, operator smoke test, or incremental
 confidence dataset is required for the trusted-approval contract.
 
+The dogfood workflow also leaves `requirement-trace` at the public default
+(`false`). This is deliberate: recent self-review markers repeatedly showed
+the same failure shape — primary route, tier-default 24-call budget, all 24
+calls consumed, then `incomplete_reason=requirement_trace`. The #1145
+evidence-repair continuation can run only from budget left after the first
+verdict, so a call-budget stop leaves it nothing to spend. Requirement trace
+remains an explicit opt-in for operators who want that stricter contract; it
+is not a prerequisite for PRA's trusted-approval dogfood.
+
 ## Verifier dogfood evidence collector (#1452)
 
 `scripts/confidence_dogfood_evidence.py` assembles what the merge-safety

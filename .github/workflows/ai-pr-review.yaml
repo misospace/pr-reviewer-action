@@ -308,7 +308,6 @@ jobs:
           github-token: ${{ steps.app-token.outputs.token }}
           primary-model-context-tokens: ${{ vars.PRIMARY_CONTEXT_TOKENS }}
           publish-mode: review_verdict
-          requirement-trace: "true"
           review-routing-mode: auto
           repository-skills: "true"
           review-verbosity: concise
