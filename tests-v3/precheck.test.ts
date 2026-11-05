@@ -1304,7 +1304,7 @@ test("runPrecheck refuses Forgejo publish paths conservatively", async () => {
 // #812: consistent re-reviews — the CI-aware skip re-check
 // ---------------------------------------------------------------------------
 
-import { TangledNotImplementedError } from "../src/platform/tangled.js";
+import { TangledNotImplementedError, tangledCapabilityError } from "../src/platform/tangled.js";
 import { GitHubAdapter } from "../src/platform/github.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { PlatformAdapter } from "../src/platform/types.js";
@@ -1510,12 +1510,21 @@ test("#812: externalChecksConclusion folds the check states", () => {
   assert.equal(externalChecksConclusion([]), "none");
 });
 
-test("precheck fails loudly on a resolved tangled platform before any backend op", async () => {
+test("#590: precheck routes a resolved tangled platform through the configured read capability (the pre-op guard is lifted)", async () => {
+  // The old rail proved the opposite: a resolved `tangled` platform threw
+  // BEFORE any adapter call, because no Tangled backend existed. #590 lifts
+  // that guard — a DID-resolved pull is now read through whatever capability
+  // the caller configured (`spec.adapter`, which `buildPlatformReadAdapter`
+  // builds as a TangledAdapter), exactly like GitHub and Forgejo. The run still
+  // fails closed: the Tangled diff read is not wired yet (#586), so it throws
+  // from INSIDE the adapter — not from a GitHub/Forgejo fallback. The only
+  // forge-specific write below (the Forgejo permission preflight) is gated on
+  // `resolvedPlatform === "forgejo"`, so a Tangled run never drives one.
   let adapterCalls = 0;
-  const counting: PlatformAdapter = {
-    platform: "github",
+  const capability: PlatformAdapter = {
+    platform: "github", // the object's tag is irrelevant: routing is by the resolved platform + spec.adapter, never by re-resolving a client here
     getPr: async () => { adapterCalls += 1; return null; },
-    getPrDiff: async () => { adapterCalls += 1; return ""; },
+    getPrDiff: async () => { adapterCalls += 1; throw tangledCapabilityError("pull diff reads (#586)"); },
     listIssueComments: async () => { adapterCalls += 1; return []; },
     listPrReviews: async () => { adapterCalls += 1; return []; },
     repoPermission: async () => { adapterCalls += 1; return "unknown"; },
@@ -1523,10 +1532,11 @@ test("precheck fails loudly on a resolved tangled platform before any backend op
     ghApi: async () => { adapterCalls += 1; return {}; },
   };
   await assert.rejects(
-    runPrecheck({ env: { REPO: "o/r", PR_NUMBER: "9", PLATFORM: "tangled", TANGLED_REPO_DID: "did:plc:repo" }, adapter: counting }),
+    runPrecheck({ env: { REPO: "did:plc:repo", PR_NUMBER: "feature", PLATFORM: "tangled", TANGLED_REPO_DID: "did:plc:repo" }, adapter: capability }),
     TangledNotImplementedError,
+    "the unwired Tangled diff capability fails the run closed inside the adapter",
   );
-  assert.equal(adapterCalls, 0, "no backend operation may run for tangled");
+  assert.ok(adapterCalls >= 1, "a resolved tangled platform now reaches the configured read capability instead of throwing before any backend op");
 });
 
 // ── #892: the label gate normalizes the real object label shape ──

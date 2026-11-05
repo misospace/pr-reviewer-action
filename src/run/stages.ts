@@ -106,7 +106,18 @@ export function projectPr(prObject: unknown, prNumber: string): Record<string, u
   const user = (typeof record.user === "object" && record.user !== null ? record.user : {}) as Record<string, unknown>;
   const author = typeof user.login === "string" && user.login !== "" ? user.login : (typeof record.author === "string" ? record.author : "");
   return {
-    number: typeof record.number === "number" ? record.number : Number(prNumber),
+    // JSON has no `NaN`: a non-numeric pull locator (a Tangled pull is
+    // DID/branch-addressed and carries no number, #590) coerced with `Number()`
+    // yields `NaN`, which `pyJsonDumps` writes as the bare `NaN` token that the
+    // corpus metadata projection's `JSON.parse` then rejects. A finite numeric
+    // number is preserved (GitHub unchanged); any non-numeric locator becomes
+    // the `0` sentinel rather than poisoning the persisted projection.
+    number:
+      typeof record.number === "number" && Number.isFinite(record.number)
+        ? record.number
+        : Number.isFinite(Number(prNumber))
+          ? Number(prNumber)
+          : 0,
     title: typeof record.title === "string" ? record.title : "",
     body: typeof record.body === "string" ? record.body : "",
     headRefOid: typeof head.sha === "string" ? head.sha : "",

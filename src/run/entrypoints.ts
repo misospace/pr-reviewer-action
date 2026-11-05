@@ -19,6 +19,7 @@ import type { UpstreamLinkMode } from "../publish/sanitize.js";
 import { nonEmpty } from "./run-dir.js";
 import { buildPlatformReadAdapter } from "./platform.js";
 import { partialCoverageOf } from "./review.js";
+import type { RunReviewResult } from "./review.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { formatOutputAssignment, isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
@@ -704,4 +705,99 @@ function confidenceConcernsFromEnv(raw: string): {
   } catch {
     return {};
   }
+}
+
+/**
+ * #590: the review-result → publish-environment mapping the Action entry and
+ * the host-neutral platform runner SHARE. Every field the published review
+ * reads from THIS run's engine result is assembled here once, so a Tangled run
+ * publishes exactly the same record the GitHub/Forgejo Action would for the
+ * identical `RunReviewResult` — the two hosts can never drift on what reaches
+ * the publish boundary. The values are the folded engine outputs (the reviewed
+ * head is the explicit `reviewedHeadSha` pin, else the event head or
+ * admission's resolved head; BASE_SHA/BROAD_FINGERPRINT are admission's;
+ * IS_FORK_PR is the final fork flag the review stages ran with, on which
+ * publish's approval guardrail fails closed). This is a pure function of its
+ * arguments; it mutates nothing and reads no ambient state.
+ */
+export function publishEnvFromReview(
+  stage: Record<string, string | undefined>,
+  review: RunReviewResult,
+  eventHeadSha: string | undefined,
+): Record<string, string | undefined> {
+  const pre = review.admission;
+  return {
+    ...stage,
+    HEAD_SHA: review.reviewedHeadSha || eventHeadSha || pre.head_sha,
+    BASE_SHA: pre.base_sha,
+    IS_FORK_PR: review.isForkPr,
+    BROAD_FINGERPRINT: pre.diff_fingerprint,
+    VERDICT: review.outputs.verdict,
+    REQUIRED_CHECKS: review.outputs.requiredChecks,
+    REVIEW_ROUTE: review.outputs.reviewRoute,
+    ESCALATION_REASON: review.outputs.escalationReason,
+    // #1003: both empty when review-triage is disabled ("did not run"),
+    // distinct from the fail-closed "unknown" answer.
+    REVIEW_TRIAGE_DECISION: review.outputs.reviewTriageDecision,
+    REVIEW_TRIAGE_REASON: review.outputs.reviewTriageReason,
+    REVIEW_MARKDOWN: review.outputs.reviewMarkdown,
+    FINDINGS: review.outputs.findings,
+    ANALYSIS_ENGINE: review.outputs.analysisEngine,
+    CACHE_HIT_RATIO: review.outputs.cacheHitRatio,
+    DEGRADED_GATE_BYPASS: review.outputs.degradedGateBypass ? "true" : "false",
+    VERDICT_POLICY: review.verdictPolicy,
+    // #1073: the confidence scorer's results, all empty when disabled.
+    CONFIDENCE_STATUS: review.outputs.confidenceStatus ?? "",
+    CONFIDENCE_SCORE: review.outputs.confidenceScore ?? "",
+    CONFIDENCE_RISK: review.outputs.confidenceRisk ?? "",
+    CONFIDENCE_REASON: review.outputs.confidenceReason ?? "",
+    CONFIDENCE_MODEL: review.outputs.confidenceModel ?? "",
+    ...(review.confidenceConcerns !== undefined
+      ? { CONFIDENCE_CONCERNS: JSON.stringify(review.confidenceConcerns) }
+      : {}),
+  };
+}
+
+/**
+ * #590: the per-run evidence the PUBLISHED marker carries that does NOT ride
+ * the SCREAMING_SNAKE publish environment (partial coverage, the #812 CI
+ * conclusion, the #1449 derived-obligation gate, the #1455 verifier telemetry,
+ * the #847 tool/context budget provenance, and the #1003 human-review triage
+ * section). Shared with the Action entry so both hosts publish one identical
+ * record for the same review, in the same field order. Absent values are
+ * omitted (never `undefined`) so a feature that did not run leaves the
+ * published marker byte-identical to its pre-feature form.
+ */
+export function reviewDerivedPublishFields(review: RunReviewResult): Partial<PublishInput> {
+  return {
+    // The #810 coverage notice and the #812 CI conclusion reach the published
+    // marker and body only through these.
+    ...(review.partialCoverage ? { partialCoverage: review.partialCoverage } : {}),
+    ...(review.ciState !== undefined ? { ciState: review.ciState } : {}),
+    // #1449: a GATE as well as disclosure — the publish boundary refuses a
+    // native approval while the state is not `complete`. Absent when off.
+    ...(review.derivedObligationState !== undefined ? { derivedObligationState: review.derivedObligationState } : {}),
+    // #1455: advisory verifier telemetry (never touches the verdict).
+    ...(review.confidenceTelemetry !== undefined ? { confidenceTelemetry: review.confidenceTelemetry } : {}),
+    // #847: the #810/#702 tool-budget provenance.
+    ...(review.toolBudget !== undefined ? { toolBudget: review.toolBudget } : {}),
+    ...(review.toolBudgetSource !== undefined ? { toolBudgetSource: review.toolBudgetSource } : {}),
+    ...(review.toolCallsUsed !== undefined ? { toolCalls: review.toolCallsUsed } : {}),
+    ...(review.toolRoundsUsed !== undefined ? { toolRounds: review.toolRoundsUsed } : {}),
+    ...(review.toolMaxRounds !== undefined ? { maxRounds: review.toolMaxRounds } : {}),
+    ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),
+    ...(review.contextPeak !== undefined ? { contextPeak: review.contextPeak } : {}),
+    ...(review.toolStopReason !== undefined ? { toolStopReason: review.toolStopReason } : {}),
+    // #1003: the human-review triage answer reaches the published body only
+    // when triage ran ("" when off), so a disabled run's review is
+    // byte-identical to pre-#1003. Triage grants no capability.
+    ...(review.outputs.reviewTriageDecision !== ""
+      ? {
+        reviewTriage: {
+          decision: review.outputs.reviewTriageDecision,
+          reason: review.outputs.reviewTriageReason,
+        },
+      }
+      : {}),
+  };
 }
