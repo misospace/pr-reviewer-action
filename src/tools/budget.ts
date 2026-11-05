@@ -22,7 +22,7 @@
  * in lockstep on the explicit/override precedence and the smart/escalated
  * tier defaults, so the #678 migration cannot regress to a single
  * undifferentiated request ceiling. They deliberately differ on the primary
- * tier default (v3 24, v2 16), while the size-scaled default is v3-only (#810).
+ * tier default (v3 40, v2 16), while the size-scaled default is v3-only (#810).
  *
  * The Python side reads os.environ; this side takes the environment as a
  * plain record so the resolver is pure and tests can evaluate cases without
@@ -48,7 +48,7 @@ export const TOOL_REQUEST_HARD_MAX = 50;
 
 export const TOOL_REQUEST_TIER_DEFAULTS: Readonly<
   Record<ToolBudgetTier, number>
-> = Object.freeze({ primary: 24, smart: 32, escalated: 40 });
+> = Object.freeze({ primary: 40, smart: 45, escalated: 50 });
 
 /**
  * PR-size weights for the #810 scaled default. One request per few changed

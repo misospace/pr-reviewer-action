@@ -203,12 +203,17 @@ test("#1145: a throwing probe records skipped_probe_error and never breaks the r
   assert.equal(result.native_loop_verdict_status, "accepted");
 });
 
-test("#1145: a fired probe with no remaining request budget is skipped_no_budget", async () => {
+test("#1447: trace repair still runs after the exploration call ceiling is exhausted", async () => {
   const { root, deps } = workspace();
   seedWorkspace(root);
-  // One-request budget: the single issued call is executed and the loop stops
-  // on budget exhaustion, so the probe sees zero remaining requests.
-  const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiVerdict("original")];
+  // The ordinary investigation gets one call and exhausts that ceiling.
+  // Requirement trace still gets its bounded post-verdict allowance.
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiVerdict("original"),
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    openAiVerdict("refreshed"),
+  ];
   let calls = 0;
   const result = freshResult();
   const handled = await runNativeLoop(
@@ -228,14 +233,19 @@ test("#1145: a fired probe with no remaining request budget is skipped_no_budget
     ),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 2); // loop round + verdict; no repair round
+  assert.equal(calls, 4); // exploration + verdict + trace repair + refreshed verdict
   assert.equal(result.stop_reason, "tool-call-budget-exhausted");
   assert.equal(result.budget_exhausted, true);
   assert.deepEqual(result.trace_repair_continuation, {
     attempted: true,
-    outcome: "skipped_no_budget",
+    outcome: "continued",
     unresolved_ids: ["R1", "R2forged"],
+    stop_reason: "max-rounds",
+    rounds: 1,
+    tool_calls: 1,
+    verdict_refreshed: true,
   });
+  assert.equal((result.tool_calls as unknown[]).length, 2);
   assert.equal(result.native_loop_verdict_produced, true);
   assert.equal(result.native_loop_verdict_status, "accepted");
 });
@@ -296,7 +306,7 @@ test("#1145: the happy path — one bounded repair round, folded telemetry, refr
   const usage = telemetry.usage as Record<string, unknown>;
   assert.equal(usage.tool_calls_executed, 2);
   assert.equal(usage.rounds_used, 2);
-  assert.equal(usage.requests_remaining_at_stop, 23);
+  assert.equal(usage.requests_remaining_at_stop, 26);
   assert.equal(telemetry.stop_reason, "model-stopped");
   assert.equal(telemetry.budget_exhausted, false);
   const verdictBody = JSON.parse(
@@ -630,7 +640,7 @@ test("#1145/#1198: a verdict turn consuming the remaining wall-clock budget leav
   assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\noriginal");
 });
 
-test("#1145: a loop that stopped on max-rounds gets no repair round (skipped_no_budget)", async () => {
+test("#1447: trace repair gets one bounded round even after exploration hits max-rounds", async () => {
   const { root, deps } = workspace();
   seedWorkspace(root);
   fs.writeFileSync(path.join(root, "helper.ts"), "export const h = 1;\n");
@@ -639,15 +649,12 @@ test("#1145: a loop that stopped on max-rounds gets no repair round (skipped_no_
     path.join(root, "pr-files.json"),
     JSON.stringify([{ filename: "src.ts" }, { filename: "notes.md" }, { filename: "other.ts" }]),
   );
-  // TOOL_MAX_ROUNDS=1 → the explicit override doubles to a 2-round cap, and
-  // the scripted loop spends BOTH rounds while plenty of request budget and
-  // wall-clock remain. The repair must NOT start: an extra round would exceed
-  // the configured round cap, so exhausted rounds are skipped_no_budget just
-  // like exhausted calls or wall-clock.
   const scripted = [
     openAiCall("c1", "read_file", '{"path":"src.ts"}'),
     openAiCall("c2", "read_file", '{"path":"helper.ts"}'),
     openAiVerdict("original"),
+    openAiCall("c3", "read_file", '{"path":"notes.md"}'),
+    openAiVerdict("refreshed"),
   ];
   let calls = 0;
   const result = freshResult();
@@ -667,26 +674,22 @@ test("#1145: a loop that stopped on max-rounds gets no repair round (skipped_no_
     ),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 3); // loop(2) + verdict(1); no repair round, no refresh
+  assert.equal(calls, 5);
   assert.equal(result.stop_reason, "max-rounds");
   assert.deepEqual(result.trace_repair_continuation, {
     attempted: true,
-    outcome: "skipped_no_budget",
+    outcome: "continued",
     unresolved_ids: ["R1"],
+    stop_reason: "max-rounds",
+    rounds: 1,
+    tool_calls: 1,
+    verdict_refreshed: true,
   });
-  // The standing verdict is untouched, and the coverage record is exactly the
-  // one the ORIGINAL loop computed — no repair round ran to fold reads in.
-  assert.equal(result.native_loop_verdict_produced, true);
-  assert.equal(result.native_loop_verdict_status, "accepted");
+  // Repair closed the notes.md gap; other.ts remains honestly partial.
   const coverage = result.partial_coverage as { stop_reason: string; unread_files: string[] };
-  assert.notEqual(coverage, undefined, "the coverage record stays");
+  assert.notEqual(coverage, undefined);
   assert.equal(coverage.stop_reason, "max-rounds");
-  assert.deepEqual(coverage.unread_files, ["notes.md", "other.ts"]);
-  const persisted = JSON.parse(
-    fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"),
-  ) as Record<string, unknown>;
-  const choice = (persisted.choices as Array<Record<string, unknown>>)[0]!;
-  assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\noriginal");
+  assert.deepEqual(coverage.unread_files, ["other.ts"]);
 });
 
 test("#1145: a repair round that issues no tool call is skipped_no_evidence, never continued", async () => {
@@ -756,6 +759,7 @@ test("#1145 wiring: runToolHarness forwards deps.traceGapProbe to the native loo
   assert.equal(probeRuns, 1);
   assert.equal(result.trace_repair_continuation?.outcome, "continued");
   assert.equal(result.trace_repair_continuation?.verdict_refreshed, true);
+  assert.equal(result.tool_request_budget, 44, "40 exploration + 4 bounded trace-closure requests");
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8")) as Record<string, unknown>;
   assert.deepEqual(artifact.trace_repair_continuation, result.trace_repair_continuation);
 });

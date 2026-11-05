@@ -28,6 +28,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { platformActionMain, PlatformActionError } from "../src/run/platform-action.js";
+import { tangledContextFromEnv } from "../src/platform/tangled.js";
 import { startMockServer } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import {
@@ -170,13 +171,23 @@ async function withTemp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   }
 }
 
+/** Removes `//` line comments and `/* ... *\/` block comments from a source
+ * string, so the source-text scans below read CODE only. A commented-out
+ * import must not satisfy an import assertion, and a commented-out helper
+ * must not read as a second copy of a shared mapping. A `//` preceded by a
+ * colon is left alone, so a URL inside a string literal survives. */
+function stripComments(source: string): string {
+  const withoutLines = source.replace(/(^|[^:])\/\/.*$/gm, "$1");
+  return withoutLines.replace(/\/\*[\s\S]*?\*\//g, " ");
+}
+
 /** The named bindings a module imports from `specifier`. Read from the
  * module TEXT on purpose: the claim is about the shared IMPORT itself, and
  * a runtime shape could not tell a shared import from a copy that happens
  * to produce the same value. */
 function importedBindings(source: string, specifier: string): string[] {
   const escaped = specifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*"${escaped}"`, "g");
+  const pattern = new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*["']${escaped}["']`, "g");
   const names: string[] = [];
   for (const match of source.matchAll(pattern)) {
     for (const raw of (match[1] ?? "").split(",")) {
@@ -310,17 +321,41 @@ test("#590: a newer head supersedes the publication and exits 0 (parity with the
   }
 });
 
-test("#590: the runner refuses a non-Tangled environment rather than falling back", async () => {
-  await withTemp(async (workspace) => {
-    const env = tangledEnv("http://127.0.0.1:1", workspace);
-    // A Tangled host that never supplied its required DID fails closed in the
-    // typed context module — it is never silently treated as GitHub/Forgejo.
-    delete env.TANGLED_REPO_DID;
-    await assert.rejects(
-      platformActionMain(env, {}),
-      (error: unknown) => error instanceof Error && /TANGLED_REPO_DID/.test(error.message),
-    );
+test("#590: a missing TANGLED_REPO_DID fails closed in the typed Tangled context - no forge request, no publication", async () => {
+  const forge = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify([]));
   });
+  const publishApi = new FakeTangledPublishApi(HEAD);
+  try {
+    await withTemp(async (workspace) => {
+      const env = tangledEnv("http://127.0.0.1:1", workspace);
+      // A GitHub token and API URL are present on purpose: a run that reached
+      // a GitHub client would use them, and the mock server would record the
+      // request.
+      env.GITHUB_TOKEN = "token-that-must-never-be-used";
+      env.GH_TOKEN = "token-that-must-never-be-used";
+      env.GITHUB_API_URL = forge.url;
+      // The Tangled host never supplied its required DID: the typed context
+      // must fail closed on it instead of defaulting to another forge.
+      delete env.TANGLED_REPO_DID;
+      // The typed context module itself is where the fail-closed decision
+      // lives, and it names the variable that is missing.
+      assert.throws(
+        () => tangledContextFromEnv(env),
+        (error: unknown) => error instanceof Error && /TANGLED_REPO_DID/.test(error.message),
+      );
+      // The runner surfaces that failure instead of continuing with it.
+      await assert.rejects(
+        platformActionMain(env, { publishApi }),
+        (error: unknown) => error instanceof Error && /TANGLED_REPO_DID/.test(error.message),
+      );
+      assert.equal(forge.requests.length, 0, "no GitHub request was ever issued");
+      assert.equal(publishApi.upserts, 0, "a failed-closed run publishes nothing");
+    });
+  } finally {
+    await forge.close();
+  }
 });
 
 test("#590: with no injected seams the engine still routes to the Tangled read capability", async () => {
@@ -439,10 +474,13 @@ test("#590: the runner completes with no GitHub Actions bookkeeping variables (n
   try {
     await withTemp(async (workspace) => {
       const env = tangledEnv(model.url, workspace);
-      // The Tangled host hands the runner no Actions bookkeeping at all: no
-      // event file to read the pull from, no outputs sink to append step
-      // outputs to, no step summary to render into, no runner temp dir to
-      // stage the run directory in. The run must complete anyway.
+      // These four assertions SET THE PRECONDITION: the Tangled host hands
+      // the runner no Actions bookkeeping at all — no event file to read the
+      // pull from, no outputs sink to append to, no step summary to render
+      // into, no runner temp dir to stage the run directory in. The EVIDENCE
+      // that the run really needs none of them is that it still completes
+      // (exit 0, review published) and that the reviewed checkout gains no
+      // file.
       assert.equal(env.GITHUB_EVENT_PATH, undefined, "the host env carries no event file");
       assert.equal(env.GITHUB_OUTPUT, undefined, "the host env carries no step-output sink");
       assert.equal(env.GITHUB_STEP_SUMMARY, undefined, "the host env carries no step summary");
@@ -472,78 +510,61 @@ test("#590: the runner completes with no GitHub Actions bookkeeping variables (n
   }
 });
 
-test("#590: a missing TANGLED_REPO_DID fails closed in the typed Tangled context - no forge client, no publication", async () => {
-  const forge = await startMockServer((_req, _body, res) => {
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify([]));
-  });
-  const publishApi = new FakeTangledPublishApi(HEAD);
-  try {
-    await withTemp(async (workspace) => {
-      const env = tangledEnv("http://127.0.0.1:1", workspace);
-      // A GitHub token and API URL are present on purpose: a run that fell
-      // back to a GitHub client would use them, and the mock server would
-      // record the request.
-      env.GITHUB_TOKEN = "token-that-must-never-be-used";
-      env.GH_TOKEN = "token-that-must-never-be-used";
-      env.GITHUB_API_URL = forge.url;
-      // The Tangled host never supplied its required DID: the typed context
-      // must fail closed on it instead of defaulting to another forge.
-      delete env.TANGLED_REPO_DID;
-      await assert.rejects(
-        platformActionMain(env, { publishApi }),
-        (error: unknown) => error instanceof Error && /TANGLED_REPO_DID/.test(error.message),
-      );
-      assert.equal(forge.requests.length, 0, "no GitHub request was ever issued");
-      assert.equal(publishApi.upserts, 0, "a failed-closed run publishes nothing");
-    });
-  } finally {
-    await forge.close();
-  }
-});
-
 test("#590: a fork pull reuses the shared fork gate - the shared admission records the fork flag", async () => {
   const model = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
     res.end(verdictResponse());
   });
-  const publishApi = new FakeTangledPublishApi(HEAD);
   try {
-    await withTemp(async (workspace) => {
-      // A run directory the test controls, so the shared admission's own
-      // provenance artifact can be read back after the run.
-      const runDir = join(workspace, "run");
-      mkdirSync(runDir, { recursive: true });
-      // A fork: the head lives in another repository than the base.
-      const fork = tangledReadCapability({
-        getPr: () => Promise.resolve({
-          title: "Tangled pull",
-          body: "",
-          state: "open",
-          draft: false,
-          head: { sha: HEAD, ref: "feature", repo: { full_name: "did:plc:fork" } },
-          base: { sha: BASE, ref: "main", repo: { full_name: "did:plc:repo" } },
-          user: { login: "did:plc:author" },
-          changed_files: 1,
-          additions: 1,
-          deletions: 0,
-          html_url: "at://did:plc:repo/org.tangled.pull/abc",
-        }),
-      });
-      const code = await platformActionMain(tangledEnv(model.url, workspace), {
-        platformAdapter: fork,
-        publishApi,
-        runDir,
-      });
-      // A fork pull is still REVIEWED: the fork policy gates capabilities, it
-      // does not skip the review.
-      assert.equal(code, 0, "a fork pull is still reviewed");
-      assert.equal(publishApi.upserts, 1, "the fork review published exactly once");
+    await withTemp(async (dir) => {
+      const workspace = join(dir, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      // The SAME runner, the SAME pull, twice: the control run's head
+      // repository IS the base repository, the fork run's head repository is
+      // another repository. Nothing else differs, so the recorded fork flag
+      // is what the two runs must disagree on.
+      const recordedForkFlag = async (label: string, headRepoFullName: string): Promise<unknown> => {
+        // A run directory per run, outside the reviewed checkout.
+        const runDir = join(dir, `run-${label}`);
+        mkdirSync(runDir, { recursive: true });
+        const publishApi = new FakeTangledPublishApi(HEAD);
+        const pull = tangledReadCapability({
+          getPr: () => Promise.resolve({
+            title: "Tangled pull",
+            body: "",
+            state: "open",
+            draft: false,
+            head: { sha: HEAD, ref: "feature", repo: { full_name: headRepoFullName } },
+            base: { sha: BASE, ref: "main", repo: { full_name: "did:plc:repo" } },
+            user: { login: "did:plc:author" },
+            changed_files: 1,
+            additions: 1,
+            deletions: 0,
+            html_url: "at://did:plc:repo/org.tangled.pull/abc",
+          }),
+        });
+        const code = await platformActionMain(tangledEnv(model.url, workspace), {
+          platformAdapter: pull,
+          publishApi,
+          runDir,
+        });
+        // A fork pull is still REVIEWED: the fork policy gates capabilities,
+        // it does not skip the review.
+        assert.equal(code, 0, "the pull is still reviewed");
+        assert.equal(publishApi.upserts, 1, "the review published exactly once");
+        const request = JSON.parse(readFileSync(join(runDir, "review-request.json"), "utf8")) as { is_fork_pr?: unknown };
+        return request.is_fork_pr;
+      };
 
-      const request = JSON.parse(readFileSync(join(runDir, "review-request.json"), "utf8")) as { is_fork_pr?: unknown };
+      const control = await recordedForkFlag("control", "did:plc:repo");
       assert.ok(
-        request.is_fork_pr === true || request.is_fork_pr === "true",
-        "the shared admission recorded the fork flag it actually used",
+        control === false || control === "false",
+        "the control pull (head repository = base repository) is not a fork",
+      );
+      const fork = await recordedForkFlag("fork", "did:plc:fork");
+      assert.ok(
+        fork === true || fork === "true",
+        "the fork pull (head repository ≠ base repository) is a fork",
       );
     });
   } finally {
@@ -573,7 +594,17 @@ test("#590: the published comment is the shared engine's review - the runner pub
       // verdict, and the engine line only the shared publisher emits.
       assert.ok(published.body.includes("Looks fine."), "the published body carries the model's review markdown");
       assert.ok(published.body.includes("Automated recommendation: APPROVE"), "the published body carries the approve verdict");
-      assert.ok(published.body.includes("_Analysis engine: m (openai)"), "the published body carries the shared publisher's engine line");
+      assert.match(published.body, /_Analysis engine: m\b/, "the published body carries the shared publisher's engine line");
+
+      // The runner has no body of its own: only the shared publisher writes
+      // the managed comment through that seam, so the runner must never call
+      // `upsertStickyComment` itself. Comments are stripped first, because a
+      // commented-out call is not a call.
+      const runnerSource = stripComments(readFileSync(resolve(ROOT, "src/run/platform-action.ts"), "utf8"));
+      assert.ok(
+        !runnerSource.includes("upsertStickyComment"),
+        "the runner never writes the managed comment through the publish seam itself",
+      );
     });
   } finally {
     await model.close();
@@ -581,13 +612,17 @@ test("#590: the published comment is the shared engine's review - the runner pub
 });
 
 test("#590: the Action entry and the Tangled runner share one publish mapping", () => {
-  const actionSource = readFileSync(resolve(ROOT, "src/run/action.ts"), "utf8");
-  const runnerSource = readFileSync(resolve(ROOT, "src/run/platform-action.ts"), "utf8");
-  const entrypointsSource = readFileSync(resolve(ROOT, "src/run/entrypoints.ts"), "utf8");
+  // Comments are stripped BEFORE the scans: a commented-out import must not
+  // satisfy an import assertion, and a commented-out helper must not read as
+  // a second copy of the shared mapping.
+  const actionSource = stripComments(readFileSync(resolve(ROOT, "src/run/action.ts"), "utf8"));
+  const runnerSource = stripComments(readFileSync(resolve(ROOT, "src/run/platform-action.ts"), "utf8"));
+  const entrypointsSource = stripComments(readFileSync(resolve(ROOT, "src/run/entrypoints.ts"), "utf8"));
+  const hosts = [["src/run/action.ts", actionSource], ["src/run/platform-action.ts", runnerSource]] as const;
 
   // Both hosts build the publish input the SAME way: they import the shared
   // mapping instead of each assembling their own from the review result.
-  for (const [name, source] of [["src/run/action.ts", actionSource], ["src/run/platform-action.ts", runnerSource]] as const) {
+  for (const [name, source] of hosts) {
     const imported = importedBindings(source, "./entrypoints.js");
     for (const required of ["publishEnvFromReview", "publishInputFromEnv", "reviewDerivedPublishFields"]) {
       assert.ok(imported.includes(required), `${name} must import ${required} from "./entrypoints.js"`);
@@ -595,9 +630,11 @@ test("#590: the Action entry and the Tangled runner share one publish mapping", 
   }
 
   // The shared mapping lives in ONE place: `entrypoints.ts` defines it
-  // exactly once, and the Action entry no longer keeps a copy of its own.
+  // exactly once, and NEITHER host keeps a copy of its own.
   assert.equal(definitionsOf(entrypointsSource, "publishEnvFromReview").length, 1, "entrypoints.ts defines publishEnvFromReview exactly once");
   assert.equal(definitionsOf(entrypointsSource, "reviewDerivedPublishFields").length, 1, "entrypoints.ts defines reviewDerivedPublishFields exactly once");
-  assert.deepEqual(definitionsOf(actionSource, "publishEnvFromReview"), [], "the Action entry defines no publishEnvFromReview of its own");
-  assert.deepEqual(definitionsOf(actionSource, "reviewDerivedPublishFields"), [], "the Action entry defines no reviewDerivedPublishFields of its own");
+  for (const [name, source] of hosts) {
+    assert.deepEqual(definitionsOf(source, "publishEnvFromReview"), [], `${name} defines no publishEnvFromReview of its own`);
+    assert.deepEqual(definitionsOf(source, "reviewDerivedPublishFields"), [], `${name} defines no reviewDerivedPublishFields of its own`);
+  }
 });
