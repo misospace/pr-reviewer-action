@@ -19,6 +19,7 @@ function profile(overrides: Partial<ConfidenceProfile> = {}): ConfidenceProfile 
     baseUrl: "https://api.example.com",
     model: "MiniMax-M3.1-Flash",
     apiFormat: "openai",
+    tokensParam: "max_tokens",
     apiKey: "scorer-key",
     requestTimeoutSec: 10,
     reasoningEffort: "",

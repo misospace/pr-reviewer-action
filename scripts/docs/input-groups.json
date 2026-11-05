@@ -93,6 +93,7 @@
       "ai-confidence-api-format",
       "ai-confidence-api-key",
       "ai-confidence-isolation",
+      "ai-confidence-tokens-param",
       "ai-confidence-reasoning-effort",
       "ai-confidence-timeout-sec",
       "ai-confidence-max-tokens",

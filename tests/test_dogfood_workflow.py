@@ -260,10 +260,8 @@ def test_dogfood_overrides_only_what_is_ours() -> None:
 def test_dogfood_enables_bounded_advisory_confidence_scoring() -> None:
     """Score with a usable configured model, without weakening review authority.
 
-    The optional dedicated format may be unset in repository variables:
-    falling back to the smart FORMAT pre-fills only the wire family. #1478:
-    the verifier's ENDPOINT, CREDENTIAL, and MODEL are isolated from the
-    primary lane — they resolve only from the operator's dedicated
+    #1478: the verifier's ENDPOINT, CREDENTIAL, and MODEL are isolated from
+    the primary lane — they resolve only from the operator's dedicated
     CONFIDENCE_* repository variables/secret, and
     ai-confidence-isolation=require-dedicated turns a missing dedicated
     endpoint (or a missing dedicated model) into a visible `unscored` run
@@ -271,16 +269,25 @@ def test_dogfood_enables_bounded_advisory_confidence_scoring() -> None:
     pre-fills the model with NOTHING: a `SMART_MODEL` substitution here would
     put the primary lane's own model on the verifier, the exact same-model
     correlation isolation exists to prevent (the resolver refuses the missing
-    model as `unscored(dedicated_model_missing)` — #1481). The primary
-    LITELLM_* credential must never appear on a confidence input, and forks
-    stay disabled by default.
+    model as `unscored(dedicated_model_missing)` — #1481). #1481 extends the
+    same no-fallback rule to the WIRE FAMILY: no `SMART_FORMAT` substitution
+    either — a dedicated endpoint's format is the dedicated endpoint's own
+    property, and an unset `CONFIDENCE_FORMAT` is a visible
+    `unscored(dedicated_format_missing)`, never a review-lane guess. The
+    primary LITELLM_* credential must never appear on a confidence input, and
+    forks stay disabled by default.
     """
     values = _review_step_with(WORKFLOW.read_text(encoding="utf-8"))
     assert values["ai-confidence-model"] == "${{ vars.CONFIDENCE_MODEL }}"
     # The regression this pins: the static workflow must never pre-fill the
     # confidence model with a primary-derived value (no SMART_MODEL fallback).
     assert "SMART_MODEL" not in values["ai-confidence-model"]
-    assert values["ai-confidence-api-format"] == "${{ vars.CONFIDENCE_FORMAT || vars.SMART_FORMAT }}"
+    # #1481 pins the same rule for the WIRE FAMILY: no SMART_FORMAT fallback.
+    # A smart-derived format is still a review-lane value riding the verifier's
+    # protocol surface; unset CONFIDENCE_FORMAT now resolves to a visible
+    # unscored(dedicated_format_missing) inside the action instead.
+    assert values["ai-confidence-api-format"] == "${{ vars.CONFIDENCE_FORMAT }}"
+    assert "SMART_FORMAT" not in values["ai-confidence-api-format"]
     assert values["ai-confidence-base-url"] == "${{ vars.CONFIDENCE_BASE_URL }}"
     assert values["ai-confidence-api-key"] == "${{ secrets.CONFIDENCE_API_KEY }}"
     assert values["ai-confidence-isolation"] == "require-dedicated"

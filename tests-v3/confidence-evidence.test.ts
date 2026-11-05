@@ -23,6 +23,7 @@ function profile(overrides: Partial<ConfidenceProfile> = {}): ConfidenceProfile 
     baseUrl: "https://api.example.com",
     model: "scorer-model",
     apiFormat: "openai",
+    tokensParam: "max_tokens",
     apiKey: "scorer-key",
     requestTimeoutSec: 10,
     reasoningEffort: "",

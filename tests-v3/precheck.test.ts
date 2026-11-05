@@ -2476,3 +2476,61 @@ test("#1481: a missing model under require-dedicated keeps the confidence family
   assert.ok(!blankModelDedicated.some((line) => line.startsWith("AI_CONFIDENCE_MODEL")));
   assert.equal(computeConfigHash(blankModelDedicated), computeConfigHash(refused));
 });
+
+test("#1481: the confidence token-limit field contributes only while the confidence family is active", () => {
+  const baselineEnv = { AI_MODEL: "m", AI_BASE_URL: "https://primary" };
+  const baseline = collectConfigLines(baselineEnv);
+
+  // Disabled family (the default): the scorer never runs, so the verifier's
+  // token field cannot change anything — even an explicit value contributes
+  // NOTHING, and the contract default (empty) never touches existing cached
+  // reviews on upgrade.
+  const disabled = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_TOKENS_PARAM: "max_completion_tokens",
+  });
+  assert.deepEqual(disabled, baseline);
+
+  // Enabled family: the resolved token field names the request's token-limit
+  // key, so it is model-affecting config and must invalidate a cached score
+  // computed against the other field.
+  const unset = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  const explicit = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TOKENS_PARAM: "max_completion_tokens",
+  });
+  assert.ok(explicit.includes("AI_CONFIDENCE_TOKENS_PARAM=max_completion_tokens"));
+  assert.ok(!unset.some((line) => line.startsWith("AI_CONFIDENCE_TOKENS_PARAM")));
+  assert.notEqual(computeConfigHash(explicit), computeConfigHash(unset));
+
+  // Whitespace canonicalization matches the resolver's trim, and a
+  // whitespace-only value is unset for both — no line, unchanged hash.
+  const trimmedValue = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TOKENS_PARAM: "  max_completion_tokens  ",
+  });
+  assert.equal(computeConfigHash(trimmedValue), computeConfigHash(explicit));
+  const whitespaceOnly = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TOKENS_PARAM: "   ",
+  });
+  assert.equal(computeConfigHash(whitespaceOnly), computeConfigHash(unset));
+
+  // require-dedicated with the field UNSET is behavior-relevant through the
+  // isolation line it already emits (the resolver answers verifier-owned
+  // max_tokens); the primary lane's own AI_TOKENS_PARAM still contributes
+  // through the unconditional sweep because it changes the REVIEW request —
+  // it just no longer decides the dedicated verifier's field.
+  const dedicated = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.ok(!dedicated.some((line) => line.startsWith("AI_CONFIDENCE_TOKENS_PARAM")));
+});

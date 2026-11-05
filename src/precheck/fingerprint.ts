@@ -237,6 +237,15 @@ const CONDITIONAL_AI_KEYS: ReadonlySet<string> = new Set([
   // (it publishes `unscored(dedicated_model_missing)`), so the isolation
   // value must be able to turn the family's own gate on.
   "AI_CONFIDENCE_ISOLATION",
+  // #1481: the verifier's own OpenAI token-limit field changes the request's
+  // token field name, so it is behavior-relevant while the family gate is
+  // active. Its contract default is EMPTY, so an unset configuration — the
+  // disabled/default shape included — emits nothing and existing baseline
+  // fingerprints stay byte-identical. Under require-dedicated the RESOLVED
+  // behavior no longer depends on AI_TOKENS_PARAM at all (the review lane's
+  // own AI_TOKENS_PARAM still contributes through the sweep, because it
+  // changes the review request itself).
+  "AI_CONFIDENCE_TOKENS_PARAM",
 ]);
 
 /** #1037: the `ai-extra-headers` surface is hashed by its canonical

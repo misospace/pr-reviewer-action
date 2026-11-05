@@ -69,6 +69,11 @@ export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.f
   // authoring bug fails loudly at startup, never silently relaxes into the
   // primary-lane inheritance an operator asked to refuse.
   "ai-confidence-isolation": ["inherit-primary", "require-dedicated"],
+  // #1481: the confidence verifier's own OpenAI token-limit field. Empty (the
+  // default) is not "no value" but lane-resolved: inherit-primary keeps the
+  // run's ai-tokens-param convention, require-dedicated resolves the
+  // verifier-owned max_tokens and never inherits the review lane's setting.
+  "ai-confidence-tokens-param": ["max_tokens", "max_completion_tokens"],
   "ai-response-format": ["off", "json_object", "json_schema"],
   "ai-primary-response-format": ["off", "json_object", "json_schema"],
   "ai-smart-response-format": ["off", "json_object", "json_schema"],

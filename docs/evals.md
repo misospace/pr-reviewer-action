@@ -919,7 +919,7 @@ nothing else may supply them):
 | `CONFIDENCE_BASE_URL` | repository **variable** | The verifier's own endpoint base URL. Must be a backend that is actually distinct from the primary `LITELLM_URL`. |
 | `CONFIDENCE_API_KEY` | repository **secret** | The verifier endpoint's credential. A distinct endpoint never inherits the primary key; write-only, never logged, and never exposed beyond the action's redacted transport path. |
 | `CONFIDENCE_MODEL` | repository **variable** (optional) | The verifier's model identifier, sent to the provider verbatim (opaque, case-sensitive — #1465). Under `ai-confidence-isolation: require-dedicated` there is NO fallback: when unset the verifier publishes `confidence-status: unscored` (cause `dedicated_model_missing`) instead of substituting a primary/smart lane model. |
-| `CONFIDENCE_FORMAT` | repository **variable** (optional) | The verifier endpoint's wire family (`openai`/`anthropic`). Falls back to `SMART_FORMAT` when unset. |
+| `CONFIDENCE_FORMAT` | repository **variable** | The verifier endpoint's wire family (`openai`/`anthropic`). No `SMART_FORMAT` fallback (#1481): unset under `require-dedicated` publishes `confidence-status: unscored` (cause `dedicated_format_missing`). |
 
 Recommended safe configuration: set ALL FOUR settings above — the distinct
 endpoint (`CONFIDENCE_BASE_URL`), its own bounded credential
@@ -928,9 +928,13 @@ endpoint (`CONFIDENCE_BASE_URL`), its own bounded credential
 family (`CONFIDENCE_FORMAT`). A second provider account or proxy virtual key
 that only the verifier may spend keeps it off the primary lane's rate
 limits, quota, and outage domain (the verifier's request is already bounded:
-one shot, 4096 completion / 98304 prompt token budgets, 120 s timeout). The
-`CONFIDENCE_FORMAT` fallback to `SMART_FORMAT` only pre-fills the wire
-family while that variable is unset; the MODEL has no fallback — under
+one shot, 4096 completion / 98304 prompt token budgets, 120 s timeout).
+`CONFIDENCE_FORMAT` has NO fallback (#1481): the wire family belongs to the
+dedicated endpoint, so under `require-dedicated` an unset `CONFIDENCE_FORMAT`
+is itself a VISIBLE failure — the run publishes `confidence-status: unscored`
+with the action-owned cause `dedicated_format_missing` (and a WARNING naming
+the inputs) instead of guessing the smart lane's family onto a backend that
+may speak the other one. The MODEL has no fallback either — under
 `require-dedicated` an unset `CONFIDENCE_MODEL` is itself a VISIBLE failure:
 the run publishes `confidence-status: unscored` with the action-owned cause
 `dedicated_model_missing` (and a WARNING naming the inputs) instead of
@@ -942,7 +946,10 @@ at the provider (`confidence-status: unscored`, cause `http_*`). Under
 failure: the run publishes `confidence-status: unscored` with the
 action-owned cause `dedicated_config_missing` (and a WARNING naming the
 inputs) while the authoritative review publishes unchanged — the verifier
-never silently dials the primary lane. Other verifier failures keep their
+never silently dials the primary lane. The OpenAI token-limit field follows
+the same rule (#1481): unset `ai-confidence-tokens-param` under
+`require-dedicated` resolves the verifier-owned `max_tokens`, never the
+review lane's `ai-tokens-param`. Other verifier failures keep their
 existing causes (`missing_credential` for a distinct endpoint without a key,
 `http_*` / `timeout` / `transport_error` for wire failures). First live
 receipt of the visible-refusal shape (PR #1481's own dogfood run, exact head

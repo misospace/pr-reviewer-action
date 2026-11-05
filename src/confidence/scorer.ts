@@ -27,7 +27,6 @@ import type { TransportFailureKind } from "../transport/http.js";
 import { basicAuthorizationHeaderValue } from "../transport/headers.js";
 import { maskDiagnostic } from "../context/redact.js";
 import { buildModelRequest, wireEffortOf } from "../model/request.js";
-import type { TokensParam } from "../model/types.js";
 import type { ConfidenceProfile } from "../routing/tiers.js";
 import { confidenceUsageFromProviderBody, type ConfidenceUsageTelemetry } from "./telemetry.js";
 import {
@@ -87,9 +86,6 @@ export interface ConfidenceScorerInput {
   primaryApiKey: string;
   prompt: { system: string; user: string };
   connectTimeoutSec: number;
-  /** The primary lane's token-field convention, so self-hosted OpenAI
-   * proxies that only accept one field keep working. */
-  tokensParam?: TokensParam;
   transport?: (input: ChatRequestInput) => Promise<ChatRequestOutcome>;
   /** #726 (engine cancellation): caller-owned abort, propagated into the
    * transport so an aborted run tears the scorer's in-flight provider
@@ -252,7 +248,11 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     // scorer's OWN compact schema rides the wire (never the verdict schema).
     responseFormat: profile.structuredOutputSupported ? "json_schema" : "off",
     responseSchema: CONFIDENCE_ANSWER_JSON_SCHEMA,
-    tokensParam: input.tokensParam ?? "max_tokens",
+    // #1481: the token-limit field is the RESOLVED profile's own — the engine
+    // no longer feeds this lane the primary/global AI_TOKENS_PARAM state, so a
+    // require-dedicated verifier can never silently inherit the review lane's
+    // convention.
+    tokensParam: profile.tokensParam,
     reasoningEffort: profile.reasoningEffort,
     // #1368: the scorer's OWN capability assertions — never another lane's.
     // Unasserted, the Anthropic wire carries no effort/format at all.

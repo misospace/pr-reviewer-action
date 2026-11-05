@@ -30,6 +30,7 @@ function profile(overrides: Partial<ConfidenceProfile> = {}): ConfidenceProfile 
     baseUrl: "https://api.example.com",
     model: "scorer-model",
     apiFormat: "openai",
+    tokensParam: "max_tokens",
     apiKey: "scorer-key",
     requestTimeoutSec: 10,
     reasoningEffort: "",
@@ -655,6 +656,78 @@ test("#1478/#1481: a require-dedicated profile refused for a missing dedicated m
   assert.equal(outcome.rawResponse, null);
   assert.equal(outcome.latencyMs, null, "no provider call happened, so no latency may be claimed");
   assert.equal(outcome.usage, null, "no provider call happened, so no usage may be claimed");
+});
+
+test("#1481: a require-dedicated profile refused for a missing dedicated format publishes unscored before any transport call", async () => {
+  // The resolver's dedicated_format_missing shape: the lane is ENABLED (the
+  // operator asked for the mode) with model and endpoint configured, but the
+  // wire family is unset — and unset does NOT mean the primary lane's family.
+  // The scorer refuses pre-wire with the action-owned cause: no provider
+  // call, no request/response artifacts, no latency or usage claim, review
+  // unaffected.
+  let called = false;
+  const outcome = await runConfidenceScorer({
+    profile: profile({ apiFormat: "", refusalCause: "dedicated_format_missing", baseUrl: "", apiKey: "", inheritedTransport: false }),
+    primaryApiKey: "primary-key-ABC",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: async () => { called = true; throw new Error("should not be called"); },
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(outcome.result.status, "unscored");
+  assert.equal(outcome.result.cause, "dedicated_format_missing");
+  assert.equal(outcome.result.model, "", "no model audited the review: the refusal happens before any call");
+  assert.equal(called, false, "a refused verifier never reaches the transport");
+  assert.equal(outcome.requestPayload, null);
+  assert.equal(outcome.rawResponse, null);
+  assert.equal(outcome.latencyMs, null, "no provider call happened, so no latency may be claimed");
+  assert.equal(outcome.usage, null, "no provider call happened, so no usage may be claimed");
+});
+
+test("#1481: the scorer sends the token field RESOLVED INTO the profile, not an ambient convention", async () => {
+  // The scorer's only token-field source is now ConfidenceProfile.tokensParam:
+  // an explicit verifier-owned max_completion_tokens reaches the OpenAI wire
+  // wholesale (the field flips, the other never appears), and the Anthropic
+  // wire keeps sending max_tokens exactly as always, ignoring the setting.
+  const captured: Array<{ endpointPath: string; body: Record<string, unknown> }> = [];
+  const transport = async (input: { payload: { endpointPath: string; body: unknown } }) => {
+    captured.push({ endpointPath: input.payload.endpointPath, body: input.payload.body as Record<string, unknown> });
+    return {
+      status: "ok" as const,
+      raw: okOpenAiResponse('{"score": 4, "risk": "low", "reason": "ok"}'),
+      response: {
+        id: "", object: "chat.completion", model: "scorer-model",
+        content: '{"score": 4, "risk": "low", "reason": "ok"}', toolCalls: [], finishReason: "stop", usage: null, error: undefined,
+      },
+    };
+  };
+  await runConfidenceScorer({
+    profile: profile({ tokensParam: "max_completion_tokens" }),
+    primaryApiKey: "",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: transport as never,
+    findings: [],
+    coverage: {},
+  });
+  await runConfidenceScorer({
+    profile: profile({ apiFormat: "anthropic", tokensParam: "max_completion_tokens" }),
+    primaryApiKey: "",
+    prompt: { system: "s", user: "u" },
+    connectTimeoutSec: 5,
+    transport: transport as never,
+    findings: [],
+    coverage: {},
+  });
+  assert.equal(captured.length, 2);
+  const openai = captured[0]!.body;
+  assert.equal(openai.max_completion_tokens, 4096, "the profile-owned max_completion_tokens reaches the OpenAI verifier wire");
+  assert.equal(openai.max_tokens, undefined, "never both token fields");
+  const anthropic = captured[1]!.body;
+  assert.equal(captured[1]!.endpointPath, "/messages");
+  assert.equal(anthropic.max_tokens, 4096, "the Anthropic wire always sends max_tokens and ignores tokensParam");
+  assert.equal(anthropic.max_completion_tokens, undefined, "Anthropic never carries the OpenAI-only field");
 });
 
 test("loopback endpoint without a key is allowed", async () => {
@@ -1419,6 +1492,7 @@ test("#1073: the fork gate is default-off, overridable only by explicit operator
     requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false, credentialSource: "own",
     maxTokens: 4096, promptTokens: 98304, modelContextTokens: 0,
     anthropicEffortSupported: false, structuredOutputSupported: false,
+    tokensParam: "max_tokens",
     refusalCause: "",
   });
   assert.ok(gated.warnings.some((warning) => warning.includes("ai-confidence-enable-for-forks")), JSON.stringify(gated.warnings));
