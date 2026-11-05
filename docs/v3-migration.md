@@ -894,9 +894,9 @@ metering). The port is transport/filesystem-agnostic by design — the caller
 supplies a `requestFn` and receives artifacts to persist, matching the
 #678 routing/tool-loop modules — so the orchestrator can wire its workspace
 writer and the `gates.ts` `specialists` branch. `src/tools/harness.ts`'s `renderSpecialistLeads` seam is wired
-to the real `renderSpecialistLeadsSection` port. The migration's comparison
-boundaries were `specialist-corpus`, `specialist-payload`, `specialist-normalize`
-(`tests/fixtures/parity/specialist-*/`, `tests/parity_runners/v2_specialist_*.py`).
+to the real `renderSpecialistLeadsSection` port. The migration's retired comparison boundaries were `specialist-corpus`,
+`specialist-payload`, and `specialist-normalize`; those parity fixtures and
+runners were removed with the historical harness.
 
 ### The `enforcement-pipeline` boundary (#680)
 
@@ -905,8 +905,8 @@ composition (`apply_verdict_policy` → `apply_required_check_validation` →
 `apply_all_enforcement`, over cwd-relative artifacts exactly as
 `scripts/sections/config.sh::apply_all_enforcement_wrapper` invokes them)
 versus the v3 ports in `src/enforcement/` (`node dist/index.js
-enforcement-fixture`). Fixtures under `tests/fixtures/parity/enforcement-pipeline/`
-carry the parsed `ai-output.json` artifact plus the optional evidence,
+enforcement-fixture`). The retired parity fixture set carried the parsed
+`ai-output.json` artifact plus the optional evidence,
 tool-harness, review-thread, human-review, and classification inputs, and
 both sides emit the resulting artifact, the `completeness.json` result, the
 required-checks status, and the applied-enforcement count (canonicalized
@@ -956,9 +956,9 @@ behavior depended on `gh`/`forgejo` subprocess stubs.
 
 ### The `platform-normalization` boundary (#706)
 
-Pins the platform read seams: raw GitHub REST/GraphQL and Forgejo `/api/v1`
-responses (a route table in each fixture under
-`tests/fixtures/parity/platform-normalization/`) are served to the real v2
+Historically pinned the platform read seams: raw GitHub REST/GraphQL and
+Forgejo `/api/v1` responses from the retired route-table fixtures were served
+to the real v2
 seam — `scripts/platform_api.sh`, `forgejo_backend.py` via `_forgejo_py`,
 `gh_api_call`, and the `pr-files.json` jq projection read from
 `scripts/sections/context.sh` — through stub `gh`/`curl` binaries, and to
