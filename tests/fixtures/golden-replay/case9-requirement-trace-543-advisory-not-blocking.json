@@ -108,8 +108,7 @@
     ],
     "published_body_includes": [
       "unmet",
-      "no regression test asserts",
-      "Approval withheld by incomplete review coverage"
+      "no regression test asserts"
     ]
   }
 }
