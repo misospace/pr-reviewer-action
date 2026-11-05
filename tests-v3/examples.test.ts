@@ -17,6 +17,16 @@ interface Workflow {
   steps?: { command?: string }[];
 }
 
+function spindleInvokesNodeRunner(workflow: Workflow): boolean {
+  // Shell comments inside a step command must not satisfy the guard, and
+  // the match must stay inside a single command (no crossing `;`, `|`, or
+  // `&&`), so `echo dist/index.js tangled` or a commented-out runner fails.
+  const commandLines = (workflow.steps ?? [])
+    .flatMap((step) => (step.command ?? "").split("\n"))
+    .filter((line) => !line.trimStart().startsWith("#"));
+  return commandLines.some((line) => /\bnode\b[^|;&]*\bdist\/index\.js\b[^|;&]*\btangled\b/.test(line));
+}
+
 function loadContractInputIds(): Set<string> {
   const contract = parse(readFileSync("contracts/action-v3.yml", "utf8")) as {
     inputs: { id: string }[];
@@ -39,7 +49,7 @@ test("examples/*.yml pin @v3 (Actions) or the host-neutral Node entry (Spindle) 
       // Node runner (#590), never `action.yml` or a GitHub Action step.
       assert.ok(Array.isArray(workflow.when), `${file}: neither GitHub Actions jobs nor a Spindle when:`);
       const commands = (workflow.steps ?? []).map((step) => step.command ?? "").join("\n");
-      assert.match(commands, /dist\/index\.js[^\n]*\btangled\b/,
+      assert.ok(spindleInvokesNodeRunner(workflow),
         `${file}: Spindle example must run the host-neutral "node dist/index.js tangled" entrypoint`);
       assert.doesNotMatch(commands, /action\.yml/, `${file}: Spindle example must not invoke action.yml`);
       continue;
@@ -66,4 +76,19 @@ test("examples/*.yml pin @v3 (Actions) or the host-neutral Node entry (Spindle) 
 
     assert.ok(sawActionStep, `${file}: expected a misospace/pr-reviewer-action step`);
   }
+});
+
+test("the Spindle Node-runner guard rejects look-alike commands", () => {
+  const spindle = (command: string): Workflow => ({ when: [], steps: [{ command }] });
+
+  assert.equal(spindleInvokesNodeRunner(spindle('node "$HOME/pr-reviewer/dist/index.js" tangled')), true,
+    "the shipped example form must pass");
+  assert.equal(spindleInvokesNodeRunner(spindle("echo dist/index.js tangled")), false,
+    "a non-Node command must not satisfy the guard");
+  assert.equal(spindleInvokesNodeRunner(spindle("# node dist/index.js tangled")), false,
+    "a commented-out invocation must not satisfy the guard");
+  assert.equal(spindleInvokesNodeRunner(spindle("node dist/index.js github")), false,
+    "invoking another platform subcommand must not satisfy the guard");
+  assert.equal(spindleInvokesNodeRunner(spindle("node -e 'console.log(1)' && echo dist/index.js tangled")), false,
+    "an unrelated node command chained to an echo must not satisfy the guard");
 });
