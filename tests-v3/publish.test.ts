@@ -969,7 +969,7 @@ test("review_verdict: degraded approve candidate withholds trusted APPROVE", asy
   }), api, { diffText: "" });
   assert.equal(result.status, "published");
   assert.equal(api.submitted[0]!.event, "COMMENT");
-  assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/);
+  assert.match(api.submitted[0]!.body, /Approval withheld by degraded review state/);
   assert.match(api.submitted[0]!.body, /"review_result":"partial"/);
 });
 
