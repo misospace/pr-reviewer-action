@@ -191,18 +191,6 @@ DOGFOOD_OVERRIDES = {
     "ai-reasoning-effort",
     "ai-primary-reasoning-effort",
     "ai-smart-reasoning-effort",
-    "ai-confidence-model",
-    "ai-confidence-api-format",
-    "ai-confidence-base-url",
-    "ai-confidence-api-key",
-    "ai-confidence-isolation",
-    "ai-confidence-reasoning-effort",
-    "ai-confidence-timeout-sec",
-    "ai-confidence-max-tokens",
-    "ai-confidence-prompt-tokens",
-    "ai-confidence-model-context-tokens",
-    "ai-confidence-anthropic-effort-support",
-    "ai-confidence-structured-output-support",
     "ai-fallback-base-url",
     "ai-fallback-api-format",
     "ai-fallback-model",
@@ -257,48 +245,21 @@ def test_dogfood_overrides_only_what_is_ours() -> None:
     assert "allow-approve" not in values
 
 
-def test_dogfood_enables_bounded_advisory_confidence_scoring() -> None:
-    """Use an explicit verifier model on the repository's shared model gateway.
+def test_dogfood_does_not_run_the_optional_confidence_verifier() -> None:
+    """Trusted approval must not require a second model call.
 
-    The verifier MODEL never falls back to SMART_MODEL or the primary model.
-    Transport intentionally does: this repository runs one trusted model
-    gateway/credential for many models, so an unset CONFIDENCE_BASE_URL and
-    CONFIDENCE_API_KEY must inherit the primary lane's resolved endpoint and
-    credential instead of requiring the same URL/key to be configured twice.
-
-    Explicit confidence transport overrides remain supported for operators
-    that actually use a separate verifier backend. The resolver's existing
-    boundary still requires an explicit confidence key when a distinct
-    confidence base URL is supplied, so this shared-gateway policy does not
-    weaken the cross-endpoint credential rule.
+    #1447 makes native APPROVE depend on deterministic completion state around
+    the authoritative review. Confidence remains a public opt-in feature, but
+    PRA's own dogfood workflow must not spend another model call or make
+    trusted approval depend on verifier availability.
     """
     values = _review_step_with(WORKFLOW.read_text(encoding="utf-8"))
-    assert values["ai-confidence-model"] == "${{ vars.CONFIDENCE_MODEL }}"
-    # Model independence stays explicit: no primary/smart model substitution.
-    assert "SMART_MODEL" not in values["ai-confidence-model"]
-
-    # These are OPTIONAL overrides. Empty values reach the resolver as empty
-    # and inherit the primary gateway/credential under inherit-primary.
-    assert values["ai-confidence-base-url"] == "${{ vars.CONFIDENCE_BASE_URL }}"
-    assert values["ai-confidence-api-key"] == "${{ secrets.CONFIDENCE_API_KEY }}"
-    assert values["ai-confidence-isolation"] == "inherit-primary"
-
-    # Format may be overridden for a confidence model that needs a different
-    # wire family; empty inherits the primary format. Never guess SMART_FORMAT.
-    assert values["ai-confidence-api-format"] == "${{ vars.CONFIDENCE_FORMAT }}"
-    assert "SMART_FORMAT" not in values["ai-confidence-api-format"]
-
-    assert values["ai-confidence-reasoning-effort"] == "${{ vars.CONFIDENCE_REASONING_EFFORT }}"
-    assert str(values["ai-confidence-timeout-sec"]) == "120"
-    assert "ai-confidence-enable-for-forks" not in values
-
-    # Do not duplicate the primary gateway secret into another workflow input.
-    # Inheritance happens inside the action's resolver; the workflow only names
-    # a CONFIDENCE_* secret when an operator deliberately provides an override.
-    for key, value in values.items():
-        if key.startswith("ai-confidence"):
-            assert "LITELLM" not in value, f"{key} directly references the primary lane credential: {value}"
+    confidence_inputs = sorted(key for key in values if key.startswith("ai-confidence"))
+    assert confidence_inputs == [], f"dogfood unexpectedly enables confidence inputs: {confidence_inputs}"
     assert values["publish-mode"] == "review_verdict"
+    # #1447: PRA intentionally exercises requirement trace as part of the
+    # trusted-approval contract even though the public action keeps it opt-in.
+    assert values["requirement-trace"] == "true"
 
 
 def test_public_action_defaults_are_the_recommended_setup() -> None:
@@ -316,8 +277,10 @@ def test_public_action_defaults_are_the_recommended_setup() -> None:
         "publish-mode": "review_comment",
         "inline-findings": "true",
         "verdict-policy": "strict",
+        "requirement-trace": "false",
         "allow-approve": "false",
         "tool-max-requests": "",
+        "primary-tool-max-requests": "",
         "tool-max-rounds": "",
         "tool-loop-wall-clock-sec": "600",
         "tool-corpus-max-bytes": "",

@@ -79,7 +79,7 @@ test("missing corpus aborts pre-loop with the version-1 telemetry shape", async 
   assert.equal(telemetry!.phase, "pre-loop");
   assert.equal(telemetry!.stop_reason, "harness-abort");
   assert.equal(telemetry!.failure, "missing-corpus");
-  assert.equal((telemetry!.usage as Record<string, unknown>).requests_remaining_at_stop, 24);
+  assert.equal((telemetry!.usage as Record<string, unknown>).requests_remaining_at_stop, 40);
   assert.equal((telemetry!.budget as Record<string, unknown>).source, "tier-default");
 });
 
@@ -1879,14 +1879,14 @@ test("#810: a small PR's harness budget matches today's tier default", async () 
   ]));
   const { result } = await runToolHarness(deps());
   assert.equal(result.planning_error, "Missing review-corpus.truncated.md");
-  assert.equal(result.tool_request_budget, 24);
+  assert.equal(result.tool_request_budget, 40);
   assert.equal(result.tool_budget_source, "tier-default");
   assert.deepEqual(result.tool_budget_size, { changed_files: 2, changed_lines: 40, specialist_leads: 0 });
 });
 
 test("#810: a large PR's harness budget scales above the tier default, under the ceiling", async () => {
   const { root, deps } = workspace();
-  const files = Array.from({ length: 40 }, (_, i) => ({
+  const files = Array.from({ length: 80 }, (_, i) => ({
     filename: `src/file${i}.ts`, status: "modified", additions: 100, deletions: 0, changes: 100,
   }));
   fs.writeFileSync(path.join(root, "pr-files.json"), JSON.stringify(files));
@@ -1895,9 +1895,9 @@ test("#810: a large PR's harness budget scales above the tier default, under the
     { file: "src/file2.ts", message: "lead two" },
     { file: null, message: "lead three" },
   ]));
-  // 40 files → ceil(40/4)=10; 4000 lines → ceil(4000/400)=10; 3 leads → 6. 26 total.
+  // 80 files → ceil(80/4)=20; 8000 lines → ceil(8000/400)=20; 3 leads → 6. 46 total.
   const { result } = await runToolHarness(deps());
-  assert.equal(result.tool_request_budget, 26);
+  assert.equal(result.tool_request_budget, 46);
   assert.equal(result.tool_budget_source, "size-scaled");
   assert.equal(result.tool_budget_configured, null);
   // An explicit operator value still outranks the derivation.
@@ -2072,7 +2072,7 @@ test("#847: buildToolLoopTelemetry folds the #810 size signal into the budget ob
 test("#847: a size-scaled run persists route/budget/source/size, stop reason and calls used in tool-harness.json", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
-  fs.writeFileSync(path.join(root, "pr.json"), JSON.stringify({ changedFiles: 54, additions: 4346, deletions: 181 }));
+  fs.writeFileSync(path.join(root, "pr.json"), JSON.stringify({ changedFiles: 100, additions: 8000, deletions: 0 }));
   fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
   const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("evidence gathered"), validVerdict()];
   let transportCalls = 0;
@@ -2082,19 +2082,19 @@ test("#847: a size-scaled run persists route/budget/source/size, stop reason and
   }));
   assert.equal(result.tool_budget_tier, "primary");
   assert.equal(result.tool_budget_source, "size-scaled");
-  // ceil(54/4) + ceil(4527/400) = 14 + 12 = 26, above the primary floor of 16.
-  assert.equal(result.tool_request_budget, 26);
-  assert.deepEqual(result.tool_budget_size, { changed_files: 54, changed_lines: 4527, specialist_leads: 0 });
+  // ceil(100/4) + ceil(8000/400) = 25 + 20 = 45, above the primary floor of 40.
+  assert.equal(result.tool_request_budget, 45);
+  assert.deepEqual(result.tool_budget_size, { changed_files: 100, changed_lines: 8000, specialist_leads: 0 });
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
   assert.equal(artifact.tool_budget_source, "size-scaled");
-  assert.equal(artifact.tool_request_budget, 26);
-  assert.deepEqual(artifact.tool_budget_size, { changed_files: 54, changed_lines: 4527, specialist_leads: 0 });
+  assert.equal(artifact.tool_request_budget, 45);
+  assert.deepEqual(artifact.tool_budget_size, { changed_files: 100, changed_lines: 8000, specialist_leads: 0 });
   assert.equal(artifact.executed_request_count, 1);
   assert.equal(artifact.stop_reason ?? artifact.tool_loop_telemetry.stop_reason, "model-stopped");
   const telemetry = artifact.tool_loop_telemetry;
   assert.equal(telemetry.budget.source, "size-scaled");
-  assert.equal(telemetry.budget.effective_max_requests, 26);
-  assert.deepEqual(telemetry.budget.size, { changed_files: 54, changed_lines: 4527, specialist_leads: 0 });
+  assert.equal(telemetry.budget.effective_max_requests, 45);
+  assert.deepEqual(telemetry.budget.size, { changed_files: 100, changed_lines: 8000, specialist_leads: 0 });
   assert.equal(telemetry.usage.tool_calls_executed, 1);
 });
 
