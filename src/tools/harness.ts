@@ -113,6 +113,12 @@ import { decodeUtf8Ignore } from "../corpus/truncate.js";
 
 export const TOOL_LOOP_TELEMETRY_VERSION = 1;
 
+/** #1447: requirement-trace gets a small dedicated repair allowance after
+ * the normal investigation ceiling. This is runtime review work, not a
+ * second reviewer: at most one repair round in the same conversation, under
+ * the same whole-run wall-clock deadline. */
+export const TRACE_REPAIR_EXTRA_REQUESTS = 4;
+
 /** Stop reason for runs that aborted before the loop could start (#702):
  * missing corpus or missing required model configuration. The specific kind
  * rides the `failure` field; the flat `planning_error`/`error` keys keep
@@ -1937,6 +1943,7 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         // #1464: the wall-clock slice held for the closing in-conversation
         // verdict, mirrored from the raw meta when it carries it.
         ...(meta.verdict_reserve_sec !== undefined ? { verdict_reserve_sec: meta.verdict_reserve_sec } : {}),
+        ...(meta.trace_repair_extra_requests !== undefined ? { trace_repair_extra_requests: meta.trace_repair_extra_requests } : {}),
         ...(meta.max_conversation_tokens !== undefined ? { max_conversation_tokens: meta.max_conversation_tokens } : {}),
         // #1381; #1396: budget provenance for the ONE enforced obligation
         // window — present for every loop run; the keys appear in the
@@ -2541,6 +2548,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     ...adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock, roundsExplicit),
     maxConversationTokens: loopContextLimits(env, limitsProfile).maxConversationTokens,
   };
+  const traceRepairExtraRequests =
+    input.tier === "primary" && input.traceGapProbe !== undefined
+      ? TRACE_REPAIR_EXTRA_REQUESTS
+      : 0;
   // #1198: a true whole-exchange deadline for EITHER tier, taken once here —
   // before the MCP chain and every turn — so pre-loop setup and an unclamped
   // closing verdict turn can no longer push the exchange past the configured
@@ -2630,6 +2641,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         : "") +
       `\nTool budget for this investigation: up to ${budgets.maxToolCalls} ` +
       `read-only tool request(s) across up to ${budgets.maxRounds} turn(s); ` +
+      (traceRepairExtraRequests > 0
+        ? `requirement-trace may use up to ${traceRepairExtraRequests} additional targeted request(s) in one post-verdict repair round; `
+        : "") +
       "later turns will state what remains.\n" +
       "\nGather the evidence needed to review this PR corpus:\n\n" + input.corpusText,
   );
@@ -3048,6 +3062,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     wall_clock_sec: outcome.wallClockSec,
     // #1464: the wall-clock slice held for the closing in-conversation verdict.
     verdict_reserve_sec: verdictReserveSec,
+    // #1447: bounded post-verdict trace-closure allowance. This is additive
+    // to the ordinary exploration ceiling but shares the same wall clock.
+    trace_repair_extra_requests: traceRepairExtraRequests,
     elapsed_sec: outcome.elapsedSec,
     tool_result_bytes: outcome.toolResultBytes,
     compaction_summarize: outcome.compactionSummarize,
@@ -3549,14 +3566,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // nothing for the repair round — every one of those is recorded as
         // `skipped_no_budget`.
         const wallClockLeft = budgets.wallClockSec - outcome.elapsedSec - verdictElapsedSec;
-        const roundsLeft = budgets.maxRounds - outcome.rounds;
+        const repairRequestBudget = outcome.requestsRemaining + traceRepairExtraRequests;
         const deadlineLeft = timeFn() < deadline;
         if (!instruction) {
           // A vacuous instruction is treated as a no-op probe: no loop, no
           // record — the run stays exactly as before.
         } else if (
-          outcome.requestsRemaining <= 0 ||
-          roundsLeft <= 0 ||
+          repairRequestBudget <= 0 ||
           wallClockLeft <= 0 ||
           !deadlineLeft
         ) {
@@ -3581,7 +3597,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
               budgets: {
                 ...budgets,
                 maxRounds: 1,
-                maxToolCalls: outcome.requestsRemaining,
+                maxToolCalls: repairRequestBudget,
                 wallClockSec: Math.max(0, wallClockLeft),
               },
               maxTokens: input.maxTokensPerTurn,
@@ -3705,6 +3721,35 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             input.result.executed_request_count =
               Number(input.result.executed_request_count ?? 0) +
               repair.executed.filter((call) => call.result.status === "ok").length;
+            input.result.planned_request_count =
+              Number(input.result.planned_request_count ?? 0) + repair.toolCallsIssued;
+
+            // #1447: a repair round can close deterministic execution coverage
+            // too. Recompute the original budget-stop coverage over the
+            // combined call log so a targeted repair read is credited, while
+            // any still-unread file or specialist lead remains partial.
+            if (coverageInputs !== null) {
+              const combinedOutcome: LoopOutcome = {
+                ...outcome,
+                executed: [...outcome.executed, ...repair.executed],
+                toolCallsIssued: outcome.toolCallsIssued + repair.toolCallsIssued,
+              };
+              const repairedCoverage = computePartialCoverage(combinedOutcome, coverageInputs);
+              if (repairedCoverage === null) delete input.result.partial_coverage;
+              else input.result.partial_coverage = repairedCoverage;
+            }
+
+            // Keep remaining-request telemetry honest against the effective
+            // base + repair allowance.
+            const repairMeta = input.result.tool_loop_meta;
+            if (repairMeta !== null && repairMeta !== undefined) {
+              repairMeta.requests_remaining = Math.max(
+                0,
+                Number(repairMeta.requests_remaining ?? 0) +
+                  traceRepairExtraRequests -
+                  repair.toolCallsIssued,
+              );
+            }
             // A refresh is justified only by new executed evidence — and it
             // is wire-safe only then: with no fresh tool_result event the
             // second verdict's user turn would sit directly after the
@@ -4027,7 +4072,9 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     executed_request_count: 0,
     tool_results: [],
     tool_budget_tier: maxRequests.route,
-    tool_request_budget: maxRequests.budget,
+    tool_request_budget:
+      maxRequests.budget +
+      (tier === "primary" && deps.traceGapProbe !== undefined ? TRACE_REPAIR_EXTRA_REQUESTS : 0),
     tool_budget_source: maxRequests.source,
     tool_budget_configured: maxRequests.configured,
   };
