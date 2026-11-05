@@ -16,6 +16,7 @@ import {
 } from "../src/publish/publish.js";
 import { cleanupManagedReviews, retireManagedInlineComments, resolveSupersededThreads, hideSupersededManagedReviews } from "../src/publish/cleanup.js";
 import { buildComments, prescriptionKey, prescriptionKeyDigest, FEEDBACK_AFFORDANCE, INLINE_DISCLAIMER } from "../src/publish/inline-findings.js";
+import { analysisEngineBase } from "../src/prompt/index.js";
 import { enforcementView, normalizeThread } from "../src/context/review-threads.js";
 import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
@@ -258,6 +259,27 @@ test("published body strips the analysis engine's base URL (#832)", async () => 
   await publishReview(input({ analysisEngine: "m@https://llm.internal.test/v1 (openai)" }), api, { diffText: "" });
   const body = api.sticky[0]!.body;
   assert.ok(body.includes("_Analysis engine: m (openai)_"));
+});
+
+test("published body strips a base URL that carries internal whitespace whole (#1474)", async () => {
+  const api = new MockPublishApi();
+  await publishReview(input({ analysisEngine: analysisEngineBase("m", "https://llm.internal.test/v1 x", "openai") }), api, { diffText: "" });
+  const body = api.sticky[0]!.body;
+  assert.ok(body.includes("_Analysis engine: m (openai)_"));
+  // The endpoint URL leaves the published body whole: no fragment of it
+  // survives next to the format group (#1474).
+  assert.ok(!body.includes("llm.internal.test"));
+});
+
+test("published body strips a base URL that carries a parenthesis group whole (#1474)", async () => {
+  const api = new MockPublishApi();
+  await publishReview(input({ analysisEngine: analysisEngineBase("m", "https://llm.internal.test/v1 (x)", "openai") }), api, { diffText: "" });
+  const body = api.sticky[0]!.body;
+  // The endpoint token ends at the API-format group — the group that ends
+  // the engine base — so the whole URL leaves and no fragment of it stays
+  // behind (#1474).
+  assert.ok(body.includes("_Analysis engine: m (openai)_"));
+  assert.ok(!body.includes("llm.internal.test"));
 });
 
 test("sticky publication failure returns failed status and error", async () => {

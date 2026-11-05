@@ -56,14 +56,22 @@ export const INTEGER_INPUTS = new Set([
   "ai-confidence-model-context-tokens",
 ]);
 
+/** #1493: the wire-family vocabulary every api-format input accepts — one
+ * list, shared by the config loader's enum check and the raw-environment
+ * resolution in `src/routing/tiers.ts`, so the contract path and the
+ * raw-environment path can never disagree about which values are valid wire
+ * families. Case-sensitive and exact: the loader rejects everything else,
+ * and the raw-environment check rejects the same values the same way. */
+export const API_FORMAT_VALUES: readonly string[] = Object.freeze(["openai", "anthropic"]);
+
 export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  "ai-api-format": ["openai", "anthropic"],
-  "ai-fallback-api-format": ["openai", "anthropic"],
-  "ai-primary-api-format": ["openai", "anthropic"],
-  "ai-smart-api-format": ["openai", "anthropic"],
+  "ai-api-format": API_FORMAT_VALUES,
+  "ai-fallback-api-format": API_FORMAT_VALUES,
+  "ai-primary-api-format": API_FORMAT_VALUES,
+  "ai-smart-api-format": API_FORMAT_VALUES,
   // #1073: the confidence scorer is its own lane; empty (the default) inherits
   // the primary lane's format rather than defaulting to openai.
-  "ai-confidence-api-format": ["openai", "anthropic"],
+  "ai-confidence-api-format": API_FORMAT_VALUES,
   // #1478: how the scorer resolves a transport when ai-confidence-base-url is
   // empty. An invalid value throws like every other typed input — a workflow
   // authoring bug fails loudly at startup, never silently relaxes into the

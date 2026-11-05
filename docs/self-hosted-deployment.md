@@ -199,11 +199,11 @@ defaults, env names that cannot drift from `src/controller/main.ts`).
 - The admin API's write surface is intentionally refused in this
   composition (bounded reason, no silent partial access); read-only
   operations, health, and metrics are served.
-- The execution envelope carries the forge platform but not its API base
-  URL, so a worker-driven Forgejo review cannot currently resolve the
-  forge endpoint the engine's adapter needs (`worker-main.ts` maps
-  `forgejoApiUrl: ""`). GitHub reviews are unaffected (the engine's
-  adapter defaults to `api.github.com`). Carrying the forge endpoint in
-  the #733 envelope is tracked as a follow-up; until then, deploy
-  Forgejo instances with the understanding that worker execution may
-  fail closed as `worker_error`.
+- The execution envelope carries the forge platform and its API base
+  URL (`ExecutionRequest.forgeApiUrl`, mapped to `forgejoApiUrl` in
+  `worker-main.ts`, #1433). It does not carry model configuration. The
+  worker maps the engine inputs as `inputs: {}`, so the required
+  `ai-base-url` and `ai-model` values have no route to the engine
+  (#1496). Until #1496 lands, worker execution cannot complete a model
+  review on either platform. A worker-driven review fails closed as
+  `worker_error`.
