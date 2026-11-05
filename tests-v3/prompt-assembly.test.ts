@@ -375,6 +375,23 @@ test("publicAnalysisEngine removes the endpoint token whole when the composed en
     // A model identifier carrying the same shape stays intact and the
     // endpoint leaves whole.
     [analysisEngineBase("m (x) — y", "https://api.example.com/v1", "openai"), "m (x) — y (openai)"],
+    // An endpoint ending in an annotation-shaped tail: a grammar arm ending
+    // in a bare `\)$` would let such a tail borrow the real format group's
+    // own parentheses, so every arm ends in a literal ` (openai)` cannot
+    // supply (#1474 review round 2).
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback", "openai"), "m (openai)"],
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — escalated", "openai"), "m (openai)"],
+    [analysisEngineBase("m", "https://api.example.com/v1 (a) — primary route", "openai"), "m (openai)"],
+    // The same annotation-shaped tails with a real annotation appended: the
+    // real route suffix survives and the endpoint leaves whole.
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (a) — fallback", "openai"), "fallback"),
+      "m (openai) — fallback (primary failed)",
+    ],
+    [
+      annotateAnalysisEngine(analysisEngineBase("m", "https://api.example.com/v1 (a) — escalated", "openai"), "escalated", { escalationReasons: "primary_requested" }),
+      "m (openai) — escalated (primary_requested)",
+    ],
   ];
   for (const [engine, expected] of cases) {
     assert.equal(publicAnalysisEngine(engine), expected);

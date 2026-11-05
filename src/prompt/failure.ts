@@ -63,18 +63,25 @@ const FIRST_PASS_TIER: ReadonlyMap<string, string> = new Map([["", "primary"], [
 const ANNOTATION_SEPARATOR = " — ";
 
 /** The closed grammar of the route annotations `annotateAnalysisEngine`
- * appends after the API-format group: the primary-route tag, or a
- * fallback/escalated tag whose parenthesis group carries no nesting (the
- * tier names and escalation reasons are whitespace-free, parenthesis-free
- * slugs). The published strip requires the text after a candidate format
- * group to be empty or match this whole, so a ` (` the endpoint carries of
- * its own — even one followed by ` — ` inside the endpoint path — cannot be
- * mistaken for the format boundary (#1474): the bare separator prefix was
- * ambiguous exactly when the endpoint token carried an em-dash of its own.
- * If a future annotation reason carries parentheses or whitespace, this
- * grammar must grow with it; if it drifts, the strip fails safe by removing
- * everything after the model, never leaving endpoint text behind. */
-const ROUTE_ANNOTATION = /^ — (?:primary route|(?:fallback|escalated) \([^()]*\))$/;
+ * appends after the API-format group: the primary-route tag; the fallback
+ * tag, which always ends in ` failed` before its closing paren; and the
+ * escalated tag, whose reasons are exactly the values the engine composes
+ * today (`primary_requested`, or `unknown` when unset). The published strip
+ * requires the text after a candidate format group to match this whole (or
+ * be empty), so a ` (` the endpoint carries of its own cannot be mistaken
+ * for the format boundary (#1474): the bare separator prefix was ambiguous
+ * when the endpoint path carried an em-dash, and a loose `\([^()]*\)$` arm
+ * was ambiguous too, because an endpoint ending in ` (a) — fallback` borrows
+ * the real format group's own parentheses to complete the arm. Every arm
+ * therefore ends in a literal no API-format group can supply: the format is
+ * validated to `openai`/`anthropic` at the configuration seam, which is
+ * disjoint from ` failed)`, from the closed reason set, and from
+ * `primary route` (the ` — primary route` and empty-suffix arms can never
+ * be completed at all, because the real format group still follows the
+ * endpoint-internal group). A new escalation reason in `src/engine/review.ts`
+ * must be added here; if the grammar drifts, the strip fails safe by
+ * removing everything after the model, never leaving endpoint text behind. */
+const ROUTE_ANNOTATION = /^ — (?:primary route|fallback \([^()]* failed\)|escalated \((?:primary_requested|unknown)\))$/;
 
 /** Port of `annotate_analysis_engine`: appends why this model produced the
  * review. A legacy (routing off) primary success stays unannotated. */
