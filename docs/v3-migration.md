@@ -373,12 +373,17 @@ low-budget pivot to blocker hypotheses, `tool-call-budget-exhausted` kept as
 a distinct stop reason); the contract description for `tool-max-requests`
 carries the same semantics.
 
-The behavior is pinned by the `tool-request-budget` snapshot boundary
-(#673): `tests/fixtures/parity/tool-budget/tool-budget-tiers.json` carries
-the fixture cases, the recorded snapshot pins the (route, budget) each
-resolves to, and `src/tools/budget.ts` is the v3 implementation
-(`PR_REVIEWER_V3_MODE=tool-budget`). A mismatch fails the harness, so #678
-cannot regress to a single undifferentiated request ceiling.
+While the port was in flight, the behavior was pinned by the
+`tool-request-budget` snapshot boundary (#673): its recorded fixtures pinned
+the (route, budget) each tier resolved to, and a mismatch failed the parity
+harness. That boundary is history, not a live contract — the snapshot
+fixtures and the harness were retired in #974. Today the resolution lives in
+`src/tools/budget.ts` and is pinned by the focused v3 suites:
+`tests-v3/budget.test.ts` (tier defaults, explicit values, and
+`PRIMARY_TOOL_MAX_REQUESTS`/`SMART_TOOL_MAX_REQUESTS` override precedence)
+and the harness tests in `tests-v3/tools-harness.test.ts` (the native loop's
+exhaustion-aware behavior and its distinct stop reasons), so #678 cannot
+regress to a single undifferentiated request ceiling.
 
 ### Size-scaled default and honest partial coverage (#810)
 
@@ -399,11 +404,13 @@ not exceed the tier default, the #702 provenance `source` stays
 `tool_budget_size` artifact field records the exact signal either way).
 
 The scaling is v3-only by design: the v2 resolver stayed at the flat tier
-default through #681. The snapshot fixtures cover the shared range — their
-cases carry env only (no workspace artifacts), so tier defaults, explicit
-values, and override precedence resolve identically. The scaling itself is
-pinned by v3-only tests (`tests-v3/budget.test.ts`, the harness tests in
-`tests-v3/tools-harness.test.ts`). Per #810's acceptance, the
+default through #681. During the migration, the retired `tool-request-budget`
+snapshot fixtures (#673) pinned the shared range — their cases carried env
+only (no workspace artifacts), so tier defaults, explicit values, and
+override precedence resolved identically — but that boundary is history, not
+a live contract: the harness was retired in #974. Both the shared range and
+the scaling itself are pinned today by v3-only tests (`tests-v3/budget.test.ts`,
+the harness tests in `tests-v3/tools-harness.test.ts`). Per #810's acceptance, the
 default is to be measured on `evals/corpus-human-findings.json` (3 runs per
 arm) before shipping; that measurement is part of the #681 release qualification (the scaled default only reaches consumers at the v3 release).
 
@@ -887,9 +894,9 @@ metering). The port is transport/filesystem-agnostic by design — the caller
 supplies a `requestFn` and receives artifacts to persist, matching the
 #678 routing/tool-loop modules — so the orchestrator can wire its workspace
 writer and the `gates.ts` `specialists` branch. `src/tools/harness.ts`'s `renderSpecialistLeads` seam is wired
-to the real `renderSpecialistLeadsSection` port. The migration's comparison
-boundaries were `specialist-corpus`, `specialist-payload`, `specialist-normalize`
-(`tests/fixtures/parity/specialist-*/`, `tests/parity_runners/v2_specialist_*.py`).
+to the real `renderSpecialistLeadsSection` port. The migration's retired comparison boundaries were `specialist-corpus`,
+`specialist-payload`, and `specialist-normalize`; those parity fixtures and
+runners were removed with the historical harness.
 
 ### The `enforcement-pipeline` boundary (#680)
 
@@ -898,8 +905,8 @@ composition (`apply_verdict_policy` → `apply_required_check_validation` →
 `apply_all_enforcement`, over cwd-relative artifacts exactly as
 `scripts/sections/config.sh::apply_all_enforcement_wrapper` invokes them)
 versus the v3 ports in `src/enforcement/` (`node dist/index.js
-enforcement-fixture`). Fixtures under `tests/fixtures/parity/enforcement-pipeline/`
-carry the parsed `ai-output.json` artifact plus the optional evidence,
+enforcement-fixture`). The retired parity fixture set carried the parsed
+`ai-output.json` artifact plus the optional evidence,
 tool-harness, review-thread, human-review, and classification inputs, and
 both sides emit the resulting artifact, the `completeness.json` result, the
 required-checks status, and the applied-enforcement count (canonicalized
@@ -949,9 +956,9 @@ behavior depended on `gh`/`forgejo` subprocess stubs.
 
 ### The `platform-normalization` boundary (#706)
 
-Pins the platform read seams: raw GitHub REST/GraphQL and Forgejo `/api/v1`
-responses (a route table in each fixture under
-`tests/fixtures/parity/platform-normalization/`) are served to the real v2
+Historically pinned the platform read seams: raw GitHub REST/GraphQL and
+Forgejo `/api/v1` responses from the retired route-table fixtures were served
+to the real v2
 seam — `scripts/platform_api.sh`, `forgejo_backend.py` via `_forgejo_py`,
 `gh_api_call`, and the `pr-files.json` jq projection read from
 `scripts/sections/context.sh` — through stub `gh`/`curl` binaries, and to
