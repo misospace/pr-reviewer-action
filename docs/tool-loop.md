@@ -94,22 +94,21 @@ and JSON-RPC body are never forwarded to an unconfigured origin, and the
 The ordinary exploration ceiling is tier-aware before route-specific
 overrides:
 
-| Route | Internal tier floor |
+| Route | Tier floor |
 | --- | --- |
-| primary | 24 |
-| smart | 32 |
-| escalated (smart under post-review escalation) | 40 |
+| primary | 40 |
+| smart | 45 |
+| escalated (smart under post-review escalation) | 50 |
 
-The public Action now defaults `primary-tool-max-requests` to **40**, so an
-ordinary downstream primary review gets 40 exploratory requests unless the
-operator explicitly chooses another value. Smart/escalated routes keep their
-tier-derived values unless `smart-tool-max-requests` or `tool-max-requests`
-overrides them. Hard ceiling for any ordinary route budget is 50.
+These are the default floors when the operator leaves the route-specific
+inputs empty. `primary-tool-max-requests` / `smart-tool-max-requests` can
+override their own route, while `tool-max-requests` overrides the derived
+tier budget when no route-specific value is set. The hard ceiling remains 50.
 
 When primary requirement-trace is active, its one post-verdict repair round
 also has a bounded four-request closure allowance. The published effective
-tool budget includes that allowance, so a 40-call primary review with trace
-enabled can execute at most 44 read-only tool calls.
+tool budget includes that allowance, so a default 40-call primary review with
+trace enabled can execute at most 44 read-only tool calls.
 
 When no explicit override wins, the default is further scaled by PR size
 (#810): one request per 4 changed files, one per 400 changed lines, and 2
