@@ -364,8 +364,10 @@ class ForgeClient:
         caller that treats it as complete will report present items as
         missing.
 
-        The walk otherwise ends only on an empty page, so a ``False``
-        means the forge itself said the list ended.
+        Apart from the bound the walk ends on the forge's EMPTY answer or
+        on a decoded payload that is not a list. So ``False`` means the
+        bound did not cut the walk short; it does not certify that every
+        payload seen along the way was a list page.
         """
         limit = self._page_limit(max_pages)
         items: list[Any] = []

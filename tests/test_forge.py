@@ -683,6 +683,26 @@ class TestGetPagesWalksUntilEmptyPage:
             server.shutdown()
             server.server_close()
 
+    def test_a_string_per_page_param_walks_the_same_rule(self):
+        server = self._make_paginated(
+            [
+                [{"i": 1}, {"i": 2}],
+                [{"i": 3}],
+            ]
+        )
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            # A caller that hands ``per_page`` in params as a string gets
+            # the same walk: the rule compares pages against emptiness,
+            # not against the requested size.
+            items = list(client.get_pages("/x", params={"per_page": "2"}))
+            assert items == [{"i": 1}, {"i": 2}, {"i": 3}]
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 class TestGetPagesHonorsMaxPages:
     """``max_pages`` bounds the walk. It is the SAFETY NET against a forge
@@ -719,8 +739,10 @@ class TestGetPagesHonorsMaxPages:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
 
-    def _make_pages(self, pages: list[list[dict]]) -> HTTPServer:
-        """A well-behaved stub: it answers an empty page past the end."""
+    def _make_pages(self, pages: list[object]) -> HTTPServer:
+        """A stub that answers each page with the given payload (a list,
+        or any non-list value the forge was not supposed to send) and an
+        empty page past the end."""
 
         class Handler(BaseHTTPRequestHandler):
             def handle_one_request(self):
@@ -791,6 +813,41 @@ class TestGetPagesHonorsMaxPages:
             # The walk ends on the forge's own empty answer: whole list.
             items, truncated = client.get_pages_report("/x", per_page=3)
             assert len(items) == 4
+            assert truncated is False
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_the_bound_cut_on_an_endless_forge_is_reported(self):
+        """The acceptance pairing: a forge that never answers an empty
+        page is stopped by the bound, and the report says so."""
+        server = self._make_endless([{"i": 1}, {"i": 2}, {"i": 3}])
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            items, truncated = client.get_pages_report("/x", per_page=3, max_pages=2)
+            assert len(items) == 6
+            assert truncated is True
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_non_list_payload_ends_the_walk_but_is_not_a_bound_cut(self):
+        """A payload that is not a list (an error envelope where a page
+        was expected) ends the walk without the bound ever firing."""
+        server = self._make_pages(
+            [
+                [{"i": 1}, {"i": 2}, {"i": 3}],
+                {"message": "not a list"},
+            ]
+        )
+        try:
+            client = forge.ForgeClient(
+                base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            items, truncated = client.get_pages_report("/x", per_page=3, max_pages=10)
+            assert items == [{"i": 1}, {"i": 2}, {"i": 3}]
             assert truncated is False
         finally:
             server.shutdown()

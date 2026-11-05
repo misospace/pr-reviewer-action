@@ -1182,3 +1182,53 @@ def test_github_client_uses_safe_opener_refuses_redirects(monkeypatch):
     finally:
         origin_server.shutdown()
         target_server.shutdown()
+
+def test_github_client_get_pages_delegates_the_walk_to_the_capability(monkeypatch):
+    """The script reads lists through the capability's walk, not a copy
+    of the rule: a short page does not end the walk, and the page-bound
+    safety net applies (#1487)."""
+    import threading
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    requested: list[tuple[str, str, str]] = []
+    pages = {"1": [{"i": 1}, {"i": 2}], "2": [{"i": 3}]}
+
+    class Handler(BaseHTTPRequestHandler):
+        def handle_one_request(self):
+            self.raw_requestline = self.rfile.readline()
+            if not self.raw_requestline:
+                return
+            if not self.parse_request():
+                return
+            params = dict(
+                urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query)
+            )
+            requested.append(
+                (params.get("page", ""), params.get("per_page", ""), params.get("state", ""))
+            )
+            body = pages.get(params.get("page", ""), [])
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def log_message(self, *_args):  # noqa: ANN001
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("GITHUB_API_URL", f"http://127.0.0.1:{server.server_port}")
+        client = hhf.GitHubClient(token="test-gh-token")
+        items = list(
+            client.get_pages("/repos/o/r/pulls/1/reviews", {"state": "open"})
+        )
+        # The whole list: the stub's short pages do not end the walk, the
+        # caller's params ride through, and the walk stops on the stub's
+        # own empty answer.
+        assert items == [{"i": 1}, {"i": 2}, {"i": 3}]
+        assert requested == [("1", "100", "open"), ("2", "100", "open"), ("3", "100", "open")]
+    finally:
+        server.shutdown()
+        server.server_close()
