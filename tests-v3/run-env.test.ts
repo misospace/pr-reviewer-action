@@ -231,7 +231,7 @@ test("#1020: smart-tier round and wall-clock inputs reach resolveLoopLimits from
     {
       name: "runner default: smart inputs exported empty",
       inputs: { "smart-tool-max-rounds": "", "smart-tool-loop-wall-clock-sec": "" },
-      smart: [4, 600, false], smartCap: 32, primary: [4, 600, false], primaryCap: 24,
+      smart: [4, 600, false], smartCap: 45, primary: [4, 600, false], primaryCap: 40,
     },
     {
       name: "smart inherits an explicit primary pair",
