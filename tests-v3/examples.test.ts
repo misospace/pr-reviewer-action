@@ -21,11 +21,12 @@ interface Workflow {
 function spindleInvokesNodeRunner(workflow: Workflow): boolean {
   // Shell comments inside a step command must not satisfy the guard, and
   // the match must stay inside a single command (no crossing `;`, `|`, or
-  // `&&`), so `echo dist/index.js tangled` or a commented-out runner fails.
+  // `&&`), so `echo dist/index.js tangled`, `echo node dist/index.js tangled`,
+  // or a commented-out runner fails. `node` must be the line's command word.
   const commandLines = (workflow.steps ?? [])
     .flatMap((step) => (step.command ?? "").split("\n"))
     .filter((line) => !line.trimStart().startsWith("#"));
-  return commandLines.some((line) => /\bnode\b[^|;&]*\bdist\/index\.js\b[^|;&]*\btangled\b/.test(line));
+  return commandLines.some((line) => /^\s*\bnode\b[^|;&]*\bdist\/index\.js\b[^|;&]*\btangled\b/.test(line));
 }
 
 function loadContractInputIds(): Set<string> {
