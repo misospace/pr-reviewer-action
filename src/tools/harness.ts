@@ -3055,7 +3055,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   }
   // #702: raw loop measurements for the artifact's tool_loop_telemetry object.
   input.result.tool_loop_meta = {
-    requests_remaining: outcome.requestsRemaining,
+    requests_remaining: outcome.requestsRemaining + traceRepairExtraRequests,
     required_evidence_requests_hint: outcome.requiredEvidenceRequestsHint,
     required_evidence_refusals: outcome.requiredEvidenceRefusals,
     max_rounds: outcome.maxRounds,
@@ -3742,9 +3742,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             if (repairMeta !== null && repairMeta !== undefined) {
               repairMeta.requests_remaining = Math.max(
                 0,
-                Number(repairMeta.requests_remaining ?? 0) +
-                  traceRepairExtraRequests -
-                  repair.toolCallsIssued,
+                Number(repairMeta.requests_remaining ?? 0) - repair.toolCallsIssued,
               );
             }
             // A refresh is justified only by new executed evidence — and it
