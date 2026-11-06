@@ -10,9 +10,10 @@ The harness script is not implemented yet. It is
 `tests/self_hosted_e2e_qualification.sh`, and it lands with issue #1482.
 The scenario families land one at a time (#1482, #1483, #1484, #1485).
 
-Until the harness lands, the CI job reports that the harness is absent, and
-`make self-hosted-qualification` reports the same. No qualification has run
-yet.
+Until the harness lands, a dispatched CI job fails closed: it exits
+non-zero instead of reporting a qualification that did not run. The
+`make self-hosted-qualification` target reports that the harness is
+absent. No qualification has run yet.
 
 The qualification program is issue #739. This page covers the harness and
 its run steps only. The deployment of the controller and the worker is
@@ -50,8 +51,8 @@ These rules apply to every scenario.
 - Every forge read and write travels through the configured forge
   capability. The forge capability is the module that builds each forge
   request. It keeps the credential in the request header, and it refuses
-  redirects. Never call a forge CLI such as `gh` or `gj`. Never reach a
-  remote forge API with `curl` or `wget`.
+  redirects. Never call a forge CLI such as `gh`, `gj`, `tea`, `gitea`, or
+  `forgejo`. Never reach a remote forge API with `curl` or `wget`.
 - The harness points only at a disposable Forgejo instance and at a test
   repository that the operator names. It never points at a production
   forge.

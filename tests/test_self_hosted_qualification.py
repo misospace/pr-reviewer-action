@@ -39,8 +39,18 @@ TARGET_NAME = "self-hosted-qualification"
 
 # A forge CLI call: the binary, then one of its subcommands. The shared
 # guard (tests/test_forge_cli.py) watches `gh` only, so the harness path
-# also watches `gj`, the Forgejo CLI.
-_FORGE_CLI_RE = re.compile(r"(?<![\w.-])(gh|gj)\s+([a-z][a-z-]*)\b")
+# also watches `gj`, the Forgejo CLI, and the Gitea/Forgejo CLIs whose
+# subcommand trees differ from `gh`'s (`tea`, `gitea`, `forgejo`). Those
+# trees evolve independently of `_FORGE_SUBCOMMANDS`, so for them any
+# subcommand word fails the gate: the harness routes every forge read and
+# write through the forge capability, so no foreign forge CLI invocation
+# is legitimate.
+_FORGE_CLI_RE = re.compile(r"(?<![\w.-])(gh|gj|tea|gitea|forgejo)\s+([a-z][a-z-]*)\b")
+
+# The forge CLIs whose forge-state subcommands are pinned by the shared
+# `_FORGE_SUBCOMMANDS`. A match on any other binary is flagged regardless
+# of its subcommand.
+_SUBCOMMAND_PINNED_CLIS = frozenset({"gh", "gj"})
 
 # A local, disposable forge: a loopback host or a docker-local alias. The
 # harness owns its own Forgejo instance and its token, and the forge
@@ -73,8 +83,12 @@ def _forge_cli_calls(path: Path) -> list[tuple[int, str]]:
     hits: list[tuple[int, str]] = []
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         for match in _FORGE_CLI_RE.finditer(line):
-            if match.group(2) in _FORGE_SUBCOMMANDS:
-                hits.append((number, line))
+            if (
+                match.group(1) in _SUBCOMMAND_PINNED_CLIS
+                and match.group(2) not in _FORGE_SUBCOMMANDS
+            ):
+                continue
+            hits.append((number, line))
     return hits
 
 
@@ -141,15 +155,30 @@ def test_the_qualification_job_drives_the_harness() -> None:
         step for step in _steps() if f"bash {HARNESS_PATH}" in str(step.get("run", ""))
     ]
     assert len(harness_steps) == 1, harness_steps
-    assert "steps.harness.outputs.present" in str(harness_steps[0].get("if", "")), (
-        "the harness run step must be skipped while the harness is absent"
+    assert "if" not in harness_steps[0], (
+        "the harness run step must be unconditional: the job must execute "
+        "the harness and report its pass/fail, never skip it"
+    )
+    assert _steps()[-1] == harness_steps[0], (
+        "the harness run must be the job's final step so its exit status "
+        "reports the qualification pass/fail"
     )
 
 
-def test_the_qualification_job_reports_an_absent_harness() -> None:
-    assert any(
-        "present=false" in str(step.get("run", "")) for step in _steps()
-    ), "the job must report that the harness is absent instead of failing"
+def test_the_qualification_job_fails_when_the_harness_is_absent() -> None:
+    absent_checks = [
+        step
+        for step in _steps()
+        if f"[[ ! -f {HARNESS_PATH} ]]" in str(step.get("run", ""))
+        and "exit 1" in str(step.get("run", ""))
+    ]
+    assert absent_checks, (
+        "an absent harness must fail the job: a green run must mean the "
+        "harness executed, never that it was skipped"
+    )
+    assert not any(
+        "steps.harness.outputs" in str(step.get("if", "")) for step in _steps()
+    ), "no step may be gated on an absent-harness skip"
 
 
 def test_the_qualification_job_passes_the_model_settings_to_the_harness() -> None:
@@ -223,6 +252,36 @@ def test_the_harness_script_never_calls_a_forge_cli() -> None:
     )
 
 
+def test_the_forge_cli_gate_flags_a_foreign_forge_cli(tmp_path: Path) -> None:
+    """`tea` and the other Gitea/Forgejo CLIs cannot read or write forge
+    state without failing the gate: their subcommand trees are not pinned,
+    so any subcommand word is flagged."""
+    harness = tmp_path / "harness.sh"
+    flagged = [
+        "tea issues list --repo o/r",
+        "tea pulls create --repo o/r",
+        "tea releases create --repo o/r",
+        "tea repos create --name r",
+        "tea login add --url https://forge.example.com",
+        "gitea admin user create --username bot",
+        "forgejo admin user create --username bot",
+    ]
+    for line in flagged:
+        harness.write_text(line + "\n", encoding="utf-8")
+        assert _forge_cli_calls(harness), f"must be flagged: {line}"
+
+
+def test_the_forge_cli_gate_keeps_the_pinned_cli_subcommand_set(tmp_path: Path) -> None:
+    """`gh` and `gj` stay flagged through the shared forge-state
+    subcommand set: a call whose subcommand is not forge-state is not a
+    forge read or write."""
+    harness = tmp_path / "harness.sh"
+    harness.write_text("gh help\n", encoding="utf-8")
+    assert _forge_cli_calls(harness) == []
+    harness.write_text("gh pr view 1 --repo o/r\n", encoding="utf-8")
+    assert [number for number, _ in _forge_cli_calls(harness)] == [1]
+
+
 def test_the_harness_script_never_reaches_a_remote_forge_directly() -> None:
     harness = ROOT / HARNESS_PATH
     if not harness.exists():
@@ -256,14 +315,73 @@ def test_the_runbook_states_the_capability_routing_rule() -> None:
     assert "Never call a forge CLI" in text, text
 
 
+# The complete scenario list of the runbook, one distinctive phrase per
+# scenario. The harness proves each of these paths; the assertion pins the
+# list so a scenario cannot silently drop out of the runbook.
+RUNBOOK_SCENARIOS = (
+    "A normal GitHub review through an adopted repository",
+    "A normal Forgejo review through the same job and engine boundary",
+    "A duplicate webhook event",
+    "A webhook burst that settles into one paid review of the newest head",
+    "A missed webhook event that the reconciler finds",
+    "A new head that arrives while the old review waits in the queue",
+    "A new head that arrives while the old review runs",
+    "A stale result that tries to publish",
+    "A worker that times out",
+    "A worker that crashes and loses its lease",
+    "A controller that restarts while jobs wait in the queue",
+    "A cancelled review",
+    "A publication that fails, followed by a retry with no second model call",
+    "Usage and cost accounting that counts one review across retries and restarts",
+    "A primary model failure that falls back to the fallback model",
+    "A fork pull request and a private repository, with the secret boundary intact",
+    "A publication that replaces the managed review of the same head",
+)
+
+# The settings table of the runbook, one name per row.
+RUNBOOK_SETTINGS = (
+    "SELF_HOSTED_QUALIFICATION",
+    "AI_BASE_URL",
+    "AI_MODEL",
+    "AI_API_KEY",
+    "PR_REVIEWER_GITHUB_APP_ID",
+    "PR_REVIEWER_GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_API_URL",
+    "FORGEJO_TOKEN",
+)
+
+
+def test_the_runbook_lists_the_complete_scenario_set() -> None:
+    # The prose wraps across lines, so the match runs on whitespace-
+    # normalized text.
+    text = re.sub(r"\s+", " ", RUNBOOK.read_text(encoding="utf-8"))
+    missing = [scenario for scenario in RUNBOOK_SCENARIOS if scenario not in text]
+    assert not missing, (
+        "the runbook must list the complete qualification scenario set:\n"
+        + "\n".join(f"  missing: {scenario}" for scenario in missing)
+    )
+
+
+def test_the_runbook_documents_the_complete_settings_table() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    parts = text.split("## Settings the harness reads", 1)
+    assert len(parts) == 2, "the settings section must stay in the runbook"
+    table = parts[1].split("##", 1)[0]
+    missing = [name for name in RUNBOOK_SETTINGS if f"`{name}`" not in table]
+    assert not missing, (
+        "the runbook must document every setting the harness reads:\n"
+        + "\n".join(f"  missing: {name}" for name in missing)
+    )
+
+
 def test_the_deployment_doc_points_at_the_runbook() -> None:
     text = DEPLOYMENT_DOC.read_text(encoding="utf-8")
     assert "self-hosted-qualification.md" in text, (
         "the deployment runbook must point at the qualification runbook"
     )
-    assert "is issue #739;" not in text, (
-        "the deployment doc must not reserve the qualification as pending "
-        "work that has neither a harness nor run steps"
+    assert "#739" not in text, (
+        "the deployment doc must point at the qualification runbook instead "
+        "of reserving the qualification as pending work under #739"
     )
     assert "no fresh-cluster qualification has run" in text, (
         "the deployment doc must state that no qualification has run yet"

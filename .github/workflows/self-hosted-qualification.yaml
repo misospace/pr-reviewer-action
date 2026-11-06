@@ -12,9 +12,9 @@ name: Self-hosted qualification
 # The checkout pins the default branch. The dispatched branch can hold
 # unreviewed code, and this job hands that code a credential.
 #
-# The harness script lands with #1482. Until it exists, the job reports
-# that the harness is absent and skips the run step. The job never fails
-# for an absent harness.
+# The harness script lands with #1482. Until it exists, the job fails
+# closed: it never reports a qualification that did not run. A green run
+# must mean the harness executed and every scenario passed.
 on:
   workflow_dispatch:
     inputs:
@@ -49,21 +49,20 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - name: Report the harness state
-        id: harness
+      # The harness script lands with #1482. Until it exists the job fails
+      # here: a missing harness must fail loudly, never go green without a
+      # qualification pass/fail to report.
+      - name: Require the harness script
         run: |
           set -euo pipefail
-          if [[ -f tests/self_hosted_e2e_qualification.sh ]]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [[ ! -f tests/self_hosted_e2e_qualification.sh ]]; then
+            echo "::error::The self-hosted qualification harness (tests/self_hosted_e2e_qualification.sh) is absent. It lands with #1482. The job fails instead of reporting a qualification that did not run."
+            exit 1
           fi
-          echo "present=false" >> "$GITHUB_OUTPUT"
-          echo "::notice::The self-hosted qualification harness (tests/self_hosted_e2e_qualification.sh) is not implemented yet. It lands with #1482. The job skips the harness run until then."
 
       # The harness drives the built v3 runtime bundle. dist/ is not
       # committed, so the job builds it before the harness runs.
       - name: Build the v3 runtime bundle
-        if: steps.harness.outputs.present == 'true'
         run: |
           npm ci
           npm run build
@@ -72,7 +71,6 @@ jobs:
       # send the run into a model call that fails later, with no clear
       # cause.
       - name: Require the model credential
-        if: steps.harness.outputs.present == 'true'
         env:
           AI_API_KEY: ${{ secrets.SELF_HOSTED_AI_API_KEY }}
         run: |
@@ -84,9 +82,10 @@ jobs:
 
       # The harness reads every forge credential and every model setting
       # from the environment. The credential rides only in the header of the
-      # forge capability, never in an argument and never in a URL.
+      # forge capability, never in an argument and never in a URL. The run
+      # is the final step: its exit status reports the qualification
+      # pass/fail.
       - name: Run the self-hosted qualification harness
-        if: steps.harness.outputs.present == 'true'
         env:
           SELF_HOSTED_QUALIFICATION: "true"
           AI_BASE_URL: ${{ inputs.ai-base-url }}

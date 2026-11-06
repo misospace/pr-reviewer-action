@@ -195,18 +195,19 @@ defaults, env names that cannot drift from `src/controller/main.ts`).
 The `self-hosted-qualification` job of
 `.github/workflows/self-hosted-qualification.yaml` runs the self-hosted
 qualification harness. The job runs on a manual dispatch only. It never
-gates a merge. The harness script lands with #1482, and the job reports
-that the harness is absent until then. Its run steps are in
+gates a merge. The harness script lands with #1482; until then a
+dispatched job fails closed instead of reporting a qualification that did
+not run. Its run steps are in
 [Self-hosted qualification](self-hosted-qualification.md).
 
 ## Known limits
 
-- The end-to-end fresh-cluster install qualification is part of issue #739.
-  The harness script lands with #1482. The CI job runs it on demand once it
-  lands, and the run steps are in
+- The end-to-end fresh-cluster install qualification has not run yet. The
+  harness script lands with #1482; the CI job executes it on demand and
+  reports its pass/fail, and the run steps are in
   [Self-hosted qualification](self-hosted-qualification.md). The scenario
-  families land one at a time, so no fresh-cluster qualification has run
-  yet. This chart is CI-render-validated but not yet cluster-tested.
+  families land one at a time, so no fresh-cluster qualification has run.
+  This chart is CI-render-validated but not yet cluster-tested.
 - The admin API's write surface is intentionally refused in this
   composition (bounded reason, no silent partial access); read-only
   operations, health, and metrics are served.
