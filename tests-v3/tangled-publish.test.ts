@@ -927,7 +927,7 @@ test("#588: an unknown current head fails closed (no record written)", async () 
   assert.equal(result.status, "failed");
   assert.equal(
     result.error,
-    "Could not determine the current head of the pull request: Tangled has no trustworthy current-head source yet: the pull record exposes no head commit, and the round patch's declared head SHA is forgeable advisory metadata. Refusing to publish a potentially stale review.",
+    "Could not determine the current head of the pull request: Tangled current head unavailable: the knot patch-record read (org.tangled.review.patch) returned no trustworthy head. Refusing to publish a potentially stale review.",
     "the unknown head fails the #451 publication-boundary re-check closed, and says why",
   );
   assert.equal(calls.created.length, 0);

@@ -115,7 +115,7 @@ export class TangledPublishApi implements PublishPlatformApi {
    * publication-boundary re-check can never be satisfied until a
    * trustworthy current-head source exists, so the publish step says so
    * instead of the generic "could not re-fetch" wording. */
-  readonly currentHeadUnavailableReason = "Tangled has no trustworthy current-head source yet: the pull record exposes no head commit, and the round patch's declared head SHA is forgeable advisory metadata";
+  readonly currentHeadUnavailableReason = "Tangled current head unavailable: the knot patch-record read (org.tangled.review.patch) returned no trustworthy head";
 
   private readonly context: TangledContext;
   private readonly atproto: TangledAtprotoClient;
@@ -156,17 +156,15 @@ export class TangledPublishApi implements PublishPlatformApi {
    * reviewed-head metadata (`buildRecord`), which is correct, but it is
    * never the current head.
    *
-   * No trustworthy current-head source exists on Tangled yet:
-   * `src/platform/tangled-bobbin.ts` documents that the pull record and the
-   * read XRPC outputs (`getPull`/`listPulls`) expose NO head commit — it
-   * lives only inside a round's gzipped patch blob — and
+   * The head comes only from an injected fresh reader (#1165:
+   * `src/platform/tangled-head.ts` reads the knot's
+   * `org.tangled.review.patch` records — the trusted source). The pull
+   * record / `getPull`/`listPulls` expose NO head commit, and
    * `src/platform/tangled-diff.ts` marks `declaredHeadSha` as ADVISORY,
-   * forgeable metadata decoded from untrusted patch content that must never
-   * be an authorization or exact-head input. So the head comes only from an
-   * injected fresh reader, and an absent reader (or a failed, empty, or
-   * non-string read) yields `null`: the caller then refuses to publish
-   * (fail closed) rather than publishing a possibly stale review. The
-   * trustworthy current-head read is tracked in #1165.
+   * forgeable metadata that must never be an exact-head input. An absent
+   * reader (or a failed, empty, or non-string read) yields `null`: the
+   * caller then refuses to publish (fail closed) rather than publishing
+   * a possibly stale review.
    */
   async getHeadSha(): Promise<string | null> {
     if (this.currentHeadSha === undefined) return null;
