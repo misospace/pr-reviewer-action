@@ -390,6 +390,48 @@ test("#1517 calibration: comparative constructions describe code, they do not cl
   assert.equal(applyNegativeEvidence([realClaim], [gofmt]).demoted, 1);
 });
 
+test("#1517 calibration: a bare schema mention is not a validation-failure claim (dispatch#82, home-ops#5853)", () => {
+  // The two remaining calibration false-demotions were bare `schema`
+  // mentions: "Schema migration — requires a Prisma migration" is a
+  // coverage concern (prisma validate is clean on exactly that defect) and
+  // "$schema is missing" is a naming/presence concern (the file parses
+  // clean at that head). Only compound failure states and explicit
+  // validation-failure phrasings match now.
+  const prisma = broadRule({ provider: "prisma-validate", domain: "schema", identity: "prisma-validate" });
+  const kubeconform = broadRule({ provider: "kubeconform", domain: "schema", identity: "kubeconform" });
+  const migration = "Schema migration — Adding notes field to 3 models requires a Prisma migration. Ensure migration is planned/deployed with this change.";
+  const missing = "Return the mult-doc break / revert the yaml server removal / revert removing the yaml anchor / $schema is missing, this happened previously as well / This didn't part properly and is no longer structured in a human readable format";
+  assert.equal(negativeEvidenceClaimMatches(migration, prisma), false);
+  assert.equal(negativeEvidenceClaimMatches(missing, kubeconform), false);
+  const migrationFinding = finding({ category: "bug", file: "prisma/schema.prisma", message: migration });
+  const outcome = applyNegativeEvidence([migrationFinding], [prisma]);
+  assert.equal(outcome.demoted, 0);
+  assert.deepEqual(outcome.decisions, []);
+  assert.equal(migrationFinding.severity, "major");
+  const missingFinding = finding({ category: "bug", file: "kubernetes/apps/base/llm/openclaw/externalsecret.yaml", message: missing });
+  assert.equal(applyNegativeEvidence([missingFinding], [kubeconform]).demoted, 0);
+  assert.equal(missingFinding.severity, "major");
+  // Genuine validation failures still match — and still demote.
+  for (const genuine of [
+    "fails schema validation",
+    "invalid YAML",
+    "invalid config",
+    "invalid schema",
+    "this configuration is schema-invalid",
+    "schema violation in the metadata block",
+    "schema errors on the labels block",
+    "validation error at line 12",
+    "manifest is not valid",
+    "malformed config: the retry block is unparsable",
+  ]) {
+    assert.equal(negativeEvidenceClaimMatches(genuine, kubeconform), true, genuine);
+  }
+  // An explicit configured validator identity still matches.
+  assert.equal(negativeEvidenceClaimMatches("kubeconform would reject this manifest", kubeconform), true);
+  const genuineFinding = finding({ category: "bug", file: "kubernetes/apps/base/llm/openclaw/externalsecret.yaml", message: "fails schema validation" });
+  assert.equal(applyNegativeEvidence([genuineFinding], [kubeconform]).demoted, 1);
+});
+
 test("#1517 apply: severity ladder and deterministic findings", () => {
   const rules = [formatterRule()];
   const minor = finding({ severity: "minor", message: "Indentation is off" });

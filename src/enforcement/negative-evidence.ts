@@ -18,7 +18,9 @@
  *   — is not a claim of violating that tool and is never demoted; a
  *   formatter cue inside a comparative construction ("rather than
  *   whitespace", "isn't treated as indented", courier#108) describes the
- *   code rather than claiming a violation; and a generic identity token
+ *   code rather than claiming a violation; a bare `schema` mention is not a
+ *   validation-failure claim ("Schema migration", "$schema is missing" —
+ *   dispatch#82 / home-ops#5853); and a generic identity token
  *   ("the" word-boundedly matched 71/74 real corpus findings) is refused at
  *   parse time and re-refused at the persisted-rule gate.
  * - `blocker`-severity findings are NEVER contradicted by negative evidence
@@ -177,9 +179,23 @@ function isBoundedStringArray(value: unknown, max: number, maxChars: number): va
 const FORMATTER_CLAIM_RE =
   /\b(?:whitespace|indent(?:ation|s|ed|ing)?|spacing|trailing[ -](?:space|whitespace|tab)s?|formatting|formatted|format[ -]?(?:issue|problem|violation|error)|line[ -]length|code[ -]style|style[ -](?:issue|problem|violation|error))\b/i;
 
-/** A schema/config-validation failure claim (schema domain). */
+/**
+ * A schema/config-validation FAILURE claim (schema domain). A bare
+ * `schema` mention is deliberately NOT a claim: "Schema migration —
+ * requires a Prisma migration" (dispatch#82) is a coverage concern and
+ * "$schema is missing" (home-ops#5853) is a naming/presence concern — the
+ * 2026-11-06 calibration demoted both real major findings on the bare
+ * word. Only compound failure states ("schema-invalid", "invalid schema",
+ * "schema violation/error/failure/mismatch/conflict", "schema fails") and
+ * explicit validation-failure phrasings ("fails schema validation",
+ * "validation error", "does not conform", "not valid", "malformed
+ * config") match — or a claim naming the configured validator/rule
+ * identity. Near-compound phrasings with linker words ("the schema is
+ * invalid") stay unmatched: the fail-safe direction leaves a real claim
+ * blocking, it never wrongly demotes.
+ */
 const SCHEMA_CLAIM_RE =
-  /\b(?:schema|does[ -]not[ -]conform|invalid[ -]?(?:config|configuration|syntax|hcl|yaml|json)|fails?[ -]?(?:schema[ -]?)?validation|validation[ -]?(?:error|failure|fail)|malformed[ -]?(?:config|configuration)|not[ -]valid)\b/i;
+  /\b(?:schema[ -]?(?:invalid\w*|violations?|errors?|fail(?:s|ed|ing|ure|ures)?|mismatch\w*|nonconform\w*|non-conform\w*|conflict\w*)|invalid[ -]?(?:config|configuration|syntax|hcl|yaml|json|schema)|does[ -]not[ -]conform|fails?[ -]?(?:schema[ -]?)?validation|validation[ -]?(?:error|failure|fail)|malformed[ -]?(?:config|configuration)|not[ -]valid)\b/i;
 
 /**
  * #1517 calibration hardening (courier#108 shape): a cue word used in a
