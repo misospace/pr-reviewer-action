@@ -4768,6 +4768,295 @@ test("#1044: a model-forged requirement_trace_repair key is stripped when the fe
   }
 });
 
+// ── #1504: the standalone trace repair is a context-rich bounded fallback ──
+
+/** A plain-text chat.completion body (the shape the native loop's scripted
+ * turns return over the mock wire). */
+function openAiText(content: string): Record<string, unknown> {
+  return { id: "c1", object: "chat.completion", model: "primary-m", choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } };
+}
+
+/** A single-tool-call chat.completion body. */
+function openAiToolCall(id: string, name: string, args: string): Record<string, unknown> {
+  return { id: "c2", object: "chat.completion", model: "primary-m", choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: [{ id, type: "function", function: { name, arguments: args } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } };
+}
+
+/** The requirement id the requirement-trace fragment rendered for its
+ * `- req-… (normative, …): <text>` line containing `marker` — the shape the
+ * native-loop planning turn carries (the JSON-escaped body keeps each
+ * fragment line backslash-free). */
+function traceFragmentId(requestBody: string, marker: string): string {
+  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(String.raw`req-([0-9a-f]{12}) \([^)]*\): [^\\]*` + escaped).exec(requestBody);
+  assert.ok(match, `no trace-fragment id rendered for marker ${JSON.stringify(marker)}`);
+  return `req-${match[1]}`;
+}
+
+test("#1504: a fallback-authored review repairs on the fallback lane and never retries the terminal primary", async () => {
+  // The #1513 repro: the primary goes terminal (MiniMax HTTP 429), the
+  // fallback produces the authoritative approve-with-missing-row review, and
+  // the repair must ride the FALLBACK profile — the primary endpoint must
+  // receive no repair request after its terminal failure.
+  const primaryBodies: string[] = [];
+  const primaryServer = await startMockServer((_req, body, res) => {
+    primaryBodies.push(String(body));
+    res.statusCode = 429;
+    res.end('{"error":{"message":"rate limited"}}');
+  });
+  let fallbackReviewRequests = 0;
+  let fallbackRepairBodies: string[] = [];
+  const fallbackServer = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    const text = String(body);
+    if (text.includes("Requirements to trace:")) {
+      fallbackRepairBodies.push(text);
+      const reqId = /req-[0-9a-f]{12}/.exec(text)?.[0] ?? "";
+      res.end(verdictBody({
+        requirement_coverage: [{
+          requirement_id: reqId,
+          disposition: "met",
+          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
+          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
+          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
+        }],
+      }));
+      return;
+    }
+    fallbackReviewRequests += 1;
+    // The fallback's authoritative review: approve but with NO trace claims.
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    mkdirSync(join(runDir, "tests"), { recursive: true });
+    writeFileSync(
+      join(runDir, "src", "context-resolution.ts"),
+      [
+        "export function resolveContext(ctx, record) {",
+        "  if (record.sourceSha !== ctx.sourceSha) {",
+        "    throw new Error('source sha mismatch');",
+        "  }",
+        "  return record;",
+        "}",
+      ].join("\n"),
+    );
+    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "ai-api-format": "openai",
+        "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ci-status-check": "false", "requirement-trace": "true", "deep-review": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      sleep: async () => {},
+      quiet: true,
+    });
+
+    assert.equal(result.outputs.verdict, "approve");
+    // Route ownership: every request the primary endpoint saw was a review
+    // attempt — none carried the repair contract.
+    assert.ok(primaryBodies.length >= 1, "the primary was dialed for the review");
+    assert.ok(
+      primaryBodies.every((body) => !body.includes("Requirements to trace:")),
+      "the terminal primary endpoint must receive no repair request",
+    );
+    // The fallback owned both the review and its repair.
+    assert.equal(fallbackReviewRequests, 1);
+    assert.equal(fallbackRepairBodies.length, 1, "exactly one bounded repair pass, on the fallback lane");
+    // The fallback repair sees the PR body (the authored context) — here the
+    // platform body "Closes #824.\n\nResolve review context from the right identity.".
+    assert.match(fallbackRepairBodies[0]!, /Resolve review context from the right identity/);
+    assert.match(fallbackRepairBodies[0]!, /navigation hints/);
+
+    // Telemetry: the repair route is the fallback lane, with the invocation
+    // reason recorded.
+    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
+      status: string; claims: number; route?: string; invocation_reason?: string; serialization_retry?: boolean;
+    };
+    assert.equal(repairRecord.status, "ok");
+    assert.equal(repairRecord.claims, 1);
+    assert.equal(repairRecord.route, "fallback");
+    assert.equal(repairRecord.invocation_reason, "no_native_loop_repair");
+    assert.equal(repairRecord.serialization_retry, false);
+    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
+      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[]; route?: string; invocation_reason?: string };
+    };
+    assert.equal(persisted.requirement_trace_repair?.attempted, true);
+    assert.equal(persisted.requirement_trace_repair?.outcome, "merged");
+    assert.equal(persisted.requirement_trace_repair?.route, "fallback");
+    assert.equal(persisted.requirement_trace_repair?.invocation_reason, "no_native_loop_repair");
+    assert.deepEqual(persisted.requirement_trace_repair?.missing_ids, []);
+
+    // The merged trace validates: the repair filled the row the fallback's
+    // own review omitted.
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ disposition: string; notes: string[] }>; incomplete: boolean;
+    };
+    assert.equal(trace.rows.length, 1);
+    assert.equal(trace.rows[0]!.disposition, "met");
+    assert.equal(trace.incomplete, false);
+    assert.notEqual(result.outputs.requiredChecks, "incomplete");
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#1504: a successful native-loop trace repair suppresses the standalone pass; the leftover row fails closed", async () => {
+  // The loop's trace-only repair merged a claim for the FIRST requirement;
+  // the second requirement's row is still unresolved. The standalone pass
+  // must NOT fire for it (no second repair model), the row fails closed, and
+  // #1492 still withholds the APPROVE.
+  const unexpected: string[] = [];
+  let toolTurn = 0;
+  let plainTurn = 0;
+  let repairMarkerRequests = 0;
+  let idFirst = "";
+  let idSecond = "";
+  const server = await startMockServer((_req, body, res) => {
+    const text = String(body);
+    if (text.includes("Requirements to trace:")) repairMarkerRequests += 1;
+    const request = JSON.parse(text) as { tools?: unknown[]; messages?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      // Native-loop planning/repair rounds carry tool declarations.
+      const scripted = [
+        openAiToolCall("c1", "read_file", '{"path":"README.md"}'),
+        openAiText("evidence gathered"),
+        // The repair round rides the enforced evidence reserve: only a call
+        // that advances an outstanding trace slot executes. A test-path read
+        // credits the first row's unmet test slot without vocabulary.
+        openAiToolCall("c2", "read_file", '{"path":"tests/context-resolution.test.ts"}'),
+        openAiText("repair round done"),
+      ];
+      const response = scripted[toolTurn];
+      toolTurn += 1;
+      if (response === undefined) {
+        unexpected.push(text.slice(0, 200));
+        res.statusCode = 500;
+        res.end('{"error":"script exhausted (tools)"}');
+        return;
+      }
+      // Extract the two ledger ids from the FIRST planning turn's trace
+      // fragment (the corpus carries the ids in the `- req-… (normative, …):`
+      // fragment shape on the native-loop planning turn).
+      if (toolTurn === 1) {
+        idFirst = traceFragmentId(text, "repository identity plus the source SHA");
+        idSecond = traceFragmentId(text, "publish timestamp against the gate timestamp");
+      }
+      res.end(JSON.stringify(response));
+      return;
+    }
+    // Tool-less turns: the in-conversation verdict, then the trace-only
+    // repair turn.
+    const scriptedPlain = [
+      openAiText(JSON.stringify(baseVerdict())),
+      openAiText("```json\n" + JSON.stringify({
+        requirement_coverage: [{
+          requirement_id: idFirst,
+          disposition: "met",
+          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
+          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
+          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
+        }],
+      }) + "\n```"),
+    ];
+    const response = scriptedPlain[plainTurn];
+    plainTurn += 1;
+    if (response === undefined) {
+      unexpected.push(text.slice(0, 200));
+      res.statusCode = 500;
+      res.end('{"error":"script exhausted (plain)"}');
+      return;
+    }
+    res.end(JSON.stringify(response));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    mkdirSync(join(runDir, "tests"), { recursive: true });
+    writeFileSync(
+      join(runDir, "src", "context-resolution.ts"),
+      [
+        "export function resolveContext(ctx, record) {",
+        "  if (record.sourceSha !== ctx.sourceSha) {",
+        "    throw new Error('source sha mismatch');",
+        "  }",
+        "  return record;",
+        "}",
+      ].join("\n"),
+    );
+    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "k",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop",
+        "tool-max-requests": "8", "deep-review": "false",
+        "verdict-policy": "model", "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "5",
+        "ci-status-check": "false", "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: twoRequirementTracePlatform(),
+      persistArtifacts: true,
+      sleep: async () => {},
+      quiet: true,
+    });
+
+    assert.equal(unexpected.length, 0, `unscripted model requests: ${JSON.stringify(unexpected)}`);
+    assert.ok(idFirst && idSecond, "both ledger ids extracted from the planning corpus");
+    // The loop's trace-only repair merged exactly one claim (the first id).
+    const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as {
+      trace_repair_continuation?: { outcome?: string; claims_merged?: number; trace_claims_merged?: boolean; unresolved_ids?: string[] };
+    };
+    assert.equal(harness.trace_repair_continuation?.outcome, "continued");
+    assert.equal(harness.trace_repair_continuation?.claims_merged, 1);
+    assert.equal(harness.trace_repair_continuation?.trace_claims_merged, true);
+    // Suppression: the standalone pass never issued a request.
+    assert.equal(repairMarkerRequests, 0, "the standalone repair pass must not run after a merged native-loop repair");
+    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
+      requirement_trace_repair?: { attempted: boolean; outcome: string; route?: string; invocation_reason?: string; claims: number; missing_ids: string[] };
+    };
+    assert.equal(persisted.requirement_trace_repair?.attempted, false);
+    assert.equal(persisted.requirement_trace_repair?.outcome, "suppressed_native_loop");
+    assert.equal(persisted.requirement_trace_repair?.route, "primary");
+    assert.equal(persisted.requirement_trace_repair?.invocation_reason, "native_loop_repair_merged_claims");
+    assert.deepEqual(persisted.requirement_trace_repair?.missing_ids, [idSecond]);
+
+    // The leftover row fails closed: the trace is incomplete and #1492
+    // withholds the APPROVE.
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ requirement_id: string; disposition: string; notes: string[] }>; incomplete: boolean;
+    };
+    assert.equal(trace.incomplete, true);
+    const filled = trace.rows.find((row) => row.requirement_id === idFirst);
+    const leftover = trace.rows.find((row) => row.requirement_id === idSecond);
+    assert.equal(filled?.disposition, "met");
+    assert.equal(leftover?.disposition, "unverifiable");
+    assert.ok(leftover?.notes.includes("not-traced-by-reviewer"));
+    assert.ok(!trace.rows.some((row) => row.notes.includes("trace-repair-ran-no-claims")), "the suppressed pass must not be reported as one that ran");
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("#899: a native loop whose harness artifact is unreadable records partial coverage, never complete", () => {
   assert.equal(resolvePartialCoverage(null, true, true)?.stop_reason, "harness-unreadable");
   assert.equal(resolvePartialCoverage(null, false, true), undefined);
