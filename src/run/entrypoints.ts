@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
@@ -409,23 +409,39 @@ function confidenceTelemetryFromRunDir(env: NodeJS.ProcessEnv): ConfidenceTeleme
 /** #1520: the reviewed diff the publish step anchors inline findings against,
  * read from the run dir's own `pr.diff` artifact — the exact bytes the engine
  * reviewed (redacted, complete; `review.ts` writes it before any finding
- * exists). The publish boundary reads its other run-dir artifacts the same
- * way (`review-coverage.json`, `confidence-score.json`), and for the same
- * reason: a FRESH forge read of the CURRENT head races a push, and the #451
- * publication-boundary head re-check runs inside `publishReview` — so the
- * anchor map must be built from the revision the review actually covered,
- * never from whatever the forge serves at publish time.
+ * exists). The publish boundary takes its other run-dir artifacts
+ * (`review-coverage.json`, `confidence-score.json`) from the same source and
+ * for the same reason: a FRESH forge read of the CURRENT head races a push,
+ * and the #451 publication-boundary head re-check runs inside
+ * `publishReview` — so the anchor map must be built from the revision the
+ * review actually covered, never from whatever the forge serves at publish
+ * time.
  *
  * `undefined` means "no reviewed diff available" (no run dir, or a missing/
  * unreadable artifact) and the caller falls back to its historical
  * per-platform source. A present-but-empty file IS the reviewed diff (an
- * empty anchor map — nothing can anchor) and is returned as "". */
+ * empty anchor map — nothing can anchor) and is returned as "".
+ *
+ * The artifact is opened once with no-follow semantics (the same regular-file
+ * guarantee as the other security-sensitive reads in `change-anchors.ts` /
+ * `mirror.ts`): a symlinked `pr.diff` is refused, never followed, and a run
+ * dir containing a NUL byte fails closed — both are "no reviewed diff
+ * available" (fallback), never a read through the link. */
 function reviewedDiffFromRunDir(runDir: string | undefined): string | undefined {
   if (runDir === undefined) return undefined;
+  let fd: number;
   try {
-    return readFileSync(join(runDir, "pr.diff"), "utf8");
+    fd = openSync(join(runDir, "pr.diff"), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   } catch {
     return undefined;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return undefined;
+    return readFileSync(fd, "utf8");
+  } catch {
+    return undefined;
+  } finally {
+    closeSync(fd);
   }
 }
 

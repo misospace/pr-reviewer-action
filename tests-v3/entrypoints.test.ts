@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
@@ -702,6 +702,75 @@ test("#1520: the forgejo publish seam's diff provider prefers the run-dir review
     // The run-dir read hits, so the fresh forge read (a network call) is
     // never reached.
     assert.equal(await seam.diffProvider(), ANCHORED_DIFF);
+  });
+});
+
+// #1520 edge-case paths (the AI review's obligation-2): the run-dir `pr.diff`
+// read must fail CLOSED on hostile or malformed path state — a NUL byte in
+// the run-dir path, a symlink planted at the artifact coordinate, a
+// directory at that coordinate — never crash the publish step and never
+// follow a link out of the (trusted, private) run dir.
+
+test("#1520: a NUL byte in the run-dir path fails closed to the historical fallback", async () => {
+  // Every fs call rejects paths containing NUL; the read must be "no
+  // reviewed diff available", not a thrown ERR_INVALID_ARG_VALUE escaping
+  // the publish step.
+  const nullDir = "/run/pr-7\x00";
+  {
+    // GitHub: the fallback is "" and the (never-existing here) fresh read
+    // stays untouched; the review still publishes body-only.
+    const input = publishInputFromEnv(inlineFindingsEnv(), "github");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const outcome = await publishWithOutcome(input as never, { api, platform: "github", diffProvider: async () => "" } as never, nullDir);
+    assert.equal(outcome.status, "published");
+    assert.equal(api.submitted.length, 0);
+  }
+  // Forgejo: the historical fresh-read fallback IS consulted and anchors.
+  const input = publishInputFromEnv(inlineFindingsEnv(), "forgejo");
+  const api = new MinimalPublishApi("a".repeat(40));
+  const seam = { api, platform: "forgejo", diffProvider: async (): Promise<string> => ANCHORED_DIFF };
+  const outcome = await publishWithOutcome(input as never, seam as never, nullDir);
+  assert.equal(outcome.status, "published");
+  const comments = api.submitted[0]!.comments ?? [];
+  assert.equal(comments.length, 1);
+  assert.equal(typeof (comments[0] as { new_position?: unknown }).new_position, "number");
+});
+
+test("#1520: a symlink at the pr.diff coordinate is refused, never followed", async () => {
+  // Same no-follow guarantee as every other security-sensitive artifact
+  // read in this repo (change-anchors head reads, mirror bookkeeping,
+  // controller publication): a link planted at the artifact coordinate is
+  // unproven content and falls back; its target bytes NEVER become the
+  // anchor map.
+  await withRunDirAsync(async (dir) => {
+    const targetDir = mkdtempSync(join(tmpdir(), "v3-publish-entry-outside-"));
+    try {
+      const target = join(targetDir, "reviewed.diff");
+      writeFileSync(target, ANCHORED_DIFF);
+      symlinkSync(target, join(dir, "pr.diff"));
+      const input = publishInputFromEnv(inlineFindingsEnv(), "github");
+      const api = new MinimalPublishApi("a".repeat(40));
+      const outcome = await publishWithOutcome(input as never, { api, platform: "github", diffProvider: async () => "" } as never, dir);
+      assert.equal(outcome.status, "published");
+      // The link target was refused, so the anchor map is empty and nothing
+      // anchors — the same outcome as "no reviewed diff", never the target.
+      assert.equal(api.submitted.length, 0);
+    } finally {
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("#1520: a directory at the pr.diff coordinate falls back like a missing artifact", async () => {
+  // Non-regular files are not the reviewed-diff artifact; the read must
+  // resolve to "unavailable" (fallback), never an EISDIR crash.
+  await withRunDirAsync(async (dir) => {
+    mkdirSync(join(dir, "pr.diff"));
+    const input = publishInputFromEnv(inlineFindingsEnv(), "github");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const outcome = await publishWithOutcome(input as never, { api, platform: "github", diffProvider: async () => "" } as never, dir);
+    assert.equal(outcome.status, "published");
+    assert.equal(api.submitted.length, 0);
   });
 });
 
