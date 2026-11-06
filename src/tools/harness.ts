@@ -65,7 +65,7 @@ import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import { extractApprovalPrerequisites, mustCheckObligationsEnabled, obligationAdmissionTokens, anchorAdmissionTokens, type ReviewObligationSource } from "../enforcement/review-obligations.js";
 import { resolveDerivedObligations, type DerivedObligationRow } from "../enforcement/derived-obligations.js";
-import { readTracePlan, tracePlanSection, traceAdmissionTokens, TRACE_PLAN_ARTIFACT, TRACE_PLAN_CANDIDATES_ARTIFACT, TRACE_PLAN_VERSION, TRACE_EVIDENCE_TOOLS, type TracePlanRow } from "../requirements/trace-plan.js";
+import { readTracePlan, tracePlanSection, traceAdmissionTokens, parseTracePlanRow, TRACE_PLAN_ARTIFACT, TRACE_PLAN_CANDIDATES_ARTIFACT, TRACE_PLAN_VERSION, TRACE_EVIDENCE_TOOLS, type TracePlanRow } from "../requirements/trace-plan.js";
 import { authorIntentSection } from "../context/author-intent.js";
 import {
   DEPENDENCY_EVIDENCE_OBLIGATIONS,
@@ -1291,22 +1291,25 @@ export function computeRequiredEvidenceReservation(unresolvedCount: number, maxR
  *
  * The rows come from the harness-authored candidates artifact — the rows the
  * planner was actually SHOWN — so the reservation guards exactly the
- * requirements the model saw. The parse is defensive: malformed JSON, a
- * wrong version, an artifact that was not injected, a non-array row list, or
- * a non-conforming row contributes NOTHING (never a throw, never a partial
- * trust of a half-read artifact).
+ * requirements the model saw. The parse is defensive (the plan module's own
+ * row parser, so the artifact can never be read more leniently than it was
+ * written): malformed JSON, a wrong version, an artifact that was not
+ * injected, a non-array row list, or a non-conforming row contributes
+ * NOTHING (never a throw, never a partial trust of a half-read artifact).
  *
  * Only a CODE-VERIFIABLE row becomes an admission row: the evidence that
- * gates a trusted approval is the enforcement location plus the matching
- * regression test, and a documentation-only row must never hold a reserved
- * request. A row whose text names nothing targetable (no admission
- * vocabulary) contributes neither an admission row nor a reservation — a row
- * with no vocabulary must never gate an admission window (the same rule the
- * derived rows follow).
+ * gates a trusted approval lives in the repository, and a documentation-only
+ * row must never hold a reserved request. A row whose text names nothing
+ * targetable (no admission vocabulary) contributes neither an admission row
+ * nor a reservation — a row with no vocabulary must never gate an admission
+ * window (the same rule the derived rows follow).
  *
  * Every trace row is admitted only by a repository read/search call that
- * names its target (see TRACE_EVIDENCE_TOOLS), and its id is prefixed so it
- * can never collide with an `obligation-<n>` or `derived-<n>` row.
+ * names its target (see TRACE_EVIDENCE_TOOLS), carries the row's
+ * admitted-read demand (#1519: one read no longer discharges a row whose
+ * proof needs enforcement AND test evidence, or every seam), and its id is
+ * prefixed so it can never collide with an `obligation-<n>` or `derived-<n>`
+ * row.
  */
 export function traceAdmissionRows(candidatesText: string | null): RequiredEvidenceRow[] {
   if (typeof candidatesText !== "string" || candidatesText.trim() === "") return [];
@@ -1324,18 +1327,12 @@ export function traceAdmissionRows(candidatesText: string | null): RequiredEvide
   if (!Array.isArray(rawRows)) return [];
   const rows: RequiredEvidenceRow[] = [];
   for (const raw of rawRows) {
-    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return [];
-    const entry = raw as Record<string, unknown>;
-    const { id, text, kind, seams, code_verifiable: codeVerifiable } = entry;
-    if (typeof id !== "string" || id === "") return [];
-    if (typeof text !== "string") return [];
-    if (typeof kind !== "string") return [];
-    if (!Array.isArray(seams) || seams.some((group) => typeof group !== "string")) return [];
-    if (typeof codeVerifiable !== "boolean") return [];
-    if (codeVerifiable !== true) continue;
-    const tokens = traceAdmissionTokens(text);
+    const row = parseTracePlanRow(raw);
+    if (row === null) return [];
+    if (row.code_verifiable !== true) continue;
+    const tokens = traceAdmissionTokens(row.text);
     if (tokens === null) continue;
-    rows.push({ id: `trace:${id}`, tokens, tools: TRACE_EVIDENCE_TOOLS, trace: true });
+    rows.push({ id: `trace:${row.id}`, tokens, tools: TRACE_EVIDENCE_TOOLS, trace: true, requiredAttempts: row.required_attempts });
   }
   return rows;
 }
@@ -1343,15 +1340,18 @@ export function traceAdmissionRows(candidatesText: string | null): RequiredEvide
 /**
  * #1506: the requirement-trace budget reservation.
  *
- * The reserved tail is sized by the number of in-scope code-verifiable
- * requirements the planner was shown (each needs at least one evidence
- * request), bounded to half the request budget so optional exploration can
+ * The reserved tail is sized by the TOTAL admitted-read demand of the
+ * in-scope code-verifiable requirements the planner was shown (#1519: a
+ * runtime row owes two reads — enforcement and matching test — and a
+ * distributed row two per seam, so a reservation of one request per row
+ * would open the window while a row still owed attempts it could no longer
+ * spend), bounded to half the request budget so optional exploration can
  * never drop to zero. It is the SAME formula the #1381 prose reservation
  * uses — one helper, one formula — and it joins the ONE reservation over the
  * shared tail as the MAX of the resolutions, never their sum (#1396).
  */
-export function computeTraceEvidenceReservation(codeVerifiableCount: number, maxRequests: number): number {
-  return computeRequiredEvidenceReservation(codeVerifiableCount, maxRequests);
+export function computeTraceEvidenceReservation(requiredAttemptsTotal: number, maxRequests: number): number {
+  return computeRequiredEvidenceReservation(requiredAttemptsTotal, maxRequests);
 }
 
 /**
@@ -1647,7 +1647,7 @@ export function buildPlanningContext(
   const writeTraceCandidates = (injected: boolean, rows: readonly TracePlanRow[]): void => {
     if (deps.writeArtifact === undefined) return;
     deps.writeArtifact(TRACE_PLAN_CANDIDATES_ARTIFACT, JSON.stringify({
-      version: 1,
+      version: TRACE_PLAN_VERSION,
       injected,
       rows: rows.map((row) => ({
         id: row.id,
@@ -1655,6 +1655,8 @@ export function buildPlanningContext(
         kind: row.kind,
         seams: row.seams,
         code_verifiable: row.code_verifiable,
+        proof_shape: row.proof_shape,
+        required_attempts: row.required_attempts,
       })),
     }, null, 2) + "\n");
   };
@@ -4385,7 +4387,10 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     requiredEvidence.filter((row) => row.obligation === undefined && row.trace !== true).length,
     maxRequests.budget,
   );
-  const traceReserve = computeTraceEvidenceReservation(traceEvidenceRows.length, maxRequests.budget);
+  const traceReserve = computeTraceEvidenceReservation(
+    traceEvidenceRows.reduce((total, row) => total + Math.max(1, row.requiredAttempts ?? 1), 0),
+    maxRequests.budget,
+  );
   const reserveForRequiredEvidence = Math.max(proseReserve, dependencyReserve, traceReserve);
   if (reserveForRequiredEvidence === 0) requiredEvidence.length = 0;
   if (dependencyReserve > 0) {

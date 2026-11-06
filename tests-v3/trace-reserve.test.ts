@@ -87,21 +87,24 @@ interface RequirementRow {
 }
 
 /**
- * The in-scope requirement rows. Every row names a distinct repository file
- * and a distinct vocabulary, so one evidence read discharges exactly one
- * row and an unrelated read discharges none.
+ * The in-scope requirement rows. Every row is a structural-state requirement
+ * that names a distinct repository file (a config path with one quoted
+ * literal — the shape `structuralStateClaim` accepts), and every row carries
+ * a distinct vocabulary, so one evidence read discharges exactly one row and
+ * an unrelated read discharges none. Runtime-behaviour and distributed rows
+ * owe MORE than one read — #1519 covers those below.
  */
 const REQUIREMENTS: readonly RequirementRow[] = [
-  { id: "req-000000000001", text: "The `src/lease/renew.ts` renewal must recheck the tenant entitlement.", path: "src/lease/renew.ts" },
-  { id: "req-000000000002", text: "The `src/audit/trail.ts` writer must persist the tamper-evident digest.", path: "src/audit/trail.ts" },
-  { id: "req-000000000003", text: "The `src/billing/invoice.ts` issuance must reconcile the ledger balance.", path: "src/billing/invoice.ts" },
-  { id: "req-000000000004", text: "The `src/cache/evict.ts` eviction must respect the pinned entry.", path: "src/cache/evict.ts" },
-  { id: "req-000000000005", text: "The `src/auth/token.ts` refresh must rotate the signing key.", path: "src/auth/token.ts" },
-  { id: "req-000000000006", text: "The `src/queue/retry.ts` redelivery must preserve the ordering.", path: "src/queue/retry.ts" },
-  { id: "req-000000000007", text: "The `src/search/index.ts` rebuild must record the analyzer version.", path: "src/search/index.ts" },
-  { id: "req-000000000008", text: "The `src/export/csv.ts` writer must quote the embedded separator.", path: "src/export/csv.ts" },
-  { id: "req-000000000009", text: "The `src/import/json.ts` loader must reject the duplicate key.", path: "src/import/json.ts" },
-  { id: "req-000000000010", text: "The `src/notify/email.ts` dispatch must honour the opt-out flag.", path: "src/notify/email.ts" },
+  { id: "req-000000000001", text: "The `config/lease-renewal.yaml` file must contain `tenant-entitlement-guard`.", path: "config/lease-renewal.yaml" },
+  { id: "req-000000000002", text: "The `config/audit-trail.yaml` file must contain `tamper-evident-digest`.", path: "config/audit-trail.yaml" },
+  { id: "req-000000000003", text: "The `config/billing-invoice.yaml` file must contain `ledger-balance`.", path: "config/billing-invoice.yaml" },
+  { id: "req-000000000004", text: "The `config/cache-eviction.yaml` file must contain `pinned-entry`.", path: "config/cache-eviction.yaml" },
+  { id: "req-000000000005", text: "The `config/auth-token.yaml` file must contain `signing-key-rotation`.", path: "config/auth-token.yaml" },
+  { id: "req-000000000006", text: "The `config/queue-redelivery.yaml` file must contain `delivery-ordering`.", path: "config/queue-redelivery.yaml" },
+  { id: "req-000000000007", text: "The `config/search-index.yaml` file must contain `analyzer-version`.", path: "config/search-index.yaml" },
+  { id: "req-000000000008", text: "The `config/export-csv.yaml` file must contain `embedded-separator`.", path: "config/export-csv.yaml" },
+  { id: "req-000000000009", text: "The `config/import-json.yaml` file must contain `duplicate-key`.", path: "config/import-json.yaml" },
+  { id: "req-000000000010", text: "The `config/notify-email.yaml` file must contain `opt-out-flag`.", path: "config/notify-email.yaml" },
 ];
 
 function writePlan(root: string, rows: readonly RequirementRow[]): void {
@@ -113,6 +116,8 @@ function writePlan(root: string, rows: readonly RequirementRow[]): void {
       kind: "acceptance",
       seams: [],
       code_verifiable: true,
+      proof_shape: "structural",
+      required_attempts: 1,
     })),
   }) + "\n");
 }
@@ -176,7 +181,10 @@ async function runHarness(
   };
 }
 
-test("#1506: the trace reserve is sized by the code-verifiable rows and bounded by the budget", () => {
+test("#1506: the trace reserve is sized by the rows' total admitted-read demand and bounded by the budget", () => {
+  // The argument is the TOTAL demand (#1519): a runtime row owes two reads
+  // and a distributed row two per seam, so the caller sums requiredAttempts
+  // over the rows — the bound is still half the request budget.
   assert.equal(computeTraceEvidenceReservation(3, 24), 3);
   assert.equal(computeTraceEvidenceReservation(0, 24), 0);
   assert.equal(computeTraceEvidenceReservation(30, 24), 12);
@@ -270,6 +278,91 @@ test("#1506: once the trace row is discharged the remaining budget is available 
   assert.equal(run.result.executed_request_count, 3);
   assert.equal(run.budget.required_evidence_refusals, 0);
   assert.equal(run.budget.required_evidence_released, true);
+});
+
+test("#1519: a runtime row discharges only after BOTH the enforcement and the matching-test read are attempted", async () => {
+  const { root, deps } = workspace();
+  writeCorpus(root);
+  // A runtime-behaviour requirement (a vetoed behavioural verb, no
+  // structural parse): the validator demands an enforcement location AND a
+  // matching regression test, so ONE admitted read must not release the
+  // row's reserve.
+  const row = {
+    id: "req-000000000001",
+    text: "The loader must verify the tenant entitlement recorded in `config/lease-renewal.yaml`.",
+    path: "config/lease-renewal.yaml",
+  };
+  fs.writeFileSync(path.join(root, TRACE_PLAN_ARTIFACT), JSON.stringify({
+    version: TRACE_PLAN_VERSION,
+    rows: [{ id: row.id, text: row.text, kind: "acceptance", seams: [], code_verifiable: true, proof_shape: "runtime", required_attempts: 2 }],
+  }) + "\n");
+  writeRequirementFiles(root, [row]);
+  writeWorkspaceFile(root, "docs/claims-1.md", "claim 1\n");
+  // The second admitted read targets a different file that still names the
+  // requirement's vocabulary: two DISTINCT admitted calls, not one.
+  writeWorkspaceFile(root, "docs/lease-renewal-notes.md", "notes\n");
+  const run = await runHarness(root, deps, {
+    env: { TOOL_MAX_REQUESTS: "2" },
+    turns: 3,
+    call: (turn) => {
+      if (turn === 1) return { name: "read_file", args: { path: row.path } };
+      if (turn === 2) return { name: "read_file", args: { path: "docs/claims-1.md" } };
+      return { name: "read_file", args: { path: "docs/lease-renewal-notes.md" } };
+    },
+  });
+  // The first read was one ATTEMPT: the row stayed active, so the in-window
+  // claims read was refused.
+  assert.ok((run.budget.required_evidence_refusals as number) >= 1);
+  // The second distinct admitted read covered the demand and discharged the
+  // row, releasing the reserve.
+  assert.deepEqual(run.budget.required_evidence_credits, [`trace:${row.id}`]);
+  assert.equal(run.budget.required_evidence_released, true);
+  // The refused claims call spent nothing: two reads is all the budget saw.
+  assert.equal(run.result.executed_request_count, 2);
+});
+
+test("#1519: a distributed row discharges only after every seam's evidence demand is attempted", async () => {
+  const { root, deps } = workspace();
+  writeCorpus(root);
+  const structuralRow = REQUIREMENTS[0]!;
+  const distributedRow = {
+    id: "req-000000000002",
+    text: "The `secrets/audit-trail.toml` digest must verify the tamper-evident seal.",
+    path: "secrets/audit-trail.toml",
+  };
+  fs.writeFileSync(path.join(root, TRACE_PLAN_ARTIFACT), JSON.stringify({
+    version: TRACE_PLAN_VERSION,
+    rows: [
+      { id: structuralRow.id, text: structuralRow.text, kind: "acceptance", seams: [], code_verifiable: true, proof_shape: "structural", required_attempts: 1 },
+      { id: distributedRow.id, text: distributedRow.text, kind: "acceptance", seams: ["control-plane", "worker"], code_verifiable: true, proof_shape: "distributed", required_attempts: 4 },
+    ],
+  }) + "\n");
+  writeRequirementFiles(root, [structuralRow, distributedRow]);
+  writeWorkspaceFile(root, "docs/claims-1.md", "claim 1\n");
+  for (const n of [1, 2, 3, 4]) writeWorkspaceFile(root, `docs/audit-trail-seam-${n}.md`, `seam ${n}\n`);
+  const run = await runHarness(root, deps, {
+    env: { TOOL_MAX_REQUESTS: "6" },
+    turns: 6,
+    call: (turn) => {
+      if (turn === 1) return { name: "read_file", args: { path: structuralRow.path } };
+      if (turn <= 4) return { name: "read_file", args: { path: `docs/audit-trail-seam-${turn - 1}.md` } };
+      if (turn === 5) return { name: "read_file", args: { path: "docs/claims-1.md" } };
+      return { name: "read_file", args: { path: "docs/audit-trail-seam-4.md" } };
+    },
+  });
+  // Three seam reads are three ATTEMPTS: the distributed row stayed active,
+  // so the in-window claims read was refused. The FOURTH admitted attempt
+  // covered the demand (enforcement + test in each of the two seams) and
+  // discharged the row.
+  assert.equal(run.budget.required_evidence_refusals, 1);
+  // #1519: the reserve is sized by the rows' TOTAL admitted-read demand
+  // (1 structural + 4 distributed = 5), not one request per row — the
+  // window must not open while a row still owes attempts it could no longer
+  // spend; here the half-budget cap (floor(6/2)) bounds it to 3.
+  assert.equal(run.budget.required_evidence_requests_hint, 3);
+  assert.deepEqual(run.budget.required_evidence_credits, [`trace:${structuralRow.id}`, `trace:${distributedRow.id}`]);
+  assert.equal(run.budget.required_evidence_released, true);
+  assert.equal(run.result.executed_request_count, 5);
 });
 
 test("#1506: the trace admission is restricted to repository read/search tools", async () => {
@@ -438,31 +531,54 @@ test("#1506: the candidates artifact is parsed defensively and never partially t
   assert.deepEqual(traceAdmissionRows(JSON.stringify({ version: TRACE_PLAN_VERSION, injected: false, rows: [] })), []);
   assert.deepEqual(traceAdmissionRows(JSON.stringify({ version: TRACE_PLAN_VERSION, injected: true, rows: "nope" })), []);
   // A non-conforming row invalidates the whole artifact — never a partial trust.
+  const validRow = { id: "req-1", text: "The `src/a.ts` guard must hold.", kind: "acceptance", seams: [], code_verifiable: true, proof_shape: "runtime", required_attempts: 2 };
   assert.deepEqual(traceAdmissionRows(JSON.stringify({
     version: TRACE_PLAN_VERSION,
     injected: true,
-    rows: [{ id: "req-1", text: "The `src/a.ts` guard must hold.", kind: "acceptance", seams: [], code_verifiable: true }, { id: 7 }],
+    rows: [validRow, { id: 7 }],
   })), []);
+  // A row whose evidence demand does not cohere is refused too (#1519).
+  for (const broken of [
+    { ...validRow, required_attempts: 1 },
+    { ...validRow, required_attempts: "2" },
+    { ...validRow, proof_shape: "bogus" },
+    { ...validRow, code_verifiable: false },
+  ]) {
+    assert.deepEqual(traceAdmissionRows(JSON.stringify({
+      version: TRACE_PLAN_VERSION,
+      injected: true,
+      rows: [broken],
+    })), []);
+  }
   // A documentation-only row is not an admission row.
   assert.deepEqual(traceAdmissionRows(JSON.stringify({
     version: TRACE_PLAN_VERSION,
     injected: true,
-    rows: [{ id: "req-1", text: "The `src/a.ts` guard must hold.", kind: "acceptance", seams: [], code_verifiable: false }],
+    rows: [{ ...validRow, code_verifiable: false, proof_shape: "non-code", required_attempts: 0 }],
   })), []);
   // A row with no targetable vocabulary is no admission row either.
   assert.deepEqual(traceAdmissionRows(JSON.stringify({
     version: TRACE_PLAN_VERSION,
     injected: true,
-    rows: [{ id: "req-1", text: "must", kind: "acceptance", seams: [], code_verifiable: true }],
+    rows: [{ ...validRow, text: "must" }],
   })), []);
+  // A structural-state row carries its one-read demand onto the admission row.
+  const structural = traceAdmissionRows(JSON.stringify({
+    version: TRACE_PLAN_VERSION,
+    injected: true,
+    rows: [{ id: "req-2", text: "The `config/settings.yaml` file must contain `metrics-enabled`.", kind: "acceptance", seams: [], code_verifiable: true, proof_shape: "structural", required_attempts: 1 }],
+  }));
+  assert.equal(structural.length, 1);
+  assert.equal(structural[0]!.requiredAttempts, 1);
   const rows = traceAdmissionRows(JSON.stringify({
     version: TRACE_PLAN_VERSION,
     injected: true,
-    rows: [{ id: "req-1", text: "The `src/a.ts` guard must hold.", kind: "acceptance", seams: [], code_verifiable: true }],
+    rows: [validRow],
   }));
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.id, "trace:req-1");
   assert.equal(rows[0]!.trace, true);
+  assert.equal(rows[0]!.requiredAttempts, 2);
   assert.deepEqual(rows[0]!.tools, TRACE_EVIDENCE_TOOLS);
   assert.ok(rows[0]!.tokens.includes("src/a.ts"));
 });
