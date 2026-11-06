@@ -199,6 +199,50 @@ test("buildTracePlan maps the ledger, the scope and the distributed hints onto p
   }
 });
 
+test("#1519 (review): an overflow-topology requirement plans as distributed, not runtime", () => {
+  // The validator classifies an overflow-topology requirement DISTRIBUTED
+  // (and then forces the row unverifiable on the overflow note), so the plan
+  // must classify it distributed too — dropping the hints made the plan
+  // budget two runtime attempts the validator's per-seam demand never asked
+  // for.
+  const groups = Array.from({ length: 5 }, (_unused, index) => ({
+    name: `overflow-seam-${index + 1}`,
+    owners: [`src/overflow/seam-${index + 1}.ts`],
+    tests: [`tests-v3/overflow/seam-${index + 1}.test.ts`],
+  }));
+  const plan = buildTracePlan({
+    ledger: { requirements: [{ id: "req-overflow", text: "Overflow topology must remain protected.", kind: "normative" }] },
+    scopeIds: ["req-overflow"],
+    distributedHints: [{ requirementId: "req-overflow", groups }],
+  });
+  assert.equal(plan.rows.length, 1);
+  assert.equal(plan.rows[0]!.proof_shape, "distributed");
+  // The demand is the validator's capped per-seam bound, not the raw seam
+  // count and not the two-attempt runtime shape.
+  assert.equal(plan.rows[0]!.required_attempts, 2 * Math.min(groups.length, 4));
+  assert.equal(plan.rows[0]!.code_verifiable, true);
+  // The row round-trips its own reader — the persisted artifact is accepted.
+  assert.deepEqual(readTracePlan(JSON.stringify({ version: TRACE_PLAN_VERSION, rows: plan.rows })).rows, plan.rows);
+  // #1519 (review follow-up): the seam RENDER is capped like the demand — a
+  // 16-seam overflow row renders at most the representable seams and must
+  // never push the whole planning section past its byte budget (a dropped
+  // section would hide every merge-gating row from the planner).
+  const seams16 = Array.from({ length: 16 }, (_unused, index) => ({
+    name: `seam-${String(index + 1).padStart(2, "0")}`,
+    owners: [`src/overflow/seam-${String(index + 1).padStart(2, "0")}/very-long-owner-pattern-directory`],
+    tests: [`tests-v3/overflow/seam-${String(index + 1).padStart(2, "0")}/very-long-test-pattern-directory`],
+  }));
+  const overflow16 = buildTracePlan({
+    ledger: { requirements: [{ id: "req-overflow16", text: "Overflow topology must remain protected.", kind: "normative" }] },
+    scopeIds: ["req-overflow16"],
+    distributedHints: [{ requirementId: "req-overflow16", groups: seams16 }],
+  });
+  const section = tracePlanSection(overflow16, []);
+  assert.ok(section.text.length > 0, "the 16-seam row still renders");
+  assert.equal(section.rows.length, 1);
+  assert.equal((section.text.match(/seam seam-/g) ?? []).length, 4, "only the representable seams render");
+});
+
 test("readTracePlan refuses a malformed artifact and the plan section is bounded", () => {
   assert.deepEqual(readTracePlan(null).rows, []);
   assert.deepEqual(readTracePlan("not json").rows, []);
@@ -387,6 +431,21 @@ test("authorIntentSection keeps the intent sections, drops the unrelated ones an
   const huge = authorIntentSection({ prTitle: null, prBody: `## Goals\n${"x".repeat(5000)}`, linkedIssues: null });
   assert.ok(Buffer.byteLength(huge, "utf8") <= AUTHOR_INTENT_SECTION_MAX_BYTES);
   assert.equal(authorIntentSection({ prTitle: null, prBody: null, linkedIssues: null }), "");
+});
+
+test("#1519 (review): the PR title rides the same secret redaction as the body", () => {
+  const section = authorIntentSection({
+    prTitle: 'Add login (password: "hunter2secretvalue")',
+    prBody: "## Goals\nHandle empty input.",
+    linkedIssues: null,
+  });
+  assert.match(section, /# Declared Author Intent and Non-Goals/);
+  assert.match(section, /PR title: Add login \(\[REDACTED\]/);
+  assert.doesNotMatch(section, /hunter2secretvalue/);
+  assert.match(section, /\[REDACTED\]/);
+  // A plain title is unchanged, and no title yields no title block.
+  assert.match(authorIntentSection({ prTitle: "Fix the parser", prBody: "## Goals\nx", linkedIssues: null }), /PR title: Fix the parser/);
+  assert.doesNotMatch(authorIntentSection({ prTitle: null, prBody: "## Goals\nx", linkedIssues: null }), /PR title:/);
 });
 
 test("hostile requirement text and PR body cannot escape the untrusted fence", () => {

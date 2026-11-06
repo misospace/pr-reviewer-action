@@ -548,8 +548,16 @@ function tracePlanRow(row: TracePlanRow): string {
   const kind = row.kind.replace(/\s+/g, " ").trim();
   const text = redactText(row.text).replace(/\s+/g, " ").trim();
   const base = `- ${id} (${kind}, ${tracePlanMarker(row)}): ${text}`;
+  // #1519 (review): the seam RENDER is capped at the validator's representable
+  // bound, exactly like the marker, the loop's slot attribution and the
+  // demand derivation — an overflow-topology row may carry up to
+  // MAX_DECLARED_GROUPS_PER_RULE seams, and an uncapped render could push a
+  // single row past the whole section's byte budget, dropping EVERY row from
+  // the planner. The plan's demand already counts only the capped seams, so
+  // the model is never shown seams it is not asked to evidence.
   const seams = (Array.isArray(row.seams) ? row.seams : [])
     .filter((seam): seam is TraceSeamHint => seam !== null && typeof seam === "object" && typeof seam.name === "string")
+    .slice(0, MAX_GROUPS_PER_RULE)
     .map(renderSeam);
   if (seams.length === 0) return base;
   return `${base} — ${seams.join("; ")}`;

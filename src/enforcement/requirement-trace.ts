@@ -2141,7 +2141,13 @@ function distributedGroupsForText(
  * the hints carry the FULL seam objects (name plus the trusted owner/test
  * glob patterns) instead of name-only strings, so the trace plan and the
  * loop's slot attribution can match evidence per seam exactly the way
- * `validateRequirementTrace` does. */
+ * `validateRequirementTrace` does. #1519 (review): a requirement whose
+ * topology OVERFLOWS the representable seam cap is NOT dropped here — the
+ * validator still classifies it distributed (`isDistributed` is computed
+ * before the overflow gate, which then forces the row `unverifiable`), so
+ * the plan must classify it distributed too; dropping the hints would make
+ * the plan budget runtime-shape attempts the validator's per-seam demand
+ * never asked for. */
 export function distributedRequirementHints(
   ledger: unknown,
   ownership: readonly RequirementOwnership[] | undefined,
@@ -2155,8 +2161,8 @@ export function distributedRequirementHints(
     seenScopeIds.add(requirementId);
     const entry = entries.get(requirementId);
     if (!entry) continue;
-    const { groups, overflow } = distributedGroupsForText(entry.text, ownership);
-    if (overflow || groups.length < MIN_DISTRIBUTED_GROUPS) continue;
+    const { groups } = distributedGroupsForText(entry.text, ownership);
+    if (groups.length < MIN_DISTRIBUTED_GROUPS) continue;
     hints.push({
       requirementId,
       groups: groups.map((group) => ({ name: group.name, owners: [...group.owners], tests: [...group.tests] })),

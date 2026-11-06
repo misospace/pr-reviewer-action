@@ -3338,7 +3338,7 @@ test("#962.22: topology overflow fails closed despite a complete five-seam proof
   }
 });
 
-test("#962.23: distributed hints omit overflowed requirements from the same ledger", () => {
+test("#962.23: distributed hints keep overflowed requirements so the plan classifies them distributed", () => {
   const overflowGroups = Array.from({ length: 5 }, (_unused, index) => ({
     name: `overflow-seam-${index + 1}`,
     owners: [`src/overflow/seam-${index + 1}.ts`],
@@ -3352,16 +3352,27 @@ test("#962.23: distributed hints omit overflowed requirements from the same ledg
     { id: "req-overflow", text: "Overflow topology must remain protected.", kind: "normative" },
     { id: "req-fork", text: STANDARDS_FORK, kind: "normative" },
   ]);
+  // #1519 (review): the validator classifies an overflow-topology requirement
+  // DISTRIBUTED (`isDistributed` is computed before the overflow gate forces
+  // the row unverifiable), so the hints must keep it — dropping it made the
+  // plan budget runtime-shape attempts the validator's per-seam demand never
+  // asked for.
   assert.deepEqual(
     distributedRequirementHints(ledger, ownership, ["req-overflow", "req-fork"]),
-    [{
-      requirementId: "req-fork",
-      groups: [
-        { name: "feature-defaults", owners: ["src/fork/feature-defaults.ts"], tests: ["tests-v3/fork-feature-defaults.test.ts"] },
-        { name: "privileged-checkout", owners: ["src/fork/privileged-checkout.ts"], tests: ["tests-v3/fork-privileged-checkout.test.ts"] },
-        { name: "secret-boundary", owners: ["src/fork/secret-boundary.ts"], tests: ["tests-v3/fork-secret-boundary.test.ts"] },
-      ],
-    }],
+    [
+      {
+        requirementId: "req-overflow",
+        groups: overflowGroups.map((group) => ({ name: group.name, owners: [...group.owners], tests: [...group.tests] })),
+      },
+      {
+        requirementId: "req-fork",
+        groups: [
+          { name: "feature-defaults", owners: ["src/fork/feature-defaults.ts"], tests: ["tests-v3/fork-feature-defaults.test.ts"] },
+          { name: "privileged-checkout", owners: ["src/fork/privileged-checkout.ts"], tests: ["tests-v3/fork-privileged-checkout.test.ts"] },
+          { name: "secret-boundary", owners: ["src/fork/secret-boundary.ts"], tests: ["tests-v3/fork-secret-boundary.test.ts"] },
+        ],
+      },
+    ],
   );
 });
 

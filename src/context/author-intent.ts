@@ -169,7 +169,12 @@ export function authorIntentSection(input: {
     const title = prTitle.replace(/\s+/g, " ").trim();
     const render = (kept: readonly MarkdownSection[]): string => {
       const blocks: string[] = [];
-      if (title !== "") blocks.push(`PR title: ${title}`);
+      // #1519 (review): the title is untrusted PR content like the body, so it
+      // rides the SAME secret redaction the kept sections get — a credential
+      // in the title must not cross the redaction boundary because it sat in
+      // a different PR field.
+      const renderedTitle = redactText(title);
+      if (renderedTitle !== "") blocks.push(`PR title: ${renderedTitle}`);
       for (const section of kept) {
         const text = redactText(`${section.headingLine}\n${section.body}`).replace(/\s+$/, "");
         blocks.push(text.length > MAX_AUTHOR_INTENT_SECTION_CHARS
