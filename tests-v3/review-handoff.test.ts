@@ -44,8 +44,9 @@ import {
   parseReviewHandoffBlock,
   renderReviewHandoffBlock,
   REVIEW_HANDOFF_ANCHOR,
-  REVIEW_HANDOFF_MAX_BYTES,
-  REVIEW_HANDOFF_MAX_IDS,
+REVIEW_HANDOFF_MAX_BYTES,
+REVIEW_HANDOFF_MAX_ID_CHARS,
+REVIEW_HANDOFF_MAX_IDS,
   REVIEW_HANDOFF_MAX_ITEMS,
   REVIEW_HANDOFF_MAX_SUGGESTION_CHARS,
   REVIEW_HANDOFF_SCHEMA,
@@ -244,6 +245,48 @@ test("#1518: the document is bounded by construction and the omission is disclos
   }));
   assert.ok(Buffer.byteLength(huge, "utf8") <= REVIEW_HANDOFF_MAX_BYTES);
   assert.ok(String(parseReviewHandoff(huge)!.items[0]!.message).length <= 400);
+});
+
+test("#1518: a hostile path never rides the handoff (traversal, absolute, NUL); symlinks stay ordinary strings", () => {
+  // The boundary paths THEMSELVES: the exact shapes `safePath` rejects
+  // (#1163) plus the symlink shape it deliberately keeps — the handoff never
+  // opens a path, so a symlink component is an ordinary relative anchor and
+  // the unsafe shapes prove no anchor at all.
+  const findings = [
+    { severity: "major", category: "bug", file: "../escape.ts", line: 1, message: "traversal" },
+    { severity: "major", category: "bug", file: "/etc/passwd", line: 1, message: "absolute" },
+    { severity: "major", category: "bug", file: "bad\u0000.ts", line: 1, message: "nul" },
+    { severity: "minor", category: "style", file: "link/target.ts", line: 2, message: "symlink component" },
+  ];
+  const json = buildReviewHandoff(baseInput({ findings }));
+  assert.ok(!json.includes("\u0000"), "a raw NUL byte never reaches the serialized payload");
+  const doc = parseReviewHandoff(json);
+  assert.ok(doc !== null, "the document still parses under the strict consumer rules");
+  assert.equal(doc!.items.length, 4, "the findings are never dropped — only the path field fails closed");
+  assert.equal(doc!.items[0]!.path, null, "a traversal path proves no anchor");
+  assert.equal(doc!.items[1]!.path, null, "an absolute path proves no anchor");
+  assert.equal(doc!.items[2]!.path, null, "a NUL-bearing path proves no anchor");
+  assert.equal(doc!.items[3]!.path, "link/target.ts", "a relative path stays an ordinary anchor");
+});
+
+test("#1518: an oversized id-list base is shrunk until the exact serialized document fits the cap", () => {
+  // Four-byte codepoints at the per-id cap: twenty ids per list alone
+  // exceed the 8 KiB bound before any finding rides the document — the base
+  // itself must shrink, never be returned oversized.
+  const ids = Array.from(
+    { length: REVIEW_HANDOFF_MAX_IDS },
+    () => "\u{1D400}".repeat(REVIEW_HANDOFF_MAX_ID_CHARS),
+  );
+  const json = buildReviewHandoff(baseInput({
+    findings: [],
+    unresolvedRequirementIds: ids,
+    unresolvedRequiredChecks: ids,
+  }));
+  assert.ok(Buffer.byteLength(json, "utf8") <= REVIEW_HANDOFF_MAX_BYTES, "the cap holds on the exact serialized string");
+  const doc = parseReviewHandoff(json);
+  assert.ok(doc !== null, "the shrunk document still parses under the strict consumer rules");
+  assert.ok(doc!.unresolved_requirement_ids.length < ids.length, "requirement ids were shrunk, never smuggled past the cap");
+  assert.ok(doc!.unresolved_required_checks.length < ids.length, "check ids were shrunk, never smuggled past the cap");
 });
 
 test("#1518: a suggestion rides the handoff only when THIS run published that replacement", () => {

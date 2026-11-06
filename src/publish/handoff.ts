@@ -39,6 +39,7 @@ import { fenceDelimiterFor } from "../context/fence.js";
 import { boundedIdList, MAX_ID_LIST_CHARS, MAX_ID_LIST_ENTRIES } from "../context/id-lists.js";
 import { pyCodepointSlice } from "../platform/py.js";
 import { findingIdentityFromRecord } from "../outcomes/identity.js";
+import { safePath } from "../findings/safe-path.js";
 import { RESERVED_MARKER_PATTERNS, REVIEW_HANDOFF_ANCHOR } from "../metadata/markers.js";
 
 /** The container anchor. It marks the START of the action-owned block and is
@@ -217,7 +218,11 @@ function handoffItem(
 ): ReviewHandoffItem {
   const rawSeverity = typeof record.severity === "string" ? record.severity : "info";
   const severity = (HANDOFF_SEVERITIES as readonly string[]).includes(rawSeverity) ? rawSeverity : "info";
-  const path = typeof record.file === "string" && record.file !== ""
+  // #1518: the path rides a PUBLIC document, so it must pass the same
+  // `safePath` bar every other untrusted-path surface applies (#1163): an
+  // absolute, traversing, or NUL-bearing path proves no anchor and is
+  // dropped (`null`), never serialized.
+  const path = safePath(record.file)
     ? bounded(record.file, REVIEW_HANDOFF_MAX_PATH_CHARS)
     : null;
   const line = typeof record.line === "number" && Number.isFinite(record.line) ? Math.trunc(record.line) : null;
@@ -276,7 +281,7 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
   );
   const requirementIds = boundedIdList(input.unresolvedRequirementIds);
   const checkIds = boundedIdList(input.unresolvedRequiredChecks);
-  const serialize = (items: ReviewHandoffItem[]): string => serializeHandoff({
+  const serialize = (items: ReviewHandoffItem[], requirementIds: string[], checkIds: string[]): string => serializeHandoff({
     schema: REVIEW_HANDOFF_SCHEMA,
     review_id: bounded(input.reviewId ?? "", REVIEW_HANDOFF_MAX_TOKEN_CHARS),
     head_sha: bounded(input.headSha, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
@@ -290,19 +295,34 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
     unresolved_required_checks: checkIds,
   });
 
+  // The document without any item is the base the disclosure rides on. The
+  // bounded id lists alone can still exceed the cap (twenty four-byte
+  // codepoint ids per list), so the base itself is shrunk before any item is
+  // admitted: the LAST ids of the LONGER list are dropped one at a time
+  // (requirements first on a tie) until the zero-item document fits. The
+  // empty-list base is far below the cap, so the loop always terminates —
+  // and the cap holds on the exact serialized string in every input.
+  let baseRequirementIds = requirementIds;
+  let baseCheckIds = checkIds;
+  while (Buffer.byteLength(serialize([], baseRequirementIds, baseCheckIds), "utf8") > REVIEW_HANDOFF_MAX_BYTES
+    && (baseRequirementIds.length > 0 || baseCheckIds.length > 0)) {
+    if (baseRequirementIds.length >= baseCheckIds.length && baseRequirementIds.length > 0) {
+      baseRequirementIds = baseRequirementIds.slice(0, -1);
+    } else {
+      baseCheckIds = baseCheckIds.slice(0, -1);
+    }
+  }
+
   const included: ReviewHandoffItem[] = [];
-  // The document without any item is the base the disclosure rides on. When
-  // even that base exceeds the cap, no item is admitted at all rather than
-  // the cap being broken.
-  if (Buffer.byteLength(serialize(included), "utf8") <= REVIEW_HANDOFF_MAX_BYTES) {
+  if (Buffer.byteLength(serialize(included, baseRequirementIds, baseCheckIds), "utf8") <= REVIEW_HANDOFF_MAX_BYTES) {
     for (const candidate of candidates.slice(0, REVIEW_HANDOFF_MAX_ITEMS)) {
       const item = handoffItem(candidate, input.publishedPrescriptions);
-      const next = serialize([...included, item]);
+      const next = serialize([...included, item], baseRequirementIds, baseCheckIds);
       if (Buffer.byteLength(next, "utf8") > REVIEW_HANDOFF_MAX_BYTES) break;
       included.push(item);
     }
   }
-  return serialize(included);
+  return serialize(included, baseRequirementIds, baseCheckIds);
 }
 
 function isStringArray(value: unknown): value is string[] {

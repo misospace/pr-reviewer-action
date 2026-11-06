@@ -278,6 +278,13 @@ here for readability, real output has no newlines):
   null when the record cannot prove one. It is never a positional index.
 - `severity` is closed to `blocker`, `major`, `minor` and `info`. Anything
   else reports as `info`.
+- `path` is the finding's file path, or null. The path must pass the same
+  `safePath` bar every other untrusted-path surface applies (#1163): a
+  non-empty, repository-relative path with no `..` segment and no NUL byte.
+  An absolute, traversing, or NUL-bearing path proves no anchor and is
+  dropped — the finding itself still rides the item. Paths are strings here
+  and are never opened, so a relative path through a symlink component stays
+  an ordinary anchor.
 - `suggestion` rides an item only when this run published that exact
   replacement as a review comment. The action publishes the replacement
   under the finding's identity digest, and the handoff carries that digest's
@@ -286,7 +293,12 @@ here for readability, real output has no newlines):
   published. The item survives in both cases. No replacement is ever
   truncated. A replacement longer than the suggestion cap loses the
   suggestion and keeps the item, because a cut-off patch is worse than no
-  patch.
+  patch. Publication is the proof, not intent: when the inline review
+  submission fails after a body that carries suggestions was already
+  published, the run re-publishes that body with the suggestions withdrawn,
+  and the body-only fallback of a native review carries the suggestion-free
+  variant from the start. A suggestion in a published handoff therefore
+  always has a review comment behind it.
 - A platform where the publish boundary holds no diff publishes no inline
   comment and therefore no suggestion. That is GitHub today: the publish
   seam passes an empty diff to the publish step on every platform but
@@ -303,7 +315,11 @@ here for readability, real output has no newlines):
 
 - The whole document is at most 8 KiB (`REVIEW_HANDOFF_MAX_BYTES`), checked
   on the exact serialized string. Omitted findings are disclosed, not
-  hidden.
+  hidden. The zero-item base (metadata plus the two id lists) can itself
+  exceed the cap — twenty four-byte-codepoint ids per list is more than the
+  bound — so the base is shrunk first: the last ids of the longer id list
+  are dropped one at a time (requirements first on a tie) until the document
+  fits. The empty-list base is far below the cap, so the bound always holds.
 - At most 25 findings are listed (`REVIEW_HANDOFF_MAX_ITEMS`).
 - A suggestion is at most 2000 codepoints
   (`REVIEW_HANDOFF_MAX_SUGGESTION_CHARS`). A longer replacement is omitted

@@ -1785,6 +1785,31 @@ export async function publishReview(
     unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
     publishedPrescriptions,
   }));
+  // #1518: a suggestion may ride the handoff ONLY after the inline review
+  // submission that would publish it SUCCEEDS. The submission happens after
+  // (or with) the body's own publication, so every path that publishes a
+  // body while the inline comments are NOT proven published uses this
+  // suggestion-free variant: the body-only fallback of a native review and
+  // the recovery re-publication after a rejected inline batch. A failed
+  // submission must never leave a published handoff advertising a
+  // replacement no review comment carries.
+  const handoffBlockSansSuggestions = publishedPrescriptions.size === 0
+    ? handoffBlock
+    : renderReviewHandoffBlock(buildReviewHandoff({
+      reviewId: input.reviewId ?? "",
+      headSha: input.headSha,
+      verdict: input.verdict,
+      reviewResult,
+      requiredChecks: input.requiredChecks,
+      findings: input.findings,
+      unresolvedRequirementIds: input.unresolvedRequirementIds ?? [],
+      unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
+      publishedPrescriptions: new Map(),
+    }));
+  const bodySansPublishedSuggestions = (body: string): string =>
+    handoffBlock === handoffBlockSansSuggestions
+      ? body
+      : body.split(handoffBlock).join(handoffBlockSansSuggestions);
 
   const cleanupRequested = input.mode !== "comment"
     && resolveCleanupFlag(input.cleanupPreviousNativeReviews, input.mode) === "true";
@@ -1876,7 +1901,16 @@ export async function publishReview(
       if (nativeSurface.supported) {
         if (inlineComments.length > 0) {
           const inlineBody = `${input.commentMarker}\n_Inline findings from the automated review (summary in the sticky comment)._`;
-          const submitted = await api.createReview({ body: inlineBody, event: "COMMENT", commit_id: input.headSha, comments: inlineComments });
+          // #1518: a throw is a failed submission too — the recovery below
+          // must run for it exactly as for an `ok: false` result, or the
+          // already-published handoff would keep advertising suggestions no
+          // review comment carries.
+          let submitted: { ok: boolean; error?: string; reviewId?: number | string };
+          try {
+            submitted = await api.createReview({ body: inlineBody, event: "COMMENT", commit_id: input.headSha, comments: inlineComments });
+          } catch (error) {
+            submitted = { ok: false, error: error instanceof Error ? error.message : String(error) };
+          }
           if (submitted.ok) {
             nativeReviewId = submitted.reviewId;
             messages.push(`Attached ${inlineComments.length} inline finding comment(s)`);
@@ -1896,10 +1930,17 @@ export async function publishReview(
             // comment with the same bounded summary the #1249 body-only
             // fallback appends (the strict policy renders the findings table
             // into the body itself, so there is nothing to duplicate there).
+            // #1518: the recovery re-publishes whenever the body must change:
+            // a non-strict policy also appends the findings summary, and a
+            // strict policy still needs the suggestion-free handoff variant
+            // when the rejected batch carried prescriptions. A body that is
+            // byte-identical to what was published (strict, no published
+            // suggestion) re-publishes nothing — the #1282 behavior.
             const compensated = !strict;
             let recovered = false;
-            if (compensated) {
-              const recoveryBody = body + renderFindingsSummary(input.findings, input.upstreamLinkMode);
+            const recoveryBody = bodySansPublishedSuggestions(body)
+              + (compensated ? renderFindingsSummary(input.findings, input.upstreamLinkMode) : "");
+            if (recoveryBody !== body) {
               const recovery = await api.upsertStickyComment(input.commentMarker, recoveryBody);
               if (recovery.ok) {
                 recovered = true;
@@ -1912,7 +1953,11 @@ export async function publishReview(
             }
             messages.push(
               "WARN: inline findings review submission failed; summary comment was still published"
-                + (recovered ? " with the findings summary appended to the review body" : ""),
+                + (recovered
+                  ? compensated
+                    ? " with the findings summary appended to the review body"
+                    : " with the remediation handoff suggestions withdrawn"
+                  : ""),
             );
           }
         }
@@ -2098,9 +2143,12 @@ export async function publishReview(
         // already part of the body, so the fallback body is unchanged (no
         // duplicate reporting); under any other policy the bounded findings
         // summary is appended, or nothing when there are no findings.
+        // #1518: the fallback review carries NO inline comments, so its body
+        // must not advertise any published prescription either — the
+        // suggestion-free handoff variant rides it instead.
         const fallbackBody = strict
-          ? body
-          : body + renderFindingsSummary(input.findings, input.upstreamLinkMode);
+          ? bodySansPublishedSuggestions(body)
+          : bodySansPublishedSuggestions(body) + renderFindingsSummary(input.findings, input.upstreamLinkMode);
         if (canApprove) {
           messages.push(`Submitting native approval for #${input.prNumber}`);
         } else if (event === "REQUEST_CHANGES") {
