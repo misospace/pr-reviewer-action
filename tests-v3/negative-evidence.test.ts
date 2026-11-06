@@ -563,15 +563,18 @@ function phaseDir(): string {
   return mkdtempSync(join(tmpdir(), "v3-neg-evidence-"));
 }
 
-test("#1517 phase: a clean declared provider writes its rule to the sidecar (operator-managed config outside the checkout)", async () => {
+test("#1517 phase: a clean declared provider writes its rule to the sidecar (operator-managed config outside the reviewed workspace)", async () => {
+  // Distinct runDir (phase cwd) and reviewed workspace: production sets
+  // GITHUB_WORKSPACE to the checkout while the phase runs with cwd=runDir.
   const dir = phaseDir();
-  // The config sits OUTSIDE the phase cwd (the reviewed-head checkout): an
-  // operator-managed source is the trusted shape for negative evidence.
+  const workspace = phaseDir();
   const operatorDir = mkdtempSync(join(tmpdir(), "v3-neg-prov-"));
   try {
+    // The config sits OUTSIDE the reviewed workspace: an operator-managed
+    // source is the trusted shape for negative evidence.
     writeFileSync(join(operatorDir, "providers.json"), JSON.stringify([FORMATTER_SPEC]));
     const outcome = await runEvidenceProvidersPhase({
-      env: { PATH: process.env.PATH ?? "", HOME: dir, EVIDENCE_PROVIDERS_FILE: join(operatorDir, "providers.json"), PR_HEAD_SHA: HEAD },
+      env: { PATH: process.env.PATH ?? "", HOME: dir, GITHUB_WORKSPACE: workspace, EVIDENCE_PROVIDERS_FILE: join(operatorDir, "providers.json"), PR_HEAD_SHA: HEAD },
       cwd: dir,
       isForkPr: "false",
       enableForForks: "false",
@@ -594,16 +597,19 @@ test("#1517 phase: a clean declared provider writes its rule to the sidecar (ope
   }
 });
 
-test("#1529 phase: a providers config inside the reviewed checkout derives ZERO negative-evidence rules — positive evidence unchanged", async () => {
+test("#1529 phase: a config inside GITHUB_WORKSPACE derives ZERO negative-evidence rules — positive evidence unchanged", async () => {
+  // The regression the trust-boundary review asked for: DISTINCT runDir
+  // (phase cwd) and reviewed workspace, with the config at an absolute
+  // $GITHUB_WORKSPACE/.github path — the standard Action shape. The config
+  // is PR-writable content: it must not mint negative-evidence authority.
   const dir = phaseDir();
+  const workspace = phaseDir();
+  const configPath = join(workspace, ".github", "providers.json");
+  mkdirSync(join(workspace, ".github"), { recursive: true });
   try {
-    // The standard Action shape: the config file lives inside the reviewed
-    // checkout (PR-writable). Providers still RUN and their findings still
-    // render (positive evidence unchanged); no negative-evidence rule may
-    // derive from content the PR controls.
-    writeFileSync(join(dir, "providers.json"), JSON.stringify([FORMATTER_SPEC]));
+    writeFileSync(configPath, JSON.stringify([FORMATTER_SPEC]));
     const outcome = await runEvidenceProvidersPhase({
-      env: { PATH: process.env.PATH ?? "", HOME: dir, EVIDENCE_PROVIDERS_FILE: "providers.json", PR_HEAD_SHA: HEAD },
+      env: { PATH: process.env.PATH ?? "", HOME: dir, GITHUB_WORKSPACE: workspace, EVIDENCE_PROVIDERS_FILE: configPath, PR_HEAD_SHA: HEAD },
       cwd: dir,
       isForkPr: "false",
       enableForForks: "false",
@@ -621,6 +627,7 @@ test("#1529 phase: a providers config inside the reviewed checkout derives ZERO 
     assert.deepEqual(sidecar.rules, []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
   }
 });
 
@@ -663,11 +670,12 @@ test("#1517 phase: skip and failure outcomes write zero rules — no stale leaka
 
 test("#1517 phase: a run head that is not a sha stamps null provenance", async () => {
   const dir = phaseDir();
+  const workspace = phaseDir();
   const operatorDir = mkdtempSync(join(tmpdir(), "v3-neg-prov-"));
   try {
     writeFileSync(join(operatorDir, "providers.json"), JSON.stringify([FORMATTER_SPEC]));
     await runEvidenceProvidersPhase({
-      env: { PATH: process.env.PATH ?? "", HOME: dir, EVIDENCE_PROVIDERS_FILE: join(operatorDir, "providers.json"), PR_HEAD_SHA: "not-a-sha" },
+      env: { PATH: process.env.PATH ?? "", HOME: dir, GITHUB_WORKSPACE: workspace, EVIDENCE_PROVIDERS_FILE: join(operatorDir, "providers.json"), PR_HEAD_SHA: "not-a-sha" },
       cwd: dir,
       isForkPr: "false",
       enableForForks: "false",
@@ -770,10 +778,12 @@ test("#1517 engine: formatter-clean demotes the formatting claim and persists th
   const root = mkdtempSync(join(tmpdir(), "v3-neg-engine-"));
   const runDir = join(root, "run");
   mkdirSync(runDir);
-  // #1529 trust boundary: the providers config sits OUTSIDE the reviewed
-  // checkout (the phase cwd is the run dir) — the operator-managed shape
-  // that is allowed to carry negative-evidence authority.
-  writeFileSync(join(root, "providers.json"), JSON.stringify([
+  // #1529 trust boundary: the reviewed workspace is `workspace` (the engine
+  // sets GITHUB_WORKSPACE from it), so the providers config sits in its own
+  // operator-managed directory OUTSIDE that workspace — the only shape
+  // allowed to carry negative-evidence authority.
+  const operatorDir = mkdtempSync(join(tmpdir(), "v3-neg-prov-"));
+  writeFileSync(join(operatorDir, "providers.json"), JSON.stringify([
     { id: "prettier", command: ["/usr/bin/true"], negative_evidence: { domain: "formatter", paths: ["src/"], categories: ["style"] } },
   ]));
   try {
@@ -782,7 +792,7 @@ test("#1517 engine: formatter-clean demotes the formatting claim and persists th
       ciChecksFile: join(runDir, "ci-checks-context.md"),
       inputs: {
         "github-token": "tok", repo: "o/r", "pr-number": "7", "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false",
-        "ai-api-key": "k", "evidence-providers-file": join(root, "providers.json"),
+        "ai-api-key": "k", "evidence-providers-file": join(operatorDir, "providers.json"),
       },
       ambient: { PATH: process.env.PATH ?? "" },
       triggerReason: "manual", forceRereview: false,
@@ -820,5 +830,6 @@ test("#1517 engine: formatter-clean demotes the formatting claim and persists th
   } finally {
     await server.close();
     rmSync(root, { recursive: true, force: true });
+    rmSync(operatorDir, { recursive: true, force: true });
   }
 });

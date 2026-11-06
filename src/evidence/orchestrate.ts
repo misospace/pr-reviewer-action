@@ -220,35 +220,33 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
 
   let providers: unknown[] = [];
   let configError = "";
-  // #1529 review (trust boundary): the config path resolves against the
-  // phase cwd — the reviewed-head checkout — so a path that lands inside it
-  // is PR-writable content. Negative evidence derives ONLY from a trusted
-  // operator/base source: an in-checkout config derives ZERO
-  // negative-evidence rules (ordinary positive evidence keeps its existing
-  // behavior). The check is lexical against the checkout's realpath, so a
-  // checkout-relative symlink pointing outside cannot launder a PR file
-  // into trusted authority.
+  // #1529 review (trust boundary): the phase cwd is the run dir, NOT the
+  // reviewed tree — the PR-controlled boundary is `GITHUB_WORKSPACE` (the
+  // reviewed checkout, `workspaceRoot` above). A provider config that
+  // resolves inside the reviewed workspace is PR-writable content: it
+  // derives ZERO negative-evidence rules (ordinary positive evidence keeps
+  // its existing behavior). Only a config from a trusted operator/base
+  // source — a path outside the reviewed workspace — may carry
+  // negative-evidence authority. The check is lexical against the
+  // workspace's realpath, so a workspace-internal symlink pointing outside
+  // cannot launder a PR file into trusted authority.
   let providersTrustedForNegativeEvidence = false;
   if (configPathRaw) {
     ({ providers, error: configError } = loadConfig(configPathRaw, cwd));
-    const boundary = safeRealpath(cwd);
-    const configResolved = resolvePath(cwd, configPathRaw);
-    const insideLexical = configResolved === boundary || configResolved.startsWith(`${boundary}/`);
-    // The boundary comparison runs on BOTH the lexical resolution and the
-    // realpath: the lexical check keeps a checkout-internal symlink from
-    // laundering a PR file into trusted authority, and the realpath check
-    // keeps a symlinked checkout root (tmpdir shapes) from misdetecting.
+    const insideLexical = configPathInsideWorkspace(configPathRaw, cwd, workspaceRoot);
+    // The containment comparison also runs on the config's realpath: a
+    // symlinked workspace root (tmpdir shapes) must not misdetect.
     let insideReal = false;
     try {
-      const configReal = safeRealpath(configResolved);
-      insideReal = configReal === boundary || configReal.startsWith(`${boundary}/`);
+      const configReal = safeRealpath(resolvePath(cwd, configPathRaw));
+      insideReal = configReal === workspaceRoot || configReal.startsWith(`${workspaceRoot}/`);
     } catch {
       // Unresolvable/missing config: no providers ran, so the side is moot.
       insideReal = insideLexical;
     }
     providersTrustedForNegativeEvidence = !insideLexical && !insideReal;
     if (!providersTrustedForNegativeEvidence) {
-      options.log?.("negative evidence: providers config resolves inside the reviewed checkout; no negative-evidence rules derive from it (#1529 review)");
+      options.log?.("negative evidence: providers config resolves inside the reviewed workspace; no negative-evidence rules derive from it (#1529 review)");
     }
   }
 
@@ -369,6 +367,15 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
   }
 
   return { summary, markdown: redactText(mdLines.join("\n")), negativeEvidenceRules, headSha };
+}
+
+/** #1529 review: true when the config path — resolved with the SAME
+ * semantics loadConfig uses (`resolvePath(cwd, raw)`) — lands inside the
+ * reviewed workspace (`workspaceRoot`, the realpath of GITHUB_WORKSPACE).
+ * Inside = PR-writable content = untrusted for negative evidence. */
+function configPathInsideWorkspace(configPathRaw: string, cwd: string, workspaceRoot: string): boolean {
+  const configResolved = resolvePath(cwd, configPathRaw);
+  return configResolved === workspaceRoot || configResolved.startsWith(`${workspaceRoot}/`);
 }
 
 function safeRealpath(path: string): string {
