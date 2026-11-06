@@ -17,6 +17,16 @@ import {
   parseTraceRepairResponse,
 } from "../src/requirements/trace-repair.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
+import {
+  applyRequirementTraceEnforcement,
+  validateRequirementTrace,
+} from "../src/enforcement/requirement-trace.js";
+import {
+  markerReviewResult,
+  resolveIncompleteReason,
+  reviewCoverageIncomplete,
+} from "../src/publish/publish.js";
+import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 
 // #1503: after the bounded evidence-repair round the loop no longer
 // re-requests the WHOLE verdict. Instead a single trace-only repair turn
@@ -1177,4 +1187,157 @@ test("#1503: the same sub-floor key merges fine when the echo is absent (positiv
   assert.equal(artifactWrites.length, 2);
   const coverage = standingVerdictBody(root).requirement_coverage as Array<Record<string, unknown>>;
   assert.deepEqual(coverage.map((c) => c.requirement_id), ["R1"]);
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// #1503 acceptance 8–9: the merged artifact is not done at re-parsing. It
+// must pass the DETERMINISTIC requirement-trace revalidation against a real
+// ledger and workspace — a complete trace keeps the native APPROVE eligible,
+// while a trace turn that filled only part of the probe leaves the omitted
+// ids incomplete at the #1492 fail-closed publication boundary (publish.test
+// pins that `requiredChecks: "incomplete"` + `requirement_trace` publishes a
+// non-blocking COMMENT and never an APPROVE).
+// ─────────────────────────────────────────────────────────────────────────
+
+const SOURCE_SHA_REQUIREMENT = "Context resolution MUST compare the source SHA against the resolved pull.";
+const ID_REFUSAL_REQUIREMENT = "The repair parser MUST reject requirement ids outside the probe set.";
+const ACCEPTANCE_LEDGER = {
+  requirements: [
+    { id: "req-source-sha", text: SOURCE_SHA_REQUIREMENT, kind: "acceptance" },
+    { id: "req-id-refusal", text: ID_REFUSAL_REQUIREMENT, kind: "acceptance" },
+  ],
+};
+const ACCEPTANCE_IDS = ["req-source-sha", "req-id-refusal"];
+
+/** Enforcement files with real predicates plus their test-path files, in
+ * the SAME workspace the deterministic validator reads, so a `met` claim
+ * from the trace turn survives revalidation on its evidence (the shape
+ * pinned by tests-v3/requirement-trace.test.ts). */
+function seedAcceptanceWorkspace(root: string) {
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.mkdirSync(path.join(root, "tests"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src", "context-resolution-checked.ts"), [
+    "export function resolveContext(ctx, record) {",
+    "  if (record.head !== ctx.sourceSha) {",
+    "    throw new Error('source sha mismatch');",
+    "  }",
+    "  return { ok: true };",
+    "}",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(root, "src", "trace-id-refusal.ts"), [
+    "export function refuseUnknownRequirementIds(ids, probeSet) {",
+    "  for (const id of ids) {",
+    "    if (!probeSet.has(id)) throw new Error('requirement id outside the probe set');",
+    "  }",
+    "}",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(root, "tests", "real.test.ts"), "test1\ntest2\ntest3\n");
+  fs.writeFileSync(
+    path.join(root, "tests", "trace-id-refusal.test.ts"),
+    "assert.throws(() => refuseUnknownRequirementIds(['req-outside'], probeSet));\n",
+  );
+}
+
+const SOURCE_SHA_CLAIM = {
+  requirement_id: "req-source-sha",
+  disposition: "met",
+  enforcement: [{ file: "src/context-resolution-checked.ts", line: 2 }],
+  test: [{ file: "tests/real.test.ts", line: 1 }],
+  reason: "compares record.head to ctx.sourceSha and throws on mismatch",
+};
+const ID_REFUSAL_CLAIM = {
+  requirement_id: "req-id-refusal",
+  disposition: "met",
+  enforcement: [{ file: "src/trace-id-refusal.ts", line: 3 }],
+  test: [{ file: "tests/trace-id-refusal.test.ts", line: 1 }],
+  reason: "refuses a requirement id that is outside the probe set",
+};
+
+/** Drive the canonical repair for BOTH probe ids and return the coverage
+ * that the reuse path reads off the standing artifact after the merge. */
+async function mergedRepairCoverage(claims: unknown[]): Promise<{ root: string; coverage: unknown }> {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  seedAcceptanceWorkspace(root);
+  const scripted = baseScripted([
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    openAiText("repair round done"),
+    openAiText("```json\n" + JSON.stringify({ requirement_coverage: claims }) + "\n```"),
+  ]);
+  let calls = 0;
+  const handled = await runNativeLoop(
+    loopInput(deps({ transport: async () => scripted[calls++], env: { SYSTEM_PROMPT: "You are the reviewer." } }), {
+      traceGapProbe: async () => ({ instruction: "Verify the unresolved requirements now.", unresolvedIds: ACCEPTANCE_IDS }),
+    }),
+  );
+  assert.equal(handled, true);
+  assert.equal(calls, 6);
+  const envelope = JSON.parse(fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"));
+  const parsed = parseVerdictResponse(envelope);
+  return { root, coverage: parsed.requirementCoverage };
+}
+
+test("#1503 acceptance 8: a complete merged trace revalidates clean and keeps the native APPROVE eligible", async () => {
+  const { root, coverage } = await mergedRepairCoverage([SOURCE_SHA_CLAIM, ID_REFUSAL_CLAIM]);
+  assert.deepEqual(
+    (coverage as Array<Record<string, unknown>>).map((claim) => claim.requirement_id).sort(),
+    [...ACCEPTANCE_IDS].sort(),
+  );
+  // Deterministic revalidation of the MERGED artifact: every in-scope row
+  // carries a verified claim, so the trace is complete.
+  const trace = validateRequirementTrace(coverage, ACCEPTANCE_LEDGER, root);
+  assert.equal(trace.incomplete, false);
+  for (const id of ACCEPTANCE_IDS) {
+    const row = trace.rows.find((candidate) => candidate.requirement_id === id);
+    assert.equal(row?.disposition, "met");
+    assert.deepEqual(row?.notes, []);
+  }
+  // The same enforcement pass review.ts runs before publishing (in place): a
+  // complete trace never escalates the required checks…
+  const artifact = { verdict: "approve", review_markdown: "## Review\noriginal", findings: [], requirement_coverage: coverage } as ReviewArtifact;
+  const enforcement = applyRequirementTraceEnforcement(artifact, { enabled: true, ledger: ACCEPTANCE_LEDGER, workspace: root });
+  assert.equal(enforcement.applied, true);
+  assert.equal(artifact.requirement_trace_incomplete, undefined);
+  const requiredChecks = String(artifact.required_checks ?? "none");
+  assert.equal(requiredChecks, "none");
+  // …so the publication gate reads a complete review and the incomplete
+  // reason stays "none" — the inputs under which publishReview's #1492 gate
+  // certifies the native APPROVE.
+  const reviewResult = markerReviewResult({ verdictPolicy: "strict", verdict: "approve", findings: [], requiredChecks });
+  assert.equal(reviewCoverageIncomplete(reviewResult), false);
+  assert.equal(resolveIncompleteReason({ requiredChecks }), "none");
+});
+
+test("#1503 acceptance 9: a partial trace-only merge leaves the omitted id incomplete at the publication boundary", async () => {
+  const { root, coverage } = await mergedRepairCoverage([SOURCE_SHA_CLAIM]);
+  assert.deepEqual(
+    (coverage as Array<Record<string, unknown>>).map((claim) => claim.requirement_id),
+    ["req-source-sha"],
+  );
+  // Deterministic revalidation: the filled id keeps its verified `met`, the
+  // omitted id stays untraced — the trace as a whole is incomplete.
+  const trace = validateRequirementTrace(coverage, ACCEPTANCE_LEDGER, root);
+  assert.equal(trace.incomplete, true);
+  const filled = trace.rows.find((row) => row.requirement_id === "req-source-sha");
+  assert.equal(filled?.disposition, "met");
+  const omitted = trace.rows.find((row) => row.requirement_id === "req-id-refusal");
+  assert.equal(omitted?.disposition, "unverifiable");
+  assert.ok(omitted?.notes.includes("not-traced-by-reviewer"));
+  // The enforcement pass escalates in place exactly as review.ts feeds publication…
+  const artifact = { verdict: "approve", review_markdown: "## Review\noriginal", findings: [], requirement_coverage: coverage } as ReviewArtifact;
+  const enforcement = applyRequirementTraceEnforcement(artifact, { enabled: true, ledger: ACCEPTANCE_LEDGER, workspace: root });
+  assert.equal(enforcement.applied, true);
+  assert.equal(artifact.requirement_trace_incomplete, true);
+  const requiredChecks = String(artifact.required_checks ?? "none");
+  assert.equal(requiredChecks, "incomplete");
+  // …and review.ts's derivation of the incomplete reason from the escalated
+  // record: the marker reads `partial` and the reason is `requirement_trace`
+  // — the inputs under which the #1492 boundary publishes a non-blocking
+  // COMMENT and withholds the APPROVE (pinned by publish.test.ts).
+  const incompleteReason = artifact.requirement_trace_incomplete === true ? "requirement_trace" : "none";
+  const reviewResult = markerReviewResult({ verdictPolicy: "strict", verdict: "approve", findings: [], requiredChecks });
+  assert.equal(reviewCoverageIncomplete(reviewResult), true);
+  assert.equal(resolveIncompleteReason({ requiredChecks, incompleteReason }), "requirement_trace");
 });
