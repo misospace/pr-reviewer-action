@@ -100,6 +100,61 @@ export const REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE =
   "Required Review Evidence section with tools BEFORE spending calls on optional exploration " +
   "(local-diff confirmation, history greps, redundant local reads).";
 
+/**
+ * #1506: the FIRST-request priority note when the outstanding rows are
+ * requirement-trace rows. The rows live in the Requirement Trace Plan
+ * section of the planning context, NOT in the Required Review Evidence
+ * section, and the note must say so: a model told to work on the wrong
+ * section spends the reserved tail on calls the reservation refuses.
+ *
+ * The note names the section and the outstanding requirement IDs. It never
+ * quotes the requirement TEXT: the text is untrusted content, and a turn
+ * note is trusted driver text. The model already holds the text — the
+ * section is in its planning context.
+ */
+export const TRACE_EVIDENCE_PRIORITY_TURN_NOTE =
+  "[loop budget] In-scope requirement evidence comes first: for every requirement in the " +
+  "Requirement Trace Plan section, locate BOTH the enforcement location AND a matching regression " +
+  "test with repository reads and searches BEFORE spending calls on optional exploration " +
+  "(claim falsification, history greps, redundant local reads).";
+
+// #1506: the window note for the requirement-trace rows: it names the
+// outstanding requirement ids and the tools that can discharge them, so the
+// reserved tail is spent on the merge-gating evidence and not on the calls
+// the reservation refuses.
+const TRACE_RESERVE_WINDOW_TURN_NOTE =
+  "[loop budget] Only {requestsLeft} tool request(s) remain and they are reserved for the in-scope " +
+  "requirement evidence still outstanding: {outstanding}. Those requirements are listed in the " +
+  "Requirement Trace Plan section — spend the reserved requests on repository reads and searches " +
+  "(read_file, find_files, list_tree, git_grep, git_log, git_blame) that name their files or terms. " +
+  "Optional calls are now refused, not executed. If the evidence cannot be located, report what is " +
+  "missing rather than approximating it.";
+
+const TRACE_RESERVE_WINDOW_ROUNDS_TURN_NOTE =
+  "[loop budget] Only {roundsLeft} loop turn(s) remain and they are reserved for the in-scope " +
+  "requirement evidence still outstanding: {outstanding}. Those requirements are listed in the " +
+  "Requirement Trace Plan section — spend the reserved turns on repository reads and searches " +
+  "(read_file, find_files, list_tree, git_grep, git_log, git_blame) that name their files or terms. " +
+  "Optional calls are now refused, not executed. If the evidence cannot be located, report what is " +
+  "missing rather than approximating it.";
+
+// #1506: the refusal a call that named no outstanding requirement row gets
+// inside the reserved window.
+const TRACE_RESERVE_REFUSAL_NOTE =
+  "Reserved requirement-evidence budget: this call was not executed and spent none of the remaining " +
+  "requests. The reserved tail still owes {outstanding} — those requirements are listed in the " +
+  "Requirement Trace Plan section. Make a repository read or search that names their files or terms, " +
+  "or finish now and report the missing evidence as unknown / needs verification.";
+
+// #1506: a run can hold BOTH the requirement-trace rows and the review-owned
+// prose rows: the note then says which other rows the reservation also
+// covers, so the model is never told the requirement rows are the only way
+// out of the window.
+const TRACE_WINDOW_CLAUSE =
+  " The reservation also covers the unresolved in-scope requirements from the Requirement Trace Plan section — a repository read or search that names one of those executes as well.";
+const PROSE_WINDOW_CLAUSE =
+  " The reservation also covers the unresolved rows of the Required Review Evidence section — a call that targets one of those executes as well.";
+
 const LOW_BUDGET_TURN_NOTE =
   "[loop budget] Only {requestsLeft} tool request(s) and {roundsLeft} " +
   "turn(s) remain. Stop broad exploration now: prioritize confirming or " +
@@ -395,6 +450,12 @@ export interface RequiredEvidenceRow {
   id: string;
   tokens: readonly string[];
   obligation?: DependencyEvidenceObligation;
+  /** #1506: the closed set of tools that may discharge this row. Absent
+   * means any tool may — the #1381 prose rows behave exactly as before. */
+  tools?: readonly string[];
+  /** #1506: the row is a merge-gating requirement-trace row, not a
+   * review-owned prose row. */
+  trace?: boolean;
 }
 
 /** #1396: whether one call attempts (would discharge) one pending row. */
@@ -406,6 +467,10 @@ function rowAdmittedByCall(
   if (row.obligation !== undefined) {
     return dependencyEvidenceObligationsForCall(name, args).includes(row.obligation);
   }
+  // #1506: a row with a tool allow-list is discharged ONLY by a call through
+  // one of those tools — the requirement evidence is repository reads, so a
+  // call through any other tool never satisfies the row.
+  if (row.tools !== undefined && !row.tools.includes(name)) return false;
   const target = argumentTargetText(args);
   return row.tokens.some((token) => targetMentions(target, token));
 }
@@ -1166,8 +1231,17 @@ export async function driveToolLoop(
   const hasActiveRow = (): boolean => pendingRows.some((row) => rowActive(row));
   const anyActiveShapeRow = (): boolean =>
     pendingRows.some((row) => row.obligation !== undefined && rowActive(row));
+  // #1506: a requirement-trace row is not a review-owned prose row: it is
+  // discharged by repository evidence, not by the Required Review Evidence
+  // section, so the two kinds never share a note.
   const anyActiveProseRow = (): boolean =>
-    pendingRows.some((row) => row.obligation === undefined && rowActive(row));
+    pendingRows.some((row) => row.obligation === undefined && row.trace !== true && rowActive(row));
+  const anyActiveTraceRow = (): boolean =>
+    pendingRows.some((row) => row.trace === true && rowActive(row));
+  const outstandingTraceIds = (): string[] =>
+    pendingRows
+      .filter((row) => row.trace === true && rowActive(row))
+      .map((row) => row.id.replace(/^trace:/, ""));
   const outstandingShapeObligations = (): DependencyEvidenceObligation[] =>
     pendingRows
       .filter((row) => row.obligation !== undefined && rowActive(row))
@@ -1336,9 +1410,22 @@ export async function driveToolLoop(
         && (requestsLeft <= reserve || roundsLeft <= reserve);
       if (outcome.rounds === 0) {
         if (reserve > 0 && hasActiveRow()) {
-          conversation.addTurnNote(anyActiveShapeRow()
+          // #1506: the priority note names the section the outstanding rows
+          // actually live in. A requirement-trace row is discharged by
+          // repository evidence carried in the Requirement Trace Plan section,
+          // not by the Required Review Evidence section, so the note must
+          // point at the right one.
+          const priorityNote = anyActiveShapeRow()
             ? DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE
-            : REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE);
+            : anyActiveTraceRow()
+              ? TRACE_EVIDENCE_PRIORITY_TURN_NOTE
+              : REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE;
+          const otherClause = anyActiveShapeRow()
+            ? (anyActiveTraceRow() ? TRACE_WINDOW_CLAUSE : anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
+            : anyActiveTraceRow() && anyActiveProseRow()
+              ? PROSE_WINDOW_CLAUSE
+              : "";
+          conversation.addTurnNote(priorityNote + otherClause);
         }
       } else {
         // #1396: one pass, one note. With a shape row active the redirect
@@ -1346,7 +1433,12 @@ export async function driveToolLoop(
         // actually scarce (requests, else rounds) — and grows the mixed-run
         // clause when prose rows gate the same window.
         const shapeNoteActive = anyActiveShapeRow();
-        const mixedClause = shapeNoteActive && anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "";
+        const traceNoteActive = anyActiveTraceRow();
+        const mixedClause = shapeNoteActive
+          ? (traceNoteActive ? TRACE_WINDOW_CLAUSE : anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
+          : traceNoteActive && anyActiveProseRow()
+            ? PROSE_WINDOW_CLAUSE
+            : "";
         const note = inObligationWindow
           ? shapeNoteActive
             ? formatNote(requestsLeft <= reserve ? RESERVE_WINDOW_TURN_NOTE : RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
@@ -1354,7 +1446,13 @@ export async function driveToolLoop(
                 roundsLeft,
                 outstanding: formatOutstandingObligations(outstandingShapeObligations()),
               }) + mixedClause
-            : REQUIRED_EVIDENCE_TURN_NOTE
+            : traceNoteActive
+              ? formatNote(requestsLeft <= reserve ? TRACE_RESERVE_WINDOW_TURN_NOTE : TRACE_RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
+                  requestsLeft,
+                  roundsLeft,
+                  outstanding: outstandingTraceIds().join(", "),
+                }) + mixedClause
+              : REQUIRED_EVIDENCE_TURN_NOTE
           : requestsLeft <= LOW_TOOL_REQUESTS_REMAINING
             ? LOW_BUDGET_TURN_NOTE
             : BUDGET_TURN_NOTE;
@@ -1555,11 +1653,19 @@ export async function driveToolLoop(
             callId,
             kind: "reserve",
             data: {
+              // #1506: the refusal names the section the outstanding rows
+              // live in: the requirement-trace rows are in the Requirement
+              // Trace Plan section, the review-owned prose rows in the
+              // Required Review Evidence section.
               error: anyActiveShapeRow()
                 ? formatNote(RESERVE_REFUSAL_NOTE, {
                     outstanding: formatOutstandingObligations(outstandingShapeObligations()),
-                  }) + (anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
-                : REQUIRED_EVIDENCE_REFUSAL_NOTE,
+                  }) + (anyActiveTraceRow() ? TRACE_WINDOW_CLAUSE : anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
+                : anyActiveTraceRow()
+                  ? formatNote(TRACE_RESERVE_REFUSAL_NOTE, {
+                      outstanding: outstandingTraceIds().join(", "),
+                    }) + (anyActiveProseRow() ? PROSE_WINDOW_CLAUSE : "")
+                  : REQUIRED_EVIDENCE_REFUSAL_NOTE,
             },
           });
           roundRefused++;
