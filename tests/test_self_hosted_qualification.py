@@ -8,9 +8,9 @@ while the harness is missing:
 - the qualification workflow runs on a manual dispatch only, and the
   unprivileged pull_request CI stays secret-free;
 - the make target and the workflow drive the same harness path;
-- the harness script, once it lands, routes every forge read and write
-  through the configured forge capability, never through a forge CLI or a
-  raw HTTP client that reaches a remote forge;
+- the workflow itself, and the harness script once it lands, route every
+  forge read and write through the configured forge capability, never
+  through a forge CLI or a raw HTTP client that reaches a remote forge;
 - the docs point at the runbook instead of reserving the qualification as
   pending work.
 """
@@ -59,9 +59,12 @@ _SUBCOMMAND_PINNED_CLIS = frozenset({"gh", "gj"})
 _LOCAL_HOST_RE = re.compile(
     r"(127\.0\.0\.1|localhost|\[::1\]|host\.docker\.internal)"
 )
+# An assignment is matched as ONE value token, so a line that sets a
+# remote URL next to a loopback value (`REMOTE=https://forge.example.com
+# PROBE=http://127.0.0.1`) exempts only the name whose own value carries
+# the loopback host.
 _LOCAL_ASSIGNMENT_RE = re.compile(
-    r"(?m)^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=[\"']?[^\n]*"
-    r"(?:127\.0\.0\.1|localhost|\[::1\]|host\.docker\.internal)"
+    r"(?m)^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=([\"']?)([^\"\'\s]*)\2"
 )
 
 
@@ -79,9 +82,17 @@ def _steps() -> list[dict]:
 
 
 def _forge_cli_calls(path: Path) -> list[tuple[int, str]]:
-    """Every forge CLI invocation in the file, as (line number, line)."""
+    """Every forge CLI invocation in the file, as (line number, line).
+
+    A ``#``-prefixed line in a shell script or YAML file is prose: it
+    cannot execute, so it is skipped the way the shared guard skips
+    comments (tests/test_forge_cli.py ``_invocations``).
+    """
+    commented = path.suffix in (".sh", ".yml", ".yaml")
     hits: list[tuple[int, str]] = []
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if commented and line.strip().startswith("#"):
+            continue
         for match in _FORGE_CLI_RE.finditer(line):
             if (
                 match.group(1) in _SUBCOMMAND_PINNED_CLIS
@@ -99,7 +110,9 @@ def _reaches_a_local_forge(path: Path, number: int) -> bool:
     if _LOCAL_HOST_RE.search(command):
         return True
     text = path.read_text(encoding="utf-8")
-    for name in _LOCAL_ASSIGNMENT_RE.findall(text):
+    for name, _quote, value in _LOCAL_ASSIGNMENT_RE.findall(text):
+        if not _LOCAL_HOST_RE.search(value):
+            continue
         if re.search(rf"\$\{{{name}\b}}|\${name}\b", command):
             return True
     return False
@@ -219,15 +232,21 @@ def test_the_qualification_job_fails_when_the_model_credential_is_missing() -> N
     ), "a missing model credential must fail loudly"
 
 
-def test_the_qualification_workflow_never_reaches_the_forge_api_directly() -> None:
+def test_the_qualification_workflow_never_bypasses_the_forge_capability() -> None:
+    """Every forge read and write in the job goes through the configured
+    forge capability: neither a forge CLI nor a raw HTTP client may touch
+    forge state from a workflow step."""
     offenders = [
-        f"{number}: {line.strip()}"
+        f"raw HTTP {number}: {line.strip()}"
         for number, line in _raw_http_invocations(QUALIFICATION_WORKFLOW)
+    ] + [
+        f"forge CLI {number}: {line.strip()}"
+        for number, line in _forge_cli_calls(QUALIFICATION_WORKFLOW)
     ]
     assert not offenders, (
         "the qualification job must read and write forge state through the "
-        "configured forge capability, never with a raw HTTP client:\n"
-        + "\n".join(offenders)
+        "configured forge capability, never with a forge CLI or a raw HTTP "
+        "client:\n" + "\n".join(offenders)
     )
 
 
@@ -280,6 +299,54 @@ def test_the_forge_cli_gate_keeps_the_pinned_cli_subcommand_set(tmp_path: Path) 
     assert _forge_cli_calls(harness) == []
     harness.write_text("gh pr view 1 --repo o/r\n", encoding="utf-8")
     assert [number for number, _ in _forge_cli_calls(harness)] == [1]
+
+
+def test_the_forge_cli_gate_reads_scripts_not_comment_prose(tmp_path: Path) -> None:
+    """A `#`-prefixed line cannot execute, so it is prose: the gate reads
+    it neither in the harness script nor in the workflow YAML, the way the
+    shared guard skips comments."""
+    harness = tmp_path / "harness.sh"
+    harness.write_text("# never run tea pulls create here\n", encoding="utf-8")
+    assert _forge_cli_calls(harness) == []
+    workflow = tmp_path / "job.yaml"
+    workflow.write_text("  # gh pr view must not be used here\n", encoding="utf-8")
+    assert _forge_cli_calls(workflow) == []
+    workflow.write_text("        run: gh pr view 1 --repo o/r\n", encoding="utf-8")
+    assert [number for number, _ in _forge_cli_calls(workflow)] == [1]
+
+
+def test_the_local_forge_exemption_is_exact(tmp_path: Path) -> None:
+    """Only a call whose target resolves, by its own assignment, to a
+    loopback forge is exempt: a remote URL sharing the line with a
+    loopback value is not, and an unset remote target is flagged."""
+    script = tmp_path / "call.sh"
+    script.write_text(
+        'FORGEJO_API_URL="http://127.0.0.1:3000"\n'
+        'curl -fsS "$FORGEJO_API_URL/api/v1/user"\n',
+        encoding="utf-8",
+    )
+    hits = _raw_http_invocations(script)
+    assert hits, "the raw call must be detected"
+    assert all(_reaches_a_local_forge(script, number) for number, _ in hits), (
+        "the loopback-assigned target is the harness's own forge: exempt"
+    )
+    script.write_text(
+        "REMOTE=https://forge.example.com PROBE=http://127.0.0.1\n"
+        'curl -fsS "$REMOTE/api/v1/user"\n',
+        encoding="utf-8",
+    )
+    hits = _raw_http_invocations(script)
+    assert hits
+    assert not any(_reaches_a_local_forge(script, number) for number, _ in hits), (
+        "the loopback value belongs to PROBE: the remote target stays an "
+        "offender"
+    )
+    script.write_text('curl -fsS "$FORGEJO_API_URL/api/v1/user"\n', encoding="utf-8")
+    hits = _raw_http_invocations(script)
+    assert hits
+    assert not any(_reaches_a_local_forge(script, number) for number, _ in hits), (
+        "no local assignment means no exemption"
+    )
 
 
 def test_the_harness_script_never_reaches_a_remote_forge_directly() -> None:
