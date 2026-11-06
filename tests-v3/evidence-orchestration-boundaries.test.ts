@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PyFloat, runEvidenceProvidersPhase, type EvidenceProviderEntry } from "../src/evidence/index.js";
@@ -186,6 +186,87 @@ test("#1531: an absolute evidence-providers-file keeps its operator-path semanti
     rmSync(runDir, { recursive: true, force: true });
     rmSync(reviewed, { recursive: true, force: true });
     rmSync(operator, { recursive: true, force: true });
+  }
+});
+
+// Review follow-up (#1533): edge-case path shapes for the workspace-rooted
+// config resolution. The input is operator-only, so these pin the behavior
+// rather than add a hardening rail: symlinks are followed, NUL bytes fail
+// closed as "not found" without crashing the phase.
+test("#1531: a symlinked config and a symlinked workspace both resolve through to the real tree", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "evidence-rundir-"));
+  const realCheckout = mkdtempSync(join(tmpdir(), "evidence-checkout-"));
+  const linked = mkdtempSync(join(tmpdir(), "evidence-linked-"));
+  const operatorStore = mkdtempSync(join(tmpdir(), "evidence-store-"));
+  try {
+    // A symlinked GITHUB_WORKSPACE (safeRealpath'd by the phase) still roots
+    // relative configs at the real checkout.
+    const workspaceLink = join(linked, "workspace");
+    symlinkSync(realCheckout, workspaceLink, "dir");
+    mkdirSync(join(realCheckout, ".github"), { recursive: true });
+    // The config itself is a symlink leaving the checkout, as an operator
+    // bind from a mounted store would be; readFileSync follows it.
+    const storeConfig = join(operatorStore, "pr-review-providers.json");
+    writeFileSync(storeConfig, JSON.stringify({ providers: [{ id: "linked-provider", command: ["unused"] }] }));
+    symlinkSync(storeConfig, join(realCheckout, ".github", "pr-review-providers.json"), "file");
+
+    const invoked: string[] = [];
+    const outcome = await runEvidenceProvidersPhase({
+      env: {
+        PATH: process.env.PATH ?? "",
+        GITHUB_WORKSPACE: workspaceLink,
+        EVIDENCE_PROVIDERS_FILE: ".github/pr-review-providers.json",
+      },
+      cwd: runDir,
+      isForkPr: "false",
+      enableForForks: "false",
+      log: () => undefined,
+      runProvider: async (provider) => {
+        invoked.push((provider as { id: string }).id);
+        return providerEntry((provider as { id: string }).id);
+      },
+    });
+
+    assert.equal(outcome, "ran");
+    assert.deepEqual(invoked, ["linked-provider"], "symlinks are followed through the workspace-realpath'd root");
+    const artifact = JSON.parse(readFileSync(join(runDir, "evidence-providers.json"), "utf8")) as { error?: string };
+    assert.equal(artifact.error, undefined);
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+    rmSync(realCheckout, { recursive: true, force: true });
+    rmSync(linked, { recursive: true, force: true });
+    rmSync(operatorStore, { recursive: true, force: true });
+  }
+});
+
+test("#1531: a NUL byte in evidence-providers-file fails closed as not found", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "evidence-rundir-"));
+  const reviewed = mkdtempSync(join(tmpdir(), "evidence-reviewed-"));
+  try {
+    const invoked: string[] = [];
+    const outcome = await runEvidenceProvidersPhase({
+      env: {
+        PATH: process.env.PATH ?? "",
+        GITHUB_WORKSPACE: reviewed,
+        EVIDENCE_PROVIDERS_FILE: "providers\u0000.json",
+      },
+      cwd: runDir,
+      isForkPr: "false",
+      enableForForks: "false",
+      log: () => undefined,
+      runProvider: async (provider) => {
+        invoked.push((provider as { id: string }).id);
+        return providerEntry((provider as { id: string }).id);
+      },
+    });
+
+    assert.equal(outcome, "ran", "the phase reports the missing config instead of crashing");
+    assert.deepEqual(invoked, []);
+    const artifact = JSON.parse(readFileSync(join(runDir, "evidence-providers.json"), "utf8")) as { error?: string };
+    assert.equal(artifact.error, "Config file not found: providers\u0000.json");
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+    rmSync(reviewed, { recursive: true, force: true });
   }
 });
 
