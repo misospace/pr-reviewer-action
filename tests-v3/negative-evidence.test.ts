@@ -432,6 +432,67 @@ test("#1517 calibration: a bare schema mention is not a validation-failure claim
   assert.equal(applyNegativeEvidence([genuineFinding], [kubeconform]).demoted, 1);
 });
 
+// ── Edge paths: NUL bytes and symlink-shaped names ───────────────────────
+// Evidence for the path-handling review: the negative-evidence matcher is
+// purely lexical — it imports no node:fs and never resolves, follows or
+// stats a filesystem entry. A path is the string the model emitted, and the
+// declared patterns match that string and nothing else.
+
+test("#1517 edge: a NUL-bearing declaration path is refused at the trust source", () => {
+  const valid = { domain: "lint", paths: ["src/"], categories: ["style"] };
+  // A NUL cannot hide inside an otherwise-valid covered path…
+  assert.equal(parseNegativeEvidenceSpec({ ...valid, paths: ["src/\0evil.ts"] }), null);
+  assert.equal(parseNegativeEvidenceSpec({ ...valid, paths: ["src\0/evil.ts"] }), null);
+  // …nor ride along beside a valid one: any refused member fails the whole
+  // declaration closed.
+  assert.equal(parseNegativeEvidenceSpec({ ...valid, paths: ["src/", "docs/\0.md"] }), null);
+  // End-to-end through the seam: a refused declaration derives no rule from
+  // an otherwise clean run.
+  assert.deepEqual(
+    deriveNegativeEvidenceRules(
+      [{ id: "x", command: ["true"], negative_evidence: { domain: "lint", paths: ["src/\0evil.ts"], categories: ["style"] } }],
+      [entry("x")],
+      HEAD,
+    ),
+    [],
+  );
+});
+
+test("#1517 edge: a NUL-bearing finding path is never matched (fail closed)", () => {
+  const rules = [formatterRule()];
+  // Every other gate agrees (style category, formatter claim, covered
+  // tree, admissible severity): the NUL byte alone must refuse the finding.
+  const nul = finding({ file: "src/a\0b.ts", message: "Trailing whitespace on line 3" });
+  const outcome = applyNegativeEvidence([nul], rules);
+  assert.equal(outcome.demoted, 0);
+  assert.deepEqual(outcome.decisions, []);
+  assert.equal(nul.severity, "major");
+  assert.equal(nul.negative_evidence, undefined);
+});
+
+test("#1517 edge: symlink-shaped paths stay lexical and ordinary (never resolved, never followed)", () => {
+  const rules = [formatterRule({ paths: ["src/"] })];
+  // A covered-tree name that happens to be a symlink on disk is covered
+  // exactly like any other file in that tree: no resolution to its target,
+  // no escape from the declared subtree, no special-casing.
+  const alias = finding({ file: "src/alias.ts", message: "Trailing whitespace on line 3" });
+  assert.equal(applyNegativeEvidence([alias], rules).demoted, 1);
+  assert.equal(alias.severity, "minor");
+  // An arrow-shaped file string is an ordinary name too: coverage follows
+  // the literal string's position in the tree, not whatever the name
+  // points at.
+  const arrow = finding({ file: "src/link -> other-repo/thing.ts", message: "Indentation is off" });
+  assert.equal(applyNegativeEvidence([arrow], rules).demoted, 1);
+  assert.equal(arrow.severity, "minor");
+  // The hypothetical TARGET is not covered through the link: coverage
+  // cannot be laundered across trees by naming a link.
+  const target = finding({ file: "other-repo/thing.ts", message: "Trailing whitespace on line 3" });
+  const targetOutcome = applyNegativeEvidence([target], rules);
+  assert.equal(targetOutcome.demoted, 0);
+  assert.deepEqual(targetOutcome.decisions, []);
+  assert.equal(target.severity, "major");
+});
+
 test("#1517 apply: severity ladder and deterministic findings", () => {
   const rules = [formatterRule()];
   const minor = finding({ severity: "minor", message: "Indentation is off" });
