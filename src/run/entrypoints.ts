@@ -406,6 +406,29 @@ function confidenceTelemetryFromRunDir(env: NodeJS.ProcessEnv): ConfidenceTeleme
   return telemetry;
 }
 
+/** #1520: the reviewed diff the publish step anchors inline findings against,
+ * read from the run dir's own `pr.diff` artifact — the exact bytes the engine
+ * reviewed (redacted, complete; `review.ts` writes it before any finding
+ * exists). The publish boundary reads its other run-dir artifacts the same
+ * way (`review-coverage.json`, `confidence-score.json`), and for the same
+ * reason: a FRESH forge read of the CURRENT head races a push, and the #451
+ * publication-boundary head re-check runs inside `publishReview` — so the
+ * anchor map must be built from the revision the review actually covered,
+ * never from whatever the forge serves at publish time.
+ *
+ * `undefined` means "no reviewed diff available" (no run dir, or a missing/
+ * unreadable artifact) and the caller falls back to its historical
+ * per-platform source. A present-but-empty file IS the reviewed diff (an
+ * empty anchor map — nothing can anchor) and is returned as "". */
+function reviewedDiffFromRunDir(runDir: string | undefined): string | undefined {
+  if (runDir === undefined) return undefined;
+  try {
+    return readFileSync(join(runDir, "pr.diff"), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 /** The platform publish seam (GitHub REST/GraphQL, Forgejo /api/v1, or the
  * Tangled ATProto record client). */
 export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
@@ -441,7 +464,18 @@ export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformA
     ...(token ? { token: platform === "forgejo" ? token : `Bearer ${token}` } : {}),
     ...(platform === "github" && env.GITHUB_API_URL ? { baseUrl: env.GITHUB_API_URL } : {}),
   };
-  const diffProvider = async (): Promise<string> => buildAdapter(env).getPrDiff();
+  const diffProvider = async (): Promise<string> =>
+    // #1520: the Forgejo adapter's inline-position re-validation anchors
+    // against the REVIEWED diff when the run dir carries it — a fresh read
+    // here would let a comment anchor on content this run never reviewed.
+    // The forge's own server-side re-validation against the current head
+    // stays the final arbiter and drops what no longer anchors (fail closed).
+    // This resolves the diff from ambient `PR_REVIEWER_RUN_DIR` while
+    // `publishWithOutcome` resolves it from its `runDir` parameter: every
+    // production composition sets both from the SAME value (`action.ts`,
+    // `platform-action.ts`, `publishMain`), and a caller must keep them
+    // pointing at one run dir or the two anchor decisions can diverge.
+    reviewedDiffFromRunDir(nonEmpty(env.PR_REVIEWER_RUN_DIR)) ?? buildAdapter(env).getPrDiff();
   const api: PublishPlatformApi = platform === "forgejo"
     ? new ForgejoPublishApi({
       ...apiOptions,
@@ -598,9 +632,16 @@ export interface PublishOutcome {
 /** Runs one publication, persists the #1027 findings ledger, relays the
  * step messages, and reports the outcome. */
 export async function publishWithOutcome(input: PublishInput, seam: ReturnType<typeof buildPublishApi>, runDir?: string): Promise<PublishOutcome> {
-  const result: PublishResult = await publishReview(input, seam.api, {
-    diffText: seam.platform === "forgejo" ? await seam.diffProvider() : "",
-  });
+  // #1520: hand the REVIEWED diff to the publish step on EVERY platform. The
+  // anchor map `buildComments` derives from it is what makes the contract's
+  // `inline-findings` promise real on GitHub (native line-anchored review
+  // comments) and lets `hasPublishablePrescription` see the prescriptions, so
+  // the #762 usefulness-feedback read runs there too and #1518's handoff can
+  // carry a `suggestion`. The historical per-platform sources below remain
+  // only as the fallback for a caller with no run dir / no `pr.diff` artifact.
+  const diffText = reviewedDiffFromRunDir(runDir)
+    ?? (seam.platform === "forgejo" ? await seam.diffProvider() : "");
+  const result: PublishResult = await publishReview(input, seam.api, { diffText });
   // #1027: the artifact is written only for a review that was actually
   // published (or superseded): a failed publication never published the
   // current findings, so their `reported` events must not reach the ledger.
