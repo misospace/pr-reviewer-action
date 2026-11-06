@@ -81,8 +81,10 @@ export interface EvidenceRunOptions {
   /** Source of the EVIDENCE_* / SARIF_* settings, and the ambient env the
    * provider allowlist draws from. */
   env: NodeJS.ProcessEnv;
-  /** The review working directory: relative config paths resolve here,
-   * providers run here, and artifacts are written here (v2: process cwd). */
+  /** The phase run directory: providers run here and artifacts are written
+   * here (v2: process cwd). Relative config paths do NOT resolve here —
+   * #1531 resolves them against the reviewed workspace (`env.GITHUB_WORKSPACE`,
+   * falling back to this directory when the env binding is absent). */
   cwd: string;
   /** Monotonic clock in ms (tests freeze it). */
   clock?: () => number;
@@ -125,8 +127,10 @@ function pyPathStr(raw: string): string {
   return leading + body || (leading === "" ? "." : leading);
 }
 
-function loadConfig(configPathRaw: string, cwd: string): { providers: unknown[]; error: string } {
-  const configPath = resolvePath(cwd, configPathRaw);
+/** `configPathRaw` resolves against `baseDir` (the reviewed workspace root,
+ * #1531); an absolute raw path is kept verbatim (operator-owned semantics). */
+function loadConfig(configPathRaw: string, baseDir: string): { providers: unknown[]; error: string } {
+  const configPath = resolvePath(baseDir, configPathRaw);
   let exists = false;
   try {
     exists = existsSync(configPath) && statSync(configPath) !== undefined;
@@ -194,6 +198,13 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
     const parsed = pyIntFromText(env.SARIF_MAX_FINDINGS);
     if (parsed !== null && parsed >= 1) sarifMaxFindings = typeof parsed === "bigint" ? Number.MAX_SAFE_INTEGER : parsed;
   }
+  // #1531: the reviewed workspace, not the phase run directory, is the root
+  // for repo-relative paths: the documented `evidence-providers-file` value
+  // (for example `.github/pr-review-providers.json`) is a path in the
+  // checkout, and SARIF trust classification is workspace-bounded. Absolute
+  // `GITHUB_WORKSPACE` values make this independent of `cwd`; `resolvePath`
+  // likewise keeps absolute operator paths verbatim. An empty binding (the
+  // library-caller case) keeps the v2 process-cwd semantics.
   const workspaceRoot = safeRealpath(resolvePath(cwd, env.GITHUB_WORKSPACE || cwd));
 
   const summary: EvidenceSummary = {
@@ -212,7 +223,7 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
 
   let providers: unknown[] = [];
   let configError = "";
-  if (configPathRaw) ({ providers, error: configError } = loadConfig(configPathRaw, cwd));
+  if (configPathRaw) ({ providers, error: configError } = loadConfig(configPathRaw, workspaceRoot));
 
   if (configError) summary.error = configError;
   summary.configured = true;
