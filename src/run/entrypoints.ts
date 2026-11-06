@@ -426,12 +426,16 @@ function confidenceTelemetryFromRunDir(env: NodeJS.ProcessEnv): ConfidenceTeleme
  * guarantee as the other security-sensitive reads in `change-anchors.ts` /
  * `mirror.ts`): a symlinked `pr.diff` is refused, never followed, and a run
  * dir containing a NUL byte fails closed — both are "no reviewed diff
- * available" (fallback), never a read through the link. */
+ * available" (fallback), never a read through the link. `O_NONBLOCK` keeps a
+ * planted FIFO from blocking the open (the regular-file check then refuses
+ * it); where `O_NOFOLLOW` is undefined (Windows) the no-follow guarantee
+ * degrades to the platform default, the same accepted degradation as those
+ * existing reads. */
 function reviewedDiffFromRunDir(runDir: string | undefined): string | undefined {
   if (runDir === undefined) return undefined;
   let fd: number;
   try {
-    fd = openSync(join(runDir, "pr.diff"), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    fd = openSync(join(runDir, "pr.diff"), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK);
   } catch {
     return undefined;
   }
