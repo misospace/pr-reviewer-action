@@ -1,0 +1,441 @@
+{
+ "schema_version": "negative-evidence-eval/v1",
+ "generated_at": "2026-11-06",
+ "subject": {
+  "pr": 1529,
+  "issue": 1517,
+  "branch": "courier/misospace/pr-reviewer-action/issue-1517",
+  "head_sha": "3be41d5e4ac4c31faadf4d6a666f8c563599a629",
+  "feature_files": [
+   "src/evidence/providers.ts (declaration parsing)",
+   "src/evidence/negative-evidence.ts + src/evidence/orchestrate.ts (derivation)",
+   "src/enforcement/negative-evidence.ts (application)"
+  ]
+ },
+ "corpus": {
+  "file": "evals/corpus-human-findings.json",
+  "description": "adjudicated human/second-review defects at the exact heads the production reviewer also reviewed; every entry is a REAL defect, so any demotion of a corpus finding is by definition a wrong demotion",
+  "entries": 74,
+  "unique_prs": 65,
+  "repos": [
+   "joryirving/home-ops",
+   "misospace/KubeTix",
+   "misospace/alert-triage",
+   "misospace/courier",
+   "misospace/dispatch",
+   "misospace/foreman-dispatch-bridge",
+   "misospace/llmkube-images",
+   "misospace/miso-gallery",
+   "misospace/pr-reviewer-action",
+   "misospace/windowstead"
+  ],
+  "severities": {
+   "major": 54,
+   "blocker": 20
+  },
+  "production_bot_at_head": {
+   "APPROVED": 59,
+   "CHANGES_REQUESTED": 8,
+   "NO_BOT_REVIEW": 7
+  },
+  "production_bot_flagged_same": {
+   "False": 61,
+   "partial": 10,
+   "false": 1,
+   "True": 2
+  }
+ },
+ "method": {
+  "replay": "the branch's own compiled code \u2014 deriveNegativeEvidenceRules -> serializeNegativeEvidenceArtifact -> negativeEvidenceRulesFromArtifact -> applyNegativeEvidence \u2014 driven over every corpus finding via an esbuild bundle of the worktree sources (scratch harness, not committed)",
+  "counterfactual": "rules derived under an ASSUMED fully clean provider run at each finding's own head (the maximally dangerous derivation state); where the assumption matters it was checked empirically (see empirical_checks)",
+  "category_worst_case": "the corpus carries no model category labels; each finding was probed against every declared category of the applicable rule, so a recorded demotion is an upper bound over category assignments",
+  "postures": {
+   "N_narrow": "per-language formatter/lint/schema trio; style-only categories (lint +docs, schema +other); max_severity minor; tool-natural paths",
+   "B_broad": "same trio; ALL parse-legal categories; max_severity major (the parse-time maximum); repo-wide paths (**)"
+  },
+  "verdict_policy": "strict mapping forces request_changes only when an open finding is blocker or major (src/enforcement/verdict-policy.ts), so only a major->minor demotion can flip a verdict; blocker findings are never demoted (application hard cap) and a minor->info demotion cannot flip"
+ },
+ "build": {
+  "typecheck": "mise run check \u2014 clean",
+  "pin_tests": "tests-v3/negative-evidence.test.ts 21/21 pass",
+  "suite": {
+   "tests": 5474,
+   "pass": 5456,
+   "fail": 4,
+   "skipped": 14,
+   "excluded": [
+    "tests-v3/acquisition-mirror",
+    "tests-v3/acquisition-workspace (hang this sandbox's runner on clean main; excluded per eval constraints)"
+   ],
+   "failure_attribution": "all 4 failures are in test files byte-identical to origin/main (verified by diff) and fail for macOS-sandbox reasons: /proc/self/cmdline absent (run-confidence #1073), /proc-based process-identity/zombie probing (executor-local, whose own skip note documents the Linux-only design), ENAMETOOLONG on a deliberately over-long tmp path (executor-local). Environmental, pre-existing, not branch regressions."
+  }
+ },
+ "replay_outcomes": {
+  "N_narrow": {
+   "distribution": {
+    "no-match": 71,
+    "blocker-refused": 1,
+    "no-rule-no-coverage": 2
+   },
+   "demotions": 0,
+   "wrong_demotions": 0,
+   "note": "structurally zero on this corpus: all 74 corpus findings are major/blocker, and the minor ceiling makes majors severity-inadmissible (71 no-match) while the blocker cap records the one matched blocker (alert-triage#153) as a refusal"
+  },
+  "B_broad": {
+   "distribution": {
+    "claim-shape-gate-refused": 47,
+    "DEMOTED": 5,
+    "no-match": 19,
+    "blocker-refused": 1,
+    "no-rule-no-coverage": 2
+   },
+   "demotions_raw": 5,
+   "wrong_demotions_after_adjudication": 4,
+   "protected_by_derivation": 1
+  },
+  "gate_saves_claim_shape_refused": 47,
+  "blocker_refusals_recorded": 1,
+  "no_declaration_coverage": 2
+ },
+ "wrong_demotions": [
+  {
+   "finding": "misospace/pr-reviewer-action#467@aae8b8ed",
+   "severity": "major",
+   "file": ".github/workflows/ci.yaml",
+   "demoting_rule": "yamllint",
+   "domain": "lint",
+   "category_used": "bug",
+   "demoted_to": "minor",
+   "path_pattern": "**",
+   "reason": "negative evidence: lint provider 'yamllint' ran clean at head aae8b8ed33fe covering '**'; major demoted to minor",
+   "message_excerpt": "The PR deletes the entire test suite under the guise of \"add shellcheck to CI.\" The diff removes the entire validate job: 215 pytest cases with coverage gate, smoke_test.sh, 31 bash test suites, py_compile checks, yamllint duplicate-key detection, and action.yml/example YAML validation. The replacement YAML validation (yaml.safe_load) does not catch duplicate keys \u2014 it silently keeps the last valu",
+   "adjudication": "WRONG DEMOTION (genuine)",
+   "class": "lint identity gate on a finding ABOUT the tool",
+   "why": "The real defect is 'the PR deletes the entire test suite under the guise of add-shellcheck-to-CI'; the human text names yamllint/shellcheck because the regression REMOVES their CI coverage. The lint gate reads that mention as a lint-violation claim. The model's finding would name the tool the same way. Provider empirically clean at the exact head (see empirical_checks[0]) \u2014 the rule derives.",
+   "flip": "bot APPROVED at head; had the reviewer emitted this real major as its sole blocking finding, the strict mapping forces request_changes, and the demotion to minor re-approves \u2014 the exact sole-major masking shape.",
+   "empirical": "yamllint clean at head (exit 0)"
+  },
+  {
+   "finding": "misospace/dispatch#82@91bbc0fd",
+   "severity": "major",
+   "file": "prisma/schema.prisma",
+   "demoting_rule": "prisma-validate",
+   "domain": "schema",
+   "category_used": "bug",
+   "demoted_to": "minor",
+   "path_pattern": "prisma",
+   "reason": "negative evidence: schema provider 'prisma-validate' ran clean at head 91bbc0fde1d0 covering 'prisma'; major demoted to minor",
+   "message_excerpt": "Schema migration \u2014 Adding notes field to 3 models requires a Prisma migration. Ensure migration is planned/deployed with this change.",
+   "adjudication": "WRONG DEMOTION (genuine)",
+   "class": "schema cue on incidental vocabulary",
+   "why": "The real defect is a missing Prisma migration for a schema change \u2014 semantic. The phrase 'Schema migration' matches the schema claim regex on the word 'Schema'. prisma validate checks schema-file validity, which holds, so the provider runs clean while the real defect stands; no local prisma CLI in the sandbox, adjudicated from the defect text (the finding is about migration completeness, not schema validity).",
+   "flip": "NO_BOT_REVIEW at head; masking exposure is the same shape had the defect been found (sole major).",
+   "empirical": "textual adjudication"
+  },
+  {
+   "finding": "misospace/courier#108@ff99fc4d",
+   "severity": "major",
+   "file": "internal/executor/mcp_status.go",
+   "demoting_rule": "gofmt",
+   "domain": "formatter",
+   "category_used": "bug",
+   "demoted_to": "minor",
+   "path_pattern": "**",
+   "reason": "negative evidence: formatter provider 'gofmt' ran clean at head ff99fc4de2ad covering '**'; major demoted to minor",
+   "message_excerpt": "ParseMCPStatus in internal/executor/mcp_status.go doesn't parse what OpenCode 1.18.31 actually prints, so in production it reports nothing useful. The tests pass because the fixtures are invented clean output. A healthy server parses to []. A failed server parses to a server named '|', with no reason, and github is missing... Each entry line starts with a bullet glyph and the status word carries a",
+   "adjudication": "WRONG DEMOTION (genuine)",
+   "class": "formatter cue on incidental vocabulary",
+   "why": "The real defect is a parser that cannot read OpenCode's actual output (ANSI-prefixed status words, box-drawing continuation lines). The words 'whitespace' and 'indented' appear only as incidental vocabulary describing the protocol shape ('continuation lines start with a box-drawing character rather than whitespace, so the reason line isn't treated as indented'). The pure-formatting regex fires on them. A formatter run says nothing about parser semantics and would run clean; no Go toolchain in the sandbox, adjudicated from the defect text (the finding claims a semantic parse bug, not a formatting violation).",
+   "flip": "bot APPROVED at head; same sole-major masking shape had the defect been found.",
+   "empirical": "textual adjudication"
+  },
+  {
+   "finding": "joryirving/home-ops#5853@63a55be5",
+   "severity": "major",
+   "file": "kubernetes/apps/base/llm/openclaw/externalsecret.yaml",
+   "demoting_rule": "kubeconform",
+   "domain": "schema",
+   "category_used": "bug",
+   "demoted_to": "minor",
+   "path_pattern": "**",
+   "reason": "negative evidence: schema provider 'kubeconform' ran clean at head 63a55be53f08 covering '**'; major demoted to minor",
+   "message_excerpt": "Return the mult-doc break / revert the yaml server removal / revert removing the yaml anchor / $schema is missing, this happened previously as well / This didn't part properly and is no longer structured in a human readable format",
+   "adjudication": "WRONG DEMOTION (genuine)",
+   "class": "schema cue on incidental vocabulary + provider blind spot",
+   "why": "The real defect bundle ('$schema is missing', 'didn't part properly', multi-doc break, removed yaml anchor) is semantic/structural. The file at the exact head PARSES cleanly (empirical check below), so parse-level and CRD-skipping schema providers derive a rule, and the schema cue fires on the literal token '$schema'. A schema tool that skips CRDs (kubeconform's default for ExternalSecret) is clean on exactly the file that is broken.",
+   "flip": "NO_BOT_REVIEW at head; masking exposure hypothetical (sole major).",
+   "empirical": "yamllint exit 0 at head \u2014 file parses"
+  }
+ ],
+ "raw_demotions_with_adjudication": [
+  {
+   "finding": "misospace/pr-reviewer-action#467@aae8b8ed",
+   "severity": "major",
+   "file": ".github/workflows/ci.yaml",
+   "demoting_rule": "yamllint",
+   "domain": "lint",
+   "category_used": "bug",
+   "demoted_to": "minor",
+   "path_pattern": "**",
+   "reason": "negative evidence: lint provider 'yamllint' ran clean at head aae8b8ed33fe covering '**'; major demoted to minor",
+   "message_excerpt": "The PR deletes the entire test suite under the guise of \"add shellcheck to CI.\" The diff removes the entire validate job: 215 pytest cases with coverage gate, smoke_test.sh, 31 bash test suites, py_compile checks, yamllint duplicate-key detection, and action.yml/example YAML validation. The replacement YAML validation (yaml.safe_load) does not catch duplicate keys \u2014 it silently keeps the last valu",
+   "adjudication": "WRONG DEMOTION (genuine)",
+   "class": "lint identity gate on a finding ABOUT the tool",
+   "why": "The real defect is 'the PR deletes the entire test suite under the guise of add-shellcheck-to-CI'; the human text names yamllint/shellcheck because the regression REMOVES their CI coverage. The lint gate reads that mention as a lint-violation claim. The model's finding would name the tool the same way. Provider empirically clean at the exact head (see empirical_checks[0]) \u2014 the rule derives.",
+   "flip": "bot APPROVED at head; had the reviewer emitted this real major as its sole blocking finding, the strict mapping forces request_changes, and the demotion to minor re-approves \u2014 the exact sole-major masking shape.",
+   "empirical": "yamllint clean at head (exit 0)"
+  },
+  {
+   "finding": "misospace/dispatch#82@91bbc0fd",
+   "severity": "major",
+   "file": "prisma/schema.prisma",
+   "demoting_rule": "prisma-validate",
+   "domain": "schema",
+   "category_used": "bug",
+   "demoted_to": "minor",
+   "path_pattern": "prisma",
+   "reason": "negative evidence: schema provider 'prisma-validate' ran clean at head 91bbc0fde1d0 covering 'prisma'; major demoted to minor",
+   "message_excerpt": "Schema migration \u2014 Adding notes field to 3 models requires a Prisma migration. Ensure migration is planned/deployed with this change.",
+   "adjudication": "WRONG DEMOTION (genuine)",
+   "class": "schema cue on incidental vocabulary",
+   "why": "The real defect is a missing Prisma migration for a schema change \u2014 semantic. The phrase 'Schema migration' matches the schema claim regex on the word 'Schema'. prisma validate checks schema-file validity, which holds, so the provider runs clean while the real defect stands; no local prisma CLI in the sandbox, adjudicated from the defect text (the finding is about migration completeness, not schema validity).",
+   "flip": "NO_BOT_REVIEW at head; masking exposure is the same shape had the defect been found (sole major).",
+   "empirical": "textual adjudication"
+  },
+  {
+   "finding": "misospace/courier#108@ff99fc4d",
+   "severity": "major",
+   "file": "internal/executor/mcp_status.go",
+   "demoting_rule": "gofmt",
+   "domain": "formatter",
+   "category_used": "bug",
+   "demoted_to": "minor",
+   "path_pattern": "**",
+   "reason": "negative evidence: formatter provider 'gofmt' ran clean at head ff99fc4de2ad covering '**'; major demoted to minor",
+   "message_excerpt": "ParseMCPStatus in internal/executor/mcp_status.go doesn't parse what OpenCode 1.18.31 actually prints, so in production it reports nothing useful. The tests pass because the fixtures are invented clean output. A healthy server parses to []. A failed server parses to a server named '|', with no reason, and github is missing... Each entry line starts with a bullet glyph and the status word carries a",
+   "adjudication": "WRONG DEMOTION (genuine)",
+   "class": "formatter cue on incidental vocabulary",
+   "why": "The real defect is a parser that cannot read OpenCode's actual output (ANSI-prefixed status words, box-drawing continuation lines). The words 'whitespace' and 'indented' appear only as incidental vocabulary describing the protocol shape ('continuation lines start with a box-drawing character rather than whitespace, so the reason line isn't treated as indented'). The pure-formatting regex fires on them. A formatter run says nothing about parser semantics and would run clean; no Go toolchain in the sandbox, adjudicated from the defect text (the finding claims a semantic parse bug, not a formatting violation).",
+   "flip": "bot APPROVED at head; same sole-major masking shape had the defect been found.",
+   "empirical": "textual adjudication"
+  },
+  {
+   "finding": "misospace/llmkube-images#237@2963232e",
+   "severity": "major",
+   "file": ".github/workflows/pull-request.yaml",
+   "demoting_rule": "kubeconform",
+   "domain": "schema",
+   "category_used": "bug",
+   "demoted_to": "minor",
+   "path_pattern": "**",
+   "reason": "negative evidence: schema provider 'kubeconform' ran clean at head 2963232e6fc7 covering '**'; major demoted to minor",
+   "message_excerpt": "[Invalid workflow file: .github/workflows/pull-request.yaml#L29] The workflow is not valid. .github/workflows/pull-request.yaml (Line: 29, Col: 3): Error calling workflow 'misospace/llmkube-images/.github/workflows/app-builder.yaml@61edd504a5fbb87aba89bc1ef4e4f525accf2ab6'. The nested job 'scan' is requesting 'security-events: write', but is only allowed 'security-events: none'. (preceded by: \"Wor",
+   "adjudication": "REFUSED BY DERIVATION under a competent declaration",
+   "class": "real toolchain violation \u2014 provider cannot run clean",
+   "why": "The finding quotes GitHub rejecting the workflow itself. The tool whose domain actually covers .github/workflows (actionlint) cannot exit 0 at that head, so no rule derives. The replay demoted it only because the broad posture declared kubeconform over ['**'] \u2014 a declaration over paths the tool does not validate, which yields vacuously-clean evidence.",
+   "flip": "none under a competent declaration",
+   "empirical": "corpus-text adjudication (GitHub's own rejection quoted in the corpus)"
+  },
+  {
+   "finding": "joryirving/home-ops#5853@63a55be5",
+   "severity": "major",
+   "file": "kubernetes/apps/base/llm/openclaw/externalsecret.yaml",
+   "demoting_rule": "kubeconform",
+   "domain": "schema",
+   "category_used": "bug",
+   "demoted_to": "minor",
+   "path_pattern": "**",
+   "reason": "negative evidence: schema provider 'kubeconform' ran clean at head 63a55be53f08 covering '**'; major demoted to minor",
+   "message_excerpt": "Return the mult-doc break / revert the yaml server removal / revert removing the yaml anchor / $schema is missing, this happened previously as well / This didn't part properly and is no longer structured in a human readable format",
+   "adjudication": "WRONG DEMOTION (genuine)",
+   "class": "schema cue on incidental vocabulary + provider blind spot",
+   "why": "The real defect bundle ('$schema is missing', 'didn't part properly', multi-doc break, removed yaml anchor) is semantic/structural. The file at the exact head PARSES cleanly (empirical check below), so parse-level and CRD-skipping schema providers derive a rule, and the schema cue fires on the literal token '$schema'. A schema tool that skips CRDs (kubeconform's default for ExternalSecret) is clean on exactly the file that is broken.",
+   "flip": "NO_BOT_REVIEW at head; masking exposure hypothetical (sole major).",
+   "empirical": "yamllint exit 0 at head \u2014 file parses"
+  }
+ ],
+ "blocker_refusal_record": [
+  {
+   "finding": "misospace/alert-triage#153@ec4db76d",
+   "severity": "blocker",
+   "file": "enrich.go",
+   "trigger": "formatter cue ('normalizes whitespace') + covered path + declared category under both postures",
+   "outcome": "unchanged \u2014 'blocker findings are never contradicted by negative evidence' (recorded on the artifact decision list, never demoted)"
+  }
+ ],
+ "empirical_checks": [
+  {
+   "finding": "misospace/pr-reviewer-action#467@aae8b8ed",
+   "check": "yamllint -d \"{rules: {key-duplicates: enable}}\" (the CI invocation) on .github/workflows/ci.yaml fetched at head aae8b8ed33fe6ad7f7624ebda6601f7ded803f59 via the GitHub contents API",
+   "result": "exit 0, no output \u2014 the provider runs CLEAN at the exact head, so a yamllint negative-evidence rule derives and the demotion fires",
+   "method": "gh api repos/misospace/pr-reviewer-action/contents/.github/workflows/ci.yaml?ref=<head>"
+  },
+  {
+   "finding": "joryirving/home-ops#5853@63a55be5",
+   "check": "yamllint -d \"{rules: {key-duplicates: enable}}\" on kubernetes/apps/base/llm/openclaw/externalsecret.yaml fetched at head 63a55be53f089e208df17fb4924b2d06c35794ec",
+   "result": "exit 0, no output \u2014 the YAML parses cleanly, so parse-level and CRD-skipping schema providers run CLEAN at the exact head and the demotion fires",
+   "method": "gh api repos/joryirving/home-ops/contents/kubernetes/apps/base/llm/openclaw/externalsecret.yaml?ref=<head>"
+  },
+  {
+   "finding": "misospace/llmkube-images#237@2963232e",
+   "check": "no actionlint binary in the sandbox; adjudicated from the corpus text, which quotes GitHub's own rejection of the workflow ('[Invalid workflow file \u2026] The workflow is not valid \u2026 (preceded by: \"Workflow is failing to start, blocking the PR\")')",
+   "result": "actionlint cannot run clean at this head \u2014 a competent actionlint declaration derives no rule; the demotion fires only under the incompetent declaration (kubeconform declared over paths kubeconform does not validate)",
+   "method": "corpus-text adjudication"
+  }
+ ],
+ "claim_shape_scan_real_texts": {
+  "formatter_cue_findings": [
+   {
+    "finding": "misospace/courier#108@ff99fc4d",
+    "file": "internal/executor/mcp_status.go",
+    "severity": "major"
+   },
+   {
+    "finding": "misospace/alert-triage#153@ec4db76d",
+    "file": "enrich.go",
+    "severity": "blocker"
+   }
+  ],
+  "schema_cue_findings": [
+   {
+    "finding": "misospace/pr-reviewer-action#628@e0a4d0f0",
+    "file": "scripts/sections/corpus.sh",
+    "severity": "major"
+   },
+   {
+    "finding": "misospace/dispatch#82@91bbc0fd",
+    "file": "prisma/schema.prisma",
+    "severity": "major"
+   },
+   {
+    "finding": "misospace/llmkube-images#237@2963232e",
+    "file": ".github/workflows/pull-request.yaml",
+    "severity": "major"
+   },
+   {
+    "finding": "joryirving/home-ops#5853@63a55be5",
+    "file": "kubernetes/apps/base/llm/openclaw/externalsecret.yaml",
+    "severity": "major"
+   }
+  ],
+  "provider_identity_mentions": [
+   {
+    "finding": "misospace/pr-reviewer-action#467@aae8b8ed",
+    "identities": [
+     "yamllint"
+    ]
+   }
+  ]
+ },
+ "real_model_prose_stress": {
+  "flag_same_prs": 12,
+  "marker_matched_reviews": 11,
+  "no_marker_review": [
+   "joryirving/home-ops#9075@935d0f80"
+  ],
+  "chunks": 130,
+  "chunks_with_extractable_file": 46,
+  "formatter_cue_hits": 0,
+  "schema_cue_hits": 0,
+  "identity_or_rule_hits": 0,
+  "would_demote_at_major": 0
+ },
+ "parse_refusal_stress": [
+  {
+   "case": "security category (real path)",
+   "parsed": false,
+   "expected_parse": false,
+   "verdict": "PASS (refused)"
+  },
+  {
+   "case": "blocker ceiling",
+   "parsed": false,
+   "expected_parse": false,
+   "verdict": "PASS (refused)"
+  },
+  {
+   "case": "traversal path (../ prefix of real file)",
+   "parsed": false,
+   "expected_parse": false,
+   "verdict": "PASS (refused)"
+  },
+  {
+   "case": "absolute path",
+   "parsed": false,
+   "expected_parse": false,
+   "verdict": "PASS (refused)"
+  },
+  {
+   "case": "backslash path",
+   "parsed": false,
+   "expected_parse": false,
+   "verdict": "PASS (refused)"
+  },
+  {
+   "case": "unknown key",
+   "parsed": false,
+   "expected_parse": false,
+   "verdict": "PASS (refused)"
+  },
+  {
+   "case": "requirements category",
+   "parsed": false,
+   "expected_parse": false,
+   "verdict": "PASS (refused)"
+  },
+  {
+   "case": "unknown domain",
+   "parsed": false,
+   "expected_parse": false,
+   "verdict": "PASS (refused)"
+  },
+  {
+   "case": "valid narrow spec (control)",
+   "parsed": true,
+   "expected_parse": true,
+   "verdict": "PASS (parses)"
+  }
+ ],
+ "identity_hole": {
+  "description": "the lint/schema claim gate passes when the message word-boundedly mentions the declared identity; the parser accepts ANY 1-128 char token as identity, including prose words",
+  "probe": "lint rule over ** with all categories, identity set to a common word, tested against all 74 real corpus texts",
+  "identity_the_passes": 71,
+  "identity_code_passes": 4,
+  "identity_lint_passes": 0,
+  "note": "no plausible operator declaration does this, but nothing refuses it \u2014 an operator misconfiguration silently voids the identity gate"
+ },
+ "defaults_hazard": {
+  "max_severity_default": "major",
+  "where": "src/evidence/providers.ts parseNegativeEvidenceSpec \u2014 omitted max_severity defaults to 'major', the dangerous end of the axis on this corpus (all 74 findings major/blocker)",
+  "why_it_matters": "the narrow posture that scores zero wrong demotions requires the operator to explicitly declare max_severity: minor; a declaration that omits the field gets the unsafe ceiling by default"
+ },
+ "verdict_flip_accounting": {
+  "published_verdicts_changed": 0,
+  "why": "the feature is inert without an operator declaration, and at every corpus head the production reviewer either never emitted the finding (59 APPROVED / 7 NO_BOT_REVIEW heads missed the defect) or flagged it without a demote-shaped claim (real-prose stress: 0 gate passes)",
+  "counterfactual_masking_exposure": 2,
+  "counterfactual_note": "2 of the 4 genuine wrong demotions sit on PRs whose production review was APPROVED \u2014 had the reviewer emitted the real major as its sole blocking finding, the demotion would have re-approved (sole-major flip shape); the other 2 sit on NO_BOT_REVIEW heads"
+ },
+ "limitations": [
+  "the corpus is one-sided by construction (adjudicated REAL defects only): it calibrates the wrong-demotion axis decisively, but cannot measure recall (how much genuine formatter/lint noise a broad enable would suppress) \u2014 no adjudicated noise corpus exists",
+  "all corpus severities are major/blocker: the categories axis is uncalibrated (nothing minor/info in the corpus), and category assignments in the replay are worst-case probes over declared categories, not model labels",
+  "the demotion replay substitutes the adjudicated human finding text for the model's finding message (the bot never emitted these findings); at the flag-same heads the bot's ACTUAL published prose was tested separately (0 gate passes in 130 chunks), but those reviews are v2-era long-form \u2014 v3-era terse finding messages are less sampled there",
+  "empirical cleanliness could be run only where a tool exists in the sandbox (yamllint): the go/prisma/actionlint candidates were adjudicated from the defect texts; gofmt-clean and prisma-validate-clean are plausible but not machine-verified",
+  "the assumed-clean counterfactual is the maximally dangerous derivation state; in production the derivation gate refuses exactly the runs where the tool would have caught the claimed defect (see llmkube-images#237), so live wrong-demotion exposure is bounded by the genuinely-clean cases measured here"
+ ],
+ "recommendation": {
+  "decision": "DECLARE NARROWLY or NOT AT ALL \u2014 never broadly",
+  "conditions": [
+   "if declared at all: max_severity must be explicitly 'minor' (the only posture with zero wrong demotions on this corpus); the omitted-field default of 'major' is the unsafe end",
+   "categories: style-only for formatters (style+docs for linters, style+other for schema tools); the corpus cannot vouch for bug/verification declarations (category axis uncalibrated, all 4 genuine wrong demotions needed a non-style category under worst-case assignment)",
+   "never declare an identity token that is a common prose word (identity gate voided: 'the' passes 71/74 real texts)",
+   "do not declare a provider over paths it does not actually validate (vacuously-clean evidence produced the llmkube-images#237 demotion under the incompetent broad posture)",
+   "broad declaration (all categories, major ceiling, ** paths) is REJECTED by this eval: 4 real adjudicated defects demoted against a target of zero, 2 of them on approved-PR masking shapes"
+  ],
+  "pre_broadening_requirements": [
+   "a findings-about-the-tool guard: the lint identity gate must not fire when the message describes removing/altering the tool's coverage (the pr-reviewer-action#467 shape)",
+   "cue-word hygiene: the formatter/schema cue regexes must not fire on incidental vocabulary ('whitespace'/'indented' describing a protocol, '$schema' as a missing key, 'Schema migration') \u2014 consider requiring the claim to assert a violation OF the tool's domain rather than merely mentioning its vocabulary",
+   "an adjudicated noise corpus (model findings adjudicated as formatter/lint/schema noise) to measure recall before any broad enable",
+   "re-run this replay against the same corpus after any parser change"
+  ]
+ }
+}
