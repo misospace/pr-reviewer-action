@@ -48,6 +48,7 @@ import {
 } from "../context/index.js";
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
+import { buildTracePlan, TRACE_PLAN_ARTIFACT } from "../requirements/trace-plan.js";
 import { classifyPr, classificationToArtifact, DEPENDENCY_UPDATE_KINDS } from "../classification/classify.js";
 import { resolveReviewRoute, resolveTierProfiles, resolveConfidenceProfile, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
@@ -1644,6 +1645,16 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   for (const warning of distributedRequirementWarnings(ledgerValue, traceOwnership.rules, traceScopeIds)) {
     errorLog(`requirement owners: ${warning}`);
   }
+  // #1506: the in-scope requirement trace plan, so the native loop's FIRST
+  // planning turn carries the requirement rows (and their distributed seam
+  // hints) the merge-gating evidence is built from. The artifact is written
+  // even when the feature is disabled — with ZERO rows — so a stale plan can
+  // never survive into a later run's planning context.
+  ws.write(TRACE_PLAN_ARTIFACT, Buffer.from(`${JSON.stringify(buildTracePlan({
+    ledger: requirementTraceEnabled ? ledgerValue : null,
+    scopeIds: requirementTraceEnabled ? traceScopeIds : [],
+    distributedHints,
+  }))}\n`, "utf8"));
   promptState = applyRequirementTraceFragment(promptState, ws, requirementTraceEnabled, undefined, traceScopeIds, distributedHints);
   // #1003 human-review triage: an operator-only, review-only opt-in. The
   // fragment adds ONE question to the reviewer and nothing else — no tool,
@@ -1819,8 +1830,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         const repairExtra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
         repaired = await runRequirementTraceRepairPass({
           requirements: repairRequirements.map((entry) => {
+            // #1519: the hints carry full seam objects now; the repair message
+            // still names the seams (the per-seam patterns live in the plan).
             const groups = distributedHints.find((hint) => hint.requirementId === entry.id)?.groups;
-            return { id: entry.id, text: entry.text, ...(groups ? { groups } : {}) };
+            return { id: entry.id, text: entry.text, ...(groups ? { groups: groups.map((group) => group.name) } : {}) };
           }),
           title: String(pr.title ?? ""),
           files: safeJson(ws.read("pr-files.json")),

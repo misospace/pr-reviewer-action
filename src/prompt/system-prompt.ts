@@ -209,7 +209,7 @@ export function applyRequirementTraceFragment(
   enabled: boolean,
   assets: PromptAssets = BUNDLED_PROMPT_ASSETS,
   scopeIds?: readonly string[],
-  distributedHints?: readonly { requirementId: string; groups: readonly string[] }[],
+  distributedHints?: readonly { requirementId: string; groups: readonly { name: string; owners?: readonly string[]; tests?: readonly string[] }[] }[],
 ): SystemPromptState {
   if (!state.isDefault || !enabled) return state;
   if (!workspace.isNonEmpty(PROMPT_PRESENCE_FILES.requirementLedger)) return state;
@@ -226,11 +226,24 @@ export function applyRequirementTraceFragment(
   }
   if (distributedHints && distributedHints.length > 0) {
     const cleanName = (name: string): string => name.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_GROUP_NAME_CHARS);
+    // #1519: the hints now carry FULL seam objects; the prompt line still
+    // renders the seam NAMES only (the rendered plan section is where the
+    // per-seam evidence paths live). A hint whose every seam name sanitizes
+    // away renders nothing and is dropped, never an empty `id →` tail.
     const hintLine = `Distributed requirements — cite one enforcement location and one matching test in each declared seam (a single location cannot satisfy them): ${distributedHints
       .slice(0, MAX_DISTRIBUTED_HINTS)
-      .map((hint) => `\`${cleanName(hint.requirementId)}\` → ${hint.groups.slice(0, MAX_GROUPS_PER_RULE).map(cleanName).join(", ")}`)
+      .map((hint) => {
+        const names = (hint.groups ?? [])
+          .slice(0, MAX_GROUPS_PER_RULE)
+          .map((group) => cleanName(group?.name ?? ""))
+          .filter((name) => name !== "");
+        return names.length === 0 ? null : `\`${cleanName(hint.requirementId)}\` → ${names.join(", ")}`;
+      })
+      .filter((rendered) => rendered !== null)
       .join("; ")}`;
-    trace += `\n${hintLine}`;
+    if (distributedHints.some((hint) => (hint.groups ?? []).some((group) => cleanName(group?.name ?? "") !== ""))) {
+      trace += `\n${hintLine}`;
+    }
   }
   if (state.systemPrompt.includes(trace)) return state;
   return { ...state, systemPrompt: `${state.systemPrompt}\n${trace}` };
