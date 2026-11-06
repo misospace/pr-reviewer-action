@@ -69,12 +69,25 @@ export function selectNewestPatchHead(
   items: readonly TangledPatchRecordItem[],
   ticketRkey: string,
   ticketUri: string,
+  expectedSourceBranch?: string,
 ): string | null {
   let best: { time: number; head: string } | undefined;
   for (const item of items) {
     const value = item.value;
     const ticket = str(value.ticket);
-    if (ticket === undefined || (ticket !== ticketRkey && ticket !== ticketUri)) continue;
+    // Fail closed on malformed patch state: a patch record without a
+    // usable `ticket` key cannot be proven to belong to another pull, so
+    // ignoring it could let an older revision masquerade as current.
+    if (ticket === undefined) return null;
+    if (ticket !== ticketRkey && ticket !== ticketUri) continue;
+    // Correlate the patch to this pull's source branch when the context
+    // provides one: the patch `source.branch` must match, and a missing
+    // source cannot prove the correlation (fail closed).
+    if (expectedSourceBranch !== undefined) {
+      const source = asRecord(value.source);
+      const branch = source === undefined ? undefined : str(source.branch);
+      if (branch !== expectedSourceBranch) return null;
+    }
     const createdAt = str(value.createdAt);
     if (createdAt === undefined) return null;
     const time = Date.parse(createdAt);
@@ -236,7 +249,7 @@ export async function readTangledCurrentHead(
       if (nextCursor === undefined || nextCursor === "") break;
       cursor = nextCursor;
     }
-    return selectNewestPatchHead(items, identity.rkey, identity.uri);
+    return selectNewestPatchHead(items, identity.rkey, identity.uri, ctx.sourceBranch);
   } catch {
     return null;
   }

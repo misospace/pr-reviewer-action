@@ -48,6 +48,7 @@ function patchItem(over: Record<string, unknown> = {}): { uri: string; cid: stri
     ticket: TICKET_RKEY,
     base: { oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
     head: { oid: HEAD1 },
+    source: { branch: "feat/x", repo: REPO_DID },
     createdAt: "2026-11-01T00:00:00.000Z",
     ...over,
   };
@@ -98,6 +99,26 @@ test("selector: a createdAt tie with different heads is ambiguous (null)", () =>
 test("selector: a createdAt tie with the same head is not ambiguous", () => {
   const items = [patchItem({}), patchItem({ cid: "bafypatch2" })];
   assert.equal(selectNewestPatchHead(items, TICKET_RKEY, TICKET_URI), HEAD1);
+});
+
+test("selector: a patch with a missing or malformed ticket fails closed (not ignored)", () => {
+  const missing = patchItem({});
+  delete missing.value.ticket;
+  assert.equal(selectNewestPatchHead([missing], TICKET_RKEY, TICKET_URI), null);
+  assert.equal(selectNewestPatchHead([patchItem({ ticket: 42 })], TICKET_RKEY, TICKET_URI), null);
+});
+
+test("selector: source-branch correlation binds the patch to this pull", () => {
+  const wrong = patchItem({ source: { branch: "other/branch", repo: REPO_DID } });
+  assert.equal(selectNewestPatchHead([wrong], TICKET_RKEY, TICKET_URI, "feat/x"), null);
+  const noSource: Record<string, unknown> = { ...patchItem({}).value };
+  delete noSource.source;
+  assert.equal(
+    selectNewestPatchHead([{ uri: patchItem({}).uri, cid: "bafy", value: noSource }], TICKET_RKEY, TICKET_URI, "feat/x"),
+    null,
+  );
+  // Without an expected source branch, the correlation check is skipped.
+  assert.equal(selectNewestPatchHead([wrong], TICKET_RKEY, TICKET_URI), HEAD1);
 });
 
 test("selector: malformed head/createdAt on a matching patch fails closed", () => {

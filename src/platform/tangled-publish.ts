@@ -112,9 +112,9 @@ export class TangledPublishApi implements PublishPlatformApi {
   };
 
   /** #588: why the current pull head is unknown on Tangled — the #451
-   * publication-boundary re-check can never be satisfied until a
-   * trustworthy current-head source exists, so the publish step says so
-   * instead of the generic "could not re-fetch" wording. */
+   * publication-boundary re-check needs the knot patch-record read
+   * (#1165), so the publish step says so instead of the generic
+   * "could not re-fetch" wording. */
   readonly currentHeadUnavailableReason = "Tangled current head unavailable: the knot patch-record read (org.tangled.review.patch) returned no trustworthy head";
 
   private readonly context: TangledContext;
