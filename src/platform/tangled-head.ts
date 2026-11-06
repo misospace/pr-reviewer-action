@@ -376,14 +376,17 @@ async function listTicketItems(
  *   unknown → publication refused). Malformed patch state (missing
  *   ticket key, bad repo binding) fails closed.
  *
- * History fallback: when source-branch correlation yields no unique
- * head (e.g. multiple open tickets and source-less patches), the
- * launch-time `ctx.sourceSha` (the REVIEWED head) is used ONLY to
- * identify the unique candidate ticket whose trusted patch history
- * contains that SHA. The returned value is always that ticket's newest
- * trusted `head.oid` from the records — never `ctx.sourceSha` echoed
- * back, never `declaredHeadSha`. Zero or multiple history matches
- * fail closed.
+ * With a single candidate ticket, source-branch correlation (or, for
+ * source-less patches, the sole-ticket identity) selects the head.
+ *
+ * With multiple candidates, source correlation is never authoritative
+ * (multiple open pulls can share source+target branches, and `source`
+ * is optional): the launch-time `ctx.sourceSha` (the REVIEWED head) is
+ * the sole disambiguator, identifying the unique candidate whose
+ * trusted patch history contains that SHA. The returned value is
+ * always that ticket's newest trusted `head.oid` from the records —
+ * never `ctx.sourceSha` echoed back, never `declaredHeadSha`. Zero or
+ * multiple history matches fail closed.
  */
 export async function readTangledCurrentHeadForContext(
   ctx: TangledContext,
@@ -399,18 +402,20 @@ export async function readTangledCurrentHeadForContext(
     return true;
   });
   if (candidates.length === 0) return null;
-  const soleCandidate = candidates.length === 1;
-  const heads = new Map<string, string>();
-  for (const candidate of candidates) {
+  if (candidates.length === 1) {
+    const candidate = candidates[0]!;
     let head = selectNewestPatchHead(items, candidate.rkey, candidate.uri, ctx.sourceBranch);
-    if (head === null && soleCandidate) {
-      // Source-less patch path: with a single open ticket for the
-      // target branch, the ticket IS the correlation.
+    if (head === null) {
+      // Single-candidate path: with one open ticket for the target
+      // branch, the ticket IS the correlation (covers source-less
+      // patches, whose `source` is optional in the lexicon).
       head = selectNewestPatchHead(items, candidate.rkey, candidate.uri, undefined);
     }
-    if (head !== null) heads.set(candidate.uri, head);
+    return head;
   }
-  if (heads.size === 1) return [...heads.values()][0] ?? null;
+  // Multi-candidate path: source-branch correlation is NOT authoritative
+  // (multiple open pulls can share source+target branches, and `source`
+  // is optional), so fall through to the history disambiguator below.
   // History fallback (see docblock): identify by reviewed SHA, return
   // newest trusted head — never the launch-time value itself.
   const reviewed = typeof ctx.sourceSha === "string" ? ctx.sourceSha.trim().toLowerCase() : "";

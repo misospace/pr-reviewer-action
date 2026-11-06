@@ -175,6 +175,25 @@ test("combined: 2 source-less open tickets, unique reviewed-SHA history match re
   assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), HEAD2);
 });
 
+test("combined: 2 same-source/target tickets — matching source.branch does NOT win over reviewed-SHA history", async () => {
+  const tickets = [ticketItem({ rkey: "3a" }), ticketItem({ rkey: "3b" })];
+  const bNewest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  // A: matching source.branch but history does NOT contain reviewed HEAD1.
+  const a = patchItem({ ticket: "3a", head: { oid: HEAD2 }, source: { branch: "feat/x", repo: REPO_DID } });
+  // B: source-less, history contains reviewed HEAD1, newest is bNewest.
+  const bOld: Record<string, unknown> = { ...patchItem({ ticket: "3b", head: { oid: HEAD1 } }).value };
+  delete bOld.source;
+  const bNew: Record<string, unknown> = { ...patchItem({ cid: "bafyb2", ticket: "3b", head: { oid: bNewest }, createdAt: "2026-11-02T00:00:00.000Z" }).value };
+  delete bNew.source;
+  const patches = [
+    a,
+    { uri: patchItem({ ticket: "3b" }).uri, cid: "bafypatch1", value: bOld },
+    { uri: patchItem({ cid: "bafyb2", ticket: "3b" }).uri, cid: "bafyb2", value: bNew },
+  ];
+  const { fetchImpl } = makeCombinedFetch(tickets, patches);
+  assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), bNewest);
+});
+
 test("combined: reviewed-SHA history fallback with zero matches fails closed", async () => {
   const tickets = [ticketItem({ rkey: "3mine" }), ticketItem({ rkey: "3other" })];
   const a: Record<string, unknown> = { ...patchItem({ ticket: "3mine", head: { oid: HEAD2 } }).value };
