@@ -87,6 +87,24 @@ function markerLine(body: string): string {
   return line!;
 }
 
+/** The metadata marker's own `review_result`. */
+function markerReviewResult(body: string): string {
+  const line = markerLine(body);
+  const json = line.slice(line.indexOf("{"), line.lastIndexOf("}") + 1);
+  return String((JSON.parse(json) as Record<string, unknown>).review_result);
+}
+
+/** The `review-handoff/v1` payload of a published body — the fenced JSON
+ * document the action renders into its marker preamble. */
+function handoffPayload(body: string): Record<string, unknown> {
+  const lines = body.split("\n");
+  const anchor = lines.findIndex((entry) => entry.startsWith("<!-- ai-pr-reviewer-handoff:v1 -->"));
+  assert.ok(anchor !== -1, "the published body carries no handoff container");
+  const payload = lines[anchor + 2];
+  assert.ok(payload !== undefined, "the handoff container carries no payload");
+  return JSON.parse(payload!) as Record<string, unknown>;
+}
+
 test("#1449: the published marker carries the run's derived-obligation state", async () => {
   for (const state of ["complete", "unresolved", "unavailable"] as const) {
     const api = new StickyApi();
@@ -137,19 +155,30 @@ test("#1449: a run without the feature publishes byte-identical output", async (
   // read APPROVE over an unfinished review.
   const enabled = new StickyApi();
   await publishReview(publishInput({ derivedObligationState: "unresolved" }), enabled, { diffText: "" });
+  const enabledBody = enabled.sticky[0]!.body;
+  const withoutBody = without.sticky[0]!.body;
+  // The marker line, compared on its own.
   assert.equal(
-    markerLine(enabled.sticky[0]!.body).replace(',"derived_obligation_state":"unresolved"', ""),
-    markerLine(without.sticky[0]!.body).replace('"review_result":"clean"', '"review_result":"partial"'),
+    markerLine(enabledBody).replace(',"derived_obligation_state":"unresolved"', ""),
+    markerLine(withoutBody).replace('"review_result":"clean"', '"review_result":"partial"'),
   );
-  assert.equal(
-    enabled.sticky[0]!.body
-      .replace(',"derived_obligation_state":"unresolved"', "")
-      .replace('"review_result":"clean"', '"review_result":"partial"')
-      .replace("✅ **Automated recommendation: APPROVE**", "🟡 **Automated recommendation: INCOMPLETE — not an approval**"),
-    without.sticky[0]!.body
-      .replace('"review_result":"clean"', '"review_result":"partial"')
-      .replace("✅ **Automated recommendation: APPROVE**", "🟡 **Automated recommendation: INCOMPLETE — not an approval**"),
-  );
+  // #1518: the published body now carries the `review-handoff/v1` container,
+  // which repeats the review result in its own JSON payload. The bodies are
+  // NOT compared whole: a whole-body comparison that normalizes every
+  // occurrence lets a handoff payload disagree with the marker and still
+  // compare equal. The handoff payload is extracted and compared SEPARATELY,
+  // and its `review_result` must carry the SAME expectation the marker has —
+  // the derived-obligation run reads `partial`, never `clean`.
+  const enabledPayload = handoffPayload(enabledBody);
+  const withoutPayload = handoffPayload(withoutBody);
+  assert.equal(enabledPayload.review_result, "partial", "the derived-obligation run's handoff reads partial, never clean");
+  assert.equal(withoutPayload.review_result, "clean", "the run without the derived state reads clean");
+  assert.equal(enabledPayload.review_result, markerReviewResult(enabledBody), "the handoff payload agrees with the marker");
+  assert.equal(withoutPayload.review_result, markerReviewResult(withoutBody), "the handoff payload agrees with the marker");
+  // The recommendation header agrees too: an unfinished review never reads
+  // as an approval.
+  assert.ok(enabledBody.includes("🟡 **Automated recommendation: INCOMPLETE — not an approval**"));
+  assert.ok(withoutBody.includes("✅ **Automated recommendation: APPROVE**"));
 });
 
 // ── the standalone `publish` CLI ──────────────────────────────────────

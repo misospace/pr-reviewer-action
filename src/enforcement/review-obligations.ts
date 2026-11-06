@@ -208,6 +208,18 @@ const ADMISSION_STOP_TOKENS: ReadonlySet<string> = new Set([
   "there", "here", "when", "where", "which", "what",
 ]);
 
+/** The shared admission vocabulary of a prose row (#1506): the lowercased
+ * word tokens (4+ characters) of the row's text minus the closed-class
+ * stopword set. One implementation, so the review-obligation rows and the
+ * requirement-trace rows cannot drift apart on what a token is. */
+export function sharedAdmissionTokens(text: string): string[] | null {
+  const tokens = new Set<string>();
+  for (const token of text.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []) {
+    if (!ADMISSION_STOP_TOKENS.has(token)) tokens.add(token);
+  }
+  return tokens.size > 0 ? [...tokens] : null;
+}
+
 /** #1381 (review): the enforceable half of the budget reservation. Inside
  * the reserved request window the tool loop admits a call only when its
  * target word-boundary-overlaps the vocabulary of an obligation that no call
@@ -222,11 +234,7 @@ const ADMISSION_STOP_TOKENS: ReadonlySet<string> = new Set([
  * admission (it still forces the verdict while unresolved). */
 export function obligationAdmissionTokens(text: string): string[] | null {
   if (!REVIEWER_GATHERABLE_CUE.test(text)) return null;
-  const tokens = new Set<string>();
-  for (const token of text.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []) {
-    if (!ADMISSION_STOP_TOKENS.has(token)) tokens.add(token);
-  }
-  return tokens.size > 0 ? [...tokens] : null;
+  return sharedAdmissionTokens(text);
 }
 
 /**

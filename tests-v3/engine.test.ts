@@ -553,8 +553,15 @@ test("the env adapter and engine produce identical structured results", async ()
     // the fork gate substitutes its own tool-harness artifacts and skips the
     // native loop. Everything else, including the ENGINE-authored
     // review-obligations.json, must stay symmetric.
-    const engineNames = [...engineResult.artifacts.keys()].filter((name) => name !== "review-obligations-candidates.json").sort();
-    const adapterNames = [...adapterResult.artifacts.keys()].filter((name) => name !== "review-obligations-candidates.json").sort();
+    // #1506: the requirement-trace plan candidates artifact is
+    // HARNESS-authored on the same seam (the harness writes the rows the
+    // planner was shown), so it is absent on the fork-gated adapter path for
+    // the same reason. The ENGINE-authored requirement-trace-plan.json stays
+    // symmetric.
+    const harnessAuthored = (name: string): boolean =>
+      name === "review-obligations-candidates.json" || name === "requirement-trace-plan-candidates.json";
+    const engineNames = [...engineResult.artifacts.keys()].filter((name) => !harnessAuthored(name)).sort();
+    const adapterNames = [...adapterResult.artifacts.keys()].filter((name) => !harnessAuthored(name)).sort();
     assert.deepEqual(engineNames, adapterNames);
     const obligationsCount = (names: string[]): number => names.filter((name) => name === "review-obligations.json").length;
     assert.equal(obligationsCount([...engineResult.artifacts.keys()]), obligationsCount([...adapterResult.artifacts.keys()]));
