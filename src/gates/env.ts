@@ -133,6 +133,11 @@ export const SPECIALIST_GATE_ENV_KEYS: EnvAllowlist = [
   "AI_SPECIALIST_ANTHROPIC_EFFORT_SUPPORT",
   "AI_TOKENS_PARAM",
   "AI_STREAM",
+  // #1515: the run-wide inference cap is a model-call setting like the retry/
+  // timeout keys above — the specialist child configures its own governor from
+  // it, so the advisory burst inside the gate subprocess honors the same cap
+  // the parent's in-process paths do.
+  "AI_MAX_CONCURRENT_MODEL_REQUESTS",
   // Deep-review phase controls.
   "DEEP_REVIEW",
   "DEEP_REVIEW_TIMEOUT_SEC",

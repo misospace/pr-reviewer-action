@@ -18,6 +18,13 @@ import {
 } from "../specialists/runner.js";
 import { DEFAULT_SPECIALIST_MAX_TOKENS, MAX_INPUT_BYTES, SPECIALIST_ROLES_ORDER, type SpecialistArtifact } from "../specialists/types.js";
 import { guardedWrite, resolveArtifactPath, resolveRoot } from "./guarded-write.js";
+import {
+  MAX_CONFIGURABLE_CONCURRENCY,
+  RUN_INFERENCE_CAP_ENV,
+  configureSharedRunInferenceGovernor,
+  inferenceGovernorFromEnv,
+  parseRunInferenceCap,
+} from "../model/governor.js";
 import { specialistRequestFn } from "./specialist-transport.js";
 import { extraHeadersForEnv } from "../transport/headers.js";
 import { resolveSpecialistProfiles, anthropicJsonObjectsPromptOnlyWarning, tierResponseFormat } from "../routing/tiers.js";
@@ -310,6 +317,19 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
   const stdout = deps.stdout ?? ((line: string) => process.stdout.write(`${line}\n`));
   const stderr = deps.stderr ?? ((line: string) => process.stderr.write(`${line}\n`));
   const args = parseSpecialistsArgs(deps.argv);
+
+  // #1515: the specialist phase is a gate SUBPROCESS with its own process —
+  // the engine's run-scoped governor never ran here — so the run-wide cap is
+  // configured from this child's (allowlisted) env too. Unset keeps the
+  // default disabled posture; the concurrent specialist roles are exactly
+  // the advisory burst the cap exists to bound.
+  const capConfig = parseRunInferenceCap(envStr(env, RUN_INFERENCE_CAP_ENV));
+  configureSharedRunInferenceGovernor(inferenceGovernorFromEnv(env));
+  if (capConfig.kind === "enabled") {
+    stdout(`inference governor: run-wide cap ${capConfig.cap} concurrent model request(s)`);
+  } else if (capConfig.kind === "invalid") {
+    stderr(`WARNING: ${RUN_INFERENCE_CAP_ENV}=${pyReprStr(capConfig.raw)} is not a positive integer up to ${MAX_CONFIGURABLE_CONCURRENCY}; run-wide inference cap disabled`);
+  }
 
   const deepMode = envStr(env, "DEEP_REVIEW", "false").trim().toLowerCase();
   if (deepMode !== "true" && deepMode !== "auto") {
