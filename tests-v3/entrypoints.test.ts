@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { TangledNotImplementedError } from "../src/platform/tangled.js";
-import { buildAdapter, buildPublishApi, publishInputFromEnv, publishMain, readEvent } from "../src/run/entrypoints.js";
+import { buildAdapter, buildPublishApi, publishInputFromEnv, publishMain, publishWithOutcome, readEvent } from "../src/run/entrypoints.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
 import { buildRunMetadataMarker } from "../src/metadata/markers.js";
@@ -585,6 +585,204 @@ test("#1161: the CLI publish path publishes the verdict natively, whatever the d
       events.push(api.submitted[0]!.event);
     }
     assert.deepEqual(events, ["APPROVE", "APPROVE", "APPROVE"]);
+  });
+});
+
+// ── #1520: the publish step is handed the REVIEWED diff on every platform ──
+//
+// `publishWithOutcome` used to give `publishReview` a diff only for Forgejo
+// (and only a FRESH forge read, which races a push). The engine writes the
+// reviewed diff to the run dir as `pr.diff`; the publish boundary now reads
+// that artifact the same way it reads `review-coverage.json`, so GitHub
+// publishes the contract's inline findings and the #762 usefulness-feedback
+// read can see publishable prescriptions there too.
+
+const ANCHORED_DIFF = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n old\n+new line\n";
+
+function inlineFindingsEnv(overrides: Partial<Record<string, string>> = {}): NodeJS.ProcessEnv {
+  return {
+    PUBLISH_MODE: "review_comment",
+    REVIEW_MARKDOWN: "# review",
+    VERDICT: "request_changes",
+    HEAD_SHA: "a".repeat(40),
+    BASE_SHA: "b".repeat(40),
+    PR_NUMBER: "7",
+    COMMENT_MARKER: "<!-- ai-pr-review -->",
+    INLINE_FINDINGS: "true",
+    INLINE_FINDINGS_MAX: "5",
+    FINDINGS: JSON.stringify([{ file: "a.ts", line: 2, severity: "major", category: "bug", message: "unchecked null deref" }]),
+    IS_FORK_PR: "false",
+    ...overrides,
+  } as NodeJS.ProcessEnv;
+}
+
+test("#1520: publishWithOutcome hands the run-dir reviewed diff to publishReview on GitHub (no fresh forge read)", async () => {
+  await withRunDirAsync(async (dir) => {
+    writeFileSync(join(dir, "pr.diff"), ANCHORED_DIFF);
+    const input = publishInputFromEnv(inlineFindingsEnv({ PR_REVIEWER_RUN_DIR: dir }), "github");
+    const api = new MinimalPublishApi("a".repeat(40));
+    // The historical fresh-read source must never run when the run dir
+    // carries the reviewed diff — a fresh read of the CURRENT head races a
+    // push and would anchor on content the review never covered.
+    const seam = {
+      api,
+      platform: "github",
+      diffProvider: async (): Promise<string> => {
+        throw new Error("fresh diff read must not run when the run dir carries the reviewed diff");
+      },
+    };
+    const outcome = await publishWithOutcome(input as never, seam as never, dir);
+    assert.equal(outcome.status, "published");
+    assert.equal(api.submitted.length, 1);
+    const comments = api.submitted[0]!.comments ?? [];
+    assert.equal(comments.length, 1);
+    assert.equal(comments[0]!.path, "a.ts");
+    assert.equal(comments[0]!.line, 2);
+    assert.equal(comments[0]!.side, "RIGHT");
+  });
+});
+
+test("#1520: a present-but-empty pr.diff IS the reviewed diff — no fallback read, empty anchor map", async () => {
+  await withRunDirAsync(async (dir) => {
+    writeFileSync(join(dir, "pr.diff"), "");
+    const input = publishInputFromEnv(inlineFindingsEnv({ PR_REVIEWER_RUN_DIR: dir }), "forgejo");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const seam = {
+      api,
+      platform: "forgejo",
+      diffProvider: async (): Promise<string> => {
+        throw new Error("an empty reviewed diff must not fall back to a fresh forge read");
+      },
+    };
+    const outcome = await publishWithOutcome(input as never, seam as never, dir);
+    assert.equal(outcome.status, "published");
+    // Nothing can anchor on an empty anchor map, so no findings review is
+    // emitted at all (#1093: never an empty native review); the findings stay
+    // in the sticky body instead.
+    assert.equal(api.submitted.length, 0);
+  });
+});
+
+test("#1520: without a run-dir pr.diff the historical per-platform sources still apply", async () => {
+  // GitHub (empty-diff path): the finding can never anchor, no fresh read
+  // exists for it, and the review still publishes body-only.
+  {
+    const input = publishInputFromEnv(inlineFindingsEnv(), "github");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const outcome = await publishWithOutcome(input as never, { api, platform: "github", diffProvider: async () => "" } as never);
+    assert.equal(outcome.status, "published");
+    // The empty diff cannot anchor anything, so no findings review is emitted.
+    assert.equal(api.submitted.length, 0);
+  }
+  // Forgejo (fresh-read fallback): the historical diffProvider is consulted,
+  // and the built comment carries the Forgejo position.
+  await withRunDirAsync(async (dir) => {
+    const input = publishInputFromEnv(inlineFindingsEnv({ PR_REVIEWER_RUN_DIR: dir }), "forgejo");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const seam = { api, platform: "forgejo", diffProvider: async (): Promise<string> => ANCHORED_DIFF };
+    const outcome = await publishWithOutcome(input as never, seam as never, dir);
+    assert.equal(outcome.status, "published");
+    const comments = api.submitted[0]!.comments ?? [];
+    assert.equal(comments.length, 1);
+    assert.equal(typeof (comments[0] as { new_position?: unknown }).new_position, "number");
+  });
+});
+
+test("#1520: the forgejo publish seam's diff provider takes the run dir from the caller, never ambient env", async (t) => {
+  // The mocked fresh read renders as an empty diff, so a regression that
+  // consults ambient env (or reads the wrong run dir) resolves "" here
+  // instead of silently reusing the artifact from another run dir.
+  t.mock.method(globalThis, "fetch", async () => new Response(""));
+  await withRunDirAsync(async (ambientDir) => {
+    writeFileSync(join(ambientDir, "pr.diff"), ANCHORED_DIFF);
+    const env = {
+      REPO: "o/r",
+      PR_NUMBER: "9",
+      PLATFORM: "forgejo",
+      FORGEJO_API_URL: "https://forge.example",
+      PR_REVIEWER_RUN_DIR: ambientDir,
+    } as NodeJS.ProcessEnv;
+    // Single source of truth: ambient `PR_REVIEWER_RUN_DIR` is never
+    // consulted by the diff provider — an omitted run dir falls straight
+    // through to the fresh forge read, even though the ambient env points
+    // at a run dir that carries the reviewed diff.
+    assert.equal(await buildPublishApi(env).diffProvider(), "");
+    // The caller's run dir hits, and the fresh forge read is never reached.
+    await withRunDirAsync(async (callerDir) => {
+      writeFileSync(join(callerDir, "pr.diff"), ANCHORED_DIFF);
+      const seam = buildPublishApi(env, callerDir);
+      assert.equal(seam.platform, "forgejo");
+      assert.equal(await seam.diffProvider(), ANCHORED_DIFF);
+    });
+  });
+});
+
+// #1520 edge-case paths (the AI review's obligation-2): the run-dir `pr.diff`
+// read must fail CLOSED on hostile or malformed path state — a NUL byte in
+// the run-dir path, a symlink planted at the artifact coordinate, a
+// directory at that coordinate — never crash the publish step and never
+// follow a link out of the (trusted, private) run dir.
+
+test("#1520: a NUL byte in the run-dir path fails closed to the historical fallback", async () => {
+  // Every fs call rejects paths containing NUL; the read must be "no
+  // reviewed diff available", not a thrown ERR_INVALID_ARG_VALUE escaping
+  // the publish step.
+  const nullDir = "/run/pr-7\x00";
+  {
+    // GitHub: the fallback is "" and the (never-existing here) fresh read
+    // stays untouched; the review still publishes body-only.
+    const input = publishInputFromEnv(inlineFindingsEnv(), "github");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const outcome = await publishWithOutcome(input as never, { api, platform: "github", diffProvider: async () => "" } as never, nullDir);
+    assert.equal(outcome.status, "published");
+    assert.equal(api.submitted.length, 0);
+  }
+  // Forgejo: the historical fresh-read fallback IS consulted and anchors.
+  const input = publishInputFromEnv(inlineFindingsEnv(), "forgejo");
+  const api = new MinimalPublishApi("a".repeat(40));
+  const seam = { api, platform: "forgejo", diffProvider: async (): Promise<string> => ANCHORED_DIFF };
+  const outcome = await publishWithOutcome(input as never, seam as never, nullDir);
+  assert.equal(outcome.status, "published");
+  const comments = api.submitted[0]!.comments ?? [];
+  assert.equal(comments.length, 1);
+  assert.equal(typeof (comments[0] as { new_position?: unknown }).new_position, "number");
+});
+
+test("#1520: a symlink at the pr.diff coordinate is refused, never followed", async () => {
+  // Same no-follow guarantee as every other security-sensitive artifact
+  // read in this repo (change-anchors head reads, mirror bookkeeping,
+  // controller publication): a link planted at the artifact coordinate is
+  // unproven content and falls back; its target bytes NEVER become the
+  // anchor map.
+  await withRunDirAsync(async (dir) => {
+    const targetDir = mkdtempSync(join(tmpdir(), "v3-publish-entry-outside-"));
+    try {
+      const target = join(targetDir, "reviewed.diff");
+      writeFileSync(target, ANCHORED_DIFF);
+      symlinkSync(target, join(dir, "pr.diff"));
+      const input = publishInputFromEnv(inlineFindingsEnv(), "github");
+      const api = new MinimalPublishApi("a".repeat(40));
+      const outcome = await publishWithOutcome(input as never, { api, platform: "github", diffProvider: async () => "" } as never, dir);
+      assert.equal(outcome.status, "published");
+      // The link target was refused, so the anchor map is empty and nothing
+      // anchors — the same outcome as "no reviewed diff", never the target.
+      assert.equal(api.submitted.length, 0);
+    } finally {
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("#1520: a directory at the pr.diff coordinate falls back like a missing artifact", async () => {
+  // Non-regular files are not the reviewed-diff artifact; the read must
+  // resolve to "unavailable" (fallback), never an EISDIR crash.
+  await withRunDirAsync(async (dir) => {
+    mkdirSync(join(dir, "pr.diff"));
+    const input = publishInputFromEnv(inlineFindingsEnv(), "github");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const outcome = await publishWithOutcome(input as never, { api, platform: "github", diffProvider: async () => "" } as never, dir);
+    assert.equal(outcome.status, "published");
+    assert.equal(api.submitted.length, 0);
   });
 });
 

@@ -452,7 +452,7 @@ async function runActionPipeline(
     // so a Tangled run publishes exactly the same record this Action would for
     // the identical engine result — the two hosts can never drift.
     const publishEnv: Env = publishEnvFromReview(stage, review, eventHeadSha);
-    const seam = buildPublishApi(publishEnv as NodeJS.ProcessEnv);
+    const seam = buildPublishApi(publishEnv as NodeJS.ProcessEnv, runDir);
     // The event-gated maybeClearRereviewLabel below owns label cleanup here;
     // publish's own rerunLabel strip would fire on every run, not just
     // label-triggered ones.
