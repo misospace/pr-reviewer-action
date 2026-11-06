@@ -1,0 +1,98 @@
+name: Self-hosted qualification
+
+# #1486: the self-hosted qualification harness. It starts disposable
+# containers and it reads a model credential, so it runs only when a
+# maintainer dispatches it. It never runs on a push or a pull request.
+#
+# The job lives in its own workflow because the unprivileged pull_request
+# CI must stay secret-free
+# (tests/test_fork_review_workflow.py::test_normal_ci_does_not_gain_privileges).
+# A credential in the pull_request path would reach fork code.
+#
+# The checkout pins the default branch. The dispatched branch can hold
+# unreviewed code, and this job hands that code a credential.
+#
+# The harness script lands with #1482. Until it exists, the job reports
+# that the harness is absent and skips the run step. The job never fails
+# for an absent harness.
+on:
+  workflow_dispatch:
+    inputs:
+      ai-base-url:
+        description: "Base URL of the model endpoint the harness reviews through"
+        required: true
+        type: string
+      ai-model:
+        description: "Model name the harness reviews through"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  self-hosted-qualification:
+    runs-on: ubuntu-latest
+    # The harness starts containers. It must not hold a runner for hours.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Report the harness state
+        id: harness
+        run: |
+          set -euo pipefail
+          if [[ -f tests/self_hosted_e2e_qualification.sh ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::The self-hosted qualification harness (tests/self_hosted_e2e_qualification.sh) is not implemented yet. It lands with #1482. The job skips the harness run until then."
+
+      # The harness drives the built v3 runtime bundle. dist/ is not
+      # committed, so the job builds it before the harness runs.
+      - name: Build the v3 runtime bundle
+        if: steps.harness.outputs.present == 'true'
+        run: |
+          npm ci
+          npm run build
+
+      # A missing credential must fail loudly. An empty model key would
+      # send the run into a model call that fails later, with no clear
+      # cause.
+      - name: Require the model credential
+        if: steps.harness.outputs.present == 'true'
+        env:
+          AI_API_KEY: ${{ secrets.SELF_HOSTED_AI_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${AI_API_KEY:-}" ]]; then
+            echo "::error::The repository secret SELF_HOSTED_AI_API_KEY is empty. The harness cannot review without a model credential."
+            exit 1
+          fi
+
+      # The harness reads every forge credential and every model setting
+      # from the environment. The credential rides only in the header of the
+      # forge capability, never in an argument and never in a URL.
+      - name: Run the self-hosted qualification harness
+        if: steps.harness.outputs.present == 'true'
+        env:
+          SELF_HOSTED_QUALIFICATION: "true"
+          AI_BASE_URL: ${{ inputs.ai-base-url }}
+          AI_MODEL: ${{ inputs.ai-model }}
+          AI_API_KEY: ${{ secrets.SELF_HOSTED_AI_API_KEY }}
+          GITHUB_API_URL: ${{ vars.SELF_HOSTED_GITHUB_API_URL }}
+          PR_REVIEWER_GITHUB_APP_ID: ${{ secrets.SELF_HOSTED_GITHUB_APP_ID }}
+          PR_REVIEWER_GITHUB_APP_PRIVATE_KEY: ${{ secrets.SELF_HOSTED_GITHUB_APP_PRIVATE_KEY }}
+        run: bash tests/self_hosted_e2e_qualification.sh

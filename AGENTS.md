@@ -133,6 +133,7 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/review-bundle.md`](docs/review-bundle.md) — #1425 `review-bundle/v1` machine-readable review contract: lifecycle states, exact-head freshness, stable finding IDs, bounded/redacted by construction
 - [`docs/evals.md`](docs/evals.md) — eval harness runbook, merge-safety scoring, semantic judge, deep-review A/B
 - [`docs/self-hosted-deployment.md`](docs/self-hosted-deployment.md) — #738 self-hosted deployment runbook: controller/worker OCI images, the bjw-s `common`-based Helm chart, external PostgreSQL, forge credentials, metrics, upgrades
+- [`docs/self-hosted-qualification.md`](docs/self-hosted-qualification.md) — #1486 self-hosted qualification harness: what it proves, the forge-capability routing rule, local and CI run steps
 - [`docs/release-notes.md`](docs/release-notes.md) — house style and process for turning release-please output into published release notes
 - `README.md` — action inputs/outputs, usage recipes, troubleshooting, versioning policy, security notes
 - [`SECURITY.md`](SECURITY.md) — threat model and operational security guidance
