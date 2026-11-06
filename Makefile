@@ -9,3 +9,24 @@ secret-scan:
 		-v "$(CURDIR):/github/workspace" \
 		ghcr.io/gitleaks/gitleaks@sha256:090a2715530bd6592342e6a66c3f35eafcaaf2a3227a312482504f9c854997e3 \
 		git --config /github/workspace/.gitleaks.toml --no-banner --redact /github/workspace
+
+# Runs the self-hosted qualification harness (#1486). The harness starts
+# disposable containers, so it needs Docker. It reads the model settings and
+# the forge credentials from the environment; see
+# docs/self-hosted-qualification.md for the full list.
+#
+# The harness script lands with #1482. Until it exists, this target reports
+# that the harness is absent and does nothing else. The target never fails
+# for an absent harness.
+.PHONY: self-hosted-qualification
+
+self-hosted-qualification:
+	@if [ ! -f tests/self_hosted_e2e_qualification.sh ]; then \
+		echo "SKIP: the self-hosted qualification harness (tests/self_hosted_e2e_qualification.sh) is not implemented yet (#1482)"; \
+		exit 0; \
+	fi; \
+	if [ ! -f dist/index.js ]; then \
+		echo "dist/index.js missing; building the v3 runtime bundle"; \
+		npm ci --no-audit --no-fund && npm run build; \
+	fi; \
+	SELF_HOSTED_QUALIFICATION=true bash tests/self_hosted_e2e_qualification.sh

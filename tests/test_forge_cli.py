@@ -1178,14 +1178,18 @@ def test_each_allow_listed_call_appears_exactly_once():
 _RAW_HTTP_RE = re.compile(r"(?<![\w-])(curl|wget)(?![\w-])")
 
 # The forge API shapes a request target can name. A raw client is flagged
-# only when its target names one of them.
+# only when its target names one of them: the GitHub API shapes, and the
+# Forgejo/Gitea shapes (the FORGEJO_API_URL setting and its /api/v1/ API
+# root).
 _FORGE_API_TARGETS = (
     "api.github.com",
     "GITHUB_API_URL",
     "GITHUB_REPOSITORY",
+    "FORGEJO_API_URL",
     "/repos/",
     "/pulls/",
     "/issues/",
+    "/api/v1/",
 )
 
 # Files exempt from the raw-HTTP guard, each with a non-empty reason. The
@@ -1318,6 +1322,8 @@ def test_every_raw_http_exemption_carries_a_reason():
         'curl -fsS -o /dev/null "https://api.github.com/repos/o/r/pulls/1"',
         '/usr/bin/curl -fsS "https://api.github.com/repos/o/r/pulls/1"',
         './wget -q -O- "https://api.github.com/repos/o/r/issues/1"',
+        'curl -fsS -H "Authorization: Bearer $TOKEN" "$FORGEJO_API_URL/api/v1/user"',
+        'wget -q -O- "https://forge.example.com/api/v1/repos/o/r/pulls/1"',
     ],
 )
 def test_the_raw_http_guard_flags_a_forge_api_target(tmp_path, line):
