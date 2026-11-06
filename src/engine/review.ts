@@ -48,6 +48,7 @@ import {
 } from "../context/index.js";
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
+import { buildTracePlan, TRACE_PLAN_ARTIFACT } from "../requirements/trace-plan.js";
 import { classifyPr, classificationToArtifact, DEPENDENCY_UPDATE_KINDS } from "../classification/classify.js";
 import { resolveReviewRoute, resolveTierProfiles, resolveConfidenceProfile, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
@@ -84,12 +85,12 @@ import { readWorkflowInputNamesByFile, resolveActionSlug } from "../enforcement/
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
 import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
-import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
+import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
+import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, unresolvedTraceRequirementIds, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { createTraceGapProbe, traceGapContinuationSummary } from "../requirements/trace-gap-probe.js";
 import { runRequirementTraceRepairPass, traceRepairOutcomeSummary } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
@@ -203,6 +204,14 @@ export interface RunReviewResult {
    * scorer produced a scored answer; the publish step renders them as
    * advisory bullets. */
   confidenceConcerns?: Array<{ file: string; line: number | null; evidence: string }>;
+  /** #1518: the requirement ids the deterministic enforcement pass could not
+   * discharge (unmet or unverifiable). These are the merge-gating ids of
+   * the enforcement pass, not model claims. */
+  unresolvedRequirementIds?: string[];
+  /** #1518: the required-check ids the deterministic enforcement pass could
+   * not resolve. These are the merge-gating ids of the enforcement pass, not
+   * model claims. */
+  unresolvedRequiredChecks?: string[];
   /** #1455: the verifier's own telemetry — the unscored cause, the measured
    * latency and the provider's token counts. The publish step carries it
    * into the metadata marker; it is advisory and changes nothing else. */
@@ -1644,6 +1653,16 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   for (const warning of distributedRequirementWarnings(ledgerValue, traceOwnership.rules, traceScopeIds)) {
     errorLog(`requirement owners: ${warning}`);
   }
+  // #1506: the in-scope requirement trace plan, so the native loop's FIRST
+  // planning turn carries the requirement rows (and their distributed seam
+  // hints) the merge-gating evidence is built from. The artifact is written
+  // even when the feature is disabled — with ZERO rows — so a stale plan can
+  // never survive into a later run's planning context.
+  ws.write(TRACE_PLAN_ARTIFACT, Buffer.from(`${JSON.stringify(buildTracePlan({
+    ledger: requirementTraceEnabled ? ledgerValue : null,
+    scopeIds: requirementTraceEnabled ? traceScopeIds : [],
+    distributedHints,
+  }))}\n`, "utf8"));
   promptState = applyRequirementTraceFragment(promptState, ws, requirementTraceEnabled, undefined, traceScopeIds, distributedHints);
   // #1003 human-review triage: an operator-only, review-only opt-in. The
   // fragment adds ONE question to the reviewer and nothing else — no tool,
@@ -1819,8 +1838,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         const repairExtra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
         repaired = await runRequirementTraceRepairPass({
           requirements: repairRequirements.map((entry) => {
+            // #1519: the hints carry full seam objects now; the repair message
+            // still names the seams (the per-seam patterns live in the plan).
             const groups = distributedHints.find((hint) => hint.requirementId === entry.id)?.groups;
-            return { id: entry.id, text: entry.text, ...(groups ? { groups } : {}) };
+            return { id: entry.id, text: entry.text, ...(groups ? { groups: groups.map((group) => group.name) } : {}) };
           }),
           title: String(pr.title ?? ""),
           files: safeJson(ws.read("pr-files.json")),
@@ -2220,6 +2241,14 @@ secrets: [profiles.primary.apiKey],
     // the final verdict.
     reconcileEnforcedReviewMarkdown(reviewRecord as never);
   }
+  // #1518: the merge-gating ids of the deterministic enforcement pass. They
+  // are computed AFTER both enforcement branches, so the strict path and the
+  // non-strict path carry the same ids, and they name the obligations that
+  // stayed open (a required check the reviewer did not resolve, a
+  // requirement the trace could not discharge) rather than only that the
+  // coverage was incomplete.
+  const unresolvedRequiredChecks = completenessResult === null ? [] : unresolvedRequiredCheckIds(completenessResult);
+  const unresolvedRequirementIds = requirementTraceResult === null ? [] : unresolvedTraceRequirementIds(requirementTraceResult.trace);
   if (blockerVerification !== null && blockerVerification.demoted > 0) {
     ws.write("blocker-verification.json", Buffer.from(`${pyJsonDumps({
       version: 1,
@@ -2866,6 +2895,12 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     admission: pre,
     // #1073: advisory concerns for the published section, scored answers only.
     ...(confidenceResult.status === "scored" ? { confidenceConcerns: confidenceResult.concerns } : {}),
+    // #1518: the enforcement pass's merge-gating ids, so the published
+    // handoff can name the obligations that stayed open. Both lists are
+    // always present here (empty when the enforcement pass found nothing);
+    // a run that never reviewed carries neither (the admission skip path).
+    unresolvedRequirementIds,
+    unresolvedRequiredChecks,
     // #1455: the verifier's telemetry for the published marker — advisory
     // only, never a verdict input.
     ...(publishedConfidenceTelemetry !== undefined ? { confidenceTelemetry: publishedConfidenceTelemetry } : {}),

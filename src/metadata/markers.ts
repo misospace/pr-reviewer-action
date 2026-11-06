@@ -34,6 +34,26 @@ export type { MetadataOptions };
  * prescription opener is the other half (`reserveSuggestionOpeners`), which is a
  * rewrite rather than a removal and so lives beside `stripReservedMarkers`.
  */
+/**
+ * #1518: the published handoff's container anchor. The container rides the
+ * action-owned managed body, so the anchor is action-owned state: no
+ * model-authored surface may carry it. The reserved pattern below keeps that
+ * true on every surface (review markdown, inline finding bodies, the
+ * outside-diff section), so the FIRST anchored block in a published body is
+ * always the action's own container and a later model-authored copy can
+ * never be mistaken for it.
+ *
+ * The grammar stops at the first `>` and does not match the metadata marker
+ * (`ai-pr-reviewer:{…}`), which names a different grammar.
+ */
+export const REVIEW_HANDOFF_ANCHOR = "<!-- ai-pr-reviewer-handoff:v1 -->";
+
+/** The reserved grammar of that anchor: any spelling, in any case, with any
+ * spacing. Used both by the reserved-marker strip and by the targeted strip
+ * a model-authored surface that never passes through `stripReservedMarkers`
+ * (an inline finding body) applies. */
+const REVIEW_HANDOFF_ANCHOR_PATTERN = /<!--\s*ai-pr-reviewer-handoff\s*:\s*[^>]*-->/gi;
+
 export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
   /<!--\s*ai-pr-review-fingerprint\s*:\s*[^>]*-->/gi,
   /<!--\s*ai-pr-review-sha\s*:\s*[^>]*-->/gi,
@@ -43,7 +63,25 @@ export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
   /<!--\s*pr-reviewer:rejected-prescriptions\s*:[^>]*-->/gi,
   // #1027: finding identity is action-owned state and model markdown cannot forge it.
   /<!--\s*pr-reviewer:finding-id\s*:[^>]*-->/gi,
+  // #1518: the published handoff's anchor is action-owned state (see
+  // `REVIEW_HANDOFF_ANCHOR` above).
+  REVIEW_HANDOFF_ANCHOR_PATTERN,
 ];
+
+/**
+ * #1518: remove every handoff-anchor occurrence from model-authored text.
+ *
+ * The anchor names the action's own container, so model text that carries it
+ * could offer a consumer a look-alike handoff. This strip runs on the
+ * surfaces that never pass through `stripReservedMarkers` — an inline
+ * finding body and the outside-diff section — so no published surface can
+ * carry a second anchor. The text itself stays a string; nothing is dropped
+ * beyond the anchor.
+ */
+export function stripReviewHandoffAnchor(text: string): string {
+  REVIEW_HANDOFF_ANCHOR_PATTERN.lastIndex = 0;
+  return text.replace(REVIEW_HANDOFF_ANCHOR_PATTERN, "");
+}
 
 /**
  * #1107: the reserved prescription opener — a fence line whose info string is

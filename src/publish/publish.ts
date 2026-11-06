@@ -21,9 +21,10 @@ import {
 } from "./inline-findings.js";
 import { redactText } from "../context/redact.js";
 import { escapeCodeSpan } from "../context/fence.js";
+import { buildReviewHandoff, renderReviewHandoffBlock } from "./handoff.js";
 import { stripRevealedCapNoteTails } from "../confidence/result.js";
 import type { ConfidenceTelemetry } from "../confidence/telemetry.js";
-import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, parseMetadata, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
+import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, parseMetadata, stripReviewHandoffAnchor, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
 import { FINDING_OUTCOMES_SCHEMA, isProvenHeadSha, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, serializeOutcomeLedger, type OutcomeEvent, type OutcomeLedger } from "../outcomes/schema.js";
 import { parseFindingIdentityMarker } from "../outcomes/identity.js";
 import { deriveOutcomeEvents, type PriorFindingObservation } from "../outcomes/reconcile.js";
@@ -85,6 +86,17 @@ export interface PublishInput {
   inlineFindingsMax: number;
   /** Structured findings (parsed array or raw). */
   findings: unknown;
+  /** #1518: the run's review id. It pairs with the head SHA to name THIS
+   * review of THIS head, and it is the id the published handoff carries
+   * (the same value the `review-bundle` output names). */
+  reviewId?: string;
+  /** #1518: the requirement ids the deterministic enforcement pass could not
+   * discharge. They ride the published handoff so a controller can see WHICH
+   * obligation stayed open. */
+  unresolvedRequirementIds?: readonly string[];
+  /** #1518: the required-check ids the deterministic enforcement pass could
+   * not resolve. They ride the published handoff. */
+  unresolvedRequiredChecks?: readonly string[];
   cleanupPreviousNativeReviews: string;
   /** #1161: DEPRECATED and inert. The input stays accepted for backward
    * compatibility, but it gates nothing and changes no published event —
@@ -337,9 +349,18 @@ export function resolveIncompleteReason(input: {
  * present) + the optional #1003 human-review triage section + sanitized
  * review. Every block is action-owned and inserted AFTER sanitization (never
  * model text) so no stripping pass can drop them, and they sit near the top
- * so a partial-coverage run cannot read as complete. */
+ * so a partial-coverage run cannot read as complete.
+ *
+ * #1518: the optional handoff container is inserted IMMEDIATELY after the
+ * marker preamble, so it is the first anchored block in the body. The
+ * preamble is action-owned and precedes every model-authored surface, so a
+ * consumer that reads the FIRST anchored block always reads this action's
+ * container and never a model-authored copy of it. */
 export function buildPublishedBody(options: {
   markers: string;
+  /** #1518: the rendered `review-handoff/v1` container (anchor + fenced
+   * JSON). Inserted right after the marker preamble. */
+  handoffBlock?: string;
   header?: string;
   note?: string;
   analysisEngine: string;
@@ -360,6 +381,9 @@ export function buildPublishedBody(options: {
   actionVersion?: string;
 }): string {
   const lines = [options.markers];
+  if (options.handoffBlock) {
+    lines.push(options.handoffBlock, "");
+  }
   if (options.header) {
     lines.push(options.header, "");
   }
@@ -626,7 +650,10 @@ export function renderPartialCoverageNotice(coverage: PartialCoverage): string {
  * clamp site so it cannot drift from `parseInlineFindingsMax`. #762:
  * `rejectedPrescriptions` holds the digests of already-rejected prescriptions
  * and drops only the replacement block of a matching finding (the finding
- * itself always posts); `suppressed` counts how many were dropped. */
+ * itself always posts); `suppressed` counts how many were dropped. #1518:
+ * `published` carries the replacements this build published, keyed by the
+ * finding's identity digest, so the published handoff can carry exactly
+ * those replacements. */
 export function buildInlineComments(options: {
   findings: unknown;
   diffText: string;
@@ -634,13 +661,13 @@ export function buildInlineComments(options: {
   forgejoPositions: boolean;
   linkMode: UpstreamLinkMode;
   rejectedPrescriptions?: ReadonlySet<string>;
-}): { comments: NativeReviewComment[]; suppressed: number } {
-  const { comments, suppressed } = buildComments(options.findings, options.diffText, Math.max(1, options.max), {
+}): { comments: NativeReviewComment[]; suppressed: number; published: Map<string, string> } {
+  const { comments, suppressed, published } = buildComments(options.findings, options.diffText, Math.max(1, options.max), {
     forgejoPositions: options.forgejoPositions,
     linkMode: options.linkMode,
     ...(options.rejectedPrescriptions === undefined ? {} : { rejectedPrescriptions: options.rejectedPrescriptions }),
   });
-  return { comments: comments as NativeReviewComment[], suppressed };
+  return { comments: comments as NativeReviewComment[], suppressed, published };
 }
 
 /** #762: the bound on the distinct reaction logins this run will verify. Each
@@ -1160,13 +1187,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * label/category/redaction/sanitization discipline as `findingToBody`
  * (`./inline-findings.js`), minus the per-comment disclaimer, since this
  * renders as one bullet in a shared section rather than a standalone
- * comment. */
+ * comment.
+ *
+ * #1518: the message is model-authored text on a published surface, and this
+ * section is appended AFTER the review markdown was sanitized, so it never
+ * passes through the reserved-marker strip. The published handoff's anchor
+ * is stripped here for the same reason the inline finding body strips it:
+ * no model-authored surface may carry the anchor that names the action's own
+ * container. */
 function renderOutsideDiffLine(finding: Record<string, unknown>, linkMode: UpstreamLinkMode): string {
   const severity = typeof finding.severity === "string" ? finding.severity : "info";
   const label = Object.hasOwn(SEVERITY_LABELS, severity) ? SEVERITY_LABELS[severity]! : severity;
   const category = finding.category;
   const suffix = category && category !== "other" ? ` (${String(category)})` : "";
-  const message = String(finding.message || "").replace(/\s+/g, " ").trim();
+  const message = stripReviewHandoffAnchor(String(finding.message || "").replace(/\s+/g, " ").trim());
   const prefix = finding.pre_existing === true ? "(pre-existing, outside this diff)" : "(outside this diff)";
   const line = `- **${label}${suffix}:** ${prefix} ${message}`;
   return sanitizeMarkdown(redactText(line), linkMode);
@@ -1595,6 +1629,12 @@ export async function publishReview(
     if (input.broadFingerprint) preamble.broadFingerprint = input.broadFingerprint;
     return preamble;
   })());
+  // #1518: the published remediation handoff is built AFTER the inline
+  // comment build below, so it can carry exactly the replacements THIS run
+  // published. The items are the FINAL post-enforcement state (severity
+  // caps, suppression, blocker-verification demotion and thread-settlement
+  // re-emission are already in `input.findings`), and every publish mode
+  // reuses the same container.
 
   // Structured findings → inline comments (both review modes, when enabled).
   // #589: on a platform WITHOUT a native review surface the built comments
@@ -1602,6 +1642,12 @@ export async function publishReview(
   // so the whole build — and every read behind it — is skipped: the body
   // compensation below is the only findings channel there.
   let inlineComments: NativeReviewComment[] = [];
+  // #1518: the replacements this run publishes as review comments, keyed by
+  // the finding's stable identity digest. A handoff item carries a
+  // suggestion ONLY when this map has that exact identity, so the handoff
+  // can never propose a replacement the action did not publish (a suppressed
+  // one, or one this run never published at all, never rides it).
+  let publishedPrescriptions: Map<string, string> = new Map();
   if (nativeSurface.supported && input.mode !== "comment" && input.inlineFindings && input.findings !== undefined && input.findings !== null) {
     // #762/#1107: usefulness feedback from the prior run's published
     // prescriptions. Read immediately before the build and fail-open end to
@@ -1627,6 +1673,7 @@ export async function publishReview(
       rejectedPrescriptions: feedback.keys,
     });
     inlineComments = built.comments;
+    publishedPrescriptions = built.published;
     try {
       const at = new Date().toISOString();
       // #1027: the identities this run actually PUBLISHES — parsed from the
@@ -1722,6 +1769,48 @@ export async function publishReview(
     }
   }
 
+  // #1518: the published remediation handoff, built AFTER the inline-comment
+  // build so it can carry exactly the replacements THIS run published. The
+  // items are the FINAL post-enforcement findings (the severity caps, the
+  // suppression, the blocker-verification demotion and the thread-settlement
+  // re-emission are already in `input.findings`), never raw model output.
+  const handoffBlock = renderReviewHandoffBlock(buildReviewHandoff({
+    reviewId: input.reviewId ?? "",
+    headSha: input.headSha,
+    verdict: input.verdict,
+    reviewResult,
+    requiredChecks: input.requiredChecks,
+    findings: input.findings,
+    unresolvedRequirementIds: input.unresolvedRequirementIds ?? [],
+    unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
+    publishedPrescriptions,
+  }));
+  // #1518: a suggestion may ride the handoff ONLY after the inline review
+  // submission that would publish it SUCCEEDS. The submission happens after
+  // (or with) the body's own publication, so every path that publishes a
+  // body while the inline comments are NOT proven published uses this
+  // suggestion-free variant: the body-only fallback of a native review and
+  // the recovery re-publication after a rejected inline batch. A failed
+  // submission must never leave a published handoff advertising a
+  // replacement no review comment carries.
+  const handoffBlockSansSuggestions = publishedPrescriptions.size === 0
+    ? handoffBlock
+    : renderReviewHandoffBlock(buildReviewHandoff({
+      reviewId: input.reviewId ?? "",
+      headSha: input.headSha,
+      verdict: input.verdict,
+      reviewResult,
+      requiredChecks: input.requiredChecks,
+      findings: input.findings,
+      unresolvedRequirementIds: input.unresolvedRequirementIds ?? [],
+      unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
+      publishedPrescriptions: new Map(),
+    }));
+  const bodySansPublishedSuggestions = (body: string): string =>
+    handoffBlock === handoffBlockSansSuggestions
+      ? body
+      : body.split(handoffBlock).join(handoffBlockSansSuggestions);
+
   const cleanupRequested = input.mode !== "comment"
     && resolveCleanupFlag(input.cleanupPreviousNativeReviews, input.mode) === "true";
   // #589: a platform that declares no native pull-review surface has no
@@ -1763,6 +1852,7 @@ export async function publishReview(
       ) + suffix;
       const body = buildPublishedBody({
         markers,
+        handoffBlock,
         header: prefix,
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
@@ -1787,6 +1877,7 @@ export async function publishReview(
         : `\n> **Native inline comments are unavailable on this platform**: ${surfaceReason}. The findings are published in this review body instead of as native review comments.\n`;
       const body = buildPublishedBody({
         markers,
+        handoffBlock,
         header: "# AI Automated Review",
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
@@ -1810,7 +1901,16 @@ export async function publishReview(
       if (nativeSurface.supported) {
         if (inlineComments.length > 0) {
           const inlineBody = `${input.commentMarker}\n_Inline findings from the automated review (summary in the sticky comment)._`;
-          const submitted = await api.createReview({ body: inlineBody, event: "COMMENT", commit_id: input.headSha, comments: inlineComments });
+          // #1518: a throw is a failed submission too — the recovery below
+          // must run for it exactly as for an `ok: false` result, or the
+          // already-published handoff would keep advertising suggestions no
+          // review comment carries.
+          let submitted: { ok: boolean; error?: string; reviewId?: number | string };
+          try {
+            submitted = await api.createReview({ body: inlineBody, event: "COMMENT", commit_id: input.headSha, comments: inlineComments });
+          } catch (error) {
+            submitted = { ok: false, error: error instanceof Error ? error.message : String(error) };
+          }
           if (submitted.ok) {
             nativeReviewId = submitted.reviewId;
             messages.push(`Attached ${inlineComments.length} inline finding comment(s)`);
@@ -1830,10 +1930,17 @@ export async function publishReview(
             // comment with the same bounded summary the #1249 body-only
             // fallback appends (the strict policy renders the findings table
             // into the body itself, so there is nothing to duplicate there).
+            // #1518: the recovery re-publishes whenever the body must change:
+            // a non-strict policy also appends the findings summary, and a
+            // strict policy still needs the suggestion-free handoff variant
+            // when the rejected batch carried prescriptions. A body that is
+            // byte-identical to what was published (strict, no published
+            // suggestion) re-publishes nothing — the #1282 behavior.
             const compensated = !strict;
             let recovered = false;
-            if (compensated) {
-              const recoveryBody = body + renderFindingsSummary(input.findings, input.upstreamLinkMode);
+            const recoveryBody = bodySansPublishedSuggestions(body)
+              + (compensated ? renderFindingsSummary(input.findings, input.upstreamLinkMode) : "");
+            if (recoveryBody !== body) {
               const recovery = await api.upsertStickyComment(input.commentMarker, recoveryBody);
               if (recovery.ok) {
                 recovered = true;
@@ -1846,7 +1953,11 @@ export async function publishReview(
             }
             messages.push(
               "WARN: inline findings review submission failed; summary comment was still published"
-                + (recovered ? " with the findings summary appended to the review body" : ""),
+                + (recovered
+                  ? compensated
+                    ? " with the findings summary appended to the review body"
+                    : " with the remediation handoff suggestions withdrawn"
+                  : ""),
             );
           }
         }
@@ -1909,6 +2020,7 @@ export async function publishReview(
           : `\n> **Native review verdicts are unavailable on this platform**: ${surfaceReason}. The review is published as a managed top-level review record; no native approval, blocking request, or inline comment was submitted.\n`;
       let body = buildPublishedBody({
         markers,
+        handoffBlock,
         header: "# AI Automated Review",
         note: "_Full PR review._",
         analysisEngine: input.analysisEngine,
@@ -2031,9 +2143,12 @@ export async function publishReview(
         // already part of the body, so the fallback body is unchanged (no
         // duplicate reporting); under any other policy the bounded findings
         // summary is appended, or nothing when there are no findings.
+        // #1518: the fallback review carries NO inline comments, so its body
+        // must not advertise any published prescription either — the
+        // suggestion-free handoff variant rides it instead.
         const fallbackBody = strict
-          ? body
-          : body + renderFindingsSummary(input.findings, input.upstreamLinkMode);
+          ? bodySansPublishedSuggestions(body)
+          : bodySansPublishedSuggestions(body) + renderFindingsSummary(input.findings, input.upstreamLinkMode);
         if (canApprove) {
           messages.push(`Submitting native approval for #${input.prNumber}`);
         } else if (event === "REQUEST_CHANGES") {

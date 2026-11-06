@@ -35,6 +35,13 @@ import type { EvidenceProvenance } from "../context/evidence-provenance.js";
 import { SKILL_RESULT_MAX_BYTES } from "../context/repository-skills.js";
 import { normalizeUsageTelemetry, type UsageTelemetry } from "../model/telemetry.js";
 import { type TransportTiming } from "../transport/timing.js";
+import { MAX_GROUP_NAME_CHARS, MAX_GROUPS_PER_RULE } from "../enforcement/requirement-trace.js";
+import {
+  traceSeamSlotForTarget,
+  traceTargetIsTestRead,
+  type TraceProofShape,
+  type TraceSeamHint,
+} from "../requirements/trace-plan.js";
 
 // Stop reasons (LoopOutcome.stopReason)
 export const STOP_MODEL_DONE = "model-stopped";
@@ -99,6 +106,63 @@ export const REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE =
   "[loop budget] Required review evidence comes first: resolve every outstanding obligation from the " +
   "Required Review Evidence section with tools BEFORE spending calls on optional exploration " +
   "(local-diff confirmation, history greps, redundant local reads).";
+
+/**
+ * #1506: the FIRST-request priority note when the outstanding rows are
+ * requirement-trace rows. The rows live in the Requirement Trace Plan
+ * section of the planning context, NOT in the Required Review Evidence
+ * section, and the note must say so: a model told to work on the wrong
+ * section spends the reserved tail on calls the reservation refuses.
+ *
+ * The note names the section and the outstanding requirement IDs. It never
+ * quotes the requirement TEXT: the text is untrusted content, and a turn
+ * note is trusted driver text. The model already holds the text — the
+ * section is in its planning context.
+ */
+export const TRACE_EVIDENCE_PRIORITY_TURN_NOTE =
+  "[loop budget] In-scope requirement evidence comes first: for every code-verifiable requirement in the " +
+  "Requirement Trace Plan section, attempt the evidence its row marker names — a runtime row needs BOTH " +
+  "the enforcement location AND a matching regression test, a structural-state row the repository state " +
+  "it names (a regression test only when its own text demands one), a distributed row every seam — with " +
+  "repository reads and searches BEFORE spending calls on optional exploration (claim falsification, " +
+  "history greps, redundant local reads).";
+
+// #1506: the window note for the requirement-trace rows: it names the
+// outstanding requirement ids and the tools that can discharge them, so the
+// reserved tail is spent on the merge-gating evidence and not on the calls
+// the reservation refuses.
+const TRACE_RESERVE_WINDOW_TURN_NOTE =
+  "[loop budget] Only {requestsLeft} tool request(s) remain and they are reserved for the in-scope " +
+  "requirement evidence still outstanding: {outstanding}. Those requirements are listed in the " +
+  "Requirement Trace Plan section — spend the reserved requests on repository reads and searches " +
+  "(read_file, find_files, list_tree, git_grep, git_log, git_blame) that name their files or terms. " +
+  "Optional calls are now refused, not executed. If the evidence cannot be located, report what is " +
+  "missing rather than approximating it.";
+
+const TRACE_RESERVE_WINDOW_ROUNDS_TURN_NOTE =
+  "[loop budget] Only {roundsLeft} loop turn(s) remain and they are reserved for the in-scope " +
+  "requirement evidence still outstanding: {outstanding}. Those requirements are listed in the " +
+  "Requirement Trace Plan section — spend the reserved turns on repository reads and searches " +
+  "(read_file, find_files, list_tree, git_grep, git_log, git_blame) that name their files or terms. " +
+  "Optional calls are now refused, not executed. If the evidence cannot be located, report what is " +
+  "missing rather than approximating it.";
+
+// #1506: the refusal a call that named no outstanding requirement row gets
+// inside the reserved window.
+const TRACE_RESERVE_REFUSAL_NOTE =
+  "Reserved requirement-evidence budget: this call was not executed and spent none of the remaining " +
+  "requests. The reserved tail still owes {outstanding} — those requirements are listed in the " +
+  "Requirement Trace Plan section. Make a repository read or search that names their files or terms, " +
+  "or finish now and report the missing evidence as unknown / needs verification.";
+
+// #1506: a run can hold BOTH the requirement-trace rows and the review-owned
+// prose rows: the note then says which other rows the reservation also
+// covers, so the model is never told the requirement rows are the only way
+// out of the window.
+const TRACE_WINDOW_CLAUSE =
+  " The reservation also covers the unresolved in-scope requirements from the Requirement Trace Plan section — a repository read or search that names one of those executes as well.";
+const PROSE_WINDOW_CLAUSE =
+  " The reservation also covers the unresolved rows of the Required Review Evidence section — a call that targets one of those executes as well.";
 
 const LOW_BUDGET_TURN_NOTE =
   "[loop budget] Only {requestsLeft} tool request(s) and {roundsLeft} " +
@@ -395,9 +459,34 @@ export interface RequiredEvidenceRow {
   id: string;
   tokens: readonly string[];
   obligation?: DependencyEvidenceObligation;
+  /** #1506: the closed set of tools that may discharge this row. Absent
+   * means any tool may — the #1381 prose rows behave exactly as before. */
+  tools?: readonly string[];
+  /** #1506: the row is a merge-gating requirement-trace row, not a
+   * review-owned prose row. */
+  trace?: boolean;
+  /** #1519: for a requirement-trace row, the distinct admitted repository
+   * reads the row needs before it is discharged and its reserved share
+   * releases: a runtime row needs BOTH the enforcement location and the
+   * matching regression test attempted, a structural-state row one checkout
+   * read (two when its text demands a test), a distributed row an
+   * enforcement read and a test read per seam. Absent means one admitted
+   * call discharges — the behavior every non-trace row keeps. */
+  requiredAttempts?: number;
+  /** #1519 (review): the row's evidence shape (trace rows only). The
+   * discharge is SLOT-aware: a runtime row (and a structural row whose text
+   * demands a test) owes one ENFORCEMENT read and one TEST read — evidence
+   * CATEGORIES, not any two reads; a distributed row owes both per declared
+   * seam, attributed with the same per-seam matching the deterministic
+   * validator applies. Absent for non-trace rows, which keep exactly the
+   * pre-#1519 behavior. */
+  proofShape?: TraceProofShape;
+  /** #1519 (review): the row's full seam hints (trace rows only), with the
+   * trusted owner/test glob patterns per-seam evidence is matched against. */
+  seams?: readonly TraceSeamHint[];
 }
 
-/** #1396: whether one call attempts (would discharge) one pending row. */
+/** #1396: whether one call admits (counts toward discharging) one pending row. */
 function rowAdmittedByCall(
   row: RequiredEvidenceRow,
   name: string,
@@ -406,8 +495,160 @@ function rowAdmittedByCall(
   if (row.obligation !== undefined) {
     return dependencyEvidenceObligationsForCall(name, args).includes(row.obligation);
   }
+  // #1506: a row with a tool allow-list is discharged ONLY by a call through
+  // one of those tools — the requirement evidence is repository reads, so a
+  // call through any other tool never satisfies the row.
+  if (row.tools !== undefined && !row.tools.includes(name)) return false;
   const target = argumentTargetText(args);
   return row.tokens.some((token) => targetMentions(target, token));
+}
+
+/**
+ * #1519 (review): ONE evidence slot a trace row must see credited before it
+ * discharges — an enforcement read, a regression-test read, or (single-slot
+ * rows) any admitted repository read. The KEY encodes the seam index for
+ * distributed rows (`"<index>:enforcement"` / `"<index>:test"`) so credit is
+ * attributed per seam exactly the way the deterministic validator matches
+ * citations to groups.
+ */
+interface TraceEvidenceSlot {
+  key: string;
+  kind: "enforcement" | "test" | "any";
+}
+
+/**
+ * #1519 (review): the FULL slot demand of a trace row. A runtime row and a
+ * structural row whose own text demands a regression test
+ * (`required_attempts === 2`) owe one enforcement read and one test read; a
+ * distributed row owes both per declared seam (capped at the validator's
+ * group bound, consistent with its `required_attempts` derivation); every
+ * other shape stays a single any-category slot (the pre-#1519 behavior).
+ * Non-trace rows owe no slots — their one-call discharge is unchanged.
+ */
+function traceRowSlots(row: RequiredEvidenceRow): TraceEvidenceSlot[] {
+  if (row.trace !== true) return [];
+  if (row.proofShape === "distributed" && Array.isArray(row.seams) && row.seams.length > 0) {
+    const slots: TraceEvidenceSlot[] = [];
+    const count = Math.min(row.seams.length, MAX_GROUPS_PER_RULE);
+    for (let index = 0; index < count; index += 1) {
+      slots.push({ key: `${index}:enforcement`, kind: "enforcement" });
+      slots.push({ key: `${index}:test`, kind: "test" });
+    }
+    return slots;
+  }
+  if (row.requiredAttempts === 2) {
+    return [
+      { key: "enforcement", kind: "enforcement" },
+      { key: "test", kind: "test" },
+    ];
+  }
+  return [{ key: "any", kind: "any" }];
+}
+
+/** The slots of a trace row no credited call has covered yet. */
+function traceUnmetSlots(row: RequiredEvidenceRow, credited: ReadonlySet<string> | undefined): TraceEvidenceSlot[] {
+  return traceRowSlots(row).filter((slot) => !credited?.has(slot.key));
+}
+
+/**
+ * #1519 (review): which UNMET slot of one trace row a call can advance —
+ * the slot-eligibility rule that replaces plain vocabulary admission for
+ * trace rows. A call is admitted to (and credits) a row only when it can
+ * advance an unmet slot of that row, which keeps the reserve honest: a call
+ * matching only already-met slots cannot advance outstanding demand and is
+ * refused inside the window.
+ *
+ * A repository read credits at most ONE slot per row: per-seam attribution
+ * walks the seams in deterministic order (enforcement before test within a
+ * seam), and only then falls back to the row vocabulary — a vocabulary-
+ * mentioning non-test read may credit the first UNMET enforcement slot, since
+ * a requirement's text often names its enforcement file but can never name
+ * its regression test. TEST slots never demand vocabulary: the validator's
+ * test gate is `isTestPath`-based. Non-trace rows never reach this helper.
+ */
+function traceSlotCreditForCall(
+  row: RequiredEvidenceRow,
+  name: string,
+  args: Record<string, unknown>,
+  unmet: readonly TraceEvidenceSlot[],
+): string | null {
+  if (row.tools !== undefined && !row.tools.includes(name)) return null;
+  const target = argumentTargetText(args);
+  const targetIsTest = traceTargetIsTestRead(target);
+  const vocabulary = row.tokens.some((token) => targetMentions(target, token));
+  if (row.proofShape === "distributed" && Array.isArray(row.seams) && row.seams.length > 0) {
+    const seams = row.seams.slice(0, MAX_GROUPS_PER_RULE);
+    for (let index = 0; index < seams.length; index += 1) {
+      const slot = traceSeamSlotForTarget(seams[index]!, target, targetIsTest);
+      if (slot === null) continue;
+      const key = `${index}:${slot}`;
+      if (unmet.some((candidate) => candidate.key === key)) return key;
+    }
+    if (!targetIsTest && vocabulary) {
+      const fallback = unmet.find((slot) => slot.kind === "enforcement");
+      if (fallback !== undefined) return fallback.key;
+    }
+    // #1519 (review, round 2): the symmetric last-resort fallback for TEST
+    // slots. A seam whose trusted test globs match no real file (config
+    // drift, a renamed test tree) must never pin the reserve: a test read
+    // that names the requirement's own vocabulary credits the first unmet
+    // test slot, so a model genuinely hunting for the requirement's
+    // regression test can always advance the row. The validator keeps its
+    // own stricter per-seam matching — this fallback releases reserve, it
+    // never certifies evidence.
+    if (targetIsTest && vocabulary) {
+      const fallback = unmet.find((slot) => slot.kind === "test");
+      if (fallback !== undefined) return fallback.key;
+    }
+    return null;
+  }
+  if (row.requiredAttempts === 2) {
+    if (targetIsTest) return unmet.some((slot) => slot.kind === "test") ? "test" : null;
+    return vocabulary && unmet.some((slot) => slot.kind === "enforcement") ? "enforcement" : null;
+  }
+  return vocabulary && unmet.some((slot) => slot.kind === "any") ? "any" : null;
+}
+
+/** The sanitized form of a trusted seam name in driver notes. */
+function traceSeamLabel(name: string): string {
+  return name.replace(/[\x00-\x1f\x7f`]/g, "").replace(/\s+/g, " ").trim().slice(0, MAX_GROUP_NAME_CHARS);
+}
+
+/**
+ * #1519 (review): the bounded outstanding-demand text of one trace row —
+ * which slots it still owes, so a redirected model spends the reserved tail
+ * on the MISSING evidence category (a runtime row whose enforcement read is
+ * done needs a TEST read, not another enforcement file). Distributed rows
+ * name the seam. Returns "" when nothing is unmet.
+ */
+function traceOutstandingDetail(row: RequiredEvidenceRow, credited: ReadonlySet<string> | undefined): string {
+  const unmet = traceUnmetSlots(row, credited);
+  if (unmet.length === 0) return "";
+  if (row.proofShape === "distributed" && Array.isArray(row.seams) && row.seams.length > 0) {
+    const seams = row.seams.slice(0, MAX_GROUPS_PER_RULE);
+    const parts: string[] = [];
+    for (let index = 0; index < seams.length; index += 1) {
+      const enforcement = unmet.some((slot) => slot.key === `${index}:enforcement`);
+      const test = unmet.some((slot) => slot.key === `${index}:test`);
+      if (!enforcement && !test) continue;
+      const label = `seam ${traceSeamLabel(seams[index]!.name)}`;
+      parts.push(
+        enforcement && test ? `${label}: enforcement + test reads owed`
+        : enforcement ? `${label}: enforcement read owed`
+        : `${label}: test read owed`,
+      );
+    }
+    if (parts.length > 0) return parts.join("; ");
+  }
+  const counts = (kind: TraceEvidenceSlot["kind"]): number => unmet.filter((slot) => slot.kind === kind).length;
+  const enforcement = counts("enforcement");
+  const test = counts("test");
+  const any = counts("any");
+  const parts: string[] = [];
+  if (enforcement > 0) parts.push(`${enforcement} enforcement read${enforcement === 1 ? "" : "s"}`);
+  if (test > 0) parts.push(`${test} test read${test === 1 ? "" : "s"}`);
+  if (any > 0) parts.push(`${any} evidence read${any === 1 ? "" : "s"}`);
+  return parts.length === 0 ? "" : `${parts.join(" + ")} owed`;
 }
 
 /** Default #1379 reserve: the budget tail the driver holds for required
@@ -1115,10 +1356,12 @@ export async function driveToolLoop(
   const reserve = outcome.requiredEvidenceRequestsHint;
   // #1381; #1396: the ONE tracked row set — produced once by the harness,
   // prose obligation rows and dependency-evidence shape rows alike. A row is
-  // discharged when an admitted executed call targets it (prose: argument-
-  // target token overlap; shape: the call's own URL/query), attempt-based
-  // and executor-status-agnostic (the row still needs a verdict disposition
-  // to count as SATISFIED — the window guarantees only the ATTEMPT).
+  // discharged when admitted executed calls have covered its evidence
+  // demand: one admitted call for prose/shape rows (#1519 keeps their
+  // behavior), the row's full required-attempts demand for trace rows —
+  // attempt-based and executor-status-agnostic (the row still needs a verdict
+  // disposition to count as SATISFIED — the window guarantees only the
+  // ATTEMPT).
   const pendingRows: RequiredEvidenceRow[] = reserve > 0
     ? [...(options.requiredEvidence ?? [])]
     : [];
@@ -1126,6 +1369,15 @@ export async function driveToolLoop(
   // (the #1145 repair seam seeds them here) start closed; a seed that names
   // no tracked row is dropped.
   const discharged = new Set<string>();
+  // #1519: SLOT credit per trace row — the set of evidence slots admitted
+  // calls have covered (keyed per seam for distributed rows). A trace row
+  // discharges only when its FULL slot demand is credited — for a runtime
+  // row BOTH the enforcement location and a matching regression-test read,
+  // for a distributed row both in every seam — so arbitrary matching reads
+  // (a second read of the same enforcement file, an unrelated doc) can no
+  // longer discharge a row. The categories and per-seam attribution mirror
+  // the deterministic validator. Non-trace rows keep the one-call discharge.
+  const traceCredited = new Map<string, Set<string>>();
   if (Array.isArray(options.requiredEvidenceCredits)) {
     for (const id of options.requiredEvidenceCredits) {
       if (typeof id !== "string") continue;
@@ -1166,8 +1418,27 @@ export async function driveToolLoop(
   const hasActiveRow = (): boolean => pendingRows.some((row) => rowActive(row));
   const anyActiveShapeRow = (): boolean =>
     pendingRows.some((row) => row.obligation !== undefined && rowActive(row));
+  // #1506: a requirement-trace row is not a review-owned prose row: it is
+  // discharged by repository evidence, not by the Required Review Evidence
+  // section, so the two kinds never share a note.
   const anyActiveProseRow = (): boolean =>
-    pendingRows.some((row) => row.obligation === undefined && rowActive(row));
+    pendingRows.some((row) => row.obligation === undefined && row.trace !== true && rowActive(row));
+  const anyActiveTraceRow = (): boolean =>
+    pendingRows.some((row) => row.trace === true && rowActive(row));
+  const outstandingTraceIds = (): string[] =>
+    pendingRows
+      .filter((row) => row.trace === true && rowActive(row))
+      .map((row) => {
+        const id = row.id.replace(/^trace:/, "");
+        // #1519 (review): the note names the UNMET SLOTS — which evidence
+        // category (enforcement vs regression test) and which distributed
+        // seam the row still owes — so the reserved tail is spent on the
+        // missing evidence instead of a redundant read of an already-covered
+        // category (a call that cannot advance an unmet slot is refused
+        // inside the window anyway).
+        const detail = traceOutstandingDetail(row, traceCredited.get(row.id));
+        return detail === "" ? id : `${id} (${detail})`;
+      });
   const outstandingShapeObligations = (): DependencyEvidenceObligation[] =>
     pendingRows
       .filter((row) => row.obligation !== undefined && rowActive(row))
@@ -1336,9 +1607,22 @@ export async function driveToolLoop(
         && (requestsLeft <= reserve || roundsLeft <= reserve);
       if (outcome.rounds === 0) {
         if (reserve > 0 && hasActiveRow()) {
-          conversation.addTurnNote(anyActiveShapeRow()
+          // #1506: the priority note names the section the outstanding rows
+          // actually live in. A requirement-trace row is discharged by
+          // repository evidence carried in the Requirement Trace Plan section,
+          // not by the Required Review Evidence section, so the note must
+          // point at the right one.
+          const priorityNote = anyActiveShapeRow()
             ? DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE
-            : REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE);
+            : anyActiveTraceRow()
+              ? TRACE_EVIDENCE_PRIORITY_TURN_NOTE
+              : REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE;
+          const otherClause = anyActiveShapeRow()
+            ? (anyActiveTraceRow() ? TRACE_WINDOW_CLAUSE : anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
+            : anyActiveTraceRow() && anyActiveProseRow()
+              ? PROSE_WINDOW_CLAUSE
+              : "";
+          conversation.addTurnNote(priorityNote + otherClause);
         }
       } else {
         // #1396: one pass, one note. With a shape row active the redirect
@@ -1346,7 +1630,12 @@ export async function driveToolLoop(
         // actually scarce (requests, else rounds) — and grows the mixed-run
         // clause when prose rows gate the same window.
         const shapeNoteActive = anyActiveShapeRow();
-        const mixedClause = shapeNoteActive && anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "";
+        const traceNoteActive = anyActiveTraceRow();
+        const mixedClause = shapeNoteActive
+          ? (traceNoteActive ? TRACE_WINDOW_CLAUSE : anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
+          : traceNoteActive && anyActiveProseRow()
+            ? PROSE_WINDOW_CLAUSE
+            : "";
         const note = inObligationWindow
           ? shapeNoteActive
             ? formatNote(requestsLeft <= reserve ? RESERVE_WINDOW_TURN_NOTE : RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
@@ -1354,7 +1643,13 @@ export async function driveToolLoop(
                 roundsLeft,
                 outstanding: formatOutstandingObligations(outstandingShapeObligations()),
               }) + mixedClause
-            : REQUIRED_EVIDENCE_TURN_NOTE
+            : traceNoteActive
+              ? formatNote(requestsLeft <= reserve ? TRACE_RESERVE_WINDOW_TURN_NOTE : TRACE_RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
+                  requestsLeft,
+                  roundsLeft,
+                  outstanding: outstandingTraceIds().join(", "),
+                }) + mixedClause
+              : REQUIRED_EVIDENCE_TURN_NOTE
           : requestsLeft <= LOW_TOOL_REQUESTS_REMAINING
             ? LOW_BUDGET_TURN_NOTE
             : BUDGET_TURN_NOTE;
@@ -1480,10 +1775,14 @@ export async function driveToolLoop(
     let roundExecuted = 0;
     let roundRefused = 0;
     let roundDedup = 0;
-    // #1396: rows this round's admitted calls discharged — the ONLY progress
-    // that can earn a round-ceiling extension below (an evidence fetch that
-    // executes but credits nothing must not buy extension rounds).
+    // #1396: rows this round's admitted calls discharged — the discharge
+    // half of the progress that can earn a round-ceiling extension below
+    // (an evidence fetch that executes but credits nothing must not buy
+    // extension rounds). #1519: a traced ATTEMPT on a multi-attempt row is
+    // the other half — it moves the row toward its discharge without closing
+    // it, and the extension below must not stall a benign tail mid-demand.
     let rowsDischargedThisRound = 0;
+    let traceAttemptsThisRound = 0;
     for (let idx = 0; idx < calls.length; idx++) {
       const call = calls[idx]!;
       const callId = call.id;
@@ -1518,10 +1817,12 @@ export async function driveToolLoop(
         continue;
       }
       // #1381 (review); #1388; #1396: the ONE enforced obligation window over
-      // every row kind. A call that targets a pending row has ATTEMPTED
-      // (discharged) it whether or not the window is open yet — the
-      // recommended path gathers that evidence EARLY, and the window must
-      // never re-demand (or hold shut for) evidence already gathered.
+      // every row kind. A call that targets a pending row has ATTEMPTED it
+      // whether or not the window is open yet — the recommended path gathers
+      // that evidence EARLY, and the window must never re-demand (or hold
+      // shut for) evidence already gathered; for a trace row the call
+      // credits one UNMET evidence slot of the row's required-attempts
+      // demand, and covering every slot is what discharges it (#1519).
       // Admission vocabulary is per row: prose rows gate on argument-VALUE
       // overlap (the `run_command` catalog gets no exemption — a catalog
       // command whose name IS the obligation evidence stays admissible);
@@ -1540,9 +1841,22 @@ export async function driveToolLoop(
       // remaining, counting the current one).
       let countsTowardAttemptsCap = false;
       if (reserve > 0 && hasActiveRow()) {
-        const targets = pendingRows.filter(
-          (row) => !discharged.has(row.id) && rowAdmittedByCall(row, call.name, args as Record<string, unknown>),
-        );
+        // #1519 (review): a trace row is admitted to a call ONLY when the
+        // call can advance one of its UNMET evidence slots — admission and
+        // credit stay the same predicate, so a call whose every match is an
+        // already-covered category (the enforcement read done, the test read
+        // still owed) cannot advance outstanding demand and is refused
+        // inside the window. Non-trace rows keep the vocabulary admission.
+        const targets: Array<{ row: RequiredEvidenceRow; slot: string | null }> = [];
+        for (const row of pendingRows) {
+          if (discharged.has(row.id)) continue;
+          if (row.trace === true) {
+            const slot = traceSlotCreditForCall(row, call.name, args as Record<string, unknown>, traceUnmetSlots(row, traceCredited.get(row.id)));
+            if (slot !== null) targets.push({ row, slot });
+          } else if (rowAdmittedByCall(row, call.name, args as Record<string, unknown>)) {
+            targets.push({ row, slot: null });
+          }
+        }
         const inWindow = budgets.maxToolCalls - callsExecuted <= reserve
           || budgets.maxRounds - (outcome.rounds - 1) <= reserve;
         // #1396 (review blocker): an evidence call ADMITTED while the window
@@ -1555,18 +1869,38 @@ export async function driveToolLoop(
             callId,
             kind: "reserve",
             data: {
+              // #1506: the refusal names the section the outstanding rows
+              // live in: the requirement-trace rows are in the Requirement
+              // Trace Plan section, the review-owned prose rows in the
+              // Required Review Evidence section.
               error: anyActiveShapeRow()
                 ? formatNote(RESERVE_REFUSAL_NOTE, {
                     outstanding: formatOutstandingObligations(outstandingShapeObligations()),
-                  }) + (anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
-                : REQUIRED_EVIDENCE_REFUSAL_NOTE,
+                  }) + (anyActiveTraceRow() ? TRACE_WINDOW_CLAUSE : anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
+                : anyActiveTraceRow()
+                  ? formatNote(TRACE_RESERVE_REFUSAL_NOTE, {
+                      outstanding: outstandingTraceIds().join(", "),
+                    }) + (anyActiveProseRow() ? PROSE_WINDOW_CLAUSE : "")
+                  : REQUIRED_EVIDENCE_REFUSAL_NOTE,
             },
           });
           roundRefused++;
           outcome.requiredEvidenceRefusals++;
           continue;
         }
-        for (const row of targets) {
+        for (const { row, slot } of targets) {
+          // #1519 (review): an admitted call credits ONE evidence slot of a
+          // trace row — the row closes only when its FULL slot demand (every
+          // category, and for a distributed row every seam) is credited. A
+          // row that still owes a slot stays active, so its reserved share
+          // keeps gating the window.
+          if (row.trace === true && slot !== null) {
+            const credited = traceCredited.get(row.id) ?? new Set<string>();
+            traceCredited.set(row.id, credited);
+            credited.add(slot);
+            traceAttemptsThisRound++;
+            if (!traceRowSlots(row).every((candidate) => credited.has(candidate.key))) continue;
+          }
           discharged.add(row.id);
           rowsDischargedThisRound++;
         }
@@ -1663,21 +1997,23 @@ export async function driveToolLoop(
 
     // #1388; #1396: round-ceiling extension for the reserved window.
     // Extension is earned ONLY at the (current) ceiling and only on
-    // progress — a row DISCHARGE: the round that just ended is the
-    // "immediately previous round" of the extension round it buys, and
-    // inside the window every admitted call removes a row, so a progress
-    // round is self-limiting (at most the initial tracked-row count across
-    // the whole loop). A hostile model emitting only refused calls executes
-    // nothing and gets ZERO extra rounds (it stops at `maxRounds` with the
-    // reserved requests intact), and since #1396 an evidence fetch that
-    // executes but discharges nothing cannot buy extension rounds either.
+    // progress: a row DISCHARGE, or (#1519) a round that pushed a
+    // multi-attempt trace row further along its demand — the discharge is
+    // still what removes a row, but a runtime or distributed tail now spends
+    // several admitted reads before it closes, and a benign tail must not
+    // stop at `maxRounds` mid-demand. The progress is self-limiting: the
+    // traced attempts are bounded by the rows' total demand, and a hostile
+    // model emitting only refused calls executes nothing, accumulates no
+    // attempts, and gets ZERO extra rounds (it stops at `maxRounds` with the
+    // reserved requests intact); an evidence fetch that executes but credits
+    // nothing cannot buy extension rounds either.
     if (
       reserve > 0
       && extensionRounds < reserve
       && outcome.rounds >= roundCeiling
       && hasActiveRow()
       && callsExecuted < budgets.maxToolCalls
-      && rowsDischargedThisRound > 0
+      && (rowsDischargedThisRound > 0 || traceAttemptsThisRound > 0)
     ) {
       roundCeiling++;
       extensionRounds++;

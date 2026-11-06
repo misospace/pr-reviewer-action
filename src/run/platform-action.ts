@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import { validateContract } from "../config/contract.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
 import { tangledContextFromEnv } from "../platform/tangled.js";
@@ -232,13 +233,17 @@ export async function platformActionMain(
       // path), so the diff provider is a no-op here; the production seam
       // (`buildPublishApi`) supplies its own when a real Tangled API is built.
       ? { api: seams.publishApi, platform: "tangled", diffProvider: async (): Promise<string> => "" }
-      : buildPublishApi(publishEnv as NodeJS.ProcessEnv);
+      : buildPublishApi(publishEnv as NodeJS.ProcessEnv, runDir);
     // No event-driven label lifecycle runs on a host process, so publish's own
     // rerunLabel strip is not requested (the Action strips it for the same
     // reason — label cleanup is event-owned). Publication is decided by
     // PUBLISH_MODE alone.
     const { rerunLabel: _rerunLabel, ...publishInput } = publishInputFromEnv(publishEnv as NodeJS.ProcessEnv, seam.platform);
-    const input = { ...publishInput, ...reviewDerivedPublishFields(review) };
+    // #1518: this host generates its own per-run review id (the Action
+    // entry already has one), so the published handoff names the review it
+    // belongs to on every host.
+    const reviewId = randomBytes(8).toString("hex");
+    const input = { ...publishInput, ...reviewDerivedPublishFields(review), reviewId };
     const outcome = await publishWithOutcome(input, seam, runDir);
     publishFailed = outcome.exitCode !== 0;
   }

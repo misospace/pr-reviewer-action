@@ -27,6 +27,7 @@ import {
   type ReviewBundleInput,
 } from "../src/publish/bundle.js";
 import { findingIdentity } from "../src/outcomes/identity.js";
+import { MAX_ID_LIST_CHARS, MAX_ID_LIST_ENTRIES } from "../src/context/id-lists.js";
 import { actionMain, reviewBundleState } from "../src/run/action.js";
 import { startMockServer, type CapturedRequest } from "./helpers.js";
 
@@ -64,6 +65,7 @@ test("#1425: serialization is deterministic and round-trips the strict parser", 
     "schema", "review_id", "generated_at", "action_version", "repository",
     "pr_number", "head_sha", "base_sha", "state", "identity", "disposition",
     "findings", "findings_total", "findings_truncated",
+    "unresolved_requirement_ids", "unresolved_required_checks",
   ]);
   const parsed = parseReviewBundle(a);
   assert.ok(parsed !== null);
@@ -99,6 +101,52 @@ test("#1425: skipped and failed bundles carry no findings key; a reviewed run's 
 test("#1425: skip_reason is only ever written on the skipped state", () => {
   const doc = JSON.parse(buildReviewBundle(baseInput({ skipReason: "should-not-appear" }))) as Record<string, unknown>;
   assert.ok(!Object.hasOwn(doc, "skip_reason"));
+});
+
+test("#1518: the merge-gating id lists ride a review-producing bundle and never a skipped or failed one", () => {
+  const reviewed = parseReviewBundle(buildReviewBundle(baseInput({
+    unresolvedRequirementIds: ["REQ-1", "REQ-2"],
+    unresolvedRequiredChecks: ["check-a"],
+  })))!;
+  assert.deepEqual(reviewed.unresolved_requirement_ids, ["REQ-1", "REQ-2"]);
+  assert.deepEqual(reviewed.unresolved_required_checks, ["check-a"]);
+
+  // A run without a review proves nothing about unresolved obligations.
+  const skipped = JSON.parse(buildReviewBundle(baseInput({
+    state: "skipped",
+    skipReason: "already-reviewed",
+    unresolvedRequirementIds: ["REQ-1"],
+    unresolvedRequiredChecks: ["check-a"],
+  }))) as Record<string, unknown>;
+  assert.ok(!Object.hasOwn(skipped, "unresolved_requirement_ids"));
+  assert.ok(!Object.hasOwn(skipped, "unresolved_required_checks"));
+
+  const failedInput = baseInput({
+    state: "failed",
+    failureReason: "model transport exploded",
+    unresolvedRequirementIds: ["REQ-1"],
+  });
+  delete failedInput.disposition;
+  const failed = JSON.parse(buildReviewBundle(failedInput)) as Record<string, unknown>;
+  assert.ok(!Object.hasOwn(failed, "unresolved_requirement_ids"));
+
+  // The parser refuses the ids on a state that proves no review.
+  const make = (state: string, extra: Record<string, unknown>) => JSON.stringify({
+    schema: REVIEW_BUNDLE_SCHEMA,
+    state,
+    review_id: "r1",
+    generated_at: "2026-11-02T12:00:00.000Z",
+    repository: "o/r",
+    pr_number: 7,
+    head_sha: "a".repeat(40),
+    base_sha: "b".repeat(40),
+    identity: { diff_fingerprint: "", analysis_engine: "" },
+    ...extra,
+  });
+  assert.equal(parseReviewBundle(make("skipped", { unresolved_requirement_ids: ["REQ-1"] })), null);
+  assert.equal(parseReviewBundle(make("failed", { unresolved_required_checks: ["check-a"] })), null);
+  assert.equal(parseReviewBundle(make("complete", { unresolved_requirement_ids: [1] })), null);
+  assert.ok(parseReviewBundle(make("complete", { unresolved_requirement_ids: ["REQ-1"] })) !== null);
 });
 
 test("#1425: partial and superseded states pass through with the publication record", () => {
@@ -197,9 +245,65 @@ test("#1425: the document is bounded by construction", () => {
     line: 49,
     message: "m".repeat(1_000),
   }), "utf8") + 1;
+  // #1518: the two merge-gating id lists are reserved at their EXACT
+  // serialized length (they are bounded already), so the budget the admit
+  // loop spends includes that reservation. One more finding of the same
+  // width as the ones admitted would not fit in that budget.
+  const reservedIdBytes = Buffer.byteLength(
+    `,"unresolved_requirement_ids":[],"unresolved_required_checks":[]`,
+    "utf8",
+  );
   assert.ok(
-    Buffer.byteLength(worst, "utf8") + nextFindingBytes > REVIEW_BUNDLE_MAX_BYTES,
+    Buffer.byteLength(worst, "utf8") + reservedIdBytes + nextFindingBytes > REVIEW_BUNDLE_MAX_BYTES,
     "the byte budget must be spent, not merely respected",
+  );
+});
+
+test("#1518: the 64 KiB bound holds with multi-byte-codepoint ids in both lists", () => {
+  // The id cap counts CODEPOINTS, not bytes: 64 four-byte codepoints are
+  // 256 bytes. A synthetic ASCII worst case therefore UNDER-counts a
+  // multi-byte id, and the document could exceed the 64 KiB cap. The
+  // builder reserves the EXACT serialized id arrays, so the bound holds for
+  // the exact string returned.
+  const multiByteIds = (count: number): string[] => Array.from({ length: count }, (_, index) =>
+    "🛑".repeat(MAX_ID_LIST_CHARS - 1) + String.fromCodePoint(0x1f600 + index));
+  const requirementIds = multiByteIds(MAX_ID_LIST_ENTRIES);
+  const checkIds = multiByteIds(MAX_ID_LIST_ENTRIES);
+  // Every id is 64 codepoints and 256 bytes: the cap counts codepoints, so
+  // the byte width is four times the ASCII assumption.
+  assert.equal(Array.from(requirementIds[0]!).length, MAX_ID_LIST_CHARS);
+  assert.equal(Buffer.byteLength(requirementIds[0]!, "utf8"), MAX_ID_LIST_CHARS * 4);
+
+  const out = buildReviewBundle(baseInput({
+    findings: Array.from({ length: REVIEW_BUNDLE_MAX_FINDINGS + 50 }, (_, i) => ({
+      severity: "info", category: "style", file: `src/f${i}.ts`, line: i, message: `finding ${i}`,
+    })),
+    unresolvedRequirementIds: requirementIds,
+    unresolvedRequiredChecks: checkIds,
+  }));
+  assert.ok(
+    Buffer.byteLength(out, "utf8") <= REVIEW_BUNDLE_MAX_BYTES,
+    `the document is ${Buffer.byteLength(out, "utf8")} bytes — over the 64 KiB cap`,
+  );
+  const doc = parseReviewBundle(out)!;
+  assert.equal(doc.unresolved_requirement_ids?.length, MAX_ID_LIST_ENTRIES);
+  assert.equal(doc.unresolved_required_checks?.length, MAX_ID_LIST_ENTRIES);
+  assert.equal(doc.unresolved_requirement_ids?.[0], requirementIds[0]);
+
+  // The synthetic ASCII worst case the builder used to reserve really was
+  // smaller than the bytes these ids need — that is the defect the exact
+  // reservation removes.
+  const asciiWorstCase = Buffer.byteLength(
+    `,"unresolved_requirement_ids":${JSON.stringify(Array.from({ length: MAX_ID_LIST_ENTRIES }, () => "x".repeat(MAX_ID_LIST_CHARS)))},"unresolved_required_checks":${JSON.stringify(Array.from({ length: MAX_ID_LIST_ENTRIES }, () => "x".repeat(MAX_ID_LIST_CHARS)))}`,
+    "utf8",
+  );
+  const exactIdBytes = Buffer.byteLength(
+    `,"unresolved_requirement_ids":${JSON.stringify(requirementIds)},"unresolved_required_checks":${JSON.stringify(checkIds)}`,
+    "utf8",
+  );
+  assert.ok(
+    exactIdBytes > asciiWorstCase,
+    "the ASCII worst case under-counts a multi-byte id — the exact reservation is what holds the bound",
   );
 });
 
@@ -446,6 +550,11 @@ test("#1425: a published review run emits a complete bundle with anchors and red
     assert.equal((bundle!.disposition as Record<string, unknown>).verdict, "approve");
     assert.equal(bundle!.publication?.status, "published");
     assert.equal(bundle!.findings?.length, 1);
+    // #1518: the merge-gating id lists ride a review-producing bundle. This
+    // run resolved every obligation, so both lists are empty — the KEYS are
+    // present, which is what proves the wiring.
+    assert.deepEqual(bundle!.unresolved_requirement_ids, []);
+    assert.deepEqual(bundle!.unresolved_required_checks, []);
     const finding = (bundle!.findings as Array<Record<string, unknown>>)[0]!;
     assert.equal(finding.severity, "minor");
     assert.equal(finding.file, "README.md");
