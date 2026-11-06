@@ -10,6 +10,7 @@ import type { PlatformAdapter } from "../platform/types.js";
 import { GitHubPublishApi } from "../platform/publish-api.js";
 import { ForgejoPublishApi } from "../platform/publish-api.js";
 import { TangledPublishApi } from "../platform/tangled-publish.js";
+import { readTangledCurrentHeadForContext } from "../platform/tangled-head.js";
 import { TangledAtprotoClient, atprotoConfigFromEnv } from "../platform/tangled-atproto.js";
 import { tangledContextFromEnv } from "../platform/tangled.js";
 import { eventLabelName } from "../precheck/decide.js";
@@ -472,16 +473,21 @@ export function buildPublishApi(env: NodeJS.ProcessEnv, runDir?: string): { api:
   // descriptive error naming the missing variable.
   if (platform === "tangled") {
     const context = tangledContextFromEnv(env);
-    // #588: no `currentHeadSha` provider is wired here on purpose — Tangled
-    // has no trustworthy current-head source yet (the pull record and the
-    // read XRPC expose no head commit, and the patch's `declaredHeadSha` is
-    // forgeable advisory metadata). The #451 head re-check therefore FAILS
-    // CLOSED for Tangled: the publish step refuses to publish until a
-    // trustworthy current-head read exists (#1165). The launch-time
-    // `TANGLED_PR_SOURCE_SHA` is never used for that re-check.
+    // #1165: the #451 head re-check reads the trusted current head from
+    // the knot's `org.tangled.review.patch` records (`tangled-head.ts`):
+    // a fresh read on every publication, never the launch-time
+    // `TANGLED_PR_SOURCE_SHA` and never the forgeable patch
+    // `declaredHeadSha`. An unknown/unreadable head still fails closed
+    // (the reader returns null and publication is refused).
     const api = new TangledPublishApi({
       context,
       atproto: new TangledAtprotoClient(atprotoConfigFromEnv(env)),
+      // The combined reader correlates the ticket and head in one pass:
+      // patch records are keyed by org.tangled.track.ticket, and the
+      // source-branch correlation (not target-branch uniqueness) picks
+      // this pull's ticket among several open PRs to the same target.
+      // Ambiguous/unknown -> null (publication refused).
+      currentHeadSha: () => readTangledCurrentHeadForContext(context, {}),
     });
     const diffProvider = async (): Promise<string> => buildPlatformReadAdapter(env).getPrDiff();
     return { api, platform, diffProvider };

@@ -14,7 +14,7 @@ A Tangled run does not complete today. The run stops at the first step that Tang
 
 1. The pull metadata read works. The diff read does not. The read adapter refuses the diff, so the precheck stops the run before the review engine starts.
 2. The round-diff read is implemented in `src/platform/tangled-diff.ts`. It is not connected to the read adapter yet, so the wiring lands with the remaining work of [#564](https://github.com/misospace/pr-reviewer-action/issues/564).
-3. After that wiring, the publication step fails closed until a trustworthy current-head read exists. See [#1165](https://github.com/misospace/pr-reviewer-action/issues/1165). A review that cannot prove the pull did not advance is never published.
+3. The publication step's #451 exact-head re-check reads the trusted current head from the knot's `org.tangled.review.patch` records (`src/platform/tangled-head.ts`, #1165): the newest patch revision's `head.oid` for the pull's ticket, correlated by source branch and bound to the repository account. Publication runs only when that head matches the reviewed head; an unknown, malformed, or ambiguous head fails closed. A review that cannot prove the pull did not advance is never published.
 
 The runner exits with code 1 at the first stop. Read the [support matrix](#support-matrix) before you plan a Tangled rollout.
 
@@ -106,7 +106,7 @@ The matrix uses three words:
 | Normal review engine | Degraded | The same engine runs on GitHub and Forgejo, but a Tangled run stops at the diff read before the engine starts. |
 | Verdict policy and required-check policy | Degraded | The same deterministic policy runs on every platform, but a Tangled run reaches no verdict. |
 | Latest-round diff and changed files | Degraded | The round-diff read is implemented in `src/platform/tangled-diff.ts`, but the read adapter still refuses the diff. The run stops there. |
-| Managed top-level review record | Degraded | The record client writes one record per pull and updates it in place on a re-review. The run stops at the diff read today. After that, publication fails closed until a trustworthy current-head read exists. |
+| Managed top-level review record | Degraded | The record client writes one record per pull and updates it in place on a re-review. The run stops at the diff read today. The publication head re-check reads the knot's `org.tangled.review.patch` records (`src/platform/tangled-head.ts`) and fails closed on an unknown, malformed, or ambiguous head. |
 | Inline findings on a diff line | Unsupported | Tangled has no inline review object. The findings stay in the review body. |
 | Native approve or request-changes objects | Unsupported | Tangled has no native review verdict object. The verdict stays in the review body. |
 | Review dismissal and minimization | Unsupported | The managed record is updated in place instead. |
