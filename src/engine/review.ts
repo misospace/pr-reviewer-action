@@ -1894,7 +1894,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
           // validator still decides whether a citation proves the requirement.
           prBody: String(pr.body ?? ""),
           coverageRows: Array.isArray(repairTarget.requirement_coverage) ? repairTarget.requirement_coverage : undefined,
-          evidenceDigest: harnessEvidenceDigest(safeJson(ws.read("tool-harness.json"))),
+          // #1504 (review): the digest comes from the authoritative loop's
+          // harness — `tool-harness.smart.json` when the escalated smart
+          // review authored the accepted artifact, never the stale
+          // primary-loop evidence beside it. Tools-off runs have neither
+          // file, so the digest is empty either way.
+          evidenceDigest: harnessEvidenceDigest(safeJson(ws.read(enforcementHarness))),
           config: {
             apiFormat: repairLane.apiFormat,
             model: repairLane.model,
@@ -1904,7 +1909,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
             temperature,
             responseFormat: repairLane.responseFormat,
             tokensParam: env.AI_TOKENS_PARAM ?? "max_tokens",
-            stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
+            // #1504 (review): the transport profile belongs to the owning lane
+            // too — a fallback with `ai-fallback-stream` diverging from the
+            // base `ai-stream` must repair on ITS streaming setting, the one
+            // its authoritative review rode, not the globally selected one.
+            stream: repairLane.stream,
             timeoutSec: repairTimeoutSec,
             inputMaxBytes: Number(env.REQUIREMENT_TRACE_REPAIR_INPUT_MAX_BYTES ?? "48000") || 48000,
             // #998: the repair lane's own effort — never another lane's.

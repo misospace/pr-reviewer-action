@@ -11,7 +11,7 @@ import { parseMetadata } from "../src/precheck/metadata.js";
 import { authoritativeBodyRevision, harnessTransportAdapter, type PrBodyRevision } from "../src/run/stages.js";
 import type { StageEnv } from "../src/run/env.js";
 import { forkGate } from "../src/gates/gates.js";
-import { startMockServer } from "./helpers.js";
+import { startMockServer, sseResponse } from "./helpers.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
 import { FINDING_TRAILER } from "../src/context/review-threads.js";
@@ -4792,6 +4792,16 @@ function traceFragmentId(requestBody: string, marker: string): string {
   return `req-${match[1]}`;
 }
 
+/** The SSE-chunk wire shape an OpenAI-format streaming response carries for
+ * one full-content delta, then the closing finish chunk with usage. */
+function openAiStreamChunks(content: string): string[] {
+  return [
+    `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", model: "fallback-m", choices: [{ index: 0, delta: { content }, finish_reason: null }] })}`,
+    `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", model: "fallback-m", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })}`,
+    "data: [DONE]",
+  ];
+}
+
 test("#1504: a fallback-authored review repairs on the fallback lane and never retries the terminal primary", async () => {
   // The #1513 repro: the primary goes terminal (MiniMax HTTP 429), the
   // fallback produces the authoritative approve-with-missing-row review, and
@@ -4908,6 +4918,280 @@ test("#1504: a fallback-authored review repairs on the fallback lane and never r
   } finally {
     await primaryServer.close();
     await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#1504 (review): the fallback repair streams on the fallback lane's own setting, not the global one", async () => {
+  // Divergent transport profile: the global ai-stream is false but the
+  // fallback lane resolves ai-fallback-stream=true. The authoritative
+  // fallback review streams on its lane profile (callTier reads
+  // profile.stream), and the repair must ride the SAME complete tier/profile
+  // — a global `env.AI_STREAM` read would silently regress the repair to
+  // the primary's transport profile.
+  const primaryBodies: string[] = [];
+  const primaryServer = await startMockServer((_req, body, res) => {
+    primaryBodies.push(String(body));
+    res.statusCode = 429;
+    res.end('{"error":{"message":"rate limited"}}');
+  });
+  const fallbackStreams: boolean[] = [];
+  let fallbackRepairRequests = 0;
+  const fallbackServer = await startMockServer((req, body, res) => {
+    fallbackStreams.push((JSON.parse(String(body)) as { stream?: boolean }).stream === true);
+    const text = String(body);
+    if (text.includes("Requirements to trace:")) {
+      fallbackRepairRequests += 1;
+      const reqId = /req-[0-9a-f]{12}/.exec(text)?.[0] ?? "";
+      // The streamed delta carries the model's message CONTENT — the verdict
+      // JSON itself, not a chat.completion envelope around it.
+      sseResponse(openAiStreamChunks(JSON.stringify({
+        requirement_coverage: [{
+          requirement_id: reqId,
+          disposition: "met",
+          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
+          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
+          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
+        }],
+      })))(req, body, res);
+      return;
+    }
+    sseResponse(openAiStreamChunks(JSON.stringify(baseVerdict())))(req, body, res);
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    mkdirSync(join(runDir, "tests"), { recursive: true });
+    writeFileSync(
+      join(runDir, "src", "context-resolution.ts"),
+      [
+        "export function resolveContext(ctx, record) {",
+        "  if (record.sourceSha !== ctx.sourceSha) {",
+        "    throw new Error('source sha mismatch');",
+        "  }",
+        "  return record;",
+        "}",
+      ].join("\n"),
+    );
+    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-fallback-base-url": fallbackServer.url, "ai-fallback-model": "fallback-m", "ai-fallback-api-key": "fallback-key",
+        "ai-stream": "false", "ai-fallback-stream": "true", "ai-api-format": "openai",
+        "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "ci-status-check": "false", "requirement-trace": "true", "deep-review": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      sleep: async () => {},
+      quiet: true,
+    });
+
+    assert.equal(result.outputs.verdict, "approve");
+    assert.equal(fallbackRepairRequests, 1, "exactly one repair pass, on the fallback lane");
+    assert.equal(fallbackStreams.length, 2, "one review request + one repair request on the fallback lane");
+    assert.ok(
+      fallbackStreams.every((stream) => stream === true),
+      "both the fallback review and its repair must ride the fallback lane's stream=true, not the global ai-stream=false",
+    );
+    // The primary lane rode the global setting, and never saw the repair.
+    assert.ok(primaryBodies.length >= 1, "the primary was dialed for the review");
+    assert.ok(
+      primaryBodies.every((body) => (JSON.parse(body) as { stream?: boolean }).stream === false),
+      "the primary lane's requests rode the global stream=false",
+    );
+    assert.ok(
+      primaryBodies.every((body) => !body.includes("Requirements to trace:")),
+      "the terminal primary endpoint must receive no repair request",
+    );
+    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
+      status: string; claims: number; route?: string;
+    };
+    assert.equal(repairRecord.status, "ok");
+    assert.equal(repairRecord.claims, 1);
+    assert.equal(repairRecord.route, "fallback");
+    assert.notEqual(result.outputs.requiredChecks, "incomplete");
+  } finally {
+    await primaryServer.close();
+    await fallbackServer.close();
+    cleanup();
+  }
+});
+
+test("#1504 (review): the escalated repair digests the smart loop's evidence, not the stale primary loop's", async () => {
+  // The primary loop reads src/primary-evidence.ts, the escalated smart loop
+  // reads src/smart-evidence.ts; neither file is in the diff or the PR body,
+  // so the repair prompt's evidence digest is the only way either path could
+  // appear in the repair request. The accepted artifact is the SMART
+  // review's, so the digest must come from tool-harness.smart.json — reading
+  // tool-harness.json would feed the repair the superseded primary-loop
+  // evidence instead.
+  let primaryToolTurn = 0;
+  let primaryPlainTurn = 0;
+  let primaryRepairTurn = false;
+  const primaryServer = await startMockServer((_req, body, res) => {
+    const text = String(body);
+    const request = JSON.parse(text) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      const scripted = [
+        openAiToolCall("p1", "read_file", '{"path":"src/primary-evidence.ts"}'),
+        openAiText("primary investigation complete"),
+      ];
+      const response = scripted[primaryToolTurn];
+      primaryToolTurn += 1;
+      if (response === undefined) {
+        res.statusCode = 500;
+        res.end('{"error":"script exhausted (primary tools)"}');
+        return;
+      }
+      res.end(JSON.stringify(response));
+      return;
+    }
+    // Tool-less turns: the in-conversation verdict (requesting escalation),
+    // then the loop's own trace-only repair turn (no claims — the escalated
+    // artifact is the one the standalone pass must recover).
+    const scriptedPlain = [
+      openAiText(JSON.stringify(baseVerdict({ smart_review_requested: true, smart_review_reason: "tool coverage gap" }))),
+      openAiText("no trace claims"),
+    ];
+    const response = scriptedPlain[primaryPlainTurn];
+    primaryPlainTurn += 1;
+    if (response === undefined) {
+      primaryRepairTurn = true;
+      res.statusCode = 500;
+      res.end('{"error":"script exhausted (primary plain)"}');
+      return;
+    }
+    res.end(JSON.stringify(response));
+  });
+  const smartRepairBodies: string[] = [];
+  let smartToolTurn = 0;
+  const smartServer = await startMockServer((_req, body, res) => {
+    const text = String(body);
+    const request = JSON.parse(text) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (text.includes("Requirements to trace:")) {
+      smartRepairBodies.push(text);
+      const reqId = /req-[0-9a-f]{12}/.exec(text)?.[0] ?? "";
+      res.end(verdictBody({
+        requirement_coverage: [{
+          requirement_id: reqId,
+          disposition: "met",
+          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
+          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
+          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
+        }],
+      }));
+      return;
+    }
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      const scripted = [
+        openAiToolCall("s1", "read_file", '{"path":"src/smart-evidence.ts"}'),
+        openAiText("smart investigation complete"),
+      ];
+      const response = scripted[smartToolTurn];
+      smartToolTurn += 1;
+      if (response === undefined) {
+        res.statusCode = 500;
+        res.end('{"error":"script exhausted (smart tools)"}');
+        return;
+      }
+      res.end(JSON.stringify(response));
+      return;
+    }
+    // The smart loop's in-conversation verdict: accepted, no trace claims,
+    // no further escalation.
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    mkdirSync(join(runDir, "tests"), { recursive: true });
+    writeFileSync(
+      join(runDir, "src", "context-resolution.ts"),
+      [
+        "export function resolveContext(ctx, record) {",
+        "  if (record.sourceSha !== ctx.sourceSha) {",
+        "    throw new Error('source sha mismatch');",
+        "  }",
+        "  return record;",
+        "}",
+      ].join("\n"),
+    );
+    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+    writeFileSync(join(runDir, "src", "primary-evidence.ts"), "export const PRIMARY_LOOP_EVIDENCE = 'primary';\n");
+    writeFileSync(join(runDir, "src", "smart-evidence.ts"), "export const SMART_LOOP_EVIDENCE = 'smart';\n");
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": primaryServer.url, "ai-model": "primary-m", "ai-api-key": "primary-key",
+        "ai-smart-base-url": smartServer.url, "ai-smart-model": "smart-m", "ai-smart-api-key": "smart-key",
+        "ai-stream": "false", "review-routing-mode": "auto", "tool-mode": "native_loop",
+        "tool-max-requests": "8", "deep-review": "false",
+        "verdict-policy": "model", "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "5",
+        "ci-status-check": "false", "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      sleep: async () => {},
+      quiet: true,
+    });
+
+    assert.equal(result.outputs.reviewRoute, "escalated");
+    assert.equal(result.outputs.verdict, "approve");
+    // Both loops gathered their own evidence; the smart loop's artifact is
+    // the authoritative one.
+    const primaryHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as {
+      tool_calls?: Array<{ tool?: string; args?: Record<string, unknown> }>;
+    };
+    const smartHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.smart.json"), "utf8")) as {
+      stop_reason?: string; native_loop_verdict_status?: string;
+      tool_calls?: Array<{ tool?: string; args?: Record<string, unknown> }>;
+    };
+    assert.ok(
+      (primaryHarness.tool_calls ?? []).some((call) => JSON.stringify(call.args ?? {}).includes("src/primary-evidence.ts")),
+      "the primary loop must have gathered its own evidence",
+    );
+    assert.equal(smartHarness.stop_reason, "model-stopped");
+    assert.equal(smartHarness.native_loop_verdict_status, "accepted");
+    assert.ok(
+      (smartHarness.tool_calls ?? []).some((call) => JSON.stringify(call.args ?? {}).includes("src/smart-evidence.ts")),
+      "the smart loop must have gathered its own evidence",
+    );
+
+    // The repair rode the smart lane, and its prompt's evidence digest is the
+    // smart loop's — never the superseded primary loop's.
+    assert.equal(smartRepairBodies.length, 1, "exactly one bounded repair pass, on the smart lane");
+    assert.match(smartRepairBodies[0]!, /src\/smart-evidence\.ts/);
+    assert.ok(
+      !smartRepairBodies[0]!.includes("src/primary-evidence.ts"),
+      "the repair must not digest the stale primary-loop evidence",
+    );
+    assert.ok(!primaryRepairTurn, "no unscripted primary-lane request after the loop's trace-only repair turn");
+    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
+      status: string; claims: number; route?: string; invocation_reason?: string;
+    };
+    assert.equal(repairRecord.status, "ok");
+    assert.equal(repairRecord.claims, 1);
+    assert.equal(repairRecord.route, "smart");
+    assert.equal(repairRecord.invocation_reason, "native_loop_no_trace_claims");
+    assert.notEqual(result.outputs.requiredChecks, "incomplete");
+  } finally {
+    await primaryServer.close();
+    await smartServer.close();
     cleanup();
   }
 });
