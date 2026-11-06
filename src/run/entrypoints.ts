@@ -428,9 +428,15 @@ function confidenceTelemetryFromRunDir(env: NodeJS.ProcessEnv): ConfidenceTeleme
  * dir containing a NUL byte fails closed — both are "no reviewed diff
  * available" (fallback), never a read through the link. `O_NONBLOCK` keeps a
  * planted FIFO from blocking the open (the regular-file check then refuses
- * it); where `O_NOFOLLOW` is undefined (Windows) the no-follow guarantee
- * degrades to the platform default, the same accepted degradation as those
- * existing reads. */
+ * it). Where `O_NOFOLLOW` is undefined (Windows: Node exposes the constant
+ * only under `#ifdef O_NOFOLLOW` and the Windows CRT has no such flag) the
+ * no-follow guarantee degrades to the platform default — intentional and
+ * unreachable on a supported deployment: the v3 runner contract is
+ * POSIX-only (#679, `src/runtime/platform.ts`), Windows was never
+ * demonstrated, and the review's tree-owning children fail closed there, so
+ * no shipped run ever produces a run dir whose `pr.diff` could be followed.
+ * The sibling no-follow reads (`mirror.ts`, `executor/paths.ts`) state the
+ * same accepted degradation. */
 function reviewedDiffFromRunDir(runDir: string | undefined): string | undefined {
   if (runDir === undefined) return undefined;
   let fd: number;
