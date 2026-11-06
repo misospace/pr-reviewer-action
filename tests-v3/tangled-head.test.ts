@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readTangledCurrentHead, selectNewestPatchHead } from "../src/platform/tangled-head.js";
+import { readTangledCurrentHead, resolveTangledTicketIdentity, selectNewestPatchHead } from "../src/platform/tangled-head.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { TangledContext } from "../src/platform/tangled.js";
 import type { TangledPullIdentity } from "../src/platform/tangled-bobbin.js";
@@ -155,6 +155,71 @@ test("read: a head that advanced past the launch-time SHA is returned, not echoe
   const head = await readTangledCurrentHead(makeCtx(), IDENTITY, { fetchImpl });
   assert.equal(head, HEAD2);
   assert.notEqual(head, makeCtx().sourceSha);
+});
+
+test("read: a patch record from a foreign repo account is rejected (no cross-repo head)", async () => {
+  const foreign = patchItem({});
+  foreign.uri = "at://did:plc:other-repo/org.tangled.review.patch/bafypatch1";
+  const { fetchImpl } = makeFetch([foreign]);
+  assert.equal(await readTangledCurrentHead(makeCtx(), IDENTITY, { fetchImpl }), null);
+});
+
+test("read: pagination beyond MAX_PAGES fails closed without unbounded requests", async () => {
+  let count = 0;
+  const fetchImpl: FetchLike = async () => {
+    count += 1;
+    return new Response(JSON.stringify({ records: [patchItem({})], cursor: "never-ending" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  assert.equal(await readTangledCurrentHead(makeCtx(), IDENTITY, { fetchImpl }), null);
+  assert.equal(count, 10, "exactly MAX_PAGES requests, then fail closed");
+});
+
+test("read: an oversized response body is capped (bounded read, no unbounded buffering)", async () => {
+  const huge = "x".repeat(33 * 1024 * 1024);
+  const fetchImpl: FetchLike = async () =>
+    new Response(JSON.stringify({ records: [], cursor: null, pad: huge }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  assert.equal(await readTangledCurrentHead(makeCtx(), IDENTITY, { fetchImpl }), null);
+});
+
+// ── ticket identity resolution (production path) ──────────────────────────
+
+function ticketItem(over: Record<string, unknown> = {}): { uri: string; cid: string; value: Record<string, unknown> } {
+  const rkey = String(over.rkey ?? TICKET_RKEY);
+  const value: Record<string, unknown> = {
+    title: "t",
+    state: "open",
+    targetBranch: "main",
+    createdAt: "2026-11-01T00:00:00.000Z",
+    ...over,
+  };
+  delete value.rkey;
+  return { uri: `at://${REPO_DID}/org.tangled.track.ticket/${rkey}`, cid: "bafyticket", value };
+}
+
+test("ticket: resolves the unique open ticket for the target branch", async () => {
+  const { fetchImpl } = makeFetch([ticketItem({})]);
+  const ticket = await resolveTangledTicketIdentity(makeCtx(), { fetchImpl });
+  assert.deepEqual(ticket, { rkey: TICKET_RKEY, uri: TICKET_URI });
+});
+
+test("ticket: zero or multiple open tickets fail closed (null)", async () => {
+  const zero = makeFetch([ticketItem({ state: "closed" })]);
+  assert.equal(await resolveTangledTicketIdentity(makeCtx(), { fetchImpl: zero.fetchImpl }), null);
+  const two = makeFetch([ticketItem({}), ticketItem({ rkey: "3other" })]);
+  assert.equal(await resolveTangledTicketIdentity(makeCtx(), { fetchImpl: two.fetchImpl }), null);
+});
+
+test("ticket: a foreign-repo ticket record is rejected", async () => {
+  const foreign = ticketItem({});
+  foreign.uri = "at://did:plc:other-repo/org.tangled.track.ticket/3ticket";
+  const { fetchImpl } = makeFetch([foreign]);
+  assert.equal(await resolveTangledTicketIdentity(makeCtx(), { fetchImpl }), null);
 });
 
 test("read: malformed listRecords payloads yield null (hostile boundary)", async () => {

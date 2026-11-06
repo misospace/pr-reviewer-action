@@ -29,6 +29,7 @@ import type { TangledContext } from "./tangled.js";
  */
 
 export const TANGLED_PATCH_COLLECTION = "org.tangled.review.patch";
+export const TANGLED_TICKET_COLLECTION = "org.tangled.track.ticket";
 
 const XRPC_LIST_RECORDS = "com.atproto.repo.listRecords";
 const PAGE_LIMIT = 100;
@@ -96,6 +97,84 @@ export interface ReadTangledCurrentHeadOptions {
   timeoutMs?: number | undefined;
 }
 
+function knotBase(ctx: TangledContext): { base: string; origin: string } | null {
+  const knotHost = ctx.knotHost;
+  if (knotHost === undefined || knotHost.trim() === "") return null;
+  const host = knotHost.trim().toLowerCase();
+  const scheme = LOOPBACK_HOSTS.has(host) ? "http" : "https";
+  const base = `${scheme}://${host}`;
+  return { base, origin: base };
+}
+
+/**
+ * Resolve the ticket identity (`org.tangled.track.ticket` rkey + URI) that
+ * patch records are keyed by. Production pull resolution yields the legacy
+ * `sh.tangled.repo.pull` identity, which is NOT the ticket key, so the
+ * production callback must resolve the ticket from the knot instead.
+ *
+ * Matching is deliberately narrow and fail-closed: the ticket must be
+ * `open`, carry `targetBranch` equal to the context's target branch, and
+ * be the UNIQUE such ticket in the repo account. Zero or multiple matches
+ * yield `null` (unknown head → publication refused). Records are bound to
+ * the repo DID exactly as in `readTangledCurrentHead`.
+ */
+export async function resolveTangledTicketIdentity(
+  ctx: TangledContext,
+  options?: ReadTangledCurrentHeadOptions,
+): Promise<{ rkey: string; uri: string } | null> {
+  try {
+    const repoDid = ctx.repoDid;
+    if (repoDid === undefined || repoDid.trim() === "") return null;
+    const knot = knotBase(ctx);
+    if (knot === null) return null;
+    const matches: Array<{ rkey: string; uri: string }> = [];
+    let cursor: string | undefined;
+    for (let page = 1; ; page += 1) {
+      if (page > MAX_PAGES) return null;
+      const u = new URL(`${knot.base}/xrpc/${XRPC_LIST_RECORDS}`);
+      u.searchParams.set("repo", repoDid.trim());
+      u.searchParams.set("collection", TANGLED_TICKET_COLLECTION);
+      u.searchParams.set("limit", String(PAGE_LIMIT));
+      if (cursor !== undefined) u.searchParams.set("cursor", cursor);
+      const result = await requestJson(u.toString(), {
+        allowedOrigin: knot.origin,
+        fetchImpl: options?.fetchImpl,
+        timeoutMs: options?.timeoutMs,
+      });
+      if (result.status < 200 || result.status >= 300) return null;
+      const resp = asRecord(result.data);
+      if (resp === undefined || !Array.isArray(resp.records)) return null;
+      for (const raw of resp.records) {
+        const item = asRecord(raw);
+        if (item === undefined) return null;
+        const uri = str(item.uri);
+        const value = asRecord(item.value);
+        if (uri === undefined || uri === "" || value === undefined) return null;
+        let parsed: ReturnType<typeof parseTangledAtUri>;
+        try {
+          parsed = parseTangledAtUri(uri);
+        } catch {
+          return null;
+        }
+        if (parsed.collection !== TANGLED_TICKET_COLLECTION) return null;
+        if (parsed.did !== repoDid.trim()) return null;
+        const state = str(value.state);
+        const targetBranch = str(value.targetBranch);
+        if (state !== "open") continue;
+        if (ctx.targetBranch !== undefined && targetBranch !== ctx.targetBranch) continue;
+        const entry = { rkey: parsed.rkey, uri: `at://${parsed.did}/${parsed.collection}/${parsed.rkey}` };
+        if (!matches.some((m) => m.uri === entry.uri)) matches.push(entry);
+      }
+      const nextCursor = str(resp.cursor);
+      if (nextCursor === undefined || nextCursor === "") break;
+      cursor = nextCursor;
+    }
+    return matches.length === 1 ? (matches[0] ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Fresh, trusted current head for `identity` from the knot patch records.
  * Returns `null` on any failure (fail closed) — see module doc.
@@ -144,6 +223,10 @@ export async function readTangledCurrentHead(
         try {
           const parsed = parseTangledAtUri(uri);
           if (parsed.collection !== TANGLED_PATCH_COLLECTION) return null;
+          // Repository binding: the patch must live in the requested
+          // repository's account, not another repo's (a malformed response
+          // must not supply a foreign patch).
+          if (parsed.did !== repoDid.trim()) return null;
         } catch {
           return null;
         }

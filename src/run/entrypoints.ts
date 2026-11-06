@@ -10,8 +10,7 @@ import type { PlatformAdapter } from "../platform/types.js";
 import { GitHubPublishApi } from "../platform/publish-api.js";
 import { ForgejoPublishApi } from "../platform/publish-api.js";
 import { TangledPublishApi } from "../platform/tangled-publish.js";
-import { readTangledCurrentHead } from "../platform/tangled-head.js";
-import { resolveTangledPull } from "../platform/tangled-bobbin.js";
+import { readTangledCurrentHead, resolveTangledTicketIdentity } from "../platform/tangled-head.js";
 import { TangledAtprotoClient, atprotoConfigFromEnv } from "../platform/tangled-atproto.js";
 import { tangledContextFromEnv } from "../platform/tangled.js";
 import { eventLabelName } from "../precheck/decide.js";
@@ -484,7 +483,16 @@ export function buildPublishApi(env: NodeJS.ProcessEnv, runDir?: string): { api:
       context,
       atproto: new TangledAtprotoClient(atprotoConfigFromEnv(env)),
       currentHeadSha: async () => {
-        const identity = await resolveTangledPull(context, {});
+        // Patch records are keyed by the org.tangled.track.ticket rkey,
+        // not by the legacy sh.tangled.repo.pull identity, so resolve the
+        // ticket from the knot first. Unknown/ambiguous ticket -> null.
+        const ticket = await resolveTangledTicketIdentity(context, {});
+        if (ticket === null) return null;
+        const identity = {
+          uri: ticket.uri,
+          rkey: ticket.rkey,
+          repoDid: context.repoDid ?? "",
+        } as unknown as Parameters<typeof readTangledCurrentHead>[1];
         return readTangledCurrentHead(context, identity, {});
       },
     });
