@@ -120,8 +120,6 @@ function tracePayload(ids: string[]) {
   );
 }
 
-const withUsage = (body: unknown, usage: Record<string, unknown>) => ({ ...(body as object), usage });
-
 function seedWorkspace(root: string) {
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
   fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
