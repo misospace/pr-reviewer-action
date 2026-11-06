@@ -51,6 +51,43 @@ const verdictJson = (mark: string) =>
   JSON.stringify({ verdict: "approve", review_markdown: `## Review\n${mark}`, findings: [] });
 const openAiVerdict = (mark: string) => openAiText(verdictJson(mark));
 
+/** #1503: the trace-only repair payload — the existing #959 requirement-coverage
+ * shape, fenced, covering exactly the requested ids. */
+const tracePayload = (ids: string[]) =>
+  openAiText(
+    "```json\n" +
+      JSON.stringify({
+        requirement_coverage: ids.map((id) => ({
+          requirement_id: id,
+          disposition: "met",
+          enforcement: [{ file: "src.ts", line: 1 }],
+          test: [{ file: "notes.md", line: 1 }],
+          reason: "cited from evidence already in the conversation",
+        })),
+      }) +
+    "\n```",
+  );
+const anthropicTrace = (ids: string[]) => ({
+  content: [
+    {
+      type: "text",
+      text:
+        "```json\n" +
+        JSON.stringify({
+          requirement_coverage: ids.map((id) => ({
+            requirement_id: id,
+            disposition: "met",
+            enforcement: [{ file: "src.ts", line: 1 }],
+            test: [{ file: "notes.md", line: 1 }],
+            reason: "cited from evidence already in the conversation",
+          })),
+        }) +
+        "\n```",
+    },
+  ],
+  stop_reason: "end_turn",
+});
+
 const freshResult = (): HarnessResult => ({
   mode: "off",
   planned_request_count: 0,
@@ -207,12 +244,14 @@ test("#1447: trace repair still runs after the exploration call ceiling is exhau
   const { root, deps } = workspace();
   seedWorkspace(root);
   // The ordinary investigation gets one call and exhausts that ceiling.
-  // Requirement trace still gets its bounded post-verdict allowance.
+  // Requirement trace still gets its bounded post-verdict allowance: one
+  // repair round of tool calls, then the trace-only turn that fills the ids.
   const scripted = [
     openAiCall("c1", "read_file", '{"path":"src.ts"}'),
     openAiVerdict("original"),
     openAiCall("c2", "read_file", '{"path":"notes.md"}'),
-    openAiVerdict("refreshed"),
+    openAiText("done"),
+    tracePayload(["R1", "R2forged"]),
   ];
   let calls = 0;
   const result = freshResult();
@@ -233,95 +272,45 @@ test("#1447: trace repair still runs after the exploration call ceiling is exhau
     ),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 4); // exploration + verdict + trace repair + refreshed verdict
+  assert.equal(calls, 5); // loop(1) + verdict(1) + repair round(1) + repair text(1) + trace-only(1)
   assert.equal(result.stop_reason, "tool-call-budget-exhausted");
   assert.equal(result.budget_exhausted, true);
   assert.deepEqual(result.trace_repair_continuation, {
     attempted: true,
     outcome: "continued",
     unresolved_ids: ["R1", "R2forged"],
-    stop_reason: "max-rounds",
-    rounds: 1,
+    stop_reason: "model-stopped",
+    rounds: 2,
     tool_calls: 1,
-    verdict_refreshed: true,
+    claims_merged: 1,
+    trace_claims_merged: true,
   });
+  // The merge set is the RAW probe ids; the parser drops any payload id that
+  // is not an exact raw match, so only R1 merges (the sanitized "R2forged"
+  // never matched the raw "R2\nforged").
   assert.equal((result.tool_calls as unknown[]).length, 2);
   assert.equal(result.native_loop_verdict_produced, true);
   assert.equal(result.native_loop_verdict_status, "accepted");
-});
-
-test("#1145: the happy path — one bounded repair round, folded telemetry, refreshed verdict", async () => {
-  const { root, deps } = workspace();
-  seedWorkspace(root);
-  const scripted = baseScripted([
-    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
-    openAiVerdict("refreshed"),
-  ]);
-  let calls = 0;
-  const result = freshResult();
-  const handled = await runNativeLoop(
-    loopInput(
-      deps({
-        transport: async () => scripted[calls++],
-        env: { SYSTEM_PROMPT: "You are the reviewer." },
-      }),
-      {
-        result,
-        traceGapProbe: async () => ({
-          instruction: "Verify requirement R1\u0000evil before the final verdict.",
-          unresolvedIds: ["R1\u0000evil\nid", "R2"],
-        }),
-      },
-    ),
-  );
-  assert.equal(handled, true);
-  assert.equal(calls, 5); // loop(2) + verdict(1) + repair(1) + verdict(1)
-  assert.deepEqual(result.trace_repair_continuation, {
-    attempted: true,
-    outcome: "continued",
-    unresolved_ids: ["R1evilid", "R2"],
-    stop_reason: "max-rounds",
-    rounds: 1,
-    tool_calls: 1,
-    verdict_refreshed: true,
-  });
-  // The repair call folded into the trace; the original loop's fields stand.
-  const traceCalls = result.tool_calls as Array<Record<string, unknown>>;
-  assert.equal(traceCalls.length, 2);
-  assert.equal(traceCalls[1]!.tool, "read_file");
-  assert.deepEqual((traceCalls[1]!.args as Record<string, unknown>).path, "notes.md");
-  assert.equal((result.tool_results as Array<Record<string, unknown>>).length, 2);
-  assert.equal(result.executed_request_count, 2);
-  assert.equal(result.rounds, 2);
-  assert.equal(result.budget_exhausted, undefined);
-  assert.equal(result.stop_reason, "model-stopped");
-  assert.equal(result.native_loop_verdict_produced, true);
-  assert.equal(result.native_loop_verdict_status, "accepted");
-  // The refreshed verdict is what landed in the artifact.
-  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8")) as Record<string, unknown>;
-  assert.deepEqual(artifact.trace_repair_continuation, result.trace_repair_continuation);
-  // Telemetry reflects the folded execution count but the original loop's
-  // budget facts (no double-counting of rounds or remaining requests).
-  const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
-  const usage = telemetry.usage as Record<string, unknown>;
-  assert.equal(usage.tool_calls_executed, 2);
-  assert.equal(usage.rounds_used, 2);
-  assert.equal(usage.requests_remaining_at_stop, 26);
-  assert.equal(telemetry.stop_reason, "model-stopped");
-  assert.equal(telemetry.budget_exhausted, false);
-  const verdictBody = JSON.parse(
+  // The standing verdict keeps its original body; only a trace claim merged in.
+  const persisted = JSON.parse(
     fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"),
   ) as Record<string, unknown>;
-  const choice = (verdictBody.choices as Array<Record<string, unknown>>)[0]!;
-  assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\nrefreshed");
+  const choice = (persisted.choices as Array<Record<string, unknown>>)[0]!;
+  const body = JSON.parse(String((choice.message as Record<string, unknown>).content));
+  assert.equal(body.review_markdown, "## Review\noriginal");
+  assert.deepEqual(
+    (body.requirement_coverage as Array<Record<string, unknown>>).map((c) => c.requirement_id),
+    ["R1"],
+  );
 });
 
-test("#1145: a failed repair verdict keeps the original verdict, artifact, and fields", async () => {
+test("#1145: the happy path — one bounded repair round, folded telemetry, trace claims merged", async () => {
   const { root, deps } = workspace();
   seedWorkspace(root);
   const scripted = baseScripted([
     openAiCall("c2", "read_file", '{"path":"notes.md"}'),
-    openAiText("not a verdict"),
+    openAiText("repair round done"),
+    tracePayload(["R1"]),
   ]);
   let calls = 0;
   const result = freshResult();
@@ -341,10 +330,83 @@ test("#1145: a failed repair verdict keeps the original verdict, artifact, and f
     ),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 5); // no retry: the lane is non-streamed
+  assert.equal(calls, 6); // loop(2) + verdict(1) + repair round(1) + repair text(1) + trace-only(1)
+  assert.deepEqual(result.trace_repair_continuation, {
+    attempted: true,
+    outcome: "continued",
+    unresolved_ids: ["R1"],
+    stop_reason: "model-stopped",
+    rounds: 2,
+    tool_calls: 1,
+    claims_merged: 1,
+    trace_claims_merged: true,
+  });
+  // The repair call folded into the trace; the original loop's fields stand.
+  const traceCalls = result.tool_calls as Array<Record<string, unknown>>;
+  assert.equal(traceCalls.length, 2);
+  assert.equal(traceCalls[1]!.tool, "read_file");
+  assert.deepEqual((traceCalls[1]!.args as Record<string, unknown>).path, "notes.md");
+  assert.equal((result.tool_results as Array<Record<string, unknown>>).length, 2);
+  assert.equal(result.executed_request_count, 2);
+  assert.equal(result.rounds, 2);
+  assert.equal(result.budget_exhausted, undefined);
+  assert.equal(result.stop_reason, "model-stopped");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  // The trace claims merged into the standing verdict; the original body stands.
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8")) as Record<string, unknown>;
+  assert.deepEqual(artifact.trace_repair_continuation, result.trace_repair_continuation);
+  // Telemetry reflects the folded execution count but the original loop's
+  // budget facts (no double-counting of rounds or remaining requests).
+  const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
+  const usage = telemetry.usage as Record<string, unknown>;
+  assert.equal(usage.tool_calls_executed, 2);
+  assert.equal(usage.rounds_used, 2);
+  assert.equal(telemetry.stop_reason, "model-stopped");
+  assert.equal(telemetry.budget_exhausted, false);
+  const verdictBody = JSON.parse(
+    fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"),
+  ) as Record<string, unknown>;
+  const choice = (verdictBody.choices as Array<Record<string, unknown>>)[0]!;
+  const body = JSON.parse(String((choice.message as Record<string, unknown>).content));
+  assert.equal(body.review_markdown, "## Review\noriginal");
+  assert.deepEqual(
+    (body.requirement_coverage as Array<Record<string, unknown>>).map((c) => c.requirement_id),
+    ["R1"],
+  );
+});
+
+test("#1145: a failed trace-only payload keeps the original verdict, artifact, and fields", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  const scripted = baseScripted([
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    openAiText("repair round done"),
+    openAiText("not a trace payload at all"),
+  ]);
+  let calls = 0;
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(
+      deps({
+        transport: async () => scripted[calls++],
+        env: { SYSTEM_PROMPT: "You are the reviewer." },
+      }),
+      {
+        result,
+        traceGapProbe: async () => ({
+          instruction: "Verify requirement R1 now.",
+          unresolvedIds: ["R1"],
+        }),
+      },
+    ),
+  );
+  assert.equal(handled, true);
+  assert.equal(calls, 6); // loop(2) + verdict(1) + repair round(1) + repair text(1) + failed trace-only(1)
   assert.equal(result.trace_repair_continuation?.outcome, "continued");
-  assert.equal(result.trace_repair_continuation?.verdict_refreshed, false);
-  // The original verdict stands in every surface.
+  assert.equal(result.trace_repair_continuation?.claims_merged, 0);
+  assert.equal(result.trace_repair_continuation?.trace_claims_merged, false);
+  // The original verdict stands in every surface, byte-intact.
   assert.equal(result.native_loop_verdict_produced, true);
   assert.equal(result.native_loop_verdict_status, "accepted");
   assert.equal(result.native_loop_verdict_error, undefined);
@@ -354,11 +416,12 @@ test("#1145: a failed repair verdict keeps the original verdict, artifact, and f
   const choice = (persisted.choices as Array<Record<string, unknown>>)[0]!;
   const body = JSON.parse(String((choice.message as Record<string, unknown>).content));
   assert.equal(body.review_markdown, "## Review\noriginal");
-  // The evidence still folded in even though the refresh failed.
+  assert.equal(body.requirement_coverage, undefined, "no trace claims merged on a failed payload");
+  // The evidence still folded in even though the trace merge failed.
   assert.equal((result.tool_calls as unknown[]).length, 2);
 });
 
-test("#1145 (anthropic): the repair round is wire-safe — no adjacent user turns, merged instruction", async () => {
+test("#1145 (anthropic): the trace-only turn is wire-safe — no adjacent user turns, tools dropped", async () => {
   const { root, deps } = workspace();
   seedWorkspace(root);
   const scripted = [
@@ -366,7 +429,8 @@ test("#1145 (anthropic): the repair round is wire-safe — no adjacent user turn
     anthropicText("evidence gathered"),
     anthropicText(verdictJson("original")),
     anthropicCall("u2", "read_file", { path: "notes.md" }),
-    anthropicText(verdictJson("refreshed")),
+    anthropicText("inspected"),
+    anthropicTrace(["R1"]),
   ];
   let calls = 0;
   const payloads: Array<Record<string, unknown>> = [];
@@ -391,9 +455,9 @@ test("#1145 (anthropic): the repair round is wire-safe — no adjacent user turn
     ),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 5);
+  assert.equal(calls, 6);
   assert.equal(result.trace_repair_continuation?.outcome, "continued");
-  assert.equal(result.trace_repair_continuation?.verdict_refreshed, true);
+  assert.equal(result.trace_repair_continuation?.trace_claims_merged, true);
 
   // Every emitted request is role-alternating (Anthropic rejects adjacent
   // same-role messages).
@@ -404,53 +468,31 @@ test("#1145 (anthropic): the repair round is wire-safe — no adjacent user turn
     }
   }
 
-  // The first verdict request: the closing instruction rides the SAME user
-  // message as the trailing tool_result blocks.
+  // The first verdict request drops the tool declarations.
   const verdict1 = payloads[2]!;
   assert.equal(verdict1.tools, undefined); // verdict turn drops tools
-  const v1Messages = verdict1.messages as Array<Record<string, unknown>>;
-  const v1Last = v1Messages[v1Messages.length - 1]!;
-  assert.equal(v1Last.role, "user");
-  const v1Blocks = v1Last.content as Array<Record<string, unknown>>;
-  assert.ok(v1Blocks.some((b) => b.type === "tool_result"));
-  assert.ok(v1Blocks.some((b) => b.type === "text" && String(b.text).includes("final review verdict")));
 
-  // The repair round: the probe instruction merged into the SAME user message
-  // as the verdict text (no adjacent user turns), tools advertised again, and
-  // the request ENDS on that user message (Anthropic requires user-first turns).
+  // The repair round advertises tools again and ends on a user message that
+  // carries the probe instruction merged in (no adjacent user turns).
   const repair = payloads[3]!;
   assert.ok(repair.tools !== undefined);
   const rMessages = repair.messages as Array<Record<string, unknown>>;
-  const lastUserIdx = (() => {
-    let idx = -1;
-    rMessages.forEach((m, i) => {
-      if (m.role === "user") idx = i;
-    });
-    return idx;
-  })();
-  assert.equal(rMessages[lastUserIdx]!.role, "user");
-  assert.equal(rMessages.length, lastUserIdx + 1); // nothing after the merged user
-  const rBlocks = rMessages[lastUserIdx]!.content as Array<Record<string, unknown>>;
-  assert.ok(rBlocks.some((b) => b.type === "tool_result"));
-  const rTexts = rBlocks.filter((b) => b.type === "text").map((b) => String(b.text));
-  assert.ok(rTexts.some((t) => t.includes("REPAIR-INSTRUCTION-MARKER")));
-  assert.ok(rTexts.some((t) => t.includes("final review verdict")));
-  // The merged user message is a SINGLE message: both texts ride one block list.
-  assert.equal(rBlocks.length, rTexts.length + 1); // one tool_result + the texts
+  assert.equal(rMessages[rMessages.length - 1]!.role, "user");
+  assert.ok(JSON.stringify(repair).includes("REPAIR-INSTRUCTION-MARKER"));
 
-  // The refreshed verdict request: the repair round's tool_use now sits in the
-  // history, its tool_result and the new verdict instruction merge into the
-  // final user message, and tools are dropped again.
-  const verdict2 = payloads[4]!;
-  assert.equal(verdict2.tools, undefined);
-  const v2Messages = verdict2.messages as Array<Record<string, unknown>>;
-  const v2Last = v2Messages[v2Messages.length - 1]!;
-  assert.equal(v2Last.role, "user");
-  const v2Blocks = v2Last.content as Array<Record<string, unknown>>;
-  assert.ok(v2Blocks.some((b) => b.type === "tool_result"));
-  assert.ok(
-    v2Blocks.some((b) => b.type === "text" && String(b.text).includes("final review verdict") && !String(b.text).includes("REPAIR-INSTRUCTION-MARKER")),
-  );
+  // The trace-only turn: tools are dropped again (it is a verdict-shaped turn),
+  // the request ends on a user message, and that user message carries the
+  // trace instruction merged into the same conversation. The repair
+  // instruction survives in the history, and no adjacent user turns exist.
+  const traceTurn = payloads[payloads.length - 1]!;
+  assert.equal(traceTurn.tools, undefined, "the trace-only turn drops the tool declarations");
+  const tMessages = traceTurn.messages as Array<Record<string, unknown>>;
+  const tLast = tMessages[tMessages.length - 1]!;
+  assert.equal(tLast.role, "user");
+  const tBlocks = tLast.content as Array<Record<string, unknown>>;
+  const tTexts = tBlocks.filter((b) => b.type === "text").map((b) => String(b.text));
+  assert.ok(tTexts.some((t) => t.includes("Requirement ids to trace")), "the trace instruction rides the trailing user message");
+  assert.ok(JSON.stringify(traceTurn).includes("REPAIR-INSTRUCTION-MARKER"), "the repair instruction is in the trace-only turn's history");
 });
 
 test("#1145: a repair round that stops on a request error records skipped_refresh_failed, not continued", async () => {
@@ -483,8 +525,17 @@ test("#1145: a repair round that stops on a request error records skipped_refres
     ),
   );
   assert.equal(handled, true);
-  assert.equal(result.trace_repair_continuation?.outcome, "skipped_refresh_failed");
-  assert.equal(result.trace_repair_continuation?.verdict_refreshed, false);
+  assert.equal(calls, 4); // loop(2) + verdict(1) + failed repair request(1)
+  assert.deepEqual(result.trace_repair_continuation, {
+    attempted: true,
+    outcome: "skipped_refresh_failed",
+    unresolved_ids: ["R1"],
+    stop_reason: "request-error",
+    rounds: 0,
+    tool_calls: 0,
+    claims_merged: 0,
+    trace_claims_merged: false,
+  });
   // The standing verdict is untouched.
   assert.equal(result.native_loop_verdict_status, "accepted");
   const verdictArtifact = JSON.parse(
@@ -494,7 +545,7 @@ test("#1145: a repair round that stops on a request error records skipped_refres
   assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\noriginal");
 });
 
-test("#1145: the refreshed verdict does not re-append the corpus", async () => {
+test("#1145: the trace-only turn does not re-append the corpus", async () => {
   const { root, deps } = workspace();
   seedWorkspace(root);
   // A corpus section that SURVIVES the verdict-corpus dedupe (it is not in
@@ -506,7 +557,8 @@ test("#1145: the refreshed verdict does not re-append the corpus", async () => {
   );
   const scripted = baseScripted([
     openAiCall("c2", "read_file", '{"path":"notes.md"}'),
-    openAiVerdict("refreshed"),
+    openAiText("repair round done"),
+    tracePayload(["R1"]),
   ]);
   let calls = 0;
   const payloads: Array<Record<string, unknown>> = [];
@@ -530,9 +582,9 @@ test("#1145: the refreshed verdict does not re-append the corpus", async () => {
     ),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 5); // loop(2) + verdict(1) + repair(1) + refreshed verdict(1)
+  assert.equal(calls, 6); // loop(2) + verdict(1) + repair round(1) + repair text(1) + trace-only(1)
   assert.equal(result.trace_repair_continuation?.outcome, "continued");
-  assert.equal(result.trace_repair_continuation?.verdict_refreshed, true);
+  assert.equal(result.trace_repair_continuation?.trace_claims_merged, true);
 
   const marker = "CORPUS-MARKER-7Q2X";
   const markerCount = (payload: Record<string, unknown>): number =>
@@ -544,38 +596,21 @@ test("#1145: the refreshed verdict does not re-append the corpus", async () => {
   const firstMessages = firstVerdict.messages as Array<Record<string, unknown>>;
   const firstLast = firstMessages[firstMessages.length - 1]!;
   assert.equal(firstLast.role, "user");
-  assert.ok(String(firstLast.content).includes("Below is the full review corpus for this PR"));
+  assert.ok(String(firstLast.content).includes("Below is the full review corpus"));
   assert.ok(String(firstLast.content).includes(marker));
 
-  // The REFRESHED verdict request must NOT carry the corpus a second time:
-  // the conversation already holds it verbatim from the first verdict turn,
-  // so a re-append would double it (202KB -> 403KB on a 200KB corpus) and
-  // overflow the context window on exactly the large PRs the repair round
-  // targets.
-  const refreshed = payloads[4]!;
-  assert.equal(markerCount(refreshed), 1, "the refreshed request must not re-append the corpus");
-  const refreshedMessages = refreshed.messages as Array<Record<string, unknown>>;
-  const refreshedLast = refreshedMessages[refreshedMessages.length - 1]!;
-  assert.equal(refreshedLast.role, "user");
-  const refreshedText = String(refreshedLast.content);
-  // The refresh's own instruction refers to the corpus ALREADY provided.
-  assert.ok(refreshedText.includes("review corpus already provided above"));
-  assert.ok(!refreshedText.includes("Below is the full review corpus"), "the refresh must not claim a corpus follows");
-  // Exactly one user event: the refresh rides the same conversation, right
-  // after the repair round's tool result — its instruction appears in ONE
-  // user turn, never two.
-  const refreshTurns = refreshedMessages.filter(
-    (m) => m.role === "user" && String(m.content).includes("review corpus already provided above"),
-  );
-  assert.equal(refreshTurns.length, 1, "the refresh adds exactly one user turn");
-
-  // The refresh still yields a verdict: the standing one is replaced by the
-  // refreshed body.
-  const verdictBody = JSON.parse(
-    fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"),
-  ) as Record<string, unknown>;
-  const choice = (verdictBody.choices as Array<Record<string, unknown>>)[0]!;
-  assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\nrefreshed");
+  // The trace-only turn must NOT re-append the corpus: the conversation
+  // already holds it verbatim from the first verdict turn, so a re-append
+  // would double it and overflow the context window on exactly the large PRs
+  // the repair targets.
+  const traceTurn = payloads[payloads.length - 1]!;
+  assert.equal(markerCount(traceTurn), 1, "the trace-only request must not re-append the corpus");
+  const traceMessages = traceTurn.messages as Array<Record<string, unknown>>;
+  const traceLast = traceMessages[traceMessages.length - 1]!;
+  assert.equal(traceLast.role, "user");
+  const traceText = String(traceLast.content);
+  assert.ok(traceText.includes("Requirement ids to trace"), "the trace instruction is present");
+  assert.ok(!traceText.includes("Below is the full review corpus"), "the trace-only turn must not re-append the corpus");
 });
 
 test("#1145/#1198: a verdict turn consuming the remaining wall-clock budget leaves no repair round (skipped_no_budget)", async () => {
@@ -654,7 +689,8 @@ test("#1447: trace repair gets one bounded round even after exploration hits max
     openAiCall("c2", "read_file", '{"path":"helper.ts"}'),
     openAiVerdict("original"),
     openAiCall("c3", "read_file", '{"path":"notes.md"}'),
-    openAiVerdict("refreshed"),
+    openAiText("inspected"),
+    tracePayload(["R1"]),
   ];
   let calls = 0;
   const result = freshResult();
@@ -674,16 +710,17 @@ test("#1447: trace repair gets one bounded round even after exploration hits max
     ),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 5);
+  assert.equal(calls, 6); // loop round(2 calls) + verdict(1) + repair round(1 call) + repair text(1) + trace-only(1)
   assert.equal(result.stop_reason, "max-rounds");
   assert.deepEqual(result.trace_repair_continuation, {
     attempted: true,
     outcome: "continued",
     unresolved_ids: ["R1"],
-    stop_reason: "max-rounds",
-    rounds: 1,
+    stop_reason: "model-stopped",
+    rounds: 2,
     tool_calls: 1,
-    verdict_refreshed: true,
+    claims_merged: 1,
+    trace_claims_merged: true,
   });
   // Repair closed the notes.md gap; other.ts remains honestly partial.
   const coverage = result.partial_coverage as { stop_reason: string; unread_files: string[] };
@@ -715,7 +752,7 @@ test("#1145: a repair round that issues no tool call is skipped_no_evidence, nev
     }),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 4); // loop(2) + verdict(1) + repair(1); NO refresh request
+  assert.equal(calls, 4); // loop(2) + verdict(1) + repair(1); NO trace-only request
   assert.deepEqual(result.trace_repair_continuation, {
     attempted: true,
     outcome: "skipped_no_evidence",
@@ -723,7 +760,8 @@ test("#1145: a repair round that issues no tool call is skipped_no_evidence, nev
     stop_reason: "no-tool-calls",
     rounds: 1,
     tool_calls: 0,
-    verdict_refreshed: false,
+    claims_merged: 0,
+    trace_claims_merged: false,
   });
   // The standing verdict and its artifact are byte-intact.
   assert.equal(result.native_loop_verdict_produced, true);
@@ -744,7 +782,8 @@ test("#1145 wiring: runToolHarness forwards deps.traceGapProbe to the native loo
   seedWorkspace(root);
   const scripted = baseScripted([
     openAiCall("c2", "read_file", '{"path":"notes.md"}'),
-    openAiVerdict("refreshed"),
+    openAiText("repair round done"),
+    tracePayload(["R1"]),
   ]);
   let calls = 0;
   let probeRuns = 0;
@@ -758,7 +797,7 @@ test("#1145 wiring: runToolHarness forwards deps.traceGapProbe to the native loo
   }));
   assert.equal(probeRuns, 1);
   assert.equal(result.trace_repair_continuation?.outcome, "continued");
-  assert.equal(result.trace_repair_continuation?.verdict_refreshed, true);
+  assert.equal(result.trace_repair_continuation?.trace_claims_merged, true);
   assert.equal(result.tool_request_budget, 44, "40 exploration + 4 bounded trace-closure requests");
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8")) as Record<string, unknown>;
   assert.deepEqual(artifact.trace_repair_continuation, result.trace_repair_continuation);

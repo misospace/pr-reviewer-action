@@ -263,7 +263,8 @@ same boundary is threaded to the transport seam as a per-attempt budget
 hook, so the transport's own retry tree — same-request 429/5xx retries and
 the #824/#1047 clamp/strip repair hops — cannot cross it either;
 exploration-clamped waits additionally cap their same-request retries at
-one. The closing verdict turn and its refresh keep the whole-run deadline.
+one. The closing verdict turn and the #1503 trace-only repair turn keep the
+whole-run deadline.
 The #1145 trace-gap repair continuation deliberately does not carry the
 reserve: it runs against the whole-run deadline under its own clamped share.
 
@@ -282,7 +283,7 @@ rounds/requests): a reserve stop can end a run with that window still open.
 When requirement-trace validation is on and the primary native loop accepts a
 verdict while in-scope requirements are still unproven — no claim, an invalid
 citation, an unmapped distributed seam — the harness asks the same conversation
-for one bounded repair round before writing outputs. #1447 gives that repair
+for a bounded repair round before writing outputs. #1447 gives that repair
 round up to four targeted requests even when ordinary exploration consumed its
 entire ceiling. This is still the same authoritative reviewer and conversation,
 not a second reviewer or confidence call, and it remains inside the same
@@ -291,12 +292,13 @@ whole-run wall-clock deadline. A probe (requirements side:
 deterministic validator the publication path uses; on a genuine gap it returns
 a fenced instruction listing the unresolved requirements with their
 deterministic validator reasons. The loop appends it to the same conversation,
-runs one more round under the remaining budgets (no new tools, permissions, or
-rounds beyond the original totals — the instruction explicitly forbids them),
-and re-requests the verdict. Every failure path keeps the original verdict:
-a throwing probe, a budget/deadline stop, a failed refresh, or a repair round
-that issued no tool call records `skipped_probe_error`, `skipped_no_budget`,
-`skipped_refresh_failed`, or `skipped_no_evidence` on the
+runs the repair rounds under the remaining budgets (no new tools, permissions,
+or call capacity beyond the original totals — the instruction explicitly
+forbids them), and then (#1503) runs a trace-only repair turn instead of
+re-requesting the verdict. Every failure path keeps the original verdict:
+a throwing probe, a budget/deadline stop, a failed repair round, or a repair
+round that issued no tool call records `skipped_probe_error`,
+`skipped_no_budget`, `skipped_refresh_failed`, or `skipped_no_evidence` on the
 harness's `trace_repair_continuation` instead of continuing.
 
 A row the validator has already refuted against the checkout
@@ -317,26 +319,45 @@ requirement-trace with a non-empty scope, and budget left over. Without it
 `unverifiable`, the run keeps reporting partial coverage, and it never reads
 as clean.
 
-The repair round shares the original run's whole-exchange wall-clock deadline,
-but it has a deliberately separate closure allowance: the ordinary loop's
-remaining requests plus at most four additional targeted requests, and exactly
-one repair round. That means a `tool-call-budget-exhausted` or `max-rounds`
-exploration stop no longer mechanically prevents requirement-trace from
-checking the evidence it just discovered it still needs. A wall-clock stop can
-still leave no safe repair capacity and records `skipped_no_budget`. After a
-repair round, deterministic changed-file/specialist coverage is recomputed over
-the combined original + repair call log, so new reads can close a real gap but
-can never erase one they did not inspect. The refreshed verdict
-is re-requested from the SAME conversation and does **not** re-append the
-review corpus: the conversation already carries it verbatim from the first
-verdict turn, so a second copy would double the corpus in the request (200KB
-corpus → 403KB request) and overflow the context window on exactly the large
-pull requests the repair round targets. The repair round is also honest about
-what it achieved: a round that issued no tool call inspected no evidence and
-is recorded `skipped_no_evidence` (never a completed `continued`), an
-errored round is `skipped_refresh_failed`, and a round that executed at least
-one read is `continued` — with `verdict_refreshed` recording whether the
-refreshed verdict turn actually succeeded.
+The repair rounds share the original run's whole-exchange wall-clock deadline,
+but they have a deliberately separate closure allowance: the ordinary loop's
+remaining requests plus at most four additional targeted requests, spread over
+at most four rounds (#1503 — spreading the same allowance over a few rounds
+lets the reviewer read one location and follow one reference; it does not
+increase the call capacity, and the ordinary primary ceiling is untouched).
+That means a `tool-call-budget-exhausted` or `max-rounds` exploration stop no
+longer mechanically prevents requirement-trace from checking the evidence it
+just discovered it still needs. A wall-clock stop can still leave no safe
+repair capacity and records `skipped_no_budget`. After a repair round,
+deterministic changed-file/specialist coverage is recomputed over the combined
+original + repair call log, so new reads can close a real gap but can never
+erase one they did not inspect.
+
+After the repair rounds, #1503 replaces the old full-verdict refresh with a
+trace-only repair turn on the SAME conversation. Re-requesting the entire
+verdict made trace completion depend on re-serializing a large unrelated
+payload: on the #1488 failure a ~129k-token refresh dropped 8 of 10
+requirement rows even though the repair reads had found the evidence. The
+trace-only instruction instead re-lists exactly the ids that were unresolved
+when the repair began and asks only for `requirement_coverage` entries — the
+same shape and the same parser (`normalizeTraceRepairPayload`) as the no-tools
+#959 repair pass. The returned claims merge into the accepted verdict artifact
+through `mergeTraceClaims`: only ids that carried no claim are filled, an
+existing claim (even one with unusable locations) is never overwritten, and
+findings, severities, the recommendation/verdict, escalation state, required
+check dispositions, and every other artifact field are unchanged. The merged
+artifact then flows through the unchanged publication-time validator; ids the
+trace-only turn did not fill stay incomplete and fall to the #1492
+fail-closed publication boundary and the #959 pass as before. A malformed,
+empty, or failed trace-only response never damages the standing verdict. The
+turn never re-appends the review corpus and, like the old refresh, needs a
+fresh tool result before it runs, so the Anthropic wire stays valid. The
+repair round is also honest about what it achieved: a round that issued no
+tool call inspected no evidence and is recorded `skipped_no_evidence` (never a
+completed `continued`), an errored round is `skipped_refresh_failed`, and a
+round that executed at least one read is `continued` — with `claims_merged`
+and `trace_claims_merged` recording how many requirement ids the trace-only
+turn actually filled.
 
 The continuation is primary-tier only (the smart tier keeps its pre-#1145
 shape) and never overrides the loop's own stop reason. What happened is

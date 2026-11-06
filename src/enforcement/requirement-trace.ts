@@ -2352,10 +2352,15 @@ export const MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS = 200;
  * direction would cycle. */
 export interface TraceGapContinuationSummary {
   /** `continued` | `skipped_no_budget` | `skipped_probe_error` |
-   * `skipped_refresh_failed` | `skipped_no_evidence` (harness-owned enum). */
+   * `skipped_refresh_failed` | `skipped_no_evidence` (harness-owned enum;
+   * `skipped_refresh_failed` names a failed repair round — the #1503
+   * trace-only turn replaced the full-verdict refresh the name refers to). */
   outcome: string;
   unresolved_ids: string[];
-  verdict_refreshed: boolean;
+  /** #1503: the trace-only repair turn merged at least one claim into the
+   * standing verdict artifact (`claims_merged` is the count). */
+  trace_claims_merged: boolean;
+  claims_merged: number;
 }
 
 /** #1044: bounded, sanitized summary of the #959 trace-repair pass, attached

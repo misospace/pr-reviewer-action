@@ -16,12 +16,13 @@
  *
  * The returned continuation is advisory and bounded: the harness appends the
  * caller-rendered (untrusted-data-fenced) instruction to the SAME
- * conversation, runs one more tool round under the loop's remaining budgets,
- * and re-requests the final verdict before outputs are written. `null` (or
- * a thrown probe) leaves the run exactly as the pre-#1145 loop would have
- * finished it — the probe can never widen the loop's authority, request new
- * tools or permissions, or ask for anything but the verdict the loop already
- * knows how to re-request.
+ * conversation, runs more tool rounds under the loop's remaining budgets,
+ * and (#1503) requests a trace-only payload for the unresolved ids before
+ * outputs are written — the accepted verdict itself is never re-generated.
+ * `null` (or a thrown probe) leaves the run exactly as the pre-#1145 loop
+ * would have finished it — the probe can never widen the loop's authority,
+ * request new tools or permissions, or ask for anything but the trace
+ * payload the loop already knows how to request.
  *
  * Confirmed-unmet exclusion: a row the validator has already REFUTED by
  * re-deriving the requirement's truth from the checkout — the #985
@@ -170,8 +171,12 @@ export function createTraceGapProbe(context: TraceGapProbeContext): TraceGapProb
  * record for the run's reporting surface (the `requirement_trace_repair`
  * artifact summary, `review-coverage.json`). Sanitized like the #1044
  * repair summary: outcome is a fixed enum, ids are control/backtick-stripped
- * and length-capped. `null` when the record is absent (tools-off, fork skip,
- * or the probe returned null) — the caller then omits the field entirely. */
+ * and length-capped. #1503: `trace_claims_merged` reports that the trace-only
+ * repair turn merged at least one claim into the standing verdict artifact
+ * (`claims_merged` is the count) — the historical `verdict_refreshed` field
+ * is gone with the full-verdict refresh. `null` when the record is absent
+ * (tools-off, fork skip, or the probe returned null) — the caller then omits
+ * the field entirely. */
 export function traceGapContinuationSummary(harness: Record<string, unknown> | null | undefined): TraceGapContinuationSummary | null {
   const record = harness?.trace_repair_continuation;
   if (record === null || record === undefined || typeof record !== "object" || Array.isArray(record)) return null;
@@ -187,5 +192,8 @@ export function traceGapContinuationSummary(harness: Record<string, unknown> | n
       if (ids.length >= MAX_TRACE_REPAIR_CLAIMS) break;
     }
   }
-  return { outcome, unresolved_ids: ids, verdict_refreshed: rec.verdict_refreshed === true };
+  const claimsMerged = typeof rec.claims_merged === "number" && Number.isFinite(rec.claims_merged)
+    ? Math.max(0, Math.trunc(rec.claims_merged))
+    : 0;
+  return { outcome, unresolved_ids: ids, trace_claims_merged: rec.trace_claims_merged === true, claims_merged: claimsMerged };
 }
