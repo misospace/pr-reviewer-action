@@ -76,6 +76,7 @@ import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
+import { boundedIdList } from "../context/id-lists.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
 
@@ -2711,6 +2712,27 @@ const MAX_RENDERED_ROWS = 20;
  * more than this many in-scope requirements — the issue's "do not dump an
  * enormous matrix into the public review" ask. */
 const COLLAPSE_THRESHOLD = 5;
+
+/**
+ * #1518: the requirement ids the trace could not discharge — every row whose
+ * disposition is `unmet` or `unverifiable`. Those are exactly the rows that
+ * set the trace's `incomplete` flag (the `validateRequirementTrace` rule) and
+ * exactly the rows the published markdown reports as notable, so the id list
+ * names the same obligations the reviewer was told about.
+ *
+ * The list is deduplicated, keeps the trace's order, and is bounded by the
+ * shared id cap, so a large ledger cannot flood the published handoff.
+ */
+export function unresolvedTraceRequirementIds(trace: RequirementTraceArtifact): string[] {
+  if (trace === null || typeof trace !== "object" || !Array.isArray(trace.rows)) return [];
+  const ids: string[] = [];
+  for (const row of trace.rows) {
+    if (row.disposition !== "unmet" && row.disposition !== "unverifiable") continue;
+    if (typeof row.requirement_id !== "string" || row.requirement_id === "") continue;
+    ids.push(row.requirement_id);
+  }
+  return boundedIdList(ids);
+}
 
 /**
  * Render the published-body "Requirement trace" section: only the

@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
@@ -655,7 +656,13 @@ function writePublishStatusOutput(env: NodeJS.ProcessEnv, status: PublishResult[
  * also writes the `publish-status` output. */
 export async function publishMain(env: NodeJS.ProcessEnv): Promise<number> {
   const seam = buildPublishApi(env);
-  const outcome = await publishWithOutcome(publishInputFromEnv(env, seam.platform), seam, nonEmpty(env.PR_REVIEWER_RUN_DIR));
+  // #1518: this path publishes its own handoff, so it needs its own per-run
+  // review id — the same random id the Action entry and the Tangled runner
+  // generate. A publisher that carried no review id would publish a handoff
+  // that names no review, and the strict parser refuses such a document.
+  const reviewId = randomBytes(8).toString("hex");
+  const publishInput = { ...publishInputFromEnv(env, seam.platform), reviewId };
+  const outcome = await publishWithOutcome(publishInput, seam, nonEmpty(env.PR_REVIEWER_RUN_DIR));
   writePublishStatusOutput(env, outcome.status);
   return outcome.exitCode;
 }
@@ -788,6 +795,12 @@ export function reviewDerivedPublishFields(review: RunReviewResult): Partial<Pub
     ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),
     ...(review.contextPeak !== undefined ? { contextPeak: review.contextPeak } : {}),
     ...(review.toolStopReason !== undefined ? { toolStopReason: review.toolStopReason } : {}),
+    // #1518: the enforcement pass's merge-gating ids. They ride the
+    // published handoff so a controller can see WHICH obligation stayed
+    // open. Absent when the run never reviewed (the admission skip path),
+    // so such a run keeps the pre-#1518 publish-input shape.
+    ...(review.unresolvedRequirementIds !== undefined ? { unresolvedRequirementIds: review.unresolvedRequirementIds } : {}),
+    ...(review.unresolvedRequiredChecks !== undefined ? { unresolvedRequiredChecks: review.unresolvedRequiredChecks } : {}),
     // #1003: the human-review triage answer reaches the published body only
     // when triage ran ("" when off), so a disabled run's review is
     // byte-identical to pre-#1003. Triage grants no capability.
