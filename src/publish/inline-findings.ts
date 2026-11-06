@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { redactText } from "../context/redact.js";
 import { safePath } from "../findings/safe-path.js";
-import { reserveSuggestionOpeners } from "../metadata/markers.js";
+import { reserveSuggestionOpeners, stripReviewHandoffAnchor } from "../metadata/markers.js";
 import { findingIdentityFromRecord, renderFindingIdentityMarker, stripFindingIdentityMarkers } from "../outcomes/identity.js";
 import { sanitizeMarkdown } from "./sanitize.js";
 
@@ -367,14 +367,22 @@ export function recoverPublishedSuggestion(body: string): string | null {
   return normalizedReplacement(replacement) === "" ? null : replacement;
 }
 
-/** Build anchorable comments; thread-backed findings are deduplicated (#766). */
+/** Build anchorable comments; thread-backed findings are deduplicated (#766).
+ *
+ * #1518: the returned `published` map carries the replacements THIS build
+ * published, keyed by the finding's stable identity digest (the same digest
+ * the comment's `pr-reviewer:finding-id` marker carries). Only a replacement
+ * that was actually published is in it: a suppressed one (a trusted 👎, #762)
+ * and a finding without a prescription contribute nothing, so the published
+ * handoff can never propose a replacement the action did not publish. */
 export function buildComments(
   findings: unknown,
   diffText: string,
   maxComments: number,
   opts: { forgejoPositions: boolean; linkMode?: string; rejectedPrescriptions?: ReadonlySet<string> },
-): { comments: unknown[]; skipped: number; suppressed: number } {
-  if (!Array.isArray(findings)) return { comments: [], skipped: 0, suppressed: 0 };
+): { comments: unknown[]; skipped: number; suppressed: number; published: Map<string, string> } {
+  const published = new Map<string, string>();
+  if (!Array.isArray(findings)) return { comments: [], skipped: 0, suppressed: 0, published };
   const positions = diffPositions(diffText);
   // #762: same inert/togithub normalization `findingToBody` applies.
   const mode = opts.linkMode === "inert" || opts.linkMode === "togithub" ? opts.linkMode : "inert";
@@ -387,6 +395,10 @@ export function buildComments(
     const anchor = commentAnchor(value, positions);
     if (anchor === null) { skipped += 1; continue; }
     const { path, line, pathPositions } = anchor;
+    // #1027/#1518: the finding's stable identity. It is the comment's
+    // `pr-reviewer:finding-id` marker, and the key under which a published
+    // replacement is reported to the handoff.
+    const identity = findingIdentityFromRecord(value);
     let body = findingToBody(value, opts.linkMode ?? "inert");
     const comment: Record<string, unknown> = { path, body };
     if (opts.forgejoPositions) comment.new_position = pathPositions.get(line)!;
@@ -417,6 +429,11 @@ export function buildComments(
         suppressed += 1;
         carriedDigest = digest;
       } else {
+        // #1518: the replacement this comment publishes is recorded under the
+        // finding's identity, so the handoff can carry exactly this
+        // replacement and nothing else. A suppressed prescription is not
+        // published, so it never enters the map.
+        if (identity !== null && !published.has(identity)) published.set(identity, action.replacement);
         if (opts.forgejoPositions) {
           body +=
             `\n\nReplacement for lines ${action.start}-${action.end} (this forge cannot apply a one-click suggestion):\n\n\`\`\`\n` +
@@ -446,28 +463,32 @@ export function buildComments(
         "\n\n</details>";
       body += reserveSuggestionOpeners(sanitizeMarkdown(redactText(section), mode));
     }
-    // #762: no model-authored text (message, suggestion, or agent prompt) may
-    // carry the reserved carry-marker grammar: the digest is recomputable
-    // from published state, so an echoed marker line would ride our own
-    // comment's provenance into a permanent self-suppression. Strip any such
-    // line from the assembled body before we append our own marker. (The
-    // suggestion region is already marker-free by `publishablePrescription`, so
-    // this is a no-op there; it still covers `message` and `agent_prompt`.)
-    // #1027: the same hygiene strips a model-authored finding-identity
-    // marker — it is this action's state and never the model's to mint.
-    body = stripRejectionCarryover(stripFindingIdentityMarkers(body));
+// #762: no model-authored text (message, suggestion, or agent prompt) may
+// carry the reserved carry-marker grammar: the digest is recomputable
+// from published state, so an echoed marker line would ride our own
+// comment's provenance into a permanent self-suppression. Strip any such
+// line from the assembled body before we append our own marker. (The
+// suggestion region is already marker-free by `publishablePrescription`, so
+// this is a no-op there; it still covers `message` and `agent_prompt`.)
+// #1027: same hygiene strips model-authored finding-identity
+// marker — this action's state and never model's to mint.
+// #1518: same hygiene strips the published handoff's anchor. This body is
+// model-authored text on a published surface, and the anchor names the
+// action's own container: a look-alike anchor here would offer a consumer a
+// handoff that this run never published. The item survives; only the
+// anchor goes.
+body = stripReviewHandoffAnchor(stripRejectionCarryover(stripFindingIdentityMarkers(body)));
     // #762: a suppressed prescription's rejection survives this run as a
     // digest-only carry marker on the replacement comment — the reaction on
     // the original comment is lost when cleanup retires it, so without the
     // carry the next run would re-post the rejected text.
     if (carriedDigest !== null) body += renderRejectionCarryover([carriedDigest]);
-    const identity = findingIdentityFromRecord(value);
     if (identity !== null) body += renderFindingIdentityMarker(identity) ?? "";
     comment.body = body;
     comments.push(comment);
     if (comments.length >= maxComments) break;
   }
-  return { comments, skipped, suppressed };
+  return { comments, skipped, suppressed, published };
 }
 
 /** Parse INLINE_FINDINGS_MAX with Python's ValueError fallback and lower

@@ -30,6 +30,7 @@
 import { redactText } from "../context/redact.js";
 import { pyCodepointSlice } from "../platform/py.js";
 import { findingIdentityFromRecord } from "../outcomes/identity.js";
+import { boundedIdList } from "../context/id-lists.js";
 
 /** The schema identifier. A consumer must refuse a document whose `schema`
  * is not byte-identical to this string (the ledger pattern, #1027). */
@@ -147,6 +148,13 @@ export interface ReviewBundleInput {
   /** Normalized findings (the review artifact's finding records); consulted
    * only for the review-producing states. */
   findings: unknown;
+  /** #1518: the requirement ids the deterministic enforcement pass could not
+   * discharge (unmet or unverifiable). Serialized only for the
+   * review-producing states, on the same presence rule as `findings`. */
+  unresolvedRequirementIds?: readonly string[];
+  /** #1518: the required-check ids the deterministic enforcement pass could
+   * not resolve. Serialized only for the review-producing states. */
+  unresolvedRequiredChecks?: readonly string[];
 }
 
 interface BundleFindingCandidate {
@@ -256,7 +264,22 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
   // charge one comma per included finding, so the byte bound holds for the
   // exact string returned no matter how the counters land.
   const disclosure = JSON.stringify({ findings: [], findings_total: candidates.length, findings_truncated: true }).slice(1, -1);
-  let bytes = Buffer.byteLength(JSON.stringify(envelope), "utf8") + (reviewsProduced ? disclosure.length + 1 : 0);
+  // #1518: the two id arrays ride the envelope's tail. They are bounded
+  // already, so their EXACT serialized byte length is reserved up front —
+  // never a synthetic ASCII worst case. The id cap counts CODEPOINTS, so a
+  // four-byte codepoint id is four bytes long: a synthetic worst case
+  // under-counts it, and the document could then exceed the 64 KiB cap.
+  const requirementIds = reviewsProduced ? boundedIdList(input.unresolvedRequirementIds) : [];
+  const checkIds = reviewsProduced ? boundedIdList(input.unresolvedRequiredChecks) : [];
+  const idSegmentBytes = reviewsProduced
+    ? Buffer.byteLength(
+      `,"unresolved_requirement_ids":${JSON.stringify(requirementIds)},"unresolved_required_checks":${JSON.stringify(checkIds)}`,
+      "utf8",
+    )
+    : 0;
+  let bytes = Buffer.byteLength(JSON.stringify(envelope), "utf8")
+    + (reviewsProduced ? Buffer.byteLength(disclosure, "utf8") + 1 : 0)
+    + idSegmentBytes;
   const included: ReviewBundleFinding[] = [];
   for (const candidate of candidates.slice(0, REVIEW_BUNDLE_MAX_FINDINGS)) {
     const finding = bundleFinding(candidate.record);
@@ -269,6 +292,10 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
     envelope.findings = included;
     envelope.findings_total = candidates.length;
     envelope.findings_truncated = included.length < candidates.length;
+    // #1518: the merge-gating ids of the deterministic enforcement pass,
+    // last in the envelope so the pinned key order above stays stable.
+    envelope.unresolved_requirement_ids = requirementIds;
+    envelope.unresolved_required_checks = checkIds;
   }
   return JSON.stringify(envelope);
 }
@@ -291,6 +318,12 @@ export interface ReviewBundle {
   findings?: unknown[];
   findings_total?: number;
   findings_truncated?: boolean;
+  /** #1518: the requirement ids the deterministic enforcement pass could not
+   * discharge. Present only on a review-producing state. */
+  unresolved_requirement_ids?: string[];
+  /** #1518: the required-check ids the deterministic enforcement pass could
+   * not resolve. Present only on a review-producing state. */
+  unresolved_required_checks?: string[];
 }
 
 /** Fail-closed parse of a bundle document: exact schema string, closed
@@ -332,6 +365,15 @@ export function parseReviewBundle(text: string): ReviewBundle | null {
     if (!Array.isArray(record.findings)) return null;
     if (typeof record.findings_total !== "number" || typeof record.findings_truncated !== "boolean") return null;
   }
+  // #1518: the merge-gating id lists follow the same presence rule as the
+  // findings set — a state that proves no review may not claim unresolved
+  // requirements or checks.
+  for (const key of ["unresolved_requirement_ids", "unresolved_required_checks"]) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (!reviewProducing) return null;
+    if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) return null;
+  }
   if (record.skip_reason !== undefined && (typeof record.skip_reason !== "string" || record.state !== "skipped")) return null;
   if (record.failure_reason !== undefined && (typeof record.failure_reason !== "string" || record.state !== "failed")) return null;
   const bundle = {
@@ -356,6 +398,12 @@ export function parseReviewBundle(text: string): ReviewBundle | null {
     bundle.findings = record.findings;
     bundle.findings_total = record.findings_total as number;
     bundle.findings_truncated = record.findings_truncated as boolean;
+  }
+  if (Array.isArray(record.unresolved_requirement_ids)) {
+    bundle.unresolved_requirement_ids = [...record.unresolved_requirement_ids] as string[];
+  }
+  if (Array.isArray(record.unresolved_required_checks)) {
+    bundle.unresolved_required_checks = [...record.unresolved_required_checks] as string[];
   }
   return bundle;
 }
