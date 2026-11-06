@@ -688,20 +688,32 @@ test("#1520: without a run-dir pr.diff the historical per-platform sources still
   });
 });
 
-test("#1520: the forgejo publish seam's diff provider prefers the run-dir reviewed diff", async () => {
-  await withRunDirAsync(async (dir) => {
-    writeFileSync(join(dir, "pr.diff"), ANCHORED_DIFF);
-    const seam = buildPublishApi({
+test("#1520: the forgejo publish seam's diff provider takes the run dir from the caller, never ambient env", async (t) => {
+  // The mocked fresh read renders as an empty diff, so a regression that
+  // consults ambient env (or reads the wrong run dir) resolves "" here
+  // instead of silently reusing the artifact from another run dir.
+  t.mock.method(globalThis, "fetch", async () => new Response(""));
+  await withRunDirAsync(async (ambientDir) => {
+    writeFileSync(join(ambientDir, "pr.diff"), ANCHORED_DIFF);
+    const env = {
       REPO: "o/r",
       PR_NUMBER: "9",
       PLATFORM: "forgejo",
       FORGEJO_API_URL: "https://forge.example",
-      PR_REVIEWER_RUN_DIR: dir,
-    } as NodeJS.ProcessEnv);
-    assert.equal(seam.platform, "forgejo");
-    // The run-dir read hits, so the fresh forge read (a network call) is
-    // never reached.
-    assert.equal(await seam.diffProvider(), ANCHORED_DIFF);
+      PR_REVIEWER_RUN_DIR: ambientDir,
+    } as NodeJS.ProcessEnv;
+    // Single source of truth: ambient `PR_REVIEWER_RUN_DIR` is never
+    // consulted by the diff provider — an omitted run dir falls straight
+    // through to the fresh forge read, even though the ambient env points
+    // at a run dir that carries the reviewed diff.
+    assert.equal(await buildPublishApi(env).diffProvider(), "");
+    // The caller's run dir hits, and the fresh forge read is never reached.
+    await withRunDirAsync(async (callerDir) => {
+      writeFileSync(join(callerDir, "pr.diff"), ANCHORED_DIFF);
+      const seam = buildPublishApi(env, callerDir);
+      assert.equal(seam.platform, "forgejo");
+      assert.equal(await seam.diffProvider(), ANCHORED_DIFF);
+    });
   });
 });
 

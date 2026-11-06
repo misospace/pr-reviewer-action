@@ -450,8 +450,11 @@ function reviewedDiffFromRunDir(runDir: string | undefined): string | undefined 
 }
 
 /** The platform publish seam (GitHub REST/GraphQL, Forgejo /api/v1, or the
- * Tangled ATProto record client). */
-export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
+ * Tangled ATProto record client). `runDir` is the same run directory the
+ * caller hands to `publishWithOutcome`; the Forgejo inline-position
+ * re-validation anchors against the reviewed diff from THAT run dir and from
+ * no other source. */
+export function buildPublishApi(env: NodeJS.ProcessEnv, runDir?: string): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
   const repo = env.REPO ?? "";
   const prNumber = env.PR_NUMBER ?? "";
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
@@ -486,16 +489,16 @@ export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformA
   };
   const diffProvider = async (): Promise<string> =>
     // #1520: the Forgejo adapter's inline-position re-validation anchors
-    // against the REVIEWED diff when the run dir carries it — a fresh read
-    // here would let a comment anchor on content this run never reviewed.
-    // The forge's own server-side re-validation against the current head
-    // stays the final arbiter and drops what no longer anchors (fail closed).
-    // This resolves the diff from ambient `PR_REVIEWER_RUN_DIR` while
-    // `publishWithOutcome` resolves it from its `runDir` parameter: every
-    // production composition sets both from the SAME value (`action.ts`,
-    // `platform-action.ts`, `publishMain`), and a caller must keep them
-    // pointing at one run dir or the two anchor decisions can diverge.
-    reviewedDiffFromRunDir(nonEmpty(env.PR_REVIEWER_RUN_DIR)) ?? buildAdapter(env).getPrDiff();
+    // against the REVIEWED diff when the caller's run dir carries it — a
+    // fresh read here would let a comment anchor on content this run never
+    // reviewed. The forge's own server-side re-validation against the
+    // current head stays the final arbiter and drops what no longer anchors
+    // (fail closed). Single source of truth: the run dir enters ONLY through
+    // the `runDir` parameter — the same value the caller hands to
+    // `publishWithOutcome` — so the two anchor decisions cannot diverge by
+    // construction; ambient `PR_REVIEWER_RUN_DIR` is never consulted here.
+    // A caller that passes no run dir gets only the fresh-read fallback.
+    reviewedDiffFromRunDir(runDir) ?? buildAdapter(env).getPrDiff();
   const api: PublishPlatformApi = platform === "forgejo"
     ? new ForgejoPublishApi({
       ...apiOptions,
@@ -715,8 +718,9 @@ function writePublishStatusOutput(env: NodeJS.ProcessEnv, status: PublishResult[
  * cannot distinguish published from superseded (both exit 0), so this step
  * also writes the `publish-status` output. */
 export async function publishMain(env: NodeJS.ProcessEnv): Promise<number> {
-  const seam = buildPublishApi(env);
-  const outcome = await publishWithOutcome(publishInputFromEnv(env, seam.platform), seam, nonEmpty(env.PR_REVIEWER_RUN_DIR));
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  const seam = buildPublishApi(env, runDir);
+  const outcome = await publishWithOutcome(publishInputFromEnv(env, seam.platform), seam, runDir);
   writePublishStatusOutput(env, outcome.status);
   return outcome.exitCode;
 }

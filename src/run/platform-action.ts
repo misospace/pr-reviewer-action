@@ -232,7 +232,7 @@ export async function platformActionMain(
       // path), so the diff provider is a no-op here; the production seam
       // (`buildPublishApi`) supplies its own when a real Tangled API is built.
       ? { api: seams.publishApi, platform: "tangled", diffProvider: async (): Promise<string> => "" }
-      : buildPublishApi(publishEnv as NodeJS.ProcessEnv);
+      : buildPublishApi(publishEnv as NodeJS.ProcessEnv, runDir);
     // No event-driven label lifecycle runs on a host process, so publish's own
     // rerunLabel strip is not requested (the Action strips it for the same
     // reason — label cleanup is event-owned). Publication is decided by
