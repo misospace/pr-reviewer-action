@@ -137,12 +137,14 @@ test("combined: multiple open PRs to the same target resolve by source branch", 
   assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), HEAD1);
 });
 
-test("combined: ambiguous correlation across tickets fails closed", async () => {
+test("combined: ambiguous source correlation disambiguates by unique reviewed-SHA history", async () => {
   const tickets = [ticketItem({ rkey: "3a" }), ticketItem({ rkey: "3b" })];
   const a = patchItem({ ticket: "3a", head: { oid: HEAD1 }, source: { branch: "feat/x", repo: REPO_DID } });
   const b = patchItem({ cid: "bafyb", ticket: "3b", head: { oid: HEAD2 }, source: { branch: "feat/x", repo: REPO_DID } });
   const { fetchImpl } = makeCombinedFetch(tickets, [a, b]);
-  assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), null);
+  // Both correlate by source branch, but only 3a's history contains the
+  // reviewed SHA (HEAD1), so the trusted newest head is 3a's.
+  assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), HEAD1);
 });
 
 test("combined: source-less patches work when the candidate is the sole open ticket", async () => {
@@ -152,6 +154,54 @@ test("combined: source-less patches work when the candidate is the sole open tic
   const patch = { uri: patchItem({ ticket: "3mine" }).uri, cid: "bafypatch1", value: noSource };
   const { fetchImpl } = makeCombinedFetch(tickets, [patch]);
   assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), HEAD1);
+});
+
+test("combined: 2 source-less open tickets, unique reviewed-SHA history match returns newest trusted head", async () => {
+  const tickets = [ticketItem({ rkey: "3mine" }), ticketItem({ rkey: "3other" })];
+  // ctx.sourceSha is HEAD1 (reviewed). Mine's history: older HEAD1, newest HEAD2.
+  const mineOld: Record<string, unknown> = { ...patchItem({ ticket: "3mine", head: { oid: HEAD1 } }).value };
+  delete mineOld.source;
+  const mineNew: Record<string, unknown> = { ...patchItem({ ticket: "3mine", head: { oid: HEAD2 }, createdAt: "2026-11-02T00:00:00.000Z" }).value };
+  delete mineNew.source;
+  const other: Record<string, unknown> = { ...patchItem({ cid: "bafyother", ticket: "3other", head: { oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }).value };
+  delete other.source;
+  const patches = [
+    { uri: patchItem({ ticket: "3mine" }).uri, cid: "bafypatch1", value: mineOld },
+    { uri: patchItem({ cid: "bafypatch2", ticket: "3mine" }).uri, cid: "bafypatch2", value: mineNew },
+    { uri: patchItem({ cid: "bafyother", ticket: "3other" }).uri, cid: "bafyother", value: other },
+  ];
+  const { fetchImpl } = makeCombinedFetch(tickets, patches);
+  // Must return the newest trusted head (HEAD2), not the reviewed SHA.
+  assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), HEAD2);
+});
+
+test("combined: reviewed-SHA history fallback with zero matches fails closed", async () => {
+  const tickets = [ticketItem({ rkey: "3mine" }), ticketItem({ rkey: "3other" })];
+  const a: Record<string, unknown> = { ...patchItem({ ticket: "3mine", head: { oid: HEAD2 } }).value };
+  delete a.source;
+  const b: Record<string, unknown> = { ...patchItem({ cid: "bafyb", ticket: "3other", head: { oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }).value };
+  delete b.source;
+  const patches = [
+    { uri: patchItem({ ticket: "3mine" }).uri, cid: "bafypatch1", value: a },
+    { uri: patchItem({ cid: "bafyb", ticket: "3other" }).uri, cid: "bafyb", value: b },
+  ];
+  const { fetchImpl } = makeCombinedFetch(tickets, patches);
+  // Reviewed HEAD1 appears in neither history.
+  assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), null);
+});
+
+test("combined: reviewed-SHA history fallback with multiple matches fails closed", async () => {
+  const tickets = [ticketItem({ rkey: "3mine" }), ticketItem({ rkey: "3other" })];
+  const a: Record<string, unknown> = { ...patchItem({ ticket: "3mine", head: { oid: HEAD1 } }).value };
+  delete a.source;
+  const b: Record<string, unknown> = { ...patchItem({ cid: "bafyb", ticket: "3other", head: { oid: HEAD1 } }).value };
+  delete b.source;
+  const patches = [
+    { uri: patchItem({ ticket: "3mine" }).uri, cid: "bafypatch1", value: a },
+    { uri: patchItem({ cid: "bafyb", ticket: "3other" }).uri, cid: "bafyb", value: b },
+  ];
+  const { fetchImpl } = makeCombinedFetch(tickets, patches);
+  assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), null);
 });
 
 test("combined: >10 historical tickets do not block the current pull", async () => {

@@ -375,6 +375,15 @@ async function listTicketItems(
  * - exactly one candidate must yield a head, else `null` (ambiguous or
  *   unknown → publication refused). Malformed patch state (missing
  *   ticket key, bad repo binding) fails closed.
+ *
+ * History fallback: when source-branch correlation yields no unique
+ * head (e.g. multiple open tickets and source-less patches), the
+ * launch-time `ctx.sourceSha` (the REVIEWED head) is used ONLY to
+ * identify the unique candidate ticket whose trusted patch history
+ * contains that SHA. The returned value is always that ticket's newest
+ * trusted `head.oid` from the records — never `ctx.sourceSha` echoed
+ * back, never `declaredHeadSha`. Zero or multiple history matches
+ * fail closed.
  */
 export async function readTangledCurrentHeadForContext(
   ctx: TangledContext,
@@ -401,6 +410,24 @@ export async function readTangledCurrentHeadForContext(
     }
     if (head !== null) heads.set(candidate.uri, head);
   }
-  if (heads.size !== 1) return null;
-  return [...heads.values()][0] ?? null;
+  if (heads.size === 1) return [...heads.values()][0] ?? null;
+  // History fallback (see docblock): identify by reviewed SHA, return
+  // newest trusted head — never the launch-time value itself.
+  const reviewed = typeof ctx.sourceSha === "string" ? ctx.sourceSha.trim().toLowerCase() : "";
+  if (!SHA_RE.test(reviewed)) return null;
+  const matches = new Map<string, string>();
+  for (const candidate of candidates) {
+    const newest = selectNewestPatchHead(items, candidate.rkey, candidate.uri, undefined);
+    if (newest === null) continue;
+    const inHistory = items.some((item) => {
+      const ticket = str(item.value.ticket);
+      if (ticket !== candidate.rkey && ticket !== candidate.uri) return false;
+      const head = asRecord(item.value.head);
+      const oid = head === undefined ? undefined : str(head.oid);
+      return oid !== undefined && oid.toLowerCase() === reviewed;
+    });
+    if (inHistory) matches.set(candidate.uri, newest);
+  }
+  if (matches.size !== 1) return null;
+  return [...matches.values()][0] ?? null;
 }
