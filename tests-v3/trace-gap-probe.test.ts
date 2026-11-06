@@ -412,22 +412,24 @@ test("#1145: summary — absent record is null (tools-off / no probe / no gaps)"
   assert.equal(traceGapContinuationSummary({ trace_repair_continuation: { unresolved_ids: ["x"] } }), null, "no outcome → null");
 });
 
-test("#1145: summary — continued record sanitized: ids stripped, capped, deduped; verdict_refreshed only when true", () => {
+test("#1145: summary — continued record sanitized: ids stripped, capped, deduped; trace_claims_merged only when true", () => {
   const summary = traceGapContinuationSummary({
     trace_repair_continuation: {
       attempted: true,
       outcome: "continued\nforged",
       unresolved_ids: ["R1\x00evil\nid", "R2", "R1\x00evil\nid", "x".repeat(200), 42],
-      verdict_refreshed: true,
+      claims_merged: 3,
+      trace_claims_merged: true,
     },
   });
   assert.notEqual(summary, null);
   assert.equal(summary?.outcome, "continuedforged");
   assert.deepEqual(summary?.unresolved_ids, ["R1evilid", "R2", "x".repeat(80)]);
-  assert.equal(summary?.verdict_refreshed, true);
+  assert.equal(summary?.trace_claims_merged, true);
+  assert.equal(summary?.claims_merged, 3);
 });
 
-test("#1145: summary — skipped record carries ids but verdict_refreshed stays false", () => {
+test("#1145: summary — skipped record carries ids but trace claims stay unmerged", () => {
   const summary = traceGapContinuationSummary({
     trace_repair_continuation: {
       attempted: true,
@@ -435,5 +437,5 @@ test("#1145: summary — skipped record carries ids but verdict_refreshed stays 
       unresolved_ids: ["R1"],
     },
   });
-  assert.deepEqual(summary, { outcome: "skipped_no_budget", unresolved_ids: ["R1"], verdict_refreshed: false });
+  assert.deepEqual(summary, { outcome: "skipped_no_budget", unresolved_ids: ["R1"], trace_claims_merged: false, claims_merged: 0 });
 });

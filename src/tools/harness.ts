@@ -42,6 +42,9 @@ import { endpointUrlCredentialOrEmpty } from "../transport/http.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
+import { extractResponseText } from "../specialists/wire.js";
+import { mergeTraceClaims } from "../enforcement/requirement-trace.js";
+import { buildTraceOnlyRepairMessage, parseTraceRepairResponse } from "../requirements/trace-repair.js";
 import { raisedCompletionBudget } from "../model/call.js";
 import { AI_MAX_TOKENS_DEFAULT } from "../config/contract.js";
 import {
@@ -189,25 +192,11 @@ export const VERDICT_CLOSING_INSTRUCTION =
   "now in the exact output format specified in your instructions. Do not " +
   "issue any further tool calls.\n\n";
 
-/** #1145: closing instruction for the REFRESH verdict turn — the SECOND
- * verdict, produced after the bounded evidence-repair round.
- *
- * The refresh does NOT re-append the review corpus: the conversation already
- * carries it verbatim from the FIRST verdict turn (that turn's user event
- * stays in the transcript, and the verdict turn keeps the full history), so
- * appending the corpus again doubles it in the refreshed request — measured
- * on a 200KB corpus: 202KB for the first verdict request, 403KB for the
- * refreshed one. On a PR whose corpus sits near the corpus/context ceiling
- * the doubled request overflows the context window, the refresh fails, and
- * the repair round's evidence is wasted: the feature would be inert exactly
- * on the large PRs it targets. The refresh therefore carries ONLY this
- * instruction, which refers to the corpus already provided above. */
-export const VERDICT_REFRESH_CLOSING_INSTRUCTION =
-  "You finished gathering evidence (the tool calls and results above, " +
-  "including the bounded evidence-repair round). Using your investigation " +
-  "together with the review corpus already provided above, produce the final " +
-  "review verdict now in the exact output format specified in your " +
-  "instructions. Do not issue any further tool calls.\n\n";
+// #1503: the #1145/#1447 full-verdict REFRESH instruction was removed here.
+// The post-repair turn is now trace-only (`buildTraceOnlyRepairMessage` in
+// `src/requirements/trace-repair.ts`): re-serializing the whole verdict asked
+// the model to reproduce a large unrelated payload and dropped trace rows on
+// the #1488 shape, exactly the failure the repair round exists to fix.
 
 export const SUMMARIZER_SYSTEM =
   "You compress earlier tool-call results from a PR review into a dense " +
@@ -436,8 +425,8 @@ export interface UsageAccumulator {
  * #1199 (review round 5): the aggregate is derivable from the persisted
  * records EXACTLY. Every model turn this function charges lands either in a
  * per-round/verdict record or in `native_loop_unrecorded_usage`'s categories
- * (the context-compaction digest calls, and a #1145 verdict refresh that
- * failed or was not accepted); there is no charge without a persisted record,
+ * (the context-compaction digest calls, and the #1503 trace-only repair
+ * turn); there is no charge without a persisted record,
  * so summing the artifact's records reproduces the aggregate without double
  * counting retries. */
 export function accumulateUsage(acc: UsageAccumulator, response: unknown, apiFormat: string): void {
@@ -789,6 +778,119 @@ export function reusableVerdictEnvelope(
   return Object.fromEntries<unknown>([...entries, ...usageEntries]);
 }
 
+/** #1503: join the completion text the way `extractContent` consumes it, so
+ * the merged artifact re-parses identically. OpenAI's `message.content`
+ * branch accepts plain strings and `type: undefined|"text"` parts; the
+ * Anthropic top-level `content` branch accepts only `type: "text"` parts.
+ * Returns null for any shape the verdict parser would not consume. */
+function joinedCompletionText(content: unknown, topLevel: boolean): string | null {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return null;
+  const parts: string[] = [];
+  for (const item of content) {
+    if (!topLevel && typeof item === "string") {
+      parts.push(item);
+      continue;
+    }
+    if (!isEnvelopeRecord(item) || typeof item.text !== "string") return null;
+    if (topLevel && item.type !== "text") return null;
+    if (!topLevel && item.type !== undefined && item.type !== null && item.type !== "text") return null;
+    parts.push(item.text);
+  }
+  return parts.join("");
+}
+
+/** #1503: re-serialize the accepted verdict's completion content with the
+ * merged requirement coverage. Strict JSON first; a markdown-fenced body is
+ * tolerated exactly as the verdict parser tolerates it. Anything else —
+ * non-object payloads, exotic decodes — returns null so the caller leaves
+ * the standing artifact byte-for-byte untouched. Only ids that carried NO
+ * claim are appended (`mergeTraceClaims` semantics: an existing claim, even
+ * one with unusable locations, is never overwritten); every other field of
+ * the verdict object is carried through the JSON round-trip unchanged. */
+function mergedVerdictContent(
+  text: string,
+  claims: readonly unknown[],
+): { text: string; merged: number } | null {
+  const decode = (body: string): unknown => {
+    try {
+      return JSON.parse(body);
+    } catch {
+      return null;
+    }
+  };
+  const trimmed = text.trim();
+  let parsed = decode(trimmed);
+  if (parsed === null && trimmed.startsWith("```")) {
+    const lines = trimmed.split("\n");
+    lines.shift();
+    if (lines.length > 0 && lines[lines.length - 1]!.trim() === "```") lines.pop();
+    parsed = decode(lines.join("\n").trim());
+  }
+  if (!isEnvelopeRecord(parsed)) return null;
+  const coverage = parsed.requirement_coverage;
+  const mergedList = mergeTraceClaims(coverage, claims);
+  const merged = mergedList.length - (Array.isArray(coverage) ? coverage.length : 0);
+  if (merged <= 0) return { text, merged: 0 };
+  return { text: JSON.stringify({ ...parsed, requirement_coverage: mergedList }), merged };
+}
+
+/** #1503: merge trace-only repair claims into the persisted accepted-verdict
+ * envelope (`ai-response.<tier>.json`, the contract `runReview` re-parses as
+ * the verdict). Mirrors `reusableVerdictEnvelope`'s projection branches:
+ * OpenAI `choices[0].message.content` first, then the Anthropic top-level
+ * `content`. Returns the rewritten envelope plus the number of ids actually
+ * filled (0 = nothing merged, artifact must not be rewritten), or null when
+ * the envelope or its completion content is not the shape the reuse parse
+ * consumes (fail-soft: the caller keeps the file exactly as the verdict turn
+ * wrote it). `secrets` masks the NEWLY spliced claim text only — the
+ * standing completion content already passed the fail-closed content gate,
+ * so it is carried through unmasked (masking it here could rewrite
+ * credential-indistinguishable prose the acceptance gate deliberately kept). */
+export function mergeTraceClaimsIntoVerdictEnvelope(
+  envelope: unknown,
+  claims: readonly unknown[],
+  secrets: readonly (string | null | undefined)[] = [],
+): { envelope: Record<string, unknown>; merged: number } | null {
+  if (!isEnvelopeRecord(envelope)) return null;
+  const safeClaims = claims.map((claim) => maskKnownSecretsDeep(claim, secrets));
+  const choices = envelope.choices;
+  if (Array.isArray(choices) && choices.length > 0) {
+    const first = isEnvelopeRecord(choices[0]) ? choices[0] : {};
+    const message = isEnvelopeRecord(first.message) ? first.message : {};
+    if (!("content" in message)) return null;
+    const text = joinedCompletionText(message.content, false);
+    if (text === null) return null;
+    const replaced = mergedVerdictContent(text, safeClaims);
+    if (replaced === null) return null;
+    if (replaced.merged === 0) return { envelope, merged: 0 };
+    // A plain string re-enters `extractContent`'s string branch — parse-
+    // identical to the projected array form for every part order.
+    return {
+      envelope: { ...envelope, choices: [{ ...first, message: { ...message, content: replaced.text } }, ...choices.slice(1)] },
+      merged: replaced.merged,
+    };
+  }
+  if (!("content" in envelope)) return null;
+  const content = envelope.content;
+  const text = joinedCompletionText(content, true);
+  if (text === null) return null;
+  const replaced = mergedVerdictContent(text, safeClaims);
+  if (replaced === null) return null;
+  if (replaced.merged === 0) return { envelope, merged: 0 };
+  const nextContent = typeof content === "string"
+    ? replaced.text
+    : [{ type: "text", text: replaced.text }];
+  return { envelope: { ...envelope, content: nextContent }, merged: replaced.merged };
+}
+
+/** #1503: the dedicated trace-repair round may span this many model turns
+ * (the pre-#1503 shape forced exactly one). The TOTAL tool-call capacity is
+ * unchanged — spreading the same bounded allowance over a few rounds only
+ * lets the reviewer read one location, look at it, and follow one reference,
+ * which a single round cannot express. */
+export const TRACE_REPAIR_MAX_ROUNDS = 4;
+
 export interface NativeVerdictOutcome {
   response: unknown;
   ok: boolean;
@@ -841,12 +943,6 @@ export interface ProduceVerdictInput {
   extraHeaders?: Readonly<Record<string, string>>;
   turnTimeout: number;
   usageAcc: UsageAccumulator;
-  /** #1199 (review round 5): when the caller provides one, every attempt is
-   * also folded into a SIDE-CAR accumulator for a `native_loop_unrecorded_usage`
-   * category — used by a #1145 refresh turn, whose usage must land in a
-   * persisted record when the refresh ends without one (failed or unaccepted).
-   * The same fold sites as `usageAcc`, by construction — never divergent. */
-  unrecordedAcc?: UsageAccumulator;
   /** Absolute wall-clock deadline in timeFn-epoch seconds; every attempt's
    * timeout is clamped to the remaining budget. */
   deadline: number;
@@ -866,9 +962,8 @@ export interface ProduceVerdictInput {
  * completion budget when the streamed body's own shape shows the token cap
  * destroyed the verdict (token-cap stop reason, or the whole budget spent on
   * reasoning before any text); no additional call is ever spent. Never
-  * throws: transport errors are classified, not propagated. Every returned
-  * body is folded into usageAcc (and into `unrecordedAcc` when the caller
-  * supplies one, at exactly the same sites).
+ * throws: transport errors are classified, not propagated. Every returned
+ * body is folded into usageAcc.
   */
 export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<NativeVerdictOutcome> {
   const { transport, timeFn } = input;
@@ -934,7 +1029,6 @@ export async function produceNativeVerdict(input: ProduceVerdictInput): Promise<
   };
   const foldAttemptUsage = (attemptResponse: unknown): void => {
     accumulateUsage(input.usageAcc, attemptResponse, input.apiFormat);
-    if (input.unrecordedAcc !== undefined) accumulateUsage(input.unrecordedAcc, attemptResponse, input.apiFormat);
     const usage = normalizeUsageTelemetry(
       attemptResponse !== null && typeof attemptResponse === "object"
         ? (attemptResponse as Record<string, unknown>).usage ?? null
@@ -1872,17 +1966,10 @@ export type HarnessResult = Record<string, unknown> & {
    * provider-reported token counts, a boolean). snake_case: persisted verbatim
    * in the harness artifact and read back by `verdictTurnTelemetry`. */
   native_loop_verdict_telemetry?: NativeLoopVerdictTelemetry | null;
-  /** #1199: the verdict-telemetry record a successful #1145 verdict refresh
-   * REPLACED (moved here before the refreshed record is written). Holds at
-   * most one element — a refresh happens at most once per run; a failed
-   * refresh leaves the standing record untouched. Content-free. snake_case:
-   * persisted verbatim in the harness artifact and consumed (nulled) by
-   * `buildToolLoopTelemetry` into `verdict.superseded`. */
-  native_loop_superseded_verdict_telemetry?: NativeLoopVerdictTelemetry[] | null;
   /** #1199 (review round 5): usage the aggregate `usage` fold charged but
    * that has no per-round or verdict record — the context-compaction digest
-   * calls, and a #1145 verdict refresh that failed or was not accepted (its
-   * tokens are billed but its verdict record is not written, so the records
+   * calls, and the #1503 trace-only repair turn (its tokens are billed but
+   * no verdict record describes it, so the records
    * below cannot sum to the aggregate without it). Persisted at exactly the
    * sites the aggregate snapshot is written. Content-free: request counts and
    * provider-reported token totals only, normalized the same way as every
@@ -1900,7 +1987,14 @@ export type HarnessResult = Record<string, unknown> & {
     stop_reason?: string;
     rounds?: number;
     tool_calls?: number;
-    verdict_refreshed?: boolean;
+    /** #1503: ids the trace-only repair turn actually merged into the
+     * standing verdict artifact (0 whenever the turn was skipped, failed,
+     * or returned nothing usable). Replaces #1145's `verdict_refreshed`:
+     * the repair no longer re-requests the whole verdict. */
+    claims_merged?: number;
+    /** #1503: `claims_merged > 0` — the artifact was rewritten with the
+     * merged trace rows. */
+    trace_claims_merged?: boolean;
   };
 };
 
@@ -1922,14 +2016,9 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
     // Consume the raw verdict record (folded into `verdict` below), exactly as
     // `tool_loop_meta` is consumed above, so it is not duplicated in the artifact.
     result.native_loop_verdict_telemetry = null;
-    // #1199: the same consumption for the superseded verdict record (a
-    // successful #1145 refresh moved the standing verdict's record here — at
-    // most one), folded into `verdict.superseded` below.
-    const supersededTel = supersededVerdictTelemetry(result);
-    result.native_loop_superseded_verdict_telemetry = null;
     // #1199 (review round 5): the same consumption for the usage that carries
-    // no round or verdict record (compaction digest calls, a failed or
-    // unaccepted #1145 refresh), folded into `unrecorded_usage` below so the
+    // no round or verdict record (compaction digest calls, the #1503 trace-only
+    // repair turn), folded into `unrecorded_usage` below so the
     // records + these categories derive the aggregate exactly.
     const unrecordedTel = unrecordedUsageTotals(result);
     result.native_loop_unrecorded_usage = null;
@@ -1990,10 +2079,10 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
       repair_rounds: Array.isArray(meta.repair_round_telemetry) ? meta.repair_round_telemetry : [],
       // #1199 (review round 5): the aggregate `usage`'s charges that have no
       // round or verdict record — `context_compaction` (the compaction digest
-      // calls) and `verdict_refresh` (a #1145 refresh that failed or was not
-      // accepted). Categories appear only when actually charged; the object is
+      // calls) and `trace_repair_turn` (the #1503 trace-only repair turn).
+      // Categories appear only when actually charged; the object is
       // empty when every aggregate charge already rides a record above, so
-      // summing `rounds` + `repair_rounds` + `verdict` (+ `superseded`) +
+      // summing `rounds` + `repair_rounds` + `verdict` +
       // `unrecorded_usage` reproduces the aggregate exactly.
       unrecorded_usage: unrecordedTel,
       stop_reason: result.stop_reason ?? "",
@@ -2006,10 +2095,9 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         reason: result.native_loop_verdict_reason ?? "",
         // #1199: the closing verdict turn's separate latency/usage record,
         // distinct from the investigation `rounds` above, folded over every
-        // verdict attempt. A successful #1145 refresh makes it describe the
-        // REFRESHED verdict — the standing record it replaced rides next to it
-        // in `superseded` (at most one; empty when no refresh replaced a
-        // verdict record; a failed refresh leaves both untouched).
+        // verdict attempt. #1503: this record always describes the FIRST
+        // (standing) verdict — the post-repair turn is trace-only and never
+        // replaces the verdict, so there is nothing superseded.
         model_sec: vTel.model_sec,
         prompt_tokens: vTel.prompt_tokens,
         completion_tokens: vTel.completion_tokens,
@@ -2027,7 +2115,6 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         attempts: vTel.attempts,
         wire_calls: vTel.wire_calls,
         finish_reason: vTel.finish_reason,
-        superseded: supersededTel,
       },
     };
   }
@@ -2128,40 +2215,6 @@ function countOrZero(value: unknown): number {
   return Math.trunc(value);
 }
 
-/** #1199: the superseded verdict record(s) — a successful #1145 refresh moves
- * the standing verdict telemetry here before writing the refreshed record (at
- * most one element per run). Reads `result.native_loop_superseded_verdict_telemetry`
- * with per-record projection so malformed records contribute defaults rather
- * than malformed shapes. Never content: numbers and a boolean only. */
-function supersededVerdictTelemetry(result: HarnessResult): NativeLoopVerdictTelemetry[] {
-  const records = result.native_loop_superseded_verdict_telemetry;
-  if (!Array.isArray(records) || records.length === 0) return [];
-  const numOrNull = (x: unknown): number | null =>
-    typeof x === "number" && Number.isFinite(x) ? x : null;
-  const projected: NativeLoopVerdictTelemetry[] = [];
-  for (const record of records) {
-    if (record === null || typeof record !== "object") continue;
-    const r = record as unknown as Record<string, unknown>;
-    projected.push({
-      model_sec: numOrNull(r.model_sec),
-      prompt_tokens: numOrNull(r.prompt_tokens),
-      completion_tokens: numOrNull(r.completion_tokens),
-      cached_tokens: numOrNull(r.cached_tokens),
-      streamed_fallback: r.streamed_fallback === true,
-      // #1466: the same transport projection as the standing verdict record.
-      ttft_sec: numOrNull(r.ttft_sec),
-      first_event_sec: numOrNull(r.first_event_sec),
-      cache_write_tokens: numOrNull(r.cache_write_tokens),
-      uncached_prompt_tokens: numOrNull(r.uncached_prompt_tokens),
-      decode_tokens_per_sec: numOrNull(r.decode_tokens_per_sec),
-      attempts: countOrZero(r.attempts),
-      wire_calls: countOrZero(r.wire_calls),
-      finish_reason: sanitizeFinishReasonToken(r.finish_reason),
-    });
-  }
-  return projected;
-}
-
 /** #1199 (review round 5): the persisted usage categories for the charges that
  * carry no round or verdict record. Reads `result.native_loop_unrecorded_usage`
  * with per-category projection so a malformed record contributes safe numeric
@@ -2174,7 +2227,7 @@ function unrecordedUsageTotals(result: HarnessResult): Record<string, Record<str
   const projected: Record<string, Record<string, unknown>> = {};
   if (raw === null || typeof raw !== "object") return projected;
   const numOrDefault = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
-  for (const category of ["context_compaction", "verdict_refresh"] as const) {
+  for (const category of ["context_compaction", "trace_repair_turn"] as const) {
     const record = (raw as Record<string, unknown>)[category];
     if (record === null || typeof record !== "object") continue;
     const r = record as Record<string, unknown>;
@@ -2697,24 +2750,22 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   const repairRoundTelemetry: NativeLoopRoundTelemetry[] = [];
   // #1199 (review round 5): usage the aggregate folds that has NO round or
   // verdict record, split into the categories `native_loop_unrecorded_usage`
-  // persists. Folded at exactly the same sites as `usageAcc` (the side-car
-  // fold below, and `foldAttemptUsage` for the refresh turn), so a category
+  // persists. Folded at exactly the same sites as `usageAcc`, so a category
   // can never drift from what the aggregate actually received: the compaction
   // digest calls go to `compactionUsage` (rids postFn with no turn signal, so
-  // no round record), and a #1145 refresh turn that ends without a verdict
-  // record (failed or unaccepted — decided AFTER `produceNativeVerdict`
-  // returns, so the side-car folds first and is only PERSISTED when the
-  // refresh is unrecorded) goes to `refreshUsage`.
+  // no round record), and the #1503 trace-only repair turn goes to
+  // `traceTurnUsage` — no verdict record ever describes it (the standing
+  // verdict record stays the FIRST verdict's), so its spend is ALWAYS the
+  // unrecorded category, never a replacement for one.
   const compactionUsage: UsageAccumulator = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
-  const refreshUsage: UsageAccumulator = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
-  let refreshTurnRecorded = true;
+  const traceTurnUsage: UsageAccumulator = { requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
   // Persisted beside every aggregate snapshot: categories appear only when
   // really charged, and the field is null when every aggregate charge already
   // rides a persisted record.
   const unrecordedUsageRecord = (): Record<string, unknown> | null => {
     const categories: Record<string, unknown> = {};
     if (compactionUsage.requests > 0) categories.context_compaction = usageWithCacheRatio(compactionUsage);
-    if (!refreshTurnRecorded && refreshUsage.requests > 0) categories.verdict_refresh = usageWithCacheRatio(refreshUsage);
+    if (traceTurnUsage.requests > 0) categories.trace_repair_turn = usageWithCacheRatio(traceTurnUsage);
     return Object.keys(categories).length > 0 ? categories : null;
   };
 
@@ -3221,16 +3272,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // message as the trailing tool_result blocks (adjacent user turns are a
   // 400). Skipped when no reviewer prompt resolved.
   if (reviewSystem) {
-    // #1145: the verdict-turn body extracted so the bounded evidence-repair
-    // continuation can re-run it over the same conversation. `recordFailure`
-    // distinguishes the FIRST verdict (owns the verdict telemetry, the error
-    // artifact, and the fallback fields) from a CONTINUATION verdict: on
-    // failure the continuation must leave the standing verdict, its fields,
-    // and its artifact byte-for-byte untouched. `isRefresh` marks the
-    // continuation turn, whose request must NOT re-append the corpus (see
-    // VERDICT_REFRESH_CLOSING_INSTRUCTION). Returns the accepted verdict
-    // response, or null when no reusable verdict was produced.
-    const runVerdictTurn = async (recordFailure: boolean, isRefresh: boolean): Promise<unknown> => {
+    // The in-conversation verdict turn. #1503: the #1145 full-verdict REFRESH
+    // re-run of this body was removed — the post-repair turn is now trace-only
+    // (`runTraceOnlyRepairTurn` below), so this owns exactly one verdict: the
+    // first. On failure it records the fallback fields and the error artifact;
+    // it returns the accepted verdict response, or null when no reusable
+    // verdict was produced.
+    const runVerdictTurn = async (): Promise<unknown> => {
       try {
         const corpusName = input.tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
         let verdictCorpus = deps.readText(corpusName) ?? "";
@@ -3239,36 +3287,21 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // profile belongs to the escalation tier. #1253: the tier decides —
         // the unreachable REVIEW_CONTEXT_PROFILE=smart override is gone.
         const shape = (input.tier === "smart" ? env.SMART_REQUEST_SHAPE : env.PRIMARY_REQUEST_SHAPE) ?? "default";
-        if (isRefresh) {
-          // #1145: the REFRESH turn carries no corpus. The conversation
-          // already holds the corpus verbatim from the FIRST verdict turn
-          // (its user event stays in the transcript), so a second copy would
-          // double the corpus in the refreshed request — 202KB -> 403KB on a
-          // 200KB corpus — and overflow the context window on exactly the
-          // large PRs the repair round targets, failing the refresh and
-          // wasting the repair round's evidence. The refresh therefore adds
-          // EXACTLY ONE user event, carrying only the closing instruction
-          // that refers to the corpus already provided above; on the
-          // Anthropic format that event still merges into the repair round's
-          // trailing tool_result message (no adjacent user turns).
-          conversation.addUser(VERDICT_REFRESH_CLOSING_INSTRUCTION);
+        verdictCorpus = replaceHarnessFindingsSection(verdictCorpus, verdictHarnessFindingsBody(outcome));
+        // #372/#398: drop the byte-duplicate sections the planning context
+        // already carries (section-exact and conservative).
+        const deduped = dedupeVerdictCorpus(verdictCorpus, input.corpusText);
+        const dropped = countOccurrences(deduped, VERDICT_DEDUP_NOTICE);
+        if (dropped > 0) {
+          const saved = Buffer.byteLength(verdictCorpus, "utf8") - Buffer.byteLength(deduped, "utf8");
+          log(
+            `  native_loop: verdict-corpus dedup dropped ${dropped} section(s) already in the planning context (${saved} bytes saved)`,
+          );
+        }
+        if (shape === "trailing_task") {
+          conversation.addUser(deduped + "\n\n" + VERDICT_CLOSING_INSTRUCTION);
         } else {
-          verdictCorpus = replaceHarnessFindingsSection(verdictCorpus, verdictHarnessFindingsBody(outcome));
-          // #372/#398: drop the byte-duplicate sections the planning context
-          // already carries (section-exact and conservative).
-          const deduped = dedupeVerdictCorpus(verdictCorpus, input.corpusText);
-          const dropped = countOccurrences(deduped, VERDICT_DEDUP_NOTICE);
-          if (dropped > 0) {
-            const saved = Buffer.byteLength(verdictCorpus, "utf8") - Buffer.byteLength(deduped, "utf8");
-            log(
-              `  native_loop: verdict-corpus dedup dropped ${dropped} section(s) already in the planning context (${saved} bytes saved)`,
-            );
-          }
-          if (shape === "trailing_task") {
-            conversation.addUser(deduped + "\n\n" + VERDICT_CLOSING_INSTRUCTION);
-          } else {
-            conversation.addUser(VERDICT_CLOSING_INSTRUCTION + deduped);
-          }
+          conversation.addUser(VERDICT_CLOSING_INSTRUCTION + deduped);
         }
         const tempRaw = (env.AI_TEMPERATURE ?? "").trim();
         const temperature = tempRaw ? Number(tempRaw) : null;
@@ -3333,13 +3366,6 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           ...(input.extraHeaders !== undefined ? { extraHeaders: input.extraHeaders } : {}),
           turnTimeout: verdictTimeout,
           usageAcc,
-          // #1199 (review round 5): a refresh turn folds its every attempt into
-          // the `verdict_refresh` side-car too. Acceptance is decided below,
-          // AFTER the call returns, so the side-car paper trail is kept only
-          // when the refresh ends without a verdict record (see
-          // `refreshTurnRecorded`); an ACCEPTED refresh's usage already rides
-          // the refreshed verdict record and the side-car is discarded.
-          ...(recordFailure === false ? { unrecordedAcc: refreshUsage } : {}),
           deadline,
           transport: deps.transport,
           timeFn,
@@ -3350,42 +3376,16 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // is unusable; on a usable verdict it consumes exactly the one read the
         // acceptance gate below used to spend (the telemetry block in between
         // touches only the telemetry clock), so every scripted clock sequence
-        // is preserved — the read just happens earlier. Without this, a refresh
-        // whose verdict is usable BUT whose run's deadline has expired would
-        // still have displaced the standing verdict's telemetry record before
-        // the acceptance gate rejected it.
+        // is preserved — the read just happens earlier.
         const verdictAccepted = verdict.ok && timeFn() < deadline;
-        // #1199 (review round 5): a refresh whose verdict is usable but not
-        // accepted (or failed outright) charged the aggregate with NO verdict
-        // record — mark the `verdict_refresh` side-car for persistence so the
-        // records still derive the aggregate. Decided right at the acceptance
-        // gate, before any record-writing side effect can complicate it.
-        if (recordFailure === false && !verdictAccepted) refreshTurnRecorded = false;
         // #1199: the closing in-conversation verdict turn gets its OWN latency +
         // provider usage record, kept separate from the investigation rounds.
         // `model_sec` spans only the model request (including a streamed→
         // non-streamed retry) on the dedicated telemetry clock, and the usage
         // is folded over EVERY verdict attempt (`verdict.usageTotals`) — null
-        // when every attempt reported none, never estimated. Only the turn that
-        // OWNS the verdict record writes it (the first verdict turn — which
-        // keeps its record even on failure, as a diagnostic — or a #1145
-        // refresh that is actually ACCEPTED): a refresh that fails OR is
-        // usable-but-unaccepted (the run's deadline expired first) leaves the
-        // standing verdict's telemetry and superseded record untouched, exactly
-        // as the verdict itself. An accepted refresh first moves the standing
-        // record into `native_loop_superseded_verdict_telemetry` (at most one
-        // element — a refresh happens at most once per run), so the refreshed
-        // turn's record does not erase the first verdict turn's from telemetry.
-        if (recordFailure || (verdict.ok && verdictAccepted)) {
-          if (recordFailure === false) {
-            const standing = input.result.native_loop_verdict_telemetry;
-            if (standing !== null && standing !== undefined && typeof standing === "object") {
-              if (!Array.isArray(input.result.native_loop_superseded_verdict_telemetry)) {
-                input.result.native_loop_superseded_verdict_telemetry = [];
-              }
-              input.result.native_loop_superseded_verdict_telemetry!.push({ ...standing });
-            }
-          }
+        // when every attempt reported none, never estimated. The turn OWNS the
+        // verdict record and writes it even on failure, as a diagnostic.
+        {
           const verdictTelemetry = {
             model_sec: Number(Math.max(0, telemetryTimeFn() - verdictModelStart).toFixed(3)),
             // #1466: the verdict record has exactly TWO scopes, and it says
@@ -3418,21 +3418,18 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           // is reported by the existing fallback line below, not a metrics line.
           if (verdict.ok) log(nativeLoopVerdictLogLine(verdictTelemetry));
         }
-        if (verdict.ok || recordFailure) {
-          input.result.native_loop_verdict_attempts = verdict.attempts;
-          input.result.native_loop_verdict_retried = verdict.retried;
-          if (verdict.retried) {
-            input.result.native_loop_verdict_stream_failure = verdict.streamFailureKind;
-          }
-        }
-        // #1047: the bounded failure-shape record (and the budget raise, when
+        input.result.native_loop_verdict_attempts = verdict.attempts;
+        input.result.native_loop_verdict_retried = verdict.retried;
+        if (verdict.retried) {
+          input.result.native_loop_verdict_stream_failure = verdict.streamFailureKind;
+        }        // #1047: the bounded failure-shape record (and the budget raise, when
         // the single non-streamed retry used one) — content-free counts and
         // reasons only, so the harness artifact can say WHY the verdict turn
         // failed without ever carrying response text.
-        if (!verdict.ok && verdict.diagnostics !== undefined && recordFailure) {
+        if (!verdict.ok && verdict.diagnostics !== undefined) {
           input.result.native_loop_verdict_diagnostics = verdict.diagnostics.record;
         }
-        if (verdict.budgetRaisedTo !== undefined && (verdict.ok || recordFailure)) {
+        if (verdict.budgetRaisedTo !== undefined) {
           input.result.native_loop_verdict_budget_raised_to = verdict.budgetRaisedTo;
         }
         // Keep a diagnostic artifact even when the response is unusable, but
@@ -3459,7 +3456,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           // content gate (#1094 review round 3), and the reuse re-parse
           // enforces the same gate.
           deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify(reusableVerdictEnvelope(verdict.response, verdict.knownSecrets)));
-        } else if (recordFailure) {
+        } else {
           if (verdict.response !== null && typeof verdict.response === "object") {
             deps.writeArtifact(`ai-response.${input.tier}.json`, JSON.stringify({ error: verdict.detail }));
           } else {
@@ -3476,41 +3473,27 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           );
           return verdict.response;
         }
-        if (recordFailure) {
-          input.result.native_loop_verdict_status = "fallback";
-          input.result.native_loop_verdict_reason =
-            timeFn() >= deadline ? "deadline" : verdict.reason;
-          input.result.native_loop_verdict_error = verdict.detail;
-          // #1047: masked whole against the loop's key — the record carries
-          // no response content, but the static field names can collide with
-          // a very short configured key (see callTier's matching mask). The
-          // list is the one the verdict turn itself was evaluated against.
-          const diagnosticsLine = verdict.diagnostics !== undefined
-            ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(verdict.diagnostics.record)}]`, verdict.knownSecrets)
-            : "";
-          log(
-            `  native_loop: no reusable in-conversation verdict [${verdict.reason}] ${verdict.detail}${diagnosticsLine} — the standard review call will synthesize the verdict`,
-          );
-        } else {
-          // The repair verdict did not come back usable: reason only, never
-          // the detail text, and the original verdict stands untouched.
-          log(
-            `  native_loop: evidence-repair verdict produced no reusable verdict [${verdict.reason}] — keeping the original verdict`,
-          );
-        }
+        input.result.native_loop_verdict_status = "fallback";
+        input.result.native_loop_verdict_reason =
+          timeFn() >= deadline ? "deadline" : verdict.reason;
+        input.result.native_loop_verdict_error = verdict.detail;
+        // #1047: masked whole against the loop's key — the record carries
+        // no response content, but the static field names can collide with
+        // a very short configured key (see callTier's matching mask). The
+        // list is the one the verdict turn itself was evaluated against.
+        const diagnosticsLine = verdict.diagnostics !== undefined
+          ? maskKnownSecrets(` [${formatResponseDiagnosticsLine(verdict.diagnostics.record)}]`, verdict.knownSecrets)
+          : "";
+        log(
+          `  native_loop: no reusable in-conversation verdict [${verdict.reason}] ${verdict.detail}${diagnosticsLine} — the standard review call will synthesize the verdict`,
+        );
         return null;
       } catch (exc) {
         const message = exc instanceof Error ? exc.message : String(exc);
-        if (recordFailure) {
-          input.result.native_loop_verdict_error = message;
-          input.result.native_loop_verdict_status = "fallback";
-          input.result.native_loop_verdict_reason = "error";
-          log(`  native_loop: verdict turn failed (${message}) — the standard review call will synthesize the verdict`);
-        } else {
-          log(
-            `  native_loop: evidence-repair verdict turn failed (${maskKnownSecrets(message, harnessSecrets)}) — keeping the original verdict`,
-          );
-        }
+        input.result.native_loop_verdict_error = message;
+        input.result.native_loop_verdict_status = "fallback";
+        input.result.native_loop_verdict_reason = "error";
+        log(`  native_loop: verdict turn failed (${message}) — the standard review call will synthesize the verdict`);
         return null;
       }
     };
@@ -3520,15 +3503,108 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // allowance below. Without this the continuation could push the run past
     // its own total wall-clock budget by exactly the verdict turn's duration.
     const verdictStartedAt = timeFn();
-    const firstVerdictResponse = await runVerdictTurn(true, false);
+    const firstVerdictResponse = await runVerdictTurn();
     const verdictElapsedSec = Math.max(0, timeFn() - verdictStartedAt);
+
+    // ── #1503: trace-only repair turn ──────────────────────────────────
+    // After the bounded evidence-repair round the loop no longer re-requests
+    // the whole verdict: re-serializing a ~129k-token conversation's entire
+    // review dropped trace rows again on the #1488 shape (8/10 requirement
+    // rows missing even though the evidence had been found). This turn asks
+    // the SAME conversation for a trace-only payload covering exactly the
+    // unresolved ids, normalizes it with the existing #959 repair parser,
+    // and merges it into the ACCEPTED verdict artifact with the existing
+    // `mergeTraceClaims` semantics: ids that already carry a claim (valid or
+    // not) are never touched, and findings, severities, recommendation/
+    // verdict, escalation state, required-check dispositions and every other
+    // artifact field are unchanged. EVERY failure path — exhausted budget,
+    // transport error, malformed or empty payload, unparsable artifact, zero
+    // mergeable ids — leaves the standing verdict and its artifact intact.
+    // Returns the number of requirement ids actually filled. Never throws.
+    const runTraceOnlyRepairTurn = async (targetIds: readonly string[]): Promise<number> => {
+      try {
+        const traceRemaining = deadline - timeFn();
+        if (traceRemaining <= 0) {
+          log("  native_loop: trace-only repair skipped (wall-clock budget exhausted) — keeping the original verdict");
+          return 0;
+        }
+        // The instruction rides the SAME conversation. On the Anthropic
+        // format it merges into the repair round's trailing tool_result
+        // message (both follow tool_result blocks, so no adjacent user
+        // turns are created) — the identical wire-safety the #1145 refresh
+        // relied on.
+        conversation.addUser(buildTraceOnlyRepairMessage({ ids: targetIds }));
+        const tempRaw = (env.AI_TEMPERATURE ?? "").trim();
+        const temperature = tempRaw ? Number(tempRaw) : null;
+        // The trace contract is NOT the verdict schema, so it rides the wire
+        // prompt-only (the #1047 rule for non-verdict JSON): no
+        // `response_format`, no Anthropic structured-output parameter — a
+        // verdict-shaped json_schema would force the full verdict back into
+        // this turn, which is the exact payload #1503 removes. `verdictTurn`
+        // keeps the full transcript and drops the tool declarations.
+        const tracePayload = conversation.toRequestPayload(input.apiFormat, input.model, {
+          stream: false,
+          maxTokens: envIntBounded(env, "AI_MAX_TOKENS", AI_MAX_TOKENS_DEFAULT, 256, 200000),
+          temperature,
+          verdictTurn: true,
+          keepFullHistoryOnVerdict: true,
+          tokensParam,
+          cachePrefix: true,
+          reasoningEffort,
+          anthropicEffortSupported: anthropicEffort,
+        }) as Record<string, unknown>;
+        const traceTimeout = Math.min(input.turnTimeout, Math.max(1, Math.trunc(traceRemaining)));
+        const traceResponse = await deps.transport(input.baseUrl, input.apiFormat, tracePayload, input.apiKey, traceTimeout);
+        // The turn's spend rides the aggregate AND the always-persisted
+        // unrecorded side-car: no verdict record describes it (the standing
+        // verdict record stays the FIRST verdict's), so the records could
+        // never reproduce the aggregate without this category.
+        accumulateUsage(usageAcc, traceResponse, input.apiFormat);
+        accumulateUsage(traceTurnUsage, traceResponse, input.apiFormat);
+        const parsed = parseTraceRepairResponse(extractResponseText(traceResponse), new Set(targetIds));
+        if (parsed.claims.length === 0) {
+          log(
+            "  native_loop: trace-only repair returned no usable claims" +
+              (parsed.errors.length > 0
+                ? ` (${maskKnownSecrets(String(parsed.errors[0] ?? ""), harnessSecrets).slice(0, 160)})`
+                : "") +
+              " — keeping the original verdict",
+          );
+          return 0;
+        }
+        const artifactName = `ai-response.${input.tier}.json`;
+        const artifactText = deps.readText(artifactName);
+        if (artifactText === null || artifactText === "") return 0;
+        let envelope: unknown;
+        try {
+          envelope = JSON.parse(artifactText);
+        } catch {
+          return 0;
+        }
+        const merge = mergeTraceClaimsIntoVerdictEnvelope(envelope, parsed.claims, harnessSecrets);
+        if (merge === null || merge.merged === 0) return 0;
+        deps.writeArtifact(artifactName, JSON.stringify(merge.envelope));
+        log(
+          `  native_loop: trace-only repair merged ${merge.merged} requirement claim(s) into the standing verdict ` +
+            `(unresolved at repair start: ${targetIds.length})`,
+        );
+        return merge.merged;
+      } catch (exc) {
+        const message = exc instanceof Error ? exc.message : String(exc);
+        log(
+          `  native_loop: trace-only repair turn failed (${maskKnownSecrets(message, harnessSecrets)}) — keeping the original verdict`,
+        );
+        return 0;
+      }
+    };
 
     // ── #1145: bounded evidence-repair continuation ──────────────────────
     // The probe inspects the ACCEPTED verdict against deterministic
     // requirement-trace validation and may ask for ONE additional bounded
-    // tool round over the same conversation, then a refreshed verdict. Every
-    // failure path here leaves the accepted verdict standing; nothing in
-    // this block may throw out of `runNativeLoop`.
+    // tool round over the same conversation, then (#1503) a trace-only
+    // repair turn instead of a full-verdict refresh. Every failure path here
+    // leaves the accepted verdict standing; nothing in this block may throw
+    // out of `runNativeLoop`.
     if (firstVerdictResponse !== null && input.traceGapProbe !== undefined) {
       let continuation: TraceGapContinuation | null = null;
       try {
@@ -3555,6 +3631,16 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         const unresolvedIds = (Array.isArray(continuation.unresolvedIds) ? continuation.unresolvedIds : [])
           .filter((id): id is string => typeof id === "string")
           .map((id) => traceGapIdLabel(id));
+        // #1503: the trace-only repair's merge set: the RAW probe ids (the
+        // labeled list above is telemetry-sanitized and must not drive the
+        // merge). Deduplicated, blank-stripped; `normalizeTraceRepairPayload`
+        // refuses any id outside this exact set, so the turn can only ever
+        // fill ids the deterministic validator found unresolved at repair
+        // start.
+        const repairTargetIds = [...new Set(
+          (Array.isArray(continuation.unresolvedIds) ? continuation.unresolvedIds : [])
+            .filter((id): id is string => typeof id === "string" && id.trim() !== ""),
+        )];
         const instruction = typeof continuation.instruction === "string" ? continuation.instruction.trim() : "";
         // #1447: trace closure no longer depends on accidental leftovers.
         // It keeps the original whole-run wall-clock deadline, but receives
@@ -3594,7 +3680,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
               model: input.model,
               budgets: {
                 ...budgets,
-                maxRounds: 1,
+                // #1503: the same bounded call allowance, now spread over a
+                // few rounds so the reviewer can read one location and
+                // follow one reference. Call capacity is unchanged:
+                // `maxToolCalls` stays the base remainder + dedicated
+                // trace-closure allowance, and the ordinary primary ceiling
+                // is untouched.
+                maxRounds: TRACE_REPAIR_MAX_ROUNDS,
                 maxToolCalls: repairRequestBudget,
                 wallClockSec: Math.max(0, wallClockLeft),
               },
@@ -3746,21 +3838,23 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
                 Number(repairMeta.requests_remaining ?? 0) - repair.toolCallsIssued,
               );
             }
-            // A refresh is justified only by new executed evidence — and it
-            // is wire-safe only then: with no fresh tool_result event the
-            // second verdict's user turn would sit directly after the
-            // (already merged) verdict+repair user message, which the
-            // Anthropic format rejects.
-            const verdictRefreshed =
-              repair.executed.length > 0 && (await runVerdictTurn(false, true)) !== null;
+            // #1503: the trace-only turn is justified only by new executed
+            // evidence — and it is wire-safe only then: with no fresh
+            // tool_result event the trace instruction's user turn would sit
+            // directly after the (already merged) verdict+repair user
+            // message, which the Anthropic format rejects.
+            const claimsMerged =
+              repair.executed.length > 0 && repairTargetIds.length > 0
+                ? await runTraceOnlyRepairTurn(repairTargetIds)
+                : 0;
             // A repair round that itself stopped on a request error did NOT
             // complete: record it distinctly instead of calling an errored
             // round "continued" (the stop_reason keeps the precise cause).
             const repairErrored = repair.stopReason === "request-error" || String(repair.error ?? "") !== "";
             // A repair round that issued NO tool call inspected no evidence,
-            // so it cannot justify a refresh (none is attempted) and must
-            // not read as a completed evidence repair: recording it as
-            // "continued" would claim the trace gap was chased when the
+            // so it cannot justify the trace-only turn (none is attempted)
+            // and must not read as a completed evidence repair: recording it
+            // as "continued" would claim the trace gap was chased when the
             // model answered the repair instruction with plain text alone.
             const repairProducedNoEvidence = !repairErrored && repair.executed.length === 0;
             input.result.trace_repair_continuation = {
@@ -3774,11 +3868,12 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
               stop_reason: repair.stopReason,
               rounds: repair.rounds,
               tool_calls: repair.executed.length,
-              verdict_refreshed: verdictRefreshed,
+              claims_merged: claimsMerged,
+              trace_claims_merged: claimsMerged > 0,
             };
             log(
               `  native_loop: trace-gap repair ran ${repair.executed.length} additional tool call(s) ` +
-                `(${repair.stopReason}); verdict ${verdictRefreshed ? "refreshed" : "kept"}`,
+                `(${repair.stopReason}); trace claims merged: ${claimsMerged}`,
             );
           }
         }
