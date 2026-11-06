@@ -183,6 +183,14 @@ export interface RunReviewResult {
    * artifacts) can tell that a trusted approve was withheld because a
    * derived architectural obligation stayed undischarged. */
   derivedObligationState?: DerivedObligationState;
+  /** #1505: the run's required-evidence state ("complete" | "unresolved"),
+   * present ONLY when the review-owned required-evidence contract was
+   * active — an inactive run has no state at all and keeps its pre-#1505
+   * published bytes exactly. The publish step carries it into the marker
+   * and the approval guardrail: unresolved required evidence reads
+   * `partial` and withholds the native APPROVE (COMMENT), never a
+   * manufactured blocking request. */
+  requiredEvidenceState?: RequiredEvidenceState;
   /** #847: the #810/#702 tool-loop budget the marker recorded (mirrors the
    * harness's `tool_request_budget` for the route the marker was built
    * from); undefined when no tool harness ran. */
@@ -477,7 +485,7 @@ function resolveReviewObligations(
   harnessArtifactName: string,
   validateRequiredChecks: string | undefined,
   derivedEnabled: boolean,
-): { obligations: ReviewObligation[]; derived: DerivedObligationResolution } {
+): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean } {
   const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
   const includeMustCheck = mustCheckObligationsEnabled(validateRequiredChecks);
   const candidateRows = (candidates?.injected === true && Array.isArray(candidates.obligations)
@@ -529,6 +537,12 @@ function resolveReviewObligations(
       obligation.status === "unresolved" ? { ...obligation, cause: obligation.cause ?? cause } : obligation
     )),
     derived,
+    // #1505: whether the review-owned required-evidence contract was ACTIVE
+    // this run (the must_check checklist enabled, or trusted-base rows were
+    // injected). The required-evidence state and its publish sentinel exist
+    // only for an active contract — an inactive run keeps its bytes
+    // exactly.
+    contractActive: includeMustCheck || candidates?.injected === true,
   };
 }
 
@@ -605,6 +619,52 @@ function derivedObligationState(
   if (derived.coverage === "incomplete") return "unavailable";
   const rows = obligations.filter((obligation) => obligation.source === "derived");
   return rows.every((obligation) => obligation.status === "satisfied") ? "complete" : "unresolved";
+}
+
+/** #1505: the run's required-evidence state — the one word a reader needs
+ * to tell WHY a trusted approve was withheld when required review evidence
+ * stayed unresolved (budget exhausted, tool capability, provider failure).
+ *
+ * - "unresolved": the contract was active and at least one `must_check` or
+ *   `trusted_base_guidance` row stayed non-satisfied;
+ * - "complete": the contract was active and every row was discharged —
+ *   including the clean "no obligations" answer.
+ *
+ * An INACTIVE contract has no state at all (""): the marker and the
+ * coverage record then keep their pre-#1505 bytes exactly. (The `derived`
+ * state has an "unavailable" arm because a derivation can fail to run;
+ * the required-evidence rows always exist once the contract is active, so
+ * there is nothing to be unavailable.) */
+export type RequiredEvidenceState = "complete" | "unresolved";
+
+function requiredEvidenceObligationState(
+  contractActive: boolean,
+  obligations: readonly ReviewObligation[],
+): RequiredEvidenceState | "" {
+  if (!contractActive) return "";
+  const rows = obligations.filter((obligation) => obligation.source !== "derived");
+  return rows.every((obligation) => obligation.status === "satisfied") ? "complete" : "unresolved";
+}
+
+/** #1505: persist the run's required-evidence state sentinel next to the
+ * derived one. Written ONLY when the contract was active, so the file is
+ * the run's own "the contract was on" flag the publish boundary fails
+ * closed on (an unreadable state over a present sentinel is
+ * `unavailable` → approval withheld, never approved). */
+function persistRequiredEvidenceState(
+  ws: RunWorkspace,
+  contractActive: boolean,
+  obligations: readonly ReviewObligation[],
+): void {
+  if (!contractActive) return;
+  const rows = obligations
+    .filter((obligation) => obligation.source !== "derived")
+    .map(({ id, source, text, status, cause }) => ({ id, source, text, status, cause }));
+  ws.write("required-evidence-state.json", `${pyJsonDumps({
+    version: 1,
+    enabled: true,
+    obligations: rows,
+  })}\n`);
 }
 
 function mergeBlockerVerificationPasses(
@@ -2093,6 +2153,11 @@ secrets: [profiles.primary.apiKey],
   // discharged. The state alone never said why.
   const derivedReason = derivedObligationStateReason(resolvedObligations.derived, resolvedObligations.obligations);
   persistDerivedObligationState(ws, resolvedObligations.derived, resolvedObligations.obligations, derivedReason);
+  // #1505: the run's required-evidence state — "" when the contract was
+  // inactive, so an inactive run's coverage record and marker keep their
+  // pre-#1505 bytes exactly.
+  const requiredState = requiredEvidenceObligationState(resolvedObligations.contractActive, resolvedObligations.obligations);
+  persistRequiredEvidenceState(ws, resolvedObligations.contractActive, resolvedObligations.obligations);
   // #874: the ledger (read above for the #959 trace scope) feeds the trace
   // escalation, which must be visible to the verdict mapping, not just
   // recorded afterward.
@@ -2181,7 +2246,7 @@ secrets: [profiles.primary.apiKey],
     applyStrictVerdictPolicy(reviewRecord as never, {
       modelVerdict,
       forced,
-      unresolvedReviewObligations: unresolvedRequiredObligations,
+      unmetReviewObligations: unresolvedRequiredObligations,
     });
     // The strict mapping can derive an approve after the enforcement banner
     // was written; reconcile the markdown with the final verdict.
@@ -2252,13 +2317,13 @@ secrets: [profiles.primary.apiKey],
     // failClosedEnforcementFired, so the relaxers below refuse when it fired.
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
-    relaxVerificationOnlyVerdict(reviewRecord as never, { forced, unresolvedReviewObligations: unresolvedObligations });
-    relaxCiOnlyVerdict(reviewRecord as never, { forced, unresolvedReviewObligations: unresolvedObligations });
+    relaxVerificationOnlyVerdict(reviewRecord as never, { forced, unmetReviewObligations: unresolvedObligations });
+    relaxCiOnlyVerdict(reviewRecord as never, { forced, unmetReviewObligations: unresolvedObligations });
     // #1016: relaxUnverifiedBlockerVerdict itself refuses to relax when any
     // demoted finding has `grounding_status === "unverified"` (unknown
     // evidence, not a refutation) — the verifier did not disprove the
     // claim, so a clean review cannot be certified.
-    relaxUnverifiedBlockerVerdict(reviewRecord as never, { forced, unresolvedReviewObligations: unresolvedObligations });
+    relaxUnverifiedBlockerVerdict(reviewRecord as never, { forced, unmetReviewObligations: unresolvedObligations });
     // #977: the relaxation can flip the model's request_changes to approve
     // after the enforcement banner was written; reconcile the markdown with
     // the final verdict.
@@ -2397,6 +2462,14 @@ secrets: [profiles.primary.apiKey],
       derived_obligation_state: derivedState,
       derived_obligation_reason: derivedReason,
     } : {}),
+    // #1505: the required-evidence state of THIS run — present only when
+    // the contract was active (an inactive run keeps the record
+    // byte-identical). The reason distinguishes a discharged contract from
+    // one that stayed open.
+    ...(requiredState !== "" ? {
+      required_evidence_state: requiredState,
+      required_evidence_reason: requiredState === "complete" ? null : "not-discharged",
+    } : {}),
     // #1145: the native loop's own bounded evidence-repair continuation
     // record (its outcome enum distinguishes a run continuation from
     // skipped_no_budget), when the probe fired or was skipped.
@@ -2478,6 +2551,10 @@ secrets: [profiles.primary.apiKey],
       // review reads `partial` — never `clean`, and never a manufactured
       // `issues`. Absent when the feature is off.
       ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
+      // #1505: unresolved required review evidence is a coverage state too —
+      // the review reads `partial`, never `clean`, while required evidence
+      // stayed ungathered. Absent when the contract was inactive.
+      ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
     }),
   };
   const unresolvedProofPins = unresolvedConfidencePins(confidenceProofPins);
@@ -2772,6 +2849,10 @@ secrets: [profiles.primary.apiKey],
       // review reads `partial` — never `clean`, and never a manufactured
       // `issues`. Absent when the feature is off.
       ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
+      // #1505: unresolved required review evidence is a coverage state too —
+      // the review reads `partial`, never `clean`, while required evidence
+      // stayed ungathered. Absent when the contract was inactive.
+      ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
     }),
     reviewRoute: env.REVIEW_ROUTE ?? "legacy",
     escalationReason: escalationReasons,
@@ -2862,6 +2943,9 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     // is the run's own state, resolved once above from the coverage answer
     // and the folded rows.
     ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
+    // #1505: the run's required-evidence state, only when the contract was
+    // active — an inactive run keeps its bytes exactly.
+    ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
     // #1455: the verifier's telemetry, only when the run measured it — a
     // disabled verifier, or a call with no usage, keeps the pre-#1455
     // marker bytes exactly.
@@ -2899,6 +2983,9 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     // derivation's coverage answer and the folded rows; it is never
     // recomputed here.
     ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
+    // #1505: the run's required-evidence state, only when the contract was
+    // active — an inactive run keeps its bytes exactly.
+    ...(requiredState !== "" ? { requiredEvidenceState: requiredState } : {}),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCallsUsed: toolBudgetTelemetry.calls } : {}),

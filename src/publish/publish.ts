@@ -130,6 +130,12 @@ export interface PublishInput {
    * architectural obligation stayed undischarged. Absent when the run has
    * no state — the marker then keeps its pre-#1449 bytes exactly. */
   derivedObligationState?: string;
+  /** #1505: the run's required-evidence state, when the review-owned
+   * required-evidence contract was active. Unresolved required evidence is
+   * a coverage state: it reads `partial` and withholds the native APPROVE
+   * (a non-blocking COMMENT), never a manufactured blocking request.
+   * Absent when the contract was inactive. */
+  requiredEvidenceState?: string;
   /** Forgejo inline-comment position backend. */
   forgejoPositions: boolean;
   /** #810: deterministic partial-coverage record from the tool harness.
@@ -296,16 +302,27 @@ export function markerReviewResult(input: {
    * while a derived obligation stayed open, and never a manufactured
    * "issues". Absent (the feature is off) changes nothing. */
   derivedObligationState?: string | undefined;
+  /** #1505: the run's required-evidence state ("complete" | "unresolved" |
+   * "unavailable"). Unresolved required review evidence — the evidence was
+   * never gathered (budget exhausted, tool capability, provider failure) —
+   * is a coverage gap with the same approval semantics: the review reads
+   * `partial`, never `clean`, and never a manufactured "issues". Absent
+   * (the contract was inactive) changes nothing. */
+  requiredEvidenceState?: string | undefined;
 }): string {
   // #1449: the derived gap is a coverage gap: the review never established
   // a derived cross-path relationship, so it cannot be published as a clean
   // review. It is NOT a findings state — the findings list stays untouched.
   const derivedGap = input.derivedObligationState === "unresolved" || input.derivedObligationState === "unavailable";
+  // #1505: unresolved required review evidence is the same coverage bucket —
+  // an availability failure the review could not finish, never a defect.
+  const requiredEvidenceGap = input.requiredEvidenceState === "unresolved" || input.requiredEvidenceState === "unavailable";
   const coverageGap =
     Boolean(input.partialCoverage)
     || Boolean(input.coverageUnknown)
     || input.degradedGateBypass === true
-    || derivedGap;
+    || derivedGap
+    || requiredEvidenceGap;
   const coverageIncomplete = input.requiredChecks === "incomplete" || coverageGap;
   if (input.verdictPolicy !== "strict") {
     if (input.verdict === "request_changes") return "issues";
@@ -1283,6 +1300,12 @@ export function evaluateApprovalGuardrails(options: {
   isForkPr: boolean | null;
   /** #1449: the run's derived-obligation state, when the feature is on. */
   derivedObligationState?: string;
+  /** #1505: the run's required-evidence state, when the review-owned
+   * required-evidence contract was active. Unresolved required evidence is
+   * a coverage state: it reads `partial` and withholds the native APPROVE
+   * (a non-blocking COMMENT), never a manufactured blocking request — the
+   * same withholding semantics the derived state carries. */
+  requiredEvidenceState?: string;
 }): {
   canApprove: boolean;
   scopeBlocked: boolean;
@@ -1290,18 +1313,24 @@ export function evaluateApprovalGuardrails(options: {
   isForkPr: boolean | null;
   /** #1449: present only when the derived state withheld the approval. */
   derivedBlocked?: boolean;
+  /** #1505: present only when the required-evidence state withheld the
+   * approval. */
+  requiredEvidenceBlocked?: boolean;
 } {
   const verdictAllowsApproval = options.verdict === "approve";
   const isFork = options.isForkPr ?? true;
   const scopeBlocked = verdictAllowsApproval && isFork && !options.approveForks;
   const derivedBlocked = verdictAllowsApproval
     && (options.derivedObligationState === "unresolved" || options.derivedObligationState === "unavailable");
+  const requiredEvidenceBlocked = verdictAllowsApproval
+    && (options.requiredEvidenceState === "unresolved" || options.requiredEvidenceState === "unavailable");
   return {
-    canApprove: verdictAllowsApproval && !scopeBlocked && !derivedBlocked,
+    canApprove: verdictAllowsApproval && !scopeBlocked && !derivedBlocked && !requiredEvidenceBlocked,
     scopeBlocked,
     verdictAllowsApproval,
     isForkPr: options.isForkPr,
     ...(derivedBlocked ? { derivedBlocked: true } : {}),
+    ...(requiredEvidenceBlocked ? { requiredEvidenceBlocked: true } : {}),
   };
 }
 
@@ -1609,6 +1638,7 @@ export async function publishReview(
     // the three closed states and omits the key otherwise, so an unknown
     // value is never published.
     ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
+    ...(input.requiredEvidenceState !== undefined ? { requiredEvidenceState: input.requiredEvidenceState } : {}),
     actionVersion: ACTION_VERSION,
   };
   if (input.partialCoverage) {
@@ -1994,6 +2024,7 @@ export async function publishReview(
         approveForks: input.approveForks,
         isForkPr: input.isForkPr,
         ...(input.derivedObligationState !== undefined ? { derivedObligationState: input.derivedObligationState } : {}),
+    ...(input.requiredEvidenceState !== undefined ? { requiredEvidenceState: input.requiredEvidenceState } : {}),
       });
       // #1447: a native APPROVE is a trusted-approval certificate, not merely
       // a rendering of the model's approve verdict. It therefore requires
@@ -2077,6 +2108,27 @@ export async function publishReview(
         body += `\n> **Approval withheld by derived-obligation state**: ${gap}, so ${advisory}.\n`;
         messages.push(
           `Withholding native approval for #${input.prNumber} (derived obligation state: ${state})`,
+        );
+      } else if (input.mode === "review_verdict" && input.verdict === "approve" && guardrails.requiredEvidenceBlocked === true) {
+        // #1505: unresolved required review evidence withholds the native
+        // approval at the publish boundary too — an approve verdict over
+        // evidence the review could not gather is an abstention, not a
+        // trust certificate. The withholding stays ADVISORY, exactly like
+        // the derived/scope cases above: the native event becomes a
+        // COMMENT, never a blocking REQUEST_CHANGES, because an incomplete
+        // review must not invent an issue.
+        const state = input.requiredEvidenceState ?? "unresolved";
+        const gap = state === "unavailable"
+          ? "the required-evidence state could not be read, so the review's required-evidence coverage is unknown"
+          : "required review evidence was not gathered by this review (budget, capability, or provider availability)";
+        // #752: a review with open findings or a coverage gap must not
+        // call itself clean, even when its verdict is an approve.
+        const advisory = reviewResult === "clean"
+          ? "this clean review is advisory"
+          : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
+        body += `\n> **Approval withheld by required-evidence state**: ${gap}, so ${advisory}.\n`;
+        messages.push(
+          `Withholding native approval for #${input.prNumber} (required-evidence state: ${state})`,
         );
       } else if (input.mode === "review_verdict" && input.verdict === "approve" && input.degradedGateBypass === true) {
         // #1447: degraded review state is an abstention, never a trusted

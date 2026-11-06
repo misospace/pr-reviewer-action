@@ -263,10 +263,13 @@ test("#1449: the derived attribution lives in the enforcement section, apart fro
   assert.match(markdown, /required review evidence unresolved: obligation-1/);
   assert.match(markdown, /derived architectural obligation unresolved: derived-1 \(derived obligation not discharged; #1449\)/);
   assert.ok(!markdown.includes("required review evidence unresolved: derived-1"), "a derived row is not required review evidence");
-  // A forcing row is unresolved: the verdict flips and the enforcement
-  // banner names both classes.
-  assert.equal(outcome.applied, true);
-  assert.equal(artifact.verdict, "request_changes");
+  // #1505: both rows are UNRESOLVED coverage — the verdict is NOT flipped
+  // and no enforcement banner claims one was; the publish boundary
+  // withholds the approval instead (#1447: found defect vs review
+  // incomplete).
+  assert.equal(outcome.applied, false);
+  assert.equal(outcome.reason, "");
+  assert.equal(artifact.verdict, "approve");
 });
 
 test("#1449: a derived row alone discloses coverage without forcing a verdict", () => {
@@ -291,7 +294,7 @@ test("#1449: a run without derived rows keeps today's attribution note byte-for-
   applyStrictVerdictPolicy(withoutDerived as never, {
     modelVerdict: "approve",
     forced: false,
-    unresolvedReviewObligations: ["obligation-1"],
+    unmetReviewObligations: ["obligation-1"],
   });
   assert.match(
     withoutDerived.review_markdown as string,
