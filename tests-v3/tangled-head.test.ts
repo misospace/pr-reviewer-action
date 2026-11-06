@@ -110,20 +110,56 @@ test("selector: 64-hex SHA-256 head OIDs are accepted (new Tangled repos)", () =
   assert.equal(selectNewestPatchHead([patchItem({ head: { oid: "a".repeat(41) } })], TICKET_RKEY, TICKET_URI), null);
 });
 
+/** Fetch mock serving ticket and patch collections by query param. */
+function makeCombinedFetch(
+  tickets: unknown[],
+  patches: unknown[],
+): { fetchImpl: FetchLike } {
+  const fetchImpl: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    const collection = url.searchParams.get("collection");
+    const records = collection === "org.tangled.track.ticket" ? tickets : patches;
+    return new Response(JSON.stringify({ records, cursor: null }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  return { fetchImpl };
+}
+
 test("combined: multiple open PRs to the same target resolve by source branch", async () => {
+  const tickets = [ticketItem({ rkey: "3mine" }), ticketItem({ rkey: "3other" })];
   const mine = patchItem({ ticket: "3mine", head: { oid: HEAD1 }, source: { branch: "feat/x", repo: REPO_DID } });
   const other = patchItem({ cid: "bafyother", ticket: "3other", head: { oid: HEAD2 }, source: { branch: "feat/other", repo: REPO_DID } });
-  const { fetchImpl } = makeFetch([mine, other]);
+  const { fetchImpl } = makeCombinedFetch(tickets, [mine, other]);
   // ctx.sourceBranch is "feat/x" — the combined reader must pick mine,
   // even though two tickets exist for the (implicit) same target.
   assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), HEAD1);
 });
 
 test("combined: ambiguous correlation across tickets fails closed", async () => {
+  const tickets = [ticketItem({ rkey: "3a" }), ticketItem({ rkey: "3b" })];
   const a = patchItem({ ticket: "3a", head: { oid: HEAD1 }, source: { branch: "feat/x", repo: REPO_DID } });
   const b = patchItem({ cid: "bafyb", ticket: "3b", head: { oid: HEAD2 }, source: { branch: "feat/x", repo: REPO_DID } });
-  const { fetchImpl } = makeFetch([a, b]);
+  const { fetchImpl } = makeCombinedFetch(tickets, [a, b]);
   assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), null);
+});
+
+test("combined: source-less patches work when the candidate is the sole open ticket", async () => {
+  const tickets = [ticketItem({ rkey: "3mine" })];
+  const noSource: Record<string, unknown> = { ...patchItem({ ticket: "3mine" }).value };
+  delete noSource.source;
+  const patch = { uri: patchItem({ ticket: "3mine" }).uri, cid: "bafypatch1", value: noSource };
+  const { fetchImpl } = makeCombinedFetch(tickets, [patch]);
+  assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), HEAD1);
+});
+
+test("combined: >10 historical tickets do not block the current pull", async () => {
+  const historical = Array.from({ length: 12 }, (_, i) => ticketItem({ rkey: `3hist${i}`, state: "closed" }));
+  const tickets = [...historical, ticketItem({ rkey: "3mine" })];
+  const mine = patchItem({ ticket: "3mine", head: { oid: HEAD1 }, source: { branch: "feat/x", repo: REPO_DID } });
+  const { fetchImpl } = makeCombinedFetch(tickets, [mine]);
+  assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), HEAD1);
 });
 
 test("selector: a patch with a missing or malformed ticket fails closed (not ignored)", () => {
