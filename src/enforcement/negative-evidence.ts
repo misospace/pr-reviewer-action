@@ -12,6 +12,15 @@
  *   rule's declared `categories`, the per-domain claim-shape gates below and
  *   the covered-path match must ALL agree before a finding is touched; a
  *   formatter-clean signal can never reach a semantic or security finding.
+ * - #1517 calibration hardening (2026-11-06 corpus eval): a message about
+ *   ALTERING the tool's coverage — "the diff removes the yamllint
+ *   duplicate-key detection from the validate job" (pr-reviewer-action#467)
+ *   — is not a claim of violating that tool and is never demoted; a
+ *   formatter cue inside a comparative construction ("rather than
+ *   whitespace", "isn't treated as indented", courier#108) describes the
+ *   code rather than claiming a violation; and a generic identity token
+ *   ("the" word-boundedly matched 71/74 real corpus findings) is refused at
+ *   parse time and re-refused at the persisted-rule gate.
  * - `blocker`-severity findings are NEVER contradicted by negative evidence
  *   (the spec parser already refuses a blocker ceiling; this is the second,
  *   independent cap). Security-category findings never match a rule at all
@@ -37,6 +46,7 @@
 
 import type { NegativeEvidenceRule } from "../evidence/negative-evidence.js";
 import { NEGATIVE_EVIDENCE_SCHEMA } from "../evidence/negative-evidence.js";
+import { isGenericNegativeEvidenceToken } from "../evidence/providers.js";
 import type { ArtifactFinding } from "./artifact.js";
 import { DETERMINISTIC_FINDING_CATEGORIES, canonicalTreePath, safeFile } from "./blocker-verification.js";
 
@@ -119,7 +129,9 @@ export function negativeEvidenceRulesFromArtifact(
 }
 
 /** Re-validate a persisted rule defensively (bounded shapes, same limits the
- * spec parser enforced at derivation). */
+ * spec parser enforced at derivation — including the generic-token refusal:
+ * a tampered or legacy sidecar cannot smuggle an identity like "the" past
+ * the persistence gate). */
 function parsePersistedRule(raw: unknown): NegativeEvidenceRule | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
@@ -131,7 +143,12 @@ function parsePersistedRule(raw: unknown): NegativeEvidenceRule | null {
   if (!isBoundedStringArray(record.categories, 16, 32) || record.categories.length === 0) return null;
   if (record.max_severity !== "major" && record.max_severity !== "minor" && record.max_severity !== "info") return null;
   if (typeof record.identity !== "string" || record.identity === "" || record.identity.length > 128) return null;
+  if (record.identity.trim() !== record.identity) return null;
+  if (isGenericNegativeEvidenceToken(record.identity)) return null;
   if (!isBoundedStringArray(record.rules, 64, 128)) return null;
+  for (const ruleId of record.rules) {
+    if (ruleId.trim() !== ruleId || isGenericNegativeEvidenceToken(ruleId)) return null;
+  }
   if (record.head_sha !== null && (typeof record.head_sha !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(record.head_sha))) return null;
   return {
     provider,
@@ -164,6 +181,43 @@ const FORMATTER_CLAIM_RE =
 const SCHEMA_CLAIM_RE =
   /\b(?:schema|does[ -]not[ -]conform|invalid[ -]?(?:config|configuration|syntax|hcl|yaml|json)|fails?[ -]?(?:schema[ -]?)?validation|validation[ -]?(?:error|failure|fail)|malformed[ -]?(?:config|configuration)|not[ -]valid)\b/i;
 
+/**
+ * #1517 calibration hardening (courier#108 shape): a cue word used in a
+ * comparative/treatment construction DESCRIBES the code rather than claiming
+ * a formatting violation — "continuation lines start with a box-drawing
+ * character rather than whitespace", "the reason line isn't treated as
+ * indented". A clean formatter says nothing about such a claim, so a cue
+ * that only occurs inside one of these constructions is refused. A cue
+ * occurring anywhere else still claims ("trailing whitespace on line 3",
+ * "the file is not formatted").
+ */
+const COMPARATIVE_CUE_RE =
+  /(?:\b(?:rather than|instead of|in place of|treated as|treats? (?:[\w-]+\s+){0,3}as|considered as|regarded as|classified as|counts as|counted as|viewed as|read as)\s*)$/i;
+
+function cueInsideComparativeConstruction(message: string, cueStart: number): boolean {
+  const before = message.slice(Math.max(0, cueStart - 64), cueStart);
+  return COMPARATIVE_CUE_RE.test(before);
+}
+
+/**
+ * #1517 calibration hardening (pr-reviewer-action#467 shape): a claim ABOUT
+ * the validation tool or check itself — removing/altering its coverage
+ * ("the diff removes the yamllint duplicate-key detection from the validate
+ * job") — is not a claim of violating that tool, and a clean run of the
+ * tool does not contradict it. Refuse the whole message when coverage-
+ * alteration vocabulary and a coverage noun co-occur; every domain gate
+ * consults this before its own cues. Deliberately over-refusing (an
+ * unmatched claim stays untouched — the fail-safe direction).
+ */
+const COVERAGE_ALTERATION_RE =
+  /\b(?:remov\w+|delet\w+|disabl\w+|enabl\w+|drop(?:s|ped|ping)?|skip(?:s|ped|ping)?|ignor\w+|exclud\w+|includ\w+|add(?:s|ed|ing)?|replac\w+|updat\w+|weaken\w+|relax\w+|tighten\w+|loosen\w+|downgrad\w+|upgrad\w+|renam\w+|no longer)\b/i;
+const COVERAGE_NOUN_RE =
+  /\b(?:checks?|coverage|detection|validat\w+|suite|jobs?|gates?|enforcement|steps?|pipelines?|workflows?|ci)\b/i;
+
+function isCoverageAlterationClaim(message: string): boolean {
+  return COVERAGE_ALTERATION_RE.test(message) && COVERAGE_NOUN_RE.test(message);
+}
+
 function escapeRegExpLiteral(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -177,7 +231,15 @@ function mentionsToken(message: string, token: string): boolean {
 /** True when the finding's message is the claim class the rule's domain
  * contradicts. */
 export function negativeEvidenceClaimMatches(message: string, rule: NegativeEvidenceRule): boolean {
-  if (rule.domain === "formatter") return FORMATTER_CLAIM_RE.test(message);
+  if (isCoverageAlterationClaim(message)) return false;
+  if (rule.domain === "formatter") {
+    // At least one cue must occur OUTSIDE a comparative construction for
+    // the message to claim a formatting violation.
+    for (const match of message.matchAll(new RegExp(FORMATTER_CLAIM_RE.source, "gi"))) {
+      if (!cueInsideComparativeConstruction(message, match.index ?? 0)) return true;
+    }
+    return false;
+  }
   const identityHit = mentionsToken(message, rule.identity)
     || rule.rules.some((ruleId) => message.toLowerCase().includes(ruleId.toLowerCase()));
   if (rule.domain === "lint") return identityHit;

@@ -165,6 +165,51 @@ export const NEGATIVE_EVIDENCE_CATEGORIES: ReadonlySet<string> = new Set([
  * blocker findings are never contradicted by negative evidence. */
 export const NEGATIVE_EVIDENCE_MAX_SEVERITIES: ReadonlySet<string> = new Set(["major", "minor", "info"]);
 
+/**
+ * #1517 (2026-11-06 corpus-calibration hardening): a tool identity or rule id
+ * must NAME the tool distinctively. A token that appears in ordinary review
+ * prose word-boundedly matches most finding texts and silently voids the
+ * lint/schema identity gate — the calibration measured a generic identity of
+ * "the" satisfying 71/74 real corpus findings. Refuse English function words
+ * and ultra-generic review nouns outright, plus any token shorter than three
+ * characters, at parse time AND when a persisted rule is revalidated.
+ * Fail-closed: a refused declaration is no declaration. An operator whose
+ * tool needs a colliding token declares a distinctive form instead (e.g.
+ * "go vet", not "go").
+ */
+export const MIN_NEGATIVE_EVIDENCE_TOKEN_CHARS = 3;
+
+const NEGATIVE_EVIDENCE_GENERIC_TOKENS: ReadonlySet<string> = new Set([
+  // English function words (articles, conjunctions, prepositions, pronouns,
+  // auxiliaries, common adverbs of degree/time).
+  "a", "an", "the", "and", "or", "but", "nor", "so", "yet", "if", "then", "than", "that", "this",
+  "these", "those", "there", "here", "when", "where", "why", "how", "all", "any", "some", "none",
+  "each", "every", "both", "few", "many", "much", "more", "most", "such", "only", "own", "same",
+  "too", "very", "just", "also", "even", "ever", "never", "not", "no", "yes", "of", "to", "in",
+  "on", "at", "by", "for", "with", "from", "into", "onto", "over", "under", "about", "after",
+  "before", "between", "through", "during", "without", "within", "is", "are", "was", "were",
+  "be", "been", "being", "am", "do", "does", "did", "done", "doing", "has", "have", "had",
+  "having", "will", "would", "shall", "should", "can", "could", "may", "might", "must", "it",
+  "its", "itself", "they", "them", "their", "theirs", "we", "us", "our", "ours", "you", "your",
+  "yours", "he", "she", "him", "his", "her", "hers", "me", "my", "mine", "who", "whom", "whose",
+  "which", "what", "because", "while", "until", "since", "although", "though", "whether",
+  "either", "neither", "always", "often", "again", "almost", "enough", "instead", "rather",
+  "out", "off", "old", "new", "now", "get", "got", "put", "set", "use", "used", "using", "one",
+  "two", "six", "ten", "way", "end", "per", "via", "vs", "versus", "etc",
+  // Ultra-generic code-review nouns — ordinary finding prose contains them.
+  "code", "lint", "linter", "formatter", "style", "check", "checks", "test", "tests", "tool",
+  "tools", "rule", "rules", "file", "files", "line", "lines", "error", "errors", "warning",
+  "warnings", "issue", "issues", "name", "config", "script", "build", "ci", "run", "runs",
+  "step", "steps",
+]);
+
+/** True when the token is too short or too generic to distinctively name a
+ * tool (see the calibration note above). */
+export function isGenericNegativeEvidenceToken(token: string): boolean {
+  const text = token.trim().toLowerCase();
+  return text.length < MIN_NEGATIVE_EVIDENCE_TOKEN_CHARS || NEGATIVE_EVIDENCE_GENERIC_TOKENS.has(text);
+}
+
 export const MAX_NEGATIVE_EVIDENCE_PATHS = 64;
 export const MAX_NEGATIVE_EVIDENCE_PATH_CHARS = 256;
 export const MAX_NEGATIVE_EVIDENCE_RULES = 64;
@@ -179,7 +224,12 @@ export interface NegativeEvidenceSpec {
   /** Finding categories the rule may contradict (subset of
    * NEGATIVE_EVIDENCE_CATEGORIES). */
   categories: string[];
-  /** The most severe finding severity the rule may contradict. */
+  /** The most severe finding severity the rule may contradict. Omitted
+   * declarations default to the safe `minor` ceiling: a clean tool run
+   * contradicts a MAJOR model finding only when the operator explicitly
+   * says so (the 2026-11-06 corpus calibration — every adjudicated human
+   * finding was major/blocker, so a default of `major` admitted the whole
+   * corpus to the wrong-demotion surface). */
   max_severity: "major" | "minor" | "info";
   /** The tool identity a lint/schema claim must name; null means "the
    * provider's own id". */
@@ -225,7 +275,10 @@ function stringListField(value: unknown, allowed: ReadonlySet<string> | null, ma
  * Parse the `negative_evidence` key of a provider spec. Returns null when
  * the key is absent or anything about the value is not exactly the declared
  * schema — fail-closed: an unparsable declaration is no declaration, and the
- * provider keeps its plain advisory-finding behavior.
+ * provider keeps its plain advisory-finding behavior. An omitted
+ * `max_severity` defaults to the safe `minor` ceiling (NOT `major`), and
+ * generic identity/rule-id tokens (see
+ * `isGenericNegativeEvidenceToken`) are refused outright.
  */
 export function parseNegativeEvidenceSpec(raw: unknown): NegativeEvidenceSpec | null {
   if (raw === null || raw === undefined) return null;
@@ -246,7 +299,7 @@ export function parseNegativeEvidenceSpec(raw: unknown): NegativeEvidenceSpec | 
   const categories = stringListField(dictGet(raw, "categories"), NEGATIVE_EVIDENCE_CATEGORIES, NEGATIVE_EVIDENCE_CATEGORIES.size, 32);
   if (categories === null || categories.length === 0) return null;
 
-  let maxSeverity: NegativeEvidenceSpec["max_severity"] = "major";
+  let maxSeverity: NegativeEvidenceSpec["max_severity"] = "minor";
   const rawMaxSeverity = dictGet(raw, "max_severity");
   if (rawMaxSeverity !== undefined && rawMaxSeverity !== null) {
     if (typeof rawMaxSeverity !== "string" || !NEGATIVE_EVIDENCE_MAX_SEVERITIES.has(rawMaxSeverity)) return null;
@@ -259,6 +312,7 @@ export function parseNegativeEvidenceSpec(raw: unknown): NegativeEvidenceSpec | 
     if (typeof rawIdentity !== "string") return null;
     const identityText = rawIdentity.trim();
     if (identityText === "" || identityText.length > 128) return null;
+    if (isGenericNegativeEvidenceToken(identityText)) return null;
     identity = identityText;
   }
 
@@ -267,6 +321,11 @@ export function parseNegativeEvidenceSpec(raw: unknown): NegativeEvidenceSpec | 
     ? []
     : stringListField(rawRules, null, MAX_NEGATIVE_EVIDENCE_RULES, 128);
   if (ruleIds === null) return null;
+  // A rule id carries the same distinctiveness duty as the identity: a
+  // generic token substring-matches ordinary prose and voids the gate.
+  for (const ruleId of ruleIds) {
+    if (isGenericNegativeEvidenceToken(ruleId)) return null;
+  }
 
   const allowed = new Set(["domain", "paths", "categories", "max_severity", "identity", "rules"]);
   for (const key of Object.keys(raw)) {

@@ -100,7 +100,10 @@ test("#1517 derivation: a clean run with a declaration derives a head-stamped ru
   assert.equal(rules[0]!.domain, "formatter");
   assert.deepEqual(rules[0]!.paths, ["src/"]);
   assert.deepEqual(rules[0]!.categories, ["style"]);
-  assert.equal(rules[0]!.max_severity, "major");
+  // Omitted ceiling = the SAFE minor posture (calibration hardening): a
+  // clean run never contradicts a major model finding unless the operator
+  // explicitly declares a major ceiling.
+  assert.equal(rules[0]!.max_severity, "minor");
   assert.equal(rules[0]!.head_sha, HEAD);
 });
 
@@ -267,6 +270,124 @@ test("#1517 apply: lint rules speak only for their own linter/rule family", () =
   // Formatter domain: pure formatting claims only.
   assert.equal(negativeEvidenceClaimMatches("bad formatting: mixed tabs and spaces", formatterRule()), true);
   assert.equal(negativeEvidenceClaimMatches("the format string is user-controlled", formatterRule()), false);
+});
+
+// ── Calibration regressions (2026-11-06 corpus eval) ─────────────────────
+
+const ALL_CATEGORIES = ["bug", "performance", "style", "docs", "tests", "question", "other", "verification"];
+
+/** The parse-legal maximum an aggressive operator can declare. */
+function broadRule(overrides: Partial<NegativeEvidenceRule> = {}): NegativeEvidenceRule {
+  return {
+    provider: "yamllint", domain: "lint", paths: ["**"], categories: ALL_CATEGORIES,
+    max_severity: "major", identity: "yamllint", rules: [], head_sha: HEAD, ...overrides,
+  };
+}
+
+test("#1517 calibration: an omitted ceiling defaults to the safe minor posture", () => {
+  // The corpus eval measured every adjudicated human finding at major or
+  // blocker: a default of `major` admitted the whole corpus to the
+  // wrong-demotion surface. The default is `minor`; `major` must be
+  // declared explicitly.
+  const spec = parseNegativeEvidenceSpec({ domain: "formatter", paths: ["src/"], categories: ["style"] });
+  assert.ok(spec !== null);
+  assert.equal(spec.max_severity, "minor");
+  assert.equal(parseNegativeEvidenceSpec({ domain: "formatter", paths: ["src/"], categories: ["style"], max_severity: "major" })?.max_severity, "major", "explicit major still declarable");
+  // Behavior: the derived minor-ceiling rule cannot reach a major finding…
+  const rules = deriveNegativeEvidenceRules([FORMATTER_SPEC], [entry("prettier")], HEAD);
+  const majorClaim = finding({ message: "Trailing whitespace on line 3" });
+  assert.equal(applyNegativeEvidence([majorClaim], rules).demoted, 0);
+  assert.equal(majorClaim.severity, "major");
+  // …but still governs the minor tier it is authoritative for.
+  const minorClaim = finding({ severity: "minor", message: "Trailing whitespace on line 3" });
+  assert.equal(applyNegativeEvidence([minorClaim], rules).demoted, 1);
+  assert.equal(minorClaim.severity, "info");
+});
+
+test("#1517 calibration: generic identity/rule-id tokens are refused at parse and at the persistence gate", () => {
+  // The eval's identity-hole probe: a generic token word-boundedly matched
+  // 71/74 real corpus findings. The declaration seam refuses them outright.
+  const valid = { domain: "lint", paths: ["src/"], categories: ["style"] };
+  for (const junk of ["the", "The", "code", "lint", "linter", "style", "check", "error", "rule", "a", "e", "go", "of", "is", "  the  ", "  ci  "]) {
+    assert.equal(parseNegativeEvidenceSpec({ ...valid, identity: junk }), null, `identity '${junk}' refused`);
+  }
+  assert.equal(parseNegativeEvidenceSpec({ ...valid, rules: ["the"] }), null, "generic rule id refused");
+  assert.equal(parseNegativeEvidenceSpec({ ...valid, rules: ["e"] }), null, "too-short rule id refused");
+  assert.equal(parseNegativeEvidenceSpec({ ...valid, rules: ["no-unused-vars", "the"] }), null);
+  // Distinctive tokens still parse: hyphenated, multiword, ≥3 chars.
+  assert.ok(parseNegativeEvidenceSpec({ ...valid, identity: "yamllint" }) !== null);
+  assert.ok(parseNegativeEvidenceSpec({ ...valid, identity: "golangci-lint" }) !== null);
+  assert.ok(parseNegativeEvidenceSpec({ ...valid, identity: "go vet" }) !== null);
+  assert.ok(parseNegativeEvidenceSpec({ ...valid, rules: ["key-duplicates", "no-unused-vars"] }) !== null);
+  // A refused declaration mints no rule at derivation…
+  assert.deepEqual(
+    deriveNegativeEvidenceRules(
+      [{ id: "yamllint", command: ["true"], negative_evidence: { domain: "lint", paths: ["**"], categories: ["style"], identity: "the" } }],
+      [entry("yamllint")],
+      HEAD,
+    ),
+    [],
+  );
+  // …and a tampered/legacy sidecar cannot smuggle one past the persistence
+  // gate either.
+  const tampered = { schema_version: NEGATIVE_EVIDENCE_SCHEMA, head_sha: HEAD, rules: [broadRule({ identity: "the" })] };
+  const gate = negativeEvidenceRulesFromArtifact(tampered, HEAD);
+  assert.equal(gate.rules.length, 0);
+  assert.equal(gate.stale, 1);
+});
+
+test("#1517 calibration: a finding about removing the tool's coverage is never demoted (pr-reviewer-action#467)", () => {
+  // Real calibration failure: the "test suite deleted under the guise of
+  // add-shellcheck-to-CI" finding names yamllint because the regression
+  // REMOVES its coverage — and yamllint verified clean at that head, so the
+  // rule derived and the identity gate read the mention as a violation
+  // claim. Coverage-alteration claims are refused for every domain.
+  const aboutCoverage = "The diff removes the yamllint duplicate-key detection from the validate job, so duplicate keys slip through again.";
+  const fullShape = "The PR deletes the entire test suite under the guise of \"add shellcheck to CI.\" The diff removes the entire validate job: 215 pytest cases with coverage gate, smoke_test.sh, 31 bash test suites, py_compile checks, yamllint duplicate-key detection, and action.yml/example YAML validation. The replacement YAML validation does not catch duplicate keys — it silently keeps the last value. SHA-pinned actions were downgraded to a floating tag.";
+  assert.equal(negativeEvidenceClaimMatches(aboutCoverage, broadRule()), false);
+  assert.equal(negativeEvidenceClaimMatches(fullShape, broadRule()), false);
+  const target = finding({ category: "bug", file: ".github/workflows/ci.yaml", message: aboutCoverage });
+  const outcome = applyNegativeEvidence([target], [broadRule()]);
+  assert.equal(outcome.demoted, 0);
+  assert.deepEqual(outcome.decisions, []);
+  assert.equal(target.severity, "major");
+  // Blocker findings stay forbidden under the same broad declaration.
+  const blocker = finding({ severity: "blocker", category: "bug", file: ".github/workflows/ci.yaml", message: fullShape });
+  const blockerOutcome = applyNegativeEvidence([blocker], [broadRule()]);
+  assert.equal(blockerOutcome.demoted, 0);
+  assert.equal(blocker.severity, "blocker");
+  // A genuine violation claim naming the same tool still demotes.
+  const violation = finding({ category: "bug", file: "deploy/charts/values.yaml", message: "yamllint reports duplicate keys in deploy/charts/values.yaml" });
+  assert.equal(negativeEvidenceClaimMatches(violation.message, broadRule()), true);
+  assert.equal(applyNegativeEvidence([violation], [broadRule()]).demoted, 1);
+  // Word-boundedness is preserved: a tool-name substring is not a mention.
+  assert.equal(negativeEvidenceClaimMatches("yamllintplus reports nothing", broadRule()), false);
+});
+
+test("#1517 calibration: comparative constructions describe code, they do not claim formatting violations (courier#108)", () => {
+  // Real calibration failure: the OpenCode parser-mismatch finding used
+  // "whitespace" and "indented" as protocol DESCRIPTIONS — "continuation
+  // lines start with a box-drawing character rather than whitespace", "the
+  // reason line isn't treated as indented" — and a broad gofmt rule demoted
+  // it. A cue that only occurs inside a comparative/treatment construction
+  // is refused; a cue occurring as a claim still demotes.
+  const gofmt = broadRule({ provider: "gofmt", domain: "formatter", identity: "gofmt" });
+  const descriptive = "continuation lines start with a box-drawing character rather than whitespace, so the reason line isn't treated as indented, and it contains the word 'error', so it gets classified as its own failed server";
+  assert.equal(negativeEvidenceClaimMatches(descriptive, gofmt), false);
+  assert.equal(negativeEvidenceClaimMatches("the parser reads the block instead of whitespace", gofmt), false);
+  assert.equal(negativeEvidenceClaimMatches("it gets classified as whitespace by the lexer", gofmt), false);
+  const target = finding({ category: "bug", file: "internal/executor/mcp_status.go", message: descriptive });
+  const outcome = applyNegativeEvidence([target], [gofmt]);
+  assert.equal(outcome.demoted, 0);
+  assert.deepEqual(outcome.decisions, []);
+  assert.equal(target.severity, "major");
+  // Positive controls: real claims still match and still demote.
+  assert.equal(negativeEvidenceClaimMatches("Trailing whitespace on line 40", gofmt), true);
+  assert.equal(negativeEvidenceClaimMatches("the file is not formatted", gofmt), true);
+  // A message mixing a construction with a real claim still claims.
+  assert.equal(negativeEvidenceClaimMatches("rather than whitespace, line 3 has trailing whitespace", gofmt), true);
+  const realClaim = finding({ category: "bug", file: "internal/executor/mcp_status.go", message: "rather than whitespace, line 3 has trailing whitespace" });
+  assert.equal(applyNegativeEvidence([realClaim], [gofmt]).demoted, 1);
 });
 
 test("#1517 apply: severity ladder and deterministic findings", () => {
@@ -442,7 +563,7 @@ function findingsVerdict(): string {
     requirement_coverage: null,
     required_check_dispositions: [],
     findings: [
-      { severity: "major", category: "style", file: "src/a.ts", line: 2, message: "Trailing whitespace on the added line" },
+      { severity: "minor", category: "style", file: "src/a.ts", line: 2, message: "Trailing whitespace on the added line" },
       { severity: "major", category: "bug", file: "src/a.ts", line: 2, message: "Unchecked null dereference will crash the handler on empty input" },
     ],
   });
@@ -483,10 +604,12 @@ test("#1517 engine: formatter-clean demotes the formatting claim and persists th
       findings: Array<Partial<ArtifactFinding>>;
       negative_evidence?: { rules: number; decisions: Array<{ decision: string; provider: string; reason: string }> };
     };
-    // The formatting claim was demoted by the deterministic clean run…
+    // The formatting claim was demoted by the deterministic clean run
+    // (the declaration omits max_severity, so the default minor ceiling
+    // governs: minor → info)…
     const formatting = artifact.findings.find((f) => f.category === "style")!;
-    assert.equal(formatting.severity, "minor");
-    assert.equal(formatting.capped_from, "major");
+    assert.equal(formatting.severity, "info");
+    assert.equal(formatting.capped_from, "minor");
     assert.equal(formatting.negative_evidence?.decision, "demoted");
     assert.equal(formatting.negative_evidence?.provider, "prettier");
     // …while the semantic claim is untouched, so the review still blocks.
