@@ -2075,8 +2075,11 @@ interface CompiledOwnership {
 
 /** Compile one narrow owner glob to a full-path regex. Only `*` (within a
  * path segment) and `?` are wildcards; `**` and absolute/`..` patterns are
- * rejected at config-parse time, so this never sees them. */
-function ownerPatternRegex(pattern: string): RegExp {
+ * rejected at config-parse time, so this never sees them. #1519: exported so
+ * the trace-plan's slot helpers attribute a repository read to a seam with
+ * the SAME glob semantics the validator applies to citations — the loop and
+ * the validator must never disagree about what a seam's evidence path is. */
+export function ownerPatternRegex(pattern: string): RegExp {
   const source = pattern
     .split("*")
     .map((part) => part.split("?").map((chunk) => escapeRegExp(chunk)).join("[^/]"))
@@ -2134,14 +2137,18 @@ function distributedGroupsForText(
   };
 }
 
-/** Resolve trusted distributed topology for the requested ledger ids. */
+/** Resolve trusted distributed topology for the requested ledger ids. #1519:
+ * the hints carry the FULL seam objects (name plus the trusted owner/test
+ * glob patterns) instead of name-only strings, so the trace plan and the
+ * loop's slot attribution can match evidence per seam exactly the way
+ * `validateRequirementTrace` does. */
 export function distributedRequirementHints(
   ledger: unknown,
   ownership: readonly RequirementOwnership[] | undefined,
   scopeIds: readonly string[],
-): { requirementId: string; groups: readonly string[] }[] {
+): { requirementId: string; groups: { name: string; owners: string[]; tests: string[] }[] }[] {
   const entries = new Map(ledgerEntriesInScope(ledger).map((entry) => [entry.id, entry]));
-  const hints: { requirementId: string; groups: readonly string[] }[] = [];
+  const hints: { requirementId: string; groups: { name: string; owners: string[]; tests: string[] }[] }[] = [];
   const seenScopeIds = new Set<string>();
   for (const requirementId of scopeIds) {
     if (seenScopeIds.has(requirementId)) continue;
@@ -2150,7 +2157,10 @@ export function distributedRequirementHints(
     if (!entry) continue;
     const { groups, overflow } = distributedGroupsForText(entry.text, ownership);
     if (overflow || groups.length < MIN_DISTRIBUTED_GROUPS) continue;
-    hints.push({ requirementId, groups: groups.map((group) => group.name) });
+    hints.push({
+      requirementId,
+      groups: groups.map((group) => ({ name: group.name, owners: [...group.owners], tests: [...group.tests] })),
+    });
     if (hints.length >= MAX_DISTRIBUTED_HINTS) break;
   }
   return hints;

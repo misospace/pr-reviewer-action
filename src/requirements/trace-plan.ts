@@ -24,12 +24,15 @@
 
 import {
   MAX_GROUPS_PER_RULE,
+  MAX_GROUP_NAME_CHARS,
   MAX_RENDERED_ID_CHARS,
   MIN_DISTRIBUTED_GROUPS,
   explicitlyRequiresTest,
   nonCodeProofDomain,
+  ownerPatternRegex,
   structuralStateClaim,
 } from "../enforcement/requirement-trace.js";
+import { isTestPath } from "../context/change-anchors.js";
 import { sharedAdmissionTokens } from "../enforcement/review-obligations.js";
 import { fenceDelimiterFor } from "../context/fence.js";
 import { redactText } from "../context/redact.js";
@@ -43,8 +46,11 @@ export const TRACE_PLAN_ARTIFACT = "requirement-trace-plan.json";
  * rather than re-deriving it. */
 export const TRACE_PLAN_CANDIDATES_ARTIFACT = "requirement-trace-plan-candidates.json";
 
-/** The plan artifact's schema version. */
-export const TRACE_PLAN_VERSION = 2;
+/** The plan artifact's schema version. #1519 (review): v3 replaces the
+ * name-only seam strings with full seam objects (name plus the trusted
+ * owner/test glob patterns), so a persisted v2 artifact reads as the EMPTY
+ * plan — the seam evidence a v2 row lacks must never gate a discharge. */
+export const TRACE_PLAN_VERSION = 3;
 
 /** The most plan rows a single review carries. */
 export const MAX_TRACE_PLAN_ROWS = 40;
@@ -76,14 +82,30 @@ export const TRACE_EVIDENCE_TOOLS: readonly string[] = Object.freeze([
   "git_blame",
 ]);
 
+/** One distributed seam hint, as the trusted owner config declares it
+ * (#1519 review): the seam group's `name` plus the base-ref-trusted owner
+ * glob patterns the validator matches ENFORCEMENT citations against
+ * (`owners`) and the patterns it matches REGRESSION-TEST citations against
+ * (`tests`) — the same shapes `distributedGroupsForText` builds. Either list
+ * may be empty; an empty list renders as "unspecified". NOTE: the validator
+ * itself has NO empty-pattern tolerance — a seam with no test patterns can
+ * never validate — the loop's seam-name fallbacks below are deliberately
+ * looser so such a seam can never pin the reserved window. */
+export interface TraceSeamHint {
+  name: string;
+  owners: readonly string[];
+  tests: readonly string[];
+}
+
 /** One in-scope requirement, as the planner sees it. */
 export interface TracePlanRow {
   id: string;
   text: string;
   kind: string;
   /** The distributed seam groups the trusted owner config declares for this
-   * requirement (empty when the requirement is not distributed). */
-  seams: string[];
+   * requirement, WITH their evidence-path patterns (empty when the
+   * requirement is not distributed). */
+  seams: TraceSeamHint[];
   /** True when the requirement is code/test-verifiable — repository evidence
    * gates it. Derived from the ledger text alone, never from a model field. */
   code_verifiable: boolean;
@@ -122,7 +144,7 @@ const TRACE_PROOF_SHAPES: ReadonlySet<string> = new Set(["runtime", "structural"
  * and the loop's discharge rule from disagreeing with the validator about
  * what evidence a row owes (#1519).
  */
-function proofDemandFor(text: string, seams: readonly string[]): { shape: TraceProofShape; attempts: number } {
+function proofDemandFor(text: string, seams: readonly TraceSeamHint[]): { shape: TraceProofShape; attempts: number } {
   const isDistributed = seams.length >= MIN_DISTRIBUTED_GROUPS;
   if (isDistributed) {
     // The validator requires an enforcement citation AND a test citation in
@@ -169,21 +191,70 @@ function planLedgerEntries(ledger: unknown): Map<string, { id: string; text: str
   return entries;
 }
 
-/** The distributed seam groups per requirement id, from the trusted owner
- * config's hints. */
+/** The most characters one seam owner/test glob pattern may carry in a plan
+ * row (#1519 review): patterns longer than this are dropped at build and
+ * refused at parse, fail-closed — the trusted config parser already bounds
+ * them far below, so only a corrupted artifact can carry a longer one. */
+const MAX_SEAM_PATTERN_CHARS = 200;
+
+/** The most owner/test patterns one seam may carry in a plan row. */
+const MAX_SEAM_PATTERNS = 8;
+
+/** The sanitized, bounded form of one seam's glob-pattern list: control
+ * characters stripped, each pattern bounded, the list capped — a pattern
+ * that does not survive is DROPPED, never partially trusted. */
+function cleanSeamPatterns(patterns: readonly unknown[]): string[] {
+  const clean: string[] = [];
+  for (const pattern of patterns) {
+    if (typeof pattern !== "string") continue;
+    const kept = pattern.replace(/[\x00-\x1f\x7f]/g, "").trim();
+    if (kept === "" || kept.length > MAX_SEAM_PATTERN_CHARS) continue;
+    if (clean.includes(kept)) continue;
+    clean.push(kept);
+    if (clean.length >= MAX_SEAM_PATTERNS) break;
+  }
+  return clean;
+}
+
+/** The sanitized form of one seam hint, or `null` when its name does not
+ * survive: the same reduction the config parser and the prompt renderer
+ * apply (`cleanName`/`cleanSeam`), so the plan carries exactly the seam the
+ * trusted config declared. */
+function cleanSeamHint(group: unknown): TraceSeamHint | null {
+  if (!group || typeof group !== "object" || Array.isArray(group)) return null;
+  const record = group as Record<string, unknown>;
+  if (typeof record.name !== "string") return null;
+  // #1519 (review): the pattern lists must be ARRAYS — a seam that carries a
+  // mangled owners/tests value does not conform and fails the whole row.
+  if (!Array.isArray(record.owners) || !Array.isArray(record.tests)) return null;
+  const name = record.name.replace(/[\x00-\x1f\x7f`]/g, "").trim().slice(0, MAX_GROUP_NAME_CHARS);
+  if (name === "") return null;
+  return { name, owners: cleanSeamPatterns(record.owners), tests: cleanSeamPatterns(record.tests) };
+}
+
+/** The distributed seam hints per requirement id, from the trusted owner
+ * config's hints — full seam objects, sanitized and bounded to the shape
+ * `parseTracePlanRow` accepts, so a built plan always round-trips its own
+ * reader. */
 function planSeamHints(
-  distributedHints: readonly { requirementId: string; groups: readonly string[] }[],
-): Map<string, string[]> {
-  const hints = new Map<string, string[]>();
+  distributedHints: readonly { requirementId: string; groups: readonly unknown[] }[],
+): Map<string, TraceSeamHint[]> {
+  const hints = new Map<string, TraceSeamHint[]>();
   for (const hint of distributedHints) {
     if (!hint || typeof hint !== "object") continue;
     const requirementId = (hint as { requirementId?: unknown }).requirementId;
     if (typeof requirementId !== "string" || requirementId === "") continue;
     if (hints.has(requirementId)) continue;
     const groups = (hint as { groups?: unknown }).groups;
-    const kept = Array.isArray(groups)
-      ? groups.filter((group): group is string => typeof group === "string" && group !== "")
-      : [];
+    const kept: TraceSeamHint[] = [];
+    if (Array.isArray(groups)) {
+      for (const group of groups) {
+        const seam = cleanSeamHint(group);
+        if (seam === null) continue;
+        if (kept.some((existing) => existing.name === seam.name)) continue;
+        kept.push(seam);
+      }
+    }
     hints.set(requirementId, kept);
   }
   return hints;
@@ -196,7 +267,7 @@ function planSeamHints(
  * evidence; only a row whose proof domain is external state or documentation
  * does not.
  */
-function codeVerifiable(text: string, seams: readonly string[]): boolean {
+function codeVerifiable(text: string, seams: readonly TraceSeamHint[]): boolean {
   return proofDemandFor(text, seams).attempts > 0;
 }
 
@@ -231,7 +302,7 @@ function sanitizePlanId(id: string): string | null {
 export function buildTracePlan(input: {
   ledger: unknown;
   scopeIds: readonly string[];
-  distributedHints: readonly { requirementId: string; groups: readonly string[] }[];
+  distributedHints: readonly { requirementId: string; groups: readonly { name: string; owners: readonly string[]; tests: readonly string[] }[] }[];
 }): TracePlan {
   const rows: TracePlanRow[] = [];
   try {
@@ -279,9 +350,13 @@ export function buildTracePlan(input: {
  * must not be able to forge marker text or prose inside them. The id is
  * reduced to the bounded `req-…`-shaped vocabulary the ledger builder itself
  * emits (a content hash — `ID_RE` upstream), and a row whose id sanitizes
- * away to nothing is skipped, never partially trusted. The evidence fields
- * must also cohere with each other and with the seams the row carries — the
- * same derivation `proofDemandFor` applies, re-checked at the boundary. */
+ * away to nothing is skipped, never partially trusted. #1519 (review): each
+ * seam must be a full object — a sanitized non-empty bounded `name` plus
+ * bounded owner/test glob lists — because the loop attributes per-seam
+ * evidence against these very patterns; a seam that does not conform fails
+ * the WHOLE row. The evidence fields must also cohere with each other and
+ * with the seams the row carries — the same derivation `proofDemandFor`
+ * applies, re-checked at the boundary. */
 export function parseTracePlanRow(raw: unknown): TracePlanRow | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
@@ -300,8 +375,17 @@ export function parseTracePlanRow(raw: unknown): TracePlanRow | null {
   if (typeof text !== "string") return null;
   if (typeof kind !== "string") return null;
   if (!Array.isArray(seams)) return null;
-  if (seams.some((group) => typeof group !== "string" || group.trim() === "")) return null;
-  const seamGroups = seams as string[];
+  const seamGroups: TraceSeamHint[] = [];
+  for (const rawSeam of seams) {
+    const seam = cleanSeamHint(rawSeam);
+    if (seam === null) return null;
+    // The validator derives its seam groups through a by-name map, so a
+    // duplicated seam name is ONE seam to it — a row that carries the same
+    // name twice would demand double evidence for a seam the validator
+    // counts once. Keep the first occurrence, never the duplication.
+    if (seamGroups.some((existing) => existing.name === seam.name)) continue;
+    seamGroups.push(seam);
+  }
   if (typeof codeVerifiable !== "boolean") return null;
   if (typeof proofShape !== "string" || !TRACE_PROOF_SHAPES.has(proofShape)) return null;
   if (
@@ -317,6 +401,14 @@ export function parseTracePlanRow(raw: unknown): TracePlanRow | null {
   if (codeVerifiable !== (requiredAttempts > 0)) return null;
   if (codeVerifiable && proofShape === "non-code") return null;
   if (!codeVerifiable && proofShape !== "non-code") return null;
+  // #1519 (review, round 2): the boundary re-check extends to the TEXT the
+  // shape was derived from. `proofDemandFor` is the same derivation the
+  // build path applied and the validator applies, so a corrupted artifact
+  // that labels a runtime requirement as a one-attempt structural row fails
+  // closed here instead of discharging on one arbitrary read and releasing
+  // a reserve the validator will only refuse.
+  const derived = proofDemandFor(text, seamGroups);
+  if (derived.shape !== proofShape || derived.attempts !== requiredAttempts) return null;
   if (proofShape === "runtime" && requiredAttempts !== 2) return null;
   if (proofShape === "structural" && requiredAttempts !== 1 && requiredAttempts !== 2) return null;
   if (proofShape === "distributed") {
@@ -421,14 +513,46 @@ function tracePlanMarker(row: TracePlanRow): string {
   return "code-verifiable, enforcement location + matching regression test";
 }
 
+/** The most patterns of one list the seam rendering shows. */
+const MAX_RENDERED_SEAM_PATTERNS = 4;
+
+/** The most characters of one rendered glob pattern; longer ones truncate. */
+const MAX_RENDERED_SEAM_PATTERN_CHARS = 80;
+
+/** The sanitized, bounded rendering of one seam's evidence-path list: an
+ * empty list renders as "unspecified", a longer list is capped with a
+ * truncation marker, and every pattern is sanitized so a config-supplied
+ * glob can never forge fence structure or prose. */
+function renderSeamPatterns(patterns: readonly string[]): string {
+  const clean = patterns
+    .map((pattern) => pattern.replace(/[\x00-\x1f\x7f`]/g, "").replace(/\s+/g, " ").trim())
+    .filter((pattern) => pattern !== "");
+  if (clean.length === 0) return "unspecified";
+  const kept = clean.slice(0, MAX_RENDERED_SEAM_PATTERNS).map((pattern) =>
+    pattern.length > MAX_RENDERED_SEAM_PATTERN_CHARS
+      ? `${pattern.slice(0, MAX_RENDERED_SEAM_PATTERN_CHARS - 1)}…`
+      : pattern,
+  );
+  return clean.length > MAX_RENDERED_SEAM_PATTERNS ? `${kept.join(", ")}, …` : kept.join(", ");
+}
+
+/** One seam's evidence locations, so the model knows WHERE the per-seam
+ * enforcement and test evidence the validator demands lives. */
+function renderSeam(seam: TraceSeamHint): string {
+  const name = seam.name.replace(/[\x00-\x1f\x7f`]/g, "").replace(/\s+/g, " ").trim();
+  return `seam ${name}: enforcement ${renderSeamPatterns(seam.owners)}; tests ${renderSeamPatterns(seam.tests)}`;
+}
+
 function tracePlanRow(row: TracePlanRow): string {
   const id = row.id.replace(/\s+/g, " ").trim();
   const kind = row.kind.replace(/\s+/g, " ").trim();
   const text = redactText(row.text).replace(/\s+/g, " ").trim();
   const base = `- ${id} (${kind}, ${tracePlanMarker(row)}): ${text}`;
-  const seams = row.seams.map((group) => group.replace(/\s+/g, " ").trim()).filter((group) => group !== "");
+  const seams = (Array.isArray(row.seams) ? row.seams : [])
+    .filter((seam): seam is TraceSeamHint => seam !== null && typeof seam === "object" && typeof seam.name === "string")
+    .map(renderSeam);
   if (seams.length === 0) return base;
-  return `${base} — seams: ${seams.join(", ")}`;
+  return `${base} — ${seams.join("; ")}`;
 }
 
 /** The navigation-hint block: PR-authored traceability hints, fenced as
@@ -496,8 +620,11 @@ export function tracePlanSection(plan: TracePlan, navigationHints: readonly stri
 
 /** A path-shaped token: a slash-separated path, or a name with a file
  * extension. The class is deliberately narrow so ordinary prose (a sentence
- * ending, a version range) does not read as a path. */
-const TRACE_PATH_TOKEN_RE = /[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)+|[A-Za-z0-9_\-]{2,}\.[A-Za-z0-9]{1,8}/g;
+ * ending, a version range) does not read as a path. #1519 (review): exported
+ * so the loop's slot helpers extract the SAME path tokens from a call target
+ * that the admission vocabulary was built from — one token class, two
+ * consumers. */
+export const TRACE_PATH_TOKEN_RE = /[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)+|[A-Za-z0-9_\-]{2,}\.[A-Za-z0-9]{1,8}/g;
 
 /** The most tokens one admission vocabulary may carry. */
 const MAX_TRACE_ADMISSION_TOKENS = 64;
@@ -537,4 +664,121 @@ export function traceAdmissionTokens(text: string): string[] | null {
   }
   for (const token of sharedAdmissionTokens(text) ?? []) push(token);
   return tokens.length > 0 ? tokens : null;
+}
+
+/** The most path tokens one target may contribute to slot attribution. */
+const MAX_TRACE_TARGET_PATHS = 64;
+
+/**
+ * #1519 (review): the path-like tokens of one tool call's (already
+ * lowercased) concatenated argument target text — the same token class the
+ * admission vocabulary was built from. Bounded, deduplicated, in order of
+ * appearance. Lexical, total, never throws.
+ */
+export function traceReadTargetPaths(target: string): string[] {
+  if (typeof target !== "string" || target === "") return [];
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  for (const match of target.match(TRACE_PATH_TOKEN_RE) ?? []) {
+    if (seen.has(match)) continue;
+    seen.add(match);
+    paths.push(match);
+    if (paths.length >= MAX_TRACE_TARGET_PATHS) break;
+  }
+  return paths;
+}
+
+/**
+ * #1519 (review): whether the target reads a TEST path — ANY extracted path
+ * token classifying as a test path via `isTestPath`, the SAME classifier the
+ * validator applies to a row's regression-test citations
+ * (`anyTestLocationValid` requires `isTestPath(loc.file)`).
+ */
+export function traceTargetIsTestRead(target: string): boolean {
+  return traceReadTargetPaths(target).some((path) => isTestPath(path));
+}
+
+/** #1381-style word-boundary mention over a lowercased target: the boundary
+ * characters are anything but `[a-z0-9]`, exactly the semantics the loop's
+ * `targetMentions` applies to admission tokens. */
+function traceTargetMentionsName(target: string, name: string): boolean {
+  const token = name.toLowerCase();
+  if (token === "") return false;
+  let from = 0;
+  for (;;) {
+    const index = target.indexOf(token, from);
+    if (index === -1) return false;
+    const before = index === 0 ? "" : target[index - 1]!;
+    const afterIndex = index + token.length;
+    const after = afterIndex >= target.length ? "" : target[afterIndex]!;
+    if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after)) return true;
+    from = index + 1;
+  }
+}
+
+/** Memoized compiled owner-style glob patterns (#1519 review, round 2): the
+ * loop compiles per slot-check per call, so a corrupted artifact carrying a
+ * pathological pattern pays its compilation cost once, never per call. A
+ * pattern that does not compile is cached as `null` — never re-thrown. */
+const SEAM_PATTERN_CACHE = new Map<string, RegExp | null>();
+function cachedOwnerPatternRegex(pattern: string): RegExp | null {
+  const cached = SEAM_PATTERN_CACHE.get(pattern);
+  if (cached !== undefined) return cached;
+  let compiled: RegExp | null = null;
+  try {
+    compiled = ownerPatternRegex(pattern);
+  } catch {
+    compiled = null;
+  }
+  SEAM_PATTERN_CACHE.set(pattern, compiled);
+  return compiled;
+}
+
+/** Whether any extracted target path matches one owner-style glob pattern —
+ * the SAME full-path anchoring `citationMatchesPatterns` applies to
+ * enforcement citations. */
+function tracePatternsMatchPath(patterns: readonly string[], paths: readonly string[]): boolean {
+  return patterns.some((pattern) => {
+    const regex = cachedOwnerPatternRegex(pattern);
+    if (regex === null) return false;
+    return paths.some((path) => regex.test(path));
+  });
+}
+
+/**
+ * #1519 (review): which evidence slot of ONE distributed seam a repository
+ * read can credit, mirroring the validator's per-seam matching:
+ *
+ * - an ENFORCEMENT slot credit requires the target NOT be a test read and
+ *   either a seam owner pattern match an extracted target path, or the
+ *   owners list be EMPTY and the target mention the seam name (a deliberate
+ *   loop-side fallback — the validator itself never matches an empty
+ *   pattern list, so the seam would fail validation anyway; the fallback
+ *   only prevents the seam from pinning the reserved window);
+ * - a TEST slot credit requires the target BE a test read and either a seam
+ *   test pattern match, or the tests list be EMPTY and the target mention
+ *   the seam name (same deliberate fallback, same rationale).
+ *
+ * The two kinds are mutually exclusive by the test-read flag, so the return
+ * is unambiguous. Lexical, total, never throws.
+ */
+export type TraceSeamSlotKind = "enforcement" | "test";
+
+export function traceSeamSlotForTarget(
+  seam: TraceSeamHint,
+  target: string,
+  targetIsTest: boolean,
+): TraceSeamSlotKind | null {
+  if (!seam || typeof seam !== "object" || typeof seam.name !== "string") return null;
+  const paths = traceReadTargetPaths(target);
+  const owners = Array.isArray(seam.owners) ? seam.owners : [];
+  const tests = Array.isArray(seam.tests) ? seam.tests : [];
+  if (!targetIsTest) {
+    if (tracePatternsMatchPath(owners, paths)) return "enforcement";
+    if (owners.length === 0 && traceTargetMentionsName(target, seam.name)) return "enforcement";
+    return null;
+  }
+  if (tracePatternsMatchPath(tests, paths)) return "test";
+  if (tests.length === 0 && traceTargetMentionsName(target, seam.name)) return "test";
+  return null;
 }

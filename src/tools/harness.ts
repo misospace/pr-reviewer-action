@@ -1332,7 +1332,19 @@ export function traceAdmissionRows(candidatesText: string | null): RequiredEvide
     if (row.code_verifiable !== true) continue;
     const tokens = traceAdmissionTokens(row.text);
     if (tokens === null) continue;
-    rows.push({ id: `trace:${row.id}`, tokens, tools: TRACE_EVIDENCE_TOOLS, trace: true, requiredAttempts: row.required_attempts });
+    // #1519 (review): the row carries its proof shape and full seam objects,
+    // so the loop's discharge is SLOT-aware — evidence CATEGORIES
+    // (enforcement vs regression test) and per-seam attribution, mirroring
+    // the deterministic validator, not a bare read count.
+    rows.push({
+      id: `trace:${row.id}`,
+      tokens,
+      tools: TRACE_EVIDENCE_TOOLS,
+      trace: true,
+      requiredAttempts: row.required_attempts,
+      proofShape: row.proof_shape,
+      seams: row.seams,
+    });
   }
   return rows;
 }

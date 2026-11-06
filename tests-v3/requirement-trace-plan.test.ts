@@ -9,6 +9,9 @@ import {
   readTracePlan,
   traceAdmissionTokens,
   tracePlanSection,
+  traceReadTargetPaths,
+  traceSeamSlotForTarget,
+  traceTargetIsTestRead,
   MAX_TRACE_PLAN_ROW_TEXT_CHARS,
   TRACE_PLAN_ARTIFACT,
   TRACE_PLAN_CANDIDATES_ARTIFACT,
@@ -66,7 +69,12 @@ const PLAN_ROW = {
   id: "req-abc123def456",
   text: "The lease renewal must verify the account identity before it commits.",
   kind: "acceptance",
-  seams: ["control-plane", "lease-worker"],
+  // #1519 (review): v3 seams carry the trusted owner/test glob patterns the
+  // validator matches evidence against, not name-only strings.
+  seams: [
+    { name: "control-plane", owners: ["src/control/*"], tests: ["tests/control/*"] },
+    { name: "lease-worker", owners: ["src/worker/*"], tests: ["tests/worker/*"] },
+  ],
   code_verifiable: true,
   proof_shape: "distributed",
   required_attempts: 4,
@@ -90,7 +98,10 @@ test("the trace plan leads the first planning turn with the requirement rows and
   assert.match(text, /# Requirement Trace Plan/);
   assert.match(text, /req-abc123def456/);
   assert.match(text, /lease renewal must verify the account identity/);
-  assert.match(text, /seams: control-plane, lease-worker/);
+  // #1519 (review): the seams render WITH their evidence locations, bounded
+  // and on the row's single collapsed line.
+  assert.match(text, /seam control-plane: enforcement src\/control\/\*; tests tests\/control\/\*/);
+  assert.match(text, /seam lease-worker: enforcement src\/worker\/\*; tests tests\/worker\/\*/);
   assert.match(text, /in-scope requirements whose repository evidence gates a trusted approval/);
   assert.match(text, /A runtime row needs BOTH an enforcement location AND a matching regression test/);
   assert.match(text, /it needs a regression test only when its own text demands one/);
@@ -126,10 +137,20 @@ test("buildTracePlan maps the ledger, the scope and the distributed hints onto p
   const plan = buildTracePlan({
     ledger,
     scopeIds: ["req-code", "req-test", "req-external", "req-doc", "req-missing", "req-invariant", "req-code"],
-    distributedHints: [{ requirementId: "req-code", groups: ["control-plane", "worker"] }],
+    // #1519 (review): the hints carry full seam objects now.
+    distributedHints: [{
+      requirementId: "req-code",
+      groups: [
+        { name: "control-plane", owners: ["src/control/*"], tests: ["tests/control/*"] },
+        { name: "worker", owners: ["src/worker/*"], tests: ["tests/worker/*"] },
+      ],
+    }],
   });
   assert.deepEqual(plan.rows.map((row) => row.id), ["req-code", "req-test", "req-external", "req-doc"]);
-  assert.deepEqual(plan.rows[0]!.seams, ["control-plane", "worker"]);
+  assert.deepEqual(plan.rows[0]!.seams, [
+    { name: "control-plane", owners: ["src/control/*"], tests: ["tests/control/*"] },
+    { name: "worker", owners: ["src/worker/*"], tests: ["tests/worker/*"] },
+  ]);
   assert.deepEqual(plan.rows[1]!.seams, []);
   assert.equal(plan.rows[0]!.code_verifiable, true);
   assert.equal(plan.rows[1]!.code_verifiable, true);
@@ -181,7 +202,10 @@ test("buildTracePlan maps the ledger, the scope and the distributed hints onto p
 test("readTracePlan refuses a malformed artifact and the plan section is bounded", () => {
   assert.deepEqual(readTracePlan(null).rows, []);
   assert.deepEqual(readTracePlan("not json").rows, []);
-  assert.deepEqual(readTracePlan(JSON.stringify({ version: 3, rows: [PLAN_ROW] })).rows, []);
+  // #1519 (review): the version gate fails closed — a stale v2 artifact
+  // (name-only seams) and a future version both read as the EMPTY plan.
+  assert.deepEqual(readTracePlan(JSON.stringify({ version: 2, rows: [PLAN_ROW] })).rows, []);
+  assert.deepEqual(readTracePlan(JSON.stringify({ version: 4, rows: [PLAN_ROW] })).rows, []);
   assert.deepEqual(readTracePlan(JSON.stringify({ version: TRACE_PLAN_VERSION, rows: [{ id: 7 }] })).rows, []);
   // #1519: a row that does not carry a coherent evidence demand is refused
   // whole — the artifact is never partially trusted.
@@ -197,13 +221,48 @@ test("readTracePlan refuses a malformed artifact and the plan section is bounded
     // A distributed row must declare its seams and owe exactly its topology.
     { ...PLAN_ROW, required_attempts: 6 },
     { ...PLAN_ROW, seams: [] },
-    // A non-distributed shape cannot carry seam hints, and a seam entry is
-    // never empty.
-    { ...valid, proof_shape: "structural", required_attempts: 1, seams: ["a", "b"] },
-    { ...valid, seams: [""] },
+    // A non-distributed shape cannot carry seam hints, and a seam is never a
+    // bare string in v3 — it is a full object with a sanitized name and
+    // bounded owner/test patterns, fail-closed (#1519 review).
+    { ...valid, proof_shape: "structural", required_attempts: 1, seams: [{ name: "a" }, { name: "b" }] },
+    { ...valid, seams: ["control-plane"] },
+    { ...valid, seams: [null] },
+    { ...valid, seams: [{ owners: ["src/*"] }] },
+    { ...valid, seams: [{ name: "" }] },
+    { ...valid, seams: [{ name: "```" }] },
+    { ...valid, seams: [{ name: "control-plane", owners: "src/control/*" }] },
+    { ...valid, seams: [{ name: "control-plane", owners: [42] }] },
+    { ...valid, seams: [{ name: "control-plane", owners: [""] }] },
+    { ...valid, seams: [{ name: "control-plane", owners: ["x".repeat(201)] }] },
+    {
+      ...valid,
+      seams: [{
+        name: "control-plane",
+        owners: Array.from({ length: 9 }, (_unused, index) => `src/pattern-${index}/*`),
+      }],
+    },
   ]) {
     assert.deepEqual(readTracePlan(JSON.stringify({ version: TRACE_PLAN_VERSION, rows: [broken] })).rows, [], JSON.stringify(broken));
   }
+  // #1519 (review): seam names and patterns are sanitized at the boundary —
+  // control characters and backticks are stripped, bounded to the trusted
+  // config's caps — and a seam whose patterns were dropped still parses
+  // (empty lists are representable; the validator tolerates them).
+  const hostileSeams = readTracePlan(JSON.stringify({
+    version: TRACE_PLAN_VERSION,
+    rows: [{
+      ...valid,
+      seams: [{
+        name: "control\u0001-plane`",
+        owners: ["src/control\u0000/*", "src/control/*", "src/control/*"],
+        tests: ["  tests/control/*  "],
+      }],
+    }],
+  }));
+  assert.deepEqual(hostileSeams.rows, [{
+    ...valid,
+    seams: [{ name: "control-plane", owners: ["src/control/*"], tests: ["tests/control/*"] }],
+  }]);
   // The id is untrusted ledger prose: it is sanitized to the bounded
   // `req-…`-shaped vocabulary the ledger builder emits, and a row whose id
   // sanitizes away is dropped, never partially trusted.
@@ -414,4 +473,44 @@ test("the trace admission vocabulary carries the path tokens and the shared pros
   assert.ok(tokens!.includes("verify"));
   assert.ok(!tokens!.includes("must"));
   assert.equal(traceAdmissionTokens(""), null);
+});
+
+test("#1519 (review): the target helpers classify evidence categories like the validator does", () => {
+  // The path tokens are the same token class the admission vocabulary uses.
+  assert.deepEqual(
+    traceReadTargetPaths("read src/control/plane.ts and docs/notes.md"),
+    ["src/control/plane.ts", "docs/notes.md"],
+  );
+  assert.deepEqual(traceReadTargetPaths(""), []);
+  assert.deepEqual(traceReadTargetPaths("no paths here at all"), []);
+  // A TEST read: any extracted path token classifying as a test path via the
+  // SAME `isTestPath` classifier the validator applies to test citations.
+  assert.equal(traceTargetIsTestRead("tests/lease-renewal.test.ts"), true);
+  assert.equal(traceTargetIsTestRead("lease-renewal.test.ts"), true);
+  assert.equal(traceTargetIsTestRead("src/control/plane.ts"), false);
+  assert.equal(traceTargetIsTestRead("docs/lease-renewal-notes.md"), false);
+});
+
+test("#1519 (review): the per-seam slot helper mirrors the validator's citation matching", () => {
+  const seam = { name: "control-plane", owners: ["src/control/*"], tests: ["tests/control/*"] };
+  assert.equal(traceSeamSlotForTarget(seam, "src/control/plane.ts", false), "enforcement");
+  assert.equal(traceSeamSlotForTarget(seam, "src/control/nested/plane.ts", false), null);
+  assert.equal(traceSeamSlotForTarget(seam, "docs/claims.md", false), null);
+  assert.equal(traceSeamSlotForTarget(seam, "tests/control/control.test.ts", true), "test");
+  assert.equal(traceSeamSlotForTarget(seam, "tests/other/other.test.ts", true), null);
+  // A test read can never credit an enforcement slot and vice versa.
+  assert.equal(traceSeamSlotForTarget(seam, "tests/control/control.test.ts", false), null);
+  assert.equal(traceSeamSlotForTarget(seam, "src/control/plane.ts", true), null);
+  // Empty pattern lists fall back to the seam name (the validator's
+  // empty-list tolerance), by word boundary.
+  const bare = { name: "worker", owners: [], tests: [] };
+  assert.equal(traceSeamSlotForTarget(bare, "src/worker/gate.ts", false), "enforcement");
+  assert.equal(traceSeamSlotForTarget(bare, "docs/notes.md", false), null);
+  assert.equal(traceSeamSlotForTarget(bare, "tests/worker-renewal.test.ts", true), "test");
+  assert.equal(traceSeamSlotForTarget(bare, "tests/unrelated.test.ts", true), null);
+  // Empty tests with declared owners: the test slot falls back to the name.
+  const half = { name: "ingest", owners: ["src/ingest/*"], tests: [] };
+  assert.equal(traceSeamSlotForTarget(half, "src/ingest/parse.ts", false), "enforcement");
+  assert.equal(traceSeamSlotForTarget(half, "tests/ingest-parse.test.ts", true), "test");
+  assert.equal(traceSeamSlotForTarget(half, "tests/other.test.ts", true), null);
 });

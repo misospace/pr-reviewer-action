@@ -1830,8 +1830,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         const repairExtra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
         repaired = await runRequirementTraceRepairPass({
           requirements: repairRequirements.map((entry) => {
+            // #1519: the hints carry full seam objects now; the repair message
+            // still names the seams (the per-seam patterns live in the plan).
             const groups = distributedHints.find((hint) => hint.requirementId === entry.id)?.groups;
-            return { id: entry.id, text: entry.text, ...(groups ? { groups } : {}) };
+            return { id: entry.id, text: entry.text, ...(groups ? { groups: groups.map((group) => group.name) } : {}) };
           }),
           title: String(pr.title ?? ""),
           files: safeJson(ws.read("pr-files.json")),

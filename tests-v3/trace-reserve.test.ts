@@ -280,13 +280,13 @@ test("#1506: once the trace row is discharged the remaining budget is available 
   assert.equal(run.budget.required_evidence_released, true);
 });
 
-test("#1519: a runtime row discharges only after BOTH the enforcement and the matching-test read are attempted", async () => {
+test("#1519 (review): a runtime row discharges only on its evidence CATEGORIES — enforcement read, then a TEST read", async () => {
   const { root, deps } = workspace();
   writeCorpus(root);
   // A runtime-behaviour requirement (a vetoed behavioural verb, no
   // structural parse): the validator demands an enforcement location AND a
-  // matching regression test, so ONE admitted read must not release the
-  // row's reserve.
+  // matching regression test, so the discharge must distinguish the
+  // categories — two arbitrary matching reads must never suffice.
   const row = {
     id: "req-000000000001",
     text: "The loader must verify the tenant entitlement recorded in `config/lease-renewal.yaml`.",
@@ -297,31 +297,40 @@ test("#1519: a runtime row discharges only after BOTH the enforcement and the ma
     rows: [{ id: row.id, text: row.text, kind: "acceptance", seams: [], code_verifiable: true, proof_shape: "runtime", required_attempts: 2 }],
   }) + "\n");
   writeRequirementFiles(root, [row]);
-  writeWorkspaceFile(root, "docs/claims-1.md", "claim 1\n");
-  // The second admitted read targets a different file that still names the
-  // requirement's vocabulary: two DISTINCT admitted calls, not one.
   writeWorkspaceFile(root, "docs/lease-renewal-notes.md", "notes\n");
+  writeWorkspaceFile(root, "tests/lease-renewal.test.ts", "test;\n");
   const run = await runHarness(root, deps, {
+    // Budget 2 → the trace reserve is min(2, floor(2/2)) = 1: the window is
+    // already open for the second call, so the refusal is observable.
     env: { TOOL_MAX_REQUESTS: "2" },
     turns: 3,
     call: (turn) => {
       if (turn === 1) return { name: "read_file", args: { path: row.path } };
-      if (turn === 2) return { name: "read_file", args: { path: "docs/claims-1.md" } };
-      return { name: "read_file", args: { path: "docs/lease-renewal-notes.md" } };
+      if (turn === 2) return { name: "read_file", args: { path: "docs/lease-renewal-notes.md" } };
+      return { name: "read_file", args: { path: "tests/lease-renewal.test.ts" } };
     },
   });
-  // The first read was one ATTEMPT: the row stayed active, so the in-window
-  // claims read was refused.
-  assert.ok((run.budget.required_evidence_refusals as number) >= 1);
-  // The second distinct admitted read covered the demand and discharged the
-  // row, releasing the reserve.
+  // The first read covered the ENFORCEMENT slot only: the row stayed active
+  // (the enforcement read alone never discharged it — that is the review
+  // finding). The second read names the requirement's vocabulary too, but it
+  // is NOT a test read and the enforcement slot is already met, so it cannot
+  // advance an unmet slot: it was REFUSED in-window without spending budget.
+  assert.equal(run.budget.required_evidence_refusals, 1);
+  // The refusal proves the row was still active AND names the unmet slot:
+  // one test read owed, not a generic read count.
+  assert.match(JSON.stringify(run.payloads), new RegExp(row.id));
+  assert.match(JSON.stringify(run.payloads), /1 test read owed/);
+  // The row discharged only when the model read a TEST path — the missing
+  // category.
+  assert.deepEqual(run.calls.map((call) => call.tool), ["read_file", "read_file"]);
   assert.deepEqual(run.budget.required_evidence_credits, [`trace:${row.id}`]);
   assert.equal(run.budget.required_evidence_released, true);
-  // The refused claims call spent nothing: two reads is all the budget saw.
+  // The refused docs read spent nothing: the enforcement read and the test
+  // read are all the budget saw.
   assert.equal(run.result.executed_request_count, 2);
 });
 
-test("#1519: a distributed row discharges only after every seam's evidence demand is attempted", async () => {
+test("#1519 (review): a distributed row tracks enforcement AND test coverage per seam", async () => {
   const { root, deps } = workspace();
   writeCorpus(root);
   const structuralRow = REQUIREMENTS[0]!;
@@ -334,37 +343,166 @@ test("#1519: a distributed row discharges only after every seam's evidence deman
     version: TRACE_PLAN_VERSION,
     rows: [
       { id: structuralRow.id, text: structuralRow.text, kind: "acceptance", seams: [], code_verifiable: true, proof_shape: "structural", required_attempts: 1 },
-      { id: distributedRow.id, text: distributedRow.text, kind: "acceptance", seams: ["control-plane", "worker"], code_verifiable: true, proof_shape: "distributed", required_attempts: 4 },
+      {
+        id: distributedRow.id,
+        text: distributedRow.text,
+        kind: "acceptance",
+        // #1519 (review): the plan rows carry seam objects with the trusted
+        // owner/test glob patterns, not name-only strings.
+        seams: [
+          { name: "control-plane", owners: ["src/control/*"], tests: ["tests/control/*"] },
+          { name: "worker", owners: ["src/worker/*"], tests: ["tests/worker/*"] },
+        ],
+        code_verifiable: true,
+        proof_shape: "distributed",
+        required_attempts: 4,
+      },
     ],
   }) + "\n");
   writeRequirementFiles(root, [structuralRow, distributedRow]);
   writeWorkspaceFile(root, "docs/claims-1.md", "claim 1\n");
-  for (const n of [1, 2, 3, 4]) writeWorkspaceFile(root, `docs/audit-trail-seam-${n}.md`, `seam ${n}\n`);
+  writeWorkspaceFile(root, "src/control/plane.ts", "export {};\n");
+  writeWorkspaceFile(root, "src/worker/worker.ts", "export {};\n");
+  writeWorkspaceFile(root, "tests/control/control.test.ts", "test;\n");
+  writeWorkspaceFile(root, "tests/worker/worker.test.ts", "test;\n");
   const run = await runHarness(root, deps, {
-    env: { TOOL_MAX_REQUESTS: "6" },
+    env: { TOOL_MAX_REQUESTS: "8" },
     turns: 6,
     call: (turn) => {
       if (turn === 1) return { name: "read_file", args: { path: structuralRow.path } };
-      if (turn <= 4) return { name: "read_file", args: { path: `docs/audit-trail-seam-${turn - 1}.md` } };
+      // Seam control-plane: enforcement, then the worker seam's test read.
+      if (turn === 2) return { name: "read_file", args: { path: "src/control/plane.ts" } };
+      if (turn === 3) return { name: "read_file", args: { path: "tests/worker/worker.test.ts" } };
+      if (turn === 4) return { name: "read_file", args: { path: "tests/control/control.test.ts" } };
+      // A read that matches NO unmet slot of the distributed row (no
+      // vocabulary, non-test): refused in-window, never a discharge.
       if (turn === 5) return { name: "read_file", args: { path: "docs/claims-1.md" } };
-      return { name: "read_file", args: { path: "docs/audit-trail-seam-4.md" } };
+      return { name: "read_file", args: { path: "src/worker/worker.ts" } };
     },
   });
-  // Three seam reads are three ATTEMPTS: the distributed row stayed active,
-  // so the in-window claims read was refused. The FOURTH admitted attempt
-  // covered the demand (enforcement + test in each of the two seams) and
-  // discharged the row.
-  assert.equal(run.budget.required_evidence_refusals, 1);
   // #1519: the reserve is sized by the rows' TOTAL admitted-read demand
   // (1 structural + 4 distributed = 5), not one request per row — the
-  // window must not open while a row still owes attempts it could no longer
-  // spend; here the half-budget cap (floor(6/2)) bounds it to 3.
-  assert.equal(run.budget.required_evidence_requests_hint, 3);
+  // window must not open while a row still owes slots it could no longer
+  // spend; here the half-budget cap (floor(8/2)) bounds it to 4.
+  assert.equal(run.budget.required_evidence_requests_hint, 4);
+  // The claims read was refused: three seam slots were met, the worker
+  // enforcement slot was not, and the claims read matches none of them.
+  assert.equal(run.budget.required_evidence_refusals, 1);
   assert.deepEqual(run.budget.required_evidence_credits, [`trace:${structuralRow.id}`, `trace:${distributedRow.id}`]);
   assert.equal(run.budget.required_evidence_released, true);
+  // Five reads executed: the refused claims read spent nothing.
   assert.equal(run.result.executed_request_count, 5);
 });
 
+test("#1519 (review): a seam with no declared test patterns discharges its test slot via a seam-name test read", async () => {
+  const { root, deps } = workspace();
+  writeCorpus(root);
+  const distributedRow = {
+    id: "req-000000000001",
+    text: "The renewal pipeline must gate every tenant handoff.",
+    path: "src/renewal/pipeline.ts",
+  };
+  fs.writeFileSync(path.join(root, TRACE_PLAN_ARTIFACT), JSON.stringify({
+    version: TRACE_PLAN_VERSION,
+    rows: [{
+      id: distributedRow.id,
+      text: distributedRow.text,
+      kind: "acceptance",
+      // The `alpha` seam declares NO test patterns: the validator itself
+      // has no empty-pattern tolerance (such a seam can never validate),
+      // but the loop's seam-name fallback keeps the row dischargeable so
+      // the reserve can never be pinned by an uncoverable seam.
+      seams: [
+        { name: "alpha", owners: ["src/alpha/*"], tests: [] },
+        { name: "beta", owners: ["src/beta/*"], tests: ["tests/beta/*"] },
+      ],
+      code_verifiable: true,
+      proof_shape: "distributed",
+      required_attempts: 4,
+    }],
+  }) + "\n");
+  writeWorkspaceFile(root, "src/alpha/gate.ts", "export {};\n");
+  writeWorkspaceFile(root, "src/beta/gate.ts", "export {};\n");
+  writeWorkspaceFile(root, "src/renewal/pipeline.ts", "export {};\n");
+  writeWorkspaceFile(root, "tests/alpha-renewal.test.ts", "test;\n");
+  writeWorkspaceFile(root, "tests/beta/beta.test.ts", "test;\n");
+  writeWorkspaceFile(root, "tests/other/other.test.ts", "test;\n");
+  const run = await runHarness(root, deps, {
+    env: { TOOL_MAX_REQUESTS: "4" },
+    turns: 5,
+    call: (turn) => {
+      if (turn === 1) return { name: "read_file", args: { path: "src/alpha/gate.ts" } };
+      if (turn === 2) return { name: "read_file", args: { path: "src/beta/gate.ts" } };
+      // A test read matching NEITHER seam (beta's patterns do not match it
+      // and it does not mention any seam name): refused in-window.
+      if (turn === 3) return { name: "read_file", args: { path: "tests/other/other.test.ts" } };
+      // The alpha seam's test slot is discharged by a test read that mentions
+      // the seam name (its tests list is empty).
+      if (turn === 4) return { name: "read_file", args: { path: "tests/alpha-renewal.test.ts" } };
+      return { name: "read_file", args: { path: "tests/beta/beta.test.ts" } };
+    },
+  });
+  assert.equal(run.budget.required_evidence_refusals, 1);
+  assert.deepEqual(run.budget.required_evidence_credits, [`trace:${distributedRow.id}`]);
+  assert.equal(run.budget.required_evidence_released, true);
+  assert.equal(run.result.executed_request_count, 4);
+});
+
+test("#1519 (review): seam with UNMATCHABLE test globs still discharges its test slot via a vocabulary test read", async () => {
+  const { root, deps } = workspace();
+  writeCorpus(root);
+  const distributedRow = {
+    id: "req-000000000002",
+    text: "The renewal pipeline must gate every tenant handoff.",
+    path: "src/renewal/pipeline.ts",
+  };
+  fs.writeFileSync(path.join(root, TRACE_PLAN_ARTIFACT), JSON.stringify({
+    version: TRACE_PLAN_VERSION,
+    rows: [{
+      id: distributedRow.id,
+      text: distributedRow.text,
+      kind: "acceptance",
+      // The `beta` seam declares test globs that match NO real file
+      // (config drift: the test tree was renamed). A non-empty but
+      // unmatchable tests list must never pin the reserve: the loop's
+      // vocabulary fallback credits the test slot when a test read names
+      // the requirement's own vocabulary, and the row discharges.
+      seams: [
+        { name: "alpha", owners: ["src/alpha/*"], tests: ["tests/alpha/*"] },
+        { name: "beta", owners: ["src/beta/*"], tests: ["tests/renamed/*"] },
+      ],
+      code_verifiable: true,
+      proof_shape: "distributed",
+      required_attempts: 4,
+    }],
+  }) + "\n");
+  writeWorkspaceFile(root, "src/alpha/gate.ts", "export {};\n");
+  writeWorkspaceFile(root, "src/beta/gate.ts", "export {};\n");
+  writeWorkspaceFile(root, "src/renewal/pipeline.ts", "export {};\n");
+  writeWorkspaceFile(root, "tests/alpha/alpha.test.ts", "test;\n");
+  writeWorkspaceFile(root, "tests/renewal-gate.test.ts", "test;\n");
+  writeWorkspaceFile(root, "tests/other/other.test.ts", "test;\n");
+  const run = await runHarness(root, deps, {
+    env: { TOOL_MAX_REQUESTS: "6" },
+    turns: 5,
+    call: (turn) => {
+      if (turn === 1) return { name: "read_file", args: { path: "src/alpha/gate.ts" } };
+      if (turn === 2) return { name: "read_file", args: { path: "src/beta/gate.ts" } };
+      if (turn === 3) return { name: "read_file", args: { path: "tests/alpha/alpha.test.ts" } };
+      // A test read matching NO unmet slot (beta's globs do not match it
+      // and it names no requirement vocabulary): refused in-window.
+      if (turn === 4) return { name: "read_file", args: { path: "tests/other/other.test.ts" } };
+      // A test read that names the row's own vocabulary credits the beta
+      // seam's unmet test slot through the fallback: the row discharges.
+      return { name: "read_file", args: { path: "tests/renewal-gate.test.ts" } };
+    },
+  });
+  assert.equal(run.budget.required_evidence_refusals, 1);
+  assert.deepEqual(run.budget.required_evidence_credits, [`trace:${distributedRow.id}`]);
+  assert.equal(run.budget.required_evidence_released, true);
+  // Four reads executed; the refused unrelated test read spent nothing.
+  assert.equal(run.result.executed_request_count, 4);
+});
 test("#1506: the trace admission is restricted to repository read/search tools", async () => {
   const { root, deps } = workspace();
   writeCorpus(root);
@@ -543,6 +681,11 @@ test("#1506: the candidates artifact is parsed defensively and never partially t
     { ...validRow, required_attempts: "2" },
     { ...validRow, proof_shape: "bogus" },
     { ...validRow, code_verifiable: false },
+    // #1519 (review, round 2): the parse re-derives the demand from the row
+    // text, so a corrupted artifact that labels a runtime requirement as a
+    // one-attempt structural row fails closed — it can never discharge on
+    // one arbitrary read and release a reserve the validator would refuse.
+    { ...validRow, proof_shape: "structural", required_attempts: 1 },
   ]) {
     assert.deepEqual(traceAdmissionRows(JSON.stringify({
       version: TRACE_PLAN_VERSION,
@@ -570,6 +713,8 @@ test("#1506: the candidates artifact is parsed defensively and never partially t
   }));
   assert.equal(structural.length, 1);
   assert.equal(structural[0]!.requiredAttempts, 1);
+  assert.equal(structural[0]!.proofShape, "structural");
+  assert.deepEqual(structural[0]!.seams, []);
   const rows = traceAdmissionRows(JSON.stringify({
     version: TRACE_PLAN_VERSION,
     injected: true,
@@ -579,7 +724,31 @@ test("#1506: the candidates artifact is parsed defensively and never partially t
   assert.equal(rows[0]!.id, "trace:req-1");
   assert.equal(rows[0]!.trace, true);
   assert.equal(rows[0]!.requiredAttempts, 2);
+  // #1519 (review): the row carries the proof shape and the FULL seam
+  // objects, so the loop's slot attribution matches the validator's.
+  assert.equal(rows[0]!.proofShape, "runtime");
+  assert.deepEqual(rows[0]!.seams, []);
   assert.deepEqual(rows[0]!.tools, TRACE_EVIDENCE_TOOLS);
+  const distributed = traceAdmissionRows(JSON.stringify({
+    version: TRACE_PLAN_VERSION,
+    injected: true,
+    rows: [{
+      ...validRow,
+      proof_shape: "distributed",
+      required_attempts: 4,
+      seams: [
+        { name: "control-plane", owners: ["src/control/*"], tests: ["tests/control/*"] },
+        { name: "worker", owners: ["src/worker/*"], tests: [] },
+      ],
+    }],
+  }));
+  assert.equal(distributed.length, 1);
+  assert.equal(distributed[0]!.proofShape, "distributed");
+  assert.equal(distributed[0]!.requiredAttempts, 4);
+  assert.deepEqual(distributed[0]!.seams, [
+    { name: "control-plane", owners: ["src/control/*"], tests: ["tests/control/*"] },
+    { name: "worker", owners: ["src/worker/*"], tests: [] },
+  ]);
   assert.ok(rows[0]!.tokens.includes("src/a.ts"));
 });
 

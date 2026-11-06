@@ -3056,7 +3056,16 @@ test("#962.14: distributed hints include only distributed ids in the requested s
   ]);
   assert.deepEqual(
     distributedRequirementHints(ledger, FORK_DISTRIBUTED_OWNERSHIP, ["req-fork", "req-narrow", "req-missing"]),
-    [{ requirementId: "req-fork", groups: ["feature-defaults", "privileged-checkout", "secret-boundary"] }],
+    // #1519 (review): the hints carry the FULL seam objects — the trusted
+    // owner/test patterns ride with each seam name, sorted deterministically.
+    [{
+      requirementId: "req-fork",
+      groups: [
+        { name: "feature-defaults", owners: ["src/fork/feature-defaults.ts"], tests: ["tests-v3/fork-feature-defaults.test.ts"] },
+        { name: "privileged-checkout", owners: ["src/fork/privileged-checkout.ts"], tests: ["tests-v3/fork-privileged-checkout.test.ts"] },
+        { name: "secret-boundary", owners: ["src/fork/secret-boundary.ts"], tests: ["tests-v3/fork-secret-boundary.test.ts"] },
+      ],
+    }],
   );
 });
 
@@ -3066,7 +3075,16 @@ test("#962.15: prompt hints append seam names, while empty hints preserve the no
     writeFileSync(join(dir, "requirement-ledger-present.txt"), "1\n");
     const workspace = workspaceAt(dir);
     const base = { systemPrompt: "BASE", isDefault: true, addendum: "" };
-    const hints = [{ requirementId: "req-fork", groups: ["privileged-checkout", "feature-defaults", "secret-boundary"] }];
+    // #1519 (review): the hints carry full seam objects; the prompt line
+    // still renders the seam NAMES only.
+    const hints = [{
+      requirementId: "req-fork",
+      groups: [
+        { name: "privileged-checkout", owners: ["src/fork/privileged-checkout.ts"], tests: [] },
+        { name: "feature-defaults", owners: [], tests: ["tests-v3/fork-feature-defaults.test.ts"] },
+        { name: "secret-boundary", owners: [], tests: [] },
+      ],
+    }];
     const hinted = applyRequirementTraceFragment(base, workspace, true, undefined, ["req-fork"], hints).systemPrompt;
     const withoutHints = applyRequirementTraceFragment(base, workspace, true, undefined, ["req-fork"]).systemPrompt;
     const emptyHints = applyRequirementTraceFragment(base, workspace, true, undefined, ["req-fork"], []).systemPrompt;
@@ -3336,7 +3354,14 @@ test("#962.23: distributed hints omit overflowed requirements from the same ledg
   ]);
   assert.deepEqual(
     distributedRequirementHints(ledger, ownership, ["req-overflow", "req-fork"]),
-    [{ requirementId: "req-fork", groups: ["feature-defaults", "privileged-checkout", "secret-boundary"] }],
+    [{
+      requirementId: "req-fork",
+      groups: [
+        { name: "feature-defaults", owners: ["src/fork/feature-defaults.ts"], tests: ["tests-v3/fork-feature-defaults.test.ts"] },
+        { name: "privileged-checkout", owners: ["src/fork/privileged-checkout.ts"], tests: ["tests-v3/fork-privileged-checkout.test.ts"] },
+        { name: "secret-boundary", owners: ["src/fork/secret-boundary.ts"], tests: ["tests-v3/fork-secret-boundary.test.ts"] },
+      ],
+    }],
   );
 });
 
