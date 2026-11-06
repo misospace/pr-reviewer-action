@@ -36,7 +36,7 @@ import {
 import { redactPrTextDeep, redactPrTextLines, redactText } from "../context/redact.js";
 import { fenceDelimiterFor, escapeCodeSpan } from "../context/fence.js";
 import { fenceSafeLength } from "../context/related-context.js";
-import { KNOWN_SECRET_REDACTED, maskAndTruncate, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, MIN_KNOWN_SECRET_CONTENT_LEN } from "../context/redact.js";
+import { KNOWN_SECRET_REDACTED, containsKnownSecret, maskAndTruncate, maskDiagnostic, maskKnownSecrets, maskKnownSecretsDeep, MIN_KNOWN_SECRET_CONTENT_LEN } from "../context/redact.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
 import { endpointUrlCredentialOrEmpty } from "../transport/http.js";
 import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFramingOverhead } from "../context/repo-map.js";
@@ -846,12 +846,15 @@ function mergedVerdictContent(
  * wrote it). `secrets` masks the NEWLY spliced claim text only — the
  * standing completion content already passed the fail-closed content gate,
  * so it is carried through unmasked (masking it here could rewrite
- * credential-indistinguishable prose the acceptance gate deliberately kept). */
+ * credential-indistinguishable prose the acceptance gate deliberately kept).
+ * The returned `content` is the (new or carried) joined completion text, so
+ * the caller can run the reuse-side content gate over the merged envelope
+ * before rewriting the artifact. */
 export function mergeTraceClaimsIntoVerdictEnvelope(
   envelope: unknown,
   claims: readonly unknown[],
   secrets: readonly (string | null | undefined)[] = [],
-): { envelope: Record<string, unknown>; merged: number } | null {
+): { envelope: Record<string, unknown>; merged: number; content: string } | null {
   if (!isEnvelopeRecord(envelope)) return null;
   const safeClaims = claims.map((claim) => maskKnownSecretsDeep(claim, secrets));
   const choices = envelope.choices;
@@ -863,12 +866,13 @@ export function mergeTraceClaimsIntoVerdictEnvelope(
     if (text === null) return null;
     const replaced = mergedVerdictContent(text, safeClaims);
     if (replaced === null) return null;
-    if (replaced.merged === 0) return { envelope, merged: 0 };
+    if (replaced.merged === 0) return { envelope, merged: 0, content: replaced.text };
     // A plain string re-enters `extractContent`'s string branch — parse-
     // identical to the projected array form for every part order.
     return {
       envelope: { ...envelope, choices: [{ ...first, message: { ...message, content: replaced.text } }, ...choices.slice(1)] },
       merged: replaced.merged,
+      content: replaced.text,
     };
   }
   if (!("content" in envelope)) return null;
@@ -877,11 +881,11 @@ export function mergeTraceClaimsIntoVerdictEnvelope(
   if (text === null) return null;
   const replaced = mergedVerdictContent(text, safeClaims);
   if (replaced === null) return null;
-  if (replaced.merged === 0) return { envelope, merged: 0 };
+  if (replaced.merged === 0) return { envelope, merged: 0, content: replaced.text };
   const nextContent = typeof content === "string"
     ? replaced.text
     : [{ type: "text", text: replaced.text }];
-  return { envelope: { ...envelope, content: nextContent }, merged: replaced.merged };
+  return { envelope: { ...envelope, content: nextContent }, merged: replaced.merged, content: replaced.text };
 }
 
 /** #1503: the dedicated trace-repair round may span this many model turns
@@ -3583,6 +3587,20 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         }
         const merge = mergeTraceClaimsIntoVerdictEnvelope(envelope, parsed.claims, harnessSecrets);
         if (merge === null || merge.merged === 0) return 0;
+        // #1503 (review): the reuse parse re-applies the fail-closed content
+        // gate over the WHOLE completion with the lane's full known-secret
+        // list — including the URL-encoded/base64 variants of SUB-floor
+        // secrets, which `harnessSecrets` (floor-filtered, ≥8) does not mask.
+        // Splicing an echoed sub-floor variant in would therefore discard
+        // the standing verdict at reuse time. Run the same gate BEFORE the
+        // rewrite and skip it on a hit: the standing artifact is exactly
+        // what reuse already accepts, so this can only ever decline the
+        // repair, never damage the verdict.
+        const reuseSecrets = callKnownSecrets(input.apiKey, input.extraHeaders, endpointUrlCredentialOrEmpty(input.baseUrl));
+        if (containsKnownSecret(merge.content, reuseSecrets)) {
+          log("  native_loop: trace-only repair claims embed a configured credential — skipping the merge, keeping the original verdict");
+          return 0;
+        }
         deps.writeArtifact(artifactName, JSON.stringify(merge.envelope));
         log(
           `  native_loop: trace-only repair merged ${merge.merged} requirement claim(s) into the standing verdict ` +

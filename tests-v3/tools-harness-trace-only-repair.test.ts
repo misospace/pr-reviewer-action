@@ -16,6 +16,7 @@ import {
   normalizeTraceRepairPayload,
   parseTraceRepairResponse,
 } from "../src/requirements/trace-repair.js";
+import { parseVerdictResponse } from "../src/model/verdict.js";
 
 // #1503: after the bounded evidence-repair round the loop no longer
 // re-requests the WHOLE verdict. Instead a single trace-only repair turn
@@ -644,6 +645,13 @@ test("mergeTraceClaimsIntoVerdictEnvelope: splices claims into an OpenAI verdict
   // Every other verdict field is carried through unchanged.
   assert.equal(body.verdict, "approve");
   assert.equal(body.review_markdown, "## Review\noriginal");
+  // #1503 (review): the helper also returns the joined completion text it
+  // spliced into the envelope, so the caller can run the reuse-side
+  // content gate over it before rewriting the artifact. It is exactly the
+  // new content string, byte-for-byte.
+  assert.equal(out!.content, message.content);
+  assert.equal(typeof out!.content, "string");
+  assert.ok(String(out!.content).includes("R1"));
 });
 
 test("mergeTraceClaimsIntoVerdictEnvelope: never overwrites an id that already carries a claim", () => {
@@ -809,4 +817,366 @@ test("buildTraceOnlyRepairMessage: an empty id list renders a placeholder, never
   const msg = buildTraceOnlyRepairMessage({ ids: [] });
   assert.ok(msg.includes("(none)"));
   assert.ok(msg.includes("Requirement ids to trace:"));
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// #1503 (review): the production-delta pins
+//
+// The trace-only repair turn (a) rides the wire prompt-only (no verdict
+// schema, no tools), (b) may merge a subset of the probe's unresolved ids,
+// (c) is wire-safe when the repair round ends on a tool_result rather than a
+// closing text round, and (d) runs a reuse-side credential gate BEFORE it
+// rewrites the standing verdict artifact — refusing to splice an echoed
+// sub-floor secret into the published verdict.
+// ─────────────────────────────────────────────────────────────────────────
+
+test("#1503: the merged artifact re-parses through the production verdict parser (reuse)", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  const scripted = baseScripted([
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    openAiText("repair round done"),
+    tracePayload(["R1"]),
+  ]);
+  let calls = 0;
+  const handled = await runNativeLoop(
+    loopInput(deps({ transport: async () => scripted[calls++], env: { SYSTEM_PROMPT: "You are the reviewer." } }), {
+      traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    }),
+  );
+  assert.equal(handled, true);
+  assert.equal(calls, 6);
+  // The standing `ai-response.primary.json` is EXACTLY the envelope the reuse
+  // path re-parses as the verdict — so it must survive the production parser
+  // with the merged coverage while every other field stands.
+  const envelope = JSON.parse(fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"));
+  const parsed = parseVerdictResponse(envelope);
+  assert.equal(parsed.verdict, "approve");
+  assert.equal(parsed.reviewMarkdown, "## Review\noriginal");
+  assert.deepEqual(parsed.findings, []);
+  const coverage = parsed.requirementCoverage as Array<Record<string, unknown>>;
+  assert.equal(coverage.length, 1);
+  assert.equal(coverage[0]!.requirement_id, "R1");
+  assert.equal(coverage[0]!.disposition, "met");
+});
+
+test("#1503: the trace-only turn rides the wire prompt-only — OpenAI carries no response_format", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  const scripted = baseScripted([
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    openAiText("repair round done"),
+    tracePayload(["R1"]),
+  ]);
+  let calls = 0;
+  const payloads: Array<Record<string, unknown>> = [];
+  await runNativeLoop(
+    loopInput(
+      deps({
+        transport: async (_b, _f, payload) => {
+          payloads.push(structuredClone(payload));
+          return scripted[calls++];
+        },
+        env: { SYSTEM_PROMPT: "You are the reviewer." },
+      }),
+      {
+        traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+      },
+    ),
+  );
+  // The trace-only turn is the LAST request of the run.
+  const traceTurn = payloads[payloads.length - 1]!;
+  // The trace contract is NOT the verdict schema: no `response_format` (a
+  // verdict-shaped json_schema would force the full verdict back into the
+  // trace turn) and no tool declarations (the verdict-turn contract).
+  assert.equal(traceTurn.response_format, undefined);
+  assert.equal(traceTurn.tools, undefined);
+});
+
+test("#1503: the trace-only turn rides the wire prompt-only — Anthropic carries no output_config format", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  const anthropicTrace = (ids: string[]) => ({
+    content: [
+      {
+        type: "text",
+        text:
+          "```json\n" +
+          JSON.stringify({
+            requirement_coverage: ids.map((id) => ({
+              requirement_id: id,
+              disposition: "met",
+              enforcement: [{ file: "src.ts", line: 1 }],
+              test: [{ file: "notes.md", line: 1 }],
+              reason: "cited from evidence already in the conversation",
+            })),
+          }) +
+          "\n```",
+      },
+    ],
+    stop_reason: "end_turn",
+  });
+  const scripted = [
+    anthropicCall("u1", "read_file", { path: "src.ts" }),
+    anthropicText("evidence gathered"),
+    anthropicText(verdictJson("original")),
+    anthropicCall("u2", "read_file", { path: "notes.md" }),
+    anthropicText("repair round done"),
+    anthropicTrace(["R1"]),
+  ];
+  let calls = 0;
+  const payloads: Array<Record<string, unknown>> = [];
+  await runNativeLoop(
+    loopInput(
+      deps({
+        transport: async (_b, _f, payload) => {
+          payloads.push(structuredClone(payload));
+          return scripted[calls++];
+        },
+        env: { SYSTEM_PROMPT: "You are the reviewer." },
+      }),
+      {
+        apiFormat: "anthropic",
+        traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+      },
+    ),
+  );
+  const traceTurn = payloads[payloads.length - 1]!;
+  // The trace contract is prompt-only on the Anthropic wire: no
+  // `output_config.format` and no `response_format` (Anthropic has none), and
+  // the verdict-turn contract drops the tool declarations.
+  assert.equal((traceTurn.output_config as Record<string, unknown> | undefined)?.format, undefined);
+  assert.equal(traceTurn.response_format, undefined);
+  assert.equal(traceTurn.tools, undefined);
+});
+
+test("#1503: loop-level partial merge — a claim for only one of two unresolved ids merges just that one", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  // The probe reports two unresolved ids, but the trace turn claims only R1.
+  const scripted = baseScripted([
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    openAiText("repair round done"),
+    tracePayload(["R1"]), // R1 only; the unclaimed R2 is never fabricated.
+  ]);
+  let calls = 0;
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(deps({ transport: async () => scripted[calls++], env: { SYSTEM_PROMPT: "You are the reviewer." } }), {
+      result,
+      traceGapProbe: async () => ({ instruction: "Verify R1 and R2 now.", unresolvedIds: ["R1", "R2"] }),
+    }),
+  );
+  assert.equal(handled, true);
+  assert.equal(calls, 6);
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  assert.equal(result.trace_repair_continuation?.claims_merged, 1);
+  assert.equal(result.trace_repair_continuation?.trace_claims_merged, true);
+  // Both ids are reported for telemetry; only the claimed one is merged.
+  assert.deepEqual(result.trace_repair_continuation?.unresolved_ids, ["R1", "R2"]);
+  const coverage = standingVerdictBody(root).requirement_coverage as Array<Record<string, unknown>>;
+  assert.deepEqual(coverage.map((c) => c.requirement_id).sort(), ["R1"]);
+});
+
+test("#1503 (anthropic): when the repair round ends on a tool_result, the trace instruction merges into that same user message", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  fs.writeFileSync(path.join(root, "a.md"), "export const a = 1;\n");
+  fs.writeFileSync(path.join(root, "b.md"), "export const b = 1;\n");
+  fs.writeFileSync(path.join(root, "c.md"), "export const c = 1;\n");
+  const anthropicTrace = (ids: string[]) => ({
+    content: [
+      {
+        type: "text",
+        text:
+          "```json\n" +
+          JSON.stringify({
+            requirement_coverage: ids.map((id) => ({
+              requirement_id: id,
+              disposition: "met",
+              enforcement: [{ file: "src.ts", line: 1 }],
+              test: [{ file: "notes.md", line: 1 }],
+              reason: "cited from evidence already in the conversation",
+            })),
+          }) +
+          "\n```",
+      },
+    ],
+    stop_reason: "end_turn",
+  });
+  // The ordinary investigation exhausts its one-request ceiling; the repair
+  // allowance is then spent entirely on sequential tool-calls (no closing text
+  // round), so the loop stops on the call ceiling. The conversation therefore
+  // ends on a tool_result user message, not an assistant text message.
+  const scripted = [
+    anthropicCall("u1", "read_file", { path: "src.ts" }), // exploration (1 request -> budget)
+    anthropicText(verdictJson("original")), // first verdict
+    anthropicCall("u2", "read_file", { path: "notes.md" }), // repair round 1
+    anthropicCall("u3", "read_file", { path: "a.md" }), // repair round 2
+    anthropicCall("u4", "read_file", { path: "b.md" }), // repair round 3
+    anthropicCall("u5", "read_file", { path: "c.md" }), // repair round 4 -> call ceiling
+    anthropicTrace(["R1"]), // the trace-only turn (still runs: evidence exists)
+  ];
+  let calls = 0;
+  const payloads: Array<Record<string, unknown>> = [];
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(
+      deps({
+        transport: async (_b, _f, payload) => {
+          payloads.push(structuredClone(payload));
+          return scripted[calls++];
+        },
+        env: { SYSTEM_PROMPT: "You are the reviewer." },
+      }),
+      {
+        apiFormat: "anthropic",
+        maxRequests: 1,
+        result,
+        traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+      },
+    ),
+  );
+  assert.equal(handled, true);
+  assert.equal(calls, 7); // exploration(1) + verdict(1) + repair(4) + trace-only(1)
+  // The repair round spent its whole allowance on tool-calls and stopped on
+  // the call ceiling — it never issued a closing text round.
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  assert.equal(result.trace_repair_continuation?.stop_reason, "tool-call-budget-exhausted");
+  assert.equal(result.trace_repair_continuation?.rounds, 4);
+  assert.equal(result.trace_repair_continuation?.tool_calls, 4);
+  assert.equal(result.trace_repair_continuation?.claims_merged, 1);
+  assert.equal(result.trace_repair_continuation?.trace_claims_merged, true);
+  // The trace-only turn is wire-safe even though the repair ended on a
+  // tool_result: no adjacent same-role messages, and the instruction merges
+  // into the SAME trailing user message that carries the last tool_result.
+  const traceTurn = payloads[payloads.length - 1]!;
+  const tMessages = traceTurn.messages as Array<Record<string, unknown>>;
+  for (let i = 1; i < tMessages.length; i++) {
+    assert.notEqual(tMessages[i]!.role, tMessages[i - 1]!.role, `adjacent ${tMessages[i - 1]!.role} in the trace payload`);
+  }
+  const tLast = tMessages[tMessages.length - 1]!;
+  assert.equal(tLast.role, "user");
+  const tBlocks = tLast.content as Array<Record<string, unknown>>;
+  assert.ok(tBlocks.some((b) => b.type === "tool_result"), "the trailing user message keeps its tool_result");
+  const tTexts = tBlocks.filter((b) => b.type === "text").map((b) => String(b.text));
+  assert.ok(tTexts.some((t) => t.includes("do NOT re-emit")), "the trace instruction rides the same merged message");
+  assert.ok(tTexts.some((t) => t.includes("Requirement ids to trace")));
+  assert.ok(tTexts.some((t) => t.includes("R1")));
+});
+
+test("#1503: the sub-floor encoded-echo gate declines the merge and leaves the artifact byte-identical", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  // A five-character lane key: below the 8-char content-gate floor, so its
+  // RAW form is prose-indistinguishable and the floor filters it out of the
+  // masking list — but its URL-encoded form is distinctive. An echoing model
+  // that leaks that encoded form into a claim would otherwise splice a
+  // credential into the published verdict.
+  const apiKey = "a b&c";
+  const encoded = encodeURIComponent(apiKey); // "a%20b%26c"
+  assert.ok(apiKey.length < 8, "the key must sit below the content-gate floor");
+  const echo = openAiText(
+    "```json\n" +
+      JSON.stringify({
+        requirement_coverage: [
+          {
+            requirement_id: "R1",
+            disposition: "met",
+            enforcement: [{ file: "src.ts", line: 1 }],
+            test: [{ file: "notes.md", line: 1 }],
+            reason: `cited from the transcript; the endpoint credential ${encoded} appears in the logs`,
+          },
+        ],
+      }) +
+      "\n```",
+  );
+  const scripted = baseScripted([
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    openAiText("repair round done"),
+    echo,
+  ]);
+  let calls = 0;
+  const artifactWrites: string[] = [];
+  const wrapped = deps({
+    transport: async () => scripted[calls++],
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+    writeArtifact: (name, text) => {
+      if (name === "ai-response.primary.json") artifactWrites.push(text);
+      fs.writeFileSync(path.join(root, name), text);
+    },
+  });
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(wrapped, {
+      result,
+      apiKey,
+      traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    }),
+  );
+  assert.equal(handled, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  // The credential hit refuses the merge: zero claims merged, and the
+  // standing verdict stands.
+  assert.equal(result.trace_repair_continuation?.claims_merged, 0);
+  assert.equal(result.trace_repair_continuation?.trace_claims_merged, false);
+  // The artifact was written EXACTLY once (the verdict turn) and never
+  // rewritten by the trace-only repair — the final bytes equal that one write.
+  assert.equal(artifactWrites.length, 1, "the artifact must not be rewritten on a credential hit");
+  assert.equal(artifactWrites[0], fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"));
+  assert.ok(!artifactWrites[0]!.includes(encoded), "the encoded credential must never be spliced into the artifact");
+  assert.equal(standingVerdictBody(root).requirement_coverage, undefined);
+});
+
+test("#1503: the same sub-floor key merges fine when the echo is absent (positive control)", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  const apiKey = "a b&c";
+  const benign = openAiText(
+    "```json\n" +
+      JSON.stringify({
+        requirement_coverage: [
+          {
+            requirement_id: "R1",
+            disposition: "met",
+            enforcement: [{ file: "src.ts", line: 1 }],
+            test: [{ file: "notes.md", line: 1 }],
+            reason: "cited from evidence already in the conversation", // no encoded credential
+          },
+        ],
+      }) +
+      "\n```",
+  );
+  const scripted = baseScripted([
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    openAiText("repair round done"),
+    benign,
+  ]);
+  let calls = 0;
+  const artifactWrites: string[] = [];
+  const wrapped = deps({
+    transport: async () => scripted[calls++],
+    env: { SYSTEM_PROMPT: "You are the reviewer." },
+    writeArtifact: (name, text) => {
+      if (name === "ai-response.primary.json") artifactWrites.push(text);
+      fs.writeFileSync(path.join(root, name), text);
+    },
+  });
+  const result = freshResult();
+  await runNativeLoop(
+    loopInput(wrapped, {
+      result,
+      apiKey,
+      traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    }),
+  );
+  // No credential echo: the gate does not fire and the claim merges.
+  assert.equal(result.trace_repair_continuation?.claims_merged, 1);
+  assert.equal(result.trace_repair_continuation?.trace_claims_merged, true);
+  // The artifact is rewritten (verdict write + merge write) and now carries
+  // the merged coverage — proving the gate only declines on a credential hit.
+  assert.equal(artifactWrites.length, 2);
+  const coverage = standingVerdictBody(root).requirement_coverage as Array<Record<string, unknown>>;
+  assert.deepEqual(coverage.map((c) => c.requirement_id), ["R1"]);
 });
