@@ -130,9 +130,46 @@ test("validateImageContractForProfile builds a contract for an oci profile", () 
   assert.equal(contract.resultVar, EXECUTION_RESULT_ENV_KEY);
 });
 
-test("validateImageContractForProfile returns null for non-oci kinds", () => {
+test("validateImageContractForProfile returns null for non-container kinds", () => {
   assert.equal(validateImageContractForProfile({ kind: "local", oci: null }), null);
-  assert.equal(validateImageContractForProfile({ kind: "kubernetes", oci: null }), null);
+});
+
+test("validateImageContractForProfile builds a contract for a kubernetes profile (#734)", () => {
+  const contract = validateImageContractForProfile({
+    kind: "kubernetes",
+    oci: null,
+    kubernetes: {
+      image: "ghcr.io/acme/pr-reviewer-worker:1.2.3@sha256:" + "a".repeat(64),
+      args: ["--worker"],
+      namespace: "review-workers",
+      serviceAccount: "pr-reviewer-worker",
+      ttlSecondsAfterFinished: 3_600,
+      resources: {
+        requests: { cpu: "500m", memory: "512Mi" },
+        limits: { cpu: "2", memory: "2Gi" },
+      },
+      volumes: [{
+        claim: "pr-reviewer-data",
+        controllerRoot: "/var/lib/pr-reviewer",
+      }],
+    },
+  });
+  assert.ok(contract !== null);
+  assert.equal(contract.image, "ghcr.io/acme/pr-reviewer-worker:1.2.3@sha256:" + "a".repeat(64));
+  assert.deepEqual([...contract.args], ["--worker"]);
+  assert.equal(contract.requestVar, EXECUTION_REQUEST_ENV_KEY);
+  assert.equal(contract.resultVar, EXECUTION_RESULT_ENV_KEY);
+});
+
+test("validateImageContractForProfile fails closed on a malformed kubernetes profile", () => {
+  assert.throws(
+    () => validateImageContractForProfile({ kind: "kubernetes", oci: null }),
+    /must carry its spec/,
+  );
+  assert.throws(
+    () => validateImageContractForProfile({ kind: "kubernetes", oci: null, kubernetes: null }),
+    /must carry its spec/,
+  );
 });
 
 test("validateImageContractForProfile fails closed on a malformed oci profile", () => {

@@ -42,6 +42,7 @@ import {
   MIN_DISTRIBUTED_GROUPS,
 } from "../enforcement/requirement-trace.js";
 import type { RequirementGroup, RequirementOwnership } from "../enforcement/requirement-trace.js";
+import { isPlainObject } from "../platform/jq.js";
 
 /** Candidate owner-config paths, in precedence order (mirrors the repository
  * config file family). */
@@ -128,10 +129,6 @@ function slugTokens(slug: string): string[] {
     .split("-")
     .map((token) => token.trim())
     .filter((token) => token.length >= 3);
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

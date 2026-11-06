@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { isLowConfidence, reviewerRequestedEscalation } from "../src/routing/escalation.js";
+import { CONFIDENCE_MINIMUM_PROMPT_TOKENS } from "../src/confidence/prompt.js";
+import { CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS } from "../src/confidence/scorer.js";
 import { anthropicEffortInactiveWarning, anthropicEffortSupported, anthropicEffortSupportInput, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, anthropicStructuredOutputSupportInput, effectiveWireEffort, effectiveWireResponseFormat, laneAnthropicEffortSupported, laneAnthropicStructuredOutputSupported, normalizeReasoningEffort, resolveConfidenceProfile, resolveReviewRoute, resolveSpecialistProfiles, resolveTierProfiles, tierReasoningEffort, tierRequestShape, tierResponseFormat } from "../src/routing/tiers.js";
+import { API_FORMAT_VALUES, ENUM_INPUTS } from "../src/config/schema.js";
 
 const longReview = "The change is reviewed carefully and the behavior appears correct. No concerns identified in the touched paths.";
 
@@ -57,7 +60,11 @@ test("specialist profiles resolve role, profile, and primary model precedence", 
     tests: { model: "specialist-model", source: "specialist-profile" },
   });
   assert.equal(resolved.overridesActive, true);
-  assert.deepEqual(resolved.warnings, []);
+  // #1465: the whitespace-only role model carries no name, so the role falls
+  // back to the specialist profile model — and the lane says that it did.
+  assert.deepEqual(resolved.warnings, [
+    "ai-specialist-tests-model holds only whitespace, so it is treated as unset and the role falls back to the specialist profile model or the primary model",
+  ]);
 
   const primary = resolveSpecialistProfiles({ AI_BASE_URL: " primary-url ", AI_MODEL: " primary-model ", AI_API_FORMAT: " OpenAI ", AI_API_KEY: " key ", AI_SPECIALIST_SECURITY_MODEL: " security-model " });
   assert.equal(primary.profileActive, false);
@@ -151,6 +158,89 @@ test("#1251: the fallback lane's raw-env inheritance mirrors the config loader's
   assert.equal(explicit.fallback.apiKey, "fk");
   assert.equal(explicit.fallback.resolved, true);
   assert.equal(resolveTierProfiles({ AI_BASE_URL: "https://b", AI_API_KEY: "k", AI_FALLBACK_BASE_URL: "", AI_FALLBACK_MODEL: "fm" }).fallback.baseUrl, "https://b");
+});
+
+test("#1493: a lane api-format outside the wire-family vocabulary fails closed", () => {
+  // The config loader rejects an api-format outside the vocabulary for every
+  // action input (`ENUM_INPUTS`); the raw-environment resolution refuses the
+  // same values, because the transport dials the Anthropic wire only for the
+  // exact `anthropic` family and treats every other string as the OpenAI
+  // wire — a typo would silently review on a protocol the operator never
+  // asked for, and the request would still look successful.
+  const base = { AI_BASE_URL: "https://primary", AI_MODEL: "main" };
+  const lanes = [
+    ["AI_PRIMARY_API_FORMAT", "ai-primary-api-format"],
+    ["AI_SMART_API_FORMAT", "ai-smart-api-format"],
+    ["AI_FALLBACK_API_FORMAT", "ai-fallback-api-format"],
+  ] as const;
+  for (const [key, input] of lanes) {
+    for (const value of ["Anthropic", "OPENAI", "openai-compatible", " anthropic"]) {
+      assert.throws(
+        () => resolveTierProfiles({ ...base, [key]: value }),
+        (error: unknown) => error instanceof Error
+          && error.message === `${key} (${input}) must be one of: openai, anthropic`,
+        `${key}=${value} must fail closed`,
+      );
+    }
+  }
+  // The rejected value never rides the message: the operator's value is free
+  // text, and a log line is not the place to repeat it.
+  assert.throws(
+    () => resolveTierProfiles({ ...base, AI_PRIMARY_API_FORMAT: "totally-bogus-format" }),
+    (error: unknown) => error instanceof Error
+      && error.message === "AI_PRIMARY_API_FORMAT (ai-primary-api-format) must be one of: openai, anthropic"
+      && error.message.includes("totally-bogus-format") === false,
+  );
+  // The base value is the lanes' inherited value, so an unusable base is
+  // refused too — by the key the operator has to fix.
+  assert.throws(
+    () => resolveTierProfiles({ ...base, AI_API_FORMAT: "provider" }),
+    (error: unknown) => error instanceof Error
+      && error.message === "AI_API_FORMAT (ai-api-format) must be one of: openai, anthropic",
+  );
+  // The base is refused even when every lane shadows it: the specialist lane
+  // reads the base directly, so an unusable base must not survive profile
+  // resolution to be coerced into a wire family there.
+  assert.throws(
+    () => resolveTierProfiles({
+      ...base,
+      AI_API_FORMAT: "Anthropic",
+      AI_PRIMARY_API_FORMAT: "openai",
+      AI_SMART_API_FORMAT: "openai",
+      AI_FALLBACK_API_FORMAT: "openai",
+    }),
+    (error: unknown) => error instanceof Error
+      && error.message === "AI_API_FORMAT (ai-api-format) must be one of: openai, anthropic",
+  );
+});
+
+test("#1493: a lane api-format inside the wire-family vocabulary still resolves", () => {
+  const base = { AI_BASE_URL: "https://primary", AI_MODEL: "main" };
+  const resolved = resolveTierProfiles({
+    ...base,
+    AI_API_FORMAT: "anthropic",
+    AI_PRIMARY_API_FORMAT: "openai",
+  });
+  assert.equal(resolved.primary.apiFormat, "openai", "the lane's own value wins over the base");
+  assert.equal(resolved.smart.apiFormat, "anthropic", "an unset lane inherits the base");
+  assert.equal(resolved.fallback.apiFormat, "anthropic", "an unset lane inherits the base");
+  // An unset base is the documented `openai` default; an empty lane value is
+  // unset, not an invalid format.
+  assert.equal(resolveTierProfiles(base).primary.apiFormat, "openai");
+  assert.equal(resolveTierProfiles({ ...base, AI_PRIMARY_API_FORMAT: "" }).primary.apiFormat, "openai");
+  assert.equal(resolveTierProfiles({ ...base, AI_API_FORMAT: "anthropic", AI_PRIMARY_API_FORMAT: "" }).primary.apiFormat, "anthropic");
+});
+
+test("#1493: the raw-environment check and the contract enum share one vocabulary", () => {
+  assert.deepEqual(API_FORMAT_VALUES, ["openai", "anthropic"]);
+  for (const id of ["ai-api-format", "ai-primary-api-format", "ai-smart-api-format", "ai-fallback-api-format", "ai-confidence-api-format"]) {
+    assert.deepEqual(ENUM_INPUTS[id], API_FORMAT_VALUES, `${id} validates against the shared vocabulary`);
+  }
+  // The specialist and confidence lanes keep their own never-fatal contracts
+  // for an unusable format (pinned in tests-v3/specialists-gate.test.ts and
+  // in the confidence tests above): the specialist profile is turned off with
+  // a warning, and the scorer falls back to the primary format. This change
+  // covers the review lanes' wire family only.
 });
 
 test("#1009: tierResponseFormat inherits the base setting when the lane override is empty", () => {
@@ -549,6 +639,19 @@ test("#1073: confidence profile inherits the primary lane when ai-confidence-bas
     reasoningEffort: "",
     inheritedTransport: true,
     credentialSource: "primary",
+    // #1368: the documented defaults ride every resolved profile (#1387:
+    // the resolver's defaults ARE the scorer module's exported constants).
+    maxTokens: CONFIDENCE_MAX_TOKENS,
+    promptTokens: CONFIDENCE_PROMPT_TOKENS,
+    modelContextTokens: 0,
+    anthropicEffortSupported: false,
+    structuredOutputSupported: false,
+    // #1481: unset confidence token-param under the default mode inherits
+    // the run's convention; no AI_TOKENS_PARAM here, so the documented
+    // max_tokens default rides the profile.
+    tokensParam: "max_tokens",
+    // #1478: the default isolation mode never refuses the resolved transport.
+    refusalCause: "",
   });
   assert.deepEqual(resolved.warnings, []);
 });
@@ -591,6 +694,282 @@ test("#1073: a distinct confidence base URL never inherits the primary credentia
   assert.equal(keyless.warnings[0]!.includes("primary-key"), false);
 });
 
+test("#1478: require-dedicated isolation refuses a missing dedicated endpoint instead of inheriting the primary lane", () => {
+  const refused = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  // The lane stays ENABLED (the model was configured) but resolves no
+  // transport: the scorer must publish the visible unscored cause instead of
+  // silently dialling the primary endpoint under the primary credential.
+  assert.equal(refused.profile.enabled, true);
+  assert.equal(refused.profile.refusalCause, "dedicated_config_missing");
+  assert.equal(refused.profile.baseUrl, "", "no primary endpoint may ride a refused verifier profile");
+  assert.equal(refused.profile.apiKey, "", "no primary credential may ride a refused verifier profile");
+  assert.equal(refused.profile.inheritedTransport, false);
+  assert.equal(refused.profile.credentialSource, "own");
+  assert.ok(refused.warnings.some((message) => message.includes("ai-confidence-isolation=require-dedicated")), JSON.stringify(refused.warnings));
+  assert.ok(!refused.warnings.some((message) => message.includes("primary-key")), "no secret value may appear in a warning");
+
+  // The default mode keeps the documented same-endpoint inheritance, byte for
+  // byte: existing consumers are unaffected.
+  const inherited = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  assert.equal(inherited.profile.refusalCause, "");
+  assert.equal(inherited.profile.baseUrl, "https://primary");
+  assert.equal(inherited.profile.apiKey, "primary-key");
+
+  // A configured dedicated endpoint resolves exactly like the documented
+  // distinct-endpoint shape — the mode changes only the EMPTY-base-url story.
+  // The model is carried VERBATIM: opaque and case-sensitive (#1465), never
+  // case-normalized and never substituted with a primary-derived name.
+  const dedicated = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "Scorer-Model-Cased",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    // #1481: the format is declared here because an UNSET one is now its own
+    // visible refusal (dedicated_format_missing, pinned by its own tests).
+    AI_CONFIDENCE_API_FORMAT: "openai",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+  });
+  assert.equal(dedicated.profile.refusalCause, "");
+  assert.equal(dedicated.profile.model, "Scorer-Model-Cased", "the configured model name is used verbatim under require-dedicated");
+  assert.equal(dedicated.profile.baseUrl, "https://independent");
+  assert.equal(dedicated.profile.apiKey, "scorer-key");
+  assert.equal(dedicated.profile.inheritedTransport, false);
+  assert.equal(dedicated.profile.credentialSource, "own");
+  assert.deepEqual(dedicated.warnings, []);
+});
+
+test("#1478/#1481: require-dedicated refuses a missing dedicated model instead of inheriting the primary or smart model", () => {
+  // The workflow no longer pre-fills ai-confidence-model with SMART_MODEL,
+  // so an unset CONFIDENCE_MODEL reaches the resolver EMPTY. Under
+  // require-dedicated that is a refused configuration, not a disabled lane:
+  // inheriting the reviewing model would be the exact same-model correlation
+  // isolation exists to prevent.
+  const refused = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_SMART_MODEL: "smart-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  // The lane stays ENABLED (the operator asked for the mode) but resolves no
+  // transport and no inherited model: the scorer must publish the visible
+  // unscored cause instead of silently scoring with a primary-derived model.
+  assert.equal(refused.profile.enabled, true);
+  assert.equal(refused.profile.refusalCause, "dedicated_model_missing");
+  assert.equal(refused.profile.model, "", "no primary-derived model may ride a refused verifier profile");
+  assert.equal(refused.profile.baseUrl, "", "no primary endpoint may ride a refused verifier profile");
+  assert.equal(refused.profile.apiKey, "", "no primary credential may ride a refused verifier profile");
+  assert.equal(refused.profile.inheritedTransport, false);
+  assert.equal(refused.profile.credentialSource, "own");
+  assert.ok(
+    refused.warnings.some((message) => message.includes("ai-confidence-isolation=require-dedicated") && message.includes("ai-confidence-model is empty")),
+    JSON.stringify(refused.warnings),
+  );
+  assert.ok(!refused.warnings.some((message) => message.includes("primary-key")), "no secret value may appear in a warning");
+
+  // A whitespace-only model value carries no name either: the same refusal,
+  // and the disabled-shape "treated as unset" notice is replaced by the
+  // accurate refusal warning.
+  const blank = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_MODEL: "   ",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.equal(blank.profile.enabled, true);
+  assert.equal(blank.profile.refusalCause, "dedicated_model_missing");
+  assert.equal(blank.profile.baseUrl, "");
+  assert.ok(blank.warnings.some((message) => message.includes("ai-confidence-model is empty")), JSON.stringify(blank.warnings));
+  assert.ok(!blank.warnings.some((message) => message.includes("stays disabled")), JSON.stringify(blank.warnings));
+
+  // The model gate comes first: even a CONFIGURED dedicated endpoint without
+  // a dedicated model is refused by model, not silently enabled.
+  const withEndpoint = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+  });
+  assert.equal(withEndpoint.profile.refusalCause, "dedicated_model_missing");
+  assert.equal(withEndpoint.profile.model, "");
+  assert.equal(withEndpoint.profile.baseUrl, "", "a refused profile carries no transport");
+
+  // The default mode keeps the documented disabled shape byte for byte: an
+  // unset ai-confidence-model still just disables the verifier (no refusal,
+  // no transport, orphan notice only) — existing consumers are unaffected.
+  const inheritDisabled = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_SMART_MODEL: "smart-model",
+  });
+  assert.equal(inheritDisabled.profile.enabled, false);
+  assert.equal(inheritDisabled.profile.refusalCause, "");
+  assert.equal(inheritDisabled.profile.model, "");
+  assert.equal(inheritDisabled.profile.baseUrl, "");
+  assert.equal(inheritDisabled.profile.apiKey, "");
+  assert.deepEqual(inheritDisabled.warnings, []);
+});
+
+test("#1481: require-dedicated refuses a missing dedicated API format instead inheriting the primary lane", () => {
+  // The workflow no longer pre-fills ai-confidence-api-format with
+  // SMART_FORMAT, so an unset CONFIDENCE_FORMAT reaches the resolver EMPTY.
+  // Under require-dedicated the wire family is dedicated configuration like
+  // the endpoint, credential, and model: inheriting the primary (or a
+  // smart-derived) family onto a possibly-different dedicated backend is the
+  // same silent primary leakage the mode exists to prevent.
+  const refused = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_PRIMARY_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  // The lane stays ENABLED (the operator asked for it) but resolves no
+  // transport and no inherited family.
+  assert.equal(refused.profile.enabled, true);
+  assert.equal(refused.profile.refusalCause, "dedicated_format_missing");
+  assert.equal(refused.profile.apiFormat, "", "no primary-derived wire family may ride the refused verifier profile");
+  assert.equal(refused.profile.baseUrl, "", "a refused profile carries no transport");
+  assert.equal(refused.profile.apiKey, "", "a refused profile carries no credential");
+  assert.equal(refused.profile.inheritedTransport, false);
+  assert.equal(refused.profile.credentialSource, "own");
+  assert.ok(
+    refused.warnings.some((message) => message.includes("ai-confidence-isolation=require-dedicated") && message.includes("ai-confidence-api-format is empty")),
+    JSON.stringify(refused.warnings),
+  );
+  assert.ok(!refused.warnings.some((message) => message.includes("primary-key")), "no secret value may appear in the warning");
+
+  // An explicitly configured dedicated format always wins, even when it
+  // DIFFERS from the primary lane — that is the point of a dedicated
+  // endpoint — and a fully dedicated configuration resolves clean.
+  const anthropicDedicated = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_PRIMARY_API_FORMAT: "openai",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_API_FORMAT: " anthropic ",
+  });
+  assert.equal(anthropicDedicated.profile.refusalCause, "");
+  assert.equal(anthropicDedicated.profile.apiFormat, "anthropic");
+  assert.deepEqual(anthropicDedicated.warnings, []);
+
+  // The gate also refuses an UNRESOLVABLE family, not only an empty one: a
+  // non-empty value outside the vocabulary (reachable via raw-env override or
+  // a canary $-reference) must still fail closed rather than fall back to the
+  // primary format the way inherit-primary mode does for the same value.
+  const invalidDedicated = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_PRIMARY_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_API_FORMAT: "openai-compatible",
+  });
+  assert.equal(invalidDedicated.profile.refusalCause, "dedicated_format_missing");
+  assert.equal(invalidDedicated.profile.apiFormat, "");
+  // A whitespace-only format carries no family either: same refusal.
+  const blankDedicated = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_API_FORMAT: "   ",
+  });
+  assert.equal(blankDedicated.profile.refusalCause, "dedicated_format_missing");
+  // inherit-primary keeps treating both classes as unset inheritance (the
+  // documented fallback for values the ambient path smuggled past the enum).
+  const invalidInherit = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_PRIMARY_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_API_FORMAT: "openai-compatible",
+  });
+  assert.equal(invalidInherit.profile.refusalCause, "");
+  assert.equal(invalidInherit.profile.apiFormat, "anthropic");
+
+  // Refusal precedence: a missing MODEL is refused before the family is even
+  // consulted (the established model gate stays first), and a missing
+  // ENDPOINT stays ahead of the family gate.
+  const modelFirst = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.equal(modelFirst.profile.refusalCause, "dedicated_model_missing");
+  const endpointBeforeFormat = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.equal(endpointBeforeFormat.profile.refusalCause, "dedicated_config_missing");
+
+  // inherit-primary (the default) keeps the documented inheritance byte for
+  // byte: an empty confidence format still inherits the resolved primary
+  // format — backward compatibility is untouched.
+  const inherited = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_PRIMARY_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  assert.equal(inherited.profile.refusalCause, "");
+  assert.equal(inherited.profile.apiFormat, "anthropic");
+  assert.deepEqual(inherited.warnings, []);
+});
+
+test("#1481: the confidence token-limit field resolves lane-owned, never ambient under require-dedicated", () => {
+  // require-dedicated + UNSET confidence token-param: the primary lane's
+  // max_completion_tokens convention must NOT ride the dedicated verifier.
+  const dedicatedUnset = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_TOKENS_PARAM: "max_completion_tokens",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_API_FORMAT: "openai",
+  });
+  assert.equal(dedicatedUnset.profile.tokensParam, "max_tokens", "a dedicated verifier never inherits the review lane's token-field convention");
+
+  // An explicit confidence value always wins — in BOTH modes.
+  const dedicatedExplicit = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
+    AI_TOKENS_PARAM: "max_tokens",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_BASE_URL: "https://independent", AI_CONFIDENCE_API_KEY: "scorer-key",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+    AI_CONFIDENCE_API_FORMAT: "openai",
+    AI_CONFIDENCE_TOKENS_PARAM: " max_completion_tokens ",
+  });
+  assert.equal(dedicatedExplicit.profile.refusalCause, "");
+  assert.equal(dedicatedExplicit.profile.tokensParam, "max_completion_tokens");
+
+  // inherit-primary + UNSET confidence token-param preserves today's
+  // inheritance of the run's AI_TOKENS_PARAM convention exactly.
+  const inheritMct = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_TOKENS_PARAM: "max_completion_tokens",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  assert.equal(inheritMct.profile.tokensParam, "max_completion_tokens");
+  const inheritDefault = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  assert.equal(inheritDefault.profile.tokensParam, "max_tokens");
+
+  // inherit-primary: the explicit confidence value still wins over the
+  // inherited convention (both directions).
+  const inheritOwnWins = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_TOKENS_PARAM: "max_completion_tokens",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TOKENS_PARAM: "max_tokens",
+  });
+  assert.equal(inheritOwnWins.profile.tokensParam, "max_tokens");
+
+  // The disabled profile carries the documented default shape.
+  const disabled = resolveConfidenceProfile({});
+  assert.equal(disabled.profile.tokensParam, "max_tokens");
+});
+
 test("#1073: same-endpoint same-model scoring emits the independence warning", () => {
   const same = resolveConfidenceProfile({
     AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_API_KEY: "primary-key",
@@ -630,6 +1009,10 @@ test("#1073: confidence profile resolves timeout, effort, and disabled state", (
     enabled: false, baseUrl: "", model: "", apiFormat: "", apiKey: "",
     requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false,
     credentialSource: "own",
+    maxTokens: 4096, promptTokens: 98304, modelContextTokens: 0,
+    anthropicEffortSupported: false, structuredOutputSupported: false,
+    tokensParam: "max_tokens",
+    refusalCause: "",
   });
   assert.deepEqual(disabled.warnings, []);
 
@@ -639,4 +1022,244 @@ test("#1073: confidence profile resolves timeout, effort, and disabled state", (
   });
   assert.equal(orphan.profile.enabled, false);
   assert.deepEqual(orphan.warnings, ["confidence scorer disabled: ai-confidence-base-url set without ai-confidence-model"]);
+});
+
+test("#1368: the confidence profile resolves its token budgets and capability assertions", () => {
+  const configured = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MAX_TOKENS: " 8192 ",
+    AI_CONFIDENCE_PROMPT_TOKENS: "131072",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "200000",
+    AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT: "true",
+    AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT: "TRUE",
+  });
+  assert.equal(configured.profile.maxTokens, 8192);
+  assert.equal(configured.profile.promptTokens, 131072);
+  assert.equal(configured.profile.modelContextTokens, 200000);
+  assert.equal(configured.profile.anthropicEffortSupported, true);
+  assert.equal(configured.profile.structuredOutputSupported, true);
+  assert.deepEqual(configured.warnings, []);
+
+  // Defaults when unset: 4096 / 98304, context unknown (0), both flags off.
+  const defaults = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+  });
+  assert.equal(defaults.profile.maxTokens, 4096);
+  assert.equal(defaults.profile.promptTokens, 98304);
+  assert.equal(defaults.profile.modelContextTokens, 0);
+  assert.equal(defaults.profile.anthropicEffortSupported, false);
+  assert.equal(defaults.profile.structuredOutputSupported, false);
+  assert.deepEqual(defaults.warnings, []);
+});
+
+test("#1368: an invalid token budget falls back to its default with a warning naming the input", () => {
+  for (const [key, value] of [
+    ["AI_CONFIDENCE_MAX_TOKENS", "0"],
+    ["AI_CONFIDENCE_MAX_TOKENS", "-5"],
+    ["AI_CONFIDENCE_MAX_TOKENS", "abc"],
+    ["AI_CONFIDENCE_PROMPT_TOKENS", "1.5"],
+    ["AI_CONFIDENCE_MODEL_CONTEXT_TOKENS", "nope"],
+  ] as const) {
+    const resolved = resolveConfidenceProfile({
+      AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+      [key]: value,
+    });
+    const expected = key === "AI_CONFIDENCE_MAX_TOKENS" ? 4096
+      : key === "AI_CONFIDENCE_PROMPT_TOKENS" ? 98304
+      : 0;
+    assert.equal((resolved.profile as unknown as Record<string, unknown>)[key === "AI_CONFIDENCE_MAX_TOKENS" ? "maxTokens" : key === "AI_CONFIDENCE_PROMPT_TOKENS" ? "promptTokens" : "modelContextTokens"], expected, `${key}=${value}`);
+    assert.ok(resolved.warnings.some((message) => message.includes(key)), `${key}=${value}: ${JSON.stringify(resolved.warnings)}`);
+  }
+});
+
+test("#1368: budgets clamp deterministically against the declared model context", () => {
+  // Every boundary below is expressed against the SYSTEM-INCLUSIVE minimum
+  // prompt budget (`CONFIDENCE_MINIMUM_PROMPT_TOKENS`: the scorer's system
+  // prompt, the empty section scaffolding, and the smallest usable diff),
+  // never against a bare 1,024 — a window that only fit a 1,024-token prompt
+  // still produced requests over the window it declared (#1368 review).
+  const FLOOR = CONFIDENCE_MINIMUM_PROMPT_TOKENS;
+  const env = (extra: Record<string, string>) => ({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer", ...extra,
+  });
+
+  // A completion budget wider than the window is clamped to the window; the
+  // prompt then clamps too (prompt + completion must fit the window), and
+  // the declared window stays an ACTUAL bound (#1368 review).
+  const maxClamped = resolveConfidenceProfile(env({
+    AI_CONFIDENCE_MAX_TOKENS: "4096", AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: String(FLOOR + 100),
+  }));
+  assert.equal(maxClamped.profile.maxTokens, 100);
+  assert.equal(maxClamped.profile.promptTokens, FLOOR);
+  assert.ok(maxClamped.profile.promptTokens + maxClamped.profile.maxTokens <= FLOOR + 100);
+  assert.ok(maxClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS clamped")));
+  assert.ok(maxClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS reduced")));
+  assert.ok(maxClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS clamped")));
+
+  // Prompt + completion over the window clamps the prompt, keeping room for
+  // the completion budget — floored so a tiny window never starves the prompt
+  // below the smallest real request.
+  const promptClamped = resolveConfidenceProfile(env({
+    AI_CONFIDENCE_MAX_TOKENS: "4096", AI_CONFIDENCE_PROMPT_TOKENS: "98304",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "20000",
+  }));
+  assert.equal(promptClamped.profile.promptTokens, 15904);
+  assert.equal(promptClamped.profile.maxTokens, 4096);
+  assert.ok(promptClamped.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS clamped")));
+
+  // The prompt floor never overrides the window: when the completion budget
+  // leaves less than the floor, BOTH budgets are reduced deterministically so
+  // prompt + completion fits the window exactly (#1368 review blocker 1 — the
+  // floor used to break the invariant).
+  const dualReduced = resolveConfidenceProfile(env({
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: String(FLOOR * 2),
+  }));
+  assert.equal(dualReduced.profile.maxTokens, FLOOR);
+  assert.equal(dualReduced.profile.promptTokens, FLOOR);
+  assert.ok(dualReduced.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS reduced")));
+  assert.ok(dualReduced.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS clamped")));
+
+  // Boundary: the smallest window that can still fit the minimum shape
+  // (system-inclusive floor prompt + a positive completion budget).
+  const smallestFitting = resolveConfidenceProfile(env({
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: String(FLOOR + 1),
+  }));
+  assert.equal(smallestFitting.profile.enabled, true);
+  assert.equal(smallestFitting.profile.maxTokens, 1);
+  assert.equal(smallestFitting.profile.promptTokens, FLOOR);
+
+  // An explicitly configured completion budget below the floor is reduced the
+  // same way — the floor stays the minimum prompt shape whatever the operator
+  // configured.
+  const explicitSmall = resolveConfidenceProfile(env({
+    AI_CONFIDENCE_MAX_TOKENS: "100", AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: String(FLOOR + 1),
+  }));
+  assert.equal(explicitSmall.profile.maxTokens, 1);
+  assert.equal(explicitSmall.profile.promptTokens, FLOOR);
+  assert.ok(explicitSmall.warnings.some((message) => message.includes("AI_CONFIDENCE_MAX_TOKENS reduced")));
+
+  // Boundary: a window that cannot fit the minimum shape fails the scorer
+  // profile closed — disabled, loudly, never an over-budget request.
+  for (const tooSmall of [String(FLOOR), String(FLOOR - 1), "1024", "512"]) {
+    const failedClosed = resolveConfidenceProfile(env({
+      AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: tooSmall,
+    }));
+    assert.equal(failedClosed.profile.enabled, false, `context=${tooSmall}`);
+    assert.ok(
+      failedClosed.warnings.some((message) => message.includes("confidence scorer disabled") && message.includes("ai-confidence-model-context-tokens")),
+      `context=${tooSmall}: ${JSON.stringify(failedClosed.warnings)}`,
+    );
+  }
+
+  // The invariant, swept: every window that resolves enabled keeps prompt +
+  // completion inside the declared window AND never leaves a prompt budget
+  // below the system-inclusive floor. Asymmetric budgets are swept too, so a
+  // tiny completion budget beside a huge prompt budget (and the reverse) hits
+  // both the "clamp the prompt" and the "reduce both" branches.
+  const budgetPairs: [string, string][] = [
+    ["1", "1"],
+    ["1", "131072"],
+    ["131072", "1"],
+    ["1024", "4096"],
+    ["4096", "1024"],
+    ["32768", "8192"],
+    ["4096", "4096"],
+  ];
+  for (const window of [FLOOR + 1, FLOOR + 4_096, 20_000, 102_400, 200_000]) {
+    for (const [maxTokensConfigured, promptTokensConfigured] of budgetPairs) {
+      const swept = resolveConfidenceProfile(env({
+        AI_CONFIDENCE_MAX_TOKENS: maxTokensConfigured,
+        AI_CONFIDENCE_PROMPT_TOKENS: promptTokensConfigured,
+        AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: String(window),
+      }));
+      assert.equal(swept.profile.enabled, true, `window=${window} budgets=${maxTokensConfigured}/${promptTokensConfigured}`);
+      assert.ok(
+        swept.profile.promptTokens + swept.profile.maxTokens <= window,
+        `window=${window} budgets=${maxTokensConfigured}/${promptTokensConfigured}: ${swept.profile.promptTokens}+${swept.profile.maxTokens} over ${window}`,
+      );
+      assert.ok(
+        swept.profile.promptTokens >= FLOOR,
+        `window=${window} budgets=${maxTokensConfigured}/${promptTokensConfigured}: prompt budget ${swept.profile.promptTokens} below the ${FLOOR}-token floor`,
+      );
+      assert.ok(
+        swept.profile.maxTokens >= 1,
+        `window=${window} budgets=${maxTokensConfigured}/${promptTokensConfigured}: completion budget ${swept.profile.maxTokens}`,
+      );
+    }
+  }
+
+  // A prompt budget below the floor is raised to it — with a declared window
+  // that has room for it, and without one.
+  const raisedWithWindow = resolveConfidenceProfile(env({
+    AI_CONFIDENCE_PROMPT_TOKENS: "600", AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "20000",
+  }));
+  assert.equal(raisedWithWindow.profile.promptTokens, FLOOR);
+  assert.ok(raisedWithWindow.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS raised")));
+  const raisedNoWindow = resolveConfidenceProfile(env({ AI_CONFIDENCE_PROMPT_TOKENS: "600" }));
+  assert.equal(raisedNoWindow.profile.promptTokens, FLOOR);
+  assert.ok(raisedNoWindow.warnings.some((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS raised")));
+  // A window too small never reports a raise it then discards: the fail-closed
+  // warning is the only budget warning that run makes.
+  const tooSmallWithTinyBudget = resolveConfidenceProfile(env({
+    AI_CONFIDENCE_PROMPT_TOKENS: "600", AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "512",
+  }));
+  assert.equal(tooSmallWithTinyBudget.profile.enabled, false);
+  assert.deepEqual(
+    tooSmallWithTinyBudget.warnings.filter((message) => message.includes("AI_CONFIDENCE_PROMPT_TOKENS")),
+    [],
+    JSON.stringify(tooSmallWithTinyBudget.warnings),
+  );
+
+  // Fitting budgets are never touched and never warn.
+  const fits = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main", AI_CONFIDENCE_MODEL: "scorer",
+    AI_CONFIDENCE_MAX_TOKENS: "4096", AI_CONFIDENCE_PROMPT_TOKENS: "98304",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "102400",
+  });
+  assert.equal(fits.profile.maxTokens, 4096);
+  assert.equal(fits.profile.promptTokens, 98304);
+  assert.deepEqual(fits.warnings, []);
+});
+
+test("#1368: a configured Anthropic effort without the scorer's own opt-in warns and names the input", () => {
+  const resolved = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer", AI_CONFIDENCE_REASONING_EFFORT: "high",
+  });
+  assert.equal(resolved.profile.reasoningEffort, "high");
+  assert.equal(resolved.profile.anthropicEffortSupported, false);
+  assert.equal(resolved.warnings.length, 1);
+  assert.match(resolved.warnings[0]!, /output_config\.effort/);
+  assert.match(resolved.warnings[0]!, /ai-confidence-anthropic-effort-support/);
+
+  // The opt-in silences the warning; the effort is then sent.
+  const asserted = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer", AI_CONFIDENCE_REASONING_EFFORT: "high",
+    AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT: "true",
+  });
+  assert.equal(asserted.profile.anthropicEffortSupported, true);
+  assert.deepEqual(asserted.warnings, []);
+
+  // OpenAI format needs no assertion and never warns about it.
+  const openai = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_CONFIDENCE_MODEL: "scorer", AI_CONFIDENCE_REASONING_EFFORT: "high",
+  });
+  assert.deepEqual(openai.warnings, []);
+
+  // Another lane's assertion is never inherited: the confidence lane has its
+  // own input only.
+  const notInherited = resolveConfidenceProfile({
+    AI_BASE_URL: "https://primary", AI_MODEL: "main",
+    AI_API_FORMAT: "anthropic",
+    AI_CONFIDENCE_MODEL: "scorer", AI_CONFIDENCE_REASONING_EFFORT: "high",
+    AI_ANTHROPIC_EFFORT_SUPPORT: "true",
+    AI_SMART_ANTHROPIC_EFFORT_SUPPORT: "true",
+  });
+  assert.equal(notInherited.profile.anthropicEffortSupported, false);
+  assert.equal(notInherited.warnings.length, 1);
 });

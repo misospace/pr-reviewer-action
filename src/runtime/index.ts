@@ -14,7 +14,10 @@ export {
   MAX_TREE_NODES,
   pgrepAvailable,
   preflightTreeCleanup,
+  processCanExecute,
+  processPresent,
   terminateProcessTree,
+  terminateProcessTreeByPid,
   type TerminationReport,
 } from "./process-tree.js";
 export {

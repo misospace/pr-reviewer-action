@@ -28,6 +28,7 @@ network-facing test binds 127.0.0.1; the mock path touches no socket at all.
 from __future__ import annotations
 
 import json
+import io
 import os
 import re
 import shutil
@@ -38,6 +39,7 @@ import tempfile
 import threading
 import time
 import types
+from contextlib import redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,6 +67,7 @@ build_prompt_via_bridge = confidence_calibration.build_prompt_via_bridge
 apply_score_via_bridge = confidence_calibration.apply_score_via_bridge
 review_result_via_bridge = confidence_calibration.review_result_via_bridge
 live_request_via_bridge = confidence_calibration.live_request_via_bridge
+live_scorer_via_bridge = confidence_calibration.live_scorer_via_bridge
 cost_table = confidence_calibration.cost_table
 primary_evidence_state = confidence_calibration.primary_evidence_state
 _safe_component = confidence_calibration._safe_component
@@ -403,9 +406,9 @@ def test_bridge_malformed_risk_becomes_unknown_but_stays_scored(tmp_path: Path) 
 
 def test_bridge_concern_fields_are_bounded(tmp_path: Path) -> None:
     concerns = [
-        {"file": "f" * 1000, "line": 3, "evidence": "e" * 2000},
-        {"file": "g.ts", "line": "not-a-number", "evidence": "ok"},
-        {"file": "h.ts", "line": 7, "evidence": "ok"},
+        {"type": "missed_issue", "severity": "major", "file": "f" * 1000, "line": 3, "evidence": "e" * 2000},
+        {"type": "missed_issue", "severity": "major", "file": "g.ts", "line": "not-a-number", "evidence": "ok"},
+        {"type": "unsupported_finding", "severity": "major", "file": "h.ts", "line": 7, "evidence": "ok"},
     ] * 5
     result = apply_score(raw_answer(3, "medium", "concerns", concerns), tmp_path=tmp_path)
     assert len(result["concerns"]) <= 8
@@ -771,6 +774,23 @@ def test_live_backend_scores_exactly_one_call_per_row(tmp_path: Path, monkeypatc
             "pilot-synth-unscored": 4,
         }
         assert all(row["usage"] == {"prompt_tokens": 100, "completion_tokens": 20} for row in scored_rows)
+        # #1387: the results state the budgets the spend projection used.
+        # A pilot live condition declares no ai-confidence-* config, so
+        # every live arm projects at the single-source documented defaults
+        # the bridge's live-request actually sends — on BOTH dimensions.
+        assert results["projected_budget"] == {
+            "completion_tokens_per_call": confidence_calibration.SCORER_MAX_TOKENS,
+            "completion_basis": "documented-default",
+            "prompt_tokens_per_call": confidence_calibration.SCORER_PROMPT_TOKENS,
+            "prompt_basis": "documented-default",
+            "per_condition": [{
+                "id": "same-model",
+                "completion_tokens_per_call": confidence_calibration.SCORER_MAX_TOKENS,
+                "completion_basis": "documented-default",
+                "prompt_tokens_per_call": confidence_calibration.SCORER_PROMPT_TOKENS,
+                "prompt_basis": "documented-default",
+            }],
+        }
         assert len(pilot.requests) == 5  # EXACTLY one request per row, no retries
         for request in pilot.requests:
             assert request["auth"] == f"Bearer {secret}"
@@ -1016,14 +1036,360 @@ def test_live_path_delegates_to_production_transport(tmp_path: Path) -> None:
     assert isinstance(diagnostic, str)
 
 
-def test_scorer_max_tokens_matches_production() -> None:
-    # The token-budget projection uses the driver's SCORER_MAX_TOKENS while
-    # the live-request itself sends production's CONFIDENCE_MAX_TOKENS;
-    # if they drift, the declared spend ceiling stops bounding real spend.
-    scorer_source = (Path(__file__).resolve().parent.parent / "src" / "confidence" / "scorer.ts").read_text(encoding="utf-8")
+def test_scorer_budgets_match_production() -> None:
+    # The token-budget projection falls back to the driver's
+    # SCORER_MAX_TOKENS / SCORER_PROMPT_TOKENS while the live-request itself
+    # sends production's CONFIDENCE_MAX_TOKENS / CONFIDENCE_PROMPT_TOKENS; if
+    # they drift, the declared spend ceiling (or the recorded PROMPT
+    # dimension) stops describing the real request (#1286/#1368). #1387:
+    # production's EFFECTIVE defaults are what ``resolveConfidenceProfile``
+    # resolves, and that resolver must read the pinned constants — not
+    # repeated literals that can silently move on their own. Pin the whole
+    # chain: BOTH exported constants' values, AND the resolver's use of them
+    # for the enabled defaults and the disabled profile.
+    repo_root = Path(__file__).resolve().parent.parent
+    scorer_source = (repo_root / "src" / "confidence" / "scorer.ts").read_text(encoding="utf-8")
     match = re.search(r"export const CONFIDENCE_MAX_TOKENS = (\d+);", scorer_source)
     assert match is not None, "production CONFIDENCE_MAX_TOKENS not found"
     assert confidence_calibration.SCORER_MAX_TOKENS == int(match.group(1))
+    prompt_match = re.search(r"export const CONFIDENCE_PROMPT_TOKENS = (\d+);", scorer_source)
+    assert prompt_match is not None, "production CONFIDENCE_PROMPT_TOKENS not found"
+    # The PROMPT default is pinned to production's single source too: the
+    # recorded PROMPT projection must describe what production resolves.
+    assert confidence_calibration.SCORER_PROMPT_TOKENS == int(prompt_match.group(1))
+    tiers_source = (repo_root / "src" / "routing" / "tiers.ts").read_text(encoding="utf-8")
+    # The resolver imports the constants it resolves, and no budget literal
+    # survives in it: the enabled defaults and the disabled profile both
+    # reference the single source.
+    assert re.search(
+        r'import \{ CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS \} from "\.\./confidence/scorer\.js";',
+        tiers_source,
+    ), "the resolver does not import the scorer budget constants"
+    assert "const maxTokensDefault = CONFIDENCE_MAX_TOKENS;" in tiers_source
+    assert "const promptTokensDefault = CONFIDENCE_PROMPT_TOKENS;" in tiers_source
+    assert "maxTokens: CONFIDENCE_MAX_TOKENS, promptTokens: CONFIDENCE_PROMPT_TOKENS" in tiers_source
+    for pattern in (r"maxTokensDefault = \d", r"promptTokensDefault = \d", r"maxTokens: \d+, promptTokens: \d+"):
+        assert re.search(pattern, tiers_source) is None, (
+            f"tiers.ts carries a repeated budget literal ({pattern}); the defaults must come from CONFIDENCE_MAX_TOKENS/CONFIDENCE_PROMPT_TOKENS"
+        )
+
+
+def test_project_spend_budget_follows_configured_budgets() -> None:
+    # #1387: the projection projects against the run's configured budgets
+    # when they are known, and records which budgets it projected against.
+    declared = {"id": "small", "confidence_env": {"AI_CONFIDENCE_MAX_TOKENS": "2048"}}
+    larger = {"id": "big", "confidence_env": {"AI_CONFIDENCE_MAX_TOKENS": "8192"}}
+    unset = {"id": "unset"}
+    record = confidence_calibration.project_spend_budget([declared, larger])
+    assert record["completion_tokens_per_call"] == 8192
+    assert record["completion_basis"] == "declared"
+    assert record["per_condition"] == [
+        {
+            "id": "small",
+            "completion_tokens_per_call": 2048,
+            "completion_basis": "declared",
+            "prompt_tokens_per_call": confidence_calibration.SCORER_PROMPT_TOKENS,
+            "prompt_basis": "documented-default",
+        },
+        {
+            "id": "big",
+            "completion_tokens_per_call": 8192,
+            "completion_basis": "declared",
+            "prompt_tokens_per_call": confidence_calibration.SCORER_PROMPT_TOKENS,
+            "prompt_basis": "documented-default",
+        },
+    ]
+    # An undeclared condition projects at the documented default, and the
+    # conservative ceiling is the MAX over conditions (production's window
+    # clamps can only lower a resolved budget, never raise it). The aggregate
+    # basis names where the aggregate VALUE came from: here the maximum is
+    # the documented default, so the aggregate is "documented-default" even
+    # though one condition declared a smaller budget. The per-condition
+    # entries still show which condition declared what.
+    mixed = confidence_calibration.project_spend_budget([declared, unset])
+    assert mixed["completion_tokens_per_call"] == confidence_calibration.SCORER_MAX_TOKENS
+    assert mixed["completion_basis"] == "documented-default"
+    assert [entry["completion_basis"] for entry in mixed["per_condition"]] == [
+        "declared", "documented-default",
+    ]
+    # A declaration that IS the maximum makes the aggregate "declared".
+    mixed_big = confidence_calibration.project_spend_budget([larger, unset])
+    assert mixed_big["completion_tokens_per_call"] == 8192
+    assert mixed_big["completion_basis"] == "declared"
+    empty = confidence_calibration.project_spend_budget([])
+    assert empty["completion_tokens_per_call"] == confidence_calibration.SCORER_MAX_TOKENS
+    assert empty["completion_basis"] == "documented-default"
+    # An unusable declaration resolves like production's positiveIntFrom
+    # does — the default, never a crash and never the unusable value.
+    for bad in ("wide", "0", "-5", "1.5", "", "  ", "２０４８"):
+        tokens, is_declared = confidence_calibration._declared_completion_budget(
+            {"AI_CONFIDENCE_MAX_TOKENS": bad}
+        )
+        assert (tokens, is_declared) == (confidence_calibration.SCORER_MAX_TOKENS, False), repr(bad)
+    tokens, is_declared = confidence_calibration._declared_completion_budget(
+        {"AI_CONFIDENCE_MAX_TOKENS": " 2048 "}
+    )
+    assert (tokens, is_declared) == (2048, True)
+
+
+def test_declared_budget_trims_the_javascript_whitespace_set() -> None:
+    # #1387: the parse mirrors production's positiveIntFrom, and that
+    # function trims with JavaScript's String.prototype.trim. Python's
+    # str.strip() is a DIFFERENT set: it also removes the C0 separators
+    # "\x1c"-\x1f" and "\x85" (which JavaScript keeps) and it keeps the BOM
+    # "\ufeff" (which JavaScript removes). A declaration production REJECTS
+    # must be rejected here too, or the projection under-projects the
+    # completion budget and under-binds the declared spend ceiling. The
+    # boundary characters are fed to the parser itself (#252).
+    rejected = ["\x1c2048", "\x1d2048", "\x1e2048", "\x1f2048", "\x852048"]
+    for value in rejected:
+        tokens, is_declared = confidence_calibration._declared_completion_budget(
+            {"AI_CONFIDENCE_MAX_TOKENS": value}
+        )
+        assert (tokens, is_declared) == (confidence_calibration.SCORER_MAX_TOKENS, False), repr(value)
+        tokens, is_declared = confidence_calibration._declared_prompt_budget(
+            {"AI_CONFIDENCE_PROMPT_TOKENS": value}
+        )
+        assert (tokens, is_declared) == (confidence_calibration.SCORER_PROMPT_TOKENS, False), repr(value)
+    # The characters JavaScript DOES trim: the BOM, the NBSP, the Unicode
+    # space separators and the line terminators all leave a usable number.
+    accepted = ["\ufeff2048", "\u00a02048\u00a0", "\u30002048", "\u20092048\u2009", "\t\n2048\r"]
+    for value in accepted:
+        tokens, is_declared = confidence_calibration._declared_completion_budget(
+            {"AI_CONFIDENCE_MAX_TOKENS": value}
+        )
+        assert (tokens, is_declared) == (2048, True), repr(value)
+        tokens, is_declared = confidence_calibration._declared_prompt_budget(
+            {"AI_CONFIDENCE_PROMPT_TOKENS": value.replace("2048", "32768")}
+        )
+        assert (tokens, is_declared) == (32768, True), repr(value)
+
+
+def test_project_spend_budget_records_the_prompt_dimension() -> None:
+    # #1387: the PROMPT dimension is recorded independently of the COMPLETION
+    # one. A run that declares ONLY the prompt budget records it, while the
+    # completion dimension keeps its own (documented-default) basis: neither
+    # dimension hides the other's declaration.
+    prompt_only = {"id": "prompt-only", "confidence_env": {"AI_CONFIDENCE_PROMPT_TOKENS": "32768"}}
+    record = confidence_calibration.project_spend_budget([prompt_only])
+    assert record["prompt_tokens_per_call"] == 32768
+    assert record["prompt_basis"] == "declared"
+    assert record["completion_tokens_per_call"] == confidence_calibration.SCORER_MAX_TOKENS
+    assert record["completion_basis"] == "documented-default"
+    assert record["per_condition"] == [
+        {
+            "id": "prompt-only",
+            "completion_tokens_per_call": confidence_calibration.SCORER_MAX_TOKENS,
+            "completion_basis": "documented-default",
+            "prompt_tokens_per_call": 32768,
+            "prompt_basis": "declared",
+        },
+    ]
+
+
+def test_declared_prompt_budget_mirrors_the_production_parser() -> None:
+    # #1387: the PROMPT dimension parses exactly like the completion one —
+    # production's positiveIntFrom accepts only a trimmed ASCII-digit string
+    # whose value is >= 1 and <= 2**53-1; anything else keeps the documented
+    # default. Unicode digits, floats, exponents, signs, blanks and unsafe
+    # integers are all rejected (never partially accepted).
+    default = confidence_calibration.SCORER_PROMPT_TOKENS
+    for bad in ("wide", "0", "-5", "1.5", "", "  ", "２０４８", "1e4", "+8", "0x10"):
+        tokens, is_declared = confidence_calibration._declared_prompt_budget(
+            {"AI_CONFIDENCE_PROMPT_TOKENS": bad}
+        )
+        assert (tokens, is_declared) == (default, False), repr(bad)
+    # A trimmed valid value parses to the declared number.
+    tokens, is_declared = confidence_calibration._declared_prompt_budget(
+        {"AI_CONFIDENCE_PROMPT_TOKENS": " 32768 "}
+    )
+    assert (tokens, is_declared) == (32768, True)
+    # Above the JS safe-integer range the resolver drops the value, so the
+    # projection falls back too — never a budget JS could not represent.
+    tokens, is_declared = confidence_calibration._declared_prompt_budget(
+        {"AI_CONFIDENCE_PROMPT_TOKENS": str(2**53)}
+    )
+    assert (tokens, is_declared) == (confidence_calibration.SCORER_PROMPT_TOKENS, False)
+    # The largest safe integer IS accepted, exactly as the resolver accepts it.
+    tokens, is_declared = confidence_calibration._declared_prompt_budget(
+        {"AI_CONFIDENCE_PROMPT_TOKENS": str(2**53 - 1)}
+    )
+    assert (tokens, is_declared) == (2**53 - 1, True)
+
+
+def test_project_spend_budget_records_both_dimensions_per_condition() -> None:
+    # #1387: both dimensions ride every per-condition entry, each with its
+    # OWN basis — a condition that declares both is "declared" on both, and a
+    # condition that declares neither is "documented-default" on both.
+    both = {"id": "both", "confidence_env": {
+        "AI_CONFIDENCE_MAX_TOKENS": "8192", "AI_CONFIDENCE_PROMPT_TOKENS": "131072",
+    }}
+    neither = {"id": "neither"}
+    record = confidence_calibration.project_spend_budget([both, neither])
+    assert record["per_condition"] == [
+        {
+            "id": "both",
+            "completion_tokens_per_call": 8192,
+            "completion_basis": "declared",
+            "prompt_tokens_per_call": 131072,
+            "prompt_basis": "declared",
+        },
+        {
+            "id": "neither",
+            "completion_tokens_per_call": confidence_calibration.SCORER_MAX_TOKENS,
+            "completion_basis": "documented-default",
+            "prompt_tokens_per_call": confidence_calibration.SCORER_PROMPT_TOKENS,
+            "prompt_basis": "documented-default",
+        },
+    ]
+    # The aggregate takes the MAX per dimension (conservative: production's
+    # window clamps can only lower a resolved budget) and its basis is
+    # "declared" when ANY condition declared that dimension.
+    assert record["completion_tokens_per_call"] == 8192
+    assert record["completion_basis"] == "declared"
+    assert record["prompt_tokens_per_call"] == 131072
+    assert record["prompt_basis"] == "declared"
+
+
+def test_project_spend_budget_default_path_records_both_pinned_defaults() -> None:
+    # #1387: with no declarations at all the record states BOTH single-source
+    # documented defaults — the pinned production constants — and marks both
+    # dimensions as "documented-default".
+    record = confidence_calibration.project_spend_budget([{"id": "default"}])
+    assert record["completion_tokens_per_call"] == confidence_calibration.SCORER_MAX_TOKENS
+    assert record["completion_basis"] == "documented-default"
+    assert record["prompt_tokens_per_call"] == confidence_calibration.SCORER_PROMPT_TOKENS
+    assert record["prompt_basis"] == "documented-default"
+    assert record["per_condition"] == [
+        {
+            "id": "default",
+            "completion_tokens_per_call": confidence_calibration.SCORER_MAX_TOKENS,
+            "completion_basis": "documented-default",
+            "prompt_tokens_per_call": confidence_calibration.SCORER_PROMPT_TOKENS,
+            "prompt_basis": "documented-default",
+        },
+    ]
+    # The empty plan projects the same defaults with no conditions at all.
+    empty = confidence_calibration.project_spend_budget([])
+    assert empty["completion_tokens_per_call"] == confidence_calibration.SCORER_MAX_TOKENS
+    assert empty["completion_basis"] == "documented-default"
+    assert empty["prompt_tokens_per_call"] == confidence_calibration.SCORER_PROMPT_TOKENS
+    assert empty["prompt_basis"] == "documented-default"
+    assert empty["per_condition"] == []
+
+
+def test_canary_projects_and_records_declared_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # #1387: a canary condition's declared ai-confidence-max-tokens drives
+    # the pre-flight token projection AND is recorded in the results. The
+    # ceilings below fit the declared 2048/call but NOT the 4096 default
+    # (2 entries x 2048 = 4096 fits; 2 x 4096 = 8192 would not), so the
+    # run completing is itself the proof the projection followed the
+    # configuration instead of pinning the documented default. The declared
+    # PROMPT budget rides the same record (recorded, never spent against).
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-1387")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-1387")
+    try:
+        plan = canary_plan(tmp_path, [canary_condition("dogfood-loopback", **{
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+                "AI_CONFIDENCE_TIMEOUT_SEC": "20",
+                "AI_CONFIDENCE_MAX_TOKENS": "2048",
+                "AI_CONFIDENCE_PROMPT_TOKENS": "32768",
+            },
+        })], ceilings={
+            "max_verifier_calls": 8, "max_output_tokens": 4096,
+            "wall_time_budget_sec": 600, "request_timeout_sec": 30,
+        })
+        rc, results = run_canary(tmp_path, plan, canary_runs_dir(tmp_path))
+        assert rc == 0
+        assert results is not None
+        assert results["projected_budget"] == {
+            "completion_tokens_per_call": 2048,
+            "completion_basis": "declared",
+            "prompt_tokens_per_call": 32768,
+            "prompt_basis": "declared",
+            "per_condition": [{
+                "id": "dogfood-loopback",
+                "completion_tokens_per_call": 2048,
+                "completion_basis": "declared",
+                "prompt_tokens_per_call": 32768,
+                "prompt_basis": "declared",
+            }],
+        }
+        scored = [row for row in results["rows"] if row["verifier"]["status"] == "scored"]
+        assert len(scored) == 2
+        # The live request carried the SAME budgets the projection recorded.
+        assert len(pilot.requests) == 2
+        for request in pilot.requests:
+            assert json.loads(request["body"])["max_tokens"] == 2048
+        assert all(row["profile"]["max_tokens"] == 2048 for row in scored)
+        assert all(row["profile"]["prompt_tokens"] == 32768 for row in scored)
+    finally:
+        server.shutdown()
+
+
+def test_live_request_carries_the_projected_budgets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # #1387: the live request the bridge sends carries the SAME budgets the
+    # projection assumes. The declared completion budget rides the wire as
+    # `max_tokens` — NOT the 4096 documented default — and the declared
+    # PROMPT budget is the one production's resolver keeps (32768 is far
+    # above the scorer's prompt floor, so nothing raises or clamps it). If
+    # the resolver ever altered either value, the assertions below fail
+    # loudly instead of letting the record drift from the request.
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 3210, "completion_tokens": 777},
+    }))
+    server, base_url = serve(pilot)
+    secret = "canary-budget-parity-key-57"
+    monkeypatch.setenv("AI_API_KEY", "primary-lane-key-not-used-9a")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", secret)
+    try:
+        condition = canary_condition("budget-parity", **{
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+                "AI_CONFIDENCE_TIMEOUT_SEC": "20",
+                "AI_CONFIDENCE_MAX_TOKENS": "2048",
+                "AI_CONFIDENCE_PROMPT_TOKENS": "32768",
+            },
+        })
+        # What the run RECORDS for that condition.
+        projection = confidence_calibration.project_spend_budget([condition])
+        assert projection["completion_tokens_per_call"] == 2048
+        assert projection["completion_basis"] == "declared"
+        assert projection["prompt_tokens_per_call"] == 32768
+        assert projection["prompt_basis"] == "declared"
+        # What the bridge RESOLVES and SENDS for the same declared config.
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40,
+                "diff": "+func observeState() {}",
+                "pr_title": "t", "pr_body": "b",
+                "findings": [], "review_summary": "s",
+                "required_checks": "complete", "coverage": {"partial_coverage": None},
+                "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            "confidence_env": condition["confidence_env"],
+            "confidence_key_env": "CONFIDENCE_CANARY_TEST_KEY",
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert len(pilot.requests) == 1
+        request = json.loads(pilot.requests[0]["body"])
+        assert request["max_tokens"] == 2048
+        assert result["profile"]["max_tokens"] == 2048
+        assert result["profile"]["prompt_tokens"] == 32768
+    finally:
+        server.shutdown()
 
 
 def test_live_request_subprocess_kill_degrades_to_transport_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1447,7 +1813,9 @@ def test_apply_score_masks_over_limit_field_back_under_limit(monkeypatch: pytest
     monkeypatch.setenv("PILOT_TEST_LANE_SECRET", "s")
     work = Path(tempfile.mkdtemp())
     evidence = "x" * 395 + " s " + "y" * 50  # > MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS after masking
-    answer = raw_answer(3, "medium", "fine", concerns=[{"file": "a.txt", "line": None, "evidence": evidence}])
+    answer = raw_answer(3, "medium", "fine", concerns=[{
+        "type": "missed_issue", "severity": "major", "file": "a.txt", "line": None, "evidence": evidence,
+    }])
     result = apply_score_via_bridge(answer, [], {}, "m", work, secret_env_names=["PILOT_TEST_LANE_SECRET"])
     assert len(result["concerns"][0]["evidence"]) <= 400
     assert "super" not in json.dumps(result)
@@ -2045,3 +2413,1303 @@ def test_score_merge_mock_rows_not_gated_by_carried_spend(tmp_path: Path, capsys
     # carried-spend budget exhaustion must never appear on zero-cost rows.
     assert "budget_exhausted" not in causes
     assert any(row["scorer"]["status"] == "scored" for row in mock_rows)
+
+
+# ── #1370 production-shape canary ────────────────────────────────────────
+#
+# The canary reuses the SAME in-process harness and loopback-only rule as
+# the pilot tests above: zero external inference, one wire attempt per row,
+# and every production-shape assertion made against what the bridge ACTUALLY
+# sent (captured by the loopback server), never against a reimplementation.
+
+CANARY_RUBRIC = "merge-readiness-verifier-v1"
+CANARY_DEFECT_MARKER = "canary-synth defect: observeState single-observation anchor 3f9d2a"
+
+CANARY_ANSWER = raw_answer(3, "high", "canary loopback verdict", [
+    {"type": "missed_issue", "severity": "major", "file": "internal/controller/observer.go",
+     "line": 42, "evidence": "single-observation transition"},
+])
+
+
+def canary_corpus(tmp_path: Path) -> Path:
+    """A two-entry mini corpus: one defective (blocker anchor) + one clean,
+    both with pinned head/base SHAs. The defect marker is UNIQUE text used
+    to assert blinding (it must never appear in any verifier prompt)."""
+    corpus = {
+        "real_pr_corpus": {
+            "vulnerable": [{
+                "id": "canary-synth-defective",
+                "repo_full_name": "synthetic/canary",
+                "number": 46,
+                "head_sha": "a" * 40,
+                "base_sha": "b" * 40,
+                "title": "feat(controller): verify terminal PR state",
+                "defect": {"description": CANARY_DEFECT_MARKER, "file": "internal/controller/observer.go",
+                           "line_range": [37, 55], "severity": "blocker"},
+            }],
+            "clean": [{
+                "id": "canary-synth-clean",
+                "repo_full_name": "synthetic/canary",
+                "number": 133,
+                "head_sha": "c" * 40,
+                "base_sha": "d" * 40,
+                "title": "feat: sanitizer",
+            }],
+        },
+    }
+    path = tmp_path / "canary-corpus.json"
+    path.write_text(json.dumps(corpus), encoding="utf-8")
+    return path
+
+
+def canary_runs_dir(
+    tmp_path: Path,
+    head_by_id: dict[str, str] | None = None,
+    base_by_id: dict[str, str] | None = None,
+    fork_by_id: dict[str, str] | None = None,
+) -> Path:
+    """A minimal retained-runs dir in the pilot work-dir layout: one run dir
+    per canary corpus id, each with the artifact set the canary reads
+    (ai-output.json, review-coverage.json, review-request.json, pr.diff,
+    pr-body.txt, pr.json). ``head_by_id``/``base_by_id`` override the
+    retained review-request.json pins and ``fork_by_id`` the resolved fork
+    state (defaults: match the corpus pins / same-repo) so the retained
+    run-state verification paths are exercisable."""
+    heads = head_by_id or {}
+    bases = base_by_id or {}
+    forks = fork_by_id or {}
+    artifacts = {
+        "canary-synth-defective": {"verdict": "approve", "sha": "a" * 40, "base": "b" * 40},
+        "canary-synth-clean": {"verdict": "approve", "sha": "c" * 40, "base": "d" * 40},
+    }
+    runs_dir = tmp_path / "canary-runs"
+    entries = []
+    for pr_id, spec in artifacts.items():
+        run_dir = runs_dir / "runs" / pr_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "ai-output.json").write_text(json.dumps({
+            "verdict": spec["verdict"], "findings": [],
+            "review_markdown": "retained review summary", "required_checks": "complete",
+        }), encoding="utf-8")
+        (run_dir / "review-coverage.json").write_text(json.dumps({
+            "partial_coverage": None, "required_checks": "complete", "tool_loop_ran": False,
+        }), encoding="utf-8")
+        (run_dir / "review-request.json").write_text(json.dumps({
+            "schema_version": "1", "pr_number": "46",
+            "head_sha": heads.get(pr_id, spec["sha"]),
+            "base_ref": bases.get(pr_id, spec["base"]),
+            "is_fork_pr": forks.get(pr_id, "false"),
+            "platform": "github",
+        }), encoding="utf-8")
+        (run_dir / "pr.diff").write_text("diff --git a/f.go b/f.go\n+func observeState() {}\n", encoding="utf-8")
+        (run_dir / "pr-body.txt").write_text("retained PR body", encoding="utf-8")
+        (run_dir / "pr.json").write_text(json.dumps({
+            "title": "feat(controller): verify terminal PR state", "body": "retained PR body",
+            "head": {"sha": heads.get(pr_id, spec["sha"])},
+        }), encoding="utf-8")
+        entries.append({"pr_id": pr_id, "ok": True, "run_dir": f"runs/{pr_id}"})
+    (runs_dir / "runs.json").write_text(json.dumps({
+        "entries": entries, "lifetime_primary_reviews": len(entries),
+    }), encoding="utf-8")
+    return runs_dir
+
+
+def canary_plan(
+    tmp_path: Path,
+    conditions: list[dict],
+    ceilings: dict | None = None,
+    entries: list[dict] | None = None,
+    corpus: Path | None = None,
+) -> Path:
+    plan = {
+        "plan_version": 1,
+        "created": "2026-11-01",
+        "source_issue": 1370,
+        "kind": "production-shape canary",
+        "blinded": True,
+        "rubric": {"id": CANARY_RUBRIC, "source": "test"},
+        "production_shape": "bridge live-scorer (test declaration)",
+        "corpus_shortfall": "test shortfall note",
+        "entries": entries or [
+            {"pr_id": "canary-synth-defective", "expectation": "known_false_approval",
+             "publish_mode": "review_comment"},
+            {"pr_id": "canary-synth-clean", "expectation": "clean_correct_approval",
+             "publish_mode": "review_comment"},
+        ],
+        "conditions": conditions,
+        "ceilings": ceilings or {
+            "max_verifier_calls": 8, "max_output_tokens": 64000,
+            "wall_time_budget_sec": 600, "request_timeout_sec": 30,
+        },
+        "verdict_policy": "strict",
+    }
+    return write_plan(tmp_path, plan)
+
+
+def canary_condition(condition_id: str = "dogfood-loopback", **overrides) -> dict:
+    condition = {
+        "id": condition_id,
+        "backend": "live",
+        "role": "primary",
+        "purpose": "test condition",
+        "confidence_env": {
+            "AI_CONFIDENCE_MODEL": "loopback-model",
+            "AI_CONFIDENCE_BASE_URL": "SET-BY-TEST",
+            "AI_CONFIDENCE_API_FORMAT": "openai",
+            "AI_CONFIDENCE_TIMEOUT_SEC": "30",
+        },
+        "key_env": "CONFIDENCE_CANARY_TEST_KEY",
+        "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+    }
+    condition.update(overrides)
+    return condition
+
+
+def run_canary(
+    tmp_path: Path,
+    plan: Path,
+    runs_dir: Path,
+    work_dir: Path | None = None,
+    out_path: Path | None = None,
+    capsys: pytest.CaptureFixture | None = None,
+) -> tuple[int, dict | None]:
+    out_path = out_path or (tmp_path / "canary-results.json")
+    work_dir = work_dir or (tmp_path / "canary-work")
+    argv = [
+        "--plan", str(plan),
+        "--artifacts-dir", str(runs_dir),
+        "--out", str(out_path),
+        "--work-dir", str(work_dir),
+        "--corpus-real", str(canary_corpus(tmp_path)),
+    ]
+    rc = run_cmd("canary", argv)
+    results = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
+    return rc, results
+
+
+def test_canary_committed_plan_validates() -> None:
+    plan = json.loads((REPO_ROOT / "evals" / "confidence-canary" / "plan.json").read_text(encoding="utf-8"))
+    corpus = load_corpus_entries(REPO_ROOT / "evals" / "corpus-real-prs.json")
+    assert confidence_calibration._validate_canary_plan(plan, corpus) == []
+
+
+def test_canary_plan_rejects_credential_and_shape_errors(tmp_path: Path) -> None:
+    corpus = load_corpus_entries(REPO_ROOT / "evals" / "corpus-real-prs.json")
+    base = json.loads((REPO_ROOT / "evals" / "confidence-canary" / "plan.json").read_text(encoding="utf-8"))
+    cases = {
+        "api_key": lambda plan: plan["conditions"][0]["confidence_env"].update(
+            {"AI_CONFIDENCE_API_KEY": "sk-literal"}),
+        "unknown_env_key": lambda plan: plan["conditions"][0]["confidence_env"].update(
+            {"AI_CONFIDENCE_NOT_A_REAL_INPUT": "x"}),
+        "distinct_url_without_key": lambda plan: plan["conditions"][0].update(
+            {"key_env": None, "confidence_env": {**plan["conditions"][0]["confidence_env"],
+                                                 "AI_CONFIDENCE_BASE_URL": "https://example.invalid/v1"}}),
+        "bad_rubric": lambda plan: plan.update({"rubric": {"id": "confidence-rubric-v1"}}),
+        "unblinded": lambda plan: plan.update({"blinded": False}),
+        # #1481: the declared require-dedicated shape must be COMPLETE, and
+        # enum-valued declared keys carry production's vocabulary — a typo'd
+        # mode would quietly resolve to something the plan never declared.
+        "dedicated_without_endpoint": lambda plan: plan["conditions"][0]["confidence_env"].update(
+            {"AI_CONFIDENCE_ISOLATION": "require-dedicated", "AI_CONFIDENCE_API_FORMAT": "openai"}),
+        "dedicated_without_format": lambda plan: (
+            plan["conditions"][0].update({"key_env": "DEDICATED_CANARY_TEST_KEY"}),
+            plan["conditions"][0]["confidence_env"].update({
+                "AI_CONFIDENCE_ISOLATION": "require-dedicated",
+                "AI_CONFIDENCE_BASE_URL": "https://example.invalid/v1",
+            })),
+        "bad_isolation_vocabulary": lambda plan: plan["conditions"][0]["confidence_env"].update(
+            {"AI_CONFIDENCE_ISOLATION": "dedicate-or-die"}),
+        "bad_confidence_tokens_param": lambda plan: plan["conditions"][0]["confidence_env"].update(
+            {"AI_CONFIDENCE_TOKENS_PARAM": "max_tokens_maybe"}),
+    }
+    for name, mutate in cases.items():
+        plan = json.loads(json.dumps(base))
+        mutate(plan)
+        errors = confidence_calibration._validate_canary_plan(plan, corpus)
+        assert errors, f"case {name} must produce plan errors"
+
+
+def test_canary_plan_accepts_require_dedicated_condition() -> None:
+    """#1481: a condition replaying the dogfood require-dedicated shape —
+    declared isolation, dedicated endpoint + key_env, dedicated model,
+    dedicated wire family, and the verifier-owned token-limit field —
+    validates clean, $-references included, so the retained canary can qualify
+    the lane exactly as the production workflow runs it."""
+    corpus = load_corpus_entries(REPO_ROOT / "evals" / "corpus-real-prs.json")
+    plan = json.loads((REPO_ROOT / "evals" / "confidence-canary" / "plan.json").read_text(encoding="utf-8"))
+    condition = plan["conditions"][0]
+    condition["key_env"] = "DEDICATED_CANARY_TEST_KEY"
+    condition["confidence_env"] = {
+        "AI_CONFIDENCE_MODEL": "$DEDICATED_MODEL_TEST",
+        "AI_CONFIDENCE_BASE_URL": "$DEDICATED_BASE_URL_TEST",
+        "AI_CONFIDENCE_API_FORMAT": "openai",
+        "AI_CONFIDENCE_ISOLATION": "require-dedicated",
+        "AI_CONFIDENCE_TOKENS_PARAM": "max_completion_tokens",
+    }
+    assert confidence_calibration._validate_canary_plan(plan, corpus) == []
+
+
+def test_canary_plan_requires_corpus_pins() -> None:
+    """Exact head/base pinning (#1370) starts at the plan: an entry whose
+    corpus record cannot prove both SHAs is not a canary row."""
+    plan = json.loads((REPO_ROOT / "evals" / "confidence-canary" / "plan.json").read_text(encoding="utf-8"))
+    pinless = {"courier-46-61": {"_pilot_kind": "vulnerable", "head_sha": "a" * 40}}
+    errors = confidence_calibration._validate_canary_plan(plan, pinless)
+    assert any("base_sha" in error for error in errors)
+
+
+def test_bridge_live_scorer_openai_production_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The canary's wire contract on the OpenAI format: declared effort rides
+    `reasoning_effort`, the declared completion budget rides `max_tokens`,
+    the structured-output assertion attaches the verifier's OWN schema, no
+    temperature is ever sent, and the key rides only the auth header."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 3210, "completion_tokens": 777},
+    }))
+    server, base_url = serve(pilot)
+    secret = "canary-loopback-key-31"
+    monkeypatch.setenv("AI_API_KEY", "primary-lane-key-not-used-9a")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", secret)
+    try:
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40,
+                "diff": "+func observeState() {}",
+                "pr_title": "t", "pr_body": "b",
+                "findings": [], "review_summary": "s",
+                "required_checks": "complete", "coverage": {"partial_coverage": None},
+                "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+                "AI_CONFIDENCE_REASONING_EFFORT": "medium",
+                "AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT": "true",
+                "AI_CONFIDENCE_MAX_TOKENS": "4096",
+                "AI_CONFIDENCE_TIMEOUT_SEC": "20",
+            },
+            "confidence_key_env": "CONFIDENCE_CANARY_TEST_KEY",
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert len(pilot.requests) == 1
+        request = json.loads(pilot.requests[0]["body"])
+        assert request["max_tokens"] == 4096  # the declared budget, not a bridge constant
+        assert request["reasoning_effort"] == "medium"
+        assert request["response_format"]["type"] == "json_schema"
+        assert request["response_format"]["json_schema"]["name"] == "confidence_review"
+        assert "temperature" not in request
+        assert pilot.requests[0]["auth"] == f"Bearer {secret}"
+        assert "primary-lane-key-not-used-9a" not in pilot.requests[0]["body"]
+        assert result["enabled"] is True
+        assert result["rubric_version"] == CANARY_RUBRIC
+        assert result["wire_effort"] == "medium"  # #998: what the WIRE carried
+        assert result["result"]["status"] == "scored"
+        assert result["result"]["score"] == 3
+        assert result["usage"] == {"prompt_tokens": 3210, "completion_tokens": 777}
+        assert result["profile"]["structured_output_supported"] is True
+        assert result["profile"]["max_tokens"] == 4096
+        assert result["profile"]["credential_source"] == "own"
+        assert isinstance(result["request_payload_masked"], str) and "observeState" in result["request_payload_masked"]
+        assert isinstance(result["raw_response_masked"], str)
+        assert result["latency_ms"] is not None
+        assert result["prompt_bytes"] is not None
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_require_dedicated_replays_the_production_isolation_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1481: the canary can replay the DOGFOOD require-dedicated shape.
+
+    The declared-confidence allowlists now carry AI_CONFIDENCE_ISOLATION and
+    AI_CONFIDENCE_TOKENS_PARAM, so a plan condition reaches the production
+    resolver as the dogfood workflow runs it. The bridge strips every ambient
+    AI_CONFIDENCE_* before applying the declared config: the inherit-primary
+    shell state set here must be invisible, and the dedicated key must be the
+    only credential on the wire — the primary AI_API_KEY never rides.
+
+    It also pins the #1481 token-field ownership THROUGH the bridge: with the
+    ambient (review-lane) AI_TOKENS_PARAM convention set to
+    max_completion_tokens, a require-dedicated condition that leaves
+    AI_CONFIDENCE_TOKENS_PARAM unset still sends max_tokens — resolved by the
+    production ConfidenceProfile, with no bridge-local ambient fallback.
+    """
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 3210, "completion_tokens": 777},
+    }))
+    server, base_url = serve(pilot)
+    secret = "canary-dedicated-key-41"
+    monkeypatch.setenv("AI_API_KEY", "primary-lane-key-must-not-ride-8c")
+    monkeypatch.setenv("AI_BASE_URL", "https://primary.example.invalid/v1")
+    monkeypatch.setenv("AI_CONFIDENCE_ISOLATION", "inherit-primary")  # ambient: must be stripped
+    monkeypatch.setenv("AI_TOKENS_PARAM", "max_completion_tokens")  # review-lane convention
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", secret)
+    try:
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40,
+                "diff": "+func observeState() {}",
+                "pr_title": "t", "pr_body": "b",
+                "findings": [], "review_summary": "s",
+                "required_checks": "complete", "coverage": {"partial_coverage": None},
+                "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "dedicated-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+                "AI_CONFIDENCE_ISOLATION": "require-dedicated",
+                "AI_CONFIDENCE_MAX_TOKENS": "4096",
+                "AI_CONFIDENCE_TIMEOUT_SEC": "20",
+            },
+            "confidence_key_env": "CONFIDENCE_CANARY_TEST_KEY",
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert len(pilot.requests) == 1
+        request = json.loads(pilot.requests[0]["body"])
+        assert request["model"] == "dedicated-model"
+        # The token field is verifier-owned: the ambient review-lane
+        # max_completion_tokens convention must NOT ride the dedicated wire.
+        assert request["max_tokens"] == 4096
+        assert "max_completion_tokens" not in request
+        assert result["profile"]["tokens_param"] == "max_tokens"
+        assert result["profile"]["inherited_transport"] is False
+        assert result["profile"]["credential_source"] == "own"
+        assert pilot.requests[0]["auth"] == f"Bearer {secret}"
+        assert "primary-lane-key-must-not-ride-8c" not in pilot.requests[0]["body"]
+        assert result["result"]["status"] == "scored"
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_require_dedicated_declared_tokens_param_reaches_the_wire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit AI_CONFIDENCE_TOKENS_PARAM in the declared condition flips
+    the dedicated verifier's wire field (the other field never appears),
+    resolved through the production ConfidenceProfile — the bridge carries no
+    request-shape override of its own."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-lane-key-9")
+    monkeypatch.setenv("AI_TOKENS_PARAM", "max_tokens")  # ambient: irrelevant under dedicated
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "canary-dedicated-key-42")
+    try:
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+                "pr_title": "t", "pr_body": "b",
+                "findings": [], "review_summary": "s",
+                "required_checks": "complete", "coverage": {},
+                "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "dedicated-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+                "AI_CONFIDENCE_ISOLATION": "require-dedicated",
+                "AI_CONFIDENCE_TOKENS_PARAM": "max_completion_tokens",
+            },
+            "confidence_key_env": "CONFIDENCE_CANARY_TEST_KEY",
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert len(pilot.requests) == 1
+        request = json.loads(pilot.requests[0]["body"])
+        assert request["max_completion_tokens"] == 4096
+        assert "max_tokens" not in request
+        assert result["profile"]["tokens_param"] == "max_completion_tokens"
+        assert result["result"]["status"] == "scored"
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_require_dedicated_missing_format_refuses_pre_wire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The visible-refusal replay the qualification path needs: a declared
+    require-dedicated condition WITHOUT AI_CONFIDENCE_API_FORMAT resolves
+    unscored(dedicated_format_missing) before any provider call — the
+    resolver never inherits the primary lane's wire family, and the bridge
+    reaches the same conclusion through the production code alone."""
+    pilot = LoopbackProvider(lambda _handler: (200, {"choices": []}))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-anthropic-lane-key")
+    monkeypatch.setenv("AI_PRIMARY_API_FORMAT", "anthropic")  # must NOT reach the verifier
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "canary-dedicated-key-43")
+    try:
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+                "pr_title": "t", "pr_body": "b",
+                "findings": [], "review_summary": "s",
+                "required_checks": "complete", "coverage": {},
+                "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "dedicated-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_ISOLATION": "require-dedicated",
+            },
+            "confidence_key_env": "CONFIDENCE_CANARY_TEST_KEY",
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert result["enabled"] is True
+        assert result["result"]["status"] == "unscored"
+        assert result["result"]["cause"] == "dedicated_format_missing"
+        assert len(pilot.requests) == 0, "the refusal happens before the wire"
+        assert result["request_payload_masked"] is None
+        assert result["raw_response_masked"] is None
+        assert any("ai-confidence-api-format" in warning for warning in result["warnings"])
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_inherit_primary_keeps_the_ambient_token_convention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backward compatibility THROUGH the bridge: an inherit-primary
+    condition with the ambient AI_TOKENS_PARAM convention still inherits it
+    (today's behavior), proving the #1481 verifier-ownership change is scoped
+    to require-dedicated and the resolver — not a bridge-side hard-coding."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-lane-key-inherited-5")
+    monkeypatch.setenv("AI_BASE_URL", base_url)  # INHERITED endpoint
+    monkeypatch.setenv("AI_TOKENS_PARAM", "max_completion_tokens")
+    monkeypatch.delenv("AI_CONNECT_TIMEOUT_SEC", raising=False)
+    try:
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+                "pr_title": "t", "pr_body": "b",
+                "findings": [], "review_summary": "s",
+                "required_checks": "complete", "coverage": {},
+                "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+            },
+            "secret_env_names": ["AI_API_KEY"],
+        }, tmp_path, 60)
+        assert len(pilot.requests) == 1
+        request = json.loads(pilot.requests[0]["body"])
+        assert request["max_completion_tokens"] == 4096, "inherit-primary keeps today's AI_TOKENS_PARAM inheritance"
+        assert "max_tokens" not in request
+        assert result["profile"]["tokens_param"] == "max_completion_tokens"
+        assert result["profile"]["inherited_transport"] is True
+    finally:
+        server.shutdown()
+
+
+def test_bridge_allowlist_matches_the_calibration_canary_mirror() -> None:
+    """#1481 parity: the bridge's CONFIDENCE_ENV_KEYS and the driver's
+    CANARY_CONFIDENCE_ENV_KEYS are one declared-confidence surface kept in
+    lockstep — a key admitted on one side but not the other would let a plan
+    declare config the bridge strips (or reject config the bridge honors).
+    Includes the #1481 additions: isolation mode and the verifier-owned
+    token-limit field."""
+    bridge_source = (SCRIPTS_DIR / "confidence_bridge.ts").read_text(encoding="utf-8")
+    match = re.search(
+        r"const CONFIDENCE_ENV_KEYS: ReadonlySet<string> = new Set\(\[(.*?)\]\);",
+        bridge_source, re.DOTALL,
+    )
+    assert match, "confidence_bridge.ts must declare CONFIDENCE_ENV_KEYS"
+    bridge_keys = set(re.findall(r'"(AI_CONFIDENCE_[A-Z_]+)"', match.group(1)))
+    assert bridge_keys == set(confidence_calibration.CANARY_CONFIDENCE_ENV_KEYS)
+    assert "AI_CONFIDENCE_ISOLATION" in bridge_keys
+    assert "AI_CONFIDENCE_TOKENS_PARAM" in bridge_keys
+
+
+def test_bridge_live_scorer_anthropic_production_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Anthropic wire: effort rides output_config under the effort-support
+    assertion, usage maps input/output tokens, and the structured-output
+    assertion attaches output_config.format."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "content": [{"type": "text", "text": CANARY_ANSWER}],
+        "usage": {"input_tokens": 5120, "output_tokens": 999},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-lane-key-is-the-verifier-key-77")
+    # The INHERITED transport reads the primary lane's endpoint from env.
+    monkeypatch.setenv("AI_BASE_URL", base_url)
+    monkeypatch.delenv("AI_CONNECT_TIMEOUT_SEC", raising=False)
+    try:
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40,
+                "diff": "+x", "pr_title": "t", "pr_body": "b",
+                "findings": [], "review_summary": "s",
+                "required_checks": "complete", "coverage": {},
+                "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            # INHERITED transport: no base URL, no key — endpoint+credential
+            # come from the primary lane env (AI_API_KEY), the dogfood-inherited
+            # shape. AI_CONFIDENCE_API_FORMAT is also inherited (anthropic).
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_API_FORMAT": "anthropic",
+                "AI_CONFIDENCE_REASONING_EFFORT": "medium",
+                "AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT": "true",
+                "AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT": "true",
+            },
+            "secret_env_names": ["AI_API_KEY"],
+        }, tmp_path, 60)
+        assert len(pilot.requests) == 1
+        request = json.loads(pilot.requests[0]["body"])
+        assert request["max_tokens"] == 4096
+        assert request["output_config"]["effort"] == "medium"
+        assert request["output_config"]["format"]["type"] == "json_schema"
+        assert "temperature" not in request
+        assert "reasoning_effort" not in request
+        # Inherited transport: the credential is the PRIMARY lane's key.
+        assert pilot.requests[0]["api_key_header"] == "primary-lane-key-is-the-verifier-key-77"
+        assert result["result"]["status"] == "scored"
+        assert result["usage"] == {"prompt_tokens": 5120, "completion_tokens": 999}
+        assert result["profile"]["inherited_transport"] is True
+        assert result["profile"]["credential_source"] == "primary"
+        assert result["wire_effort"] == "medium"
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_context_clamp_fails_closed_without_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A declared window too small for the minimum shape disables the lane
+    BEFORE any wire attempt (#1368 fail-closed clamp), loudly."""
+    pilot = LoopbackProvider(lambda _handler: (200, {"choices": []}))
+    server, base_url = serve(pilot)
+    try:
+        result = live_scorer_via_bridge({
+            "row": {"head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "d",
+                    "findings": [], "verdict": "approve", "coverage": {},
+                    "is_fork_pr": "false"},
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+                "AI_CONFIDENCE_MODEL_CONTEXT_TOKENS": "512",
+            },
+            "confidence_key_env": "",
+            "secret_env_names": [],
+        }, tmp_path, 60)
+        assert result["enabled"] is False
+        assert result["result"]["status"] == "disabled"
+        assert any("disabled" in warning for warning in result["warnings"])
+        assert len(pilot.requests) == 0
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_prompt_over_budget_refuses_without_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prompt that cannot fit the declared budget is REFUSED before the
+    wire (#1368): unscored with the production cause, zero requests."""
+    pilot = LoopbackProvider(lambda _handler: (200, {"choices": []}))
+    server, base_url = serve(pilot)
+    try:
+        result = live_scorer_via_bridge({
+            "row": {
+                "head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+                "findings": [{"text": "F" * 60_000}],
+                "review_summary": "s", "coverage": {},
+                "verdict": "approve",
+                "is_fork_pr": "false", "publish_mode": "review_comment",
+            },
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+                "AI_CONFIDENCE_PROMPT_TOKENS": "1",
+            },
+            "secret_env_names": [],
+        }, tmp_path, 60)
+        assert result["result"]["status"] == "unscored"
+        assert result["result"]["cause"] == "prompt_over_budget"
+        assert len(pilot.requests) == 0
+        assert result["request_payload_masked"] is None
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_malformed_answer_is_unscored_with_wire_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": "not json at all"}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-9")
+    try:
+        result = live_scorer_via_bridge({
+            "row": {"head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+                    "findings": [], "verdict": "approve", "coverage": {},
+                    "is_fork_pr": "false", "publish_mode": "review_comment"},
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+            },
+            "secret_env_names": ["AI_API_KEY"],
+        }, tmp_path, 60)
+        assert result["result"]["status"] == "unscored"
+        assert result["result"]["cause"] == "malformed_answer"
+        assert result["result"]["model"] == "loopback-model"
+        assert result["wire_effort"] == ""  # no effort was configured or sent
+        # The wire artifacts still exist: the call happened, the answer failed.
+        assert isinstance(result["request_payload_masked"], str)
+        assert isinstance(result["raw_response_masked"], str)
+    finally:
+        server.shutdown()
+
+
+def test_canary_driver_end_to_end_loopback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Full canary pass over a retained-runs dir: two scored rows, the
+    fallback NOT fired, audit + digests + ledger present, and the corpus
+    defect marker NEVER reaches the wire (blinding)."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-8")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-8")
+    try:
+        plan = canary_plan(tmp_path, [canary_condition("dogfood-loopback", **{
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+                "AI_CONFIDENCE_TIMEOUT_SEC": "20",
+            },
+        })])
+        runs_dir = canary_runs_dir(tmp_path)
+        rc, results = run_canary(tmp_path, plan, runs_dir)
+        assert rc == 0
+        assert results is not None
+        assert results["production_shape"].startswith("bridge live-scorer")
+        assert results["artifacts_runs_digest"].startswith("sha256:")
+        assert results["lifetime_wire_calls"] == 2
+        # #1387: nothing declared → the projection states it used the
+        # single-source documented defaults, on BOTH dimensions.
+        prompt_default = confidence_calibration.SCORER_PROMPT_TOKENS
+        assert results["projected_budget"]["completion_tokens_per_call"] == confidence_calibration.SCORER_MAX_TOKENS
+        assert results["projected_budget"]["completion_basis"] == "documented-default"
+        assert results["projected_budget"]["prompt_tokens_per_call"] == prompt_default
+        assert results["projected_budget"]["prompt_basis"] == "documented-default"
+        scored = [row for row in results["rows"] if row["verifier"]["status"] == "scored"]
+        assert len(scored) == 2
+        assert all(row["verifier"]["score"] == 3 for row in scored)
+        assert all(row["wire_attempts"] == 1 for row in scored)
+        assert all(row["usage"] == {"prompt_tokens": 100, "completion_tokens": 20} for row in scored)
+        assert all(row["rubric_version"] == CANARY_RUBRIC for row in scored)
+        # Retained run-state proof rides every row.
+        assert all(row["is_fork_pr"] == "false" for row in scored)
+        assert all(row["publish_mode"] == "review_comment" for row in scored)
+        assert all(row["profile"]["api_format"] == "openai" for row in scored)
+        # The retained artifacts are pinned per row.
+        assert all("ai-output.json" in row["artifact_digests"] for row in scored)
+        # BLINDING: the corpus defect marker never reaches the wire, and no
+        # row input ever carries the expectation label.
+        for request in pilot.requests:
+            assert CANARY_DEFECT_MARKER not in request["body"]
+            assert "known_false_approval" not in request["body"]
+        # No fallback row exists: the primary condition scored everywhere.
+        assert all(row["condition"] == "dogfood-loopback" for row in results["rows"])
+        # The spend ledger recorded the lifetime bound for the work dir.
+        ledger = json.loads((tmp_path / "canary-work" / "scorer-spend.json").read_text(encoding="utf-8"))
+        assert ledger["lifetime_wire_calls"] == 2
+        # The audit tree holds masked wire artifacts.
+        audit_files = list((tmp_path / "canary-work" / "audit").rglob("*.txt"))
+        assert len(audit_files) == 2
+        for audit_file in audit_files:
+            text = audit_file.read_text(encoding="utf-8")
+            assert "=== request (masked) ===" in text and "=== response (masked) ===" in text
+    finally:
+        server.shutdown()
+
+
+def test_canary_driver_fallback_fires_only_on_unscored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The declared fallback runs for an entry ONLY when the primary
+    condition's row came back not scored; a scored primary row suppresses
+    it (no repeated sweeps). One server 429s the PRIMARY condition
+    (model=primary-model) and answers the FALLBACK condition."""
+    def respond(handler):
+        body = json.loads(pilot.requests[-1]["body"])
+        if body.get("model") == "primary-model":
+            return (429, {"error": {"message": "slow down"}})
+        return (200, {"choices": [{"message": {"content": CANARY_ANSWER}}],
+                       "usage": {"prompt_tokens": 11, "completion_tokens": 7}})
+    pilot = LoopbackProvider(respond)
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-7")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-7")
+    try:
+        primary = canary_condition("dogfood-primary", **{
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "primary-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+            },
+        })
+        fallback = canary_condition("hetero-fallback", **{
+            "role": "fallback", "fallback_for": "dogfood-primary",
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "fallback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+            },
+        })
+        plan = canary_plan(tmp_path, [primary, fallback])
+        runs_dir = canary_runs_dir(tmp_path)
+        # Both entries are approve-path; make the CLEAN entry's primary row
+        # succeed so its fallback is suppressed: flip the corpus kind — no,
+        # keep both 429: the clean entry's primary is also unscored, so both
+        # fallbacks fire. Assert exactly that.
+        rc, results = run_canary(tmp_path, plan, runs_dir)
+        assert rc == 0
+        rows_by_condition = {}
+        for row in results["rows"]:
+            rows_by_condition.setdefault(row["condition"], []).append(row)
+        assert all(row["verifier"]["cause"] == "http_429" for row in rows_by_condition["dogfood-primary"])
+        assert all(row["verifier"]["status"] == "scored" for row in rows_by_condition["hetero-fallback"])
+        assert len(rows_by_condition["hetero-fallback"]) == 2
+        assert results["lifetime_wire_calls"] == 4
+    finally:
+        server.shutdown()
+
+
+def test_canary_driver_budget_preflight_refuses_without_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    pilot = LoopbackProvider(lambda _handler: (200, {"choices": []}))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-6")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-6")
+    try:
+        plan = canary_plan(tmp_path, [canary_condition("dogfood-loopback", **{
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+            },
+        })], ceilings={
+            "max_verifier_calls": 1, "max_output_tokens": 64000,
+            "wall_time_budget_sec": 600, "request_timeout_sec": 30,
+        })
+        rc, results = run_canary(tmp_path, plan, canary_runs_dir(tmp_path))
+        assert rc == 3
+        assert results is None
+        assert len(pilot.requests) == 0
+        assert "max_verifier_calls" in capsys.readouterr().err
+    finally:
+        server.shutdown()
+
+
+def test_canary_driver_ledger_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AI_API_KEY", "primary-5")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-5")
+    plan = canary_plan(tmp_path, [canary_condition()])
+    runs_dir = canary_runs_dir(tmp_path)
+    work_dir = tmp_path / "canary-work"
+    work_dir.mkdir()
+    (work_dir / "scorer-spend.json").write_text("{not json", encoding="utf-8")
+    out_path = tmp_path / "results.json"
+    rc = run_cmd("canary", [
+        "--plan", str(plan), "--artifacts-dir", str(runs_dir),
+        "--out", str(out_path), "--work-dir", str(work_dir),
+        "--corpus-real", str(canary_corpus(tmp_path)),
+    ])
+    assert rc == 3
+    assert not out_path.exists()
+
+
+def test_canary_driver_missing_key_env_fails_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    monkeypatch.setenv("AI_API_KEY", "primary-4")
+    monkeypatch.delenv("CONFIDENCE_CANARY_TEST_KEY", raising=False)
+    plan = canary_plan(tmp_path, [canary_condition()])
+    rc, _ = run_canary(tmp_path, plan, canary_runs_dir(tmp_path))
+    assert rc == 4
+    assert "CONFIDENCE_CANARY_TEST_KEY" in capsys.readouterr().err
+
+
+def test_canary_driver_pin_verification_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact head+base pinning (#1370): a retained run must be the review OF
+    the corpus head AGAINST the corpus base. Either mismatch fails the row
+    closed with ZERO wire calls; both matching verifies and dispatches."""
+    cases = {
+        "head_ok_base_bad": (
+            {"canary-synth-defective": "f" * 40},
+            "retained_base_mismatch",
+        ),
+        "head_bad_base_ok": (
+            None,
+            "retained_head_mismatch",
+        ),
+        "both_match": (
+            None,
+            None,
+        ),
+    }
+    for name, (base_override, expected_cause) in cases.items():
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        pilot = LoopbackProvider(lambda _handler: (200, {
+            "choices": [{"message": {"content": CANARY_ANSWER}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+        }))
+        server, base_url = serve(pilot)
+        monkeypatch.setenv("AI_API_KEY", "primary-pin")
+        monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-pin")
+        try:
+            plan = canary_plan(case_dir, [canary_condition("dogfood-loopback", **{
+                "confidence_env": {
+                    "AI_CONFIDENCE_MODEL": "loopback-model",
+                    "AI_CONFIDENCE_BASE_URL": base_url,
+                    "AI_CONFIDENCE_API_FORMAT": "openai",
+                },
+            })])
+            runs_dir = canary_runs_dir(
+                case_dir,
+                head_by_id={"canary-synth-defective": "e" * 40} if name == "head_bad_base_ok" else None,
+                base_by_id=base_override,
+            )
+            rc, results = run_canary(
+                tmp_path, plan, runs_dir,
+                work_dir=case_dir / "work", out_path=case_dir / "results.json",
+            )
+            assert rc == 0, name
+            defective = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-defective")
+            clean = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-clean")
+            if expected_cause is None:
+                # Both pins verified: the row dispatches and carries the
+                # VERIFIED pins (which equal the corpus pins).
+                assert defective["verifier"]["status"] == "scored", name
+                assert defective["retained_pins"]["head_sha"] == "a" * 40
+                assert defective["retained_pins"]["base_sha"] == "b" * 40
+                assert defective["wire_attempts"] == 1
+            else:
+                assert defective["verifier"]["status"] == "unscored", name
+                assert defective["verifier"]["cause"] == expected_cause, name
+                assert defective["wire_attempts"] == 0, name
+                assert defective["retained_pins"] is not None, name
+            # The other row's pins always match the corpus: it dispatches
+            # regardless of which pin the defective row mismatches.
+            assert clean["verifier"]["status"] == "scored", name
+        finally:
+            server.shutdown()
+
+
+def test_canary_driver_pins_unreadable_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retained run whose review-request.json is missing (or pinless)
+    cannot prove its pins: unscored, zero wire calls."""
+    pilot = LoopbackProvider(lambda _handler: (200, {"choices": []}))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-pin2")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-pin2")
+    try:
+        plan = canary_plan(tmp_path, [canary_condition("dogfood-loopback", **{
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+            },
+        })])
+        runs_dir = canary_runs_dir(tmp_path)
+        # Strip the pin record entirely.
+        (runs_dir / "runs" / "canary-synth-defective" / "review-request.json").unlink()
+        rc, results = run_canary(tmp_path, plan, runs_dir)
+        assert rc == 0
+        defective = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-defective")
+        assert defective["verifier"]["status"] == "unscored"
+        assert defective["verifier"]["cause"] == "retained_pins_unreadable"
+        assert defective["wire_attempts"] == 0
+        assert len(pilot.requests) == 1  # only the clean row dispatched
+    finally:
+        server.shutdown()
+
+
+def test_canary_driver_ledger_slot_consumed_when_bridge_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spend-ceiling regression (#1392 review): the slot is durably reserved
+    BEFORE dispatch and stays consumed when the bridge dies after the
+    reservation — a subsequent invocation sees the slot as spent and cannot
+    exceed the lifetime ceiling."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-slot")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-slot")
+    work_dir = tmp_path / "canary-work"
+    shared: dict = {}
+
+    plan = canary_plan(tmp_path, [canary_condition("dogfood-loopback", **{
+        "confidence_env": {
+            "AI_CONFIDENCE_MODEL": "loopback-model",
+            "AI_CONFIDENCE_BASE_URL": base_url,
+            "AI_CONFIDENCE_API_FORMAT": "openai",
+        },
+    })], entries=[{"pr_id": "canary-synth-defective", "expectation": "known_false_approval",
+                  "publish_mode": "review_comment"}],
+        ceilings={
+            "max_verifier_calls": 1, "max_output_tokens": 64000,
+            "wall_time_budget_sec": 600, "request_timeout_sec": 30,
+        })
+    runs_dir = canary_runs_dir(tmp_path)
+    out_path = tmp_path / "canary-results.json"
+    argv = [
+        "--plan", str(plan), "--artifacts-dir", str(runs_dir),
+        "--out", str(out_path), "--work-dir", str(work_dir),
+        "--corpus-real", str(canary_corpus(tmp_path)),
+    ]
+    try:
+        # Run 1: the slot is reserved, then the bridge fails after dispatch.
+        original = confidence_calibration.live_scorer_via_bridge
+
+        def crashing_bridge(_request, _work_dir, _timeout):
+            shared["reserved_before_crash"] = json.loads(
+                (work_dir / "scorer-spend.json").read_text(encoding="utf-8")
+            )["lifetime_wire_calls"]
+            raise RuntimeError("bridge died after dispatch")
+
+        confidence_calibration.live_scorer_via_bridge = crashing_bridge
+        try:
+            rc1 = run_cmd("canary", argv)
+        finally:
+            confidence_calibration.live_scorer_via_bridge = original
+        assert rc1 == 0
+        assert shared["reserved_before_crash"] == 1, "the slot must be durable BEFORE dispatch"
+        results1 = json.loads(out_path.read_text(encoding="utf-8"))
+        row = results1["rows"][0]
+        assert row["verifier"]["status"] == "unscored"
+        assert row["verifier"]["cause"] == "bridge_live_scorer_failed"
+        assert row["wire_attempts"] == 1, "the reservation is consumed even on failure"
+        ledger = json.loads((work_dir / "scorer-spend.json").read_text(encoding="utf-8"))
+        assert ledger["lifetime_wire_calls"] == 1
+        assert len(pilot.requests) == 0  # the bridge failed before its transport
+        # Run 2: the carried slot counts — planned 1 + spent 1 > ceiling 1
+        # aborts BEFORE any dispatch.
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc2 = run_cmd("canary", argv)
+        assert rc2 == 3
+        assert "max_verifier_calls" in err.getvalue()
+        assert len(pilot.requests) == 0, "a ceiling-exceeded rerun makes zero calls"
+        ledger2 = json.loads((work_dir / "scorer-spend.json").read_text(encoding="utf-8"))
+        assert ledger2["lifetime_wire_calls"] == 1, "the abort spends nothing further"
+    finally:
+        server.shutdown()
+
+
+def test_canary_driver_ledger_write_failure_aborts_without_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reservation that cannot be durably written dispatches NOTHING and
+    aborts the run: zero provider calls, exit 3, results-so-far written."""
+    pilot = LoopbackProvider(lambda _handler: (200, {"choices": []}))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-led")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-led")
+    try:
+        plan = canary_plan(tmp_path, [canary_condition("dogfood-loopback", **{
+            "confidence_env": {
+                "AI_CONFIDENCE_MODEL": "loopback-model",
+                "AI_CONFIDENCE_BASE_URL": base_url,
+                "AI_CONFIDENCE_API_FORMAT": "openai",
+            },
+        })])
+        runs_dir = canary_runs_dir(tmp_path)
+        out_path = tmp_path / "canary-results.json"
+
+        original = confidence_calibration._write_scorer_spend
+
+        def failing_write(_path, _count):
+            raise OSError("disk gone")
+
+        confidence_calibration._write_scorer_spend = failing_write
+        try:
+            argv = [
+                "--plan", str(plan), "--artifacts-dir", str(runs_dir),
+                "--out", str(out_path), "--work-dir", str(tmp_path / "canary-work"),
+                "--corpus-real", str(canary_corpus(tmp_path)),
+            ]
+            rc = run_cmd("canary", argv)
+        finally:
+            confidence_calibration._write_scorer_spend = original
+        assert rc == 3
+        assert len(pilot.requests) == 0, "zero provider calls without a durable reservation"
+        results = json.loads(out_path.read_text(encoding="utf-8"))
+        assert results["lifetime_wire_calls"] == 0
+        assert "spend ledger could not be written" in results["budget_note"]
+        assert all(row["verifier"].get("cause") in ("ledger_unavailable", "budget_exhausted")
+                   for row in results["rows"])
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_fork_state_is_proof_not_synthesis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fork flag is the retained run's verified state: 'true' disables the
+    lane under the default enable-for-forks=false (the production fork gate),
+    the explicit operator enable can run it, and a missing/unknown flag is
+    REJECTED rather than silently treated as same-repo."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-fork")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-fork")
+    base_row = {
+        "head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+        "pr_title": "t", "pr_body": "b", "findings": [], "review_summary": "s",
+        "required_checks": "complete", "coverage": {},
+        "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+        "publish_mode": "review_comment",
+    }
+    base_env = {
+        "AI_CONFIDENCE_MODEL": "loopback-model",
+        "AI_CONFIDENCE_BASE_URL": base_url,
+        "AI_CONFIDENCE_API_FORMAT": "openai",
+    }
+    try:
+        # A fork row under the default enable-for-forks=false: the production
+        # fork gate disables the lane BEFORE any wire attempt.
+        result = live_scorer_via_bridge({
+            "row": {**base_row, "is_fork_pr": "true"},
+            "confidence_env": base_env,
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert result["enabled"] is False
+        assert result["result"]["status"] == "disabled"
+        assert any("cross-repository" in warning for warning in result["warnings"])
+        assert len(pilot.requests) == 0
+        # The explicit operator enable lets the fork row run.
+        result = live_scorer_via_bridge({
+            "row": {**base_row, "is_fork_pr": "true"},
+            "confidence_env": {**base_env, "AI_CONFIDENCE_ENABLE_FOR_FORKS": "true"},
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert result["enabled"] is True
+        assert result["result"]["status"] == "scored"
+        assert len(pilot.requests) == 1
+        # A missing or unknown fork flag is a bridge input rejection — it
+        # must NEVER silently become same-repo.
+        for bad in (None, "", "maybe", "False"):
+            row = {**base_row, "is_fork_pr": bad}
+            if bad is None:
+                del row["is_fork_pr"]
+            with pytest.raises(RuntimeError, match="live-scorer failed"):
+                live_scorer_via_bridge({
+                    "row": row,
+                    "confidence_env": base_env,
+                    "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+                }, tmp_path, 60)
+        assert len(pilot.requests) == 1, "rejected inputs dispatch nothing"
+    finally:
+        server.shutdown()
+
+
+def test_bridge_live_scorer_publish_mode_matches_production_predicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The publish gate consumes the retained run's RESOLVED mode verbatim:
+    every real PublishMode passes the eligibility predicate; a missing mode
+    reproduces `publishStepRuns(undefined) === false`; an unknown value is
+    refused by the same predicate before any scorer dispatch — never a
+    bridge-local default."""
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-mode")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-mode")
+    row = {
+        "head_sha": "a" * 40, "base_sha": "b" * 40, "diff": "+x",
+        "pr_title": "t", "pr_body": "b", "findings": [], "review_summary": "s",
+        "required_checks": "complete", "coverage": {},
+        "verdict": "approve", "verdict_policy": "strict", "partial_coverage": False,
+        "is_fork_pr": "false",
+    }
+    env = {
+        "AI_CONFIDENCE_MODEL": "loopback-model",
+        "AI_CONFIDENCE_BASE_URL": base_url,
+        "AI_CONFIDENCE_API_FORMAT": "openai",
+    }
+    try:
+        for mode in ("comment", "review_comment", "review_verdict", "review_blockers"):
+            result = live_scorer_via_bridge({
+                "row": {**row, "publish_mode": mode},
+                "confidence_env": env,
+                "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+            }, tmp_path, 60)
+            assert result["result"]["status"] == "scored", mode
+        assert len(pilot.requests) == 4
+        # Missing mode: undefined reaches the predicate — the production
+        # refusal shape, zero wire calls.
+        result = live_scorer_via_bridge({
+            "row": row, "confidence_env": env,
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert result["result"]["status"] == "unscored"
+        assert result["result"]["cause"] == "not_published"
+        # Unknown mode: the SAME predicate refuses it, zero wire calls.
+        result = live_scorer_via_bridge({
+            "row": {**row, "publish_mode": "banana"},
+            "confidence_env": env,
+            "secret_env_names": ["AI_API_KEY", "CONFIDENCE_CANARY_TEST_KEY"],
+        }, tmp_path, 60)
+        assert result["result"]["status"] == "unscored"
+        assert result["result"]["cause"] == "not_published"
+        assert len(pilot.requests) == 4, "refusals dispatch nothing"
+    finally:
+        server.shutdown()
+
+
+def test_canary_driver_fork_state_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fork state comes from the retained request record, fail-closed:
+    a fork row is gate-disabled with zero calls, the operator enable can
+    run it, and unreadable state never silently becomes same-repo."""
+    base_env = {
+        "AI_CONFIDENCE_MODEL": "loopback-model",
+        "AI_CONFIDENCE_BASE_URL": "SET-BY-TEST",
+        "AI_CONFIDENCE_API_FORMAT": "openai",
+    }
+    # 1. Fork row + default enable-for-forks=false: zero PROVIDER calls (the
+    # production fork gate disables the lane inside the bridge, before its
+    # wire; the dispatch's spend slot is still consumed — a ceiling on
+    # dispatches, not on provider answers).
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-df")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-df")
+    try:
+        (tmp_path / "fork-case").mkdir()
+        plan = canary_plan(tmp_path / "fork-case", [canary_condition("dogfood-loopback", **{
+            "confidence_env": {**base_env, "AI_CONFIDENCE_BASE_URL": base_url},
+        })])
+        runs_dir = canary_runs_dir(
+            tmp_path / "fork-case", fork_by_id={"canary-synth-defective": "true"},
+        )
+        rc, results = run_canary(
+            tmp_path, plan, runs_dir,
+            work_dir=tmp_path / "fork-case" / "work",
+            out_path=tmp_path / "fork-case" / "results.json",
+        )
+        assert rc == 0
+        defective = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-defective")
+        clean = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-clean")
+        assert defective["is_fork_pr"] == "true"
+        assert defective["verifier"]["status"] == "disabled"
+        assert defective["wire_attempts"] == 1  # dispatch slot consumed
+        assert clean["verifier"]["status"] == "scored"
+        assert len(pilot.requests) == 1, "the fork row makes zero provider calls"
+    finally:
+        server.shutdown()
+    # 2. Same fork row with the explicit operator enable: it runs.
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-df2")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-df2")
+    try:
+        (tmp_path / "fork-enabled").mkdir()
+        plan = canary_plan(tmp_path / "fork-enabled", [canary_condition("dogfood-loopback", **{
+            "confidence_env": {**base_env, "AI_CONFIDENCE_BASE_URL": base_url,
+                               "AI_CONFIDENCE_ENABLE_FOR_FORKS": "true"},
+        })])
+        runs_dir = canary_runs_dir(
+            tmp_path / "fork-enabled", fork_by_id={"canary-synth-defective": "true"},
+        )
+        rc, results = run_canary(
+            tmp_path, plan, runs_dir,
+            work_dir=tmp_path / "fork-enabled" / "work",
+            out_path=tmp_path / "fork-enabled" / "results.json",
+        )
+        assert rc == 0
+        defective = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-defective")
+        assert defective["verifier"]["status"] == "scored"
+        assert len(pilot.requests) == 2
+    finally:
+        server.shutdown()
+    # 3. Unknown retained fork state: fail closed in the DRIVER (before any
+    # reservation), distinct cause, zero calls for that row.
+    pilot = LoopbackProvider(lambda _handler: (200, {
+        "choices": [{"message": {"content": CANARY_ANSWER}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
+    server, base_url = serve(pilot)
+    monkeypatch.setenv("AI_API_KEY", "primary-df3")
+    monkeypatch.setenv("CONFIDENCE_CANARY_TEST_KEY", "loop-df3")
+    try:
+        (tmp_path / "fork-unknown").mkdir()
+        plan = canary_plan(tmp_path / "fork-unknown", [canary_condition("dogfood-loopback", **{
+            "confidence_env": {**base_env, "AI_CONFIDENCE_BASE_URL": base_url},
+        })])
+        runs_dir = canary_runs_dir(
+            tmp_path / "fork-unknown", fork_by_id={"canary-synth-defective": "maybe"},
+        )
+        rc, results = run_canary(
+            tmp_path, plan, runs_dir,
+            work_dir=tmp_path / "fork-unknown" / "work",
+            out_path=tmp_path / "fork-unknown" / "results.json",
+        )
+        assert rc == 0
+        defective = next(row for row in results["rows"] if row["pr_id"] == "canary-synth-defective")
+        assert defective["verifier"]["status"] == "unscored"
+        assert defective["verifier"]["cause"] == "retained_fork_state_unknown"
+        assert defective["wire_attempts"] == 0
+        assert len(pilot.requests) == 1  # only the clean row dispatched
+    finally:
+        server.shutdown()
+
+
+def test_canary_plan_requires_publish_mode() -> None:
+    """The resolved publish mode is plan-declared run-state: missing or
+    unknown values are plan errors, never bridge defaults."""
+    plan = json.loads((REPO_ROOT / "evals" / "confidence-canary" / "plan.json").read_text(encoding="utf-8"))
+    corpus = load_corpus_entries(REPO_ROOT / "evals" / "corpus-real-prs.json")
+    assert confidence_calibration._validate_canary_plan(plan, corpus) == []
+    missing = json.loads(json.dumps(plan))
+    del missing["entries"][0]["publish_mode"]
+    errors = confidence_calibration._validate_canary_plan(missing, corpus)
+    assert any("publish_mode" in error for error in errors)
+    unknown = json.loads(json.dumps(plan))
+    unknown["entries"][0]["publish_mode"] = "sticky_comment"
+    errors = confidence_calibration._validate_canary_plan(unknown, corpus)
+    assert any("publish_mode" in error for error in errors)

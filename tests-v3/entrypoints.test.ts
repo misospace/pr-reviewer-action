@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { TangledNotImplementedError } from "../src/platform/tangled.js";
-import { buildAdapter, buildPublishApi, publishInputFromEnv, publishMain, readEvent } from "../src/run/entrypoints.js";
+import { buildAdapter, buildPublishApi, publishInputFromEnv, publishMain, publishWithOutcome, readEvent } from "../src/run/entrypoints.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { publishReview } from "../src/publish/publish.js";
+import { buildRunMetadataMarker } from "../src/metadata/markers.js";
 import { parseInlineFindingsMax } from "../src/publish/inline-findings.js";
 import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, PublishPlatformApi, PublishReviewRef } from "../src/platform/publish-api.js";
 
@@ -385,6 +386,130 @@ test("#873: a missing, empty, or structurally unrecognizable review-coverage.jso
   });
 });
 
+// ---------------------------------------------------------------------------
+// #1455: the standalone `publish` CLI must publish the verifier's telemetry
+// too. The values ride the run dir's own `confidence-score.json` artifact,
+// so both publish paths publish ONE record.
+// ---------------------------------------------------------------------------
+
+/** Writes the verifier artifact the review stage produces. */
+function writeConfidenceArtifact(dir: string, overrides: Partial<{
+  version: number;
+  status: string;
+  cause: string;
+  latency_ms: number;
+  usage: Record<string, number>;
+}> = {}): void {
+  const artifact = {
+    version: 2,
+    rubric: "merge-safety-v1",
+    status: "unscored",
+    score: null,
+    risk: "unknown",
+    reason: "",
+    concerns: [],
+    model: "scorer-model",
+    cause: "http_429",
+    caps: [],
+    parser_notes: [],
+    latency_ms: 250,
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    ...overrides,
+  };
+  writeFileSync(join(dir, "confidence-score.json"), JSON.stringify(artifact));
+}
+
+test("#1455: the standalone publish path reads the verifier's telemetry from the run dir artifact", () => {
+  withRunDir((dir) => {
+    writeConfidenceArtifact(dir);
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(input.confidenceTelemetry, {
+      status: "unscored",
+      cause: "http_429",
+      latencyMs: 250,
+      usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+    });
+  });
+});
+
+test("#1455: the standalone publish path publishes the telemetry even when no confidence status reached the environment", () => {
+  // The telemetry carries the status it was measured under, so the marker
+  // does not depend on an ambient CONFIDENCE_STATUS that may be absent or
+  // stale: the standalone CLI publishes what the composite action publishes
+  // for the same run.
+  withRunDir((dir) => {
+    writeConfidenceArtifact(dir);
+    for (const env of [
+      { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" },
+      { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment", CONFIDENCE_STATUS: "unscored" },
+      // A stale status that contradicts the record: the marker must not
+      // carry a cause beside a "scored" claim.
+      { PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment", CONFIDENCE_STATUS: "scored" },
+    ]) {
+      const input = publishInputFromEnv(env as NodeJS.ProcessEnv, "github");
+      // The publish seam builds the marker from the confidence block and the
+      // telemetry exactly as the composite path does.
+      const marker = buildRunMetadataMarker({
+        headSha: "a".repeat(40),
+        baseSha: "b".repeat(40),
+        reviewResult: "clean",
+        ...(input.confidence && input.confidence.status !== ""
+          ? { confidenceStatus: input.confidence.status === "scored" || input.confidence.status === "unscored" ? input.confidence.status : "" }
+          : {}),
+        ...(input.confidenceTelemetry !== undefined ? { confidenceTelemetry: input.confidenceTelemetry } : {}),
+      });
+      assert.match(marker, /"confidence_latency_ms":250/, `marker: ${marker}`);
+      assert.match(marker, /"confidence_prompt_tokens":10/, `marker: ${marker}`);
+      assert.match(marker, /"confidence_total_tokens":15/, `marker: ${marker}`);
+      if (env.CONFIDENCE_STATUS === "scored") {
+        assert.doesNotMatch(marker, /confidence_cause/, "a scored marker carries no cause");
+      } else {
+        assert.match(marker, /"confidence_cause":"http_429"/, `marker: ${marker}`);
+      }
+    }
+  });
+});
+
+test("#1455: a missing, unreadable, or version-mismatched confidence artifact publishes no telemetry", () => {
+  withRunDir((dir) => {
+    // No artifact at all.
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").confidenceTelemetry, undefined);
+  });
+  withRunDir((dir) => {
+    writeFileSync(join(dir, "confidence-score.json"), "not json");
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").confidenceTelemetry, undefined);
+  });
+  withRunDir((dir) => {
+    // A version-1 artifact is a pre-#1369 prose-quality confidence grade:
+    // its semantics are not comparable, so it is trusted for nothing.
+    writeConfidenceArtifact(dir, { version: 1 });
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").confidenceTelemetry, undefined);
+  });
+  withRunDir((dir) => {
+    // A run whose verifier measured no latency and no usage still carries
+    // its unscored cause — that is the fact the collector needs most.
+    writeConfidenceArtifact(dir, { latency_ms: undefined as unknown as number, usage: undefined as unknown as Record<string, number> });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.confidenceTelemetry?.status, "unscored");
+    assert.equal(input.confidenceTelemetry?.cause, "http_429");
+    assert.equal(input.confidenceTelemetry?.latencyMs, null);
+    assert.equal(input.confidenceTelemetry?.usage, null);
+  });
+  withRunDir((dir) => {
+    // A record the verifier never ran for publishes nothing.
+    writeConfidenceArtifact(dir, { status: "disabled" });
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").confidenceTelemetry, undefined);
+  });
+});
+
+test("#1455: a cause that is not a conservative machine token never leaves the artifact", () => {
+  withRunDir((dir) => {
+    writeConfidenceArtifact(dir, { cause: "provider said: rate limited" });
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.confidenceTelemetry?.cause, "");
+  });
+});
+
 test("#873/#838: no explicit PR_REVIEWER_RUN_DIR (absent or empty) fails closed, never falling back to cwd/GITHUB_WORKSPACE", () => {
   for (const env of [
     { PUBLISH_MODE: "comment" },
@@ -397,7 +522,7 @@ test("#873/#838: no explicit PR_REVIEWER_RUN_DIR (absent or empty) fails closed,
   }
 });
 
-test("#873/#1145: the CLI publish path (publishInputFromEnv + publishReview) publishes the approve with the partial-coverage gap stated", async () => {
+test("#873/#1447: the CLI publish path (publishInputFromEnv + publishReview) withholds the approve when partial coverage is persisted", async () => {
   await withRunDirAsync(async (dir) => {
     writeCoverageArtifact(dir, { tool_loop_ran: true, enforcement_harness: "tool-harness.json", partial_coverage: PARTIAL_COVERAGE });
     const head = "a".repeat(40);
@@ -420,11 +545,10 @@ test("#873/#1145: the CLI publish path (publishInputFromEnv + publishReview) pub
     const result = await publishReview(input, api, { diffText: "" });
     assert.equal(result.status, "published");
     assert.equal(api.submitted.length, 1);
-    // #1145: the fail-closed STATE resolution above is the invariant; the
-    // publish mode is authoritative, so the verdict's native event stands
-    // with the gap stated on the body.
-    assert.equal(api.submitted[0]!.event, "APPROVE");
-    assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/);
+    // #1447: the persisted fail-closed state is authoritative; incomplete
+    // coverage withholds the native approval.
+    assert.equal(api.submitted[0]!.event, "COMMENT");
+    assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/);
   });
 });
 
@@ -464,6 +588,204 @@ test("#1161: the CLI publish path publishes the verdict natively, whatever the d
   });
 });
 
+// ── #1520: the publish step is handed the REVIEWED diff on every platform ──
+//
+// `publishWithOutcome` used to give `publishReview` a diff only for Forgejo
+// (and only a FRESH forge read, which races a push). The engine writes the
+// reviewed diff to the run dir as `pr.diff`; the publish boundary now reads
+// that artifact the same way it reads `review-coverage.json`, so GitHub
+// publishes the contract's inline findings and the #762 usefulness-feedback
+// read can see publishable prescriptions there too.
+
+const ANCHORED_DIFF = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n old\n+new line\n";
+
+function inlineFindingsEnv(overrides: Partial<Record<string, string>> = {}): NodeJS.ProcessEnv {
+  return {
+    PUBLISH_MODE: "review_comment",
+    REVIEW_MARKDOWN: "# review",
+    VERDICT: "request_changes",
+    HEAD_SHA: "a".repeat(40),
+    BASE_SHA: "b".repeat(40),
+    PR_NUMBER: "7",
+    COMMENT_MARKER: "<!-- ai-pr-review -->",
+    INLINE_FINDINGS: "true",
+    INLINE_FINDINGS_MAX: "5",
+    FINDINGS: JSON.stringify([{ file: "a.ts", line: 2, severity: "major", category: "bug", message: "unchecked null deref" }]),
+    IS_FORK_PR: "false",
+    ...overrides,
+  } as NodeJS.ProcessEnv;
+}
+
+test("#1520: publishWithOutcome hands the run-dir reviewed diff to publishReview on GitHub (no fresh forge read)", async () => {
+  await withRunDirAsync(async (dir) => {
+    writeFileSync(join(dir, "pr.diff"), ANCHORED_DIFF);
+    const input = publishInputFromEnv(inlineFindingsEnv({ PR_REVIEWER_RUN_DIR: dir }), "github");
+    const api = new MinimalPublishApi("a".repeat(40));
+    // The historical fresh-read source must never run when the run dir
+    // carries the reviewed diff — a fresh read of the CURRENT head races a
+    // push and would anchor on content the review never covered.
+    const seam = {
+      api,
+      platform: "github",
+      diffProvider: async (): Promise<string> => {
+        throw new Error("fresh diff read must not run when the run dir carries the reviewed diff");
+      },
+    };
+    const outcome = await publishWithOutcome(input as never, seam as never, dir);
+    assert.equal(outcome.status, "published");
+    assert.equal(api.submitted.length, 1);
+    const comments = api.submitted[0]!.comments ?? [];
+    assert.equal(comments.length, 1);
+    assert.equal(comments[0]!.path, "a.ts");
+    assert.equal(comments[0]!.line, 2);
+    assert.equal(comments[0]!.side, "RIGHT");
+  });
+});
+
+test("#1520: a present-but-empty pr.diff IS the reviewed diff — no fallback read, empty anchor map", async () => {
+  await withRunDirAsync(async (dir) => {
+    writeFileSync(join(dir, "pr.diff"), "");
+    const input = publishInputFromEnv(inlineFindingsEnv({ PR_REVIEWER_RUN_DIR: dir }), "forgejo");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const seam = {
+      api,
+      platform: "forgejo",
+      diffProvider: async (): Promise<string> => {
+        throw new Error("an empty reviewed diff must not fall back to a fresh forge read");
+      },
+    };
+    const outcome = await publishWithOutcome(input as never, seam as never, dir);
+    assert.equal(outcome.status, "published");
+    // Nothing can anchor on an empty anchor map, so no findings review is
+    // emitted at all (#1093: never an empty native review); the findings stay
+    // in the sticky body instead.
+    assert.equal(api.submitted.length, 0);
+  });
+});
+
+test("#1520: without a run-dir pr.diff the historical per-platform sources still apply", async () => {
+  // GitHub (empty-diff path): the finding can never anchor, no fresh read
+  // exists for it, and the review still publishes body-only.
+  {
+    const input = publishInputFromEnv(inlineFindingsEnv(), "github");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const outcome = await publishWithOutcome(input as never, { api, platform: "github", diffProvider: async () => "" } as never);
+    assert.equal(outcome.status, "published");
+    // The empty diff cannot anchor anything, so no findings review is emitted.
+    assert.equal(api.submitted.length, 0);
+  }
+  // Forgejo (fresh-read fallback): the historical diffProvider is consulted,
+  // and the built comment carries the Forgejo position.
+  await withRunDirAsync(async (dir) => {
+    const input = publishInputFromEnv(inlineFindingsEnv({ PR_REVIEWER_RUN_DIR: dir }), "forgejo");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const seam = { api, platform: "forgejo", diffProvider: async (): Promise<string> => ANCHORED_DIFF };
+    const outcome = await publishWithOutcome(input as never, seam as never, dir);
+    assert.equal(outcome.status, "published");
+    const comments = api.submitted[0]!.comments ?? [];
+    assert.equal(comments.length, 1);
+    assert.equal(typeof (comments[0] as { new_position?: unknown }).new_position, "number");
+  });
+});
+
+test("#1520: the forgejo publish seam's diff provider takes the run dir from the caller, never ambient env", async (t) => {
+  // The mocked fresh read renders as an empty diff, so a regression that
+  // consults ambient env (or reads the wrong run dir) resolves "" here
+  // instead of silently reusing the artifact from another run dir.
+  t.mock.method(globalThis, "fetch", async () => new Response(""));
+  await withRunDirAsync(async (ambientDir) => {
+    writeFileSync(join(ambientDir, "pr.diff"), ANCHORED_DIFF);
+    const env = {
+      REPO: "o/r",
+      PR_NUMBER: "9",
+      PLATFORM: "forgejo",
+      FORGEJO_API_URL: "https://forge.example",
+      PR_REVIEWER_RUN_DIR: ambientDir,
+    } as NodeJS.ProcessEnv;
+    // Single source of truth: ambient `PR_REVIEWER_RUN_DIR` is never
+    // consulted by the diff provider — an omitted run dir falls straight
+    // through to the fresh forge read, even though the ambient env points
+    // at a run dir that carries the reviewed diff.
+    assert.equal(await buildPublishApi(env).diffProvider(), "");
+    // The caller's run dir hits, and the fresh forge read is never reached.
+    await withRunDirAsync(async (callerDir) => {
+      writeFileSync(join(callerDir, "pr.diff"), ANCHORED_DIFF);
+      const seam = buildPublishApi(env, callerDir);
+      assert.equal(seam.platform, "forgejo");
+      assert.equal(await seam.diffProvider(), ANCHORED_DIFF);
+    });
+  });
+});
+
+// #1520 edge-case paths (the AI review's obligation-2): the run-dir `pr.diff`
+// read must fail CLOSED on hostile or malformed path state — a NUL byte in
+// the run-dir path, a symlink planted at the artifact coordinate, a
+// directory at that coordinate — never crash the publish step and never
+// follow a link out of the (trusted, private) run dir.
+
+test("#1520: a NUL byte in the run-dir path fails closed to the historical fallback", async () => {
+  // Every fs call rejects paths containing NUL; the read must be "no
+  // reviewed diff available", not a thrown ERR_INVALID_ARG_VALUE escaping
+  // the publish step.
+  const nullDir = "/run/pr-7\x00";
+  {
+    // GitHub: the fallback is "" and the (never-existing here) fresh read
+    // stays untouched; the review still publishes body-only.
+    const input = publishInputFromEnv(inlineFindingsEnv(), "github");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const outcome = await publishWithOutcome(input as never, { api, platform: "github", diffProvider: async () => "" } as never, nullDir);
+    assert.equal(outcome.status, "published");
+    assert.equal(api.submitted.length, 0);
+  }
+  // Forgejo: the historical fresh-read fallback IS consulted and anchors.
+  const input = publishInputFromEnv(inlineFindingsEnv(), "forgejo");
+  const api = new MinimalPublishApi("a".repeat(40));
+  const seam = { api, platform: "forgejo", diffProvider: async (): Promise<string> => ANCHORED_DIFF };
+  const outcome = await publishWithOutcome(input as never, seam as never, nullDir);
+  assert.equal(outcome.status, "published");
+  const comments = api.submitted[0]!.comments ?? [];
+  assert.equal(comments.length, 1);
+  assert.equal(typeof (comments[0] as { new_position?: unknown }).new_position, "number");
+});
+
+test("#1520: a symlink at the pr.diff coordinate is refused, never followed", async () => {
+  // Same no-follow guarantee as every other security-sensitive artifact
+  // read in this repo (change-anchors head reads, mirror bookkeeping,
+  // controller publication): a link planted at the artifact coordinate is
+  // unproven content and falls back; its target bytes NEVER become the
+  // anchor map.
+  await withRunDirAsync(async (dir) => {
+    const targetDir = mkdtempSync(join(tmpdir(), "v3-publish-entry-outside-"));
+    try {
+      const target = join(targetDir, "reviewed.diff");
+      writeFileSync(target, ANCHORED_DIFF);
+      symlinkSync(target, join(dir, "pr.diff"));
+      const input = publishInputFromEnv(inlineFindingsEnv(), "github");
+      const api = new MinimalPublishApi("a".repeat(40));
+      const outcome = await publishWithOutcome(input as never, { api, platform: "github", diffProvider: async () => "" } as never, dir);
+      assert.equal(outcome.status, "published");
+      // The link target was refused, so the anchor map is empty and nothing
+      // anchors — the same outcome as "no reviewed diff", never the target.
+      assert.equal(api.submitted.length, 0);
+    } finally {
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("#1520: a directory at the pr.diff coordinate falls back like a missing artifact", async () => {
+  // Non-regular files are not the reviewed-diff artifact; the read must
+  // resolve to "unavailable" (fallback), never an EISDIR crash.
+  await withRunDirAsync(async (dir) => {
+    mkdirSync(join(dir, "pr.diff"));
+    const input = publishInputFromEnv(inlineFindingsEnv(), "github");
+    const api = new MinimalPublishApi("a".repeat(40));
+    const outcome = await publishWithOutcome(input as never, { api, platform: "github", diffProvider: async () => "" } as never, dir);
+    assert.equal(outcome.status, "published");
+    assert.equal(api.submitted.length, 0);
+  });
+});
+
 test("#873/#838 regression: a partial primary harness is never hidden by an omitted or stale-'off' ambient TOOL_MODE", async () => {
   // The exact maintainer-flagged bug: the artifact itself records the real
   // partial run; ambient TOOL_MODE — which `publish` no longer consults at
@@ -477,8 +799,8 @@ test("#873/#838 regression: a partial primary harness is never hidden by an omit
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published", JSON.stringify(toolModeOverride));
-      assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify(toolModeOverride));  // #1145
-      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/, JSON.stringify(toolModeOverride));
+      assert.equal(api.submitted[0]!.event, "COMMENT", JSON.stringify(toolModeOverride));  // #1447: incomplete/unknown coverage withholds trusted approval
+      assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/, JSON.stringify(toolModeOverride));
     });
   }
 });
@@ -503,8 +825,8 @@ test("#873/#838 regression: a complete primary harness never hides a partial sma
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published", JSON.stringify(routeOverride));
-      assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify(routeOverride));  // #1145
-      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/, JSON.stringify(routeOverride));
+      assert.equal(api.submitted[0]!.event, "COMMENT", JSON.stringify(routeOverride));  // #1447: incomplete/unknown coverage withholds trusted approval
+      assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/, JSON.stringify(routeOverride));
     });
   }
 });
@@ -525,8 +847,8 @@ test("#873/#838 regression: an incomplete required_checks is never hidden by an 
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published", JSON.stringify(requiredChecksOverride));
-      assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify(requiredChecksOverride));  // #1145
-      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/, JSON.stringify(requiredChecksOverride));
+      assert.equal(api.submitted[0]!.event, "COMMENT", JSON.stringify(requiredChecksOverride));  // #1447: incomplete/unknown coverage withholds trusted approval
+      assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/, JSON.stringify(requiredChecksOverride));
     });
   }
 });
@@ -541,7 +863,7 @@ test("#873/#838 regression: tool_loop_ran:true with an unrecognized enforcement_
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published", JSON.stringify(enforcementHarness));
-      assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify(enforcementHarness));  // #1145: fail-closed STATE, verdict publishes
+      assert.equal(api.submitted[0]!.event, "COMMENT", JSON.stringify(enforcementHarness));  // #1447: incomplete/unknown coverage withholds trusted approval
       assert.match(api.submitted[0]!.body, /could not be verified/, JSON.stringify(enforcementHarness));
     });
   }
@@ -559,7 +881,7 @@ test("#873/#838 regression: tool_loop_ran:true naming a missing enforcement_harn
     const api = new MinimalPublishApi("a".repeat(40));
     const result = await publishReview(input, api, { diffText: "" });
     assert.equal(result.status, "published");
-    assert.equal(api.submitted[0]!.event, "APPROVE");  // #1145
+    assert.equal(api.submitted[0]!.event, "COMMENT");  // #1447: incomplete/unknown coverage withholds trusted approval
     assert.match(api.submitted[0]!.body, /could not be verified/);
   });
 });
@@ -586,7 +908,7 @@ test("#873/#838 regression: an absent or invalid persisted required_checks is co
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published", JSON.stringify(artifact));
-      assert.equal(api.submitted[0]!.event, "APPROVE", JSON.stringify(artifact));  // #1145: fail-closed state, verdict publishes
+      assert.equal(api.submitted[0]!.event, "COMMENT", JSON.stringify(artifact));  // #1447: incomplete/unknown coverage withholds trusted approval
       assert.match(api.submitted[0]!.body, /could not be verified/, JSON.stringify(artifact));
     });
   }
@@ -619,7 +941,7 @@ test("#873/#838 regression: a traversal-looking enforcement_harness value is nev
     const api = new MinimalPublishApi("a".repeat(40));
     const result = await publishReview(input, api, { diffText: "" });
     assert.equal(result.status, "published");
-    assert.equal(api.submitted[0]!.event, "APPROVE");  // #1145: the forged file never resolved as complete (asserted above)
+    assert.equal(api.submitted[0]!.event, "COMMENT");  // #1447: incomplete/unknown coverage withholds trusted approval
     assert.match(api.submitted[0]!.body, /could not be verified/);
   } finally {
     rmSync(parentDir, { recursive: true, force: true });
@@ -647,7 +969,7 @@ test("#873/#838 regression: a missing review-coverage.json resolves fail-closed 
     const api = new MinimalPublishApi("a".repeat(40));
     const result = await publishReview(input, api, { diffText: "" });
     assert.equal(result.status, "published");
-    assert.equal(api.submitted[0]!.event, "APPROVE");  // #1145
+    assert.equal(api.submitted[0]!.event, "COMMENT");  // #1447: incomplete/unknown coverage withholds trusted approval
     assert.match(api.submitted[0]!.body, /could not be verified/);
   });
 });
@@ -674,8 +996,7 @@ test("#873/#838 cross-process regression: publish reads the real state from an e
     process.chdir(checkoutDir);
 
     // 1. Explicit PR_REVIEWER_RUN_DIR: publish reads the REAL (partial)
-    // state (#1145: that fail-closed state resolution is the invariant; the
-    // verdict's native event publishes with the gap stated).
+    // state (#1447: persisted partial coverage withholds trusted approval).
     {
       const input = publishInputFromEnv(publishVerdictEnv({ PR_REVIEWER_RUN_DIR: runDir }), "github");
       assert.ok(input.partialCoverage);
@@ -683,8 +1004,8 @@ test("#873/#838 cross-process regression: publish reads the real state from an e
       const api = new MinimalPublishApi("a".repeat(40));
       const result = await publishReview(input, api, { diffText: "" });
       assert.equal(result.status, "published");
-      assert.equal(api.submitted[0]!.event, "APPROVE");  // #1145
-      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/);
+      assert.equal(api.submitted[0]!.event, "COMMENT");  // #1447: incomplete/unknown coverage withholds trusted approval
+      assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/);
     }
 
     // 2. No explicit PR_REVIEWER_RUN_DIR (absent, and the empty-string
@@ -700,7 +1021,7 @@ test("#873/#838 cross-process regression: publish reads the real state from an e
         const api = new MinimalPublishApi("a".repeat(40));
         const result = await publishReview(input, api, { diffText: "" });
         assert.equal(result.status, "published", variant.name);
-        assert.equal(api.submitted[0]!.event, "APPROVE", variant.name);  // #1145: fail-closed state, verdict publishes
+        assert.equal(api.submitted[0]!.event, "COMMENT", variant.name);  // #1447: incomplete/unknown coverage withholds trusted approval
         assert.match(api.submitted[0]!.body, /could not be verified/, variant.name);
       }
     }

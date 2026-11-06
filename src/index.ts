@@ -9,8 +9,11 @@ import { runStripSourceTextFixture } from "./context/linked-sources-fixture.js";
 import { CI_GATE_SUBMODE, SPECIALIST_GATE_SUBMODE, ciGateMain, exitAfterFlush, specialistsGateMain } from "./gates/workloads.js";
 import { runReview, RunReviewError } from "./run/index.js";
 import { engineMain } from "./engine/cli.js";
+import { workerMain } from "./executor/worker-main.js";
+import { controllerMain } from "./controller/main.js";
 import { publishMain } from "./run/entrypoints.js";
 import { actionMain } from "./run/action.js";
+import { platformActionMain } from "./run/platform-action.js";
 
 // The syntax-provider worker entry (#764). The shipped runtime is a
 // single-file bundle, so the provider's worker thread loads THIS file and
@@ -78,12 +81,54 @@ if (require.main === module) {
         process.stderr.write(`v3 run error: ${error instanceof Error ? error.message : "unknown error"}\n`);
         exitAfterFlush(error instanceof RunReviewError ? error.exitCode : 1);
       });
+  } else if (firstArg === "tangled") {
+    // #590: the host-neutral Tangled/Spindle runner. Sequences precheck →
+    // review → publish in one ordinary Node process, driving the SAME v3
+    // engine and platform-capability seams as the Action entry — no GitHub
+    // Actions bookkeeping (no GITHUB_EVENT_PATH / GITHUB_OUTPUT / step
+    // summary), no gh/Python/shell, and no GitHub/Forgejo fallback: the
+    // platform is pinned to `tangled` and every forge read/write goes through
+    // the configured capability. Review failures propagate their exit code,
+    // exactly like the action entry.
+    assertSupportedNode(process.versions.node);
+    platformActionMain(process.env)
+      .then((code) => { exitAfterFlush(code); })
+      .catch((error: unknown) => {
+        process.stderr.write(`v3 tangled error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        exitAfterFlush(error instanceof RunReviewError ? error.exitCode : 1);
+      });
   } else if (firstArg === "engine") {
     assertSupportedNode(process.versions.node);
     engineMain(argv.slice(1))
       .then((code) => exitAfterFlush(code))
       .catch((error: unknown) => {
         process.stderr.write(`v3 engine error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        exitAfterFlush(1);
+      });
+  } else if (firstArg === "worker") {
+    // The #733 worker entrypoint (the image the executor's envelope
+    // protocol launches): runs ONE review execution from the request
+    // envelope — the FINAL argv element — and writes the structured
+    // result file the executor's contract consumes. Operator args may
+    // precede the envelope path; the last element is always the envelope.
+    assertSupportedNode(process.versions.node);
+    workerMain(argv.slice(1), process.env)
+      .then((code) => exitAfterFlush(code))
+      .catch((error: unknown) => {
+        process.stderr.write(`v3 worker error: ${error instanceof Error ? error.message : "unknown error"}\n`);
+        exitAfterFlush(1);
+      });
+  } else if (firstArg === "controller") {
+    // The #738 self-hosted controller entrypoint: composes the #1348
+    // daemon from the operator's environment (instance config, PostgreSQL
+    // control plane, forge capability, executor bindings, ingress) and
+    // runs it until SIGTERM/SIGINT. Exit 2 = configuration refusal,
+    // 1 = composition/runtime failure, 0 = clean stop.
+    assertSupportedNode(process.versions.node);
+    controllerMain(argv.slice(1), process.env)
+      .then((code) => exitAfterFlush(code))
+      .catch((error: unknown) => {
+        process.stderr.write(`v3 controller error: ${error instanceof Error ? error.message : "unknown error"}\n`);
         exitAfterFlush(1);
       });
   } else if (firstArg === CI_GATE_SUBMODE || firstArg === SPECIALIST_GATE_SUBMODE) {

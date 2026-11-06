@@ -80,27 +80,36 @@ Role overrides share the profile transport and are ignored with a warning for `D
 
 ### Independent confidence scorer (opt-in)
 
-Set `ai-confidence-model` and the review runs one extra, bounded model call that grades the finished review 0–5 with a risk band. Default off: without the model the scorer costs nothing and nothing confidence-related appears anywhere.
+Set `ai-confidence-model` and the review runs one extra, bounded model call. It independently verifies whether the change is safe to merge, and reports a merge-readiness score from 0 to 5 with a risk band. Default off: without the model the scorer costs nothing and nothing confidence-related appears anywhere.
 
 | Input | Purpose |
 |---|---|
 | `ai-confidence-model` | Enable the scorer; blank (default) keeps every confidence surface off. |
 | `ai-confidence-base-url` | Optional scorer endpoint; blank inherits the primary endpoint. |
-| `ai-confidence-api-format` | `openai` (default) or `anthropic`; blank inherits the primary format. |
+| `ai-confidence-api-format` | `openai` or `anthropic`; blank (default) inherits the primary format — except under `require-dedicated`, where the family is dedicated configuration and a blank is refused (`unscored`, cause `dedicated_format_missing`, #1481). |
 | `ai-confidence-api-key` | Scorer endpoint key. A distinct endpoint never inherits the primary key. |
+| `ai-confidence-isolation` | `inherit-primary` (default) or `require-dedicated`. `require-dedicated` refuses the same-endpoint inheritance: a scorer model without its own `ai-confidence-base-url` publishes `confidence-status: unscored` (cause `dedicated_config_missing`) instead of silently dialing the primary endpoint under the primary credential. The mode likewise refuses a missing dedicated model (`dedicated_model_missing`) and a missing dedicated wire family (`dedicated_format_missing`, #1481). The review itself is unaffected. |
+| `ai-confidence-tokens-param` | OpenAI token-limit field for the verifier's requests: `max_tokens` or `max_completion_tokens` (ignored on the anthropic wire). Explicit always wins; blank under `inherit-primary` keeps the run's `ai-tokens-param` convention, and blank under `require-dedicated` resolves the verifier-owned `max_tokens` — the dedicated verifier never inherits the review lane's field (#1481). |
 | `ai-confidence-timeout-sec` | Wall-clock budget for the scorer call, default 120. |
 | `ai-confidence-reasoning-effort` | Optional effort token; blank omits the field entirely. |
+| `ai-confidence-max-tokens` | Completion budget for the scorer's answer, default 4096. Reasoning models spend part of it thinking, so it must leave room for the hidden reasoning *and* the final JSON answer. |
+| `ai-confidence-prompt-tokens` | Prompt budget for the scorer's one call, default 98304 (~96k). The estimate is bytes/4; the diff is truncated in-band when the prompt exceeds it, and the call is refused (`unscored`) rather than sent over the budget. |
+| `ai-confidence-model-context-tokens` | Optional declared context window of the scorer model. When set, both budgets are clamped so prompt + completion fit the window; a window too small for even the smallest real request disables the scorer with a warning. |
+| `ai-confidence-anthropic-effort-support` | Operator-only assertion that an Anthropic-format scorer endpoint accepts `output_config.effort`. Never inferred from the model name and never inherited from another lane; unasserted, the effort bytes are simply absent and the run says so. |
+| `ai-confidence-structured-output-support` | Operator-only assertion that the scorer endpoint accepts structured output with the scorer's own JSON schema, on either wire format. Unasserted (default), the request bytes are unchanged. |
 | `ai-confidence-enable-for-forks` | Operator-only; default `false` keeps the scorer off cross-repository (fork) PRs, because the prompt carries the review's own privileged output to a separate endpoint under a privileged credential. |
 
 **Local models:** point `ai-confidence-base-url` at your server's OpenAI-compatible URL (e.g. `http://localhost:11434/v1` for ollama) with `ai-confidence-api-format: openai`; Anthropic-compatible local proxies take `ai-confidence-api-format: anthropic`. A keyless scorer endpoint may only be loopback (`localhost`, `127.0.0.1`, `::1`) — any other distinct endpoint must set `ai-confidence-api-key`, because the primary lane's key never rides a different URL.
 
-**Cost ceilings:** exactly one extra model call per published review — bounded (1,024 completion tokens, no tools, no corpus), one wire attempt, no retries. The call is capped by `ai-confidence-timeout-sec` (default 120s). Any failure — timeout, HTTP 429/5xx, malformed answer — degrades to `confidence-status: unscored`. The review itself is unchanged — same verdict, findings, required checks, and approval — but the published body gains the additive advisory `Independent confidence` section and the review marker gains the confidence keys.
+**Cost ceilings:** exactly one extra model call per published review — bounded (`ai-confidence-max-tokens` completion, default 4096; `ai-confidence-prompt-tokens` prompt, default ~96k; no tools, no corpus), one wire attempt, no retries. The call is capped by `ai-confidence-timeout-sec` (default 120s). Any failure — timeout, HTTP 429/5xx, malformed answer, or a prompt that does not fit the declared budgets — degrades to `confidence-status: unscored`. The review itself is unchanged — same verdict, findings, required checks, and approval — but the published body gains the additive advisory `Independent confidence` section and the review marker gains the confidence keys.
 
-**What a score means:** advisory confidence in *this review* (how well it covered and supported its own conclusions) — not a probability the code is correct, and no verdict or approval authority. The score never changes the verdict, findings, or required checks. Deterministic caps outrank the model: a blocker finding caps the score at 2, a major finding or partial review coverage at 3.
+**What a score means:** an independent merge-safety verification of *the change*, not a self-assessment of how well the review covered its own conclusions. The verifier reads the PR description and the diff itself. It asks whether the change is safe to merge, from the evidence the review carries. The score answers that question, and it is not a probability that the code is correct. `cannot_verify` fails closed to `unscored`: when the supplied evidence is too incomplete to verify, the verifier declines instead of guessing a score. The score never changes the verdict, the findings, the required checks, or publication. Deterministic caps outrank the model. A blocker finding caps the score at 2. A major finding or incomplete review coverage caps it at 3. A concern the verifier itself raises caps it at 4.
 
-**Independence:** the scorer resolving to the same endpoint and model that wrote the review is correlated self-grading, not independent evidence — the action warns about it. Point `ai-confidence-base-url` at a different backend for a genuine second opinion.
+**Independence:** the scorer resolving to the same endpoint and model that wrote the review is correlated self-grading, not independent evidence — the action warns about it. Point `ai-confidence-base-url` at a different backend for a genuine second opinion. Workflows that REQUIRE that independence set `ai-confidence-isolation: require-dedicated` (#1478): the verifier's endpoint, credential, model, wire family, and OpenAI token-limit field then resolve only from the workflow's own dedicated configuration (#1481) — a missing dedicated endpoint (`dedicated_config_missing`), model (`dedicated_model_missing`), or wire family (`dedicated_format_missing`) fails visibly as `unscored` instead of silently inheriting the primary transport, and the dedicated verifier's token field defaults to the verifier-owned `max_tokens` rather than the review lane's `ai-tokens-param`.
 
 **Where results appear:** the five `confidence-*` step outputs, an `Independent confidence` row in the step summary, an advisory section in the published review, the additive confidence keys in the review marker, and the `confidence-score.json` / `confidence-request.json` / `confidence-response.json` run artifacts. Disabled runs keep all of it absent.
+
+The review marker also carries the verifier's own evidence. `confidence_cause` says why the verifier did not score, for example a timeout or a rate limit. `confidence_latency_ms` says how long the provider took to answer the verifier's call. `confidence_prompt_tokens`, `confidence_completion_tokens`, and `confidence_total_tokens` say how many tokens the call used. A key is absent when the run has no value for it.
 
 ## ⚙️ How it works
 
@@ -117,23 +126,31 @@ flowchart LR
 
 ## 🖥️ Platform support
 
-The action works on **GitHub** and **Forgejo** (1.4.x), with **Tangled** resolvable as a platform. Set `platform: auto` (default) to detect automatically from `TANGLED_REPO_DID` (the Tangled repository owner DID, checked first), `GITHUB_SERVER_URL`, and `FORGEJO_API_URL`, or set explicitly to `forgejo` / `github` / `tangled` (explicit `tangled` requires `TANGLED_REPO_DID`). Tangled is resolution-only for now: its backend operations are not implemented yet and fail loudly until follow-up work lands.
+The action works on **GitHub** and **Forgejo** (1.4.x). **Tangled** support is experimental. Set `platform: auto` (default) to detect the platform from `TANGLED_REPO_DID` (the Tangled repository owner DID, checked first), `GITHUB_SERVER_URL` and `FORGEJO_API_URL`, or set it explicitly to `github` / `forgejo` / `tangled`. An explicit `tangled` requires `TANGLED_REPO_DID`.
 
-| Feature | GitHub | Forgejo |
-|---|---|---|
-| PR diff, files, metadata | ✅ Full | ✅ Full (REST backend) |
-| Managed sticky comment | ✅ Full | ✅ Full |
-| Native review comments (`review_comment`) | ✅ Full | ⚠️ Degraded — REST-based; no inline line anchors |
-| Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST |
-| Native blocking reviews (`review_blockers`) | ✅ Full | ⚠️ Degraded — request_changes/comment via REST |
-| Cleanup: dismiss stale reviews | ✅ Full | ✅ Full (REST) |
-| Cleanup: minimizeComment (hide outdated) | ✅ Full | ⚠️ Incomplete-replacement path: author-side deletion of superseded non-verdict (COMMENTED/DISMISSED) non-official reviews that carry no inline findings (REST); verdict reviews degrade to dismissal and are never deleted (verdict deletion could reactivate a stale verdict upstream); findings-bearing reviews stay visible (no GraphQL) |
-| CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST; own single-job status auto-discovered by run-jobs API) |
-| Evidence providers | ✅ Full | ✅ Full |
-| Tool harness | ✅ Full | ✅ Full |
-| Reviewer-requested smart escalation | ✅ Full | ✅ Full |
+| Feature | GitHub | Forgejo | Tangled (experimental) |
+|---|---|---|---|
+| PR diff, files, metadata | ✅ Full | ✅ Full (REST backend) | ⚠️ Degraded — the metadata read works, the diff read stops the run |
+| Managed sticky comment | ✅ Full | ✅ Full | ⚠️ Degraded — one managed AT-Proto review record, published after the diff read and the current-head proof land |
+| Native review comments (`review_comment`) | ✅ Full | ⚠️ Degraded — REST-based; no inline line anchors | ❌ Unsupported — Tangled has no inline review object |
+| Native review verdicts (`review_verdict`) | ✅ Full | ⚠️ Degraded — approve/request_changes via REST | ❌ Unsupported — Tangled has no native verdict object |
+| Native blocking reviews (`review_blockers`) | ✅ Full | ⚠️ Degraded — request_changes/comment via REST | ❌ Unsupported — the verdict stays in the review body |
+| Cleanup: dismiss stale reviews | ✅ Full | ✅ Full (REST) | ❌ Unsupported — the managed record is updated in place |
+| Cleanup: minimizeComment (hide outdated) | ✅ Full | ⚠️ Incomplete-replacement path: author-side deletion of superseded non-verdict (COMMENTED/DISMISSED) non-official reviews that carry no inline findings (REST); verdict reviews degrade to dismissal and are never deleted (verdict deletion could reactivate a stale verdict upstream); findings-bearing reviews stay visible (no GraphQL) | ❌ Unsupported — Tangled has no review cleanup surface |
+| CI status check polling | ✅ Full | ✅ Commit-status polling (Forgejo REST; own single-job status auto-discovered by run-jobs API) | ❌ Unsupported — the runner turns the CI gate off |
+| Evidence providers | ✅ Full | ✅ Full | ⚠️ Degraded — the provider commands read the checkout. A provider that calls the GitHub API does not work |
+| Tool harness | ✅ Full | ✅ Full | ⚠️ Degraded — the `gh_api` and `repo_contents` tools fail |
+| Reviewer-requested smart escalation | ✅ Full | ✅ Full | ⚠️ Degraded — the engine path is shared, but a Tangled run reaches no verdict |
 
 Forgejo Authorized Integrations can reuse managed sticky comments with repository and issue permissions; `read:user` is not required. The action matches the integration owner's ID from its Forgejo-generated audience against comment author IDs. If a prior managed comment has no usable author ID and ownership cannot be established, publication fails closed.
+
+### 🧪 Tangled (experimental)
+
+Tangled is not GitHub Actions, so `action.yml` is not the Tangled entry point. A Tangled review runs on the host-neutral runner, `node dist/index.js tangled`, in one plain Node process. The runner pins the platform to `tangled` and refuses a `github` or `forgejo` platform instead of falling back to another forge.
+
+A Tangled run does not complete today. The metadata read works, and the run stops at the diff read. After that, the publication step fails closed until a trustworthy current-head read exists ([#1165](https://github.com/misospace/pr-reviewer-action/issues/1165)), because a review that cannot prove the pull did not advance is never published.
+
+Read [Tangled (experimental)](docs/tangled.md) for the setup, the configuration, the identity model and the full support matrix. The copyable Spindle workflow example is [`examples/tangled-workflow.yml`](examples/tangled-workflow.yml).
 
 **PR reviewability metadata is capability-checked, not version-guessed.** A successfully read PR must explicitly report a boolean `draft` value to be reviewable: `draft: true` skips as `pr-draft`, while a readable payload with a missing or malformed draft bit fails closed as `pr-draft-unknown`. A failed PR metadata lookup on the ordinary shared-admission path is an operational failure and fails the run rather than producing a green skip; the human-triggered re-review command keeps its retriable `comment-pr-lookup-failed` behavior. We intentionally do not claim a Forgejo version floor for the `draft` field: deployments and API compatibility layers vary, and the runtime checks the capability directly. If an instance repeatedly reports `pr-draft-unknown`, its pull-request endpoint must be upgraded or configured to return an explicit boolean `draft`.
 
@@ -182,6 +199,7 @@ No Action input controls this: the signatures are a fixed allowlist. Every failu
 | Default-off experimental features | [Opt-in features](docs/opt-in-features.md) |
 | Local model issues and common misconfigurations | [Troubleshooting](docs/troubleshooting.md) |
 | Repository-owned config file | [Repository config](docs/repository-config.md) |
+| Reviewing on Tangled (experimental) | [Tangled](docs/tangled.md) |
 | Reviewing pull requests from forks | [Fork reviews](docs/fork-review.md) |
 | Upgrading from v2 | [v2 → v3 migration](docs/v3-migration.md) |
 
@@ -228,7 +246,7 @@ scripts/bootstrap.sh
 
 It verifies (and if needed installs) the pinned [mise](https://mise.jdx.dev) launcher, installs the locked toolchain, and runs `npm ci`. Everything is user-scoped and digest-verified — no privileged installs, no global config or git-hook changes. It runs no tests, formatters or generators, and it is idempotent and convergent: a re-run re-checks the prerequisites and re-runs `npm ci`, so it is safe to repeat. It fails with a clear message if `pgrep`/`pkill` (procps) are missing, because process-tree cleanup and gate preflight refuse to run without them.
 
-The Node version pin lives in [`.mise/config.toml`](.mise/config.toml), where it tracks the shipped `node24` action runtime and CI's `node-version: '24'`; [`.mise/mise.lock`](.mise/mise.lock) pins its download checksums. The launcher is installed into a user-scoped directory that is often not on `PATH`, so bootstrap prints the exact `export PATH=…` line to run (and to add to your shell rc). Reuse that environment with `mise exec -- <command>`, or run:
+The Node version pin lives in [`.mise/config.toml`](.mise/config.toml), where it tracks CI's `node-version: '26'` and the `@types/node` major in `package.json`; [`.mise/mise.lock`](.mise/mise.lock) pins its download checksums. The shipped action still declares the `node24` runtime (`runs.using`), because the Actions runner has no `node26` selector yet; CI re-runs the full suite on Node 24 (`validate-runtime-floor`) so the Node-26 typings can never green-light an API the shipped runtime lacks. The launcher is installed into a user-scoped directory that is often not on `PATH`, so bootstrap prints the exact `export PATH=…` line to run (and to add to your shell rc). Reuse that environment with `mise exec -- <command>`, or run:
 
 ```bash
 mise run check   # fast static validation (typecheck)

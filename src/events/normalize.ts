@@ -77,6 +77,7 @@
  * lets a poller converge with the webhook that carried `installation.id`.
  */
 
+import { isPlainObject } from "../platform/jq.js";
 import type {
   CanonicalForgeEvent,
   ForgeEventKind,
@@ -117,10 +118,6 @@ const PR_SCOPED_KINDS: ReadonlySet<ForgeEventKind> = new Set<ForgeEventKind>([
   "pr_merged",
   "follow_up",
 ]);
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function asObject(value: unknown): Record<string, unknown> {
   return isPlainObject(value) ? value : {};

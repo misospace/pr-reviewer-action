@@ -402,7 +402,7 @@ export const VERDICT_USER_INSTRUCTION =
   "Produce the final review verdict now as a single JSON object. " +
   "Do not issue any tool calls. " +
   "Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Mark a requirement unknown unless the supplied corpus proves it satisfied or violated. " +
-  "Emit 'required_check_dispositions' as null unless required checks appear in the context; then one disposition entry per required check, echoing the check text exactly, with status satisfied, not_applicable, or unresolved. Use not_applicable only when you can ground it in the actual change (a concise rationale is required); do not request changes merely because a checklist names a test that is absent — request changes only when the underlying applicable risk is unresolved; never invent additional checks.";
+  "Emit 'required_check_dispositions' as null unless required checks appear in the context; then one disposition entry per required check, echoing the check text exactly, with status satisfied, not_applicable, unresolved, or unmet. Use not_applicable only when you can ground it in the actual change (a concise rationale is required); unmet means you performed the check and confirmed the requirement is NOT satisfied (a grounded rationale is required there too); do not request changes merely because a checklist names a test that is absent — request changes only when the underlying applicable risk is unresolved; never invent additional checks. When a 'Required Review Evidence' section is present in the provided review context, emit one disposition per listed obligation — must_check rows by echoing the exact check text, trusted_base_guidance rows by echoing 'obligation-<n>' (or the exact text) as check — with status satisfied, not_applicable, unresolved, or unmet and a grounded rationale. When a derived architectural obligation row is present (id 'derived-<n>'), emit one disposition per such row by echoing the row id, and a satisfied derived row's rationale must name one of that row's listed locations.";
 
 /** Placeholder emitted for a corpus section dropped by dedupeVerdictCorpus.
  * Callers count occurrences of this literal to log how many sections were
@@ -1583,16 +1583,24 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
         // Identity is the EXACT deterministic check text echoed back; the
         // parser/coverage layers validate it against the supplied list, so
         // the model cannot invent, omit, duplicate, or reword mandatory
-        // checks. `not_applicable` must carry a grounded rationale.
+        // checks. `not_applicable` and `unmet` (#1381: a confirmed negative)
+        // must each carry a grounded rationale. When a Required Review Evidence section is present, emit one disposition per listed obligation, echoing `obligation-<n>` or the exact text as `check`, with a grounded rationale.
         required_check_dispositions: {
           type: ["array", "null"],
+          // #1449: the derived architectural obligation rows are disposed by
+          // their row id (`derived-<n>`), and a satisfied derived row's
+          // rationale must name one of that row's listed locations. Prose
+          // only — the schema's shape (properties, enum, required) is
+          // unchanged.
+          description:
+            "One disposition per listed obligation: must_check rows by the exact check text, trusted_base_guidance rows by 'obligation-<n>' or the exact text, and derived architectural obligation rows by their row id ('derived-<n>') — a satisfied derived row's rationale must name one of that row's listed locations.",
           items: {
             type: "object",
             properties: {
               check: { type: "string" },
               status: {
                 type: "string",
-                enum: ["satisfied", "not_applicable", "unresolved"],
+                enum: ["satisfied", "not_applicable", "unresolved", "unmet"],
               },
               rationale: { type: ["string", "null"] },
             },
@@ -1600,8 +1608,25 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
             additionalProperties: false,
           },
         },
+        // #1337: dependency-upgrade coverage accounting, one entry per
+        // closed aspect; unknown status words are parsed fail-closed to
+        // `invalid` (counted not-checked), so the wire enum mirrors the
+        // parser's accepted set.
+        dependency_coverage: {
+          type: ["array", "null"],
+          items: {
+            type: "object",
+            properties: {
+              aspect: { type: "string", enum: ["source_mapping", "release_notes", "advisories", "signature_verification", "relevance"] },
+              status: { type: "string", enum: ["checked_no_match", "finding_present", "unavailable", "not_checked", "skipped"] },
+              note: { type: ["string", "null"] },
+            },
+            required: ["aspect", "status", "note"],
+            additionalProperties: false,
+          },
+        },
       },
-      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions"],
+      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions", "dependency_coverage"],
       additionalProperties: false,
     },
   },

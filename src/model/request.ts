@@ -1,4 +1,4 @@
-import type { ModelRequestConfig, TransportWirePayload } from "./types.js";
+import type { AnthropicWireBody, ModelRequestConfig, OpenAiWireBody, TransportWirePayload } from "./types.js";
 
 /**
  * The strict OpenAI verdict schema. VERDICT-TURN CONTRACT (#362): this must
@@ -25,7 +25,9 @@ import type { ModelRequestConfig, TransportWirePayload } from "./types.js";
  * model can only ever name a logical id here — the deterministic resolver
  * validates every id against the trusted base-ref configuration.
  * `required_check_dispositions` (#750) carries one disposition per
- * deterministic must_check item, echoed by exact check text.
+ * deterministic must_check item, echoed by exact check text. A Required
+ * Review Evidence section also requires one disposition per listed
+ * obligation, echoed by id or exact text.
  */
 export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
   type: "json_schema",
@@ -105,22 +107,47 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
         // Identity is the EXACT deterministic check text echoed back; the
         // parser/coverage layers validate it against the supplied list, so
         // the model cannot invent, omit, duplicate, or reword mandatory
-        // checks. `not_applicable` must carry a grounded rationale.
+        // checks. `not_applicable` and `unmet` (#1381: a confirmed negative)
+        // must each carry a grounded rationale. When a Required Review Evidence section is present, emit one disposition per listed obligation, echoing `obligation-<n>` or the exact text as `check`, with a grounded rationale.
         required_check_dispositions: {
           type: ["array", "null"],
+          // #1449: the derived architectural obligation rows are disposed by
+          // their row id (`derived-<n>`), and a satisfied derived row's
+          // rationale must name one of that row's listed locations. Prose
+          // only — the schema's shape (properties, enum, required) is
+          // unchanged.
+          description:
+            "One disposition per listed obligation: must_check rows by the exact check text, trusted_base_guidance rows by 'obligation-<n>' or the exact text, and derived architectural obligation rows by their row id ('derived-<n>') — a satisfied derived row's rationale must name one of that row's listed locations.",
           items: {
             type: "object",
             properties: {
               check: { type: "string" },
-              status: { type: "string", enum: ["satisfied", "not_applicable", "unresolved"] },
+              status: { type: "string", enum: ["satisfied", "not_applicable", "unresolved", "unmet"] },
               rationale: { type: ["string", "null"] },
             },
             required: ["check", "status", "rationale"],
             additionalProperties: false,
           },
         },
+        // #1337: dependency-upgrade coverage accounting, one entry per
+        // closed aspect; unknown status words are parsed fail-closed to
+        // `invalid` (counted not-checked), so the wire enum mirrors the
+        // parser's accepted set.
+        dependency_coverage: {
+          type: ["array", "null"],
+          items: {
+            type: "object",
+            properties: {
+              aspect: { type: "string", enum: ["source_mapping", "release_notes", "advisories", "signature_verification", "relevance"] },
+              status: { type: "string", enum: ["checked_no_match", "finding_present", "unavailable", "not_checked", "skipped"] },
+              note: { type: ["string", "null"] },
+            },
+            required: ["aspect", "status", "note"],
+            additionalProperties: false,
+          },
+        },
       },
-      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions"],
+      required: ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions", "dependency_coverage"],
       additionalProperties: false,
     },
   },
@@ -174,6 +201,35 @@ export function buildAnthropicOutputConfig(
 }
 
 /**
+ * #1368 review: the reasoning-effort value a BUILT wire body actually
+ * carries, or "" when it carries none. Read back from the body the transport
+ * sends rather than re-derived from the configuration that named it, so a
+ * recorded provenance can never claim an effort the wire never carried
+ * (#998's truth-telling rule: the operator is told what was SENT, never what
+ * the config named).
+ *
+ * The wire FAMILY decides the field, not the body's shape: the OpenAI family
+ * carries `reasoning_effort` and never `output_config`, the Anthropic family
+ * carries `output_config.effort` (only under the operator's effort-support
+ * assertion) and never `reasoning_effort`. Reading the family's own field is
+ * what keeps this a statement about the bytes that were sent.
+ */
+export function wireEffortOf(payload: TransportWirePayload): string {
+  const body = payload.body;
+  if (payload.endpointPath === "/messages") {
+    const outputConfig = (body as AnthropicWireBody).output_config;
+    if (outputConfig !== undefined) {
+      const effort = outputConfig.effort;
+      if (typeof effort === "string" && effort !== "") return effort;
+    }
+    return "";
+  }
+  const direct = (body as OpenAiWireBody).reasoning_effort;
+  if (typeof direct === "string" && direct !== "") return direct;
+  return "";
+}
+
+/**
  * Build the transport wire payload for a review request. Provider-neutral:
  * branches only on the configured api format, never on model names.
  *
@@ -206,10 +262,15 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
     // rides along because #1047's format was asserted (and vice versa), an
     // unset/unasserted key contributes nothing, and only a surviving key set
     // emits the object at all — never `thinking: {"type":"disabled"}` and
-    // never an invented "none" effort.
+    // never an invented "none" effort. #1368: a `responseSchema` replaces
+    // the pinned verdict schema with the caller's own (the confidence
+    // scorer's answer contract); absent keeps the verdict envelope exactly
+    // as before.
     const effort = config.anthropicEffortSupported ? config.reasoningEffort : "";
     const format = config.anthropicStructuredOutputSupported && config.responseFormat === "json_schema"
-      ? ANTHROPIC_VERDICT_OUTPUT_FORMAT
+      ? (config.responseSchema !== undefined
+          ? { type: "json_schema", schema: config.responseSchema }
+          : ANTHROPIC_VERDICT_OUTPUT_FORMAT)
       : undefined;
     const outputConfig = buildAnthropicOutputConfig(effort, format);
     if (outputConfig !== null) body.output_config = outputConfig;
@@ -228,7 +289,12 @@ export function buildModelRequest(config: ModelRequestConfig): TransportWirePayl
   if (config.responseFormat === "json_object") {
     body.response_format = { type: "json_object" };
   } else if (config.responseFormat === "json_schema") {
-    body.response_format = OPENAI_VERDICT_JSON_SCHEMA;
+    // #1368: a `responseSchema` swaps the pinned verdict schema for the
+    // caller's own inner schema (the confidence scorer's answer contract);
+    // absent keeps the verdict wrapper byte-for-byte as before.
+    body.response_format = config.responseSchema !== undefined
+      ? { type: "json_schema", json_schema: { name: "confidence_review", strict: true, schema: config.responseSchema } }
+      : OPENAI_VERDICT_JSON_SCHEMA;
   }
   if (config.stream) body.stream_options = { include_usage: true };
   // #998: the protocol-native effort field, verbatim.

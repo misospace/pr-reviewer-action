@@ -49,6 +49,13 @@ export interface ModelRequestConfig {
    * prompt-only. `json_object` is never sent on this wire family regardless
    * (no Anthropic-native equivalent exists to opt into). Ignored by OpenAI. */
   anthropicStructuredOutputSupported: boolean;
+  /** #1368: the INNER JSON schema object used instead of the pinned verdict
+   * schema when `responseFormat === "json_schema"` — the confidence scorer's
+   * own compact answer contract (`CONFIDENCE_ANSWER_JSON_SCHEMA`). Absent
+   * (the default) keeps the request bytes unchanged: OpenAI carries the
+   * verdict schema wrapper, Anthropic the verdict output format, exactly as
+   * before. */
+  responseSchema?: Record<string, unknown>;
 }
 
 /**
@@ -104,9 +111,11 @@ export interface NormalizedUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
-  /** #910: prompt-cache reads/writes as the provider reported them, set only
-   * when non-zero. OpenAI-style providers count reads inside promptTokens;
-   * Anthropic reports them outside input_tokens. */
+  /** #910: prompt-cache reads/writes as the provider reported them.
+   * OpenAI-style providers count reads inside promptTokens; Anthropic reports
+   * them outside input_tokens. The OpenAI path sets them only when non-zero;
+   * the Anthropic path (#1466) sets a counter the provider REPORTED even when
+   * its value is zero, and leaves an unreported counter absent. */
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
 }
@@ -154,13 +163,15 @@ export interface NormalizedFinding {
 }
 
 /**
- * #750: the three structured dispositions a reviewer may record for a
+ * #750: the structured dispositions a reviewer may record for a
  * deterministic `must_check` item. A required check is a mandatory review
  * QUESTION, not automatically an implementation requirement: `not_applicable`
  * is a completed disposition when the reviewer can ground it in the actual
- * change context.
+ * change context, and `unmet` (#1381) is a completed-but-failed one — the
+ * reviewer performed the check and confirmed the requirement is NOT
+ * satisfied, so it is recorded but never clean coverage.
  */
-export type RequiredCheckStatus = "satisfied" | "not_applicable" | "unresolved";
+export type RequiredCheckStatus = "satisfied" | "not_applicable" | "unresolved" | "unmet";
 
 /**
  * #1003: the opt-in human-review triage answer — "does this change need a
@@ -260,6 +271,16 @@ export interface ParsedReviewVerdict {
    * reviewer request is made.
    */
   reviewTriageTargets: string[];
+  /**
+   * #1337: structured dependency-upgrade coverage accounting answer,
+   * normalized fail-closed (unknown status word → `invalid`, which the
+   * rollup counts as not-checked). Tri-state with
+   * `dependencyCoverageEmitted`, same shape as the required-check
+   * dispositions: only true key absence may read "not reported".
+   */
+  dependencyCoverage: import("./dependency-coverage.js").NormalizedDependencyCoverageAspect[] | null;
+  /** True iff the model emitted the `dependency_coverage` key at all. */
+  dependencyCoverageEmitted: boolean;
   extra: Record<string, unknown>;
 }
 

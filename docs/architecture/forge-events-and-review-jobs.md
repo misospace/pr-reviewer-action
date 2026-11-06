@@ -67,6 +67,7 @@ with sentinels in the same style as `CanonicalForgeEvent`:
 | `nonce` | manual forced-rereview nonce | `""` |
 | `adoptionEpoch` | operator adoption/config-generation reference layered on the fingerprint (the #728 epoch dimension); changing it re-keys every job for the same head+config | `""` = pre-adoption/absent |
 | `eventReference` | the follow-up comment id a `follow_up` job answers (1–19 digits, no leading zero); forced `""` for `review` jobs | `""` |
+| `forgeIntegration` | the instance-config forge integration `name` the intake carried (#1440) — the stable identity the execution envelope's `forgeApiUrl` is resolved by | `""` = no integration named |
 | `fork` | trust metadata preserved from the event | `false` |
 | `deadlineAtMs` | deadline/cancellation identity | `0` = none |
 | `runId` | assigned run id | `""` = unassigned |
@@ -75,12 +76,12 @@ with sentinels in the same style as `CanonicalForgeEvent`:
 
 `deriveGenerationId` (`src/jobs/generation.ts`) is sha256 over a
 canonical serialization — a fixed-order `key=value\n` line per field — of
-exactly these twelve **identity fields**:
+exactly these thirteen **identity fields**:
 
 ```
 platform, installationId, repoFullName, prNumber, prId,
 headSha, baseSha, configFingerprint, kind, nonce,
-adoptionEpoch, eventReference
+adoptionEpoch, eventReference, forgeIntegration
 ```
 
 **Excluded, deliberately:**
@@ -106,8 +107,20 @@ adoptionEpoch, eventReference
   follow-up comments on the same PR must not collapse into one job.
   Forced `""` for `review` jobs, so a review's identity never depends on
   a comment id (webhook/poll/reconcile dedupe of reviews is unchanged).
+- `forgeIntegration` — the instance-config forge integration `name`
+  (#1440): a deployment may serve SEVERAL forge integrations of the same
+  `kind` (e.g. two Forgejo instances), and a job minted for one of them
+  must never share a generation with the other — the identity is what the
+  controller resolves each execution envelope's `forgeApiUrl` from, so
+  collapsing the two would stamp one installation's API base into the
+  other's envelopes. `""` = no integration named (legacy/pre-#1440 or no
+  named integration; the envelope endpoint then resolves by platform kind
+  only when exactly one integration of that kind exists). The identity is
+  operator infrastructure: it comes from the daemon's instance config,
+  never from repository config or event content, and an unresolvable one
+  refuses the request rather than guessing.
 
-**Rejected:** if ANY of the twelve identity values, stringified, contains
+**Rejected:** if ANY of the thirteen identity values, stringified, contains
 a `\n` or `\r`, `deriveGenerationId` returns `""` instead of a hash — in
 the `key=value\n` join, a newline inside one value can make two distinct
 identities serialize to the same bytes and collide their ids.
@@ -156,6 +169,11 @@ scheduling boundary itself (defense in depth on top of `schedule.ts`):
   safe integer before pattern/coercion (the event-boundary rule); a
   provided-but-invalid epoch fails the build rather than being silently
   emptied into the identity;
+- a provided `forgeIntegration` (any job kind) follows the same
+  conventions as `adoptionEpoch`: it must match
+  `[A-Za-z0-9._-]{1,64}` exactly; only the EMPTY string (or absent) is
+  absent (becomes `""`); a number must be a safe integer before
+  pattern/coercion; a provided-but-invalid identity fails the build;
 - a `follow_up` job's `eventReference` is the event's, and must be
   non-empty and match `/^[1-9]\d{0,18}$/` (1–19 digits, no leading
   zero); a number must be a safe integer before pattern/coercion (the
@@ -189,6 +207,87 @@ resolvable PR number (`prNumber > 0`), so a headless `check_update`
 for the rest — including `follow_up`, which is not a VERDICT review (it
 becomes a `follow_up` job via `buildReviewJob` but is never a candidate
 for the review generation a verdict is published against).
+
+### Forge-integration identity wiring (#1440)
+
+The controller daemon (`src/controller/daemon.ts`) owns where the
+identity comes from and how the execution envelope's endpoint is
+resolved from it. The identity is OPERATOR infrastructure: the daemon's
+instance config, never repository config and never event content.
+
+**Where the identity is stamped.** A daemon bound to an integration
+(`ControllerDaemonOptions.forgeIntegration`) stamps that name on every
+job its intake mints: the webhook delivery path (`ingest`) AND the
+follow-up consumer it composes (a `/ai-review` comment command) — both
+stamp the SAME name, so the two paths never disagree about WHICH
+installation a job belongs to. The remaining identity fields still
+come from each path's own source (the intake resolver's, resp. the
+operator's follow-up build options), so an operator that wants a
+command and a delivery on one head to collapse into ONE generation
+wires the same fields into both. An UNBOUND daemon stamps nothing; an
+operator serving several installations of one platform supplies the
+identity through its own `resolveEventIdentity` resolver.
+
+**The reconciliation poll’s jobs.** The poll mints its OWN generations,
+so the daemon hands it the identity through the RECONCILE CONTEXT
+(`ReconcileContext`): the daemon’s ledger, the PER-REPOSITORY identity
+resolver (`resolveBuildOptions`), and the queue handoff
+(`context.enqueueJob`). The resolver runs the daemon’s OWN intake
+resolution for the repository — the per-repository config fingerprint
+and adoption epoch, plus the bound forge-integration name — so the poll
+and the intake agree on every identity field the resolver contributes: a
+webhook delivery and a poll of one head collapse into one review. The
+poll’s installation id stays the operator’s own declaration and must
+match the webhook’s, as the poll always required. A STATIC options
+object could not do that: the fingerprint is per-repository, so a poll
+minting from one static value would mint a second generation of the
+same head and buy a second review of it. A resolver that answers `null`
+means the intake mints nothing for that repository (the adoption policy
+refuses it), so the poll mints nothing either — the entry is skipped,
+with no job and no reservation. A poll that ignores the context and
+mints an identity-less job is REFUSED at the enqueue seam on a bound
+daemon, before the queue is mutated: the refusal names the rule and the
+bound identity, the poll’s report records that reason (bounded: control
+characters stripped, capped at 128 characters), and the head is
+re-discovered on the next pass — a refused handoff releases the durable
+reservation before the failure propagates. An unbound daemon keeps the
+permissive behavior: the operator’s own build options decide.
+
+**`reconcile.poll` binds that composition in the daemon (#1446).** A
+schedule with an operator callback can still be mis-wired: the pass is told
+to resolve through the context, and a pass that mints from its own options
+instead gets the handoff's refusal rather than a divergent generation.
+`reconcile.poll` removes the callback. The daemon runs
+`reconcileRepositories` itself against the context above and takes only the
+lister, the polled repositories, and the optional listing installation id
+from the operator, so the identity is in the build options before
+`buildReviewJob()` hashes the generation with no operator code in between.
+That optional id is still a MINTED identity field, not a listing detail: it
+is hashed into the generation id, so it must be the installation the intake
+normalizes its deliveries to — the daemon cannot read a delivery's
+installation id and check it for you.
+The schedule binds exactly one of `poll` or `run` (neither is a poll that
+polls nothing, both is two owners of one head's mint site), and a `poll`
+must name its platform itself when there is no `webhook.platform` to
+inherit — a generation that cannot name the forge it was polled against
+converges with nothing.
+
+**How the endpoint is resolved.** Identity first: a job naming an
+integration resolves to that integration's `forgeApiUrl` (a non-secret
+coordinate, screened at startup by `forgeApiUrlProblem`). An
+identity-less job falls back to the platform kind ONLY when exactly one
+integration of that kind exists; zero keeps the GitHub default and more
+than one is ambiguous and refused. A named integration whose kind
+disagrees with the job's platform is refused, and so is an AMBIGUOUS
+name (several configured integrations sharing one name) — resolution
+never takes the first of several. Every refusal is a `RangeError` the
+scheduler turns into a failed outcome: the job never reaches a worker.
+
+**Startup screening.** The daemon refuses to start when the bound name
+names no integration or more than one, when the named integration's
+kind disagrees with the bound intake platform, or when the name is not
+a valid identity token (`[A-Za-z0-9._-]{1,64}` — the builder's own
+rule, so a bound name can never mint an unusable identity).
 
 ## Manual rereview nonce
 
@@ -260,7 +359,7 @@ runtime.
 |---|---|
 | webhook + poll of the same PR/config dedupe to one job id; only reason/trigger differ (through the REAL normalizers, same installationId) | `normalizeGitHubEvent` + `reconciliationPollEvent` + `buildReviewJob`; test "webhook and poll … identical jobs" |
 | new headSha / new configFingerprint ⇒ new id | `deriveGenerationId`; tests "a new headSha …", "a different configFingerprint …" |
-| each of the twelve identity fields, varied alone ⇒ distinct id | `deriveGenerationId`; test "each of the twelve identity fields …" |
+| each of the thirteen identity fields, varied alone ⇒ distinct id | `deriveGenerationId`; test "each of the thirteen identity fields …" |
 | irrelevant kinds (pr_closed, unknown, visibility_change, …) schedule nothing and build nothing | `shouldSchedule` + `buildReviewJob`; test "irrelevant events …" |
 | headless check_update (no PR number) ⇒ no generation | `shouldSchedule`; test "a headless check_update …" |
 | same head/config: rereview_label ≡ synchronize id; manual nonce breaks it | `deriveGenerationId` (reason out, nonce in); tests "rereview_label and synchronize …", "a manual forced rereview …" |

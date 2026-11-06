@@ -1,5 +1,11 @@
 import type { EnvLike } from "../tools/budget.js";
 import { REASONING_EFFORT_PATTERN } from "../config/load-config.js";
+import { API_FORMAT_VALUES } from "../config/schema.js";
+import { CONFIDENCE_MINIMUM_PROMPT_TOKENS } from "../confidence/prompt.js";
+import { CONFIDENCE_MAX_TOKENS, CONFIDENCE_PROMPT_TOKENS } from "../confidence/scorer.js";
+import { differsOnlyByCase, isBlankModelValue, modelNameForNotice, opaqueModelId } from "../model/identity.js";
+import type { TokensParam } from "../model/types.js";
+import { endpointUrlCredential } from "../transport/http.js";
 
 /**
  * Review routing and tier bindings, ported from scripts/sections/classification.sh
@@ -49,6 +55,10 @@ export interface TierProfiles {
   primary: ResolvedTier;
   smart: ResolvedTier;
   fallback: ResolvedTier;
+  /** #1465: operator-facing notices from the tier resolution — for example a
+   * configured model value that holds nothing but whitespace, which the lane
+   * treats as unset. Never fatal, and never a secret. */
+  warnings: string[];
 }
 
 export type SpecialistModelSource = "role-override" | "specialist-profile" | "primary";
@@ -77,6 +87,28 @@ export interface SpecialistProfiles {
 
 function value(env: EnvLike, key: string, fallback = ""): string { return env[key] || fallback; }
 function trimmed(env: EnvLike, key: string): string { return (env[key] ?? "").trim(); }
+
+/**
+ * #1428: one request carries one credential, refused at profile resolution —
+ * before ANY request the run could make, not per wire attempt. An endpoint
+ * URL that carries a credential in its userinfo and a separately configured
+ * API key are two channels for one request; honoring both would drop one
+ * silently. The refusal names the environment variables involved and never
+ * echoes a value. The transport's own wire-boundary assertion stays as the
+ * defense in depth for callers that bypass profile resolution.
+ */
+function refuseConflictingCredentialChannels(
+  baseUrlKey: string,
+  apiKeyKey: string,
+  baseUrl: string,
+  apiKey: string,
+): void {
+  const urlCredential = endpointUrlCredential(baseUrl);
+  if (urlCredential === "" || apiKey === "") return;
+  throw new Error(
+    `${baseUrlKey} carries a credential in its userinfo and ${apiKeyKey} carries a separate model credential; one request carries one credential, so remove one`,
+  );
+}
 function numberValue(env: EnvLike, key: string, fallback: number): number {
   const parsed = Number.parseInt(env[key] ?? "", 10);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -215,10 +247,11 @@ export function laneAnthropicEffortSupported(
 }
 
 /** #998: the input name that carries the effort opt-in for one lane. */
-export function anthropicEffortSupportInput(lane: "primary" | "smart" | "fallback" | "specialist"): string {
+export function anthropicEffortSupportInput(lane: "primary" | "smart" | "fallback" | "specialist" | "confidence"): string {
   if (lane === "smart") return "ai-smart-anthropic-effort-support";
   if (lane === "specialist") return "ai-specialist-anthropic-effort-support";
   if (lane === "fallback") return "ai-fallback-anthropic-effort-support";
+  if (lane === "confidence") return "ai-confidence-anthropic-effort-support";
   // The base assertion scopes the base and primary lanes.
   return "ai-anthropic-effort-support";
 }
@@ -244,7 +277,7 @@ export function effectiveWireEffort(
  * it never mentions a secret. Silent omission alone is what made a configured
  * effort indistinguishable from an ignored one (#1049 review). */
 export function anthropicEffortInactiveWarning(
-  lane: "primary" | "smart" | "fallback" | "specialist",
+  lane: "primary" | "smart" | "fallback" | "specialist" | "confidence",
   effort: string,
   boundary = "",
 ): string {
@@ -359,11 +392,16 @@ export function resolveSpecialistProfiles(env: EnvLike): SpecialistProfiles {
   const warnings: string[] = [];
   const primary = {
     baseUrl: trimmed(env, "AI_BASE_URL"),
-    model: trimmed(env, "AI_MODEL"),
+    // #1465: a model identifier is an opaque provider token — trimmed, never
+    // case-folded.
+    model: opaqueModelId(env.AI_MODEL),
     apiFormat: trimmed(env, "AI_API_FORMAT").toLowerCase() || "openai",
     apiKey: trimmed(env, "AI_API_KEY"),
   };
-  const specialistModel = trimmed(env, "AI_SPECIALIST_MODEL");
+  const specialistModel = opaqueModelId(env.AI_SPECIALIST_MODEL);
+  if (isBlankModelValue(env.AI_SPECIALIST_MODEL)) {
+    warnings.push("ai-specialist-model holds only whitespace, so it is treated as unset and the specialist profile falls back to the primary model");
+  }
   const specialistBaseUrl = trimmed(env, "AI_SPECIALIST_BASE_URL");
   const specialistApiFormat = trimmed(env, "AI_SPECIALIST_API_FORMAT");
   const specialistApiKey = trimmed(env, "AI_SPECIALIST_API_KEY");
@@ -391,9 +429,25 @@ export function resolveSpecialistProfiles(env: EnvLike): SpecialistProfiles {
         apiKey: specialistApiKey || primary.apiKey,
       }
     : primary;
+  // #1428: the same one-credential rule the review lanes refuse at profile
+  // resolution — an inherited endpoint's URL credential plus a separately
+  // configured specialist key is still two channels for one request.
+  refuseConflictingCredentialChannels(
+    specialistBaseUrl !== "" ? "AI_SPECIALIST_BASE_URL" : "AI_BASE_URL",
+    specialistApiKey !== "" ? "AI_SPECIALIST_API_KEY" : "AI_API_KEY",
+    transport.baseUrl,
+    transport.apiKey,
+  );
   const roles = ["correctness", "security", "tests"] as const;
   const roleModels = Object.fromEntries(roles.map((role) => {
-    const override = trimmed(env, `AI_SPECIALIST_${role.toUpperCase()}_MODEL`);
+    const roleKey = `AI_SPECIALIST_${role.toUpperCase()}_MODEL`;
+    const override = opaqueModelId(env[roleKey]);
+    // #1465: a whitespace-only override carries no name, so the role falls
+    // back to the profile or the primary model. The lane reports it instead
+    // of dropping it silently.
+    if (isBlankModelValue(env[roleKey])) {
+      warnings.push(`${roleKey.toLowerCase().replaceAll("_", "-")} holds only whitespace, so it is treated as unset and the role falls back to the specialist profile model or the primary model`);
+    }
     if (override !== "") return [role, { model: override, source: "role-override" as const }];
     if (profileActive) return [role, { model: specialistModel, source: "specialist-profile" as const }];
     return [role, { model: primary.model, source: "primary" as const }];
@@ -434,30 +488,111 @@ export function resolveSpecialistProfiles(env: EnvLike): SpecialistProfiles {
   };
 }
 
+/** The env key a lane's resolved value actually came from, for refusal
+ * messages that name the configuration the operator must fix. */
+function effectiveKey(env: EnvLike, laneKey: string, baseKey: string): string {
+  return (env[laneKey] ?? "") !== "" ? laneKey : baseKey;
+}
+
+/** #1493: the fail-closed check behind `laneApiFormat`. The message names the
+ * environment variable that must be fixed and the input id the operator
+ * edits, and never echoes the rejected value. */
+function checkedApiFormat(envKey: string, value: string): string {
+  if (API_FORMAT_VALUES.includes(value)) return value;
+  throw new Error(
+    `${envKey} (${inputName(envKey)}) must be one of: ${API_FORMAT_VALUES.join(", ")}`,
+  );
+}
+
+/** #1493: the base wire family, checked even when every review lane shadows
+ * it. The specialist lane reads the base directly, so an unusable base value
+ * must not survive profile resolution to be coerced into a wire family
+ * there. */
+function baseApiFormat(env: EnvLike): string {
+  const base = env.AI_API_FORMAT ?? "";
+  return base === "" ? "openai" : checkedApiFormat("AI_API_FORMAT", base);
+}
+
+/** #1493: the wire family a review lane dials, resolved from the raw
+ * environment. The lane's own value wins; an empty lane value inherits the
+ * base value; an empty base value is the documented `openai` default.
+ *
+ * Every non-empty value is checked against the shared vocabulary and a value
+ * outside it FAILS CLOSED. The transport dials the Anthropic wire only for
+ * the exact `anthropic` family and treats every other string as the OpenAI
+ * wire, so an unvalidated value (`Anthropic`, `openai-compatible`, …) would
+ * silently review on a protocol the operator never asked for — a wrong-wire
+ * request that still looks successful. The config loader validates the same
+ * vocabulary for the action inputs (`ENUM_INPUTS`); this check closes the
+ * raw-environment path, where the value arrives from the ambient process
+ * environment and the contract never validated it. */
+function laneApiFormat(env: EnvLike, laneKey: string, base: string): string {
+  const lane = env[laneKey] ?? "";
+  return lane === "" ? base : checkedApiFormat(laneKey, lane);
+}
+
 export function resolveTierProfiles(env: EnvLike): TierProfiles {
+  // #1465: a configured model value that holds nothing but whitespace carries
+  // no name, so every lane treats it as unset. The lane reports it instead of
+  // dropping it silently: the operator has to know that a value they set is
+  // not the model the lane will call.
+  const warnings: string[] = [];
+  // #1493: the base wire family is resolved and checked once, before the
+  // lanes, so an unusable base is refused even when every lane shadows it.
+  const baseFormat = baseApiFormat(env);
+  const blankModelNotices: Array<[string, string]> = [
+    ["AI_MODEL", "ai-model holds only whitespace, so it is treated as unset and the review lanes have no model to call"],
+    ["AI_PRIMARY_MODEL", "ai-primary-model holds only whitespace, so it is treated as unset and the primary lane falls back to ai-model"],
+    ["AI_SMART_MODEL", "ai-smart-model holds only whitespace, so it is treated as unset and the smart lane stays off"],
+    ["AI_FALLBACK_MODEL", "ai-fallback-model holds only whitespace, so it is treated as unset and the fallback lane stays off"],
+  ];
+  for (const [key, notice] of blankModelNotices) {
+    if (isBlankModelValue(env[key])) warnings.push(notice);
+  }
   const primary = {
     baseUrl: value(env, "AI_PRIMARY_BASE_URL", value(env, "AI_BASE_URL")),
-    model: value(env, "AI_PRIMARY_MODEL", value(env, "AI_MODEL")),
-    apiFormat: value(env, "AI_PRIMARY_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
+    // #1465: every lane's model is an opaque provider token, resolved
+    // through the one shared place (`opaqueModelId`) — trimmed, never
+    // case-folded. An empty lane override still inherits the base model.
+    model: opaqueModelId(env.AI_PRIMARY_MODEL) || opaqueModelId(env.AI_MODEL),
+    apiFormat: laneApiFormat(env, "AI_PRIMARY_API_FORMAT", baseFormat),
     apiKey: value(env, "AI_PRIMARY_API_KEY", value(env, "AI_API_KEY")),
   };
-  const smartModel = value(env, "AI_SMART_MODEL");
+  refuseConflictingCredentialChannels(
+    effectiveKey(env, "AI_PRIMARY_BASE_URL", "AI_BASE_URL"),
+    effectiveKey(env, "AI_PRIMARY_API_KEY", "AI_API_KEY"),
+    primary.baseUrl,
+    primary.apiKey,
+  );
+  const smartModel = opaqueModelId(env.AI_SMART_MODEL);
   const smartResolved = smartModel.length > 0;
   const smart = {
     baseUrl: value(env, "AI_SMART_BASE_URL", value(env, "AI_BASE_URL")),
     model: smartModel,
-    apiFormat: value(env, "AI_SMART_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
+    apiFormat: laneApiFormat(env, "AI_SMART_API_FORMAT", baseFormat),
     apiKey: value(env, "AI_SMART_API_KEY", value(env, "AI_API_KEY")),
   };
+  refuseConflictingCredentialChannels(
+    effectiveKey(env, "AI_SMART_BASE_URL", "AI_BASE_URL"),
+    effectiveKey(env, "AI_SMART_API_KEY", "AI_API_KEY"),
+    smart.baseUrl,
+    smart.apiKey,
+  );
   const fallback = {
     // #1251: raw-env parity with the config loader's resolveInherited —
     // an unset/empty fallback endpoint inherits the base endpoint (but never
     // the base model; the config loader deliberately leaves that unset).
     baseUrl: value(env, "AI_FALLBACK_BASE_URL", value(env, "AI_BASE_URL")),
-    model: value(env, "AI_FALLBACK_MODEL"),
-    apiFormat: value(env, "AI_FALLBACK_API_FORMAT", value(env, "AI_API_FORMAT", "openai")),
+    model: opaqueModelId(env.AI_FALLBACK_MODEL),
+    apiFormat: laneApiFormat(env, "AI_FALLBACK_API_FORMAT", baseFormat),
     apiKey: value(env, "AI_FALLBACK_API_KEY", value(env, "AI_API_KEY")),
   };
+  refuseConflictingCredentialChannels(
+    effectiveKey(env, "AI_FALLBACK_BASE_URL", "AI_BASE_URL"),
+    effectiveKey(env, "AI_FALLBACK_API_KEY", "AI_API_KEY"),
+    fallback.baseUrl,
+    fallback.apiKey,
+  );
   const primaryRetries = numberValue(env, "AI_PRIMARY_RETRIES", 8);
   const delay = numberValue(env, "AI_PRIMARY_RETRY_DELAY_SEC", 15);
   const stream = trueValue(env.AI_STREAM === undefined ? "true" : env.AI_STREAM);
@@ -510,6 +645,7 @@ export function resolveTierProfiles(env: EnvLike): TierProfiles {
       // own ai-fallback-base-url, which may be a different backend).
       anthropicStructuredOutputSupported: laneAnthropicStructuredOutputSupported("fallback", env),
     },
+    warnings,
   };
 }
 
@@ -540,7 +676,21 @@ export interface ConfidenceProfile {
   enabled: boolean;
   baseUrl: string;
   model: string;
+  /** Verifier's own wire family. Under `inherit-primary` an empty
+   * `ai-confidence-api-format` inherits the primary lane's resolved format;
+   * under `require-dedicated` the family is endpoint-owned, and an unset
+   * format REFUSES the lane (#1481: `refusalCause:
+   * dedicated_format_missing`) rather silently inheriting the primary's. */
   apiFormat: string;
+  /** #1481: the OpenAI token-limit field this lane's requests use — an
+   * endpoint protocol setting like the wire family, never ambient review-lane
+   * state. An explicit `ai-confidence-tokens-param` always wins; under
+   * `inherit-primary` an unset value keeps the run's historical convention
+   * (`AI_TOKENS_PARAM`, defaulting to `max_tokens`); under `require-dedicated`
+   * an unset value resolves to verifier-owned `max_tokens` and never inherits
+   * the primary lane's `AI_TOKENS_PARAM`. Ignored on the Anthropic wire,
+   * which always sends `max_tokens`. */
+  tokensParam: TokensParam;
   apiKey: string;
   requestTimeoutSec: number;
   /** #998-style free-form effort, "" = omit the field. Unlike the review
@@ -555,6 +705,36 @@ export interface ConfidenceProfile {
    * Provenance, not value equality — an operator may deliberately reuse
    * the same secret on a distinct endpoint, and that must stay allowed. */
   credentialSource: "own" | "primary";
+  /** #1368: the scorer's completion/output budget in tokens (positive
+   * integer). Provider accounting may include reasoning/thinking tokens
+   * inside this budget, so it must leave room for hidden reasoning plus the
+   * final structured JSON answer; default 4096. A scorer that exhausts the
+   * budget degrades to unscored — it never affects the review. */
+  maxTokens: number;
+  /** #1368: the scorer's prompt budget in tokens (~96k default). A
+   * deterministic bytes/4 estimate bounds the assembled prompt with explicit
+   * in-band truncation when exceeded. */
+  promptTokens: number;
+  /** #1368: the operator-declared context window of the confidence model,
+   * for deterministic budget validation; 0 = unknown (no clamping). */
+  modelContextTokens: number;
+  /** #1368: the operator's assertion that the scorer's Anthropic-compatible
+   * endpoint accepts `output_config.effort`. Never inherited from any other
+   * lane (capability assertions never cross lanes); false keeps the
+   * Anthropic request byte-identical even when an effort is configured. */
+  anthropicEffortSupported: boolean;
+  /** #1368: the operator's assertion that the scorer's endpoint (either wire
+   * family) accepts structured output with the scorer's own compact JSON
+   * schema. False (the default) keeps the request bytes unchanged. */
+  structuredOutputSupported: boolean;
+  /** #1478: set when the resolver REFUSED the resolved configuration itself —
+   * the require-dedicated isolation mode without the dedicated configuration
+   * it requires (no dedicated model: `dedicated_model_missing`; no dedicated
+   * endpoint: `dedicated_config_missing`; no dedicated wire family:
+   * `dedicated_format_missing`, #1481). The scorer publishes `unscored`
+   * with exactly this action-owned cause, pre-wire, and the review is
+   * unaffected. "" = nothing refused. */
+  refusalCause: string;
 }
 
 export interface ConfidenceResolution {
@@ -572,19 +752,27 @@ export interface ConfidenceResolution {
 function primaryLane(env: EnvLike): { baseUrl: string; model: string; apiFormat: string; apiKey: string } {
   return {
     baseUrl: trimmed(env, "AI_PRIMARY_BASE_URL") || trimmed(env, "AI_BASE_URL"),
-    model: trimmed(env, "AI_PRIMARY_MODEL") || trimmed(env, "AI_MODEL"),
+    // #1465: the primary lane's model is an opaque provider token — trimmed,
+    // never case-folded.
+    model: opaqueModelId(env.AI_PRIMARY_MODEL) || opaqueModelId(env.AI_MODEL),
     apiFormat: (trimmed(env, "AI_PRIMARY_API_FORMAT") || trimmed(env, "AI_API_FORMAT") || "openai").toLowerCase(),
     apiKey: trimmed(env, "AI_PRIMARY_API_KEY") || trimmed(env, "AI_API_KEY"),
   };
 }
 
 /** The disabled profile every early return shares: no endpoint, no
- * credential, no model — nothing the run could dial. */
+ * credential, no model — nothing the run could dial. The #1368 budget and
+ * capability fields carry their documented defaults so the shape stays
+ * uniform for every consumer. */
 function disabledConfidenceProfile(): ConfidenceProfile {
   return {
     enabled: false, baseUrl: "", model: "", apiFormat: "", apiKey: "",
     requestTimeoutSec: 120, reasoningEffort: "", inheritedTransport: false,
     credentialSource: "own",
+    maxTokens: CONFIDENCE_MAX_TOKENS, promptTokens: CONFIDENCE_PROMPT_TOKENS, modelContextTokens: 0,
+    anthropicEffortSupported: false, structuredOutputSupported: false,
+    tokensParam: "max_tokens",
+    refusalCause: "",
   };
 }
 
@@ -596,16 +784,96 @@ function isForkPr(env: EnvLike): boolean {
   return env.IS_FORK_PR === "true";
 }
 
+/** #1368: one positive-integer env value, or its documented default with a
+ * WARNING naming the input — the same drop-loudly-never-fatal style
+ * `effortFrom` uses. An empty value means "not set" and takes the default
+ * silently (the contract's own unset shape). */
+function positiveIntFrom(env: EnvLike, key: string, fallback: number, warnings: string[]): number {
+  const raw = (env[key] ?? "").trim();
+  if (raw === "") return fallback;
+  const parsed = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : Number.NaN;
+  if (!Number.isFinite(parsed) || !Number.isSafeInteger(parsed) || parsed < 1) {
+    warnings.push(`${key} ignored: the value must be a positive integer; the default ${fallback} is used`);
+    return fallback;
+  }
+  return parsed;
+}
+
+/** #1368: the boolean capability-assertion convention every lane opt-in
+ * shares — true only on the exact word "true", so nothing is ever enabled by
+ * accident (malformed values are off, never an opt-in). */
+function confidenceCapabilityFlag(env: EnvLike, key: string): boolean {
+  return (env[key] ?? "").trim().toLowerCase() === "true";
+}
+
+/** #1481: resolve the confidence lane's OpenAI token-limit field. An explicit
+ * ai-confidence-tokens-param (trimmed, lowercased; the contract validates the
+ * enum) always wins. Unset: under inherit-primary the lane keeps the run's
+ * historical convention — AI_TOKENS_PARAM exactly as the review engine reads
+ * it, defaulting to max_tokens — while under require-dedicated the value is
+ * verifier-owned `max_tokens`, never the primary lane's setting (the same
+ * "nothing primary-derived rides the verifier" contract as endpoint,
+ * credential, model, and wire family). An unset/unknown AI_TOKENS_PARAM is
+ * max_tokens in both modes, matching every other consumer of that key. */
+function confidenceTokensParamFrom(env: EnvLike, requireDedicated: boolean): TokensParam {
+  const own = trimmed(env, "AI_CONFIDENCE_TOKENS_PARAM").toLowerCase();
+  if (own === "max_tokens" || own === "max_completion_tokens") return own;
+  if (requireDedicated) return "max_tokens";
+  return trimmed(env, "AI_TOKENS_PARAM").toLowerCase() === "max_completion_tokens" ? "max_completion_tokens" : "max_tokens";
+}
+
+/** #1465: the public input name for an env key (`AI_PRIMARY_MODEL` becomes
+ * `ai-primary-model`), so a warning names the input the operator edits. */
+function inputName(envKey: string): string {
+  return envKey.toLowerCase().replaceAll("_", "-");
+}
+
+/** #1465: the input that supplied the primary lane's model. The config loader
+ * inherits `ai-primary-model` from `ai-model`, so the lane value equals the
+ * base value when the operator never set one of their own. The notice names
+ * the input the operator actually wrote. */
+function primaryModelInput(env: EnvLike): string {
+  const lane = opaqueModelId(env.AI_PRIMARY_MODEL);
+  const base = opaqueModelId(env.AI_MODEL);
+  return lane !== "" && lane !== base ? "ai-primary-model" : "ai-model";
+}
+
+/** #1465: the deterministic near-miss notice for two model names that differ
+ * ONLY in letter case and go to the same endpoint. One provider's namespace
+ * holds one spelling of a name, so a case difference inside it is a typo.
+ * The notice is advisory only: it never changes the resolved model, never
+ * changes the request bytes, and never fails the run. */
+function confidenceModelCaseWarning(confidenceModel: string, siblingInput: string, siblingModel: string): string {
+  return `confidence scorer: the verifier model '${modelNameForNotice(confidenceModel)}' and ${siblingInput} '${modelNameForNotice(siblingModel)}' differ only in letter case, and both names go to the same endpoint. A provider treats a model name as a case-sensitive identifier, so one of the two names is not the name that provider knows. Set both names to the exact name the provider expects.`;
+}
+
 export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   const warnings: string[] = [];
   const primary = primaryLane(env);
-  const model = trimmed(env, "AI_CONFIDENCE_MODEL");
+  // #1465: the scorer's model identifier is an opaque provider token — the
+  // configured value, trimmed, never case-folded. The request and the
+  // published telemetry carry it byte-identically.
+  const model = opaqueModelId(env.AI_CONFIDENCE_MODEL);
   const enabled = model !== "";
   const baseUrl = trimmed(env, "AI_CONFIDENCE_BASE_URL");
   const apiFormatRaw = trimmed(env, "AI_CONFIDENCE_API_FORMAT");
   const apiKey = trimmed(env, "AI_CONFIDENCE_API_KEY");
+  // #1478: the operator-declared isolation mode. Config-load validation
+  // restricts the input to the two vocabulary values (anything else throws at
+  // startup), so here only the exact strict token is special and every other
+  // value — including the default — is the documented inherit-primary
+  // behavior.
+  const requireDedicated = trimmed(env, "AI_CONFIDENCE_ISOLATION") === "require-dedicated";
+  // #1465: a whitespace-only model value carries no name, so the lane treats
+  // it as unset. The lane reports it instead of dropping it silently. Under
+  // require-dedicated the unset model is not merely disabling — it is a
+  // REFUSED configuration (below), and the refusal warning is the accurate
+  // notice; this disabled-shape notice would contradict it.
+  if (isBlankModelValue(env.AI_CONFIDENCE_MODEL) && !requireDedicated) {
+    warnings.push("ai-confidence-model holds only whitespace, so it is treated as unset and the verifier stays disabled");
+  }
 
-  if (!enabled) {
+  if (!enabled && !requireDedicated) {
     // Disabled is the default: a transport configured without a model is a
     // likely typo, reported the same way the specialist lane reports orphan
     // transport fields — loudly, but never fatal.
@@ -633,15 +901,94 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
     return { profile: disabledConfidenceProfile(), warnings };
   }
 
+  // #1478: under require-dedicated the verifier's MODEL is dedicated too. The
+  // mode's contract is that nothing primary-derived rides the verifier lane —
+  // endpoint, credential, AND model — so an unset `ai-confidence-model` must
+  // NOT fall back to the primary or smart lane's model (the exact same-model
+  // correlation isolation exists to prevent). Mirror the missing-endpoint
+  // refusal: the lane stays ENABLED (the operator asked for it) but resolves
+  // no transport, and the scorer refuses the call pre-wire with the
+  // action-owned cause — visible as `unscored(dedicated_model_missing)` while
+  // the review itself publishes unchanged. No provider call, no wire
+  // artifacts, no substitution.
+  if (!enabled) {
+    warnings.push(
+      "confidence scorer: ai-confidence-isolation=require-dedicated but ai-confidence-model is empty — the verifier never inherits the primary or smart lane's model; set ai-confidence-model to a model the dedicated verifier endpoint serves, or drop ai-confidence-isolation to restore the inherit-primary default",
+    );
+    return {
+      profile: {
+        ...disabledConfidenceProfile(),
+        enabled: true,
+        refusalCause: "dedicated_model_missing",
+      },
+      warnings,
+    };
+  }
+
   const distinctEndpoint = baseUrl !== "";
-  // An explicitly configured api-format wins; empty inherits the primary
-  // lane's resolved format (the contract validates the enum, but ambient
-  // overrides or test rigs may not — an unknown value falls back to the
-  // primary format rather than crashing the run).
+  if (requireDedicated && !distinctEndpoint) {
+    // Isolation was requested and the dedicated endpoint does not exist. The
+    // primary lane's endpoint and credential must NOT ride the verifier: the
+    // run keeps the lane ENABLED (the model was configured) but resolves no
+    // transport, and the scorer refuses the call pre-wire with the
+    // action-owned cause — visible as `unscored(dedicated_config_missing)`
+    // while the review itself publishes unchanged. Silence here would be the
+    // exact failure #1478 measured: a verifier silently dialling the primary
+    // backend under the primary credential.
+    warnings.push(
+      "confidence scorer: ai-confidence-isolation=require-dedicated but ai-confidence-base-url is empty — the verifier never inherits the primary lane's endpoint or credential; set ai-confidence-base-url and ai-confidence-api-key to the dedicated verifier endpoint, or drop ai-confidence-isolation to restore the same-endpoint default",
+    );
+    return {
+      profile: {
+        ...disabledConfidenceProfile(),
+        enabled: true,
+        model,
+        refusalCause: "dedicated_config_missing",
+      },
+      warnings,
+    };
+  }
+  // An explicitly configured api-format wins; under inherit-primary an empty
+  // value inherits the primary lane's resolved format (the contract validates
+  // the enum, but ambient overrides or test rigs may not — an unknown value
+  // falls back to the primary format rather than crashing the run).
+  // #1481: the wire family is an ENDPOINT property, so under require-dedicated
+  // it is dedicated configuration like the endpoint, credential, and model:
+  // a blank (or unresolvable) ai-confidence-api-format REFUSES the lane with
+  // the action-owned cause `dedicated_format_missing` — enabled profile, no
+  // transport, no provider call — instead of silently inheriting the primary
+  // (or a workflow's smart-derived) format onto a verifier that may speak a
+  // different family.
   const configuredFormat = apiFormatRaw.toLowerCase();
+  const dedicatedFormat = configuredFormat === "openai" || configuredFormat === "anthropic";
+  if (requireDedicated && !dedicatedFormat) {
+    warnings.push(
+      "confidence scorer: ai-confidence-isolation=require-dedicated but ai-confidence-api-format is empty or not openai/anthropic — the verifier never inherits the primary lane's wire family; set ai-confidence-api-format to the format the dedicated verifier endpoint speaks (openai or anthropic), or drop ai-confidence-isolation to restore the inherit-primary default",
+    );
+    return {
+      profile: {
+        ...disabledConfidenceProfile(),
+        enabled: true,
+        model,
+        refusalCause: "dedicated_format_missing",
+      },
+      warnings,
+    };
+  }
   const apiFormat = apiFormatRaw !== ""
     ? (configuredFormat === "openai" || configuredFormat === "anthropic" ? configuredFormat : primary.apiFormat)
     : primary.apiFormat;
+  // #1481: the OpenAI token-limit field (`max_tokens` vs
+  // `max_completion_tokens`) is the SAME class of endpoint protocol setting as
+  // the wire family, so it resolves verifier-side: an explicit
+  // ai-confidence-tokens-param always wins; under inherit-primary an unset
+  // value keeps today's inheritance of the run's AI_TOKENS_PARAM convention;
+  // under require-dedicated an unset value resolves the verifier-owned
+  // `max_tokens` default and NEVER the primary lane's AI_TOKENS_PARAM (a
+  // dedicated OpenAI-compatible verifier that needs the other field says so
+  // with its own input). The Anthropic wire always sends max_tokens and
+  // ignores this value.
+  const confidenceTokensParam = confidenceTokensParamFrom(env, requireDedicated);
 
   // Credential rule (#1073): an explicitly configured scorer key is ALWAYS
   // used as-is — including on the same endpoint, where the operator named the
@@ -652,11 +999,36 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
   // warned about rather than silently degrading.
   const inheritedTransport = !distinctEndpoint;
   const resolvedBaseUrl = distinctEndpoint ? baseUrl : primary.baseUrl;
+  // #1428: the URL-credential channel is resolved here for the refusal rules
+  // below, but the lane's contract is never-fatal: a fail-closed hostile
+  // shape (an encoded `@`, an `@` outside the authority) disables the lane
+  // with the reason named instead of throwing out of profile resolution.
+  let urlCredential = "";
+  try {
+    urlCredential = endpointUrlCredential(resolvedBaseUrl);
+  } catch (error) {
+    warnings.push(
+      `confidence scorer disabled: the endpoint URL cannot be used as a request target (${error instanceof Error ? error.message : String(error)})`,
+    );
+    return { profile: disabledConfidenceProfile(), warnings };
+  }
   const apiKeyResolved = apiKey !== "" ? apiKey : (distinctEndpoint ? "" : primary.apiKey);
-  if (distinctEndpoint && apiKey === "") {
+  // A URL credential IS the lane's credential, so the "set a key explicitly"
+  // notice only applies to a credential-free distinct endpoint (#1428).
+  if (distinctEndpoint && apiKey === "" && urlCredential === "") {
     warnings.push(
       "confidence scorer: ai-confidence-base-url is set but ai-confidence-api-key is empty — a distinct endpoint never inherits the primary API key; set ai-confidence-api-key explicitly",
     );
+  }
+  // #1428: the one-credential rule reaches the confidence lane too, but the
+  // lane's contract is never-fatal — a URL credential plus a separate key is
+  // two channels for one request, so the lane is disabled with the refusal
+  // named instead of sending a request the transport would refuse anyway.
+  if (endpointUrlCredential(resolvedBaseUrl) !== "" && apiKeyResolved !== "") {
+    warnings.push(
+      "confidence scorer disabled: ai-confidence-base-url carries a credential in its userinfo and ai-confidence-api-key carries a separate model credential; one request carries one credential, so remove one",
+    );
+    return { profile: disabledConfidenceProfile(), warnings };
   }
 
   // Same-endpoint AND same-model scoring is less independent: the model that
@@ -669,8 +1041,120 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
     );
   }
 
+  // #1465: the near-miss check for a case-mangled sibling model. Two names
+  // that differ only in letter case and go to the SAME endpoint are the
+  // shape of the refusal an operator actually hit (an HTTP 403 for the
+  // exact string sent): one provider's namespace holds one spelling of a
+  // name. Names on a different endpoint are left alone, because two
+  // providers may each name their own model as they like. Deterministic and
+  // advisory: one notice per sibling, never fatal, and the resolved model is
+  // never rewritten.
+  const siblings: Array<{ input: string; model: string; baseUrl: string }> = [
+    { input: primaryModelInput(env), model: primary.model, baseUrl: primary.baseUrl },
+    {
+      input: inputName("AI_SMART_MODEL"),
+      model: opaqueModelId(env.AI_SMART_MODEL),
+      baseUrl: trimmed(env, "AI_SMART_BASE_URL") || primary.baseUrl,
+    },
+    {
+      input: inputName("AI_FALLBACK_MODEL"),
+      model: opaqueModelId(env.AI_FALLBACK_MODEL),
+      baseUrl: trimmed(env, "AI_FALLBACK_BASE_URL") || primary.baseUrl,
+    },
+  ];
+  for (const sibling of siblings) {
+    if (sibling.baseUrl !== resolvedBaseUrl) continue;
+    if (!differsOnlyByCase(model, sibling.model)) continue;
+    warnings.push(confidenceModelCaseWarning(model, sibling.input, sibling.model));
+  }
+
   const effort = effortFrom(env, "AI_CONFIDENCE_REASONING_EFFORT");
   if (effort.warning !== null) warnings.push(effort.warning);
+
+  // #1368: the scorer's own budgets and capability assertions. Every value
+  // is resolved here — defaults, validation warnings, and the deterministic
+  // context clamps — so the profile is the single source the scorer reads.
+  const maxTokensDefault = CONFIDENCE_MAX_TOKENS;
+  const promptTokensDefault = CONFIDENCE_PROMPT_TOKENS;
+  // #1368 review: the smallest prompt budget the context clamp ever leaves —
+  // the floor that keeps a tiny window from starving the prompt to zero, and
+  // the minimum shape a declared window must be able to fit (floor prompt +
+  // a positive completion budget) for the scorer to run at all. It is the
+  // SYSTEM-INCLUSIVE minimum: the scorer's system prompt, every fixed section
+  // rendered empty, and the diff at its byte floor. A bare 1,024 left the
+  // system prompt and the section scaffolding outside the bound, so a window
+  // that "fit" the floor still resolved a profile whose every request exceeded
+  // the window it declared. Derived from the prompt builder's own rendering,
+  // so it cannot drift from what the scorer actually sends.
+  const confidencePromptFloorTokens = CONFIDENCE_MINIMUM_PROMPT_TOKENS;
+  let maxTokens = positiveIntFrom(env, "AI_CONFIDENCE_MAX_TOKENS", maxTokensDefault, warnings);
+  let promptTokens = positiveIntFrom(env, "AI_CONFIDENCE_PROMPT_TOKENS", promptTokensDefault, warnings);
+  const modelContextTokens = positiveIntFrom(env, "AI_CONFIDENCE_MODEL_CONTEXT_TOKENS", 0, warnings);
+  const anthropicEffortSupported = confidenceCapabilityFlag(env, "AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT");
+  const structuredOutputSupported = confidenceCapabilityFlag(env, "AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT");
+  // Deterministic shape of the budgets. Never fatal: each adjustment is
+  // announced, and a declared window is an ACTUAL bound — the resolved budgets
+  // always satisfy promptTokens + maxTokens <= modelContextTokens (#1368
+  // review). In order: a window too small for ANY real request fails the
+  // scorer closed; a prompt budget below the floor is raised to it; then the
+  // pair is fitted into the declared window.
+  if (modelContextTokens > 0 && modelContextTokens <= confidencePromptFloorTokens) {
+    // Fail closed: no prompt+completion shape fits a window this small,
+    // and a declared context bound is an actual bound — the scorer is
+    // disabled (no call, no artifact), loudly, instead of producing an
+    // over-budget request (#1368 review).
+    warnings.push(
+      `confidence scorer disabled: the declared ai-confidence-model-context-tokens window (${modelContextTokens}) cannot fit the minimum prompt budget (${confidencePromptFloorTokens}, the scorer's system prompt and section scaffolding plus the smallest usable diff) plus a positive completion budget; raise ai-confidence-model-context-tokens or unset it`,
+    );
+    return { profile: disabledConfidenceProfile(), warnings };
+  }
+  // A prompt budget below the floor cannot hold even the scorer's smallest real
+  // request, so the lane would resolve "enabled" and then refuse every call.
+  // Raised to the floor and announced — the same drop-loudly-never-fatal
+  // treatment every other unusable value gets. (A declared window that reached
+  // this point is already known large enough for the floor; the fit below
+  // still gets the last word on the pair.)
+  if (promptTokens < confidencePromptFloorTokens) {
+    warnings.push(
+      `AI_CONFIDENCE_PROMPT_TOKENS raised to ${confidencePromptFloorTokens}: the configured prompt budget (${promptTokens}) cannot hold the scorer's smallest real request (its system prompt and section scaffolding plus the smallest usable diff)`,
+    );
+    promptTokens = confidencePromptFloorTokens;
+  }
+  if (modelContextTokens > 0) {
+    if (maxTokens > modelContextTokens) {
+      warnings.push(
+        `AI_CONFIDENCE_MAX_TOKENS clamped to ${modelContextTokens}: the declared ai-confidence-model-context-tokens window (${modelContextTokens}) is smaller than the configured completion budget`,
+      );
+      maxTokens = modelContextTokens;
+    }
+    if (promptTokens + maxTokens > modelContextTokens) {
+      const remaining = modelContextTokens - maxTokens;
+      if (remaining >= confidencePromptFloorTokens) {
+        warnings.push(
+          `AI_CONFIDENCE_PROMPT_TOKENS clamped to ${remaining}: prompt plus completion budgets must fit the declared ai-confidence-model-context-tokens window (${modelContextTokens})`,
+        );
+        promptTokens = remaining;
+      } else {
+        // The completion budget leaves less than the prompt floor: reduce
+        // BOTH budgets deterministically so prompt + completion fits the
+        // window exactly. Never fatal, both reductions announced.
+        const clampedMax = modelContextTokens - confidencePromptFloorTokens;
+        warnings.push(
+          `AI_CONFIDENCE_MAX_TOKENS reduced to ${clampedMax}: the declared ai-confidence-model-context-tokens window (${modelContextTokens}) cannot fit the configured completion budget plus the minimum prompt budget (${confidencePromptFloorTokens})`,
+        );
+        warnings.push(
+          `AI_CONFIDENCE_PROMPT_TOKENS clamped to ${confidencePromptFloorTokens}: prompt plus completion budgets must fit the declared ai-confidence-model-context-tokens window (${modelContextTokens})`,
+        );
+        maxTokens = clampedMax;
+        promptTokens = confidencePromptFloorTokens;
+      }
+    }
+  }
+  // #1368: a configured effort that cannot be sent must never be silent —
+  // the same truth-telling warning the review lanes emit (#1049 review).
+  if (apiFormat === "anthropic" && effort.value !== "" && !anthropicEffortSupported) {
+    warnings.push(anthropicEffortInactiveWarning("confidence", effort.value));
+  }
 
   return {
     profile: {
@@ -678,11 +1162,18 @@ export function resolveConfidenceProfile(env: EnvLike): ConfidenceResolution {
       baseUrl: resolvedBaseUrl,
       model,
       apiFormat,
+      tokensParam: confidenceTokensParam,
       apiKey: apiKeyResolved,
       requestTimeoutSec: numberValue(env, "AI_CONFIDENCE_TIMEOUT_SEC", 120),
       reasoningEffort: effort.value,
       inheritedTransport,
       credentialSource: apiKey !== "" || distinctEndpoint ? "own" : "primary",
+      maxTokens,
+      promptTokens,
+      modelContextTokens,
+      anthropicEffortSupported,
+      structuredOutputSupported,
+      refusalCause: "",
     },
     warnings,
   };

@@ -8,10 +8,20 @@
  * hard security policy      → what this module + instance-config.ts refuse
  *                             to express (structural, not a config section)
  *   > operator policy         → InstanceConfig (validated strictly, fails closed)
- *     > repository config     → the base-side `.github/pr-reviewer.yml`
- *                               (untrusted: total functions, warn + ignore)
- *       > engine defaults     → the action contract defaults
+ *     > namespace/account     → the operator-managed shared review policies
+ *       shared review policy    of #1350 (`namespace-policy.ts`, listed in
+ *                               the instance config; one definition reused
+ *                               by many repositories)
+ *       > repository config     → the base-side `.github/pr-reviewer.yml`
+ *                                 (untrusted: total functions, warn + ignore)
+ *         > engine defaults     → the action contract defaults
  * ```
+ *
+ * The namespace layer (#1350) is operator-managed instance-config data,
+ * never repository content: a repository's PR head cannot touch it. It is
+ * resolved by deterministic owner/repository matching and applies the same
+ * narrow-not-widen rules, chaining the envelope so numeric ceilings and
+ * enum/boolean explicit-wins cascade instance → namespace → repository.
  *
  * The repository config file is the SAME file, trust rules, and input-id
  * language the v3 Action adopts (`repository-config.ts`, #777). Operator
@@ -45,6 +55,8 @@ import type { ActionContract } from "./contract.js";
 import type { EvidenceProfile, ExecutorProfile, InstanceConfig, ModelProfile } from "./instance-config.js";
 import { hasControlCharacters } from "./instance-config.js";
 import type { RawInputs } from "./load-config.js";
+import type { NamespacePolicy, NamespaceScope } from "./namespace-policy.js";
+import { selectNamespacePolicy } from "./namespace-policy.js";
 import { applyRepositoryConfigValues, parseRepositoryConfigText, type RepositoryConfigFile } from "./repository-config.js";
 
 /** The operator-mode extension keys of the shared repository config file.
@@ -81,6 +93,19 @@ const MAX_ECHO_CHARS = 128;
 
 export class EffectiveConfigError extends Error {}
 
+/** Which config layer supplied a shared rule, as recorded in the
+ * provenance map (#1350): the instance's operator envelope, a repository's
+ * base-side config, or a matched namespace/account policy
+ * (`namespace:<policy-name>`). */
+export type ConfigSourceLayer = "instance" | "repository" | `namespace:${string}`;
+
+/** Provider-neutral identity of the repository being resolved: the forge
+ * account/organization login and repository name, lowercased for matching
+ * by `selectNamespacePolicy`. GitHub organizations, GitLab groups, and
+ * Forgejo/Gitea owners all map onto this one account-scope concept; no
+ * forge-specific field exists here. */
+export interface EffectiveScope extends NamespaceScope {}
+
 export interface EffectiveReviewConfig {
   readonly schemaVersion: 1;
   /** Repository config may turn review off for itself (`enabled: false`);
@@ -109,6 +134,27 @@ export interface EffectiveReviewConfig {
   /** Which repository config file was used, or `null` when none was found
    * or the found file was malformed and ignored. */
   readonly repoConfigPath: string | null;
+  /** The matched namespace/account shared review policy (#1350), or `null`
+   * when no policy governs this repository or no scope was supplied. */
+  readonly namespacePolicy: string | null;
+  /** Inline shared review-guidance text blocks from the matched namespace
+   * policy, in listed order (order is precedence and part of the
+   * fingerprint). Content is operator config, never repository-supplied. */
+  readonly namespaceReviewInstructions: readonly string[];
+  /** Which layer supplied each shared rule (#1350), keyed by rule identity
+   * (`reviewer-settings/<input-id>`, `ignore-paths/<glob>`,
+   * `skip-only-paths/<glob>`, `review-instructions/<index>`,
+   * `namespace-instructions/<index>`, `require-suggested-fix`). Scalar
+   * settings record the LAST WRITER of the effective value (a repository
+   * narrowing a namespace-set ceiling is attributed to the repository);
+   * list-valued rules record the FIRST supplier in merge order (the
+   * namespace layer merges first, so a glob both layers supplied is
+   * attributed to the namespace — the list entry is identical either way).
+   * Descriptive metadata about sources — derived from the same material the
+   * fingerprint hashes — and deliberately excluded from it, like the
+   * warnings and `repoConfigPath`: a policy rename that changes no
+   * effective value is not a material change. */
+  readonly provenance: Readonly<Record<string, ConfigSourceLayer>>;
   /** `ecfg-v1-<sha256>` over the material effective config. */
   readonly fingerprint: string;
   /** Visible, non-fatal notices from repository-config handling. */
@@ -147,18 +193,19 @@ function yamlBoolean(value: Exclude<unknown, undefined>): boolean {
 function validatePathGlobs(
   value: unknown,
   key: string,
+  sourceLabel: string,
   sourcePath: string,
   warnings: string[],
 ): readonly string[] {
   if (value === undefined) return [];
   const entries = Array.isArray(value) ? value : [value];
   if (entries.length > MAX_PATH_GLOBS) {
-    warnings.push(`Repository config '${sourcePath}' sets '${key}' with more than ${MAX_PATH_GLOBS} entries; ignoring the key.`);
+    warnings.push(`${sourceLabel} '${sourcePath}' sets '${key}' with more than ${MAX_PATH_GLOBS} entries; ignoring the key.`);
     return [];
   }
   const out: string[] = [];
   for (const [index, entry] of entries.entries()) {
-    const label = `Repository config '${sourcePath}' sets '${key}[${index}]'`;
+    const label = `${sourceLabel} '${sourcePath}' sets '${key}[${index}]'`;
     if (typeof entry !== "string" || entry === "") {
       warnings.push(`${label} to an invalid value (must be a non-empty string); ignoring the entry.`);
       continue;
@@ -187,18 +234,19 @@ function validatePathGlobs(
  * MAX_INSTRUCTION_TOTAL_BYTES caps — never from the PR head. */
 function validateInstructionPaths(
   value: unknown,
+  sourceLabel: string,
   sourcePath: string,
   warnings: string[],
 ): readonly string[] {
   if (value === undefined) return [];
   const entries = Array.isArray(value) ? value : [value];
   if (entries.length > MAX_REVIEW_INSTRUCTION_FILES) {
-    warnings.push(`Repository config '${sourcePath}' sets 'review-instructions' with more than ${MAX_REVIEW_INSTRUCTION_FILES} files; ignoring the key.`);
+    warnings.push(`${sourceLabel} '${sourcePath}' sets 'review-instructions' with more than ${MAX_REVIEW_INSTRUCTION_FILES} files; ignoring the key.`);
     return [];
   }
   const out: string[] = [];
   for (const [index, entry] of entries.entries()) {
-    const label = `Repository config '${sourcePath}' sets 'review-instructions[${index}]'`;
+    const label = `${sourceLabel} '${sourcePath}' sets 'review-instructions[${index}]'`;
     if (typeof entry !== "string" || entry === "") {
       warnings.push(`${label} to an invalid value (must be a non-empty string); ignoring the entry.`);
       continue;
@@ -270,6 +318,7 @@ export function resolveEffectiveReviewConfig(
   contract: ActionContract,
   instance: InstanceConfig,
   file: RepositoryConfigFile | undefined,
+  options: { readonly scope?: EffectiveScope } = {},
 ): EffectiveReviewConfig {
   const warnings: string[] = [];
   let values: Readonly<Record<string, unknown>> = {};
@@ -307,31 +356,131 @@ export function resolveEffectiveReviewConfig(
     else warnings.push(`Repository config '${sourcePath}' sets 'enabled' to an invalid value (must be a boolean); ignoring it.`);
   }
 
-  // Layer 2 → layer 3 narrowing: the operator envelope (reviewerDefaults,
-  // plus the explicit policy-override opt-in) narrowed by the repository's
-  // contract-input keys, byte-identical to the Action-mode precedence.
+  // Layer 2 → 3 → 4 narrowing: the operator envelope (reviewerDefaults,
+  // plus the explicit policy-override opt-in), narrowed by the matched
+  // #1350 namespace policy's reviewer-defaults (operator-authored, so it
+  // may set repo-policy inputs without the repository opt-in — applied
+  // over a gate-forced copy), then by the repository's contract-input keys with
+  // the operator's own gate value restored. Chaining through
+  // `applyRepositoryConfigValues` gives the cascade for free: numeric
+  // ceilings chain (instance ceiling → namespace narrows below it →
+  // repository narrows below the namespace ceiling) and enum/boolean
+  // explicit-wins chains (instance-explicit beats namespace; a
+  // namespace-set key beats the repository).
   const operatorRaw: RawInputs = instance.allowRepoPolicyOverrides
     ? { ...instance.reviewerDefaults, "allow-repo-policy-overrides": "true" }
     : instance.reviewerDefaults;
-  const envelope = applyRepositoryConfigValues(contract, operatorRaw, envelopeValues, sourcePath ?? "");
-  warnings.push(...envelope.warnings);
+  // #1350: deterministic owner/repository matching picks the one
+  // operator-managed namespace policy governing this repository (null when
+  // none does, or when no scope was supplied — the Action mode never passes
+  // one, so the namespace layer is inert there). The scope is trusted
+  // caller input (the repository's resolved identity), but it still fails
+  // closed rather than match on a malformed identity. A defensive guard
+  // keeps an unvalidated instance from crashing the resolver.
+  if (options.scope !== undefined) {
+    const { owner, name } = options.scope;
+    if (typeof owner !== "string" || typeof name !== "string" || owner === "" || name === "" || hasControlCharacters(owner) || hasControlCharacters(name)) {
+      throw new EffectiveConfigError("namespace scope must carry non-empty, control-free owner and repository-name strings");
+    }
+  }
+  const scopePolicies = Array.isArray(instance.namespacePolicies) ? instance.namespacePolicies : [];
+  const policy = options.scope === undefined ? null : selectNamespacePolicy(scopePolicies, options.scope);
+  const gateRaw = operatorRaw["allow-repo-policy-overrides"];
+  const nsBase: RawInputs = { ...operatorRaw, "allow-repo-policy-overrides": "true" };
+  const nsResult = policy
+    ? applyRepositoryConfigValues(contract, nsBase, policy.reviewerDefaults, policy.name, { sourceLabel: "Namespace policy" })
+    : null;
+  let midRaw: RawInputs = nsResult ? { ...nsResult.raw } : { ...operatorRaw };
+  if (gateRaw === undefined) {
+    const { "allow-repo-policy-overrides": _gate, ...rest } = midRaw;
+    void _gate;
+    midRaw = rest;
+  } else {
+    midRaw = { ...midRaw, "allow-repo-policy-overrides": gateRaw };
+  }
+  // Keys the namespace layer actually applied are upper-layer ceilings for
+  // the repository tier — even when a namespace value happens to equal the
+  // contract default, which the default-equality heuristic alone could not
+  // distinguish from "unset".
+  const nsExplicit = new Set(nsResult?.appliedKeys ?? []);
+  const envelope = applyRepositoryConfigValues(contract, midRaw, envelopeValues, sourcePath ?? "", { explicitKeys: nsExplicit });
+  warnings.push(...(nsResult?.warnings ?? []), ...envelope.warnings);
   const reviewerSettings: Record<string, string> = {};
   for (const [key, value] of Object.entries(envelope.raw)) {
     if (value !== undefined && key !== "allow-repo-policy-overrides") reviewerSettings[key] = value;
   }
 
-  const ignorePaths = validatePathGlobs(extensionValues.get("ignore-paths"), "ignore-paths", sourcePath ?? "", warnings);
-  const skipOnlyPaths = validatePathGlobs(extensionValues.get("skip-only-paths"), "skip-only-paths", sourcePath ?? "", warnings);
-  const reviewInstructions = validateInstructionPaths(extensionValues.get("review-instructions"), sourcePath ?? "", warnings);
+  // Path guidance merges across the namespace and repository layers:
+  // `ignore-paths` unions (additive narrowing, namespace entries first);
+  // `skip-only-paths` cannot union (that would widen) and its globs do not
+  // compose textually, so when the namespace layer sets the gate the
+  // repository's list is ignored with a warning — the conservative,
+  // deterministic single-supplier rule.
+  const namespaceSource: ConfigSourceLayer | null = policy === null ? null : `namespace:${policy.name}`;
+  const repoIgnorePaths = validatePathGlobs(extensionValues.get("ignore-paths"), "ignore-paths", "Repository config", sourcePath ?? "", warnings);
+  const ignorePaths: string[] = [];
+  for (const glob of [...(policy?.ignorePaths ?? []), ...repoIgnorePaths]) {
+    if (!ignorePaths.includes(glob)) ignorePaths.push(glob);
+  }
+  const repoSkipOnlyPaths = validatePathGlobs(extensionValues.get("skip-only-paths"), "skip-only-paths", "Repository config", sourcePath ?? "", warnings);
+  let skipOnlyPaths: readonly string[] = repoSkipOnlyPaths;
+  if ((policy?.skipOnlyPaths.length ?? 0) > 0) {
+    if (repoSkipOnlyPaths.length > 0) {
+      warnings.push(`Repository config '${sourcePath}' sets 'skip-only-paths', but namespace policy '${policy!.name}' already restricts the reviewed path set; the repository value is ignored.`);
+    }
+    skipOnlyPaths = policy!.skipOnlyPaths;
+  }
+  const reviewInstructions = validateInstructionPaths(extensionValues.get("review-instructions"), "Repository config", sourcePath ?? "", warnings);
 
   // Stricter-only: `false` would relax finding behavior, so it is ignored
-  // with a warning (narrow-only, like every other repository key).
-  let requireSuggestedFix = false;
+  // with a warning (narrow-only, like every other repository key). Either
+  // layer's `true` makes finding behavior stricter.
   const suggestedRaw = extensionValues.get("require-suggested-fix");
+  let repoSuggestedFix = false;
   if (suggestedRaw !== undefined) {
-    if (isYamlBoolean(suggestedRaw) && yamlBoolean(suggestedRaw)) requireSuggestedFix = true;
+    if (isYamlBoolean(suggestedRaw) && yamlBoolean(suggestedRaw)) repoSuggestedFix = true;
     else warnings.push(`Repository config '${sourcePath}' sets 'require-suggested-fix' to a value other than true; repository config may only make finding behavior stricter, so it is ignored.`);
   }
+  const requireSuggestedFix = repoSuggestedFix || policy?.requireSuggestedFix === true;
+  // Scalar attribution is last-writer: when both layers set true the
+  // repository wrote the effective value last.
+  const requireSuggestedFixSource: ConfigSourceLayer | null = repoSuggestedFix
+    ? "repository"
+    : policy?.requireSuggestedFix === true
+      ? namespaceSource!
+      : null;
+  const namespaceReviewInstructions: readonly string[] = policy?.reviewInstructions ?? [];
+
+  // #1350 provenance: which layer supplied each shared rule's effective
+  // value — scalar settings record the last writer (a repository narrowing
+  // a namespace-set ceiling value is attributed to the repository);
+  // list-valued rules record the first supplier in merge order.
+  const provenance: Record<string, ConfigSourceLayer> = {};
+  const nsApplied = new Set(nsResult?.appliedKeys ?? []);
+  const repoApplied = new Set(envelope.appliedKeys);
+  for (const key of Object.keys(reviewerSettings)) {
+    if (repoApplied.has(key)) provenance[`reviewer-settings/${key}`] = "repository";
+    else if (nsApplied.has(key) && namespaceSource !== null) provenance[`reviewer-settings/${key}`] = namespaceSource;
+    else if (key in instance.reviewerDefaults) provenance[`reviewer-settings/${key}`] = "instance";
+  }
+  for (const glob of ignorePaths) {
+    provenance[`ignore-paths/${glob}`] = namespaceSource !== null && policy!.ignorePaths.includes(glob)
+      ? namespaceSource
+      : "repository";
+  }
+  const skipOnlySource: ConfigSourceLayer = (policy?.skipOnlyPaths.length ?? 0) > 0 && namespaceSource !== null
+    ? namespaceSource
+    : "repository";
+  for (const glob of skipOnlyPaths) {
+    provenance[`skip-only-paths/${glob}`] = skipOnlySource;
+  }
+  for (const [index] of reviewInstructions.entries()) {
+    provenance[`review-instructions/${index}`] = "repository";
+  }
+  for (const [index] of namespaceReviewInstructions.entries()) {
+    provenance[`namespace-instructions/${index}`] = namespaceSource!;
+  }
+  if (requireSuggestedFixSource !== null) provenance["require-suggested-fix"] = requireSuggestedFixSource;
 
   const modelProfile = resolveProfile(instance, extensionValues.get("model-profile"), instance.modelProfiles, instance.defaultModelProfile, "model", sourcePath ?? "", enabled, warnings);
   // The instance validator guarantees a resolvable default model profile;
@@ -354,6 +503,9 @@ export function resolveEffectiveReviewConfig(
     reviewInstructions,
     requireSuggestedFix,
     repoConfigPath: sourcePath,
+    namespacePolicy: policy?.name ?? null,
+    namespaceReviewInstructions,
+    provenance,
     warnings,
   };
   return Object.freeze({ ...partial, fingerprint: effectiveConfigFingerprint(partial) });
@@ -374,11 +526,18 @@ export function resolveEffectiveReviewConfig(
  * unchanged head needs a new generation is #728's to answer with an
  * adoption/config generation dimension layered on this fingerprint.
  * Warnings and the config file path remain excluded: they describe the
- * run; they are not config state. */
+ * run; they are not config state. The namespace layer's shared inline
+ * instruction blocks (#1350) ARE material — instruction precedence is
+ * behavior — and are hashed in listed order when present; the key is
+ * included only when non-empty so deployments without namespace policies
+ * keep byte-identical fingerprints across the upgrade. The matched
+ * policy's NAME and the provenance map stay excluded: they describe where
+ * each rule came from, not the rule — a policy rename that changes no
+ * effective value is not a material change. */
 export function effectiveConfigFingerprint(
   config: Omit<EffectiveReviewConfig, "fingerprint"> | EffectiveReviewConfig,
 ): string {
-  const material = {
+  const material: Record<string, unknown> = {
     version: 1,
     enabled: config.enabled,
     model: config.modelProfile,
@@ -390,6 +549,9 @@ export function effectiveConfigFingerprint(
     reviewInstructions: [...config.reviewInstructions],
     requireSuggestedFix: config.requireSuggestedFix,
   };
+  if (config.namespaceReviewInstructions.length > 0) {
+    material.namespaceReviewInstructions = [...config.namespaceReviewInstructions];
+  }
   const digest = createHash("sha256").update(pythonJsonStringify(material), "utf8").digest("hex");
   return `ecfg-v1-${digest}`;
 }

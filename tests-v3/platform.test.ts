@@ -387,3 +387,144 @@ test("github adapter ghApi honors the per-call timeout override (#1210)", async 
   assert.match(String(result.error), /Platform request failed/);
   assert.ok(Date.now() - startedAt < 10_000, "the per-call override bound fired, not the adapter default");
 });
+
+// ── #1341: a failed PR read records its cause class ──────────────────────
+
+test("#1341: a non-2xx PR read records the HTTP status as the cause on both forges", async () => {
+  const github = new GitHubAdapter({
+    repo: "o/r",
+    prNumber: "1340",
+    token: "Bearer tok_secret",
+    fetchImpl: jsonResponse({ message: "hostile body ghp_AAAAtoken123" }, 422),
+  });
+  assert.equal(await github.getPr(), null);
+  const githubCause = github.prReadFailure();
+  assert.ok(githubCause instanceof PlatformRequestError);
+  assert.equal(githubCause.status, 422);
+  assert.match(githubCause.message, /HTTP status 422/);
+  // The cause is status-only: never the response body, never the token.
+  assert.doesNotMatch(githubCause.message, /hostile body|ghp_AAAAtoken123|tok_secret/);
+
+  const forgejo = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "1340",
+    baseUrl: "https://git.example.com",
+    token: "tok_secret",
+    fetchImpl: jsonResponse({ message: "hostile body ghp_AAAAtoken123" }, 422),
+  });
+  assert.equal(await forgejo.getPr(), null);
+  const forgejoCause = forgejo.prReadFailure();
+  assert.ok(forgejoCause instanceof PlatformRequestError);
+  assert.equal(forgejoCause.status, 422);
+  assert.doesNotMatch(forgejoCause.message, /hostile body|ghp_AAAAtoken123|tok_secret/);
+});
+
+test("#1341: a PR read with no response records the transport kind as the cause on both forges", async () => {
+  // The rejected fetch's message carries a credential-shaped URL on
+  // purpose: the recorded cause must be rebuilt from the kind alone, so
+  // neither the message nor any leaked text reaches the cause object.
+  const transport: FetchLike = async () => {
+    throw new Error("fetch failed https://evil.example.com/?token=tok_secret");
+  };
+  const github = new GitHubAdapter({ repo: "o/r", prNumber: "1", token: "Bearer t", fetchImpl: transport });
+  assert.equal(await github.getPr(), null);
+  assert.equal(github.prReadFailure()?.status, null);
+  assert.equal(github.prReadFailure()?.kind, "transport");
+  // Object-level pin for the re-wrap: the original error text (which here
+  // carries a credential-shaped URL) never reaches the cause object.
+  assert.doesNotMatch(github.prReadFailure()?.message ?? "", /evil|secret|credential/);
+
+  const forgejo = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    baseUrl: "https://git.example.com",
+    token: "t",
+    fetchImpl: transport,
+  });
+  assert.equal(await forgejo.getPr(), null);
+  assert.equal(forgejo.prReadFailure()?.status, null);
+  assert.equal(forgejo.prReadFailure()?.kind, "transport");
+
+  // A blocked redirect is a distinct no-response cause class, and the
+  // redirect target is never reported.
+  const redirect: FetchLike = async () => new Response(null, { status: 302, headers: { Location: "https://evil.example.com/steal?token=secret" } });
+  const redirected = new GitHubAdapter({ repo: "o/r", prNumber: "1", token: "Bearer t", fetchImpl: redirect });
+  assert.equal(await redirected.getPr(), null);
+  assert.equal(redirected.prReadFailure()?.kind, "redirect-blocked");
+  assert.doesNotMatch(String(redirected.prReadFailure()?.message), /evil\.example\.com|secret/);
+});
+
+test("#1341: a successful PR read clears the recorded cause", async () => {
+  let status = 500;
+  const fetchImpl: FetchLike = async () => new Response(JSON.stringify({ number: 1, state: "open" }), { status, headers: { "Content-Type": "application/json" } });
+  const adapter = new GitHubAdapter({ repo: "o/r", prNumber: "1", token: "Bearer t", fetchImpl });
+  assert.equal(await adapter.getPr(), null);
+  assert.equal(adapter.prReadFailure()?.status, 500);
+  status = 200;
+  assert.deepEqual(await adapter.getPr(), { number: 1, state: "open" });
+  assert.equal(adapter.prReadFailure(), null);
+});
+
+test("#1341: a 2xx response with an unusable payload records the payload cause on both forges", async () => {
+  // A 200 whose body is not a PR object is a failed read, not a fact about
+  // the PR: the cause must be named (invalid-json / invalid-payload), and
+  // a status that is not the failure (200) must not be reported as one.
+  // A PR record is a non-array object carrying a numeric `number`, so
+  // `{}` and `[]` are unusable payloads on BOTH forges — a PR-less object
+  // must never pass through (GitHub) or be synthesized into a PR shape
+  // (Forgejo).
+  const githubInvalidJson = new GitHubAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    token: "Bearer tok_secret",
+    fetchImpl: async () => new Response("<html>hostile body ghp_AAAAtoken123</html>", { status: 200, headers: { "Content-Type": "text/html" } }),
+  });
+  assert.equal(await githubInvalidJson.getPr(), null);
+  const jsonCause = githubInvalidJson.prReadFailure();
+  assert.equal(jsonCause?.kind, "invalid-json");
+  assert.doesNotMatch(jsonCause?.message ?? "", /hostile body|ghp_AAAAtoken123|tok_secret/);
+
+  const githubNullPayload = new GitHubAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    token: "Bearer t",
+    fetchImpl: async () => new Response("null", { status: 200, headers: { "Content-Type": "application/json" } }),
+  });
+  assert.equal(await githubNullPayload.getPr(), null);
+  assert.equal(githubNullPayload.prReadFailure()?.kind, "invalid-payload");
+
+  const githubEmptyObject = new GitHubAdapter({ repo: "o/r", prNumber: "1", token: "Bearer t", fetchImpl: jsonResponse({}) });
+  assert.equal(await githubEmptyObject.getPr(), null);
+  assert.equal(githubEmptyObject.prReadFailure()?.kind, "invalid-payload");
+
+  const githubArrayPayload = new GitHubAdapter({ repo: "o/r", prNumber: "1", token: "Bearer t", fetchImpl: jsonResponse([]) });
+  assert.equal(await githubArrayPayload.getPr(), null);
+  assert.equal(githubArrayPayload.prReadFailure()?.kind, "invalid-payload");
+
+  const forgejoArrayPayload = new ForgejoAdapter({
+    repo: "o/r",
+    prNumber: "1",
+    baseUrl: "https://git.example.com",
+    token: "t",
+    fetchImpl: jsonResponse([]),
+  });
+  assert.equal(await forgejoArrayPayload.getPr(), null);
+  assert.equal(forgejoArrayPayload.prReadFailure()?.kind, "invalid-payload");
+
+  const forgejoEmptyObject = new ForgejoAdapter({ repo: "o/r", prNumber: "1", baseUrl: "https://git.example.com", token: "t", fetchImpl: jsonResponse({}) });
+  assert.equal(await forgejoEmptyObject.getPr(), null);
+  assert.equal(forgejoEmptyObject.prReadFailure()?.kind, "invalid-payload");
+});
+
+test("#1341: an invalid repository reference is its own cause class", async () => {
+  const github = new GitHubAdapter({ repo: "bad repo name", prNumber: "1", token: "Bearer t", fetchImpl: jsonResponse({}) });
+  assert.equal(await github.getPr(), null);
+  assert.equal(github.prReadFailure()?.kind, "invalid-repo");
+  assert.equal(github.prReadFailure()?.status, null);
+  // Forgejo keeps its pinned fail-closed refusal for an invalid repo ref
+  // (it throws "Invalid repo full name" before any request,
+  // platform-reads.test.ts) — that thrown error already names the
+  // problem, so no cause latch is involved.
+  const forgejo = new ForgejoAdapter({ repo: "bad repo name", prNumber: "1", baseUrl: "https://git.example.com", token: "t", fetchImpl: jsonResponse({}) });
+  await assert.rejects(forgejo.getPr(), /Invalid repo full name/);
+});

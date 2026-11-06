@@ -17,7 +17,17 @@ import type { ChangedFile, IssueLabel, LinkedIssue } from "../context/types.js";
 export const PR_KINDS: readonly string[] = [
   "renovate_digest_only",
   "image_digest_only",
+  "renovate_image_update",
+  // #1379: vendor-agnostic dependency-update kinds — the same pure-diff
+  // shapes as the #1336 Renovate twins without the forge-authorship gate,
+  // placed after their twins so first-match-wins keeps every Renovate PR on
+  // its existing kind (and its existing artifacts).
+  "image_update",
+  "renovate_chart_update",
+  "chart_update",
   "dependency_upgrade",
+  "platform_version_update",
+  "action_update",
   "app_code",
   "k8s_manifest",
   "auth_changes",
@@ -38,6 +48,7 @@ export const RISK_FLAGS: readonly string[] = [
   "path_handling_changes",
   "auth_changes",
   "secret_handling_changes",
+  "dependency_security_sensitive",
 ];
 
 // ---------------------------------------------------------------------------
@@ -932,6 +943,278 @@ function isDocumentationPath(path: string): boolean {
   return DOCUMENTATION_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
+/** Markdown documentation: the only file type whose prose the navigation-link
+ * discount reads. The discount's syntax model — inline links, fenced code
+ * blocks, inline code spans — is Markdown syntax. Other documentation types
+ * (`rst`, `txt`, `adoc`) keep the ordinary scan and fail toward detection: a
+ * Markdown-link-shaped string in an `.rst` file is literal text, not rendered
+ * navigation (#1354). */
+function isMarkdownPath(path: string): boolean {
+  return path.toLowerCase().endsWith(".md");
+}
+
+/** #1354: an ordinary parent-relative Markdown navigation link
+ * (`[Guide](../README.md)`) is repo-internal navigation in rendered
+ * documentation, not a filesystem traversal surface. In DOCUMENTATION chunks
+ * only, the `traversal_literal` scan view blanks the destination of a
+ * Markdown inline link whose target is a relative path; everything else on
+ * the line — including traversal prose in the link text — keeps its existing
+ * semantics, and a suppressed destination is recorded as a discounted
+ * `diff_nav_link` signal rather than silently dropped. Executable files keep
+ * the unblanked view and fail toward detection: a quoted traversal literal
+ * there fires even when it is Markdown-link-shaped. Scheme (`https:`),
+ * protocol-relative (`//`), root-absolute (`/`) and fragment (`#`)
+ * destinations are left as-is: they are not repo-internal navigation.
+ *
+ * The discount is a PROSE rule: it applies to rendered documentation text
+ * only. A line inside a fenced code block, and a link-shaped match inside an
+ * inline code span, are example/quoted code, not prose — they keep the
+ * ordinary traversal semantics and fail toward detection (#1354).
+ *
+ * The discount is also a MARKDOWN rule: the syntax model above exists only in
+ * Markdown, so it applies to Markdown documentation only. A link-shaped
+ * string in another documentation type (`rst`, `txt`, `adoc`) is literal
+ * text, not rendered navigation, and keeps its ordinary scan semantics.
+ *
+ * The blanked region is a DESTINATION, not the paren group: a group that
+ * CommonMark does not read as a destination is not navigation either, and an
+ * escaped `\[` is not a link opener at all. The label reads backslash escapes
+ * too, so an escaped `\]` cannot close a label and start a link. See
+ * `markdownDestinationSpan` and `escapedMarkdownLinkOpener`.
+ *
+ * Known limit of a diff-local Markdown view, accepted because reading it the
+ * other way would cost the feature it exists for: an INDENTED code block and
+ * a fence opened ABOVE the shown hunk are invisible here, so their link-shaped
+ * content is read as prose. The exposed surface stays bounded to a traversal
+ * inside a relative link destination — the exact shape this discount is for. */
+const MARKDOWN_INLINE_LINK_PATTERN = /!?\[(?:[^\]\\]|\\.)*\]\([^)]*\)/g;
+
+/** A Markdown fence line: an optional container prefix (a blockquote marker
+ * or a list marker), then whitespace, then a run of 3 or more backticks or 3
+ * or more tildes. The run's character and length are the fence's identity.
+ *
+ * The indentation limit is loose on purpose. CommonMark allows up to three
+ * spaces of indent RELATIVE to the container, and the container's indent (a
+ * list item, a blockquote) is not in the diff, so a fence nested in a list
+ * can carry four spaces or more, and a fence can open on the same line as a
+ * list bullet. Reading such a line as a fence keeps the block's content code,
+ * which fails toward detection: a fence recognized too eagerly turns a
+ * discount into a fired signal, never the other way round. */
+const MARKDOWN_FENCE_PATTERN = /^\s*(?:>\s*)*(?:(?:[-*+]|\d+[.)])\s+)?\s*(`{3,}|~{3,})/;
+
+/** The open fence of one diff stream. */
+type MarkdownFence = { char: string; length: number };
+
+function isRelativeNavigationDestination(destination: string): boolean {
+  const unwrapped = destination.startsWith("<") && destination.endsWith(">")
+    ? destination.slice(1, -1)
+    : destination;
+  if (unwrapped === "") return false;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(unwrapped)) return false;
+  if (unwrapped.startsWith("//")) return false;
+  if (unwrapped.startsWith("/")) return false;
+  if (unwrapped.startsWith("#")) return false;
+  return true;
+}
+
+/** Markdown's inline whitespace (CommonMark's blank characters, minus the
+ * newlines a diff line cannot carry). */
+function isMarkdownInlineBlank(char: string): boolean {
+  return char === " " || char === "\t" || char === "\f" || char === "\r";
+}
+
+/** A C0 control character or DEL. Neither can appear in a destination, and a
+ * line that carries one inside a link-shaped group is not rendered
+ * navigation: the scan keeps firing (#1354, fail toward detection). */
+function isControlCharacter(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return code < 0x20 || code === 0x7f;
+}
+
+/** The destination inside an inline link's paren group, as [start, end)
+ * offsets in the group text, or `null` when the group holds no destination.
+ *
+ * CommonMark: a destination is either the angle form, which carries no
+ * unescaped blank or control character and ends at its `>`, or a run that
+ * stops at the first blank character. What follows a destination is a title or
+ * ordinary text — never a navigation target — so it is NOT blanked: the
+ * traversal in `[Guide](guide.md "see ../../etc/passwd")` is a title, and the
+ * traversal in `[a](see open("../../etc/passwd")` is code text in a group that
+ * was never a destination at all (#1354).
+ *
+ * A backslash escapes nothing in the plain form: a raw blank ends the run
+ * whether or not it is escaped, so `[a](../x\ ../../etc/passwd)` has the
+ * destination `../x\` and the traversal after it keeps the scan — a link shape
+ * whose destination ends at an escaped blank renders no link that could reach
+ * outside the repo (#1354, fail toward detection). */
+function markdownDestinationSpan(group: string): [number, number] | null {
+  let start = 0;
+  while (start < group.length && isMarkdownInlineBlank(group[start] ?? "")) start += 1;
+  if (start >= group.length) return null;
+  if (group[start] === "<") {
+    for (let index = start + 1; index < group.length; index += 1) {
+      const char = group[index] ?? "";
+      if (char === "\\") {
+        index += 1;
+        continue;
+      }
+      if (char === ">") return [start, index + 1];
+      if (isMarkdownInlineBlank(char) || isControlCharacter(char)) return null;
+    }
+    return null;
+  }
+  let end = start;
+  while (end < group.length) {
+    const char = group[end] ?? "";
+    if (isMarkdownInlineBlank(char)) break;
+    if (isControlCharacter(char)) return null;
+    end += 1;
+  }
+  return end > start ? [start, end] : null;
+}
+
+/** A `[` preceded by an odd number of backslashes is an escaped literal
+ * bracket, not a link opener (CommonMark), so the link shape it starts is
+ * literal text and keeps the ordinary scan (#1354). */
+function escapedMarkdownLinkOpener(text: string, bracket: number): boolean {
+  let backslashes = 0;
+  for (let index = bracket - 1; index >= 0 && text[index] === "\\"; index -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function blankMarkdownNavDestinations(text: string): string {
+  const codeSpans = inlineCodeSpans(text);
+  return text.replace(MARKDOWN_INLINE_LINK_PATTERN, (...args: unknown[]) => {
+    const match = args[0] as string;
+    // The match offset is the second-to-last callback argument, because the
+    // last one is the whole string. Reading it by position keeps this guard
+    // correct if the link pattern ever gains a capture group, which would
+    // otherwise shift the arguments and silence the code-span rule.
+    const offset = args[args.length - 2] as number;
+    // A link-shaped match that starts inside an inline code span is quoted
+    // code, not a navigation link: it is left as-is, so the traversal literal
+    // inside it keeps its ordinary semantics.
+    if (codeSpans.some(([start, end]) => offset >= start && offset < end)) return match;
+    // An escaped `\[` (or `\![`) opens no link, so nothing on its right is a
+    // destination.
+    const bracket = match.startsWith("!") ? offset + 1 : offset;
+    if (escapedMarkdownLinkOpener(text, bracket)) return match;
+    // The destination group is the paren group after the label's `]`: the
+    // label itself may contain parentheses (`[docs (see ../x)](guide.md)`), so
+    // the boundary is the `](` pair, not the first `(`.
+    const open = match.lastIndexOf("](");
+    const group = match.slice(open + 2, match.length - 1);
+    const span = markdownDestinationSpan(group);
+    if (span === null) return match;
+    const destination = group.slice(span[0], span[1]);
+    if (!isRelativeNavigationDestination(destination)) return match;
+    return (
+      match.slice(0, open + 2 + span[0]) +
+      " ".repeat(span[1] - span[0]) +
+      match.slice(open + 2 + span[1])
+    );
+  });
+}
+
+/** The inline code spans of a line, as [start, end) index ranges. A backtick
+ * run opens a span and the NEXT run of EXACTLY the same length closes it; a
+ * run with no such partner is literal text. The discount is a prose rule, so
+ * a link-shaped match inside a code span is quoted code and keeps its
+ * ordinary scan semantics — the code-span reading fails toward detection. */
+function inlineCodeSpans(text: string): [number, number][] {
+  const runs: { start: number; length: number }[] = [];
+  const pattern = /`+/g;
+  let match = pattern.exec(text);
+  while (match !== null) {
+    runs.push({ start: match.index, length: match[0].length });
+    match = pattern.exec(text);
+  }
+  const spans: [number, number][] = [];
+  let open: { start: number; length: number } | null = null;
+  for (const run of runs) {
+    if (open === null) {
+      open = run;
+      continue;
+    }
+    // A run of a different length cannot close the span: it is its content.
+    if (run.length !== open.length) continue;
+    spans.push([open.start, run.start + run.length]);
+    open = null;
+  }
+  return spans;
+}
+
+/** One step of the Markdown fence state machine for a single diff stream: is
+ * this line code, and what fence (if any) is open afterwards. With no open
+ * fence, a fence-shaped line is an opener — but a BACKTICK fence whose info
+ * string contains a backtick is not an opener (CommonMark), so it stays
+ * ordinary content. With an open fence, a closer repeats the SAME character,
+ * is at least as long as the opener's run, and has nothing but whitespace
+ * after it; a fence-shaped line with the other character neither closes the
+ * open fence nor opens a second one — it is ordinary content inside the open
+ * fence, so the block stays open. */
+function markdownFenceStep(
+  content: string,
+  open: MarkdownFence | null,
+): { isCode: boolean; open: MarkdownFence | null } {
+  const match = MARKDOWN_FENCE_PATTERN.exec(content);
+  if (open === null) {
+    if (match === null) return { isCode: false, open: null };
+    const run = match[1] ?? "";
+    const info = content.slice(match[0].length);
+    if (run.startsWith("`") && info.includes("`")) return { isCode: false, open: null };
+    return { isCode: true, open: { char: run[0] ?? "`", length: run.length } };
+  }
+  if (match === null) return { isCode: true, open };
+  const run = match[1] ?? "";
+  if (run[0] !== open.char || run.length < open.length) return { isCode: true, open };
+  if (content.slice(match[0].length).trim() !== "") return { isCode: true, open };
+  return { isCode: true, open: null };
+}
+
+/** Which chunk lines are Markdown PROSE, per line. A `+` line belongs to the
+ * NEW file only, a `-` line to the OLD file only, and a context line to BOTH,
+ * so one fence state is tracked per stream. A context line is prose only when
+ * BOTH streams say prose: disagreement is read as code, the conservative
+ * direction (more scrutiny, never fewer). A line with no diff marker (a hunk
+ * header, an index line) is not content, and the fence state carries across
+ * it, so a fence opened in one hunk still covers the next. The discount is a
+ * prose rule: code contexts keep their ordinary scan and fail toward
+ * detection. */
+function markdownProseLines(lines: readonly string[]): boolean[] {
+  // A line with no diff marker is not content, and it keeps the prose view:
+  // git prints the section heading after the second `@@`, and that heading is
+  // file text, so a navigation link in it is navigation like any other.
+  const prose: boolean[] = new Array(lines.length).fill(true);
+  let openNew: MarkdownFence | null = null;
+  let openOld: MarkdownFence | null = null;
+  lines.forEach((line, index) => {
+    const marker = diffMarker(line);
+    if (marker === "\u0000") return;
+    const content = line.slice(1);
+    let newCode = false;
+    let oldCode = false;
+    if (marker === "+" || marker === " ") {
+      const step = markdownFenceStep(content, openNew);
+      openNew = step.open;
+      newCode = step.isCode;
+    }
+    if (marker === "-" || marker === " ") {
+      const step = markdownFenceStep(content, openOld);
+      openOld = step.open;
+      oldCode = step.isCode;
+    }
+    prose[index] = !newCode && !oldCode;
+  });
+  return prose;
+}
+
+/** The symlink-operation class name, shared with `symlinkCodeView`, which
+ * decides what counts as executable text for it (#1331). */
+const SYMLINK_SENSITIVE_CLASS = "symlink_sensitive";
+
 const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp[]])[] = [
   // Explicit traversal literals (outside specifiers/anchor calls).
   ["traversal_literal", [PATH_TRAVERSAL_PATTERN]],
@@ -957,8 +1240,11 @@ const PATH_HANDLING_CONTENT_CLASSES: readonly (readonly [string, readonly RegExp
     /\bunzip\s*\(/i,
   ]],
   // Symlink-sensitive filesystem operations. A recognised self-location
-  // `readlink` (#1034) is blanked before this scan runs.
-  ["symlink_sensitive", [
+  // `readlink` (#1034) is blanked before this scan runs. Quoted text is inert
+  // data for this class too (#1331), but through `symlinkCodeView`, which
+  // recovers the executable command forms that live inside quote-shaped
+  // syntax rather than dropping the whole span.
+  [SYMLINK_SENSITIVE_CLASS, [
     /symlink|readlink|lstat|follow_symlinks|O_NOFOLLOW/i,
   ]],
   // Identifier-shaped path references (`filepath`) — variables and
@@ -1130,12 +1416,46 @@ function pathSample(line: string): string {
   return cleaned.trim().slice(0, MAX_PATH_SAMPLE_CHARS);
 }
 
+function symlinkSample(raw: string, ownView: string, view: string, patterns: readonly RegExp[]): string {
+  /** #1335: the symlink view can match a run CARRIED from a following line —
+   * an exec call's argument list past the line break, or argv moved one
+   * element per line — where the line being scanned alone would record an
+   * excerpt that never contains the matched token (the pre-#1331 scan
+   * sampled the argv line itself, because that line matched on its own).
+   * The excerpt is redirected to the carried run ONLY when the scanned line
+   * cannot explain the hit itself: `ownView` is the same code view computed
+   * over the scanned line ALONE, so it keeps that line's own recovery —
+   * backtick, command substitution, argv-position token — whose raw excerpt
+   * already shows both the token and the construct that fired, and
+   * redirecting there would drop the diff marker and leave a bare token
+   * that reads like the inert value-position form #1331 just stopped
+   * firing; and it drops the inert text the fired view drops too (quotes,
+   * comments, trusted scaffolding), so a mention the scan deliberately
+   * discounts on the opener cannot pin the sample to the inert form while
+   * the real trigger sits on a following line. The redirected excerpt obeys
+   * the same bounds and sanitization as every other sample. Firing,
+   * attribution, and the discount branches are untouched: sample text only.
+   * SEARCH: every run of the scanned line's OWN recovery appears identically
+   * inside `ownView` (same text, same joining newlines), so when `ownView`
+   * misses, any run of the full view that matches is carried text by
+   * construction. */
+  if (!matchesAny(ownView, patterns)) {
+    for (const run of view.split("\n")) {
+      if (matchesAny(run, patterns)) return pathSample(run);
+    }
+  }
+  return pathSample(raw);
+}
+
 /** Lexical view of a line for the code-only material classes: every quoted
  * span is removed (quote chars doubled, contents dropped — string contents,
  * interpolation included, are data, not code identifiers). Comments are NOT
  * handled here: the comment-free lines from `blankCommentSpans` are the sole
  * comment authority, so this runs only on text that has already been through
- * them. */
+ * them. Keeping the quote characters is what makes removal non-adjacent, so
+ * stripping can never spell a token that was not already there; that guarantee
+ * is what the #1331 containment argument below relies on, and the span rule is
+ * shared with `quotedSpanEnd`. */
 function stripQuotedSpans(line: string): string {
   const out: string[] = [];
   let i = 0;
@@ -1143,24 +1463,477 @@ function stripQuotedSpans(line: string): string {
   while (i < n) {
     const ch = line[i] ?? "";
     if (ch === "'" || ch === '"' || ch === "`") {
-      let j = i + 1;
-      while (j < n) {
-        const c = line[j] ?? "";
-        if (c === "\\" && j + 1 < n) {
-          j += 2;
-          continue;
-        }
-        if (c === ch) break;
-        j += 1;
-      }
+      const close = quotedSpanEnd(line, i);
       out.push(ch + ch);
-      i = j < n ? j + 1 : n;
+      i = close === null ? n : close + 1;
       continue;
     }
     out.push(ch);
     i += 1;
   }
   return out.join("");
+}
+
+/** #1331 exec-call heads: a call that EXECUTES text, so what it executes as
+ * command text is recovered from its argument list even where it contains
+ * prose-shaped whitespace. Two branches: an unambiguous command verb in ANY
+ * position (`exec`, Go `exec.Command`, Java `Runtime.getRuntime().exec`,
+ * `system`, `spawn…`, Ruby `Open3.capture*`), and a generic verb (`run`,
+ * `call`, `check_output`, `Popen`) only behind a known exec module —
+ * recognizing any `run(` would donate arbitrary prose. #1334 review round 4
+ * names `popen` and `shell_exec` explicitly so a shell-string executor's
+ * command string is recovered wherever it is spelled (the `Popen` branch
+ * already covered `os.popen` case-insensitively; the bare spellings of both
+ * heads did not match at all). Global: every exec call on a line contributes
+ * the command text it executes. */
+const EXEC_ARGV_HEAD_PATTERN = new RegExp(
+  String.raw`(?:`
+    + String.raw`(?:^|[^\w$])(?:exec|execl|execle|execlp|execv|execve|execvp|execvpe|execSync|execFile(?:Sync)?|system|popen|shell_exec|spawn\w*|command(?:Sync)?|capture\w*)`
+    + String.raw`|\b(?:subprocess|child_process|execa|os|open3|syscall)\s*\.\s*(?:run|call|check_call|check_output|getoutput|getstatusoutput|Popen|exec\w*|spawn\w*|command(?:Sync)?|capture\w*)`
+    + String.raw`)\s*\(`,
+  "gi",
+);
+
+/** File types for which a backtick opens a STRING rather than a command: the
+ * JavaScript family. Everywhere else this classifier reaches a backtick is
+ * command substitution (shell, Ruby, Perl), and an unknown or extensionless
+ * type recovers too — mistaking a shell substitution for a template literal
+ * would hide a real operation, which is the wrong direction to fail in. */
+const TEMPLATE_LITERAL_EXTENSIONS = new Set([
+  "js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts", "json", "json5",
+]);
+
+/** File types whose quoted strings NEVER execute shell command substitution
+ * while being evaluated: in these languages `$(...)` inside a quoted span is
+ * inert data (#1331 review: Python `message = "$(readlink $1)"` must not
+ * fire). The languages that DO evaluate `$(...)` at string-evaluation time —
+ * the shell family and PowerShell — are not listed; nor are YAML, Makefile
+ * and Dockerfile, whose string content is routinely handed to a shell
+ * (JSON stays listed, following the backtick precedent already set in
+ * `TEMPLATE_LITERAL_EXTENSIONS` — a data format whose strings are inert), and
+ * an unknown or extensionless type recovers too — mistaking a shell
+ * substitution for inert string data would hide a real operation, which is
+ * the wrong direction to fail in. A string that a listed language passes
+ * to a shell is still recovered by the exec-argument rule, which is
+ * language-agnostic. */
+const COMMAND_SUBSTITUTION_INERT_EXTENSIONS = new Set([
+  ...TEMPLATE_LITERAL_EXTENSIONS,
+  "py", "pyi", "pyw", "rb", "rake", "pl", "pm", "php", "go", "rs",
+  "java", "kt", "kts", "scala", "swift", "cs", "c", "h", "cc", "cpp",
+  "cxx", "hpp", "hh", "hxx", "m", "mm", "lua", "dart", "ex", "exs",
+  "erl", "hrl", "hs", "jl", "r", "sql", "tcl", "vb",
+]);
+
+/** Bounds on the #1331 recovery work, because the scanned text is
+ * attacker-controlled diff content. A line longer than the first bound scans
+ * as the pre-#1331 view (detection kept, recovery not paid for); at most this
+ * many characters are recovered per line, shared with an argument list carried
+ * across lines; and at most this many exec calls per line contribute. Without
+ * them, a single minified or hostile line of repeated unclosed `exec(` turns
+ * the per-head walk into O(calls × line length) per line. */
+const MAX_SYMLINK_SCAN_LINE_CHARS = 4000;
+const MAX_SYMLINK_RECOVERED_CHARS = 4000;
+const MAX_EXEC_HEADS_PER_LINE = 8;
+
+/** Index of the quote that closes the span opening at `start`, or null when
+ * it never closes. THE shared span rule: `stripQuotedSpans`, the argv-token
+ * scan and the quote-aware paren walk must agree on where a string ends. */
+function quotedSpanEnd(text: string, start: number): number | null {
+  const quote = text[start] ?? "";
+  let j = start + 1;
+  while (j < text.length) {
+    const ch = text[j] ?? "";
+    if (ch === "\\" && j + 1 < text.length) {
+      j += 2;
+      continue;
+    }
+    if (ch === quote) return j;
+    j += 1;
+  }
+  return null;
+}
+
+/** The quoted spans of `text` as RAW slices (escapes left as written, an
+ * unterminated quote yields the remainder) with their open index and close
+ * index (null when the span never closes), so a caller can judge the
+ * position a span occupies. Rawness is what keeps the containment guarantee
+ * of `symlinkCodeView` honest: a word that only exists once escapes are
+ * unwrapped (`"sym\link"`) is not a signal. */
+function quotedSpans(text: string): { text: string; open: number; close: number | null }[] {
+  const spans: { text: string; open: number; close: number | null }[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const quote = text[i];
+    if (quote !== "'" && quote !== '"' && quote !== "`") continue;
+    const close = quotedSpanEnd(text, i);
+    spans.push({ text: text.slice(i + 1, close ?? text.length), open: i, close });
+    if (close === null) break;
+    i = close;
+  }
+  return spans;
+}
+
+/** Whether the whitespace-free quoted span opening at `open` (closing at
+ * `close`, null when unterminated) sits where an argv/path TOKEN lives
+ * (#1331 review: whitespace-free alone does not make quoted prose a token —
+ * `raise RuntimeError("symlink")` is a diagnostic value). It does when it is
+ * in list-element position — preceded by `[` or `,`, or followed by `,`
+ * (`["readlink", user_path]` at any nesting or line break,
+ * `exec.Command("readlink", p)`). The sole argument of a call, even carried
+ * to its own line by the formatter, is a value, not an argv element, and
+ * stays inert; an argument that is NOT the sole one (`log("symlink",
+ * level)`) keeps the token, the toward-detection direction. #1334 review
+ * round 4 retired the earlier path-shaped rule (any span containing `/`): a
+ * quoted constant path in non-argv position (`bin_path = "/usr/bin/readlink"`)
+ * is trusted constant-path scaffolding — no execution, no untrusted source —
+ * and the normative rule requires a real untrusted-path surface, so being
+ * path-shaped adds nothing that list-element position does not already cover.
+ * Exec calls recover their command text independently, so dropping
+ * value-position tokens cannot hide a shell-string executor or an
+ * interpreter operand. */
+function isArgvPathTokenPosition(line: string, open: number, close: number | null): boolean {
+  let j = open - 1;
+  while (j >= 0 && (line[j] === " " || line[j] === "\t")) j -= 1;
+  const prev = line[j];
+  if (prev === "[" || prev === ",") return true;
+  let k = (close ?? line.length - 1) + 1;
+  while (k < line.length && (line[k] === " " || line[k] === "\t")) k += 1;
+  return line[k] === ",";
+}
+
+/** Quote-aware paren walk: the index of the `)` that brings `depth` to zero
+ * (null when the text ends with the call still open) plus the depth the text
+ * leaves behind, so a caller can continue on the next line. A paren inside a
+ * quoted span is command text rather than call structure, so
+ * `["bash", "-c", "echo )", "readlink -f x"]` never closes the call early. */
+function scanCallDepth(text: string, depth: number, start = 0): { close: number | null; depth: number } {
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const close = quotedSpanEnd(text, i);
+      i = close === null ? text.length : close;
+      continue;
+    }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth <= 0) return { close: i, depth };
+    }
+  }
+  return { close: null, depth };
+}
+
+/** The argument-list text of an exec call whose `(` is still open at the end
+ * of `index`: the opening line's remainder plus the following lines up to the
+ * balanced closer, within `MAX_CONSTRUCTION_CONTINUATION_LINES` — the same
+ * bound `constructionOperandSpans` gives an open construction call — and
+ * within `maxChars`, so the walk stays bounded even when the closer never
+ * comes. Auto-formatted argv is therefore still read as the call's content. */
+function openCallArgumentText(
+  lines: string[],
+  index: number,
+  argsStart: number,
+  maxChars: number,
+): string {
+  let depth = 1;
+  let size = 0;
+  const parts: string[] = [];
+  const limit = Math.min(lines.length, index + 1 + MAX_CONSTRUCTION_CONTINUATION_LINES);
+  for (let i = index; i < limit; i++) {
+    const text = (lines[i] ?? "").slice(i === index ? argsStart : 0);
+    const scanned = scanCallDepth(text, depth);
+    depth = scanned.depth;
+    parts.push(scanned.close === null ? text : text.slice(0, scanned.close));
+    size += text.length;
+    if (scanned.close !== null || size >= maxChars) break;
+  }
+  return parts.join("\n");
+}
+
+/** #1334 review: heads whose FIRST argument is a shell command STRING rather
+ * than an argv list — `os.system`/`popen`, `subprocess.getoutput`/
+ * `getstatusoutput`, `shell_exec`, Ruby `Open3.capture*`, and the Node
+ * spellings (`exec`, `execSync`, anything `execa.*`) whose string argument is
+ * handed to a shell. The list-form `subprocess` heads (`run`, `call`,
+ * `check_*`, `Popen`) count only behind an explicit `shell=True`/`shell:
+ * true` marker: without it the first argument is the program name or a
+ * staged-command variable, and reading a whitespace-containing string there
+ * as command text would re-admit exactly the inert prose this class just
+ * stopped firing. `execFile`/`spawn` stay argv: their string arguments are
+ * operands, and Node `spawn` never invokes a shell. */
+const SHELL_STRING_MARKER_PATTERN = /\bshell\s*[=:]\s*(?:True|true)\b/;
+
+function isShellStringHead(callee: string, args: string): boolean {
+  const last = callee.split(".").pop()?.trim() ?? "";
+  if (last === "popen") return true;
+  if (/^(?:system|getoutput|getstatusoutput|shell_exec|execa|exec|execSync|capture\w*)$/i.test(last)) return true;
+  if (/^(?:run|call|check_call|check_output|Popen)$/i.test(last)) {
+    return SHELL_STRING_MARKER_PATTERN.test(args);
+  }
+  return /^execa\./i.test(callee);
+}
+
+/** Programs whose argv turns a following flag's argument into executed
+ * command text: the shell family plus the Windows interpreters. */
+const SHELL_INTERPRETER_TOKENS = new Set([
+  "sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish", "cmd", "powershell", "pwsh",
+]);
+
+function isShellInterpreterToken(token: string): boolean {
+  const base = token.replace(/\.exe$/i, "").split("/").pop() ?? "";
+  return SHELL_INTERPRETER_TOKENS.has(base.toLowerCase());
+}
+
+/** An interpreter command token anywhere in the argument list before the
+ * flag — bare or quoted, path-prefixed (`/bin/sh`) — so a wrapper argv
+ * (`["timeout", "5", "bash", "-c", …]`, `["sudo", "bash", "-c", …]`) still
+ * hands its flag's operand to an interpreter (#1334 review round 3). */
+function hasInterpreterToken(args: string): boolean {
+  for (const { text } of quotedSpans(args)) {
+    if (isShellInterpreterToken(text.trim())) return true;
+  }
+  return /\b(?:sh|bash|dash|zsh|ksh|csh|tcsh|fish|cmd|powershell|pwsh)\b/i.test(stripQuotedSpans(args));
+}
+
+/** The interpreter flags whose argument is a command line (`sh -c`,
+ * `cmd /c`, PowerShell `-Command`). The flag may be a quoted argv element
+ * (`"-c"`), which is consumed whole so the remainder after it starts outside
+ * the string; the bare spelling carries no quote context and can match
+ * inside string data — a toward-detection direction, still a raw slice.
+ * Matched only inside already-recovered command contexts and
+ * behind a recognized interpreter token — at the raw line level `-c` is
+ * ambiguous (`grep -c "symlink"` counts matches, it executes nothing), so
+ * the line-level scan never elevates on it. */
+const INTERPRETER_FLAG_PATTERN =
+  /(?:^|(?<=[^\w-]))(?:"(?:-c|\/c|-Command)"|'(?:-c|\/c|-Command)'|-c|\/c|-Command)(?![\w-])/i;
+
+/** Bound on command-text recovery nesting: a line's executed command strings
+ * are the first execution level below it, and a command string's own
+ * interpreter flags are the second. Deeper nesting keeps only the unwrapped
+ * text's quoted-data-stripped view, which can only fire. */
+const MAX_COMMAND_RECOVERY_DEPTH = 2;
+
+/** First top-level argument of an argument-list text: up to the first comma
+ * no bracket, brace or quoted span shelters, so `["a", "b"]` and
+ * `"cmd" + p` stay one argument while `os.popen(cmd, "r")` splits. */
+function firstTopLevelArg(args: string): string {
+  let depth = 0;
+  for (let i = 0; i < args.length; i++) {
+    const ch = args[i];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const close = quotedSpanEnd(args, i);
+      i = close === null ? args.length : close;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth <= 0) return args.slice(0, i);
+      depth -= 1;
+    } else if (ch === "," && depth <= 0) return args.slice(0, i);
+  }
+  return args;
+}
+
+/** The code view of text a call executes as a shell command: the host-level
+ * quoted spans are the boundary between the host language and the command
+ * line, so their CONTENTS are the command text and are unwrapped; inside the
+ * command line the same quoted-data rule applies one level down — quoted
+ * prose stays inert (`echo 'too many symlink levels'` executes no symlink
+ * operation), while command substitution and backticks are evaluated by the
+ * shell that receives the text regardless of the host file kind. At the
+ * depth cap only the unwrapped text's quoted-data-stripped view is kept —
+ * the quote stays the data marker at every level (#1334 review round 3:
+ * keeping raw text there let quoted prose fire again one nesting level
+ * down). */
+function commandTextView(text: string, depth: number, keep: (part: string) => void): void {
+  let unwrapped = "";
+  let last = 0;
+  for (const { text: content, open, close } of quotedSpans(text)) {
+    unwrapped += `${text.slice(last, open)}\n${content}\n`;
+    last = close === null ? text.length : close + 1;
+  }
+  unwrapped += text.slice(last);
+  keep(depth >= MAX_COMMAND_RECOVERY_DEPTH ? stripQuotedSpans(unwrapped) : symlinkCodeView([unwrapped], 0, true, true, depth));
+}
+
+/** #1331 code view for the symlink class: quoted text is inert DATA, so a
+ * diagnostic string (`raise SystemExit("too many symlink levels")`,
+ * `echo "too many symlink levels" >&2`) stops creating path-handling
+ * scrutiny — while the executable shapes that merely LOOK quoted are recovered
+ * explicitly, which is what the issue requires instead of a blanket
+ * `stripQuotedSpans`:
+ *   - a whitespace-free quoted span in ARGV/PATH-TOKEN position is a token,
+ *     never prose: in list-element position — preceded by `[`/`,` or
+ *     followed by `,` (`["readlink", user_path]` at any nesting or line
+ *     break, `exec.Command("readlink", p)`); a whitespace-free span in VALUE
+ *     position — the sole argument of a call, `raise
+ *     RuntimeError("symlink")` — is diagnostic data and stays inert
+ *     (#1331 review); a quoted constant path in non-argv position
+ *     (`bin_path = "/usr/bin/readlink"`) is trusted constant-path
+ *     scaffolding and stays inert too (#1334 review round 4 retired the
+ *     path-shaped rule — an untrusted-path surface is required);
+ *   - a command substitution executes its contents, quoted or not, in the
+ *     file kinds whose language evaluates it: `target="$(readlink "$1")"`
+ *     in shell (and PowerShell), gated by
+ *     `COMMAND_SUBSTITUTION_INERT_EXTENSIONS` (#1331 review: a Python string
+ *     such as `message = "$(readlink $1)"` is inert data); outside the
+ *     JavaScript family the backtick spelling too (shell, Ruby, Perl,
+ *     extensionless scripts);
+ *   - what a call EXECUTES as command text is recovered, not its whole
+ *     argument list (#1334 review: `subprocess.check_output(["echo",
+ *     "too many symlink levels"])` passes prose to echo — operand data): the
+ *     first argument of a shell-string executor (`os.system`,
+ *     `subprocess.getoutput`, Node `exec`, `execa.*`, list-form
+ *     `subprocess` heads behind `shell=True`) is unwrapped to the command
+ *     line it carries, an interpreter argv (`["bash", "-c", …]`) recovers
+ *     its `-c` operand, and a whitespace-free first argument is the command
+ *     token (`subprocess.run("readlink")`); within recovered command text
+ *     the same quoted-data rule applies one level down, with substitution
+ *     and backticks evaluated because the receiving context is a shell;
+ * CONTAINMENT: every scanned run is a raw slice of this line or of this
+ * call's own argument list, and runs are never concatenated adjacently
+ * (`stripQuotedSpans` keeps the quote characters, recovered runs are joined
+ * with newlines, unwrapped command contents are carried on their own
+ * lines), so the class's match set stays a SUBSET of the pre-#1331 chunk
+ * scan — a carried argument list is text of a following line that scan
+ * already read unquoted. The precision correction can drop signals but
+ * cannot invent one.
+ * DECLARED LIMITS, all in the concealment direction: whitespace-containing
+ * quoted text behind a call `EXEC_ARGV_HEAD_PATTERN` does not recognize
+ * (`runner.run("readlink -f " + p)`, pinned in the tests) — the same rule
+ * covers PowerShell `Invoke-Expression "readlink -f $p"`, a whitespace-
+ * containing command string behind a list-form exec head with no shell
+ * marker (`subprocess.run("readlink -f x")`; the `shell=True` spelling
+ * still fires), an argv list staged in a whitespace-containing variable
+ * before `subprocess.run(args)` (a whitespace-free staged list is a
+ * `[`-position token and still fires), and a shell command staged the same
+ * way — bare or whitespace-containing — and invoked later as `$cmd`, since
+ * linking those statements is the taint tracking this model refuses to be
+ * (`cmd = "readlink"` no longer fires: a value-position token is prose, so
+ * a staged command reads like one); a whitespace-free span that is the sole
+ * argument of a non-exec call, on the line or carried to its own line by
+ * the formatter (`runner.run("readlink")`); and — the concealment family
+ * the unrecognized-head rule already declared, widened by the
+ * value-position rule — a whitespace-free quoted command word inside a
+ * whitespace-separated argv the head pattern does not name
+ * (`sudo "readlink" "$1"`, `find . -exec "readlink" {} \;`): list-element
+ * position is comma-modeled, so shell-style whitespace argv conceals it —
+ * and comma-modeled position also keeps a whitespace-free single-word
+ * operand of a non-symlink program (`["echo", "readlink"]`) firing, since
+ * argv tokens are position-modeled, not program-modeled; the tail of an
+ * open exec call longer than `MAX_CONSTRUCTION_CONTINUATION_LINES` or
+ * `MAX_SYMLINK_RECOVERED_CHARS`; the `(MAX_EXEC_HEADS_PER_LINE + 1)`-th exec
+ * call of one line, which cannot contribute once its predecessors consumed
+ * the head budget — predecessors that, since round 4 names `popen` and
+ * `shell_exec` explicitly, include quoted prose that merely mentions a head
+ * spelling (eight `log("popen(x)")` calls starve a real exec call later on
+ * the line), a widening of this declared family the explicit spellings
+ * bought; command text nested deeper than
+ * `MAX_COMMAND_RECOVERY_DEPTH`, kept only as their quoted-data-stripped
+ * view; a line
+ * longer than `MAX_SYMLINK_SCAN_LINE_CHARS`, which keeps the pre-#1331 view
+ * without the recovery; and a word that only exists after escapes are
+ * unwrapped — which also keeps escaped INNER quotes
+ * (`os.system("sh -c 'echo \"too many symlink levels\"'")`) visible one
+ * nesting level down, since span pairing is lexical and unescaping escapes
+ * to repair it would invent exactly such words. Unquoted words inside an
+ * executed command string
+ * (`os.system("echo too many symlink levels")`) still fire — unquoted text
+ * was always code-level in the pre-#1331 scan, and the quote is the data
+ * marker at every execution level. Comments are handled upstream:
+ * `blankCommentSpans` is the sole comment authority. */
+function symlinkCodeView(
+  lines: string[],
+  index: number,
+  backtickIsCommand: boolean,
+  substitutionIsCommand: boolean,
+  depth = 0,
+): string {
+  const line = lines[index] ?? "";
+  // A minified, generated or hostile over-long line keeps the pre-#1331 view:
+  // scanning it as-is can only fire, and the per-head walks below stay bounded.
+  if (line.length > MAX_SYMLINK_SCAN_LINE_CHARS) return line;
+  const recovered: string[] = [];
+  let budget = MAX_SYMLINK_RECOVERED_CHARS;
+  const keep = (text: string): void => {
+    if (text === "" || budget <= 0) return;
+    recovered.push(text.length <= budget ? text : text.slice(0, budget));
+    budget -= Math.min(text.length, budget);
+  };
+  for (let i = 0; i < line.length && budget > 0; i++) {
+    if (substitutionIsCommand && line[i] === "$" && line[i + 1] === "(") {
+      const { close } = scanCallDepth(line, 1, i + 2);
+      keep(line.slice(i + 2, close ?? line.length));
+      if (close === null) break;
+      i = close;
+      continue;
+    }
+    if (backtickIsCommand && line[i] === "`") {
+      const close = quotedSpanEnd(line, i);
+      keep(line.slice(i + 1, close ?? line.length));
+      if (close === null) break;
+      i = close;
+    }
+  }
+  let heads = 0;
+  for (const head of line.matchAll(EXEC_ARGV_HEAD_PATTERN)) {
+    if (heads >= MAX_EXEC_HEADS_PER_LINE || budget <= 0) break;
+    heads += 1;
+    const argsStart = head.index + head[0].length;
+    const { close } = scanCallDepth(line, 1, argsStart);
+    const args = close === null
+      ? openCallArgumentText(lines, index, argsStart, budget)
+      : line.slice(argsStart, close);
+    // #1334 review: only what the call executes as command text is
+    // recovered. A shell-string executor's first argument IS the command
+    // line; an argv call contributes its command token and — when an
+    // interpreter token precedes the command flag (#1334 review round 3:
+    // wrappers such as `["timeout", "5", "bash", "-c", …]` count) — the
+    // flag's command operand, never its operand arguments.
+    const callee = head[0].replace(/\s*\($/, "").replace(/^[^\w$]+/, "");
+    if (isShellStringHead(callee, args)) {
+      commandTextView(firstTopLevelArg(args), depth + 1, keep);
+      continue;
+    }
+    const commandSpan = quotedSpans(args)[0];
+    if (commandSpan) {
+      const token = commandSpan.text.trim();
+      if (!/\s/.test(token)) keep(token);
+    }
+    if (depth < MAX_COMMAND_RECOVERY_DEPTH) {
+      const flag = INTERPRETER_FLAG_PATTERN.exec(args);
+      if (flag && hasInterpreterToken(args.slice(0, flag.index))) {
+        commandTextView(args.slice(flag.index + flag[0].length), depth + 1, keep);
+      }
+    }
+  }
+  for (const { text: span, open, close } of quotedSpans(line)) {
+    const token = span.trim();
+    if (token !== "" && !/\s/.test(token) && isArgvPathTokenPosition(line, open, close)) {
+      keep(token);
+      continue;
+    }
+    // Inside an already-recovered command line, a quoted span directly after
+    // an interpreter's command flag is that flag's command operand
+    // (`os.system("sh -c 'readlink -f x'")`) — executed text, not data. The
+    // word before the flag must name the interpreter (#1334 review round 3:
+    // `grep -c "…"`, `cut -c "…"` count or cut, they execute nothing). At
+    // the raw line level `-c` never elevates: it is ambiguous there.
+    if (depth >= 1 && depth < MAX_COMMAND_RECOVERY_DEPTH) {
+      const before = line.slice(Math.max(0, open - 16), open).replace(/[ \t]+$/, "");
+      if (/(?:^|[^\w.-])(?:-c|\/c|-Command)$/i.test(before)) {
+        const word = (before
+          .replace(/(?:-c|\/c|-Command)$/i, "")
+          .replace(/[ \t]+$/, "")
+          .split(/\s+/)
+          .pop() ?? "").replace(/^[^\w./]+/, "");
+        if (isShellInterpreterToken(word)) {
+          commandTextView(span, depth + 1, keep);
+        }
+      }
+    }
+  }
+  const code = stripQuotedSpans(line);
+  return recovered.length === 0 ? code : `${code}\n${recovered.join("\n")}`;
 }
 
 /** Index of the `)` that closes a construction call opened `depth` paren
@@ -1264,7 +2037,7 @@ function constructionOperandSpans(lines: string[], index: number): string {
  * files, and bounded line excerpts. */
 export interface PathHandlingSignal {
   signal: string;
-  source: "filename" | "diff" | "diff_test_file" | "filename_test_file" | "diff_comment";
+  source: "filename" | "diff" | "diff_test_file" | "filename_test_file" | "diff_comment" | "diff_nav_link";
   files: string[];
   samples: string[];
 }
@@ -1297,8 +2070,9 @@ function recordSignal(
 
 /** Bounded provenance for the path-handling signal model — why path handling
  * fired, and which signals were deliberately discounted: test-file backing
- * (`diff_test_file` / `filename_test_file`) and prose mentions that survive
- * only inside a comment (`diff_comment`, #960). */
+ * (`diff_test_file` / `filename_test_file`), prose mentions that survive
+ * only inside a comment (`diff_comment`, #960), and parent-relative Markdown
+ * navigation link destinations (`diff_nav_link`, #1354). */
 export interface PathHandlingProvenance {
   fired: boolean;
   signals: PathHandlingSignal[];
@@ -1362,21 +2136,86 @@ export function evaluatePathHandlingSignals(
         ? isDocumentationPath(chunkFile)
         : filenames.length > 0 && filenames.every((name) => isDocumentationPath(name));
 
+    // #1354: the navigation-link discount is a PROSE rule and a MARKDOWN
+    // rule, so it applies only to Markdown prose lines. Fenced example
+    // content is code and keeps the ordinary traversal semantics; other
+    // documentation types keep the ordinary scan entirely.
+    const navLinkMarkdown =
+      chunkFile !== null
+        ? isDocumentationPath(chunkFile) && isMarkdownPath(chunkFile)
+        : filenames.length > 0 &&
+          filenames.every((name) => isDocumentationPath(name) && isMarkdownPath(name));
+    const proseLines = navLinkMarkdown ? markdownProseLines(lines) : null;
+
+    // #1331: a backtick opens a command substitution except in the JavaScript
+    // family; `$(...)` executes only where the language evaluates it at
+    // string-evaluation time (shell family, PowerShell — see
+    // COMMAND_SUBSTITUTION_INERT_EXTENSIONS). A chunk with no file type of
+    // its own recovers for both, because unknown state must fail toward
+    // detection rather than read a substitution as a template literal.
+    const backtickIsCommand =
+      chunkPath === null || !TEMPLATE_LITERAL_EXTENSIONS.has(fileKindToken(chunkPath));
+    const substitutionIsCommand =
+      chunkPath === null || !COMMAND_SUBSTITUTION_INERT_EXTENSIONS.has(fileKindToken(chunkPath));
+
     for (const [className, patterns] of PATH_HANDLING_CONTENT_CLASSES) {
       const codeOnly = LEXICAL_CODE_ONLY_CLASSES.has(className);
       if (codeOnly && isDocumentation) continue;
+      // Each class gets its own view of the same comment-free text: the
+      // lexical classes drop every quoted span, the symlink class drops them
+      // only where they are inert data (#1331), the rest scan as-is.
+      const symlinkClass = className === SYMLINK_SENSITIVE_CLASS;
+      const traversalClass = className === "traversal_literal";
+      const navLinkScope = traversalClass && proseLines !== null;
       let fired = false;
       for (let index = 0; index < neutralized.length; index++) {
         const raw = lines[index] ?? "";
-        // commentFree is the sole comment authority; the lexical view only
-        // additionally strips quoted spans.
+        // commentFree is the sole comment authority; the code views only
+        // additionally handle quoted spans.
         const base = neutralized[index] ?? "";
-        const scanLine = codeOnly ? stripQuotedSpans(base) : base;
+        // #1354: the navigation-link discount applies to Markdown prose
+        // lines only. A fenced or inline-code line scans unblanked, exactly
+        // like an executable file, and so does a non-Markdown documentation
+        // file.
+        const prose = proseLines === null ? false : (proseLines[index] ?? false);
+        const scanLine = codeOnly
+          ? stripQuotedSpans(base)
+          : symlinkClass
+            ? symlinkCodeView(neutralized, index, backtickIsCommand, substitutionIsCommand)
+            : navLinkScope && prose
+              ? blankMarkdownNavDestinations(base)
+              : base;
         if (matchesAny(scanLine, patterns)) {
           if (!fired) {
-            recordSignal(buckets, className, source, chunkFile, pathSample(raw));
+            recordSignal(
+              buckets,
+              className,
+              source,
+              chunkFile,
+              symlinkClass
+                ? symlinkSample(
+                    raw,
+                    symlinkCodeView([neutralized[index] ?? ""], 0, backtickIsCommand, substitutionIsCommand),
+                    scanLine,
+                    patterns,
+                  )
+                : pathSample(raw),
+            );
             fired = true;
           }
+          continue;
+        }
+        // #1354: a hit that survives outside comments but is suppressed only
+        // by the navigation-link view is a Markdown nav destination, not a
+        // traversal literal. Record it as discounted (never fired, never
+        // silently dropped) so the decision is explainable from the artifact
+        // alone. A code line is not prose: it must fire, not be discounted.
+        if (
+          navLinkScope && prose &&
+          matchesAny(commentFree[index] ?? "", patterns) &&
+          !matchesAny(blankMarkdownNavDestinations(commentFree[index] ?? ""), patterns)
+        ) {
+          recordSignal(discountedBuckets, className, "diff_nav_link", chunkFile, pathSample(raw));
           continue;
         }
         // #960: a hit that survives in the raw line but is gone once comments
@@ -1580,11 +2419,39 @@ type KindPredicate = (
   diffText: string,
   fullDiffText: string,
   authoritativeChangedFiles: number | undefined,
+  metadata: PrMetadata,
 ) => boolean;
 const KIND_RULES: readonly { kind: string; matches: KindPredicate }[] = [
   { kind: "renovate_digest_only", matches: isRenovateDigestOnly },
   { kind: "image_digest_only", matches: isImageDigestOnly },
+  // #1336: Renovate-authored image tag/digest and Helm chart/appVersion
+  // refreshes are dependency updates, not ordinary app-code/manifest edits.
+  // They precede k8s_manifest (whose generic lane would swallow a Renovate
+  // image bump in a HelmRelease) and depend on forge-reported Renovate
+  // authorship metadata — a human tag bump keeps the pre-existing kinds.
+  { kind: "renovate_image_update", matches: isRenovateImageUpdate },
+  // #1379: vendor-agnostic twins of the #1336 Renovate kinds. Placed AFTER
+  // their Renovate twins (first match wins): a forge-reported Renovate PR
+  // keeps its renovate_* kind — and with it the existing must_check set and
+  // the benign zero-selection gates — while the same pure-diff shape from
+  // any other author gets the vendor-agnostic kind. Both twins and the new
+  // kinds share the identical pure-diff predicates; the ONLY difference is
+  // the authorship gate.
+  { kind: "image_update", matches: isImageUpdate },
+  { kind: "renovate_chart_update", matches: isRenovateChartUpdate },
+  { kind: "chart_update", matches: isChartUpdate },
   { kind: "dependency_upgrade", matches: isDependencyUpgrade },
+  // #1379: platform/runtime version bumps embedded in YAML (regression:
+  // home-ops#11668 — three `KubernetesUpgrade` resources bumping
+  // `spec.kubernetes.version` used to fall through to k8s_manifest's generic
+  // lane). Bounded, closed-vocabulary detection; it must precede
+  // k8s_manifest (which would otherwise swallow these YAML files) and runs
+  // after the chart rules so a chart-bearing `version:` bump keeps the chart
+  // kinds.
+  { kind: "platform_version_update", matches: isPlatformVersionUpdate },
+  // #1379: GitHub Action ref bumps in workflow/composite-action YAML — the
+  // same external-dependency shape (an upstream artifact pinned by ref).
+  { kind: "action_update", matches: isActionUpdate },
   { kind: "k8s_manifest", matches: filenameMatches(K8S_PATTERNS) },
   // secret handling before auth (more specific)
   { kind: "secret_handling_changes", matches: filenameMatches(SECRET_HANDLING_PATTERNS) },
@@ -1707,6 +2574,120 @@ function evaluateDigestBlock(
   return digestChanged;
 }
 
+/** Result of walking a unified diff's contiguous change blocks. */
+interface ImageBlockWalk {
+  /** False when the diff carries structural metadata, a truncation marker, a
+   * binary-diff marker, or (strict mode only) a changed line the parser
+   * rejected — evidence too incomplete for an "only X changed" claim. */
+  ok: boolean;
+  sawBlock: boolean;
+  anyTrue: boolean;
+  totalAdded: number;
+  totalRemoved: number;
+  /** Lenient mode only: the `+++ b/` file most recently seen, for
+   * attribution callbacks. */
+  currentFile: string;
+}
+
+/** Shared unified-diff change-block walker for the image-reference rules:
+ * pairs each contiguous run of removed lines with the added lines that
+ * follow it (delimited by context, hunk headers, or file headers), and
+ * delegates line parsing and per-block evaluation to the caller. A block's
+ * evaluation returning `null` invalidates it; returning a boolean ORs into
+ * `anyTrue`. Strict mode (the kind rules) aborts on the first impurity —
+ * the fail-closed shape `isImageDigestOnly` established (#909). Lenient mode
+ * (the #1336 risk scan) flushes the current block on an impurity and keeps
+ * walking, so cleanly paired blocks elsewhere in the diff still report —
+ * only their evaluation result is visible (`anyTrue` counts validated blocks
+ * only). `onLine`/`onPair` observe parsed lines and accepted pairs for
+ * attribution. */
+function walkImageRefBlocks<T>(
+  fullDiffText: string,
+  parseLine: (content: string) => T | null,
+  evaluateBlock: (removed: readonly T[], added: readonly T[]) => boolean | null,
+  opts: { lenient: boolean; onLine?: (parsed: T, file: string) => void; onPair?: (removed: readonly T[], added: readonly T[], file: string) => void },
+): ImageBlockWalk {
+  let removed: T[] = [];
+  let added: T[] = [];
+  let sawBlock = false;
+  let anyTrue = false;
+  let totalRemoved = 0;
+  let totalAdded = 0;
+  let currentFile = "";
+
+  const flush = (): boolean => {
+    if (removed.length === 0 && added.length === 0) return true;
+    const changed = evaluateBlock(removed, added);
+    if (changed === null) {
+      if (!opts.lenient) return false;
+    } else {
+      sawBlock = true;
+      anyTrue = anyTrue || changed;
+      opts.onPair?.(removed, added, currentFile);
+    }
+    removed = [];
+    added = [];
+    return true;
+  };
+
+  for (const line of fullDiffText.split("\n")) {
+    // Rename/copy/mode metadata is a structural change, never a digest
+    // refresh — fail closed even if the file status looks like a plain edit.
+    if (STRUCTURAL_DIFF_LINE_RE.test(line)) {
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      continue;
+    }
+    // A truncation marker means changed lines are missing: not complete
+    // evidence, so never claim digest-only.
+    if (DIFF_TRUNCATION_MARKER_RE.test(line)) {
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      continue;
+    }
+    // A binary diff has no `+`/`-` lines, so it would otherwise vanish from
+    // the line reconciliation below.
+    if (BINARY_DIFF_LINE_RE.test(line)) {
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      continue;
+    }
+    const isRemoved = line.startsWith("-") && !line.startsWith("---");
+    const isAdded = line.startsWith("+") && !line.startsWith("+++");
+    if (!isRemoved && !isAdded) {
+      // Context line, hunk header (`@@`), file header, or any other line:
+      // the current change block is complete. File headers carry the
+      // attribution target for lenient-mode callbacks.
+      if (line.startsWith("+++ ")) currentFile = line.slice(4).replace(/^b\//, "");
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      continue;
+    }
+    const parsed = parseLine(line.slice(1));
+    if (parsed === null) {
+      if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+      continue;
+    }
+    if (isRemoved) {
+      // Git emits a block's removals before its additions; a removal after an
+      // addition means the block boundary was mis-detected, so fail closed.
+      if (added.length > 0) {
+        if (!opts.lenient) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+        if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+        continue;
+      }
+      removed.push(parsed);
+      totalRemoved += 1;
+    } else {
+      added.push(parsed);
+      totalAdded += 1;
+    }
+    opts.onLine?.(parsed, currentFile);
+  }
+  if (!flush()) return { ok: false, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+  return { ok: true, sawBlock, anyTrue, totalAdded, totalRemoved, currentFile };
+}
+
 /** Renovate image-digest-only refresh: every changed line is a single image
  * reference whose repository and tag are unchanged and only the `@sha256:`
  * digest differs (YAML `image:`/`tag:`, compose, Dockerfile `FROM`). A mixed
@@ -1730,58 +2711,9 @@ function isImageDigestOnly(
   authoritativeChangedFiles: number | undefined,
 ): boolean {
   if (!allFilesAreImageManifests(files)) return false;
-  let removed: { normalized: string; digest: string }[] = [];
-  let added: { normalized: string; digest: string }[] = [];
-  let sawBlock = false;
-  let anyDigestChanged = false;
-  let totalRemoved = 0;
-  let totalAdded = 0;
-
-  const flushBlock = (): boolean => {
-    if (removed.length === 0 && added.length === 0) return true;
-    const changed = evaluateDigestBlock(removed, added);
-    if (changed === null) return false;
-    sawBlock = true;
-    anyDigestChanged = anyDigestChanged || changed;
-    removed = [];
-    added = [];
-    return true;
-  };
-
-  for (const line of fullDiffText.split("\n")) {
-    // Rename/copy/mode metadata is a structural change, never a digest
-    // refresh — fail closed even if the file status looks like a plain edit.
-    if (STRUCTURAL_DIFF_LINE_RE.test(line)) return false;
-    // A truncation marker means changed lines are missing: not complete
-    // evidence, so never claim digest-only.
-    if (DIFF_TRUNCATION_MARKER_RE.test(line)) return false;
-    // A binary diff has no `+`/`-` lines, so it would otherwise vanish from
-    // the line reconciliation below.
-    if (BINARY_DIFF_LINE_RE.test(line)) return false;
-    const isRemoved = line.startsWith("-") && !line.startsWith("---");
-    const isAdded = line.startsWith("+") && !line.startsWith("+++");
-    if (!isRemoved && !isAdded) {
-      // Context line, hunk header (`@@`), file header, or any other line:
-      // the current change block is complete.
-      if (!flushBlock()) return false;
-      continue;
-    }
-    const parsed = parseImageDigestLine(line.slice(1));
-    if (parsed === null) return false;
-    if (isRemoved) {
-      // Git emits a block's removals before its additions; a removal after an
-      // addition means the block boundary was mis-detected, so fail closed.
-      if (added.length > 0) return false;
-      removed.push(parsed);
-      totalRemoved += 1;
-    } else {
-      added.push(parsed);
-      totalAdded += 1;
-    }
-  }
-  if (!flushBlock()) return false;
-  if (!sawBlock || !anyDigestChanged) return false;
-  return evidenceIsComplete(files, authoritativeChangedFiles, totalAdded, totalRemoved);
+  const walk = walkImageRefBlocks(fullDiffText, parseImageDigestLine, evaluateDigestBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
 }
 
 /** Prove the supplied file list and diff are complete before claiming every
@@ -1816,13 +2748,750 @@ function evidenceIsComplete(
 }
 
 /** A dependency/manifest file changed, but NOT a k8s manifest (which happens
- * to reference versions and must classify as k8s_manifest instead). */
-function isDependencyUpgrade(files: readonly ChangedFile[], _diffText: string): boolean {
+ * to reference versions and must classify as k8s_manifest instead).
+ *
+ * #1379 adds a second, pure-diff clause for Terraform: every changed file is
+ * a `.tf` file whose own diff region carries a module/provider marker
+ * (HCL `module "…"` / `provider "…"` blocks, or a `required_providers`
+ * block) and whose changed lines are only paired `version = "…"` value
+ * changes — the provider/module pin shape. A `.tf` diff without the marker
+ * (plain resource edits) keeps the fall-through kinds; a mixed diff fails
+ * the strict walk and falls through too. Same fail-closed evidence
+ * reconciliation as the image/chart rules. */
+function isDependencyUpgrade(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
   const filenames = files.map((file) => file.filename);
   const hasDepFile = filenames.some((name) => matchesAny(name, DEPENDENCY_PATTERNS));
-  if (!hasDepFile) return false;
-  const hasK8s = filenames.some((name) => matchesAny(name, K8S_PATTERNS));
-  return !hasK8s;
+  if (hasDepFile) {
+    const hasK8s = filenames.some((name) => matchesAny(name, K8S_PATTERNS));
+    return !hasK8s;
+  }
+  // #1379: Terraform provider/module version bumps. Every changed file must
+  // be a modified `.tf` file — one resource file in the mix is a mixed PR.
+  if (files.length === 0) return false;
+  if (!files.every((file) => file.status === "modified" && /\.tf$/i.test(file.filename))) return false;
+  // The module/provider marker must be attributed per file through its own
+  // diff region (same discipline as the chart rule): a marker in one file's
+  // region says nothing about a sibling file.
+  const regions = diffFileRegions(fullDiffText, files);
+  const terraformDependency = files.every((file) => {
+    const region = regions.get(file.filename) ?? "";
+    return TERRAFORM_MODULE_MARKER_RE.test(region);
+  });
+  if (!terraformDependency) return false;
+  const walk = walkImageRefBlocks(fullDiffText, parseTerraformVersionLine, evaluateValueOnlyBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+// ---------------------------------------------------------------------------
+// Renovate image/chart updates (#1336)
+// ---------------------------------------------------------------------------
+
+/** Forge-reported PR metadata the update rules may rely on. Author and branch
+ * are forge identity facts (never PR-body content); the title is forge-reported
+ * text. All three are untrusted data: this boundary keeps only the booleans
+ * the rules need, so no untrusted string is retained. */
+interface PrMetadata {
+  renovateAuthored: boolean;
+  /** Whether the forge-reported title carries a security-fix/advisory
+   * identifier (`CVE-…`, `GHSA-…`, "security"). */
+  titleReportsAdvisory: boolean;
+}
+
+/** Renovate authorship from forge-reported metadata only: the bot account —
+ * a login that STARTS with `renovate` (`renovate[bot]`, `renovate-bot`,
+ * custom-configured `renovate-pro[bot]`) — or a `renovate/` head branch.
+ * Both are author-chosen strings (a fork PR's head branch is fully
+ * attacker-controlled), so the load-bearing guard for these kinds is the
+ * pure-diff requirement and the evidence reconciliation, not the name; the
+ * residual risk — a human PR from a `renovate/` branch reaching the benign
+ * zero-selection gate for a pure tag refresh — is a documented decision
+ * (docs/deep-review.md). The title never establishes authorship: it is
+ * attacker-influenced text and must not gate a zero-specialist path. */
+const RENOVATE_AUTHOR_RE = /^renovate($|\[|-|_)/i;
+const RENOVATE_BRANCH_RE = /^renovate\//i;
+
+/** Security-fix/advisory vocabulary in the forge-reported PR title — a known
+ * fact from the update metadata (Renovate titles carry the dependency and,
+ * for vulnerability-alert branches, the fix context), never a guess about the
+ * image contents. */
+const SECURITY_TITLE_RE = /\b(?:CVE-\d{4}-\d+|GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}|security)\b/i;
+
+/** Untrusted data, never instructions. The forge-reported metadata is read
+ * here and reduced to two booleans: the title against the closed advisory
+ * vocabulary, the author login and head branch against the closed
+ * Renovate-authorship prefixes. Nothing derived from the untrusted text is
+ * retained, rendered, or promoted into a kind — the classifier emits closed
+ * values only, so hostile content can neither close a fence nor carry itself
+ * into an artifact, a log line, or the prompt through this path.
+ *
+ * The title is read in FULL against the advisory vocabulary: a bounded
+ * projection would let an author pad the title past the bound and suppress
+ * the advisory signal, so the signal is never traded away for a smaller
+ * working set. The authorship prefixes themselves stay author-chosen strings
+ * (the documented #1336 residual risk) — the pure-diff requirement is the
+ * load-bearing guard for the kinds they gate. */
+function classifyPrMetadata(prAuthor: string, headBranch: string, prTitle: string): PrMetadata {
+  const renovateAuthored = RENOVATE_AUTHOR_RE.test(prAuthor) || RENOVATE_BRANCH_RE.test(headBranch); // untrusted identity: closed prefixes only
+  const titleReportsAdvisory = SECURITY_TITLE_RE.test(prTitle); // untrusted content: closed advisory vocabulary only
+  return { renovateAuthored, titleReportsAdvisory };
+}
+
+/** An allowed image-reference line form — the #909 digest-line grammar
+ * generalized to an optional `:tag`: optional YAML `image:`/`tag:` key or
+ * Dockerfile `FROM [--platform=...]` prefix, optional quotes, the reference
+ * (charset excludes `@`), an optional trailing `@sha256:<64hex>`, optional
+ * closing quote, and an optional trailing `AS <stage>`. */
+const IMAGE_REF_LINE_RE =
+  /^(\s*(?:FROM\s+(?:--platform=\S+\s+)?|(?:image|tag)\s*:\s*)?["']?)([A-Za-z0-9][A-Za-z0-9._:/-]*)(@sha256:[0-9a-fA-F]{64})?(["']?)((?:\s+AS\s+\S+)?)\s*$/i;
+
+/** A tag is the last `:`-segment of the reference with no `/` or `@` in it —
+ * so a registry port (`localhost:5000/repo`) is never mistaken for a tag. */
+const IMAGE_TAG_RE = /^[A-Za-z0-9._-]+$/;
+
+/** At most one digest token per line: the anchored regex admits a single
+ * `@sha256:`, but a second `sha256:<hex>` could hide in the `AS <stage>` tail;
+ * an ambiguous token would let a non-reference difference normalize away. */
+function parseImageRefLine(content: string): { normalized: string; repo: string; tag: string | null; digest: string | null } | null {
+  if ((content.match(/sha256:[0-9a-fA-F]{64}/g) ?? []).length > 1) return null;
+  const match = IMAGE_REF_LINE_RE.exec(content);
+  if (match === null) return null;
+  const [, prefix = "", ref = "", digestToken = "", quote = "", tail = ""] = match;
+  // A line that is not keyed (`image:`/`tag:`) and not a Dockerfile FROM is
+  // not attributable to an image reference — ordinary single-token or quoted
+  // value diffs (`- build/` / `+ "prod"` in .gitignore or YAML) must never
+  // feed the provenance/sensitivity scan. The opening quote sits inside the
+  // prefix capture, so a bare-prefix check would pass it: require the key.
+  if (!/^\s*(?:FROM\b|(?:image|tag)\s*:)/i.test(prefix)) return null;
+  const digest = digestToken === "" ? null : digestToken.slice(1).toLowerCase();
+  // A `tag:` YAML value is a tag, never a repository (`tag: v1.2.3` in a
+  // values file, `tag: latest@sha256:…` in a HelmRelease): it carries no
+  // provenance to compare. Only a full-reference `tag:` value (a `/` path)
+  // names a repository.
+  const isTagKey = /^\s*tag\s*:/i.test(prefix);
+  let repo = "";
+  let tag: string | null = null;
+  if (isTagKey && !ref.includes("/")) {
+    tag = ref;
+  } else {
+    repo = ref;
+    const colon = ref.lastIndexOf(":");
+    if (colon >= 0) {
+      const candidate = ref.slice(colon + 1);
+      if (candidate.length > 0 && IMAGE_TAG_RE.test(candidate)) {
+        tag = candidate;
+        repo = ref.slice(0, colon);
+      }
+    }
+  }
+  return {
+    // The paired-comparison form: key, indentation, repository, platform,
+    // stage and quotes preserved; tag and digest blanked.
+    normalized:
+      `${prefix}${repo !== "" ? repo : ""}${tag !== null ? (repo !== "" ? ":" : "") + "<TAG>" : ""}${digest !== null ? "@sha256:<DIGEST>" : ""}${quote}${tail}`,
+    repo,
+    tag,
+    digest,
+  };
+}
+
+/** Every paired line keeps its repository (and everything around the
+ * reference) and at least one pair changed a tag or digest. A repository
+ * change is a provenance change, not a version refresh — the kind rule
+ * rejects it (the #1336 risk scan flags it instead). */
+function evaluateImageRefBlock(
+  removed: readonly { normalized: string; repo: string; tag: string | null; digest: string | null }[],
+  added: readonly { normalized: string; repo: string; tag: string | null; digest: string | null }[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let refChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    if (before.normalized !== after.normalized) return null;
+    if (before.repo !== after.repo || before.tag !== after.tag || before.digest !== after.digest) refChanged = true;
+  }
+  return refChanged;
+}
+
+function isRenovateImageUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+  metadata: PrMetadata,
+): boolean {
+  if (!metadata.renovateAuthored) return false;
+  return isImageUpdate(files, _diffText, fullDiffText, authoritativeChangedFiles);
+}
+
+/** Helm chart version vocabulary: HelmRelease `chart:`/`version:`,
+ * Chart.yaml `version:`/`appVersion:`. Case-sensitive — these are the exact
+ * YAML keys Renovate's helm-release and Chart.yaml managers bump; a
+ * case-insensitive match would swallow unrelated version-shaped keys. The
+ * anchor excludes prefixed keys like `apiVersion:`.
+ *
+ * The line shape is captured in groups — indentation, key, separator, quoting
+ * — so the comparison can hold every byte around the version value fixed: a
+ * pure chart refresh changes the VALUE only (#1336 pure-diff requirement). */
+const CHART_VERSION_LINE_RE = /^(\s*)((?:chart|version|appVersion))(\s*:\s*)(["']?)([A-Za-z0-9][A-Za-z0-9._-]*)(["']?)(\s*)$/;
+
+/** One parsed chart-version line: the key, the version value, and the line
+ * with the value blanked out (`normalized`) — indentation, key, separator and
+ * quoting. A pair may only differ in the value, so the normalized shape must
+ * be identical on both sides. */
+interface ChartVersionLine {
+  key: string;
+  value: string;
+  normalized: string;
+}
+
+function parseChartVersionLine(content: string): ChartVersionLine | null {
+  const match = CHART_VERSION_LINE_RE.exec(content);
+  if (match === null) return null;
+  const [, indent = "", key = "", separator = "", openQuote = "", value = "", closeQuote = "", trailing = ""] = match;
+  // A quoted value must be quoted consistently: a mismatched or stray quote
+  // is not a well-formed version line, so the line does not parse at all and
+  // the block fails closed rather than accepting a half-quoted shape.
+  if (openQuote !== closeQuote) return null;
+  return { key, value, normalized: `${indent}${key}${separator}${openQuote}${closeQuote}${trailing}` };
+}
+
+/** Chart/appVersion refresh: pairs keep the same key and change the value; a
+ * changed `chart:` value is a renamed dependency, not an update. Pairing is
+ * strictly positional with equal run lengths — an unpaired `chart:` line
+ * (a dependency added or removed alongside the bump) invalidates the block,
+ * exactly like the image rule (#1336 review): the pairing must be able to SEE
+ * every chart-line change. At least one true value change must exist.
+ *
+ * Only the version VALUE may change: the normalized shape (indentation, key,
+ * separator, quoting) must match on both sides, so a re-indent or a quote-style
+ * change travelling with the bump disqualifies the kind instead of reaching
+ * the zero-specialist gate (#1336 review: "every changed line is a version
+ * bump"). */
+function evaluateChartVersionBlock(
+  removed: readonly ChartVersionLine[],
+  added: readonly ChartVersionLine[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let valueChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    if (before.key !== after.key) return null;
+    if (before.normalized !== after.normalized) return null;
+    if (before.key === "chart" && before.value !== after.value) return null;
+    if (before.value !== after.value) valueChanged = true;
+  }
+  return valueChanged;
+}
+
+/** Chart-bearing manifests: a HelmRelease/Chart.yaml filename, or any YAML in
+ * a diff that carries a HelmRelease marker (Renovate's helm-release manager
+ * bumps `version:` inside `kind: HelmRelease` documents whose filenames are
+ * unconstrained). Without this gate a Renovate `version:` bump in arbitrary
+ * YAML would drop the correctness lane the k8s_manifest kind used to give. */
+const CHART_FILE_RE = /(?:helmrelease|chart)\.ya?ml$/i;
+const CHART_PR_MARKER_RE = /^\s*(?:kind\s*:\s*["']?HelmRelease["']?\s*|apiVersion\s*:\s*["']?helm\.toolkit\.fluxcd\.io)/m;
+
+/** The diff region that belongs to each changed file: the text between this
+ * file's `+++ b/…` header and the next file header. A diff with no file
+ * header at all (a bare hunk) belongs to the single changed file — with more
+ * than one changed file the region cannot be attributed, so no file may claim
+ * a marker it does not own (fail closed).
+ *
+ * The marker must be attributed per file: a `kind: HelmRelease` marker in one
+ * file's region says nothing about another file, so a chart-shaped file can
+ * no longer bless an unrelated YAML `version:` change in a sibling file
+ * (#1336 review). */
+function diffFileRegions(fullDiffText: string, files: readonly ChangedFile[]): Map<string, string> {
+  const regions = new Map<string, string>();
+  let current: string | null = null;
+  let buffer: string[] = [];
+  const flush = (): void => {
+    if (current === null) return;
+    const existing = regions.get(current);
+    regions.set(current, existing === undefined ? buffer.join("\n") : `${existing}\n${buffer.join("\n")}`);
+    buffer = [];
+  };
+  for (const line of fullDiffText.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      // A new file section: close the previous one and drop its pending
+      // header lines, so a region never carries another file's header.
+      flush();
+      current = null;
+      buffer = [];
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      flush();
+      current = line.slice(4).replace(/^b\//, "").trim();
+      buffer = [line];
+      continue;
+    }
+    if (line.startsWith("--- ")) {
+      // The old-path header precedes the new-path header of the same file.
+      flush();
+      current = line.slice(4).replace(/^a\//, "").trim();
+      buffer = [line];
+      continue;
+    }
+    buffer.push(line);
+  }
+  flush();
+  if (regions.size === 0 && files.length === 1) regions.set(files[0]!.filename, fullDiffText);
+  return regions;
+}
+
+/** The shared chart-update shape: every changed file a modified
+ * `.yaml`/`.yml`, every file chart-bearing on its own — by name or by a
+ * `kind: HelmRelease`/`helm.toolkit.fluxcd.io` marker in its OWN diff
+ * region — and a strict chart-version walk with the value the only thing
+ * that may change, plus the evidence reconciliation. The #1336 Renovate
+ * rule gates this on authorship; the #1379 vendor-agnostic rule takes it
+ * as-is. */
+function isChartUpdateShape(
+  files: readonly ChangedFile[],
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  if (files.length === 0) return false;
+  if (!files.every((file) => file.status === "modified" && /\.ya?ml$/i.test(file.filename))) return false;
+  // Every changed file must be chart-bearing ON ITS OWN: chart-shaped by
+  // name, or carrying the HelmRelease marker in its own diff region. A
+  // marker in a sibling file's region blesses nothing, so one chart file
+  // can no longer carry an unrelated YAML `version:` change into the
+  // zero-selection gate (#1336 review).
+  const regions = diffFileRegions(fullDiffText, files);
+  const chartBearing = files.every((file) => {
+    if (CHART_FILE_RE.test(file.filename)) return true;
+    const region = regions.get(file.filename) ?? "";
+    return CHART_PR_MARKER_RE.test(region);
+  });
+  if (!chartBearing) return false;
+  const walk = walkImageRefBlocks(fullDiffText, parseChartVersionLine, evaluateChartVersionBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+function isRenovateChartUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+  metadata: PrMetadata,
+): boolean {
+  if (!metadata.renovateAuthored) return false;
+  return isChartUpdateShape(files, fullDiffText, authoritativeChangedFiles);
+}
+
+// ---------------------------------------------------------------------------
+// Vendor-agnostic dependency-update kinds (#1379)
+// ---------------------------------------------------------------------------
+
+/** #1379: the pure-diff predicates of the #1336 Renovate kinds, shared with
+ * any author. Each rule below is the corresponding Renovate twin minus the
+ * `metadata.renovateAuthored` gate — identical files gate, identical strict
+ * walk, identical `evidenceIsComplete` reconciliation — so a dependency
+ * update gets the same review contract regardless of who (or what bot)
+ * authored it, and nothing keys on the string "renovate" or any bot login.
+ * The Renovate kinds keep their authorship gate ahead of these rules in
+ * KIND_RULES, so a Renovate PR still classifies as its renovate_* kind and
+ * the benign zero-selection gates stay Renovate-only. */
+
+/** #1379 image-update rule: the #1336 image predicate without the
+ * authorship gate. Fires only when every changed file is a modified
+ * image-manifest (YAML/compose/Dockerfile), every changed line is an image
+ * reference whose repository (and everything around it) is unchanged and at
+ * least one pair changed the tag or digest, and the diff carries a
+ * truncation/binary/structural marker or a line the parser rejects —
+ * fail-closed, exactly like the twins. */
+function isImageUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  if (!allFilesAreImageManifests(files)) return false;
+  const walk = walkImageRefBlocks(fullDiffText, parseImageRefLine, evaluateImageRefBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+/** #1379 chart-update rule: the #1336 chart predicate without the authorship
+ * gate (everything else preserved: every changed file a modified
+ * `.yaml`/`.yml`, every file chart-bearing on its own — by name or by a
+ * `kind: HelmRelease`/`helm.toolkit.fluxcd.io` marker in its OWN diff
+ * region — and a strict chart-version walk with the value the only thing
+ * that may change). */
+function isChartUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  if (files.length === 0) return false;
+  if (!files.every((file) => file.status === "modified" && /\.ya?ml$/i.test(file.filename))) return false;
+  const regions = diffFileRegions(fullDiffText, files);
+  const chartBearing = files.every((file) => {
+    if (CHART_FILE_RE.test(file.filename)) return true;
+    const region = regions.get(file.filename) ?? "";
+    return CHART_PR_MARKER_RE.test(region);
+  });
+  if (!chartBearing) return false;
+  const walk = walkImageRefBlocks(fullDiffText, parseChartVersionLine, evaluateChartVersionBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+// ── Platform/runtime version bumps (#1379, regression: home-ops#11668) ────
+
+/** A YAML version-value line whose key path ENDS with `version` (bare
+ * `version`, dotted `kubernetes.version`, compound `kubernetesVersion`),
+ * case-insensitive on the suffix. Groups capture indentation, the full key
+ * path, separator and quoting so the comparison holds every byte around the
+ * value fixed — a pure platform bump changes the VALUE only. */
+const PLATFORM_VERSION_LINE_RE =
+  /^(\s*)((?:[A-Za-z][A-Za-z0-9_.-]*[Vv]ersion|[Vv]ersion))(\s*:\s*)(["']?)(v?[0-9]+(?:\.[0-9]+){0,3}(?:[-+][A-Za-z0-9._-]+)?)(["']?)(\s*)$/;
+
+/** Closed platform/runtime vocabulary (#1379). A bare `version:` key alone
+ * is an ordinary app/chart bump; only a platform-named key path — or the
+ * file's own region carrying a platform marker — puts a version bump in
+ * platform/runtime context. */
+const PLATFORM_CONTEXT_TOKENS: readonly string[] = [
+  "kubernetes", "k8s", "kubelet", "talos", "containerd", "etcd",
+];
+
+/** Tokenize a key path for the platform vocabulary: dot/hyphen/underscore
+ * separators AND camelCase boundaries (`kubernetesVersion` → `kubernetes`,
+ * `version`), case-insensitive. No untrusted text is retained — the result
+ * is only ever compared against the closed token list. */
+function platformContextTokens(keyPath: string): string[] {
+  const camelSplit = keyPath.replace(/([a-z])([A-Z])/g, "$1 $2");
+  return camelSplit.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token !== "");
+}
+
+/** Platform-marker lines a file's own diff region may carry (#1379): a YAML
+ * key line naming one of the closed platform tokens (e.g. `kubernetes:`,
+ * `kubelet:`, `talos:`), or a `kind:` whose value contains `Kubernetes`
+ * (case-insensitive — e.g. `kind: KubernetesUpgrade`). Bounded, closed
+ * vocabulary; never free text from the diff. */
+const PLATFORM_REGION_KEY_RE = /^\s*[-+]?\s*(?:kubernetes|k8s|kubelet|talos|containerd|etcd)\s*:\s*(?:#.*)?$/im;
+const PLATFORM_REGION_KIND_RE = /^\s*[-+]?\s*kind\s*:\s*["']?[A-Za-z]*[Kk]ubernetes[A-Za-z]*["']?\s*$/m;
+
+interface PlatformVersionLine {
+  keyPath: string;
+  tokens: string[];
+  value: string;
+  normalized: string;
+}
+
+function parsePlatformVersionLine(content: string): PlatformVersionLine | null {
+  const match = PLATFORM_VERSION_LINE_RE.exec(content);
+  if (match === null) return null;
+  const [, indent = "", keyPath = "", separator = "", openQuote = "", value = "", closeQuote = "", trailing = ""] = match;
+  // A quoted value must be quoted consistently: a mismatched or stray quote
+  // is not a well-formed version line, so the line does not parse at all
+  // and the block fails closed (same shape as the chart rule).
+  if (openQuote !== closeQuote) return null;
+  return {
+    keyPath,
+    tokens: platformContextTokens(keyPath),
+    value,
+    // The paired-comparison form: indentation, key path, separator and
+    // quoting preserved; the value blanked, so a pair may only differ in
+    // the value.
+    normalized: `${indent}${keyPath}${separator}${openQuote}${closeQuote}${trailing}`,
+  };
+}
+
+/** A paired version-value change where both sides keep their platform
+ * context (a key rename or context loss is not a version bump — fail
+ * closed, same pairing discipline as the chart rule). */
+function evaluatePlatformVersionBlock(
+  removed: readonly PlatformVersionLine[],
+  added: readonly PlatformVersionLine[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let valueChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    if (before.normalized !== after.normalized) return null;
+    if (before.value !== after.value) valueChanged = true;
+  }
+  return valueChanged;
+}
+
+/** #1379 platform/runtime version bumps embedded in YAML. Every changed
+ * file is a modified `.yaml`/`.yml`; the changed lines are paired
+ * version-value bumps; and the bump sits in PLATFORM context — either the
+ * key path itself carries one of the closed platform tokens, or the file's
+ * own diff region carries a platform marker line (a platform YAML key, or
+ * a `kind:` naming a Kubernetes resource type). Anti-collision: the bare
+ * `version:` case qualifies ONLY through the region context, so an
+ * ordinary app/chart `version:` bump in YAML with no platform context
+ * keeps the pre-existing kinds (k8s_manifest/app_code semantics); the
+ * chart rules run earlier and win for chart-bearing files. */
+function isPlatformVersionUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  if (files.length === 0) return false;
+  if (!files.every((file) => file.status === "modified" && /\.ya?ml$/i.test(file.filename))) return false;
+  // Per-file attribution, same discipline as the chart rule: a marker in a
+  // sibling file's region blesses nothing. A file qualifies on the key
+  // path alone when ANY of its changed version lines carries a
+  // platform-named key (e.g. `kubernetes.version:`, `kubernetesVersion:`)
+  // — otherwise only through a platform marker in its own region.
+  const keyContextFiles = new Set<string>();
+  const walk = walkImageRefBlocks(fullDiffText, parsePlatformVersionLine, evaluatePlatformVersionBlock, {
+    lenient: false,
+    onLine: (parsed, file) => {
+      if (file === "" || keyContextFiles.has(file)) return;
+      if (parsed.tokens.some((token) => PLATFORM_CONTEXT_TOKENS.includes(token))) keyContextFiles.add(file);
+    },
+  });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  const regions = diffFileRegions(fullDiffText, files);
+  const filesWithContext = files.every((file) => {
+    if (keyContextFiles.has(file.filename)) return true;
+    const region = regions.get(file.filename) ?? "";
+    return PLATFORM_REGION_KEY_RE.test(region) || PLATFORM_REGION_KIND_RE.test(region);
+  });
+  if (!filesWithContext) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+// ── GitHub Action ref bumps (#1379) ───────────────────────────────────────
+
+/** A `uses:` reference line: `uses: ['"]?<owner>/<repo>@<ref>['"]?` — the
+ * owner/repo grammar mirrors the image-reference charset (closed classes,
+ * no whitespace/quotes); the ref is everything after the FIRST `@` up to
+ * the closing quote or whitespace. Groups capture indentation, key,
+ * separator, owner/repo and quoting so the comparison holds everything
+ * except the ref fixed — a pure action bump changes the REF only. */
+const ACTION_USES_LINE_RE =
+  /^(\s*(?:uses\s*:\s*))(["']?)([A-Za-z0-9][A-Za-z0-9._\/-]*\/[A-Za-z0-9][A-Za-z0-9._\/-]*)@([A-Za-z0-9._\/-]+)(["']?)(\s*)$/;
+
+interface ActionUsesLine {
+  ownerRepo: string;
+  ref: string;
+  normalized: string;
+}
+
+function parseActionUsesLine(content: string): ActionUsesLine | null {
+  const match = ACTION_USES_LINE_RE.exec(content);
+  if (match === null) return null;
+  const [, keyPart = "", openQuote = "", ownerRepo = "", ref = "", closeQuote = "", trailing = ""] = match;
+  // A quoted value must be quoted consistently (same fail-closed shape as
+  // the chart/platform rules).
+  if (openQuote !== closeQuote) return null;
+  return {
+    ownerRepo,
+    ref,
+    // Indentation, key, owner/repo and quotes preserved; the ref blanked —
+    // a pair may only differ in the ref (the update itself).
+    normalized: `${keyPart}${openQuote}${ownerRepo}@${closeQuote}${trailing}`,
+  };
+}
+
+/** Ref-only paired change: an empty→ref or ref→empty change does not parse
+ * (the ref charset requires at least one character), so a partial pin or
+ * unpin fails the strict walk rather than counting as an update. */
+function evaluateActionUsesBlock(
+  removed: readonly ActionUsesLine[],
+  added: readonly ActionUsesLine[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let refChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    const before = removed[index]!;
+    const after = added[index]!;
+    if (before.normalized !== after.normalized) return null;
+    if (before.ref !== after.ref) refChanged = true;
+  }
+  return refChanged;
+}
+
+const GITHUB_WORKFLOW_PATH_RE = /^\.github\/(workflows|actions)\//i;
+
+/** #1379 GitHub Action ref bumps: every changed file is a modified workflow
+ * or composite-action YAML (`.github/workflows/`, `.github/actions/`), the
+ * changed lines are paired `uses:` ref changes, and the diff is pure and
+ * complete (strict walk + evidence reconciliation, fail-closed). */
+function isActionUpdate(
+  files: readonly ChangedFile[],
+  _diffText: string,
+  fullDiffText: string,
+  authoritativeChangedFiles: number | undefined,
+): boolean {
+  if (files.length === 0) return false;
+  if (!files.every((file) => file.status === "modified" && GITHUB_WORKFLOW_PATH_RE.test(file.filename))) return false;
+  const walk = walkImageRefBlocks(fullDiffText, parseActionUsesLine, evaluateActionUsesBlock, { lenient: false });
+  if (!walk.ok || !walk.sawBlock || !walk.anyTrue) return false;
+  return evidenceIsComplete(files, authoritativeChangedFiles, walk.totalAdded, walk.totalRemoved);
+}
+
+// ── Terraform provider/module version bumps (#1379) ───────────────────────
+
+/** HCL module/provider block markers a `.tf` file's own diff region may
+ * carry (#1379): `module "…"`, `provider "…"`, or the `required_providers`
+ * block. Closed vocabulary; never free text from the diff. */
+const TERRAFORM_MODULE_MARKER_RE = /\b(?:module|provider)\s+["']|\brequired_providers\b/;
+
+/** A Terraform `version = "…"` assignment line: optional indentation, the
+ * `version` key, `=`, a double-quoted value. Everything but the value is
+ * held fixed in the normalized form, so a pair may only differ in the
+ * version value. */
+const TERRAFORM_VERSION_LINE_RE = /^(\s*)(version)(\s*=\s*)(")([^"]*)(")(\s*)$/;
+
+interface TerraformVersionLine {
+  value: string;
+  normalized: string;
+}
+
+function parseTerraformVersionLine(content: string): TerraformVersionLine | null {
+  const match = TERRAFORM_VERSION_LINE_RE.exec(content);
+  if (match === null) return null;
+  const [, indent = "", key = "", separator = "", openQuote = "", value = "", closeQuote = "", trailing = ""] = match;
+  return { value, normalized: `${indent}${key}${separator}${openQuote}${closeQuote}${trailing}` };
+}
+
+/** Generic value-only paired-change evaluator over lines whose parsed form
+ * carries `normalized` and `value` (shared by the Terraform rule; the
+ * platform rule keeps its own to enforce context on top). */
+function evaluateValueOnlyBlock(
+  removed: readonly { normalized: string; value: string }[],
+  added: readonly { normalized: string; value: string }[],
+): boolean | null {
+  if (removed.length === 0 || removed.length !== added.length) return null;
+  let valueChanged = false;
+  for (let index = 0; index < removed.length; index += 1) {
+    if (removed[index]!.normalized !== added[index]!.normalized) return null;
+    if (removed[index]!.value !== added[index]!.value) valueChanged = true;
+  }
+  return valueChanged;
+}
+
+// ---------------------------------------------------------------------------
+// Dependency-update risk signals (#1336)
+// ---------------------------------------------------------------------------
+
+/** The update types the bounded #1336 risk triggers may escalate: the
+ * Renovate kinds, the #1379 vendor-agnostic update kinds, and the generic
+ * dependency kind. Outside this context a title word like "security" must
+ * not invent a dependency risk signal for an ordinary code PR (its own
+ * lanes already cover that). */
+export const DEPENDENCY_UPDATE_KINDS: ReadonlySet<string> = new Set([
+  "renovate_digest_only",
+  "image_digest_only",
+  "renovate_image_update",
+  "renovate_chart_update",
+  "dependency_upgrade",
+  // #1379: vendor-agnostic update kinds ride the same update context.
+  "image_update",
+  "chart_update",
+  "platform_version_update",
+  "action_update",
+]);
+
+/**
+ * #1379: the kinds whose must_check list carries the three upstream-evidence
+ * obligations (provenance, exact release delta, advisories) — the same set
+ * the dependency_evidence prompt fragment gates on (the digest-only kinds
+ * are deliberately excluded: their benign zero-selection gates stay as they
+ * were). Exported so the tool-harness seam can key the #1379 tool-loop
+ * dependency-evidence budget reserve on the PR's classification kind without
+ * re-deriving the family.
+ */
+export const DEPENDENCY_EVIDENCE_KINDS: ReadonlySet<string> = new Set([
+  "dependency_upgrade",
+  "renovate_image_update",
+  "renovate_chart_update",
+  "image_update",
+  "chart_update",
+  "platform_version_update",
+  "action_update",
+]);
+
+/** Bounded component vocabulary for the sensitive-component trigger:
+ * proxy/auth/network/secret-handling infrastructure. Exact-token matching —
+ * any non-alphanumeric character separates tokens (`oauth2-proxy` → `oauth2`,
+ * `proxy`) — so a token that is NOT on this closed list (`author`) never
+ * fires; a closed compound-name list covers the well-known components whose
+ * token isn't a bare stem (`certs`, `certbot`, `certificate`, `certmanager`,
+ * `oauth2proxy` — certificate material is exactly the secret-handling class
+ * this trigger exists for). Only ever evaluated inside the
+ * dependency-update context. */
+const SENSITIVE_COMPONENT_TOKENS: readonly string[] = [
+  "auth", "oauth", "oidc", "saml", "sso", "proxy", "gateway", "ingress",
+  "traefik", "nginx", "caddy", "haproxy", "envoy", "vpn", "wireguard",
+  "tailscale", "cloudflared", "vault", "sops", "cert", "secret", "secrets",
+  "keycloak", "authelia", "authentik", "auth0", "oauth2", "vaultwarden",
+  // Compound/camelCase spellings whose tokens are not a bare stem:
+  "certs", "certbot", "certificate", "certmanager", "oauth2proxy",
+];
+
+function mentionsSensitiveComponent(text: string): boolean {
+  const tokens = text.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token !== "");
+  return tokens.some((token) => SENSITIVE_COMPONENT_TOKENS.includes(token));
+}
+
+/** Lenient image-reference scan of the full diff: pairs what parses cleanly,
+ * reports provenance changes (a paired reference whose repository/registry
+ * differs — the "unknown upstream provenance" escalation fact) and the files
+ * carrying them, and collects sensitive-component repositories from every
+ * parsed reference line. Impure content never aborts the scan — cleanly
+ * paired blocks elsewhere in the diff still report, so a genuine repository
+ * swap is never erased by an unrelated line the parser rejects (the kind
+ * rules stay strict; this scan only ever ADDS scrutiny). */
+function scanImageRefDiff(fullDiffText: string): { repoChanged: boolean; repoChangeFiles: string[]; sensitiveFiles: string[] } {
+  const repoChangeFiles: string[] = [];
+  const sensitiveFiles: string[] = [];
+  const push = (list: string[], file: string): void => {
+    if (file === "" || list.includes(file)) return;
+    list.push(file);
+  };
+  /** Provenance comparison: a repository must be named on BOTH sides — a
+   * bare `tag:` value carries none — and differ. */
+  const repoSwap = (a: { repo: string }, b: { repo: string }): boolean =>
+    a.repo !== "" && b.repo !== "" && a.repo !== b.repo;
+  const walk = walkImageRefBlocks(
+    fullDiffText,
+    parseImageRefLine,
+    (removed, added) => {
+      if (removed.length !== added.length) return null;
+      for (let index = 0; index < removed.length; index += 1) {
+        if (repoSwap(removed[index]!, added[index]!)) return true;
+      }
+      return false;
+    },
+    {
+      lenient: true,
+      onLine: (parsed, file) => {
+        if (parsed.repo !== "" && mentionsSensitiveComponent(parsed.repo)) push(sensitiveFiles, file);
+      },
+      onPair: (removed, added, file) => {
+        for (let index = 0; index < Math.min(removed.length, added.length); index += 1) {
+          if (repoSwap(removed[index]!, added[index]!)) {
+            push(repoChangeFiles, file);
+            return;
+          }
+        }
+      },
+    },
+  );
+  // A provenance claim needs at least one cleanly paired block that changed
+  // the repository — `anyTrue` is exactly that.
+  return { repoChanged: walk.anyTrue, repoChangeFiles: walk.anyTrue ? repoChangeFiles : [], sensitiveFiles };
 }
 
 function classifyPrKind(
@@ -1830,9 +3499,10 @@ function classifyPrKind(
   diffText: string,
   fullDiffText: string,
   authoritativeChangedFiles: number | undefined,
+  metadata: PrMetadata,
 ): string {
   for (const rule of KIND_RULES) {
-    if (rule.matches(files, diffText, fullDiffText, authoritativeChangedFiles)) return rule.kind;
+    if (rule.matches(files, diffText, fullDiffText, authoritativeChangedFiles, metadata)) return rule.kind;
   }
   return DEFAULT_PR_KIND;
 }
@@ -1870,7 +3540,10 @@ function issueLabels(issue: LinkedIssue): Set<string> {
 function detectRiskFlags(
   files: readonly ChangedFile[],
   diffText: string,
+  fullDiffText: string,
   linkedIssues: readonly LinkedIssue[],
+  prKind: string,
+  metadata: PrMetadata,
 ): { flags: string[]; flagsWithFiles: Record<string, string[]> } {
   const flags: string[] = [];
   const flagsWithFiles: Record<string, string[]> = {};
@@ -1926,6 +3599,27 @@ function detectRiskFlags(
     }
   }
 
+  // #1336: bounded dependency-update risk signals — every trigger is a known
+  // fact (a paired reference whose repository changed, a forge-reported title
+  // carrying an advisory identifier, a security-infrastructure component in a
+  // changed reference or path), never an inference about image contents.
+  const imageScan = scanImageRefDiff(fullDiffText);
+  const updateContext = metadata.renovateAuthored || DEPENDENCY_UPDATE_KINDS.has(prKind);
+  // Attribution merges two known-fact sources: files whose changed image
+  // references name a sensitive component (from the scan) and changed
+  // filenames whose own path segments do.
+  const sensitiveFiles = [...imageScan.sensitiveFiles];
+  for (const name of filenames) {
+    if (mentionsSensitiveComponent(name) && !sensitiveFiles.includes(name)) sensitiveFiles.push(name);
+  }
+  if (imageScan.repoChanged || (updateContext && (metadata.titleReportsAdvisory || sensitiveFiles.length > 0))) {
+    const attribution = [...imageScan.repoChangeFiles, ...sensitiveFiles].filter(
+      (name, index, list) => list.indexOf(name) === index,
+    );
+    if (!flags.includes("dependency_security_sensitive")) flags.push("dependency_security_sensitive");
+    flagsWithFiles["dependency_security_sensitive"] = attribution;
+  }
+
   return { flags, flagsWithFiles };
 }
 
@@ -1935,14 +3629,59 @@ function detectRiskFlags(
 
 /** Checklist items per risk class. Keys are pr_kind values AND the file-based
  * risk flags (which share names), so a flag like auth_changes detected on an
- * app_code PR still pulls in the auth checklist (#157). */
+ * app_code PR still pulls in the auth checklist (#157).
+ *
+ * #1379: the dependency families carry three deterministic upstream-evidence
+ * obligations — provenance, the exact old→new upstream delta, and the
+ * security-advisory check — whose unresolved coverage prevents a clean
+ * published verdict (strictReviewResult: incomplete required checks ⇒
+ * review_result "partial", never "clean"). `renovate_digest_only` and
+ * `image_digest_only` are deliberately untouched: a digest-only refresh has
+ * no upstream version range to evidence, and their benign zero-selection
+ * gates stay exactly as-is. */
+const IMAGE_EVIDENCE_CHECKS: readonly string[] = [
+  "establish upstream provenance for the updated image: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated image",
+  "check upstream security advisories for the updated image version range, or report the advisory check as not performed",
+];
+const CHART_EVIDENCE_CHECKS: readonly string[] = [
+  "establish upstream provenance for the updated chart: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated chart",
+  "check upstream security advisories for the updated chart version range, or report the advisory check as not performed",
+];
+const DEPENDENCY_EVIDENCE_CHECKS: readonly string[] = [
+  "establish upstream provenance for the updated dependency: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated dependency",
+  "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed",
+];
+const PLATFORM_EVIDENCE_CHECKS: readonly string[] = [
+  "establish upstream provenance for the updated platform/runtime component: publisher and canonical source repository",
+  "inspect the exact old→new upstream release delta for the updated platform/runtime component",
+  "check upstream security advisories for the updated platform/runtime component version range, or report the advisory check as not performed",
+];
+// #1379: an action ref bump is a dependency update of the packaged-action
+// kind — it carries the generic dependency wording (deviation noted in the
+// issue thread: the spec names no dedicated family for action_update).
+const ACTION_EVIDENCE_CHECKS = DEPENDENCY_EVIDENCE_CHECKS;
+
 const KIND_CHECKS: Readonly<Record<string, readonly string[]>> = {
   renovate_digest_only: ["verify no functional changes beyond lockfile hashes"],
   image_digest_only: ["verify only image digests changed; repository and tag unchanged"],
+  // #1379: the upstream-evidence obligations. Shared text across kinds is
+  // deduplicated by buildMustCheck; each family names its own artifact
+  // ("image" / "chart" / "updated dependency" / "updated platform/runtime
+  // component") so a mixed family still carries the right obligations.
+  renovate_image_update: ["verify only image tags/digests changed; repository unchanged", ...IMAGE_EVIDENCE_CHECKS],
+  image_update: IMAGE_EVIDENCE_CHECKS,
+  renovate_chart_update: ["verify only chart/version values changed", ...CHART_EVIDENCE_CHECKS],
+  chart_update: CHART_EVIDENCE_CHECKS,
   dependency_upgrade: [
     "check for breaking API changes in updated dependencies",
     "run full test suite after upgrade",
+    ...DEPENDENCY_EVIDENCE_CHECKS,
   ],
+  platform_version_update: PLATFORM_EVIDENCE_CHECKS,
+  action_update: ACTION_EVIDENCE_CHECKS,
   k8s_manifest: [
     "validate manifest against target cluster version",
     "check for resource quota / limit changes",
@@ -1976,6 +3715,9 @@ const FLAG_CHECKS: Readonly<Record<string, readonly string[]>> = {
   linked_audit_issue: ["verify audit findings are addressed"],
   linked_priority_p0: ["treat as critical — verify all changes thoroughly"],
   linked_priority_p1: ["treat as high priority — verify correctness carefully"],
+  dependency_security_sensitive: [
+    "verify the update provenance and any referenced security advisory",
+  ],
 };
 
 /** Kinds/flags whose RISK FLAG can still fire from diff CONTENT alone (with an
@@ -2126,6 +3868,14 @@ export interface ClassifyInput {
    * and fails closed when either is short (#909). */
   authoritativeChangedFiles?: number | undefined;
   linkedIssues?: readonly LinkedIssue[] | undefined;
+  /** #1336: forge-reported PR metadata for the Renovate-update rules — the
+   * author login (never PR-body content), the forge-reported title, and the
+   * head branch name. All optional; absent/empty means no metadata signal.
+   * Untrusted data: the classifier reduces these to booleans at the metadata
+   * boundary and retains no untrusted text (see `classifyPrMetadata`). */
+  prAuthor?: string | undefined;
+  prTitle?: string | undefined;
+  headBranch?: string | undefined;
   maxSummaryFiles?: number | undefined;
   metadataStatus?: unknown;
 }
@@ -2141,6 +3891,9 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     linkedIssues = [],
     maxSummaryFiles = 50,
     metadataStatus = null,
+    prAuthor = "",
+    prTitle = "",
+    headBranch = "",
   } = input;
 
   const uncertainty = linkedMetadataUncertainty(metadataStatus);
@@ -2157,8 +3910,9 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     discounted: pathEvaluation.discounted,
   };
 
-  const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText, authoritativeChangedFiles);
-  const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, linkedIssues);
+  const metadata = classifyPrMetadata(prAuthor, headBranch, prTitle);
+  const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText, authoritativeChangedFiles, metadata);
+  const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, fullDiffText ?? diffText, linkedIssues, prKind, metadata);
   const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles);
 
   // Build changed files summary (just filenames, truncated).

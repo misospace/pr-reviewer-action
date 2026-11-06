@@ -16,6 +16,8 @@ import {
 } from "../src/publish/publish.js";
 import { cleanupManagedReviews, retireManagedInlineComments, resolveSupersededThreads, hideSupersededManagedReviews } from "../src/publish/cleanup.js";
 import { buildComments, prescriptionKey, prescriptionKeyDigest, FEEDBACK_AFFORDANCE, INLINE_DISCLAIMER } from "../src/publish/inline-findings.js";
+import { parseReviewHandoffBlock } from "../src/publish/handoff.js";
+import { analysisEngineBase } from "../src/prompt/index.js";
 import { enforcementView, normalizeThread } from "../src/context/review-threads.js";
 import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
@@ -260,6 +262,27 @@ test("published body strips the analysis engine's base URL (#832)", async () => 
   assert.ok(body.includes("_Analysis engine: m (openai)_"));
 });
 
+test("published body strips a base URL that carries internal whitespace whole (#1474)", async () => {
+  const api = new MockPublishApi();
+  await publishReview(input({ analysisEngine: analysisEngineBase("m", "https://llm.internal.test/v1 x", "openai") }), api, { diffText: "" });
+  const body = api.sticky[0]!.body;
+  assert.ok(body.includes("_Analysis engine: m (openai)_"));
+  // The endpoint URL leaves the published body whole: no fragment of it
+  // survives next to the format group (#1474).
+  assert.ok(!body.includes("llm.internal.test"));
+});
+
+test("published body strips a base URL that carries a parenthesis group whole (#1474)", async () => {
+  const api = new MockPublishApi();
+  await publishReview(input({ analysisEngine: analysisEngineBase("m", "https://llm.internal.test/v1 (x)", "openai") }), api, { diffText: "" });
+  const body = api.sticky[0]!.body;
+  // The endpoint token ends at the API-format group — the group that ends
+  // the engine base — so the whole URL leaves and no fragment of it stays
+  // behind (#1474).
+  assert.ok(body.includes("_Analysis engine: m (openai)_"));
+  assert.ok(!body.includes("llm.internal.test"));
+});
+
 test("sticky publication failure returns failed status and error", async () => {
   const api = new MockPublishApi();
   api.stickyResult = { ok: false, created: false, error: "permission denied" };
@@ -326,6 +349,59 @@ test("#1161: review_verdict publishes a request_changes verdict as a native REQU
   assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
   assert.equal(api.submitted[0]!.commit_id, HEAD);
   assert.ok(result.messages.includes("Submitting blocking findings for #42"));
+});
+
+test("#1449: a native approval cannot bypass the derived-obligation state", async () => {
+  // The publish boundary: an `unresolved` or `unavailable` derived state
+  // withholds the native APPROVE. The run stays ADVISORY — the native
+  // event is a COMMENT, never a blocking REQUEST_CHANGES, because an
+  // incomplete review must not invent an issue.
+  for (const state of ["unresolved", "unavailable"]) {
+    const api = new MockPublishApi();
+    const result = await publishReview(
+      input({ mode: "review_verdict", verdict: "approve", derivedObligationState: state }),
+      api,
+      { diffText: "" },
+    );
+    assert.equal(result.status, "published", state);
+    assert.equal(api.submitted.length, 1, state);
+    assert.equal(api.submitted[0]!.event, "COMMENT", state);
+    assert.ok(
+      result.messages.some((message) => message.includes("Withholding native approval") && message.includes(state)),
+      result.messages.join("; "),
+    );
+    // The published body names the reason.
+    assert.match(api.submitted[0]!.body, /Approval withheld by derived-obligation state/);
+    // Never a blocking request.
+    assert.ok(!api.submitted.some((review) => review.event === "REQUEST_CHANGES"), state);
+  }
+  // A complete derived state approves exactly like a run without the
+  // feature.
+  const complete = new MockPublishApi();
+  await publishReview(
+    input({ mode: "review_verdict", verdict: "approve", derivedObligationState: "complete" }),
+    complete,
+    { diffText: "" },
+  );
+  assert.equal(complete.submitted[0]!.event, "APPROVE");
+});
+
+test("#1449: the approval guardrails withhold an approval for an unresolved derived state", () => {
+  const check = (overrides: Partial<Parameters<typeof evaluateApprovalGuardrails>[0]>) => evaluateApprovalGuardrails({
+    verdict: "approve", approveForks: false, isForkPr: false, ...overrides,
+  });
+  assert.equal(check({ derivedObligationState: "unresolved" }).canApprove, false);
+  assert.equal(check({ derivedObligationState: "unavailable" }).canApprove, false);
+  assert.equal(check({ derivedObligationState: "complete" }).canApprove, true);
+  // A verdict that is not an approve never allows an approval.
+  assert.equal(check({ verdict: "request_changes", derivedObligationState: "unresolved" }).canApprove, false);
+  // The state absent: the result is byte-identical to the pre-#1449 shape.
+  assert.deepEqual(check({}), {
+    canApprove: true,
+    scopeBlocked: false,
+    verdictAllowsApproval: true,
+    isForkPr: false,
+  });
 });
 
 test("#1161: a fork PR without approve-forks never approves and states the scope policy", async () => {
@@ -673,7 +749,7 @@ test("#810: partial coverage renders the notice near the top and records it in t
   // Near the top: after the engine line, before any model-produced text.
   assert.ok(noticeAt > body.indexOf("_Analysis engine: test-engine_"));
   assert.ok(noticeAt < body.indexOf("Safe."));
-  assert.match(body, /stopped on its budget \(`tool-call-budget-exhausted`\) before finishing/);
+  assert.match(body, /stopped early \(`tool-call-budget-exhausted`\) before finishing/);
   assert.match(body, /Changed files never read \(2 of 3\): `src\/b\.ts`, `src\/c\.ts`/);
   assert.match(body, /Specialist leads never resolved \(2 of 2\): `security` \(`src\/c\.ts`\): unvalidated input; `tests` \(no file path\): new flag untested/);
   assert.match(body, /Absence of findings in the unread paths is not evidence they are safe\./);
@@ -798,13 +874,12 @@ test("#847: without a tool harness the marker stays byte-identical to the pre-#8
 });
 
 // ---------------------------------------------------------------------------
-// #873 — required-check coverage incomplete (or a #810 tool-loop coverage
-// gap) must never let a run READ as clean: the marker stays `partial` under
-// every verdict policy. #1145 restated the event rule: in `review_verdict`
-// the valid verdict publishes its native event with the gap stated (no
-// COMMENT downgrade); comment-only modes still never header as an approval.
-// Evidence: PR #854 published APPROVE with
-// "review_result":"partial","required_checks":"incomplete" in its marker.
+// #873 / #1447 — required-check coverage incomplete (or a #810 tool-loop
+// coverage gap) must never let a run READ as clean OR certify a native
+// APPROVE: the marker stays `partial` under every verdict policy and
+// review_verdict publishes a non-blocking COMMENT abstention.
+// Evidence: PR #854 demonstrated why the old shape was unsafe by publishing
+// APPROVE with "review_result":"partial","required_checks":"incomplete".
 // ---------------------------------------------------------------------------
 
 const VERDICT_POLICIES = [undefined, "model", "findings_severity_gated", "strict"] as const;
@@ -846,7 +921,7 @@ const INCOMPLETE_STATES: Array<{ name: string; requiredChecks: string; partialCo
 
 for (const state of INCOMPLETE_STATES) {
   for (const verdictPolicy of VERDICT_POLICIES) {
-    test(`review_verdict: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) publishes APPROVE with an explicit gaps note (#1145)`, async () => {
+    test(`review_verdict: ${state.name} + approve (policy=${verdictPolicy ?? "default"}) withholds APPROVE as COMMENT when coverage is incomplete (#1447)`, async () => {
       const api = new MockPublishApi();
       const result = await publishReview(input({
         mode: "review_verdict", allowApprove: true, verdict: "approve",
@@ -856,12 +931,12 @@ for (const state of INCOMPLETE_STATES) {
       }), api, { diffText: "" });
       assert.equal(result.status, "published");
       assert.equal(api.submitted.length, 1);
-      // #1145: the publish mode is authoritative — the verdict's native event
-      // is never downgraded by a coverage/trace shortfall...
-      assert.equal(api.submitted[0]!.event, "APPROVE", `policy=${verdictPolicy}`);
-      // ...but the shortfall stays machine- and human-readable: partial
-      // marker + explicit note on the approved review.
-      assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/);
+      // #1447: incomplete coverage is an abstention, so the model's approve
+      // verdict is published as a non-blocking COMMENT, not a trusted APPROVE.
+      assert.equal(api.submitted[0]!.event, "COMMENT", `policy=${verdictPolicy}`);
+      // The shortfall stays machine- and human-readable: partial marker plus
+      // an explicit approval-withheld note.
+      assert.match(api.submitted[0]!.body, /Approval withheld by incomplete review coverage/);
       assert.match(api.submitted[0]!.body, /"review_result":"partial"/);
     });
 
@@ -907,6 +982,20 @@ test("review_verdict: complete coverage + approve still publishes APPROVE (no re
   }
 });
 
+test("review_verdict: degraded approve candidate withholds trusted APPROVE", async () => {
+  const api = new MockPublishApi();
+  const result = await publishReview(input({
+    mode: "review_verdict",
+    verdict: "approve",
+    requiredChecks: "complete",
+    degradedGateBypass: true,
+  }), api, { diffText: "" });
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "COMMENT");
+  assert.match(api.submitted[0]!.body, /Approval withheld by degraded review state/);
+  assert.match(api.submitted[0]!.body, /"review_result":"partial"/);
+});
+
 test("review_verdict: request_changes stays REQUEST_CHANGES even with incomplete coverage", async () => {
   const api = new MockPublishApi();
   const result = await publishReview(input({
@@ -916,7 +1005,7 @@ test("review_verdict: request_changes stays REQUEST_CHANGES even with incomplete
   assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
 });
 
-test("review_verdict: an unknown coverage state names BOTH possible causes in the approval note", async () => {
+test("review_verdict: an unknown coverage state withholds approval and names BOTH possible causes", async () => {
   // #1145: coverage can be unknown because the run directory was missing OR
   // because the run directory's coverage artifact was unreadable or
   // unrecognized. The note must not claim the run directory was absent —
@@ -927,9 +1016,9 @@ test("review_verdict: an unknown coverage state names BOTH possible causes in th
     coverageUnknown: true,
   }), api, { diffText: "" });
   assert.equal(result.status, "published");
-  assert.equal(api.submitted[0]!.event, "APPROVE");
+  assert.equal(api.submitted[0]!.event, "COMMENT");
   const body = api.submitted[0]!.body;
-  assert.match(body, /Approval published with incomplete coverage/);
+  assert.match(body, /Approval withheld by incomplete review coverage/);
   assert.ok(body.includes("tool-loop coverage could not be verified"), "the stable phrase is kept");
   assert.ok(
     body.includes("(the run directory or its coverage artifact was unavailable to confirm it)"),
@@ -1049,10 +1138,78 @@ test("failed and plain fallback native submissions preserve previous findings", 
 });
 
 // ---------------------------------------------------------------------------
-// #1249: a body-only fallback (a rejected commit-bound submission — e.g. an
-// anchor batch that raced a new push) must not drop the findings the inline
-// comments carried. Under a non-strict verdict policy the findings table is
-// not part of the native review body, so the fallback body carries the
+// #1518: a published remediation handoff must never advertise a suggestion
+// the run did not actually publish as a review comment. The handoff rides
+// the body, and the body can be published BEFORE (sticky recovery) or
+// WITHOUT (body-only fallback) the inline submission succeeding — every
+// such path carries the suggestion-free handoff variant.
+// ---------------------------------------------------------------------------
+test("#1518: a failed inline submission withdraws the handoff suggestions from the published body", async () => {
+  const api = new MockPublishApi();
+  api.reviewResults = [{ ok: false, error: "nope" }];
+  const findings = [{ file: "a.ts", line: 2, severity: "major", message: "A finding", suggestion: "REPL" }];
+  const result = await publishReview(
+    input({ mode: "review_comment", reviewId: "0123456789abcdef", inlineFindings: true, findings }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.ok(api.sticky.length >= 2, "the failed submission re-publishes the sticky body");
+  const before = parseReviewHandoffBlock(api.sticky[0]!.body);
+  const after = parseReviewHandoffBlock(api.sticky[api.sticky.length - 1]!.body);
+  assert.ok(before !== null && after !== null, "both published bodies carry a parseable handoff");
+  assert.equal(before!.items[0]!.suggestion, "REPL", "the first publication advertised the replacement");
+  assert.equal(after!.items[0]!.suggestion, undefined, "the withdrawal removes the suggestion no review comment backs");
+  assert.ok(
+    result.messages.some((line) => line.includes("with the findings summary appended to the review body")),
+    "the step messages disclose the non-strict compensation (summary appended, suggestions gone)",
+  );
+
+  // Strict policy: the body already renders the findings table, so the only
+  // change the withdrawal makes is the suggestion-free handoff variant —
+  // and that alone is worth re-publishing.
+  const strictApi = new MockPublishApi();
+  strictApi.reviewResults = [{ ok: false, error: "nope" }];
+  const strictResult = await publishReview(
+    input({ mode: "review_comment", reviewId: "0123456789abcdef", verdictPolicy: "strict", inlineFindings: true, findings }),
+    strictApi,
+    { diffText: DIFF },
+  );
+  assert.equal(strictResult.status, "published");
+  assert.ok(strictApi.sticky.length >= 2, "the strict policy still re-publishes to withdraw the suggestions");
+  const strictAfter = parseReviewHandoffBlock(strictApi.sticky[strictApi.sticky.length - 1]!.body);
+  assert.ok(strictAfter !== null);
+  assert.equal(strictAfter!.items[0]!.suggestion, undefined, "the strict publication carries no unbacked suggestion");
+  assert.ok(
+    strictResult.messages.some((line) => line.includes("with the remediation handoff suggestions withdrawn")),
+    "the step messages disclose the withdrawal",
+  );
+});
+
+test("#1518: the body-only fallback review carries no published prescription", async () => {
+  const api = new MockPublishApi();
+  api.reviewResults = [{ ok: false, error: "race" }, { ok: true }];
+  const findings = [{ file: "a.ts", line: 2, severity: "major", message: "A finding", suggestion: "REPL" }];
+  const result = await publishReview(
+    input({ mode: "review_verdict", reviewId: "0123456789abcdef", verdict: "request_changes", inlineFindings: true, findings }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted.length, 2, "the rejected commit-bound batch falls back body-only");
+  const rejected = parseReviewHandoffBlock(api.submitted[0]!.body);
+  const fallback = parseReviewHandoffBlock(api.submitted[1]!.body);
+  assert.ok(rejected !== null && fallback !== null, "both bodies carry a parseable handoff");
+  assert.equal(rejected!.items[0]!.suggestion, "REPL", "the rejected batch went out with the inline comments that carried the replacement");
+  assert.equal(fallback!.items[0]!.suggestion, undefined, "the fallback published no inline comment, so it advertises none");
+  assert.equal(fallback!.items[0]!.message, "A finding", "the finding itself still rides the fallback handoff");
+});
+
+// ---------------------------------------------------------------------------
+// #1249: body-only fallback (a rejected commit-bound submission — e.g. an
+// anchor batch raced a new push) must not drop findings the inline
+// comments carried. Under a non-strict verdict policy the findings table
+// is not part of the native review body, so the fallback body carries a
 // bounded findings summary; under strict the body already renders it, so no
 // duplicate table may appear.
 // ---------------------------------------------------------------------------

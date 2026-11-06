@@ -4,6 +4,7 @@ import type {
   ReviewTriageDecision,
   VerdictValue,
 } from "../model/types.js";
+import { aspectStatusLookup, rollupDependencyCoverage } from "../model/dependency-coverage.js";
 
 /**
  * The persisted review artifact (`ai-output.json` in v2) — the single object
@@ -91,6 +92,14 @@ export interface ReviewArtifact {
   requirement_trace_incomplete?: boolean;
   /** #750: the model's structured dispositions, when the key was emitted. */
   required_check_dispositions?: Array<Record<string, unknown>>;
+  /** #1337: the model's structured dependency-upgrade coverage accounting
+   * answer (fail-closed normalized), when the key was emitted. Purely
+   * informational: the deterministic rollup never gates the verdict and
+   * never fabricates a finding from an evidence gap. */
+  dependency_coverage?: Array<Record<string, unknown>>;
+  /** #1337: deterministic rollup (`complete` | `partial` | `unavailable`)
+   * over the closed aspect set; written whenever the answer was emitted. */
+  dependency_coverage_status?: string;
   /** #766: replaced with the settled (enforced) records by thread enforcement. */
   thread_dispositions?: Array<ArtifactThreadDisposition | Record<string, unknown>>;
   /** #774: replaced with the settled records by human-review enforcement. */
@@ -170,6 +179,22 @@ export function reviewArtifactFromParsed(parsed: ParsedReviewVerdict): ReviewArt
           status: d.status,
           rationale: d.rationale,
         }));
+  }
+  // #1337: publish the accounting only for a REAL array answer. The strict
+  // wire schema always carries the key (null permitted), so key-presence
+  // alone would make every json_schema run report an empty accounting —
+  // a null/malformed answer is "not reported", never an empty rollup.
+  if (parsed.dependencyCoverageEmitted && parsed.dependencyCoverage !== null) {
+    artifact.dependency_coverage = parsed.dependencyCoverage.map((entry) => ({
+      aspect: entry.aspect,
+      status: entry.status,
+      note: entry.note,
+    }));
+    // The rollup is deterministic over the normalized answer (the model's
+    // prose never contributes), so it can be written here once.
+    artifact.dependency_coverage_status = rollupDependencyCoverage(
+      aspectStatusLookup(parsed.dependencyCoverage),
+    );
   }
   if (parsed.threadDispositionsEmitted) {
     artifact.thread_dispositions = parsed.threadDispositions === null

@@ -92,8 +92,15 @@
       "ai-confidence-base-url",
       "ai-confidence-api-format",
       "ai-confidence-api-key",
+      "ai-confidence-isolation",
+      "ai-confidence-tokens-param",
       "ai-confidence-reasoning-effort",
       "ai-confidence-timeout-sec",
+      "ai-confidence-max-tokens",
+      "ai-confidence-prompt-tokens",
+      "ai-confidence-model-context-tokens",
+      "ai-confidence-anthropic-effort-support",
+      "ai-confidence-structured-output-support",
       "ai-confidence-enable-for-forks"
     ]
   },
@@ -158,7 +165,8 @@
       "deep-review-timeout-sec",
       "deep-review-max-tokens",
       "deep-review-corpus-max-bytes",
-      "claim-falsification"
+      "claim-falsification",
+      "derived-obligations"
     ]
   },
   {

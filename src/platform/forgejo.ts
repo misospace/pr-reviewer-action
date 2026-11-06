@@ -109,6 +109,8 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   private readonly timeoutMs: number;
   private readonly fetchImpl: FetchLike;
   private jwtCache: { token: string; fetchedAt: number } | null = null;
+  /** #1341: the cause of the most recent `getPr()` failure, or null. */
+  private lastPrReadFailure: PlatformRequestError | null = null;
 
   constructor(options: ForgejoAdapterOptions) {
     const parsed = parsePlatformBaseUrl(options.baseUrl, "Forgejo API base URL");
@@ -226,9 +228,13 @@ export class ForgejoAdapter implements PlatformReadAdapter {
 
   /** Normalize a Forgejo PR payload into the GitHub shape (#254 golden
    * fixtures). head.repo.full_name missing → "" so fork detection fails
-   * closed; head.repo is never defaulted to the base repo. */
+   * closed; head.repo is never defaulted to the base repo. #1341: an empty
+   * or otherwise PR-less object is NOT synthesizable into a PR — a usable
+   * payload must at least carry the numeric `number` identity field both
+   * forges always return, so a malformed successful read records the
+   * invalid-payload cause instead of fabricating a PR-shaped value. */
   private static prToGithubShape(data: unknown, owner: string, repo: string, prNumber: string): unknown {
-    if (!isObject(data)) return null;
+    if (!isObject(data) || typeof data.number !== "number") return null;
     const head = isObject(data.head) ? data.head : {};
     const base = isObject(data.base) ? data.base : {};
     const branchRepoFullName = (branch: Record<string, unknown>): string => {
@@ -273,17 +279,51 @@ export class ForgejoAdapter implements PlatformReadAdapter {
   }
 
   async getPr(): Promise<unknown | null> {
+    this.lastPrReadFailure = null;
+    // An invalid repo ref keeps the pinned fail-closed refusal (it throws
+    // before any request, platform-reads.test.ts; the thrown error already
+    // names the problem) — #1341 records causes for READ failures below.
     const { owner, repo } = parseRepo(this.repo);
     try {
       const { status, data } = await requestJson(
         this.repoUrl("/pulls/", this.prNumber),
         (await this.options()),
       );
-      if (status !== 200) return null;
-      return ForgejoAdapter.prToGithubShape(data, owner, repo, this.prNumber);
-    } catch {
+      if (status !== 200) {
+        // #1341: a non-2xx response IS an answer — keep its status as the
+        // cause class (credential- and body-free by construction).
+        this.lastPrReadFailure = new PlatformRequestError(`PR read failed with HTTP status ${status}`, status, "http-status");
+        return null;
+      }
+      const pr = ForgejoAdapter.prToGithubShape(data, owner, repo, this.prNumber);
+      if (pr === null) {
+        // #1341: a 2xx whose body is not a PR object is still a failed
+        // read — name it instead of leaving the admission error
+        // unexplained. (The returned value is unchanged: null, as before.)
+        this.lastPrReadFailure = new PlatformRequestError("PR read returned an unusable payload", null, "invalid-payload");
+        return null;
+      }
+      return pr;
+    } catch (error) {
+      // #1341: no usable response arrived — keep the seam's cause class
+      // (`transport`, `redirect-blocked`, `too-large`, `origin-mismatch`,
+      // `invalid-json`, `request-failed`) as a RE-WRAPPED error: the
+      // recorded cause's message is built from the kind alone, never the
+      // underlying error text, so the cause object carries no response
+      // content and no credential material.
+      const cause = error instanceof PlatformRequestError ? error : null;
+      this.lastPrReadFailure = new PlatformRequestError(
+        `PR read failed (${cause?.kind ?? "request-failed"})`,
+        cause?.status ?? null,
+        cause?.kind ?? "request-failed",
+      );
       return null;
     }
+  }
+
+  /** #1341: the cause of the most recent `getPr()` failure, or null. */
+  prReadFailure(): PlatformRequestError | null {
+    return this.lastPrReadFailure;
   }
 
   async getPrDiff(): Promise<string> {

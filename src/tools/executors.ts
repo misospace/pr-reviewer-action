@@ -33,6 +33,7 @@ import { isRepositorySkillPath, readRepositorySkill, SKILL_LIMITS, SKILL_RESULT_
 import { USER_AGENT } from "../platform/user-agent.js";
 import { decodeEndpointPath } from "../platform/endpoint.js";
 import { createToolFetch, resolvePublicAddresses, systemResolver, type Resolver } from "../platform/safe-fetch.js";
+import { pyCodepointSlice } from "../platform/py.js";
 import { runProcess, type ProcessResult } from "../runtime/subprocess.js";
 import { pyDumpsCompact, pyDumpsSorted } from "../model/conversation.js";
 
@@ -696,24 +697,17 @@ export async function readFile(input: string, ctx: ToolContext, offset?: number 
     }
   }
   if (offset == null && limit == null) {
-    return { content: codepointSlice(content, 12000), committed: bound };
+    return { content: pyCodepointSlice(content, 12000), committed: bound };
   }
   const lines = splitKeepEnds(content);
   const start = Math.max((offset || 1) - 1, 0);
   const end = limit != null ? start + limit : lines.length;
   const window = lines.slice(start, end).join("");
   return {
-    content: codepointSlice(window, 12000),
+    content: pyCodepointSlice(window, 12000),
     range: { offset: start + 1, lines: end - start, total_lines: lines.length },
     committed: bound,
   };
-}
-
-/** Python `str[:n]` slices by codepoints; JS slices by UTF-16 units. Slice by
- * codepoint so astral characters count once, matching the v2 cap. */
-function codepointSlice(text: string, n: number): string {
-  if (text.length <= n) return text;
-  return Array.from(text).slice(0, n).join("");
 }
 
 /** Python `str.splitlines(keepends=True)` for the line-window read. Splits on
@@ -1115,7 +1109,7 @@ export async function webFetch(url: string, ctx: ToolContext): Promise<Obj> {
     }
     // Node's text() decoding replaces invalid sequences, matching v2's
     // errors="replace" decode.
-    return { content: codepointSlice(res.body, 10000) };
+    return { content: pyCodepointSlice(res.body, 10000) };
   }
   return { error: "Too many redirects" };
 }
@@ -1159,9 +1153,9 @@ export async function webSearch(query: string, ctx: ToolContext): Promise<Obj> {
       // Unparseable URL: scheme unknown — keep as-is (v2 keeps it too).
     }
     results.push({
-      title: codepointSlice(String(record.title ?? ""), 300),
+      title: pyCodepointSlice(String(record.title ?? ""), 300),
       url: resultUrl,
-      snippet: codepointSlice(String(record.content ?? ""), 500),
+      snippet: pyCodepointSlice(String(record.content ?? ""), 500),
     });
   }
   return { results };

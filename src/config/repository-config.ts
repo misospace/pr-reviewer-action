@@ -182,12 +182,17 @@ function stringifyDefault(input: ContractInput): string {
   return input.default === undefined ? "" : String(input.default);
 }
 
-/** True when the operator's own raw input differs from the contract
- * default — the closest signal this Action can observe for "the workflow
- * author explicitly set this input" (GitHub Actions gives composite actions
- * no way to distinguish an input explicitly set to its own default from one
- * left unset; see docs/repository-config.md). */
-function isOperatorExplicit(input: ContractInput, operatorRaw: RawInputs): boolean {
+/** True when an upper layer explicitly set this input: either the caller
+ * supplies `explicitKeys` (config layers above the repository whose applied
+ * keys must always win — e.g. the #1350 namespace layer, where a value that
+ * happens to equal the contract default is still an operator-set ceiling),
+ * or the operator's own raw input differs from the contract default — the
+ * closest signal this Action can observe for "the workflow author explicitly
+ * set this input" (GitHub Actions gives composite actions no way to
+ * distinguish an input explicitly set to its own default from one left
+ * unset; see docs/repository-config.md). */
+function isOperatorExplicit(input: ContractInput, operatorRaw: RawInputs, explicitKeys?: ReadonlySet<string>): boolean {
+  if (explicitKeys?.has(input.id)) return true;
   const value = operatorRaw[input.id];
   if (value === undefined) return false;
   return value !== stringifyDefault(input);
@@ -287,47 +292,50 @@ export function applyRepositoryConfigValues(
   operatorRaw: RawInputs,
   values: Readonly<Record<string, unknown>>,
   sourcePath: string,
+  options: { readonly sourceLabel?: string; readonly explicitKeys?: ReadonlySet<string> } = {},
 ): RepositoryConfigResolution {
   const raw: Record<string, string | undefined> = { ...operatorRaw };
   const warnings: string[] = [];
   const appliedKeys: string[] = [];
+  const sourceLabel = options.sourceLabel ?? "Repository config";
+  const explicitKeys = options.explicitKeys;
 
   const byId = new Map(contract.inputs.map((input) => [input.id, input]));
   const policyAllowed = operatorRaw["allow-repo-policy-overrides"] === "true";
   for (const [key, value] of Object.entries(values)) {
     const input = byId.get(key);
     if (!input || !input["repo-configurable"] || SECRET_INPUTS.has(key)) {
-      warnings.push(`Repository config '${sourcePath}' sets '${key}', which is not repo-configurable; ignoring it.`);
+      warnings.push(`${sourceLabel} '${sourcePath}' sets '${key}', which is not repo-configurable; ignoring it.`);
       continue;
     }
     if (input["repo-policy"] && !policyAllowed) {
-      warnings.push(`Repository config '${sourcePath}' sets policy input '${key}', but the operator did not enable allow-repo-policy-overrides; ignoring it.`);
+      warnings.push(`${sourceLabel} '${sourcePath}' sets policy input '${key}', but the operator did not enable allow-repo-policy-overrides; ignoring it.`);
       continue;
     }
     const isNumeric = INTEGER_INPUTS.has(key) || FLOAT_INPUTS.has(key);
     if (isNumeric) {
       const candidate = normalizeCandidate(input, value);
       if (!candidate.ok) {
-        warnings.push(`Repository config '${sourcePath}' sets '${key}' to an invalid value (${candidate.reason}); ignoring it.`);
+        warnings.push(`${sourceLabel} '${sourcePath}' sets '${key}' to an invalid value (${candidate.reason}); ignoring it.`);
         continue;
       }
       const ceiling = numericCeiling(input, operatorRaw);
       const number = Number(candidate.text);
       if (number > ceiling) {
-        warnings.push(`Repository config '${sourcePath}' sets '${key}' to ${number}, which exceeds the operator ceiling of ${ceiling}; ignoring it.`);
+        warnings.push(`${sourceLabel} '${sourcePath}' sets '${key}' to ${number}, which exceeds the operator ceiling of ${ceiling}; ignoring it.`);
         continue;
       }
       raw[key] = candidate.text;
       appliedKeys.push(key);
       continue;
     }
-    if (isOperatorExplicit(input, operatorRaw)) {
-      warnings.push(`Repository config '${sourcePath}' sets '${key}', but the operator explicitly set it; repository value ignored.`);
+    if (isOperatorExplicit(input, operatorRaw, explicitKeys)) {
+      warnings.push(`${sourceLabel} '${sourcePath}' sets '${key}', but the operator explicitly set it; the lower-layer value is ignored.`);
       continue;
     }
     const candidate = normalizeCandidate(input, value);
     if (!candidate.ok) {
-      warnings.push(`Repository config '${sourcePath}' sets '${key}' to an invalid value (${candidate.reason}); ignoring it.`);
+      warnings.push(`${sourceLabel} '${sourcePath}' sets '${key}' to an invalid value (${candidate.reason}); ignoring it.`);
       continue;
     }
     raw[key] = candidate.text;

@@ -3,6 +3,12 @@ import assert from "node:assert/strict";
 import {
   runHttpRequest,
   resolveEndpoint,
+  resolveEndpointChannel,
+  endpointUrlCredential,
+  endpointUrlCredentialOrEmpty,
+  redactEndpointUrlCredential,
+  assertSingleCredentialChannel,
+  CREDENTIAL_CHANNEL_CONFLICT_MESSAGE,
   TransportFailure,
   classifySocketError,
   describeTransportFailure,
@@ -185,6 +191,183 @@ test("the api key rides only the auth headers — never the URL, body, or failur
   if (refused.status !== "failure") return;
   assert.equal(refused.failure.kind, "network");
   assert.ok(!refused.failure.message.includes(key), "the network-failure message must not carry the key");
+});
+
+test("#1428: a credential from the endpoint URL's userinfo travels as HTTP Basic and nowhere else", async () => {
+  // The URL userinfo is the credential channel RFC 7617 assigns to HTTP
+  // Basic. The request target, the Host header, the request line, and the
+  // body must all be credential-free; the credential rides only the
+  // Authorization header.
+  const credential = "lane-operator:hunter2";
+  const expectedBasic = `Basic ${Buffer.from(credential, "utf8").toString("base64")}`;
+  for (const apiFormat of ["openai", "anthropic"] as const) {
+    const seenTargets: string[] = [];
+    const server = await startMockServer((req, body, res) => {
+      seenTargets.push(`${req.method} ${req.url}`);
+      if (apiFormat === "anthropic") {
+        sseResponse([
+          'data: {"type":"message_start","message":{"id":"m1","model":"m","usage":{"input_tokens":1,"output_tokens":0}}}',
+          'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}',
+          'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+          'data: {"type":"message_stop"}',
+        ])(req, body, res);
+        return;
+      }
+      res.statusCode = 200;
+      res.end('{"id":"1","choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}');
+    });
+    try {
+      const credentialedBase = server.url.replace("http://", `http://${credential}@`);
+      const outcome = await runChatRequest({
+        baseUrl: credentialedBase,
+        apiFormat,
+        payload: apiFormat === "openai"
+          ? payload({ model: "m", stream: false })
+          : ({ endpointPath: "/messages", body: { model: "m", stream: true, max_tokens: 8 } } as unknown as TransportWirePayload),
+        apiKey: "",
+        anthropicVersion: "2023-06-01",
+        requestTimeoutSec: 5,
+        connectTimeoutSec: 5,
+      });
+      assert.equal(outcome.status, "ok");
+      const captured = server.requests.at(-1)!;
+      // The credential rides exactly one header, and it is the Basic one.
+      assert.equal(captured.headers.authorization, expectedBasic);
+      // The URL channel replaces the separate-key channels, never joins them.
+      assert.equal(captured.headers["x-api-key"], undefined, "the URL credential must not also ride x-api-key");
+      // Request line: the userinfo never reaches the request target...
+      assert.deepEqual(seenTargets, [`POST ${apiFormat === "anthropic" ? "/messages" : "/chat/completions"}`]);
+      // ...nor the Host header...
+      assert.equal(captured.headers.host, server.url.replace("http://", ""));
+      // ...nor any other header (even the Basic header carries only the
+      // base64 form, never the raw credential), nor the body.
+      const base64 = expectedBasic.slice("Basic ".length);
+      const echoed = captured.rawHeaders.filter(
+        (value) => value.includes(credential)
+          || (value.includes(base64) && value !== expectedBasic),
+      );
+      assert.deepEqual(echoed, [], "the credential must ride only the Authorization header");
+      assert.ok(!captured.body.includes(credential), "the wire body must not carry the credential");
+      assert.ok(!captured.body.includes(base64), "the wire body must not carry the encoded credential either");
+      // Only the credential channel changes: the Anthropic framing headers
+      // ride a URL-credentialed request exactly like a keyed one.
+      if (apiFormat === "anthropic") {
+        assert.equal(captured.headers["anthropic-version"], "2023-06-01");
+        assert.equal(captured.headers.accept, "text/event-stream");
+      }
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+test("#1428: an endpoint URL credential and a separate API key are refused before any request", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.end("{}");
+  });
+  try {
+    const credentialedBase = server.url.replace("http://", "http://lane-operator:hunter2@");
+    let caught: unknown = null;
+    try {
+      await runHttpRequest({
+        baseUrl: credentialedBase,
+        apiFormat: "openai",
+        bodyText: "{}",
+        apiKey: "sk-separate-key",
+        anthropicVersion: "2023-06-01",
+        requestTimeoutSec: 5,
+        connectTimeoutSec: 5,
+        stream: false,
+      });
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(caught instanceof Error);
+    assert.equal(caught.message, CREDENTIAL_CHANNEL_CONFLICT_MESSAGE);
+    assert.ok(!caught.message.includes("hunter2"), "the refusal must not echo the credential");
+    assert.equal(server.requests.length, 0, "the refusal must happen before any request");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1428: endpoint userinfo resolves fail-closed, and credential-free endpoints are untouched", () => {
+  // The decoded userinfo is the credential, whatever characters it carries —
+  // decoded one escape at a time, exactly like the reference resolver's
+  // `urllib.parse.unquote` (a valid escape is its byte, an invalid escape
+  // sequence stays literal, invalid UTF-8 replaces).
+  assert.equal(endpointUrlCredential("https://user:pa%2Fss@host/v1"), "user:pa/ss");
+  assert.equal(endpointUrlCredential("https://user:p%2Fss%FF@host/v1"), "user:p/ss\uFFFD");
+  // A non-BMP character sharing a segment with an escape survives intact.
+  assert.equal(endpointUrlCredential("https://user:%F0%9F%94%92p%41@host/v1"), "user:🔒pA");
+  assert.equal(endpointUrlCredential("https://token@host"), "token");
+  assert.equal(endpointUrlCredential("https://user%40x:pass@host/v1"), "user@x:pass");
+  // An empty userinfo carries no credential.
+  assert.equal(endpointUrlCredential("https://@host/v1"), "");
+  assert.equal(endpointUrlCredential("https://host/v1"), "");
+  // Fail-closed shapes, mirrored from the shared resolver (#1414/#1419).
+  assert.throws(() => endpointUrlCredential("https://user:pa/ss@host/v1"), /credential outside its authority/);
+  assert.throws(() => endpointUrlCredential("https://host/pa@ss/v1"), /credential outside its authority/);
+  assert.throws(() => endpointUrlCredential("https://host/pa%40ss%zz/v1"), /credential outside its authority/);
+  assert.throws(() => endpointUrlCredential("https://host%40x/v1"), /encoded credential/);
+  assert.throws(() => endpointUrlCredential("https://@/v1"), /unparseable credential/);
+  // Reference parity: with the credential attributed to the authority, an
+  // `@` further along the path is path data, not an ambiguous credential.
+  assert.equal(endpointUrlCredential("https://u:p@host/pa@ss/v1"), "u:p");
+  // A credential-free endpoint resolves byte-for-byte as before #1428.
+  assert.equal(resolveEndpoint("https://host/v1", "openai").toString(), "https://host/v1/chat/completions");
+  // The resolved request target loses only the userinfo; identity is kept.
+  const resolved = resolveEndpointChannel("https://user:pass@host:8443/v1", "openai");
+  assert.equal(resolved.url.toString(), "https://host:8443/v1/chat/completions");
+  assert.equal(resolved.urlCredential, "user:pass");
+  // The one-credential assertion itself.
+  assert.throws(() => assertSingleCredentialChannel("user:pass", "sk-key"), /one request carries one credential/);
+  assert.doesNotThrow(() => assertSingleCredentialChannel("user:pass", ""));
+  assert.doesNotThrow(() => assertSingleCredentialChannel("", "sk-key"));
+});
+
+test("#1428: the diagnostic redaction of a credential-bearing endpoint URL is structural and fail-closed", () => {
+  // The credential leaves the URL exactly as the resolver removes it from
+  // the request target — scheme, host, port, and path survive.
+  assert.equal(redactEndpointUrlCredential("https://user:pass@host:8443/v1"), "https://host:8443/v1");
+  assert.equal(redactEndpointUrlCredential("https://user:pa%2Fss@host/v1"), "https://host/v1");
+  // A credential-free URL passes through byte-for-byte.
+  assert.equal(redactEndpointUrlCredential("https://host/v1"), "https://host/v1");
+  // Fail closed: a URL whose credential cannot be attributed is replaced
+  // wholesale, never echoed in any form. The placeholder is whitespace-free,
+  // so the published engine-string strip (#832) removes it whole.
+  assert.equal(redactEndpointUrlCredential("https://host/pa@ss/v1"), "<redacted-endpoint-URL>");
+  // The masking-value helper never throws and never echoes a hostile shape.
+  assert.equal(endpointUrlCredentialOrEmpty("https://u:p@host/v1"), "u:p");
+  assert.equal(endpointUrlCredentialOrEmpty("https://host/v1"), "");
+  assert.equal(endpointUrlCredentialOrEmpty("https://host/pa@ss/v1"), "");
+});
+
+test("#1428: the response-side known-secret list carries the URL credential and the exact Basic header value", () => {
+  // A provider error body can quote the request's Authorization value back —
+  // #1428 puts the decoded URL credential on that same list, so the echo
+  // masks like every other configured credential. The list also carries the
+  // exact `Basic <base64>` header value the wire sent (shared builder, so the
+  // mask list cannot drift from the header): an echo of the literal header
+  // value masks whole.
+  const credential = "u:p";
+  const expectedBasic = `Basic ${Buffer.from(credential, "utf8").toString("base64")}`;
+  const secrets = callKnownSecrets("sk-key", { "x-gateway": "gw-token" }, credential);
+  assert.ok(secrets.includes(credential), "the URL credential must join the response-side mask set");
+  assert.ok(secrets.includes(expectedBasic), "the exact Basic header value must join the response-side mask set");
+  assert.ok(maskKnownSecrets(`rejected credential u:p for sk-key`, secrets).includes(KNOWN_SECRET_REDACTED));
+  assert.ok(!maskKnownSecrets(`rejected credential u:p for sk-key`, secrets).includes("u:p"));
+  // The wire value the transport actually sends is the masked one, byte for
+  // byte: a response echoing `Authorization: Basic <base64>` fully masks.
+  const echoed = `request rejected: Authorization: ${expectedBasic} is invalid`;
+  const masked = maskKnownSecrets(echoed, secrets);
+  assert.ok(masked.includes(KNOWN_SECRET_REDACTED));
+  assert.ok(!masked.includes(expectedBasic), "the echoed Basic header value must not survive masking");
+  assert.ok(!masked.includes("u:p"), "the decoded credential must not survive masking");
+  // An absent or unattributable credential contributes nothing and never throws.
+  assert.ok(callKnownSecrets("sk-key", undefined, "").includes("sk-key"));
+  assert.ok(callKnownSecrets("sk-key", undefined, undefined).includes("sk-key"));
 });
 
 test("#1037: configured extra-header VALUES are credentials too — only the wire headers, never the URL, body, or a secret-aware failure detail", async () => {
@@ -912,6 +1095,188 @@ test("a persistent 429 gives up after three attempts with the status preserved",
     assert.equal(outcome.failure.retryAfterSec, 0);
     assert.equal(count(), 3);
   } finally {
+    await server.close();
+  }
+});
+
+test("#1464 review: maxRetryAttempts 1 makes a retryable 429 return after ONE wire attempt; unset keeps the three attempts", async () => {
+  // #1464 review: an exploration-clamped model wait passes 1 so a
+  // rate-limited round cannot multiply its wait (attempts × backoff) into
+  // the verdict's reserved slice. With the cap, the first 429 is returned
+  // immediately — no retry, no backoff sleep.
+  const { server, count } = await retryServer([429, 200], "0");
+  const slept: number[] = [];
+  try {
+    const outcome = await runChatRequest({ ...retryInput(server.url, slept), maxRetryAttempts: 1 });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status !== "failure") return;
+    assert.equal(outcome.failure.kind, "http_status");
+    assert.equal(outcome.failure.status, 429);
+    assert.equal(count(), 1, "the cap stops the same-request retry before a second wire attempt");
+    assert.deepEqual(slept, [], "no backoff sleep runs under the cap");
+  } finally {
+    await server.close();
+  }
+  // Omitting the field keeps the default three-attempt budget.
+  const defaultRun = await retryServer([429], "0");
+  const defaultSlept: number[] = [];
+  try {
+    const outcome = await runChatRequest(retryInput(defaultRun.server.url, defaultSlept));
+    assert.equal(outcome.status, "failure");
+    assert.equal(defaultRun.count(), 3, "unset maxRetryAttempts keeps the default retry budget");
+  } finally {
+    await defaultRun.server.close();
+  }
+});
+
+// #1464 review (AI blocker): the same-request retry cap only bounds the
+// 429/5xx branch — the #824/#1047 clamp/strip repair recursions each fired a
+// fresh full-timeout request, so an exploration-clamped wait could spend the
+// verdict's reserved slice on a slow 400 repair hop. The `attemptBudgetSec`
+// hook makes the caller's deadline a boundary of the WHOLE transport retry
+// tree: every attempt's timeout is capped at the remaining budget and no
+// follow-up attempt fires once it is spent.
+
+test("#1464 review: the clamp repair hop is refused once the attempt budget is spent", async () => {
+  const { server, requests } = await cappedServer(8192, (requested) =>
+    `max_tokens: ${requested} > 8192, which is the maximum allowed number of output tokens for <model>`);
+  const slept: number[] = [];
+  const stderr = captureStderr();
+  let hookReads = 0;
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      payload: payload({ model: "m", stream: false, max_tokens: 16384, messages: [] }),
+      attemptBudgetSec: () => ++hookReads <= 1 ? 30 : 0,
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status !== "failure") return;
+    assert.equal(outcome.failure.kind, "http_status");
+    assert.equal(outcome.failure.status, 400, "the original 400 is returned unchanged, not a repair outcome");
+    assert.equal(requests.length, 1, "no clamp repair request fires past the boundary");
+    assert.deepEqual(stderr.lines.filter((line) => line.includes("clamped")), [], "no clamp repair is even announced");
+  } finally {
+    stderr.restore();
+    await server.close();
+  }
+});
+
+test("#1464 review: the clamp repair hop's timeout is capped at the remaining budget", async () => {
+  // Request 1 answers 400 immediately; the clamp repair (request 2) never
+  // responds. With the hook reporting 2s left, the repair must time out in
+  // ~2s instead of riding the full 30s request timeout past the boundary.
+  let requests = 0;
+  const server = await startMockServer((_req, body, res) => {
+    requests++;
+    if (requests === 1) {
+      const sent = JSON.parse(body) as Record<string, unknown>;
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: `max_tokens: ${sent.max_tokens} > 8192, which is the maximum allowed number of output tokens for <model>` } }));
+      return;
+    }
+    // Never respond: only the capped timeout can end this attempt.
+  });
+  const slept: number[] = [];
+  let hookReads = 0;
+  const started = Date.now();
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      requestTimeoutSec: 30,
+      connectTimeoutSec: 5,
+      payload: payload({ model: "m", stream: false, max_tokens: 16384, messages: [] }),
+      attemptBudgetSec: () => ++hookReads <= 1 ? 30 : 2,
+    });
+    assert.equal(outcome.status, "failure");
+    const elapsedSec = (Date.now() - started) / 1000;
+    assert.ok(elapsedSec < 10, `the repair hop timed out at the budgeted ~2s, not the 30s request timeout (took ${elapsedSec.toFixed(1)}s)`);
+    assert.equal(requests, 2, "the repair hop fired once, bounded by the hook");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1464 review: the strip repair hop is refused once the attempt budget is spent", async () => {
+  let requests = 0;
+  const server = await startMockServer((_req, _body, res) => {
+    requests++;
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: { message: "response_format is not supported by this model" } }));
+  });
+  const slept: number[] = [];
+  let hookReads = 0;
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      payload: payload({ model: "m", stream: false, max_tokens: 900, response_format: { type: "json_object" }, messages: [] }),
+      attemptBudgetSec: () => ++hookReads <= 1 ? 30 : 0,
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status !== "failure") return;
+    assert.equal(outcome.failure.status, 400, "the original 400 is returned unchanged");
+    assert.equal(requests, 1, "no strip repair request fires past the boundary");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1464 review: a 429 retry is refused once the attempt budget is spent", async () => {
+  const { server, count } = await retryServer([429, 200], "0");
+  const slept: number[] = [];
+  let hookReads = 0;
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      attemptBudgetSec: () => ++hookReads <= 1 ? 30 : 0,
+    });
+    assert.equal(outcome.status, "failure");
+    if (outcome.status !== "failure") return;
+    assert.equal(outcome.failure.status, 429);
+    assert.equal(count(), 1, "no same-request retry fires past the boundary");
+    assert.deepEqual(slept, [], "no backoff sleep runs past the boundary");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1464 review: with the budget hook set, the 429 backoff sleep is capped at the remaining budget", async () => {
+  // Retry-After 600 would ride the 30s maximum unhooked; the hook reports 5s
+  // of remaining budget, so the sleep is capped at 4s (remaining − 1s) and
+  // the follow-up attempt cannot cross the boundary.
+  const { server, count } = await retryServer([429, 200], "600");
+  const slept: number[] = [];
+  let hookReads = 0;
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      maxRetryAttempts: 3,
+      attemptBudgetSec: () => ++hookReads <= 1 ? 30 : 5,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.equal(count(), 2);
+    assert.deepEqual(slept, [4000], "the backoff sleep is capped at the remaining budget minus the 1s floor");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1464 review: a successful clamp repair still works with the budget hook present", async () => {
+  // Regression pin: the hook caps and gates follow-ups without breaking the
+  // ordinary clamp path when budget remains.
+  const { server, requests } = await cappedServer(8192, (requested) =>
+    `max_tokens: ${requested} > 8192, which is the maximum allowed number of output tokens for <model>`);
+  const slept: number[] = [];
+  const stderr = captureStderr();
+  try {
+    const outcome = await runChatRequest({
+      ...retryInput(server.url, slept),
+      payload: payload({ model: "m", stream: false, max_tokens: 16384, messages: [] }),
+      attemptBudgetSec: () => 30,
+    });
+    assert.equal(outcome.status, "ok");
+    assert.deepEqual(requests.map((call) => call.requested), [16384, 8192]);
+  } finally {
+    stderr.restore();
     await server.close();
   }
 });

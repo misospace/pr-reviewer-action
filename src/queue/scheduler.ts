@@ -339,6 +339,69 @@ export class ReviewQueueController {
     return true;
   }
 
+  /** Feed a RECOVERED execution's terminal outcome into the queue without
+   * a new dispatch (#1348): after a controller restart the daemon asks the
+   * executor seam (`reconcile`) what became of an abandoned worker and, if
+   * the execution settled, routes the result here instead of letting the
+   * queue redispatch and rerun the model (#733: a settled reconciliation
+   * result "MUST NOT be rerun").
+   *
+   * The seam applies ONLY to a record this process does not currently have
+   * in flight — `starting`/`running` with no live dispatch entry (the
+   * in-process handle map was empty at restart). A record a live dispatch
+   * owns, a `publishing` record (the retry path already owns its
+   * republication), and terminal records refuse (`false`, no change). The
+   * outcome itself is validated like an executor settle: the same
+   * supersession/attempts/backoff rules apply, and a late duplicate is
+   * revoked by the same lease-owner check. */
+  async resolveRecovered(jobId: string, outcome: ExecutionOutcome): Promise<boolean> {
+    this.ensureLoaded();
+    const record = this.records.get(jobId);
+    if (record === undefined || isTerminalState(record.state)) return false;
+    if (record.state !== "starting" && record.state !== "running") return false;
+    // A live in-process dispatch owns this record; its own settle path
+    // must stay the only writer.
+    if (this.controllers.has(jobId)) return false;
+    // The recovered record carries its persisted lease owner; settle's
+    // lease-token check accepts exactly that owner and nothing else.
+    const token = record.leaseOwner;
+    if (token === "") return false;
+    await this.settle(jobId, token, outcome);
+    return true;
+  }
+
+  /** Take over an ACTIVE record's lease after a controller restart
+   * (#1348).
+   *
+   * WHY: a recovered record whose worker is PROVABLY alive must never
+   * become dispatchable again — a redispatch runs the same review twice
+   * (duplicate model spend). `recover()` requeues every active record
+   * whose lease is absent or expired, so the daemon needs a seam that
+   * claims the record FIRST and keeps its lease alive while it
+   * re-reconciles the orphaned worker.
+   *
+   * The claim is deliberately narrow, and an uncertain claim changes
+   * NOTHING: the record must exist, be in `starting`/`running`, have NO
+   * in-process dispatch entry (a live dispatch owns its own settle path
+   * and must stay the only writer), and the owner token must be a
+   * non-empty string. The claim takes the lease (owner, expiry,
+   * `updatedAtMs`) and persists it, so the expiry path sees a live lease
+   * and leaves the record alone. */
+  adoptRecovered(jobId: string, owner: string): boolean {
+    if (typeof owner !== "string" || owner === "") return false;
+    this.ensureLoaded();
+    const record = this.records.get(jobId);
+    if (record === undefined) return false;
+    if (record.state !== "starting" && record.state !== "running") return false;
+    // A live in-process dispatch owns this record; its own settle path
+    // must stay the only writer.
+    if (this.controllers.has(jobId)) return false;
+    const now = this.nowMsFn();
+    this.records.set(jobId, withRenewedLease(record, owner, now, this.options.leaseTtlMs));
+    this.save();
+    return true;
+  }
+
   /** Stop intake, drain active work for up to `drainMs` of the injected
    * clock (driving `tick` + microtask flushes — NO real sleeping; the
    * drain is bounded at 128 passes and stops early once a pass makes no
@@ -767,7 +830,14 @@ export class ReviewQueueController {
         Object.freeze({
           ...withState(publishing, "superseded", now),
           failureReason: "superseded-by-newer-head",
-          supersededByJobId: this.findSupersedingSibling(publishing) ?? "",
+          // The enqueue path's own attribution is authoritative when it
+          // is already on the record (a sibling whose jobId ties/losses
+          // the lexical tie-break is still the superseder the enqueue
+          // named); the sibling lookup is the fallback.
+          supersededByJobId:
+            publishing.supersededByJobId !== ""
+              ? publishing.supersededByJobId
+              : (this.findSupersedingSibling(publishing) ?? ""),
           leaseOwner: "",
           leaseExpiresAtMs: 0,
         }),
@@ -822,7 +892,10 @@ export class ReviewQueueController {
     now: number,
   ): void {
     this.publishInFlight.add(jobId);
-    void this.runPublish(jobId, "", record, now, /*requireLeaseMatch*/ false);
+    // Fire-and-forget, but NEVER unhandled: a durable-write failure in the
+    // background publish must not crash the process. The record stays
+    // `publishing` and the next tick retries the publish.
+    void this.runPublish(jobId, "", record, now, /*requireLeaseMatch*/ false).catch(() => undefined);
   }
 
   /** Background publish from `settleCompleted`: the in-process
@@ -835,7 +908,7 @@ export class ReviewQueueController {
     record: JobRecord,
     now: number,
   ): void {
-    void this.runPublish(jobId, token, record, now, /*requireLeaseMatch*/ true);
+    void this.runPublish(jobId, token, record, now, /*requireLeaseMatch*/ true).catch(() => undefined);
   }
 
   /** Shared background publish driver. Always mutates the record

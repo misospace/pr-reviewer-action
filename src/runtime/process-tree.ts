@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { isPosix } from "./platform.js";
 
 /**
@@ -22,6 +23,15 @@ import { isPosix } from "./platform.js";
  * 4. wait a bounded grace, polling liveness;
  * 5. KILL the group and any snapshot survivor, then verify. Survivors that
  *    still cannot be confirmed dead are reported — never silently dropped.
+ *
+ * Liveness is "can this pid still execute", not "does this pid still answer
+ * `kill(pid, 0)`": a killed process its parent has not reaped is a ZOMBIE —
+ * it cannot execute another instruction but keeps answering the signal
+ * probe. An orphan re-parented to a PID 1 that never `wait()`s (a container
+ * init or bare shell) would otherwise be a survivor forever, in exactly the
+ * constrained sandboxes where the runner's own reaping is missing. A zombie
+ * is reported in `unreaped`, never as a survivor: terminated is the property
+ * the cleanup owns, and the report still says nothing silently.
  *
  * `pgrep` is a hard preflight (`preflightTreeCleanup`): the forks refuse to
  * launch when it is missing instead of silently weakening cleanup to
@@ -82,13 +92,69 @@ export async function preflightTreeCleanup(): Promise<void> {
   }
 }
 
-function isAlive(pid: number): boolean {
+type ProcessLiveness = "running" | "zombie" | "gone";
+
+/**
+ * `/proc/<pid>/stat` field 3 (`state`), parsed AFTER the last `)`: the
+ * `comm` field may contain spaces and parentheses, so splitting the whole
+ * line mis-counts every field behind it (same rule as the executor's
+ * process-identity reader). Returns null when `/proc` says nothing: no
+ * `/proc` platform, a vanished pid, or an unreadable entry.
+ */
+function procState(pid: number): string | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return null;
+    return stat.slice(close + 1).trim().split(/\s+/)[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Three-state liveness for the cleanup's verification pass. `running` can
+ * still execute; `zombie` cannot execute but is not reaped yet (it still
+ * answers `kill(pid, 0)`); `gone` no longer exists. A pid `/proc` cannot
+ * describe (macOS, or it vanished between steps) falls back to the signal
+ * probe, so an unverifiable process is never called terminated.
+ */
+function processLiveness(pid: number): ProcessLiveness {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return "gone";
+  const state = procState(pid);
+  if (state !== null) return state === "Z" ? "zombie" : "running";
   try {
     process.kill(pid, 0);
-    return true;
+    return "running";
   } catch {
-    return false;
+    return "gone";
   }
+}
+
+/**
+ * Whether `pid` can still execute instructions. A zombie (killed, awaiting
+ * reap) CANNOT execute, so it is terminated even while it keeps answering
+ * `kill(pid, 0)`; only a pid no liveness source can describe stays counted.
+ * This is the predicate the tree sweep polls during the grace, decides the
+ * KILL escalation with, and classifies `survived` vs `unreaped` by.
+ */
+export function processCanExecute(pid: number): boolean {
+  return processLiveness(pid) === "running";
+}
+
+/**
+ * Whether `pid` still names a process record — ALIVE or a killed-but-unreaped
+ * zombie. A pid that no liveness source can describe (a vanished pid, or one
+ * `/proc` cannot read and the signal probe cannot confirm) is NOT present.
+ *
+ * The counterpart of {@link processCanExecute}: "can it still execute" answers
+ * the worker's FATE, while "is it still there" answers whether anything can
+ * still be signalled or swept on its behalf. A zombie is present — its pid is
+ * not released until it is reaped, so it can never have been recycled — but
+ * it cannot execute, and its process group may still hold live members.
+ */
+export function processPresent(pid: number): boolean {
+  return processLiveness(pid) !== "gone";
 }
 
 function sleep(ms: number): Promise<void> {
@@ -162,8 +228,12 @@ export interface TerminationReport {
   snapshot: number[];
   /** Snapshot descendants that needed SIGKILL after the TERM grace. */
   killedAfterGrace: number[];
-  /** Snapshot descendants still not confirmed dead after KILL + settle. */
+  /** Snapshot descendants still able to execute after KILL + settle. */
   survived: number[];
+  /** Snapshot descendants confirmed terminated (killed) but not yet reaped
+   * by their parent at verification time. A zombie cannot execute, so it is
+   * NOT a survivor — but it is reported here, never silently dropped. */
+  unreaped: number[];
   /** Non-fatal cleanup observations (e.g. EPERM on an already-dead pid). */
   issues: string[];
 }
@@ -184,6 +254,18 @@ function signalGroupOrLeader(pid: number, signal: NodeJS.Signals, issues: string
   }
 }
 
+/** An empty report: nothing was terminated and nothing was observed. */
+function emptyTerminationReport(): TerminationReport {
+  return {
+    swept: false,
+    snapshot: [],
+    killedAfterGrace: [],
+    survived: [],
+    unreaped: [],
+    issues: [],
+  };
+}
+
 /**
  * Terminate and reap the tree rooted at `child`'s PID: snapshot, TERM group +
  * descendants, bounded grace, KILL group + survivors, verify. Idempotent per
@@ -193,15 +275,37 @@ export async function terminateProcessTree(
   child: ChildProcess,
   options: { graceMs: number },
 ): Promise<TerminationReport> {
-  const report: TerminationReport = {
-    swept: false,
-    snapshot: [],
-    killedAfterGrace: [],
-    survived: [],
-    issues: [],
-  };
   const pid = child.pid;
+  if (pid === undefined || pid === null) return emptyTerminationReport();
+  return terminateProcessTreeByPid(pid, options);
+}
+
+/**
+ * Terminate and reap the tree rooted at `pid` — the PID-based entry point a
+ * RECOVERED cancellation needs: after a controller restart the in-memory
+ * `ChildProcess` handle is gone, but the pid (recorded in the durable
+ * recovery record) still identifies the worker.
+ *
+ * The TERM → grace → KILL → verify discipline lives here exactly once; the
+ * handle-based entry point delegates to it, so a recovered cancellation and
+ * a live cancellation cannot drift apart.
+ *
+ * A pid that is not a process id is REFUSED, never signalled: `kill(0, sig)`
+ * reaches the caller's own process group and `kill(-pid, sig)` with a
+ * negative pid reaches init, so a corrupt (or hostile) pid must never reach
+ * a signal. The refusal is reported as an issue — the caller must treat the
+ * termination as unconfirmed.
+ */
+export async function terminateProcessTreeByPid(
+  pid: number | null | undefined,
+  options: { graceMs: number },
+): Promise<TerminationReport> {
+  const report: TerminationReport = emptyTerminationReport();
   if (pid === undefined || pid === null) return report;
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    report.issues.push(`refusing to terminate pid ${pid}: not a process id`);
+    return report;
+  }
   if (!isPosix()) {
     report.issues.push("non-POSIX platform: process-tree termination refused by policy");
     return report;
@@ -232,14 +336,16 @@ export async function terminateProcessTree(
   const deadline = Date.now() + options.graceMs;
   while (Date.now() < deadline) {
     const targets = [pid, ...report.snapshot];
-    if (!targets.some((candidate) => isAlive(candidate))) break;
+    if (!targets.some((candidate) => processLiveness(candidate) === "running")) break;
     await sleep(GRACE_POLL_MS);
   }
 
   // KILL phase: group first, then any snapshot survivor (PGID escapees).
   signalGroupOrLeader(pid, "SIGKILL", report.issues);
   for (const descendant of report.snapshot) {
-    if (!isAlive(descendant)) continue;
+    // A zombie cannot execute, so it is already terminated: signaling it
+    // again would only mis-record it as a grace-period kill.
+    if (processLiveness(descendant) !== "running") continue;
     try {
       process.kill(descendant, "SIGKILL");
       report.killedAfterGrace.push(descendant);
@@ -252,9 +358,13 @@ export async function terminateProcessTree(
   }
 
   for (const descendant of report.snapshot) {
-    // A brief zombie window is possible while the OS re-parents or the
-    // leader's parent reaps; only persistent survivors are reported.
-    if (isAlive(descendant)) report.survived.push(descendant);
+    // A zombie window is expected while the OS re-parents or the leader's
+    // parent reaps: the process is terminated (it cannot execute), so it is
+    // reported in `unreaped`, not as a survivor. Only a pid that can still
+    // execute is a survivor.
+    const liveness = processLiveness(descendant);
+    if (liveness === "running") report.survived.push(descendant);
+    else if (liveness === "zombie") report.unreaped.push(descendant);
   }
   return report;
 }

@@ -1,6 +1,7 @@
 import { appendFileSync } from "node:fs";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
 import { renderStepSummary, type ReviewStepOutputs } from "../publish/outputs.js";
+import { aspectStatusLookup, describeDependencyCoverageRollup, type DependencyCoverageRollup } from "../model/dependency-coverage.js";
 import { publicAnalysisEngine } from "../prompt/index.js";
 import { resolveTierBudgets } from "../corpus/budgets.js";
 import type { HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
@@ -101,6 +102,18 @@ export function writeStepSummary(stepSummaryPath: string, input: SummaryInput): 
       }
       : {}),
     ...(total > 0 ? { requirementCoverage: { total, unknown } } : {}),
+    // #1337: present only when the model emitted a `dependency_coverage`
+    // answer (the output is "" otherwise), so a run without an answer
+    // gains no row. Deterministic rollup over the persisted records;
+    // never model prose.
+    ...(input.outputs.dependencyCoverageStatus !== undefined && input.outputs.dependencyCoverageStatus !== ""
+      ? {
+        dependencyCoverage: describeDependencyCoverageRollup(
+          input.outputs.dependencyCoverageStatus as DependencyCoverageRollup,
+          aspectStatusLookup(Array.isArray(reviewRecord.dependency_coverage) ? (reviewRecord.dependency_coverage as never) : null),
+        ),
+      }
+      : {}),
     primaryTools: {
       executedRequestCount: typeof primaryHarness?.executed_request_count === "number" ? primaryHarness.executed_request_count : 0,
       successfulToolCalls: okCalls,

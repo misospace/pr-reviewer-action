@@ -1,4 +1,5 @@
-import { appendFileSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { resolvePlatform } from "../platform/resolve.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
@@ -21,9 +22,11 @@ import type { UpstreamLinkMode } from "../publish/sanitize.js";
 import { nonEmpty } from "./run-dir.js";
 import { buildPlatformReadAdapter } from "./platform.js";
 import { partialCoverageOf } from "./review.js";
+import type { RunReviewResult } from "./review.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { formatOutputAssignment, isIncompleteReason, type IncompleteReason } from "../publish/outputs.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
+import { confidenceTelemetryFromArtifact, type ConfidenceTelemetry } from "../confidence/telemetry.js";
 import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 
 /**
@@ -327,6 +330,41 @@ function partialCoverageFromRunDir(env: NodeJS.ProcessEnv): CoverageResolution {
   return { partialCoverage: partialCoverageOf(harness), unknown: false, requiredChecks, incompleteReason };
 }
 
+/** #1449: the run's derived-obligation state, read from the run dir's own
+ * `review-coverage.json` artifact (never cwd, never ambient env).
+ *
+ * This is the ONE seam the standalone `publish` CLI reads the state through,
+ * so the composite action and the standalone CLI publish the SAME record from
+ * the SAME run — neither path re-derives the state.
+ *
+ * The state IS a gate, not only disclosure: it decides whether a native
+ * approval may publish. So an UNCERTAIN state must fail CLOSED, never open:
+ * the engine writes `derived-obligation-state.json` ONLY when the operator
+ * enabled the feature, so that file is the run's own "the feature was on"
+ * sentinel. When the sentinel is present but the coverage record's state is
+ * missing, unreadable, or unrecognized, the state is `unavailable` — the
+ * derived coverage is unknown, so the approval is withheld. When the sentinel
+ * is absent the feature was off and the state stays absent (the published
+ * bytes are exactly the pre-#1449 ones).
+ *
+ * A run dir that carries neither file is a run without the feature: the
+ * state is simply not published, and the publish step's own guardrail sees
+ * no derived state. */
+function derivedObligationStateFromRunDir(env: NodeJS.ProcessEnv): string | undefined {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return undefined;
+  const record = readJsonObject(join(runDir, "review-coverage.json"));
+  const state = record === null ? undefined : record.derived_obligation_state;
+  if (state === "complete" || state === "unresolved" || state === "unavailable") {
+    return state;
+  }
+  // #1449: fail closed when the run says the feature was on but the state
+  // cannot be read — an unknown derived coverage must never certify an
+  // approval. The sentinel exists only in a feature-on run.
+  const featureEnabled = existsSync(join(runDir, "derived-obligation-state.json"));
+  return featureEnabled ? "unavailable" : undefined;
+}
+
 /** #1005: read the persisted reviewer-routing plan from the run dir (never
  * cwd). A missing, unparseable, or structurally unrecognizable plan yields
  * `undefined` (no routing) so an uncertain plan can never mutate the forge. */
@@ -348,9 +386,84 @@ function reviewRoutingFromRunDir(env: NodeJS.ProcessEnv): HumanReviewRoutingPlan
   };
 }
 
+/** #1455: read the verifier's telemetry from the run dir's own
+ * `confidence-score.json` artifact (never cwd, never ambient env).
+ *
+ * This is the ONE seam the publish step reads the telemetry through, so the
+ * composite action and the standalone `publish` CLI publish the SAME values
+ * from the SAME record — neither path re-derives them, and neither can
+ * publish a value the other would not.
+ *
+ * A missing, unreadable, or structurally unrecognized artifact yields
+ * `undefined` (no telemetry), so an uncertain record never publishes a
+ * half-validated value. */
+function confidenceTelemetryFromRunDir(env: NodeJS.ProcessEnv): ConfidenceTelemetry | undefined {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return undefined;
+  const record = readJsonObject(join(runDir, "confidence-score.json"));
+  if (record === null) return undefined;
+  const telemetry = confidenceTelemetryFromArtifact(record);
+  // A record the verifier never ran for publishes nothing: the marker keeps
+  // its pre-#1455 bytes exactly.
+  if (telemetry.status === "") return undefined;
+  return telemetry;
+}
+
+/** #1520: the reviewed diff the publish step anchors inline findings against,
+ * read from the run dir's own `pr.diff` artifact — the exact bytes the engine
+ * reviewed (redacted, complete; `review.ts` writes it before any finding
+ * exists). The publish boundary takes its other run-dir artifacts
+ * (`review-coverage.json`, `confidence-score.json`) from the same source and
+ * for the same reason: a FRESH forge read of the CURRENT head races a push,
+ * and the #451 publication-boundary head re-check runs inside
+ * `publishReview` — so the anchor map must be built from the revision the
+ * review actually covered, never from whatever the forge serves at publish
+ * time.
+ *
+ * `undefined` means "no reviewed diff available" (no run dir, or a missing/
+ * unreadable artifact) and the caller falls back to its historical
+ * per-platform source. A present-but-empty file IS the reviewed diff (an
+ * empty anchor map — nothing can anchor) and is returned as "".
+ *
+ * The artifact is opened once with no-follow semantics (the same regular-file
+ * guarantee as the other security-sensitive reads in `change-anchors.ts` /
+ * `mirror.ts`): a symlinked `pr.diff` is refused, never followed, and a run
+ * dir containing a NUL byte fails closed — both are "no reviewed diff
+ * available" (fallback), never a read through the link. `O_NONBLOCK` keeps a
+ * planted FIFO from blocking the open (the regular-file check then refuses
+ * it). Where `O_NOFOLLOW` is undefined (Windows: Node exposes the constant
+ * only under `#ifdef O_NOFOLLOW` and the Windows CRT has no such flag) the
+ * no-follow guarantee degrades to the platform default — intentional and
+ * unreachable on a supported deployment: the v3 runner contract is
+ * POSIX-only (#679, `src/runtime/platform.ts`), Windows was never
+ * demonstrated, and the review's tree-owning children fail closed there, so
+ * no shipped run ever produces a run dir whose `pr.diff` could be followed.
+ * The sibling no-follow reads (`mirror.ts`, `executor/paths.ts`) state the
+ * same accepted degradation. */
+function reviewedDiffFromRunDir(runDir: string | undefined): string | undefined {
+  if (runDir === undefined) return undefined;
+  let fd: number;
+  try {
+    fd = openSync(join(runDir, "pr.diff"), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK);
+  } catch {
+    return undefined;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return undefined;
+    return readFileSync(fd, "utf8");
+  } catch {
+    return undefined;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** The platform publish seam (GitHub REST/GraphQL, Forgejo /api/v1, or the
- * Tangled ATProto record client). */
-export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
+ * Tangled ATProto record client). `runDir` is the same run directory the
+ * caller hands to `publishWithOutcome`; the Forgejo inline-position
+ * re-validation anchors against the reviewed diff from THAT run dir and from
+ * no other source. */
+export function buildPublishApi(env: NodeJS.ProcessEnv, runDir?: string): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
   const repo = env.REPO ?? "";
   const prNumber = env.PR_NUMBER ?? "";
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
@@ -386,7 +499,18 @@ export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformA
     ...(token ? { token: platform === "forgejo" ? token : `Bearer ${token}` } : {}),
     ...(platform === "github" && env.GITHUB_API_URL ? { baseUrl: env.GITHUB_API_URL } : {}),
   };
-  const diffProvider = async (): Promise<string> => buildAdapter(env).getPrDiff();
+  const diffProvider = async (): Promise<string> =>
+    // #1520: the Forgejo adapter's inline-position re-validation anchors
+    // against the REVIEWED diff when the caller's run dir carries it — a
+    // fresh read here would let a comment anchor on content this run never
+    // reviewed. The forge's own server-side re-validation against the
+    // current head stays the final arbiter and drops what no longer anchors
+    // (fail closed). Single source of truth: the run dir enters ONLY through
+    // the `runDir` parameter — the same value the caller hands to
+    // `publishWithOutcome` — so the two anchor decisions cannot diverge by
+    // construction; ambient `PR_REVIEWER_RUN_DIR` is never consulted here.
+    // A caller that passes no run dir gets only the fresh-read fallback.
+    reviewedDiffFromRunDir(runDir) ?? buildAdapter(env).getPrDiff();
   const api: PublishPlatformApi = platform === "forgejo"
     ? new ForgejoPublishApi({
       ...apiOptions,
@@ -409,6 +533,8 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
   // or stale for the run actually being published.
   const coverage = partialCoverageFromRunDir(env);
   const reviewRouting = reviewRoutingFromRunDir(env);
+  const confidenceTelemetry = confidenceTelemetryFromRunDir(env);
+  const derivedObligationState = derivedObligationStateFromRunDir(env);
   return {
     mode: publishMode(env.PUBLISH_MODE),
     reviewMarkdown: env.REVIEW_MARKDOWN ?? "",
@@ -501,6 +627,19 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
       }
       : {}),
     degradedGateBypass: env.DEGRADED_GATE_BYPASS === "true",
+    // #1455: the verifier's telemetry (the unscored cause, the measured
+    // latency, the provider's token counts), read back from the run dir's own
+    // artifact so the standalone `publish` CLI publishes the SAME values the
+    // composite action does. Absent when the run measured none of them.
+    ...(confidenceTelemetry !== undefined ? { confidenceTelemetry } : {}),
+    // #1449: the run's derived-obligation state, read back from the run
+    // dir's own artifact so the standalone `publish` CLI publishes the SAME
+    // record the composite action does. It is a GATE as well as disclosure:
+    // the publish boundary refuses a native approval while the state is not
+    // `complete`, and an unreadable state in a feature-on run reads
+    // `unavailable` (fail closed) so a coverage gap can never certify an
+    // approval. Absent when the feature was off.
+    ...(derivedObligationState !== undefined ? { derivedObligationState } : {}),
     // #1005: the deterministic reviewer-routing plan the review step persisted
     // (read from the run dir, never cwd). Absent when routing did not run.
     ...(reviewRouting ? { reviewRouting } : {}),
@@ -528,9 +667,16 @@ export interface PublishOutcome {
 /** Runs one publication, persists the #1027 findings ledger, relays the
  * step messages, and reports the outcome. */
 export async function publishWithOutcome(input: PublishInput, seam: ReturnType<typeof buildPublishApi>, runDir?: string): Promise<PublishOutcome> {
-  const result: PublishResult = await publishReview(input, seam.api, {
-    diffText: seam.platform === "forgejo" ? await seam.diffProvider() : "",
-  });
+  // #1520: hand the REVIEWED diff to the publish step on EVERY platform. The
+  // anchor map `buildComments` derives from it is what makes the contract's
+  // `inline-findings` promise real on GitHub (native line-anchored review
+  // comments) and lets `hasPublishablePrescription` see the prescriptions, so
+  // the #762 usefulness-feedback read runs there too and #1518's handoff can
+  // carry a `suggestion`. The historical per-platform sources below remain
+  // only as the fallback for a caller with no run dir / no `pr.diff` artifact.
+  const diffText = reviewedDiffFromRunDir(runDir)
+    ?? (seam.platform === "forgejo" ? await seam.diffProvider() : "");
+  const result: PublishResult = await publishReview(input, seam.api, { diffText });
   // #1027: the artifact is written only for a review that was actually
   // published (or superseded): a failed publication never published the
   // current findings, so their `reported` events must not reach the ledger.
@@ -584,8 +730,15 @@ function writePublishStatusOutput(env: NodeJS.ProcessEnv, status: PublishResult[
  * cannot distinguish published from superseded (both exit 0), so this step
  * also writes the `publish-status` output. */
 export async function publishMain(env: NodeJS.ProcessEnv): Promise<number> {
-  const seam = buildPublishApi(env);
-  const outcome = await publishWithOutcome(publishInputFromEnv(env, seam.platform), seam, nonEmpty(env.PR_REVIEWER_RUN_DIR));
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  const seam = buildPublishApi(env, runDir);
+  // #1518: this path publishes its own handoff, so it needs its own per-run
+  // review id — the same random id the Action entry and the Tangled runner
+  // generate. A publisher that carried no review id would publish a handoff
+  // that names no review, and the strict parser refuses such a document.
+  const reviewId = randomBytes(8).toString("hex");
+  const publishInput = { ...publishInputFromEnv(env, seam.platform), reviewId };
+  const outcome = await publishWithOutcome(publishInput, seam, runDir);
   writePublishStatusOutput(env, outcome.status);
   return outcome.exitCode;
 }
@@ -600,12 +753,25 @@ function parseJsonish(raw: string): unknown {
 }
 
 /** #1073: bounded confidence concerns from the review step, serialized as
- * JSON. Absent or malformed means none render — never a garbage bullet. */
-function confidenceConcernsFromEnv(raw: string): { concerns: Array<{ file: string; line: number | null; evidence: string }> } | Record<string, never> {
+ * JSON. #1369: verifier concerns carry their closed-vocabulary `type` and
+ * `severity` tokens through with the file/line/evidence bound; an entry
+ * whose tokens are not in the verifier vocabulary degrades to untyped
+ * rendering, never a garbage bullet. Absent or malformed means none render. */
+function confidenceConcernsFromEnv(raw: string): {
+  concerns: Array<{
+    file: string;
+    line: number | null;
+    evidence: string;
+    type?: string;
+    severity?: string;
+  }>;
+} | Record<string, never> {
   if (raw.trim() === "") return {};
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return {};
+    const CONCERN_TYPES = new Set(["missed_issue", "unsupported_finding"]);
+    const CONCERN_SEVERITIES = new Set(["blocker", "major"]);
     const concerns = parsed
       .filter((entry): entry is Record<string, unknown> =>
         typeof entry === "object" && entry !== null && !Array.isArray(entry))
@@ -614,10 +780,113 @@ function confidenceConcernsFromEnv(raw: string): { concerns: Array<{ file: strin
         file: typeof entry.file === "string" ? entry.file.slice(0, 300) : "",
         line: typeof entry.line === "number" && Number.isInteger(entry.line) && entry.line >= 0 ? entry.line : null,
         evidence: typeof entry.evidence === "string" ? entry.evidence.slice(0, 400) : "",
+        ...(typeof entry.type === "string" && CONCERN_TYPES.has(entry.type) ? { type: entry.type } : {}),
+        ...(typeof entry.severity === "string" && CONCERN_SEVERITIES.has(entry.severity) ? { severity: entry.severity } : {}),
       }))
       .filter((concern) => concern.file !== "" || concern.evidence !== "");
     return concerns.length > 0 ? { concerns } : {};
   } catch {
     return {};
   }
+}
+
+/**
+ * #590: the review-result → publish-environment mapping the Action entry and
+ * the host-neutral platform runner SHARE. Every field the published review
+ * reads from THIS run's engine result is assembled here once, so a Tangled run
+ * publishes exactly the same record the GitHub/Forgejo Action would for the
+ * identical `RunReviewResult` — the two hosts can never drift on what reaches
+ * the publish boundary. The values are the folded engine outputs (the reviewed
+ * head is the explicit `reviewedHeadSha` pin, else the event head or
+ * admission's resolved head; BASE_SHA/BROAD_FINGERPRINT are admission's;
+ * IS_FORK_PR is the final fork flag the review stages ran with, on which
+ * publish's approval guardrail fails closed). This is a pure function of its
+ * arguments; it mutates nothing and reads no ambient state.
+ */
+export function publishEnvFromReview(
+  stage: Record<string, string | undefined>,
+  review: RunReviewResult,
+  eventHeadSha: string | undefined,
+): Record<string, string | undefined> {
+  const pre = review.admission;
+  return {
+    ...stage,
+    HEAD_SHA: review.reviewedHeadSha || eventHeadSha || pre.head_sha,
+    BASE_SHA: pre.base_sha,
+    IS_FORK_PR: review.isForkPr,
+    BROAD_FINGERPRINT: pre.diff_fingerprint,
+    VERDICT: review.outputs.verdict,
+    REQUIRED_CHECKS: review.outputs.requiredChecks,
+    REVIEW_ROUTE: review.outputs.reviewRoute,
+    ESCALATION_REASON: review.outputs.escalationReason,
+    // #1003: both empty when review-triage is disabled ("did not run"),
+    // distinct from the fail-closed "unknown" answer.
+    REVIEW_TRIAGE_DECISION: review.outputs.reviewTriageDecision,
+    REVIEW_TRIAGE_REASON: review.outputs.reviewTriageReason,
+    REVIEW_MARKDOWN: review.outputs.reviewMarkdown,
+    FINDINGS: review.outputs.findings,
+    ANALYSIS_ENGINE: review.outputs.analysisEngine,
+    CACHE_HIT_RATIO: review.outputs.cacheHitRatio,
+    DEGRADED_GATE_BYPASS: review.outputs.degradedGateBypass ? "true" : "false",
+    VERDICT_POLICY: review.verdictPolicy,
+    // #1073: the confidence scorer's results, all empty when disabled.
+    CONFIDENCE_STATUS: review.outputs.confidenceStatus ?? "",
+    CONFIDENCE_SCORE: review.outputs.confidenceScore ?? "",
+    CONFIDENCE_RISK: review.outputs.confidenceRisk ?? "",
+    CONFIDENCE_REASON: review.outputs.confidenceReason ?? "",
+    CONFIDENCE_MODEL: review.outputs.confidenceModel ?? "",
+    ...(review.confidenceConcerns !== undefined
+      ? { CONFIDENCE_CONCERNS: JSON.stringify(review.confidenceConcerns) }
+      : {}),
+  };
+}
+
+/**
+ * #590: the per-run evidence the PUBLISHED marker carries that does NOT ride
+ * the SCREAMING_SNAKE publish environment (partial coverage, the #812 CI
+ * conclusion, the #1449 derived-obligation gate, the #1455 verifier telemetry,
+ * the #847 tool/context budget provenance, and the #1003 human-review triage
+ * section). Shared with the Action entry so both hosts publish one identical
+ * record for the same review, in the same field order. Absent values are
+ * omitted (never `undefined`) so a feature that did not run leaves the
+ * published marker byte-identical to its pre-feature form.
+ */
+export function reviewDerivedPublishFields(review: RunReviewResult): Partial<PublishInput> {
+  return {
+    // The #810 coverage notice and the #812 CI conclusion reach the published
+    // marker and body only through these.
+    ...(review.partialCoverage ? { partialCoverage: review.partialCoverage } : {}),
+    ...(review.ciState !== undefined ? { ciState: review.ciState } : {}),
+    // #1449: a GATE as well as disclosure — the publish boundary refuses a
+    // native approval while the state is not `complete`. Absent when off.
+    ...(review.derivedObligationState !== undefined ? { derivedObligationState: review.derivedObligationState } : {}),
+    // #1455: advisory verifier telemetry (never touches the verdict).
+    ...(review.confidenceTelemetry !== undefined ? { confidenceTelemetry: review.confidenceTelemetry } : {}),
+    // #847: the #810/#702 tool-budget provenance.
+    ...(review.toolBudget !== undefined ? { toolBudget: review.toolBudget } : {}),
+    ...(review.toolBudgetSource !== undefined ? { toolBudgetSource: review.toolBudgetSource } : {}),
+    ...(review.toolCallsUsed !== undefined ? { toolCalls: review.toolCallsUsed } : {}),
+    ...(review.toolRoundsUsed !== undefined ? { toolRounds: review.toolRoundsUsed } : {}),
+    ...(review.toolMaxRounds !== undefined ? { maxRounds: review.toolMaxRounds } : {}),
+    ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),
+    ...(review.contextPeak !== undefined ? { contextPeak: review.contextPeak } : {}),
+    ...(review.toolStopReason !== undefined ? { toolStopReason: review.toolStopReason } : {}),
+    // #1518: the enforcement pass's merge-gating ids. They ride the
+    // published handoff so a controller can see WHICH obligation stayed
+    // open. Absent when the run never reviewed (the admission skip path),
+    // so such a run keeps the pre-#1518 publish-input shape.
+    ...(review.unresolvedRequirementIds !== undefined ? { unresolvedRequirementIds: review.unresolvedRequirementIds } : {}),
+    ...(review.unresolvedRequiredChecks !== undefined ? { unresolvedRequiredChecks: review.unresolvedRequiredChecks } : {}),
+    // #1003: the human-review triage answer reaches the published body only
+    // when triage ran ("" when off), so a disabled run's review is
+    // byte-identical to pre-#1003. Triage grants no capability.
+    ...(review.outputs.reviewTriageDecision !== ""
+      ? {
+        reviewTriage: {
+          decision: review.outputs.reviewTriageDecision,
+          reason: review.outputs.reviewTriageReason,
+        },
+      }
+      : {}),
+  };
 }

@@ -30,6 +30,7 @@ requirements:
   untrusted-content-is-data:
     owners:
       - src/model/conversation.ts
+      - src/context/fence.ts
       - src/context/pr-thread.ts
       - src/context/review-threads.ts
       - src/specialists/render.ts

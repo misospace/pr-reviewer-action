@@ -15,9 +15,10 @@ env via the yamllint pin) so a later cleanup cannot silently shrink the
 dogfood loop back to the old profile.
 They also pin the public ``action.yml`` defaults for the same inputs,
 which #565 deliberately leaves unchanged, and the comment re-review shape
-(#914): the ``issue_comment`` trigger, the API ``pr-gate`` step that must
-precede any checkout, the fork-aware checkout ref, and the concurrency
-grouping that keeps comment runs from cancelling in-flight push reviews.
+(#914): the ``issue_comment`` trigger, the forge-capability ``pr-gate``
+that must precede the PR-head checkout, the fork-aware checkout ref, and
+the concurrency grouping that keeps comment runs from cancelling in-flight
+push reviews.
 """
 
 from __future__ import annotations
@@ -33,6 +34,12 @@ ACTION = ROOT / "action.yml"
 CONTRACTS = ROOT / "contracts" / "action-v3.yml"
 
 REVIEW_STEP = "Review PR with reusable AI reviewer"
+
+# The three steps of the comment-triggered gate, in the order they run.
+PREFILTER_STEP = "Prefilter re-review command"
+TRUSTED_CHECKOUT_STEP = "Checkout trusted base ref for the forge capability"
+SETUP_PYTHON_STEP = "Set up Python"
+PR_GATE_STEP = "Resolve PR through the forge capability (pr-gate)"
 
 
 def _unquote(value: str) -> str:
@@ -184,10 +191,6 @@ DOGFOOD_OVERRIDES = {
     "ai-reasoning-effort",
     "ai-primary-reasoning-effort",
     "ai-smart-reasoning-effort",
-    "ai-confidence-model",
-    "ai-confidence-api-format",
-    "ai-confidence-reasoning-effort",
-    "ai-confidence-timeout-sec",
     "ai-fallback-base-url",
     "ai-fallback-api-format",
     "ai-fallback-model",
@@ -242,23 +245,21 @@ def test_dogfood_overrides_only_what_is_ours() -> None:
     assert "allow-approve" not in values
 
 
-def test_dogfood_enables_bounded_advisory_confidence_scoring() -> None:
-    """Score with a usable configured model, without weakening review authority.
+def test_dogfood_does_not_run_the_optional_confidence_verifier() -> None:
+    """Trusted approval must not require a second model call.
 
-    The optional dedicated model/format may be unset in repository variables:
-    falling back to the smart lane keeps dogfood scoring enabled rather than
-    silently turning it off. Credential and endpoint inheritance uses the
-    action's same-origin policy, and forks stay disabled by default.
+    #1447 makes native APPROVE depend on deterministic completion state around
+    the authoritative review. Confidence remains a public opt-in feature, but
+    PRA's own dogfood workflow must not spend another model call or make
+    trusted approval depend on verifier availability.
     """
     values = _review_step_with(WORKFLOW.read_text(encoding="utf-8"))
-    assert values["ai-confidence-model"] == "${{ vars.CONFIDENCE_MODEL || vars.SMART_MODEL }}"
-    assert values["ai-confidence-api-format"] == "${{ vars.CONFIDENCE_FORMAT || vars.SMART_FORMAT }}"
-    assert values["ai-confidence-reasoning-effort"] == "${{ vars.CONFIDENCE_REASONING_EFFORT }}"
-    assert str(values["ai-confidence-timeout-sec"]) == "120"
-    assert "ai-confidence-base-url" not in values
-    assert "ai-confidence-api-key" not in values
-    assert "ai-confidence-enable-for-forks" not in values
+    confidence_inputs = sorted(key for key in values if key.startswith("ai-confidence"))
+    assert confidence_inputs == [], f"dogfood unexpectedly enables confidence inputs: {confidence_inputs}"
     assert values["publish-mode"] == "review_verdict"
+    # #1447: PRA intentionally exercises requirement trace as part of the
+    # trusted-approval contract even though the public action keeps it opt-in.
+    assert values["requirement-trace"] == "true"
 
 
 def test_public_action_defaults_are_the_recommended_setup() -> None:
@@ -276,8 +277,10 @@ def test_public_action_defaults_are_the_recommended_setup() -> None:
         "publish-mode": "review_comment",
         "inline-findings": "true",
         "verdict-policy": "strict",
+        "requirement-trace": "false",
         "allow-approve": "false",
         "tool-max-requests": "",
+        "primary-tool-max-requests": "",
         "tool-max-rounds": "",
         "tool-loop-wall-clock-sec": "600",
         "tool-corpus-max-bytes": "",
@@ -291,8 +294,8 @@ def test_public_action_defaults_are_the_recommended_setup() -> None:
 # the `rereview-command` (default `/ai-review`; bare command only in v1, no
 # arguments) forces a fresh full review. The payload carries no head SHA and
 # the run carries base-repo secrets, so the workflow resolves the PR through
-# the API (pr-gate) before any checkout and routes fork comments to a
-# base-repo checkout.
+# the repository's configured forge capability (pr-gate) before the PR-head
+# checkout and routes fork comments to a base-repo checkout.
 
 
 def test_comment_rereview_trigger_is_created() -> None:
@@ -300,16 +303,29 @@ def test_comment_rereview_trigger_is_created() -> None:
     assert _trigger_types("issue_comment", WORKFLOW.read_text(encoding="utf-8")) == "types: [created]"
 
 
-def test_pr_gate_runs_before_checkout() -> None:
-    """The API PR resolution (pr-gate) exists and precedes any checkout.
+def test_the_comment_gate_steps_run_in_the_preserved_order() -> None:
+    """prefilter → trusted base checkout → capability pr-gate → PR-head checkout.
 
     SECURITY: the issue_comment payload has no head SHA, so the PR must be
-    resolved through the API before checkout decides what to fetch — a fork
-    head must never be checked out in this base-repo-secrets run.
+    resolved through the forge capability before the PR-head checkout decides
+    what to fetch — a fork head must never be checked out in this
+    base-repo-secrets run. The trusted base checkout sits between the
+    prefilter and the gate: the capability IS repo code, so it must be
+    present before it can be invoked, and it must be base-repo code.
     """
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "id: pr-gate" in text, "pr-gate step id missing"
-    assert _step_index("Resolve PR through the API (pr-gate)", text) < _step_index("Checkout repository", text)
+    assert "id: comment-prefilter" in text, "prefilter step id missing"
+    order = [
+        _step_index(PREFILTER_STEP, text),
+        _step_index(TRUSTED_CHECKOUT_STEP, text),
+        _step_index(PR_GATE_STEP, text),
+        _step_index("Checkout repository", text),
+    ]
+    assert order == sorted(order), (
+        "the comment gate must run prefilter → trusted base checkout → "
+        f"capability pr-gate → PR-head checkout, got {order}"
+    )
 
 
 def _step_block(step_name: str, workflow_text: str) -> str:
@@ -331,23 +347,44 @@ def _step_block(step_name: str, workflow_text: str) -> str:
     return "\n".join(block)
 
 
-def test_pr_gate_binds_the_token_its_script_uses() -> None:
-    """pr-gate binds GITHUB_TOKEN, which its run script expands under ``set -u``.
+def _step_uses(step_name: str, workflow_text: str) -> str:
+    """The ``uses:`` line of the named step."""
+    for line in _step_block(step_name, workflow_text).splitlines():
+        if line.strip().startswith("uses:"):
+            return line.strip()
+    raise AssertionError(f"step {step_name!r} has no uses: in {WORKFLOW}")
 
-    The script calls the API with ``Bearer ${GITHUB_TOKEN}``, but GitHub
-    Actions does not export the job token as a shell variable: without an
-    explicit ``env:`` binding, ``set -euo pipefail`` makes the pre-checkout
-    gate fail on the very first expansion of every real issue_comment run.
+
+def _command_lines(block: str) -> list[str]:
+    """The block's lines that are commands, with the comments removed."""
+    return [
+        line
+        for line in block.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def test_pr_gate_binds_the_token_for_the_capability() -> None:
+    """pr-gate binds GITHUB_TOKEN for the capability, and never expands it.
+
+    GitHub Actions does not export the job token as a shell variable, so
+    the capability needs an explicit ``env:`` binding to find it. The token
+    travels in that binding only: the capability resolves it from the
+    environment and puts it in the Authorization header, so it must never be
+    expanded in the shell text, in argv, or in the request URL.
     """
     text = WORKFLOW.read_text(encoding="utf-8")
-    block = _step_block("Resolve PR through the API (pr-gate)", text)
+    block = _step_block(PR_GATE_STEP, text)
     env_lines = [line for line in block.splitlines() if line.strip().startswith("GITHUB_TOKEN:")]
-    assert env_lines, "pr-gate env: must bind GITHUB_TOKEN for its script"
+    assert env_lines, "pr-gate env: must bind GITHUB_TOKEN for the capability"
     value = _unquote(env_lines[0].strip().removeprefix("GITHUB_TOKEN:"))
     assert "secrets.GITHUB_TOKEN" in value or "github.token" in value, (
         f"GITHUB_TOKEN must be bound from the job token: {value!r}"
     )
-    assert "${GITHUB_TOKEN}" in block, "the run script must expand the bound ${GITHUB_TOKEN}"
+    assert "$GITHUB_TOKEN" not in block, (
+        "the token must never be expanded in the shell text: the capability "
+        "reads it from the environment and puts it in the Authorization header"
+    )
 
 
 def _checkout_ref(workflow_text: str) -> str:
@@ -388,7 +425,7 @@ def test_build_sha_stamps_the_checked_out_ref() -> None:
 def test_pipeline_steps_skip_dispatch_and_draft_comment_runs() -> None:
     """Manual dispatch and draft-PR comment runs never reach the review pipeline."""
     text = WORKFLOW.read_text(encoding="utf-8")
-    for step in ("Set up Node 24", "Build the action bundle", REVIEW_STEP):
+    for step in ("Set up Node 26", "Build the action bundle", REVIEW_STEP):
         expr = _extract_if(step, text)
         assert "workflow_dispatch" in expr, f"{step}: dispatch runs must be skipped: {expr!r}"
         assert "pr-gate.outputs.is_draft" in expr, f"{step}: draft comment runs must be skipped: {expr!r}"
@@ -436,33 +473,47 @@ def _contract_input_default(input_id: str, contracts_text: str) -> str:
     raise AssertionError(f"input {input_id!r} has no default in contracts/action-v3.yml")
 
 
-def test_pr_gate_prefilters_non_matching_comment_bodies() -> None:
-    """pr-gate exits 0 before the API call when the body provably cannot trigger.
+def test_the_prefilter_runs_before_any_forge_call_or_checkout() -> None:
+    """The prefilter decides alone: no forge call, no checkout in that step.
 
     The pre-filter is the action's own matcher (commentBodyTriggersCommentCommand
     in src/precheck/decide.ts) run on the body via env, so a skip only ever
-    happens on a body the action itself would not accept.
+    happens on a body the action itself would not accept. It runs first, so
+    a comment that cannot trigger never reaches the forge at all.
     """
     text = WORKFLOW.read_text(encoding="utf-8")
-    block = _step_block("Resolve PR through the API (pr-gate)", text)
-    assert "COMMENT_BODY" in block, "pr-gate must read the comment body via env"
+    block = _step_block(PREFILTER_STEP, text)
+    assert "COMMENT_BODY" in block, "the prefilter must read the comment body via env"
     assert 'replace(/^\\s+/' in block, "pre-filter must strip leading whitespace like the action's matcher"
     assert "startsWith(command)" in block, "pre-filter must use the literal prefix check"
     assert "trimEnd()" in block, "pre-filter must tolerate only trailing whitespace"
     assert 'if [ "$may_trigger" != "true" ]' in block, "the early exit must be guarded by may_trigger"
     block_lines = block.splitlines()
     exit_index = next((i for i, line in enumerate(block_lines) if line.strip() == "exit 0"), None)
-    assert exit_index is not None, "pr-gate must early-exit on a non-matching body"
-    curl_index = next((i for i, line in enumerate(block_lines) if "curl" in line), None)
-    assert curl_index is not None and curl_index > exit_index, (
-        "the API call must appear after the early exit"
+    assert exit_index is not None, "the prefilter must early-exit on a non-matching body"
+    # The prefilter performs no forge call and no checkout: the gate (and
+    # the trusted checkout the capability needs) runs only after it decided
+    # that the comment can trigger a review.
+    assert "forge_cli.py" not in block, "the prefilter must not call the forge"
+    assert not [line for line in _command_lines(block) if "uses:" in line], (
+        "the prefilter must not check anything out"
+    )
+    # It is the first step of the job.
+    assert _step_index(PREFILTER_STEP, text) == min(
+        _step_index(name, text)
+        for name in (
+            PREFILTER_STEP,
+            TRUSTED_CHECKOUT_STEP,
+            PR_GATE_STEP,
+            "Checkout repository",
+        )
     )
 
 
 def test_prefilter_command_matches_contract_default() -> None:
     """The pre-filter's command is the contract default (parsed from both sides)."""
     text = WORKFLOW.read_text(encoding="utf-8")
-    block = _step_block("Resolve PR through the API (pr-gate)", text)
+    block = _step_block(PREFILTER_STEP, text)
     env_line = next(
         line for line in block.splitlines() if line.strip().startswith("REREVIEW_DEFAULT_COMMAND:")
     )
@@ -492,7 +543,7 @@ def test_pipeline_steps_gate_on_comment_prefilter() -> None:
     for step in (
         "Checkout repository",
         "Generate bot token",
-        "Set up Node 24",
+        "Set up Node 26",
         "Build the action bundle",
         REVIEW_STEP,
     ):
@@ -505,54 +556,90 @@ def test_pipeline_steps_gate_on_comment_prefilter() -> None:
         assert "github.event_name != 'issue_comment' ||" in expr, (
             f"{step}: pre-filter gate must keep the non-comment escape hatch: {expr!r}"
         )
-    for step in ("Set up Node 24", "Build the action bundle", REVIEW_STEP):
+    for step in ("Set up Node 26", "Build the action bundle", REVIEW_STEP):
         expr = _extract_if(step, text)
         assert "workflow_dispatch" in expr and "is_draft" in expr, (
             f"{step}: must keep its existing dispatch/draft gates: {expr!r}"
         )
 
 
-# Forge-API outage resilience: pr-gate retries the lookup, then fails SOFT
-# (may_trigger=false + a fixed-constant summary warning + exit 0) so an
-# outage drops the trigger (recoverable by re-commenting / the ai-review
+# Forge-API outage resilience: pr-gate retries the capability lookup, then
+# fails SOFT (may_trigger=false + a fixed-constant summary warning + exit 0)
+# so an outage drops the trigger (recoverable by re-commenting / the ai-review
 # label) instead of turning every command comment into a red job. The
 # fail-safe direction: a dropped trigger can never grant a review.
 
 
 def _pr_gate_failure_branch(workflow_text: str) -> str:
-    """The pr-gate API-lookup failure branch (between the guard and `fi`).
+    """The pr-gate soft-fail branch (between the guard and `fi`).
 
     Line-based (no PyYAML): the branch runs from the line that anchors the
-    `if ! pr_json="$(curl ..."; then` guard to the next `fi`.
+    "no usable field" guard to the next `fi`.
     """
-    block = _step_block("Resolve PR through the API (pr-gate)", workflow_text)
+    block = _step_block(PR_GATE_STEP, workflow_text)
     lines = block.splitlines()
-    start = next(i for i, line in enumerate(lines) if 'if ! pr_json="$(curl' in line)
+    start = next(i for i, line in enumerate(lines) if 'if [ -z "$head_sha" ]' in line)
     for end in range(start + 1, len(lines)):
         if lines[end].strip() == "fi":
             return "\n".join(lines[start + 1 : end])
     raise AssertionError("pr-gate failure branch is not closed with fi")
 
 
-def test_pr_gate_retries_then_fails_soft() -> None:
-    """A forge-API outage fails soft: retry the lookup, then skip cleanly.
+def test_pr_gate_reads_the_pr_through_the_forge_capability() -> None:
+    """The lookup goes through the capability, never a raw HTTP client.
 
-    The lookup is retried (``--retry 3 --retry-all-errors --retry-delay 2``)
-    and wrapped in an ``if ! pr_json="$(curl ..."; then`` guard; the failure
-    branch writes ``may_trigger=false`` to ``$GITHUB_OUTPUT``, appends a
-    single-quoted fixed-constant warning to ``$GITHUB_STEP_SUMMARY``, and
-    exits 0. The old interpolated ``echo "may_trigger=$may_trigger"`` line is
-    gone — ``may_trigger`` is only ever written as literal true/false.
+    The repository's configured forge capability (scripts/forge_cli.py) is
+    the only place a forge request may be built: it keeps the token in the
+    Authorization header, validates the base URL, refuses redirects, and
+    reports credential-free errors. A raw client would bypass all of that.
     """
     text = WORKFLOW.read_text(encoding="utf-8")
-    block = _step_block("Resolve PR through the API (pr-gate)", text)
-    # The lookup is wrapped in the `if ! pr_json="$(curl ..."; then` guard.
-    assert 'if ! pr_json="$(curl' in block, (
-        "the lookup must be inside `if ! pr_json=\"$(curl ...\"; then`"
+    block = _step_block(PR_GATE_STEP, text)
+    assert "scripts/forge_cli.py pr-details" in block, (
+        "the pr-gate must read the pull request through the configured forge "
+        "capability"
     )
-    # The curl carries the retry flags.
-    assert "--retry 3 --retry-all-errors --retry-delay 2" in block, (
-        "the lookup must be retried: --retry 3 --retry-all-errors --retry-delay 2"
+    offenders = [
+        line for line in _command_lines(block) if "curl" in line or "wget" in line
+    ]
+    assert not offenders, (
+        "the pr-gate must not reach the forge API with a raw HTTP client:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_pr_gate_retries_the_capability_then_fails_soft() -> None:
+    """A forge-API outage fails soft: retry the lookup, then skip cleanly.
+
+    The lookup is the configured forge capability, retried with a bounded
+    budget (three attempts, two seconds apart); the failure branch writes
+    ``may_trigger=false`` to ``$GITHUB_OUTPUT``, appends a single-quoted
+    fixed-constant warning to ``$GITHUB_STEP_SUMMARY``, and exits 0. The
+    old interpolated ``echo "may_trigger=$may_trigger"`` line is gone —
+    ``may_trigger`` is only ever written as literal true/false.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    block = _step_block(PR_GATE_STEP, text)
+    # The lookup is the capability, inside a bounded retry loop.
+    assert "max_attempts=3" in block, "the lookup must be bounded to three attempts"
+    assert "retry_delay_sec=2" in block, "the retries must be two seconds apart"
+    assert 'sleep "$retry_delay_sec"' in block, "the retry must sleep between attempts"
+    assert 'while [ "$attempt" -le "$max_attempts" ]' in block, (
+        "the capability call must be inside the bounded retry loop"
+    )
+    assert (
+        'details="$(python3 scripts/forge_cli.py pr-details '
+        '--repo "$GITHUB_REPOSITORY" --number "$ISSUE_NUMBER")"'
+    ) in block, "the capability must be the lookup the retry loop runs"
+    assert "lookup_status=$?" in block, (
+        "the loop must read the capability's exit status"
+    )
+    assert 'if [ "$lookup_status" -eq 0 ]; then' in block, (
+        "a successful lookup must break out of the retry loop"
+    )
+    assert 'if [ "$lookup_status" -eq 1 ]; then' in block, (
+        "an absent pull request is a definitive answer, not an outage, so it "
+        "must not be retried"
     )
     # The old interpolated line is gone: may_trigger is only literal true/false.
     assert 'echo "may_trigger=$may_trigger"' not in block, (
@@ -580,6 +667,82 @@ def test_pr_gate_retries_then_fails_soft() -> None:
     assert "$" not in stripped, (
         "the warning line must carry no $ interpolation other than the "
         f"$GITHUB_STEP_SUMMARY redirect target: {warning_line!r}"
+    )
+
+
+def test_pr_gate_still_produces_its_outputs() -> None:
+    """The pr-gate outputs the downstream steps read are still produced.
+
+    ``head_sha``, ``is_fork``, ``is_draft`` and ``may_trigger`` are the
+    outputs the checkout, the build stamp and the review step consume.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    block = _step_block(PR_GATE_STEP, text)
+    assert "id: pr-gate" in block, "the gate step must keep its id"
+    for output in ("may_trigger=true", "head_sha=", "is_fork=true", "is_fork=false", "is_draft="):
+        assert f'echo "{output}' in block, f"the pr-gate must write {output!r}"
+
+
+def test_the_trusted_checkout_is_base_repo_code_before_the_gate() -> None:
+    """The capability's own code is checked out from the base repo, untrusted-free.
+
+    The capability IS repo code: it must be present before it can be
+    invoked, so it is checked out from the base repository at its
+    default-branch tip (``github.sha``) — never the PR head, which may be a
+    fork. The job token is not persisted into the checkout's git config.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    expr = _extract_if(TRUSTED_CHECKOUT_STEP, text)
+    assert "github.event_name == 'issue_comment'" in expr, (
+        f"the trusted checkout must run on the comment path only: {expr!r}"
+    )
+    assert "steps.comment-prefilter.outputs.may_trigger == 'true'" in expr, (
+        f"the trusted checkout must be gated on the prefilter: {expr!r}"
+    )
+    with_values = _extract_with_block(TRUSTED_CHECKOUT_STEP, text)
+    assert with_values.get("repository") == "${{ github.repository }}", (
+        f"the trusted checkout must come from the base repository: {with_values!r}"
+    )
+    assert with_values.get("ref") == "${{ github.sha }}", (
+        f"the trusted checkout must use the base-repo default-branch tip: {with_values!r}"
+    )
+    assert with_values.get("fetch-depth") == "1"
+    assert with_values.get("persist-credentials") == "false", (
+        "the trusted checkout must not persist the job token"
+    )
+    # The same pinned checkout action as the PR-head checkout.
+    assert _step_uses(TRUSTED_CHECKOUT_STEP, text) == _step_uses("Checkout repository", text), (
+        "the trusted checkout must use the same pinned checkout action"
+    )
+
+
+def test_the_pr_gate_runs_under_the_pinned_interpreter() -> None:
+    """The capability runs under the pinned interpreter, not the runner's python3.
+
+    The release workflows pin the interpreter before they call
+    ``scripts/forge_cli.py`` so the capability never depends on whatever
+    python3 the runner image happens to ship. The dogfood gate must do the
+    same, and it must not pay for the interpreter on a comment that cannot
+    trigger a review.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    expr = _extract_if(SETUP_PYTHON_STEP, text)
+    assert "github.event_name == 'issue_comment'" in expr, (
+        f"the interpreter must be set up on the comment path only: {expr!r}"
+    )
+    assert "steps.comment-prefilter.outputs.may_trigger == 'true'" in expr, (
+        f"the interpreter must be gated on the prefilter: {expr!r}"
+    )
+    with_values = _extract_with_block(SETUP_PYTHON_STEP, text)
+    assert with_values.get("python-version") == "3.14", (
+        f"the capability must run under the pinned interpreter: {with_values!r}"
+    )
+    assert "actions/setup-python@" in _step_uses(SETUP_PYTHON_STEP, text), (
+        "the interpreter must be installed by the pinned setup-python action"
+    )
+    # The interpreter is installed before the gate that calls the capability.
+    assert _step_index(SETUP_PYTHON_STEP, text) < _step_index(PR_GATE_STEP, text), (
+        "the interpreter must be installed before the capability is called"
     )
 
 

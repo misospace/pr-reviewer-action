@@ -52,7 +52,7 @@ retried once non-streamed before the loop gives up on that turn.
 | `gh_api` | Structured JSON from a read-only API endpoint (`repos/`, `issues/`, `search/`, `releases/`, `git/` prefixes only; GitHub-REST-shaped paths), for an allowlisted repo. Calls are served through the run's configured forge capability — the same `PlatformAdapter.ghApi` seam every platform read uses — so GitHub runs honor `github-api-url` and non-GitHub forges serve their translated endpoints, refusing unmapped ones in-band. Blob content (`git/blobs`) is refused: this channel has no file path, so it cannot apply the path-aware source masking blob bytes need, and base64-encoded bytes hide credential shapes from the redactor. | `tool-allowed-gh-api-repos`; endpoint allowlist; deny-listed paths (`/actions/secrets`, `/actions/variables`, `/dependabot/secrets`, `/environments/`, `/dispatches`, `/git/blobs/`) |
 | `repo_contents` | Source files or directory listings from an explicitly allowlisted related GitHub repository (file reads go through the blob API and are masked with the path-aware source-safe policy, so a credential in a file never reaches the model in the clear; directories return sorted name/type rows capped at `max_entries`, default 200, max 500). Unsupported on Forgejo. | same allowlist as `gh_api` |
 | `web_fetch` | A URL on an allowlisted host; output capped at ~10 KB of decoded text. Redirects are followed up to 10 hops, each re-validated against the host allowlist. | `allowed-source-hosts` |
-| `web_search` | A ranked `{title, url, snippet}` list from the configured search endpoint — advertised only when `search-url` is set. The model supplies only the query; the host is fixed by the input. | `search-url` |
+| `web_search` | A ranked `{title, url, snippet}` list from the configured search endpoint — advertised only when `search-url` is set. The model supplies only the query; the host is fixed by the input, and the result count is bounded to 1..15 (`tool-max-search-results`). | `search-url` |
 
 `tool-allowed-gh-api-repos` is a comma-separated `owner/repo` list (`*` allows
 any repo the path allowlist still permits); empty means the current repo
@@ -91,19 +91,24 @@ and JSON-RPC body are never forwarded to an unconfigured origin, and the
 
 ### Tool-call budget (tier defaults, size scaling)
 
-`tool-max-requests` bounds the total tool calls the harness executes. Left
-empty (the default), the effective budget is **tier-aware** by review route:
+The ordinary exploration ceiling is tier-aware before route-specific
+overrides:
 
-| Route | Tier default |
+| Route | Tier floor |
 | --- | --- |
-| primary | 24 |
-| smart | 32 |
-| escalated (smart under post-review escalation) | 40 |
+| primary | 40 |
+| smart | 45 |
+| escalated (smart under post-review escalation) | 50 |
 
-Hard ceiling in all cases: 50. `primary-tool-max-requests` /
-`smart-tool-max-requests` override the budget for their own route only;
-`tool-max-requests` overrides every route; any explicit value is bounded to
-1..50.
+These are the default floors when the operator leaves the route-specific
+inputs empty. `primary-tool-max-requests` / `smart-tool-max-requests` can
+override their own route, while `tool-max-requests` overrides the derived
+tier budget when no route-specific value is set. The hard ceiling remains 50.
+
+When primary requirement-trace is active, its one post-verdict repair round
+also has a bounded four-request closure allowance. The published effective
+tool budget includes that allowance, so a default 40-call primary review with
+trace enabled can execute at most 44 read-only tool calls.
 
 When no explicit override wins, the default is further scaled by PR size
 (#810): one request per 4 changed files, one per 400 changed lines, and 2
@@ -136,11 +141,11 @@ count and opts only that tier out of the scaling, under the same rule: up to
 
 ### Wall clock and per-turn timeouts
 
-- `tool-loop-wall-clock-sec` (default 600) bounds the whole exchange — every
-  model round-trip plus tool execution.
+- `tool-loop-wall-clock-sec` (default 600, clamped to 10..900) bounds the whole
+  exchange — every model round-trip plus tool execution.
 - `smart-tool-loop-wall-clock-sec` (default empty, inheriting
-  `tool-loop-wall-clock-sec`) bounds the smart tier's exchange, and therefore
-  the deadline its per-turn timeouts are clamped to.
+  `tool-loop-wall-clock-sec`, same 10..900 clamp) bounds the smart tier's
+  exchange, and therefore the deadline its per-turn timeouts are clamped to.
 - `tool-turn-timeout-sec` (default 180) bounds each individual model turn. On
   the smart/escalated tier this is also clamped to whatever remains of the
   wall-clock deadline, so a slow turn can't single-handedly blow past it.
@@ -207,10 +212,12 @@ unresolved blocker hypotheses and verdict evidence.
 | `max-rounds` | The round cap (above) was reached before the model stopped on its own. |
 | `tool-call-budget-exhausted` | The resolved tool-call budget was spent. |
 | `wall-clock-exceeded` | `tool-loop-wall-clock-sec` elapsed. |
+| `wall-clock-verdict-reserve` | Exploration stopped at the verdict reserve (#1464): the remaining wall clock fell to the slice reserved for the closing verdict, so no further exploratory round starts. The round that started before the threshold is clamped to the exploration boundary — its model wait (including the transport's retry and repair hops) and its tool execution cannot spend the reserved slice. |
 | `request-error` | A transport error ended the loop mid-exchange. |
 
-`max-rounds`, `tool-call-budget-exhausted`, and `wall-clock-exceeded` are
-budget stops — the investigation was cut off, not finished by choice. On any
+`max-rounds`, `tool-call-budget-exhausted`, `wall-clock-exceeded`, and
+`wall-clock-verdict-reserve` are budget stops — the investigation was cut
+off, not finished by choice. On any
 budget stop, the harness folds its own call log against the changed-file
 manifest and the specialist-lead artifacts to compute which changed files
 were never read and which specialist leads were never resolved. If that gap
@@ -237,23 +244,61 @@ read) publishes `coverage: "unknown"` with no stop reason (#873/#838).
 review's own coverage is incomplete; gate merges on both the verdict and the
 review result, never on the verdict alone.
 
+## Verdict wall-clock reserve (#1464)
+
+A deterministic slice of the wall-clock budget is reserved for the closing
+in-conversation verdict, so a slow provider cannot spend the whole budget on
+investigation and leave the verdict turn to fail the pre-request deadline
+check. The reserve is `verdictWallClockReserveSec`'s deterministic function
+of the resolved budget — 25% of it, floored at 30s, capped at half the
+budget, so at least half the clock always remains for investigation — with
+no new Action input. For the default 600s budget the reserve is 150s.
+
+The reserve is actually reserved, not merely checked between rounds: the
+harness derives an exploration boundary (`deadline − reserve`) and the MAIN
+investigation loop's model waits (round calls, their streamed→non-streamed
+retry, compaction digest calls) and tool execution clamp to it, so a round
+that started before the threshold cannot consume the reserved slice. The
+same boundary is threaded to the transport seam as a per-attempt budget
+hook, so the transport's own retry tree — same-request 429/5xx retries and
+the #824/#1047 clamp/strip repair hops — cannot cross it either;
+exploration-clamped waits additionally cap their same-request retries at
+one. The closing verdict turn and the #1503 trace-only repair turn keep the
+whole-run deadline.
+The #1145 trace-gap repair continuation deliberately does not carry the
+reserve: it runs against the whole-run deadline under its own clamped share.
+
+The resolved reserve is logged at loop start, recorded as
+`verdict_reserve_sec` in `tool_loop_meta` and the telemetry marker (see
+[`docs/telemetry.md`](telemetry.md)), and a reserve stop logs an explicit
+"stopped exploratory rounds at the verdict reserve" line. A reserve stop
+joins the #1338 honesty surfaces: the verdict findings body carries the
+interrupted-investigation note, coverage is accounted as partial, and the
+unresolved cause maps to `budget-exhausted`. The reserve is time-based and
+independent of the #1379/#1396 required-evidence window (reserved in
+rounds/requests): a reserve stop can end a run with that window still open.
+
 ## Evidence-repair continuation (#1145)
 
 When requirement-trace validation is on and the primary native loop accepts a
 verdict while in-scope requirements are still unproven — no claim, an invalid
-citation, an unmapped distributed seam — and at least one tool request remains
-in the loop's budget, the harness asks the same conversation for one bounded
-repair round before writing outputs. A probe (requirements side:
+citation, an unmapped distributed seam — the harness asks the same conversation
+for a bounded repair round before writing outputs. #1447 gives that repair
+round up to four targeted requests even when ordinary exploration consumed its
+entire ceiling. This is still the same authoritative reviewer and conversation,
+not a second reviewer or confidence call, and it remains inside the same
+whole-run wall-clock deadline. A probe (requirements side:
 `createTraceGapProbe`) re-validates the accepted verdict with the exact
 deterministic validator the publication path uses; on a genuine gap it returns
 a fenced instruction listing the unresolved requirements with their
 deterministic validator reasons. The loop appends it to the same conversation,
-runs one more round under the remaining budgets (no new tools, permissions, or
-rounds beyond the original totals — the instruction explicitly forbids them),
-and re-requests the verdict. Every failure path keeps the original verdict:
-a throwing probe, a budget/deadline stop, a failed refresh, or a repair round
-that issued no tool call records `skipped_probe_error`, `skipped_no_budget`,
-`skipped_refresh_failed`, or `skipped_no_evidence` on the
+runs the repair rounds under the remaining budgets (no new tools, permissions,
+or call capacity beyond the original totals — the instruction explicitly
+forbids them), and then (#1503) runs a trace-only repair turn instead of
+re-requesting the verdict. Every failure path keeps the original verdict:
+a throwing probe, a budget/deadline stop, a failed repair round, or a repair
+round that issued no tool call records `skipped_probe_error`,
+`skipped_no_budget`, `skipped_refresh_failed`, or `skipped_no_evidence` on the
 harness's `trace_repair_continuation` instead of continuing.
 
 A row the validator has already refuted against the checkout
@@ -274,26 +319,45 @@ requirement-trace with a non-empty scope, and budget left over. Without it
 `unverifiable`, the run keeps reporting partial coverage, and it never reads
 as clean.
 
-Three budget facts bound the repair round exactly. It runs only inside what
-is LEFT of the original run's totals: its wall-clock allowance is the run's
-total wall-clock budget minus the original loop's elapsed time **and** the
-first verdict turn's elapsed time; its tool-call allowance is the loop's
-remaining request budget; and it starts only when the loop has a round left
-(`rounds < maxRounds`). A loop that stopped on any budget stop has by
-definition exhausted at least one of the three — a `max-rounds` stop has no
-round left, a call-budget stop has no request left, a wall-clock stop has no
-time left — so the repair is recorded `skipped_no_budget` and the run's
-budgets are never exceeded. The refreshed verdict
-is re-requested from the SAME conversation and does **not** re-append the
-review corpus: the conversation already carries it verbatim from the first
-verdict turn, so a second copy would double the corpus in the request (200KB
-corpus → 403KB request) and overflow the context window on exactly the large
-pull requests the repair round targets. The repair round is also honest about
-what it achieved: a round that issued no tool call inspected no evidence and
-is recorded `skipped_no_evidence` (never a completed `continued`), an
-errored round is `skipped_refresh_failed`, and a round that executed at least
-one read is `continued` — with `verdict_refreshed` recording whether the
-refreshed verdict turn actually succeeded.
+The repair rounds share the original run's whole-exchange wall-clock deadline,
+but they have a deliberately separate closure allowance: the ordinary loop's
+remaining requests plus at most four additional targeted requests, spread over
+at most four rounds (#1503 — spreading the same allowance over a few rounds
+lets the reviewer read one location and follow one reference; it does not
+increase the call capacity, and the ordinary primary ceiling is untouched).
+That means a `tool-call-budget-exhausted` or `max-rounds` exploration stop no
+longer mechanically prevents requirement-trace from checking the evidence it
+just discovered it still needs. A wall-clock stop can still leave no safe
+repair capacity and records `skipped_no_budget`. After a repair round,
+deterministic changed-file/specialist coverage is recomputed over the combined
+original + repair call log, so new reads can close a real gap but can never
+erase one they did not inspect.
+
+After the repair rounds, #1503 replaces the old full-verdict refresh with a
+trace-only repair turn on the SAME conversation. Re-requesting the entire
+verdict made trace completion depend on re-serializing a large unrelated
+payload: on the #1488 failure a ~129k-token refresh dropped 8 of 10
+requirement rows even though the repair reads had found the evidence. The
+trace-only instruction instead re-lists exactly the ids that were unresolved
+when the repair began and asks only for `requirement_coverage` entries — the
+same shape and the same parser (`normalizeTraceRepairPayload`) as the no-tools
+#959 repair pass. The returned claims merge into the accepted verdict artifact
+through `mergeTraceClaims`: only ids that carried no claim are filled, an
+existing claim (even one with unusable locations) is never overwritten, and
+findings, severities, the recommendation/verdict, escalation state, required
+check dispositions, and every other artifact field are unchanged. The merged
+artifact then flows through the unchanged publication-time validator; ids the
+trace-only turn did not fill stay incomplete and fall to the #1492
+fail-closed publication boundary and the #959 pass as before. A malformed,
+empty, or failed trace-only response never damages the standing verdict. The
+turn never re-appends the review corpus and, like the old refresh, needs a
+fresh tool result before it runs, so the Anthropic wire stays valid. The
+repair round is also honest about what it achieved: a round that issued no
+tool call inspected no evidence and is recorded `skipped_no_evidence` (never a
+completed `continued`), an errored round is `skipped_refresh_failed`, and a
+round that executed at least one read is `continued` — with `claims_merged`
+and `trace_claims_merged` recording how many requirement ids the trace-only
+turn actually filled.
 
 The continuation is primary-tier only (the smart tier keeps its pre-#1145
 shape) and never overrides the loop's own stop reason. What happened is

@@ -29,7 +29,12 @@
  * AND test-path-classified test citation, and a predicate involving one of
  * the requirement's derived key terms at (or near) the enforcement
  * location — see `extractRequirementTerms`/`enforcementPredicateFound`
- * below for the exact heuristic and its documented limits. `not_applicable`,
+ * below for the exact heuristic and its documented limits. #1343: the
+ * lexical half is dropped where the subject is established by declaration
+ * instead — a citation into a base-ref-trusted declared owner of the
+ * requirement (repository config) needs only a real predicate, on the cited
+ * line itself, and every distributed seam citation is owner-anchored by
+ * construction. `not_applicable`,
  * `unmet`, and an explicit `unverifiable` each require a non-empty, bounded
  * `reason`; a missing one downgrades to `unverifiable`. Any downgrade or
  * missing trace marks the requirement `unverifiable`, and a well-formed
@@ -71,6 +76,7 @@ import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
+import { boundedIdList } from "../context/id-lists.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
 
@@ -150,6 +156,7 @@ function capReason(value: unknown): string {
  * requirements (or both an enforcement and a test location) is read once. */
 class FileTextCache {
   private readonly linesByFile = new Map<string, string[] | null>();
+  private readonly signalsByFile = new Map<string, boolean[] | null>();
   constructor(private readonly workspace: string) {}
 
   private load(file: string): string[] | null {
@@ -182,6 +189,21 @@ class FileTextCache {
    * the checkout. 1-indexed callers convert via `lines[line - 1]`. */
   lines(file: string): string[] | null {
     return this.load(file);
+  }
+
+  /** The file's per-line predicate signal, or `null` when it is not a
+   * readable regular file in the checkout. Computed once per file, so a file
+   * cited by several requirements is scanned once.
+   *
+   * The open-span state is carried across the file's lines, so a shape inside
+   * a multi-line block comment or template literal is prose on EVERY line of
+   * that span, not only on the line that opened it. */
+  predicateSignals(file: string): boolean[] | null {
+    if (this.signalsByFile.has(file)) return this.signalsByFile.get(file) ?? null;
+    const lines = this.load(file);
+    const signals = lines === null ? null : filePredicateSignal(lines);
+    this.signalsByFile.set(file, signals);
+    return signals;
   }
 }
 
@@ -246,6 +268,29 @@ function anyTestLocationValid(locations: readonly TraceLocation[], cache: FileTe
 // coincidentally near unrelated comparison syntax could pass. It is
 // deliberately permissive when the requirement text yields no usable terms
 // at all (documented below) rather than fail every odd phrasing closed.
+//
+// #1343: for prose standards the derived terms are generic words the
+// enforcing code never spells, so the lexical half alone made the gate
+// unsatisfiable-by-construction for a reviewer citing the real enforcement.
+// Where the subject is established by declaration — a citation into a
+// base-ref-trusted declared owner of the requirement (repository config,
+// `enforcementPredicateSatisfied`), or any distributed seam citation, whose
+// group owner globs come from the same trusted config — the predicate
+// requirement is kept and only the lexical co-occurrence is dropped. The
+// owner-anchored predicate must sit ON the cited line (the lexical half was
+// what bounded which line could qualify there); every other citation still
+// needs the term and the predicate on the same line.
+//
+// #1347: with the lexical half gone the shape test alone was the anti-copy
+// core, and applied to raw text it accepted copy-only lines — an arrow
+// function, an optional chain, a nullish coalesce, or an assertion-shaped word
+// that survives only inside an identifier, a comment or a string literal. The
+// accepted shape is tightened in `linePredicateSignal`, which all three
+// consumers share, so the legacy and distributed paths move with it rather
+// than diverging. The review follow-ups narrowed the accepted shapes further:
+// only the `throw` KEYWORD counts (never a member property named `throw`),
+// and a non-keyword assertion name counts only in a call shape (never a
+// member read such as `expect.value`).
 // ---------------------------------------------------------------------------
 
 const PREDICATE_WINDOW_RADIUS = 3;
@@ -312,21 +357,515 @@ export function extractRequirementTerms(text: string, symbol?: string): string[]
 const COMPARISON_RE = /(===|!==|==|!=|<=|>=|<|>)/;
 const GUARD_RE = /\b(if|unless)\b/i;
 const LOGICAL_OR_TERNARY_RE = /(\?|&&|\|\|)/;
-const ASSERTION_CALL_RE = /\b(throw|reject|assert\w*|expect|invariant|must\w*)\b/i;
+/** `throw` is a keyword wherever the language has it, and a bare `throw` is
+ * always a throw — but only as the KEYWORD. `throw` is not a reserved word in
+ * every language (Python and Rust have no `throw` statement), so a member
+ * property named `throw` (`state.throw`, `state?.throw`) is an ordinary name
+ * whose value is copied, not enforcement. The lookbehind refuses a member
+ * read; the word-boundary anchor keeps `throwing` from reading as an
+ * assertion. The check runs on the UNBLANKED code view (see
+ * `throwKeywordSignal`), because the operator blanker erases the `?.` of an
+ * optional chain and would leave `state?.throw` looking like a bare keyword. */
+const THROW_KEYWORD_RE = /(?<![.\w$])throw\b/i;
+/** #1347: `reject`, `expect`, `invariant`, `assert` and `must…` are not
+ * keywords but library/identifier names, so a bare occurrence is a NAME —
+ * `const expect = state.requested;` is a copy, not enforcement. They count
+ * only in a call shape, possibly through a suffix (`expect(…)`,
+ * `assertEquals(…)`, `mustBePositive(…)`), or as a member CALL reached
+ * through the bare name (`Assert.ok(…)`, `assert.deep.equal(…)`,
+ * `invariant.call(…)`). A member READ with no call (`expect.value`,
+ * `must.not`) copies a value and is refused. The suffix may NOT be followed
+ * by a member dot: `expected.ceiling` / `rejected.length` are ordinary
+ * English identifiers copying a value, not assertions. */
+const ASSERTION_CALL_RE =
+  /\b(?:assert|must|expect|reject|invariant)(?:[A-Za-z0-9_]*\s*\(|\s*(?:\.\s*[A-Za-z_$][A-Za-z0-9_$]*\s*)+\()/i;
 const MATCH_CALL_RE = /\.(includes|startsWith|endsWith|equals|match|test)\s*\(/i;
 
-/** A line is predicate-shaped when it carries a comparison, a guard/logical
- * operator, an assertion-style call, or a string-match call — the shapes
- * that actually enforce something, as opposed to merely naming a value. */
-function linePredicateSignal(line: string): boolean {
-  return COMPARISON_RE.test(line)
-    || GUARD_RE.test(line)
-    || LOGICAL_OR_TERNARY_RE.test(line)
-    || ASSERTION_CALL_RE.test(line)
-    || MATCH_CALL_RE.test(line);
+/** Index of the quote that closes a span opened at `start`, honoring `\`
+ * escapes; `-1` when the span is not closed on this line. */
+function findClosingQuote(line: string, start: number, quote: string): number {
+  for (let index = start + 1; index < line.length; index += 1) {
+    const char = line[index] as string;
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === quote) return index;
+  }
+  return -1;
 }
 
-function windowLines(lines: readonly string[], line1Based: number, radius: number): readonly string[] {
+/**
+ * Cross-line span state for the code view (#1347): whether the previous line
+ * left a block comment or a template literal open.
+ *
+ * A span that is still open on the next line is prose there too. A line-local
+ * scan read `if (state.requested > ceiling)` or `mustNotExceed(…)` written
+ * INSIDE a multi-line block comment or template literal as enforcement,
+ * because only the line that opened the span was scrubbed. The state is
+ * carried across the file's lines so an open span is a span on every line it
+ * covers.
+ */
+interface CodeSpanState {
+  inBlockComment: boolean;
+  inTemplate: boolean;
+  /** Inside a `${ … }` interpolation inside a template literal. */
+  inInterpolation: boolean;
+  /** Brace depth inside that interpolation. */
+  interpolationDepth: number;
+}
+
+function freshSpanState(): CodeSpanState {
+  return { inBlockComment: false, inTemplate: false, inInterpolation: false, interpolationDepth: 0 };
+}
+
+/** How many times `char` occurs in `text`. */
+function countChar(text: string, char: string): number {
+  let count = 0;
+  for (const candidate of text) {
+    if (candidate === char) count += 1;
+  }
+  return count;
+}
+
+/**
+ * Scan template-literal content from `start` (just after the opening
+ * backtick) to its closing backtick. Returns the index just past the closing
+ * backtick, or `-1` when the template does not close on this line — the state
+ * then carries the open span (and an open interpolation) onto the next line.
+ *
+ * The `${ … }` interpolation is skipped as a unit, so a nested template inside
+ * it cannot terminate the outer template early, and the interpolation's own
+ * braces are counted so a `}` inside it does not close it either. This is not a
+ * parser: a `}` inside a NESTED template's text still ends the interpolation
+ * early, which is a named residual.
+ */
+function scanTemplateContent(line: string, start: number, state: CodeSpanState): number {
+  let index = start;
+  while (index < line.length) {
+    if (state.inInterpolation) {
+      const char = line[index] as string;
+      if (char === "{") {
+        state.interpolationDepth += 1;
+        index += 1;
+        continue;
+      }
+      if (char === "}") {
+        state.interpolationDepth -= 1;
+        index += 1;
+        if (state.interpolationDepth === 0) state.inInterpolation = false;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+    const char = line[index] as string;
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+    if (char === "`") return index + 1;
+    if (char === "$" && line[index + 1] === "{") {
+      state.inInterpolation = true;
+      state.interpolationDepth = 1;
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  return -1;
+}
+
+/** The two code views of one line, produced by ONE scan: the RAW view (spans
+ * removed, operators NOT blanked) and the BLANKED view (spans removed,
+ * non-predicate operators blanked).
+ *
+ * One scan, so the two views can never disagree about where a span starts or
+ * ends. A disagreement would let one view open a span the other does not, and
+ * the span state carries across lines, so the divergence would swallow the
+ * rest of the file — a false downgrade the shape check cannot afford. */
+interface LineCodeView {
+  raw: string;
+  blanked: string;
+}
+
+const EMPTY_LINE_VIEW: LineCodeView = { raw: "", blanked: "" };
+
+/**
+ * The line with its string literals and comments removed (#1347), carrying the
+ * open-span state across lines.
+ *
+ * An assertion-shaped word that survives only inside
+ * `const note = 'must not exceed the ceiling';` or `// must never be exceeded`
+ * is prose about the value, not enforcement of it, and a `>` inside a comment
+ * is not a comparison. The scan is deliberately language-agnostic: it drops
+ * `'…'`/`"…"`/`` `…` `` bodies (honoring `\` escapes; an unterminated quote
+ * takes the rest of the line, and an unterminated backtick opens a template
+ * span that CONTINUES on the next line), `//` line comments, `/* … *\/` blocks
+ * (an unclosed one CONTINUES on the next line), a `#` comment at line start or
+ * after whitespace (script languages — a `#` glued to an identifier is a
+ * private field, `this.#ceiling > requested`, and must survive), and a
+ * doc-comment continuation line whose first non-space character is `*`.
+ *
+ * Not a tokenizer, and the unmodeled cases are named rather than silently
+ * wrong. Permissive (a shape survives that is not one): a regex literal
+ * (`const gt = />/;`) and a `//` inside an unquoted URL pass through; a `#`
+ * that is glued directly to code is NOT treated as a comment, because
+ * `this.#ceiling > requested` is a private field and stripping from the `#`
+ * would erase the real comparison — so an inline script-language comment
+ * written without its space (`x = 1#if a > b`) still counts; and a template
+ * whose opening backtick is preceded by an unpaired `/` in the code before it
+ * on that line (a division, or a backtick inside a regex literal such as
+ * `/[|;&<>`$]/`) is treated as line-local, because a stray backtick that
+ * opened a file-wide template span would swallow the rest of the file — a
+ * false downgrade is far worse than the leak this closes.
+ * Strict (a real predicate is lost): a quote character inside a regex literal
+ * (`if (/[="']/.test(key))`) opens a span that consumes the rest of the line,
+ * and content inside a multi-line template literal is prose under the same
+ * rule the single-line string literal already follows.
+ */
+function scanCodeView(
+  line: string,
+  state: CodeSpanState,
+  blankGenerics: boolean,
+): LineCodeView {
+  let index = 0;
+  let resumed = false;
+  // Resume a block comment opened on an earlier line: everything up to its
+  // terminator is comment text, and the rest of the line is code again. The
+  // terminator is the FIRST `*/`, as the language reads it — a `*/` inside a
+  // string inside the comment ends the comment there, and the code after it
+  // is read as code.
+  if (state.inBlockComment) {
+    const close = line.indexOf("*/");
+    if (close < 0) return EMPTY_LINE_VIEW;
+    index = close + 2;
+    state.inBlockComment = false;
+    resumed = true;
+  }
+  // Resume a template literal opened on an earlier line.
+  if (state.inTemplate) {
+    const close = scanTemplateContent(line, 0, state);
+    if (close < 0) return EMPTY_LINE_VIEW;
+    index = close;
+    state.inTemplate = false;
+    resumed = true;
+  }
+  // A doc-comment continuation line carries no code. It is skipped only when
+  // no span was resumed: a resumed line can be the one that CLOSES the span,
+  // and its trailing code is real.
+  if (!resumed && line.trimStart().startsWith("*")) return EMPTY_LINE_VIEW;
+  let raw = "";
+  let blanked = "";
+  // The code between two spans is a RUN. The operator blanker runs per run,
+  // which is the same as running it over the whole line first: a blanked pair
+  // (`=>`, `->`, `?.`, `??`, `?:`) is two adjacent characters, so it never
+  // straddles a span, and one scan produces both views — they can never
+  // disagree about where a span starts or ends. The generic-argument-list
+  // blanker (#1355) reads the RAW run first, so the operator blanker cannot
+  // turn a span it refused into one it accepts (`x<y??z>w` refuses at the
+  // `??`; after `??` is blanked the `<`/`>` comparison must survive).
+  let run = "";
+  const flush = (): void => {
+    if (run === "") return;
+    raw += run;
+    blanked += blankNonPredicateOperators(
+      blankGenerics ? blankGenericArgumentLists(run) : run,
+    );
+    run = "";
+  };
+  for (; index < line.length; index += 1) {
+    const char = line[index] as string;
+    if (char === "/" && line[index + 1] === "/") break;
+    if (char === "/" && line[index + 1] === "*") {
+      const close = line.indexOf("*/", index + 2);
+      if (close < 0) {
+        state.inBlockComment = true;
+        break;
+      }
+      index = close + 1;
+      flush();
+      continue;
+    }
+    if (char === "#" && (index === 0 || /\s/.test(line[index - 1] as string))) break;
+    if (char === "'" || char === '"') {
+      const close = findClosingQuote(line, index, char);
+      if (close < 0) {
+        // An unterminated quote takes the rest of the line.
+        flush();
+        raw += " ";
+        blanked += " ";
+        break;
+      }
+      index = close;
+      flush();
+      raw += " ";
+      blanked += " ";
+      continue;
+    }
+    if (char === "`") {
+      const close = scanTemplateContent(line, index + 1, state);
+      if (close < 0) {
+        // The template continues onto the next line — unless an unpaired `/`
+        // precedes the backtick in the code before it on this line, which is
+        // the conservative read (a division, or a stray backtick inside a
+        // regex literal). The count covers the pending run too, so the slash
+        // that opens the regex is counted with the rest.
+        if (countChar(raw + run, "/") % 2 === 0) {
+          state.inTemplate = true;
+        } else {
+          state.inTemplate = false;
+          state.inInterpolation = false;
+          state.interpolationDepth = 0;
+        }
+        flush();
+        raw += " ";
+        blanked += " ";
+        break;
+      }
+      index = close - 1;
+      flush();
+      raw += " ";
+      blanked += " ";
+      continue;
+    }
+    run += char;
+  }
+  flush();
+  return { raw, blanked };
+}
+
+/** The code views of a file's lines. */
+interface FileCodeViews {
+  raw: readonly string[];
+  blanked: readonly string[];
+}
+
+function computeCodeViews(
+  lines: readonly string[],
+  blankGenerics: boolean,
+): FileCodeViews {
+  const raw: string[] = [];
+  const blanked: string[] = [];
+  const state = freshSpanState();
+  for (const line of lines) {
+    const view = scanCodeView(line, state, blankGenerics);
+    raw.push(view.raw);
+    blanked.push(view.blanked);
+  }
+  return { raw, blanked };
+}
+
+/**
+ * Operator spellings that read as a predicate shape but enforce nothing
+ * (#1347): an arrow function (`=>`, and the `->` spelling Ruby/PHP/C++ use),
+ * an optional chain (`?.`), a nullish coalesce (`??`), and an optional
+ * property/parameter marker (`?:`). None of them is a comparison in any
+ * language this gate reads, so removing them cannot lose an enforcement shape.
+ *
+ * Blanking is ADJACENCY-only: the non-predicate markers `?.`, `??` and `?:`
+ * are normally spelled with their follower glued to the `?`, while a ternary
+ * `?` is normally separated from its branch by whitespace. Matching a spaced
+ * `? .` instead would erase the `?` of a real ternary whose branch starts with
+ * a dot — `flag ? .5 : 1`, or the Swift-style contextual case
+ * `wide ? .large : .small` — downgrading genuine enforcement to non-predicate.
+ * The named cost of this direction: the legal-but-unformatted spaced optional
+ * chain `obj ? .value` reads as a ternary and survives (documented residual).
+ *
+ * It is applied to each CODE RUN — the text between spans — which is the same
+ * as running it over the whole line FIRST: a blanked pair (`=>`, `->`, `?.`,
+ * `??`, `?:`) is two adjacent characters, so it never straddles a span, and
+ * one pair can never be split by a span. Running it before span removal is
+ * what keeps a literal span from collapsing a real ternary
+ * (`clip(symbol ? TEMPLATE : path)`) into a form the blanker reads as a
+ * marker. Blanking only ever removes operator characters, so it cannot
+ * fabricate a quote or a comment for the scan that follows. The
+ * generic-argument-list blanker (#1355) runs on the same run, before this one
+ * and on the raw text: a complete generic span can never straddle a run
+ * either, because its content refuses quote characters and comments are
+ * removed before runs are formed.
+ */
+function blankNonPredicateOperators(code: string): string {
+  return code.replace(/=>|->/g, " ").replace(/\?(?:\?|:|\.(?![0-9]))/g, " ");
+}
+
+/**
+ * #1355: a generic argument list (`Map<string, number>`) used to read as a
+ * comparison — its `<`/`>` are the same characters `COMPARISON_RE` matches —
+ * so an owner-anchored copy-only citation such as
+ * `const ceiling = Map<string, number>;` passed as `met`. The list is blanked
+ * before the comparison is read, but ONLY a span that closes as a type list:
+ * the opening `<` must be GLUED to a name (`Map<`, never a spaced `a < b`),
+ * a matching `>` must exist at angle depth 0, and every character between
+ * must be type-like (identifiers, whitespace, commas, dots, `[`/`]`, and
+ * single `|`/`&`). Anything else refuses the span and the `<`/`>` survive —
+ * which is the direction the issue pins, because a real comparison never
+ * closes a type-like span: the unspaced `a<b` has no matching `>`, `a<=b`
+ * carries `=`, and `a<b && c>d`, `a<b || c>d`, `a<b ? c>d : e` refuse at the
+ * operator, so both comparisons keep firing.
+ *
+ * What IS blanked is the copy-only citation shape: `Map<string, number>`,
+ * nested `Map<string, Array<number>>`, unions `Array<string | number>`,
+ * qualified names `Foo.Bar<number>`, array types `Array<T[]>` — type
+ * annotations enforce nothing. The named residuals (#1355), all GLUED chains
+ * whose span happens to look like a type list and is indistinguishable from
+ * one without a parser: `a<b>c` (chained comparison), `a<b, c>d` (comma
+ * operator), `a<b|c>d` (single-bar bitwise or — distinct from the `||` that
+ * refuses the span), and a generic whose arguments are richer than bare
+ * identifiers — object literals `{ a: string }`, string-literal keys,
+ * function types, default type parameters — still refuse the span and keep
+ * reading as a comparison. A shift chain is refused, not blanked:
+ * `a<<b>>c` carries `<<`, which never occurs inside a valid argument list,
+ * so the span refuses and both operators survive. A generic list that WRAPS
+ * to the next line is not blanked either (the scan is run-scoped): its
+ * opening line still passes as enforcement — the pre-existing behavior,
+ * left in place because carrying an open-generic span across lines would
+ * swallow the comparisons after an unclosed `<`, the same file-wide-span
+ * failure the template-literal rule was measured against.
+ *
+ * Blanking can never add an ACCEPTED shape: it inserts spaces (never
+ * juxtaposes characters), and a `<` in a blanked span had already fired
+ * `COMPARISON_RE`, so the line was accepted before the blanker ran —
+ * `expect<Foo>(x)` even reads as an assertion call after `Foo` is blanked,
+ * but it was accepted as a comparison either way. The corpus measurement
+ * (`generic_added_total`, pinned 0) and an exhaustive brute force over the
+ * blanker's alphabet found no accept-status fabrication.
+ */
+function blankGenericArgumentLists(code: string): string {
+  let blanked = "";
+  let index = 0;
+  while (index < code.length) {
+    const char = code[index] as string;
+    if (
+      char === "<" && index > 0
+      && /[A-Za-z0-9_$]/.test(code[index - 1] as string)
+    ) {
+      const close = matchingGenericListClose(code, index);
+      if (close >= 0) {
+        blanked += " ".repeat(close + 1 - index);
+        index = close + 1;
+        continue;
+      }
+    }
+    blanked += char;
+    index += 1;
+  }
+  return blanked;
+}
+
+/** Characters a generic argument list may carry besides its own `<`/`>`:
+ * identifier text, whitespace, the argument separator, qualified-name dots,
+ * array/index brackets, and the single union/intersection bars. `&&`, `||`
+ * and every other operator (`= + - * / % ! ( ) { } ; : ?` quotes) marks the
+ * span as an EXPRESSION, not a type list, and refuses the blank. */
+const GENERIC_LIST_CONTENT_RE = /[A-Za-z0-9_$\s,.[\]|&]/;
+
+/** The index of the `>` that closes the generic argument list opened at
+ * `open` (a `<` glued to a name), or `-1` when the span is not a type list:
+ * no angle-depth-0 close on this run, or a non-type-like character inside. */
+function matchingGenericListClose(code: string, open: number): number {
+  let depth = 0;
+  for (let index = open; index < code.length; index += 1) {
+    const char = code[index] as string;
+    if (char === "<") {
+      // `<<` is a left shift, never part of an argument list (`>>` IS — it
+      // closes nested generics — so only the doubled `<` refuses the span).
+      if (code[index + 1] === "<") return -1;
+      depth += 1;
+      continue;
+    }
+    if (char === ">") {
+      depth -= 1;
+      if (depth === 0) return index;
+      continue;
+    }
+    if (!GENERIC_LIST_CONTENT_RE.test(char)) return -1;
+    if ((char === "&" || char === "|") && code[index + 1] === char) return -1;
+  }
+  return -1;
+}
+
+/**
+ * A line is predicate-shaped when its CODE (comments and string literals
+ * removed) carries a comparison, a guard/logical operator, an assertion-style
+ * call, or a string-match call — the shapes that actually enforce something,
+ * as opposed to merely naming a value.
+ *
+ * #1347: applied to raw text the shape test fired on text that is not a
+ * predicate at all — `>`/`<` matched arrow functions and generics, `?` matched
+ * `?.` and `??`, and `throw|reject|assert…|expect|invariant|must…` matched
+ * inside identifiers, comments and string literals. The owner-anchored path
+ * (#1343) dropped the lexical subject half, so there the shape was the whole
+ * anti-copy core and a copy-only citation passed as `met`. The artifacts are
+ * excluded here, in the helper shared by every consumer (legacy,
+ * owner-anchored and distributed), so no path accepts a shape another rejects.
+ * Review follow-up: only the `throw` KEYWORD counts, never a member property
+ * named `throw`; the non-keyword assertion names need their call shape — a
+ * member READ (`expect.value`) copies a value, only a member CALL
+ * (`assert.ok(…)`) enforces one — because `const expect = state.requested;` is
+ * exactly the copy this gate exists to refuse. #1355 closed the last artifact
+ * #1347 named: a generic argument list (`Map<string, Ceiling>`) is blanked
+ * before the comparison is read, while the unspaced real comparison `a<b`
+ * survives — the comparisons this gate must keep never close a type-like
+ * span, and the glued chains that do (`a<b>c`, `a<b|c>d`, `a<b, c>d`) are the
+ * named residual of `blankGenericArgumentLists`.
+ */
+/** Exported for the retained corpus measurement (#1347):
+ * `scripts/measure_predicate_signal.mjs` re-runs this production shape over
+ * the repository's own sources so the false-downgrade measurement cannot
+ * drift from the shipped logic. Not part of any action contract.
+ *
+ * The shape is read per FILE, because a span that is still open on the next
+ * line is prose there too: the open block-comment and template-literal state
+ * is carried across the file's lines, so a shape inside a multi-line span
+ * never counts as enforcement on any line of that span. */
+export function filePredicateSignal(lines: readonly string[]): boolean[] {
+  const views = computeCodeViews(lines, true);
+  return lines.map((_, index) => predicateSignalIn(views, index));
+}
+
+/** Exported for the retained corpus measurement (#1355): the shipped
+ * production pipeline with the generic-argument-list blanker disabled, so the
+ * refinement's false-downgrade rate is measured against the production logic
+ * itself rather than a re-implementation that could drift from it. Not part
+ * of any action contract. */
+export function filePredicateSignalIgnoringGenericArgumentLists(
+  lines: readonly string[],
+): boolean[] {
+  const views = computeCodeViews(lines, false);
+  return lines.map((_, index) => predicateSignalIn(views, index));
+}
+
+/** The shipped production shape for one self-contained line — the single-line
+ * view of the same file-level scan, so the two cannot disagree. */
+export function linePredicateSignal(rawLine: string): boolean {
+  return filePredicateSignal([rawLine])[0] === true;
+}
+
+/**
+ * True when a line's code views carry an enforcement shape (#1347).
+ *
+ * The `throw` KEYWORD is read on the RAW view: a property named `throw`
+ * (`state.throw`, `state?.throw`) is an ordinary name whose value is copied,
+ * so a copy-only owner-anchored citation that reads one must not pass as
+ * enforcement. The operator blanker erases the `?.` of an optional chain, so
+ * on the blanked view `state?.throw` would read as a bare `throw` keyword; the
+ * raw view keeps the dot that marks the member access, and the lookbehind in
+ * `THROW_KEYWORD_RE` refuses it. The blanked view is used for every other
+ * shape, where the erased operators are the artifacts being excluded.
+ */
+function predicateSignalIn(views: FileCodeViews, index: number): boolean {
+  const raw = views.raw[index] ?? "";
+  const blanked = views.blanked[index] ?? "";
+  return COMPARISON_RE.test(blanked)
+    || GUARD_RE.test(blanked)
+    || LOGICAL_OR_TERNARY_RE.test(blanked)
+    || THROW_KEYWORD_RE.test(raw)
+    || ASSERTION_CALL_RE.test(blanked)
+    || MATCH_CALL_RE.test(blanked);
+}
+
+function windowLines<T>(lines: readonly T[], line1Based: number, radius: number): readonly T[] {
   const start = Math.max(0, line1Based - 1 - radius);
   const end = Math.min(lines.length, line1Based + radius);
   return lines.slice(start, end);
@@ -335,9 +874,24 @@ function windowLines(lines: readonly string[], line1Based: number, radius: numbe
 /** True when a predicate-shaped line occurs near one of the given citations. */
 function predicateSignalFound(locations: readonly TraceLocation[], cache: FileTextCache): boolean {
   for (const loc of locations) {
-    const lines = cache.lines(loc.file);
-    if (lines === null || loc.line > lines.length) continue;
-    if (windowLines(lines, loc.line, PREDICATE_WINDOW_RADIUS).some(linePredicateSignal)) return true;
+    const signals = cache.predicateSignals(loc.file);
+    if (signals === null || loc.line > signals.length) continue;
+    if (windowLines(signals, loc.line, PREDICATE_WINDOW_RADIUS).some((signal) => signal)) return true;
+  }
+  return false;
+}
+
+/** #1343: true when a predicate-shaped line occurs ON the cited line itself
+ * — not merely within a window around it. The owner-anchored exception drops
+ * the lexical subject check, so the predicate is the whole anti-copy core
+ * there: a copy-only cited line standing next to an unrelated comparison
+ * must not pass, which is exactly the case the issue's acceptance
+ * criterion ("a real predicate on the cited line") rules out. */
+function citedLinePredicateFound(locations: readonly TraceLocation[], cache: FileTextCache): boolean {
+  for (const loc of locations) {
+    const signals = cache.predicateSignals(loc.file);
+    if (signals === null || loc.line < 1 || loc.line > signals.length) continue;
+    if (signals[loc.line - 1] === true) return true;
   }
   return false;
 }
@@ -354,6 +908,13 @@ function predicateSignalFound(locations: readonly TraceLocation[], cache: FileTe
  * location validity alone stands: a documented limitation, not a silent
  * pass-everything default, since this only fires when term extraction
  * itself found nothing to check.
+ *
+ * Note the asymmetry the two halves read: the shape test sees the scrubbed
+ * code view (#1347) while the term test still matches the raw line, so a
+ * genuine predicate followed by `// ceiling` on the same line counts. Pre-#1347
+ * behavior on the term half, kept deliberately: a requirement word a reviewer
+ * quotes in a comment beside the real comparison is evidence of the citation,
+ * not the copy, this gate exists to refuse.
  */
 export function enforcementPredicateFound(
   locations: readonly TraceLocation[],
@@ -361,18 +922,59 @@ export function enforcementPredicateFound(
   cache: FileTextCache,
 ): boolean {
   if (terms.length === 0) return true;
+  const termRe = new RegExp(`\\b(?:${terms.map(escapeRegExp).join("|")})\\b`, "i");
   for (const loc of locations) {
     const lines = cache.lines(loc.file);
-    if (lines === null || loc.line > lines.length) continue;
+    const signals = cache.predicateSignals(loc.file);
+    if (lines === null || signals === null || loc.line > lines.length) continue;
     const window = windowLines(lines, loc.line, PREDICATE_WINDOW_RADIUS);
-    for (const line of window) {
-      if (!linePredicateSignal(line)) continue;
-      for (const term of terms) {
-        if (new RegExp(`\\b${escapeRegExp(term)}\\b`, "i").test(line)) return true;
-      }
+    const windowSignals = windowLines(signals, loc.line, PREDICATE_WINDOW_RADIUS);
+    for (const [index, line] of window.entries()) {
+      if (windowSignals[index] !== true) continue;
+      if (termRe.test(line)) return true;
     }
   }
   return false;
+}
+
+/** #1343: the declared owner globs for one requirement — the top-level
+ * `owners` of every rule whose `match` tokens all appear in its text. The
+ * rules come from the base-ref-trusted repository config (never the PR
+ * head), so "this file owns that requirement" is maintainer-declared, not
+ * inferred from the model's citation. Deduplicated; bounded by the config's
+ * own rule/owner caps. */
+function declaredOwnerGlobsFor(text: string, ownership: readonly RequirementOwnership[] | undefined): string[] {
+  const globs: string[] = [];
+  for (const rule of ownership ?? []) {
+    if (!rule || !ruleMatchesRequirement(rule, text) || !Array.isArray(rule.owners)) continue;
+    for (const pattern of rule.owners) {
+      if (typeof pattern === "string" && pattern !== "" && !globs.includes(pattern)) globs.push(pattern);
+    }
+  }
+  return globs;
+}
+
+/** #1343: the `met` predicate gate for a narrow requirement's enforcement
+ * citations. A location-valid citation into a declared owner of this
+ * requirement proves the subject by declaration, so the lexical term
+ * co-occurrence is dropped there while the predicate requirement is kept:
+ * the CITED LINE itself must be predicate-shaped (a copy-only cited line
+ * beside an unrelated predicate does not pass — the predicate is the whole
+ * anti-copy core once the lexical half is gone). A citation that is neither a
+ * declared owner nor carries the requirement's vocabulary still fails, so
+ * the boundary does not become fail-open; the lexical check is unchanged for
+ * every other shape (including the documented empty-terms skip). */
+function enforcementPredicateSatisfied(
+  validLocations: readonly TraceLocation[],
+  terms: readonly string[],
+  ownerGlobs: readonly string[],
+  cache: FileTextCache,
+): boolean {
+  if (ownerGlobs.length > 0) {
+    const ownerCitations = validLocations.filter((loc) => citationMatchesPatterns(loc, ownerGlobs));
+    if (ownerCitations.length > 0 && citedLinePredicateFound(ownerCitations, cache)) return true;
+  }
+  return enforcementPredicateFound(validLocations, terms, cache);
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,7 +1848,12 @@ const MAX_SUBJECT_TERM_CHARS = 200;
  * `request`, `only`, `never`, … — and bare acronyms (`PR`, `API`, `URLs`),
  * which occur as ordinary prose in almost every diff, name nothing specific
  * enough to establish scope on their own. That generic overlap is what let
- * #956's unrelated standards leak in. */
+ * #956's unrelated standards leak in.
+ *
+ * #1346 extends the same reasoning to pairs: a phrase counts only when at
+ * least one of its words carries some specificity, so a bigram of two pure
+ * connectives ("only through", "never appear", "may appear" …) composes no
+ * concept and is dropped. See {@link GENERIC_PHRASE_WORDS}. */
 interface RequirementSubjectSignals {
   phrases: string[][];
   strongTerms: string[];
@@ -1262,6 +1869,58 @@ function isStrongTerm(word: string): boolean {
   if (word === word.toUpperCase()) return false; // pure acronym: HTTP, API, PR, URL
   if (/^[A-Z]{2,}s$/.test(word)) return false; // acronym + plural: URLs, APIs, JSONs
   return true; // identifier: sourceSha, repoDid, SQLite, HTTPServer, GitHub
+}
+
+/** #1346: words that carry no subject at all — connective adverbs,
+ * subject-less prepositions and particles, modals and quantifiers, and
+ * appearance verbs ("appear", "seem", "remain"). They are ordinary English
+ * prose: any diff's comments repeat them regardless of what the change
+ * touches, so a bigram made of two of them ("only through", "never appear",
+ * "may appear") names nothing an enforcing change would reference.
+ *
+ * The observed leak: PR #1342 (Renovate classifier kinds) scoped the AGENTS.md
+ * credential-transport standard in on two generic bigrams of its prose alone —
+ * the diff's added comments happened to contain "only through" and "never
+ * appear" while touching no credential or transport code — and the review had
+ * to disposition a boundary it cannot reach, three rounds running.
+ *
+ * This set is NOT {@link TERM_STOPWORDS}: those words are removed from the
+ * stream entirely (and from the broader enforcement-line term net below);
+ * these stay in the stream and in every mixed pair, and only suppress a
+ * bigram whose BOTH halves are generic. A pair keeps counting when either
+ * word is specific — `data never` (the #957 pinned case), `trust boundary`,
+ * `auth headers`. Words that name a domain concept even when they read as
+ * verbs here (`cross`, `forge`, `close`, `weaken`) are deliberately excluded:
+ * suppressing them would narrow real subject overlap, which the fail-closed
+ * direction of scope (#958 owner paths, no-provenance and linked-issue
+ * entries) cannot recover. */
+const GENERIC_PHRASE_WORDS: ReadonlySet<string> = new Set([
+  // connective adverbs / degree words
+  "only", "merely", "simply", "just", "even", "still", "ever", "never", "always",
+  "often", "rarely", "generally", "typically", "usually", "currently", "previously",
+  "eventually", "immediately", "directly", "exactly", "precisely", "respectively",
+  "quite", "very", "too", "instead", "rather", "otherwise", "thus", "hence",
+  "therefore", "however", "moreover", "furthermore", "further", "more", "most",
+  "less", "least", "much", "many", "few", "enough",
+  // subject-less prepositions and particles
+  "through", "throughout", "across", "along", "around", "above", "below",
+  "behind", "beyond", "inside", "outside", "during", "upon", "toward", "towards",
+  "out", "off",
+  // modals and quantifiers
+  "can", "cannot", "could", "would", "may", "might", "will", "both", "either",
+  "neither", "other", "others", "another", "same", "own", "some", "every",
+  "each", "none", "nothing", "everything", "something", "anything",
+  // appearance verbs
+  "appear", "appears", "appeared", "appearing", "seem", "seems", "seemed",
+  "occur", "occurs", "occurred", "occurring", "happen", "happens", "happened",
+  "happening", "remain", "remains", "remained", "stay", "stays", "stayed",
+  // adjectives of possibility
+  "able", "unable",
+]);
+
+/** True when a single word is generic under {@link GENERIC_PHRASE_WORDS}. */
+function genericPhraseWord(word: string): boolean {
+  return GENERIC_PHRASE_WORDS.has(word.toLowerCase());
 }
 
 /** #1000: a code span carrying `-` or `/` is ONE literal compound identifier,
@@ -1361,7 +2020,12 @@ export function requirementSubjectSignals(text: string): RequirementSubjectSigna
   });
   const phrases: string[][] = [];
   for (let i = 0; i < kept.length - 1; i += 1) {
-    if (kept[i + 1]!.index === kept[i]!.index + 1) phrases.push([kept[i]!.word, kept[i + 1]!.word]);
+    if (kept[i + 1]!.index !== kept[i]!.index + 1) continue;
+    // #1346: two generic connectives compose no concept — see
+    // GENERIC_PHRASE_WORDS. The atomic single-term phrases pushed below are
+    // never subject to this test: a code span is one literal identifier.
+    if (genericPhraseWord(kept[i]!.word) && genericPhraseWord(kept[i + 1]!.word)) continue;
+    phrases.push([kept[i]!.word, kept[i + 1]!.word]);
   }
   for (const term of atomic) phrases.push([term]);
   const strongTerms = kept.filter((entry) => isStrongTerm(entry.word)).map((entry) => entry.word.toLowerCase());
@@ -1412,8 +2076,11 @@ interface CompiledOwnership {
 
 /** Compile one narrow owner glob to a full-path regex. Only `*` (within a
  * path segment) and `?` are wildcards; `**` and absolute/`..` patterns are
- * rejected at config-parse time, so this never sees them. */
-function ownerPatternRegex(pattern: string): RegExp {
+ * rejected at config-parse time, so this never sees them. #1519: exported so
+ * the trace-plan's slot helpers attribute a repository read to a seam with
+ * the SAME glob semantics the validator applies to citations — the loop and
+ * the validator must never disagree about what a seam's evidence path is. */
+export function ownerPatternRegex(pattern: string): RegExp {
   const source = pattern
     .split("*")
     .map((part) => part.split("?").map((chunk) => escapeRegExp(chunk)).join("[^/]"))
@@ -1471,23 +2138,36 @@ function distributedGroupsForText(
   };
 }
 
-/** Resolve trusted distributed topology for the requested ledger ids. */
+/** Resolve trusted distributed topology for the requested ledger ids. #1519:
+ * the hints carry the FULL seam objects (name plus the trusted owner/test
+ * glob patterns) instead of name-only strings, so the trace plan and the
+ * loop's slot attribution can match evidence per seam exactly the way
+ * `validateRequirementTrace` does. #1519 (review): a requirement whose
+ * topology OVERFLOWS the representable seam cap is NOT dropped here — the
+ * validator still classifies it distributed (`isDistributed` is computed
+ * before the overflow gate, which then forces the row `unverifiable`), so
+ * the plan must classify it distributed too; dropping the hints would make
+ * the plan budget runtime-shape attempts the validator's per-seam demand
+ * never asked for. */
 export function distributedRequirementHints(
   ledger: unknown,
   ownership: readonly RequirementOwnership[] | undefined,
   scopeIds: readonly string[],
-): { requirementId: string; groups: readonly string[] }[] {
+): { requirementId: string; groups: { name: string; owners: string[]; tests: string[] }[] }[] {
   const entries = new Map(ledgerEntriesInScope(ledger).map((entry) => [entry.id, entry]));
-  const hints: { requirementId: string; groups: readonly string[] }[] = [];
+  const hints: { requirementId: string; groups: { name: string; owners: string[]; tests: string[] }[] }[] = [];
   const seenScopeIds = new Set<string>();
   for (const requirementId of scopeIds) {
     if (seenScopeIds.has(requirementId)) continue;
     seenScopeIds.add(requirementId);
     const entry = entries.get(requirementId);
     if (!entry) continue;
-    const { groups, overflow } = distributedGroupsForText(entry.text, ownership);
-    if (overflow || groups.length < MIN_DISTRIBUTED_GROUPS) continue;
-    hints.push({ requirementId, groups: groups.map((group) => group.name) });
+    const { groups } = distributedGroupsForText(entry.text, ownership);
+    if (groups.length < MIN_DISTRIBUTED_GROUPS) continue;
+    hints.push({
+      requirementId,
+      groups: groups.map((group) => ({ name: group.name, owners: [...group.owners], tests: [...group.tests] })),
+    });
     if (hints.length >= MAX_DISTRIBUTED_HINTS) break;
   }
   return hints;
@@ -1584,8 +2264,9 @@ function ownershipTouched(compiled: readonly CompiledOwnership[], text: string, 
 /** A requirement's subject is touched when the changed text contains one of
  * its multi-word phrases (in any spelling) or one of its distinctive
  * identifier-shaped terms. Two plain words like `docs` and `repo` are
- * deliberately NOT enough — see `requirementSubjectSignals`. Bounded
- * heuristic, like `enforcementPredicateFound`. */
+ * deliberately NOT enough — see `requirementSubjectSignals`. Neither are two
+ * generic connectives like `only through` (#1346). Bounded heuristic, like
+ * `enforcementPredicateFound`. */
 function subjectTouched(text: string, changed: string): boolean {
   const { phrases, strongTerms } = requirementSubjectSignals(text);
   if (phrases.some((words) => phraseMatched(words, changed))) return true;
@@ -1606,7 +2287,10 @@ export interface RequirementTraceScope {
  * changed text every entry stays in scope (fail closed). #957 tightened the
  * subject test: only a multi-word phrase or an identifier-shaped single term
  * counts, so unrelated standards can no longer ride in on generic vocabulary
- * shared with every diff. #958 adds explicit `ownership` (from repository
+ * shared with every diff. #1346 tightened it one step further: a phrase counts
+ * only when at least one of its words is specific, so a generic connective
+ * bigram in ordinary prose ("only through", "never appear") is no scope
+ * evidence. #958 adds explicit `ownership` (from repository
  * config) so a change to a boundary's own file scopes its requirement in
  * even when the diff repeats none of its prose. */
 export function requirementTraceScope(
@@ -1668,10 +2352,15 @@ export const MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS = 200;
  * direction would cycle. */
 export interface TraceGapContinuationSummary {
   /** `continued` | `skipped_no_budget` | `skipped_probe_error` |
-   * `skipped_refresh_failed` | `skipped_no_evidence` (harness-owned enum). */
+   * `skipped_refresh_failed` | `skipped_no_evidence` (harness-owned enum;
+   * `skipped_refresh_failed` names a failed repair round — the #1503
+   * trace-only turn replaced the full-verdict refresh the name refers to). */
   outcome: string;
   unresolved_ids: string[];
-  verdict_refreshed: boolean;
+  /** #1503: the trace-only repair turn merged at least one claim into the
+   * standing verdict artifact (`claims_merged` is the count). */
+  trace_claims_merged: boolean;
+  claims_merged: number;
 }
 
 /** #1044: bounded, sanitized summary of the #959 trace-repair pass, attached
@@ -1891,12 +2580,15 @@ export function validateRequirementTrace(
           if (uncoveredEnforcement.length > 0 || distributedGroups.some((group) => !testMatches.has(group.name)) || validTests.length === 0) {
             disposition = "unverifiable";
           } else {
-            const terms = extractRequirementTerms(entry.text);
+            // #1343: every matched citation is already anchored to a trusted
+            // declared seam surface (the group owner globs from base-ref
+            // config), so the subject is established by declaration and the
+            // lexical term co-occurrence is dropped — the predicate alone
+            // carries anti-copy. A seam matched only by value-copying lines
+            // still fails (predicate required), and citations outside every
+            // declared seam never count toward coverage at all.
             const matchedLocations = [...enforcementMatches.values()];
-            const predicateFound = terms.length === 0
-              ? predicateSignalFound(matchedLocations, cache)
-              : enforcementPredicateFound(matchedLocations, terms, cache);
-            if (!predicateFound) {
+            if (!predicateSignalFound(matchedLocations, cache)) {
               disposition = "unverifiable";
               notes.push("enforcement-location-copies-without-comparing");
             }
@@ -1937,7 +2629,8 @@ export function validateRequirementTrace(
             if (disposition === "met") {
               const terms = extractRequirementTerms(entry.text, symbol);
               const validEnforcementLocations = enforcement.filter((loc) => locationValid(loc, cache));
-              if (!enforcementPredicateFound(validEnforcementLocations, terms, cache)) {
+              const ownerGlobs = declaredOwnerGlobsFor(entry.text, context.ownership);
+              if (!enforcementPredicateSatisfied(validEnforcementLocations, terms, ownerGlobs, cache)) {
                 disposition = "unverifiable";
                 notes.push("enforcement-location-copies-without-comparing");
               }
@@ -2024,6 +2717,27 @@ const MAX_RENDERED_ROWS = 20;
  * more than this many in-scope requirements — the issue's "do not dump an
  * enormous matrix into the public review" ask. */
 const COLLAPSE_THRESHOLD = 5;
+
+/**
+ * #1518: the requirement ids the trace could not discharge — every row whose
+ * disposition is `unmet` or `unverifiable`. Those are exactly the rows that
+ * set the trace's `incomplete` flag (the `validateRequirementTrace` rule) and
+ * exactly the rows the published markdown reports as notable, so the id list
+ * names the same obligations the reviewer was told about.
+ *
+ * The list is deduplicated, keeps the trace's order, and is bounded by the
+ * shared id cap, so a large ledger cannot flood the published handoff.
+ */
+export function unresolvedTraceRequirementIds(trace: RequirementTraceArtifact): string[] {
+  if (trace === null || typeof trace !== "object" || !Array.isArray(trace.rows)) return [];
+  const ids: string[] = [];
+  for (const row of trace.rows) {
+    if (row.disposition !== "unmet" && row.disposition !== "unverifiable") continue;
+    if (typeof row.requirement_id !== "string" || row.requirement_id === "") continue;
+    ids.push(row.requirement_id);
+  }
+  return boundedIdList(ids);
+}
 
 /**
  * Render the published-body "Requirement trace" section: only the

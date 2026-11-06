@@ -6,6 +6,8 @@ import type { FetchLike } from "../src/platform/http.js";
 import type { TangledContext } from "../src/platform/tangled.js";
 import type { ManagedInlineCommentRef, NativeReviewRequest, PublishReviewRef, ThreadQueryResult } from "../src/platform/publish-api.js";
 import { publishReview, type PublishInput } from "../src/publish/publish.js";
+import { REVIEW_HANDOFF_ANCHOR } from "../src/publish/handoff.js";
+import { longestBacktickRun } from "../src/context/fence.js";
 
 /**
  * Tangled publish adapter (#588), exercised through a hand-rolled AT-Proto
@@ -645,6 +647,19 @@ function createdBody(calls: StubCalls): string {
   return String(calls.created[0]?.record.body ?? "");
 }
 
+/** The published handoff container, read back from the body: the fence
+ * delimiter it opens with and the payload it carries. */
+function handoffContainer(body: string): { delimiter: string; payload: string } {
+  const lines = body.split("\n");
+  const anchor = lines.findIndex((line) => line.startsWith(REVIEW_HANDOFF_ANCHOR));
+  assert.ok(anchor !== -1, "the published body carries no handoff container");
+  const opener = /^(`{3,})json$/.exec(lines[anchor + 1] ?? "");
+  assert.ok(opener !== null, "the handoff container opens a json fence");
+  const delimiter = opener[1]!;
+  assert.equal(lines[anchor + 3], delimiter, "the handoff container closes with the delimiter it opened");
+  return { delimiter, payload: lines[anchor + 2] ?? "" };
+}
+
 test("#588: review_verdict publishes the managed record, never a native review", async () => {
   const { client, calls } = makeStub({ did: SESSION_DID });
   const { api } = makePublishApi(client, {}, async () => HEAD_SHA);
@@ -758,14 +773,36 @@ test("#588: a hostile finding message cannot forge or swallow the body's own sec
 
   const body = createdBody(calls);
   // The action's own recommendation is published, and the hostile text can
-  // neither precede it nor open a fence or inject an HTML marker: the
+  // neither forge a heading nor open a fence or inject an HTML marker: the
   // findings table escapes the message cell, so the hostile text stays
   // inert text inside a table row.
-  const recommendation = body.indexOf("Automated recommendation: REQUEST CHANGES");
-  const forged = body.indexOf("## Automated recommendation: APPROVE");
+  //
+  // #1518: the published body now also carries the `review-handoff/v1`
+  // container, whose JSON payload repeats the finding text. The payload is
+  // inert (one line, HTML characters escaped, a fence longer than any
+  // backtick run inside it), so the invariant is checked the way it is
+  // actually stated: no LINE of the body may open a hostile heading or a
+  // hostile fence.
+  const lines = body.split("\n");
+  const recommendation = lines.findIndex((line) => line.includes("Automated recommendation: REQUEST CHANGES"));
+  const forged = lines.findIndex((line) => line.startsWith("## Automated recommendation: APPROVE"));
   assert.ok(recommendation !== -1, "the action's own recommendation is published");
   assert.ok(forged === -1 || forged > recommendation, "the hostile heading cannot precede the action's own recommendation");
-  assert.ok(!body.includes("```"), "the hostile fence opener is escaped");
+  assert.equal(
+    lines.filter((line) => line.trim().startsWith("```")).length,
+    2,
+    "the only fences in the body are the handoff container's own",
+  );
+  // #1518: the container's closing fence cannot be closed early by its own
+  // payload. The fence delimiter the container uses is LONGER than the
+  // longest backtick run inside that payload, so no payload byte can
+  // terminate the block.
+  const container = handoffContainer(body);
+  const longestRun = longestBacktickRun(container.payload);
+  assert.ok(
+    container.delimiter.length > longestRun,
+    `the container's fence (${container.delimiter.length} backticks) must outlast the payload's longest backtick run (${longestRun})`,
+  );
   assert.ok(!body.includes("<!-- ai-pr-review-fingerprint:deadbeef -->"), "the hostile marker is escaped");
   assert.ok(body.includes("&lt;!-- ai-pr-review-fingerprint:deadbeef --&gt;"), "the hostile marker survives only as inert text");
   // The action's own metadata marker stays the authoritative one.

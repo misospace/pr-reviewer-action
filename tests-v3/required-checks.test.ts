@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseVerdictResponse } from "../src/model/verdict.js";
 import { evaluateRequiredCheckCoverage, requiredCheckCoverageToArtifact } from "../src/enforcement/required-checks.js";
+import { strictReviewResult } from "../src/enforcement/verdict-policy.js";
 import type { NormalizedRequiredCheckDisposition } from "../src/model/types.js";
 
 /** OpenAI-shaped response wrapper, mirroring tests-v3/verdict.test.ts. */
@@ -233,4 +234,101 @@ test("#750 end-to-end: parser output with a preserved malformed duplicate folds 
   assert.equal(nullCoverage.structured, false);
   assert.equal(nullCoverage.status, "incomplete");
   assert.ok(nullCoverage.checks.every((row) => row.reason === "no-structured-dispositions"));
+});
+
+test("#1388: unmet (alias failed) is a completed-but-failed disposition recorded verbatim, never clean coverage", () => {
+  // Direct fold: an unmet row is recorded with reason ok…
+  const coverage = evaluateRequiredCheckCoverage(
+    ["check secret rotation impact"],
+    [d("check secret rotation impact", "unmet", "the secrets file is read and logged verbatim")],
+  );
+  assert.equal(coverage.checks[0]!.status, "unmet");
+  assert.equal(coverage.checks[0]!.reason, "ok");
+  // …but completeness still requires every row satisfied or not_applicable:
+  // a performed-and-failed check is not clean coverage.
+  assert.equal(coverage.status, "incomplete");
+  // The `failed` prose alias folds to `unmet` (same fold the parser applies).
+  const alias = evaluateRequiredCheckCoverage(
+    ["check secret rotation impact"],
+    [d("check secret rotation impact", "failed", "the secrets file is read and logged verbatim")],
+  );
+  assert.deepEqual(alias.checks[0]!.status, "unmet");
+  assert.equal(alias.checks[0]!.reason, "ok");
+  // An unmet row among otherwise-clean rows keeps the whole fold incomplete.
+  const mixed = evaluateRequiredCheckCoverage(
+    ["review auth flow for regression", "check secret rotation impact"],
+    [
+      d("review auth flow for regression", "satisfied", "untouched"),
+      d("check secret rotation impact", "unmet", "logging confirmed"),
+    ],
+  );
+  assert.equal(mixed.status, "incomplete");
+  // The serializer round-trips the unmet row.
+  assert.deepEqual(requiredCheckCoverageToArtifact(coverage).checks, [
+    { check: "check secret rotation impact", status: "unmet", rationale: "the secrets file is read and logged verbatim", reason: "ok" },
+  ]);
+});
+
+test("#1388: unmet without a usable rationale is malformed and the check stays unresolved", () => {
+  for (const rationale of [null, "   "]) {
+    const coverage = evaluateRequiredCheckCoverage(
+      ["check secret rotation impact"],
+      [d("check secret rotation impact", "unmet", rationale)],
+    );
+    assert.equal(coverage.status, "incomplete");
+    assert.equal(coverage.checks[0]!.reason, "malformed-disposition");
+    assert.equal(coverage.checks[0]!.status, "unresolved");
+  }
+});
+
+test("#1379: unresolved upstream-evidence obligations keep the published verdict out of clean", () => {
+  const evidenceChecks = [
+    "establish upstream provenance for the updated image: publisher and canonical source repository",
+    "inspect the exact old→new upstream release delta for the updated image",
+    "check upstream security advisories for the updated image version range, or report the advisory check as not performed",
+  ];
+
+  // With no dispositions at all, the evidence obligations stay unresolved.
+  const incomplete = evaluateRequiredCheckCoverage(evidenceChecks, null);
+  assert.equal(incomplete.status, "incomplete");
+  assert.equal(incomplete.checks.every((row) => row.status === "unresolved"), true);
+  assert.deepEqual(
+    incomplete.checks.map((row) => row.check),
+    evidenceChecks,
+  );
+
+  // With every obligation satisfied, coverage is complete.
+  const dispositions: NormalizedRequiredCheckDisposition[] = evidenceChecks.map((check) => ({
+    check,
+    status: "satisfied" as const,
+    rationale: "verified against the upstream release feed",
+  }));
+  const complete = evaluateRequiredCheckCoverage(evidenceChecks, dispositions);
+  assert.equal(complete.status, "complete");
+
+  // A partial approval over unresolved evidence is not published as clean.
+  assert.equal(strictReviewResult("approve", [], "incomplete"), "partial");
+});
+
+test("#1379: missing release notes do not block the delta obligation — compare/changelog/commit evidence satisfies it", () => {
+  // Acceptance: "When release notes are missing, compare/changelog/commit
+  // evidence can satisfy the delta requirement." The reviewer dispositions
+  // the check itself, so the deterministic fold needs a satisfied
+  // disposition whose rationale cites the alternative upstream evidence —
+  // exactly the release-notes-absent case.
+  const deltaCheck =
+    "inspect exact old→new upstream release delta for updated image";
+  const dispositions: NormalizedRequiredCheckDisposition[] = [
+    {
+      check: deltaCheck,
+      status: "satisfied" as const,
+      rationale:
+        "upstream published no release notes for v1.106.5...v1.106.6; verified the delta via the tags/compare view and changelog history instead",
+    },
+  ];
+  const coverage = evaluateRequiredCheckCoverage([deltaCheck], dispositions);
+  assert.equal(coverage.status, "complete");
+  assert.equal(coverage.checks[0]!.status, "satisfied");
+  // Complete coverage keeps a strict approve clean (never demoted).
+  assert.equal(strictReviewResult("approve", [], "complete"), "clean");
 });

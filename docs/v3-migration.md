@@ -373,12 +373,17 @@ low-budget pivot to blocker hypotheses, `tool-call-budget-exhausted` kept as
 a distinct stop reason); the contract description for `tool-max-requests`
 carries the same semantics.
 
-The behavior is pinned by the `tool-request-budget` snapshot boundary
-(#673): `tests/fixtures/parity/tool-budget/tool-budget-tiers.json` carries
-the fixture cases, the recorded snapshot pins the (route, budget) each
-resolves to, and `src/tools/budget.ts` is the v3 implementation
-(`PR_REVIEWER_V3_MODE=tool-budget`). A mismatch fails the harness, so #678
-cannot regress to a single undifferentiated request ceiling.
+While the port was in flight, the behavior was pinned by the
+`tool-request-budget` snapshot boundary (#673): its recorded fixtures pinned
+the (route, budget) each tier resolved to, and a mismatch failed the parity
+harness. That boundary is history, not a live contract — the snapshot
+fixtures and the harness were retired in #974. Today the resolution lives in
+`src/tools/budget.ts` and is pinned by the focused v3 suites:
+`tests-v3/budget.test.ts` (tier defaults, explicit values, and
+`PRIMARY_TOOL_MAX_REQUESTS`/`SMART_TOOL_MAX_REQUESTS` override precedence)
+and the harness tests in `tests-v3/tools-harness.test.ts` (the native loop's
+exhaustion-aware behavior and its distinct stop reasons), so #678 cannot
+regress to a single undifferentiated request ceiling.
 
 ### Size-scaled default and honest partial coverage (#810)
 
@@ -399,11 +404,13 @@ not exceed the tier default, the #702 provenance `source` stays
 `tool_budget_size` artifact field records the exact signal either way).
 
 The scaling is v3-only by design: the v2 resolver stayed at the flat tier
-default through #681. The snapshot fixtures cover the shared range — their
-cases carry env only (no workspace artifacts), so tier defaults, explicit
-values, and override precedence resolve identically. The scaling itself is
-pinned by v3-only tests (`tests-v3/budget.test.ts`, the harness tests in
-`tests-v3/tools-harness.test.ts`). Per #810's acceptance, the
+default through #681. During the migration, the retired `tool-request-budget`
+snapshot fixtures (#673) pinned the shared range — their cases carried env
+only (no workspace artifacts), so tier defaults, explicit values, and
+override precedence resolved identically — but that boundary is history, not
+a live contract: the harness was retired in #974. Both the shared range and
+the scaling itself are pinned today by v3-only tests (`tests-v3/budget.test.ts`,
+the harness tests in `tests-v3/tools-harness.test.ts`). Per #810's acceptance, the
 default is to be measured on `evals/corpus-human-findings.json` (3 runs per
 arm) before shipping; that measurement is part of the #681 release qualification (the scaled default only reaches consumers at the v3 release).
 
@@ -578,6 +585,10 @@ These v2 fields have no v3 ID or compatibility alias:
 
 The `tool_planning_*` inputs are currently deprecated fallback inputs in v2
 and are removed in v3. They are intentionally not copied into the v3 contract.
+Since #1255 the v3 runtime no longer honors the legacy `TOOL_PLANNING_*` env
+names either: set the replacement inputs (`tool_turn_timeout_sec`,
+`tool_corpus_max_bytes`, `tool_max_tokens_per_turn`) instead — a stale env
+variable is silently ignored.
 
 The `escalate_on_*` inputs above are also currently deprecated in v2
 (accepted for backward compatibility since #721 but already inert — they no
@@ -883,9 +894,9 @@ metering). The port is transport/filesystem-agnostic by design — the caller
 supplies a `requestFn` and receives artifacts to persist, matching the
 #678 routing/tool-loop modules — so the orchestrator can wire its workspace
 writer and the `gates.ts` `specialists` branch. `src/tools/harness.ts`'s `renderSpecialistLeads` seam is wired
-to the real `renderSpecialistLeadsSection` port. The migration's comparison
-boundaries were `specialist-corpus`, `specialist-payload`, `specialist-normalize`
-(`tests/fixtures/parity/specialist-*/`, `tests/parity_runners/v2_specialist_*.py`).
+to the real `renderSpecialistLeadsSection` port. The migration's retired comparison boundaries were `specialist-corpus`,
+`specialist-payload`, and `specialist-normalize`; those parity fixtures and
+runners were removed with the historical harness.
 
 ### The `enforcement-pipeline` boundary (#680)
 
@@ -894,8 +905,8 @@ composition (`apply_verdict_policy` → `apply_required_check_validation` →
 `apply_all_enforcement`, over cwd-relative artifacts exactly as
 `scripts/sections/config.sh::apply_all_enforcement_wrapper` invokes them)
 versus the v3 ports in `src/enforcement/` (`node dist/index.js
-enforcement-fixture`). Fixtures under `tests/fixtures/parity/enforcement-pipeline/`
-carry the parsed `ai-output.json` artifact plus the optional evidence,
+enforcement-fixture`). The retired parity fixture set carried the parsed
+`ai-output.json` artifact plus the optional evidence,
 tool-harness, review-thread, human-review, and classification inputs, and
 both sides emit the resulting artifact, the `completeness.json` result, the
 required-checks status, and the applied-enforcement count (canonicalized
@@ -945,9 +956,9 @@ behavior depended on `gh`/`forgejo` subprocess stubs.
 
 ### The `platform-normalization` boundary (#706)
 
-Pins the platform read seams: raw GitHub REST/GraphQL and Forgejo `/api/v1`
-responses (a route table in each fixture under
-`tests/fixtures/parity/platform-normalization/`) are served to the real v2
+Historically pinned the platform read seams: raw GitHub REST/GraphQL and
+Forgejo `/api/v1` responses from the retired route-table fixtures were served
+to the real v2
 seam — `scripts/platform_api.sh`, `forgejo_backend.py` via `_forgejo_py`,
 `gh_api_call`, and the `pr-files.json` jq projection read from
 `scripts/sections/context.sh` — through stub `gh`/`curl` binaries, and to
@@ -964,36 +975,47 @@ list; a failed or unparseable commit-status read folds to `[]` ("no external
 CI") rather than to the empty transient signal; and the Forgejo
 conversation branch is newest-first while GitHub's is oldest-first.
 
-### Tangled resolution and fail-loud backend (#583)
+### Tangled resolution and the experimental backend (#583–#592)
 
-`platform` resolution accepts `tangled` on all three seams —
-`pr_reviewer/platform.py::resolve_platform`,
-`scripts/platform_api.sh::platform_resolve`, and
-`src/platform/resolve.ts::resolvePlatform` — with
-identical semantics: an explicit `tangled` requires a non-empty
-`TANGLED_REPO_DID` (the repository *owner* DID; descriptive failure when
-missing), and `auto` checks `TANGLED_REPO_DID` first so a Spindle runner is
-never misclassified as Forgejo merely because its server URL is
-non-GitHub. The unsupported-value diagnostic reads
-`unsupported PLATFORM '…' (expected github|forgejo|tangled|auto)` on every
-seam.
+`platform` resolution accepts `tangled` on the v3 seam
+(`src/platform/resolve.ts::resolvePlatform`) with the semantics the v2
+seams had: an explicit `tangled` requires a non-empty `TANGLED_REPO_DID`
+(the repository *owner* DID; descriptive failure when missing), and `auto`
+checks `TANGLED_REPO_DID` first so a Spindle runner is never misclassified
+as Forgejo merely because its server URL is non-GitHub. The
+unsupported-value diagnostic reads
+`unsupported PLATFORM '…' (expected github|forgejo|tangled|auto)`.
 
-A resolved `tangled` is an identity, not a backend: `ResolvedPlatform`
-includes `"tangled"`, while every adapter and publish type (`PlatformAdapter`,
-`PlatformReadAdapter`, `PublishPlatformApi`) stays `"github" | "forgejo"`.
-`requireImplementedBackend` in `src/platform/tangled.ts` is an assertion
-guard every adapter-construction boundary runs (`buildAdapter`,
-`buildPlatformReadAdapter` — before fixture interception, matching the shell
-seam's ordering — `buildPublishApi`, `ciAdapterFromEnv`, `clearRereviewLabel`,
-and `runPrecheck`), so no code path can construct a GitHub URL or adapter for
-a Tangled environment. The v2 seam mirrors this fail-loud guard
-(`TANGLED_NOT_IMPLEMENTED`, `_platform_tangled_guard`). The Spindle runtime
-context normalization lives in `src/platform/tangled.ts` (`TangledContext`),
-the port of the original branch's `pr_reviewer/tangled_context.py`, which
-was not resurrected after the v2 teardown; the retained Python/shell pieces
-(`pr_reviewer/platform.py`, `scripts/platform_api.sh`) are resolver/parity
-oracles only. Tangled API/XRPC/Bobbin calls stay out of scope until the #564
-backend tickets.
+The v2 resolver seams (`pr_reviewer/platform.py::resolve_platform`,
+`scripts/platform_api.sh::platform_resolve`) were deleted in the v2
+teardown (#706). This section records their semantics as history, not as a
+live dependency.
+
+A resolved `tangled` started as an identity, not a backend (#583):
+`ResolvedPlatform` included `"tangled"`, while every adapter and publish
+type (`PlatformAdapter`, `PlatformReadAdapter`, `PublishPlatformApi`) stayed
+`"github" | "forgejo"`, and `requireImplementedBackend` in
+`src/platform/tangled.ts` was an assertion guard every adapter-construction
+boundary ran, so no code path could construct a GitHub URL or adapter for a
+Tangled environment. The v2 seam mirrored this fail-loud guard
+(`TANGLED_NOT_IMPLEMENTED`, `_platform_tangled_guard`).
+
+That guard now applies to the GitHub and Forgejo paths only. The platform
+seam selects the Tangled capabilities itself: the Tangled read adapter
+(#585) and the Tangled publish adapter (#588), and `PublishPlatformApi`
+accepts `tangled`. The fail-loud precheck guard was removed with the
+host-neutral runner (#590), which pins the platform to `tangled` and refuses
+a GitHub or Forgejo platform instead of falling back to another forge.
+
+The Spindle runtime context normalization lives in
+`src/platform/tangled.ts` (`TangledContext`). The Tangled boundary grew
+the Bobbin pull resolver (#584), the AT-Proto record client (#837), the
+managed top-level review record (#588) and the host-neutral runner (#590).
+Tangled support is experimental, and a Tangled run does not complete today:
+the diff read is not connected to the read adapter yet, and the publication
+step fails closed until a trustworthy current-head read exists (#1165).
+[`docs/tangled.md`](tangled.md) holds the support matrix, the setup and the
+guardrails.
 
 ### The `prompt-assembly` boundary (#706)
 

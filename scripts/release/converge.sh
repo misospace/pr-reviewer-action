@@ -18,7 +18,12 @@
 # can never find in main's history (#906). The anchor is the tag release-please
 # tracks instead (component `source` in release-please-config.json). Every step is idempotent, so any later run
 # converges a partially published release; the PR check fails closed.
-# Needs `git` (with an `origin` remote), `gh`, and GITHUB_REPOSITORY.
+#
+# Every forge read and write goes through scripts/forge_cli.py, the adapter
+# over the repository's configured forge capability (`pr_reviewer.forge`):
+# the token rides only the Authorization header, redirects are refused, and a
+# failure is reported as the capability's fixed, credential-free error string.
+# Needs `git` (with an `origin` remote), `python3`, and GITHUB_REPOSITORY.
 set -euo pipefail
 
 MODE=${1:?mode required (state|finish|anchor)}
@@ -27,6 +32,19 @@ SHA=${3:?release sha required}
 REPO=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY required}
 PENDING="autorelease: pending"
 TAGGED="autorelease: tagged"
+
+# The forge capability resolves GITHUB_TOKEN before GH_TOKEN; `gh` resolved
+# GH_TOKEN first. Pin both names to the same credential so the adapter can
+# never authenticate as a different principal than the code it replaced.
+if [ -n "${GH_TOKEN:-}" ]; then
+  export GITHUB_TOKEN="$GH_TOKEN"
+fi
+
+# The forge adapter lives at the repository root; resolve it from this
+# script's own location so the script works from any working directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+FORGE_CLI="$ROOT/scripts/forge_cli.py"
 
 remote_sha() { git ls-remote origin "refs/tags/$1" | cut -f1; }
 stable() { [[ "$TAG" != *-* ]]; }
@@ -51,9 +69,9 @@ PR=""
 PR_STATE=unknown   # tagged | pending | unlabeled | unknown
 read_pr_state() {
   local labels
-  PR="$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number // empty')" || return 1
+  PR="$(python3 "$FORGE_CLI" pr-number-for-commit --repo "$REPO" --sha "$SHA")" || return 1
   [ -n "$PR" ] || return 1
-  labels="$(gh api "repos/$REPO/issues/$PR/labels" --jq '.[].name')" || return 1
+  labels="$(python3 "$FORGE_CLI" issue-labels --repo "$REPO" --number "$PR")" || return 1
   local tagged=false pending=false
   printf '%s\n' "$labels" | grep -qxF "$TAGGED" && tagged=true
   printf '%s\n' "$labels" | grep -qxF "$PENDING" && pending=true
@@ -72,7 +90,7 @@ fi
 anchor_ok=false
 [ "$(remote_sha "$ANCHOR")" = "$SHA" ] && anchor_ok=true
 release_present=false
-gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && release_present=true
+python3 "$FORGE_CLI" release-exists --repo "$REPO" --tag "$TAG" >/dev/null 2>&1 && release_present=true
 read_pr_state 2>/dev/null || PR_STATE=unknown
 
 complete=false
@@ -109,17 +127,17 @@ if [ "$release_present" = false ]; then
   ' CHANGELOG.md > "$notes" 2>/dev/null || true
   flags=(--verify-tag --title "$TAG" --notes-file "$notes")
   stable || flags+=(--prerelease)
-  gh release create "$TAG" --repo "$REPO" "${flags[@]}" >&2
+  python3 "$FORGE_CLI" release-create --repo "$REPO" --tag "$TAG" "${flags[@]}" >&2
   echo "converge: created the GitHub Release $TAG"
 fi
 
 case "$PR_STATE" in
   tagged) ;;
   pending)
-    gh pr edit "$PR" --repo "$REPO" --remove-label "$PENDING" --add-label "$TAGGED" >&2
+    python3 "$FORGE_CLI" set-issue-labels --repo "$REPO" --number "$PR" --remove "$PENDING" --add "$TAGGED" >&2
     echo "converge: marked release PR #$PR tagged" ;;
   unlabeled)
-    gh pr edit "$PR" --repo "$REPO" --add-label "$TAGGED" >&2
+    python3 "$FORGE_CLI" set-issue-labels --repo "$REPO" --number "$PR" --add "$TAGGED" >&2
     echo "converge: marked release PR #$PR tagged" ;;
   *)
     echo "converge: could not resolve the release PR for $SHA or read its labels; $TAG is not converged" >&2

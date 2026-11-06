@@ -1,0 +1,1185 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createModelGateway } from "../src/gateway/gateway.js";
+import { createGatewayCapabilityAuth } from "../src/gateway/capability.js";
+import { InMemoryBudgetLedger } from "../src/gateway/budget.js";
+import {
+  GATEWAY_REFUSAL_CODES,
+  validateBudgetLimits,
+  type BudgetLedger,
+  type GatewayBudgetLimits,
+  type GatewayPerRequestBudget,
+  type GatewayProfileEndpoint,
+  type ModelGateway,
+} from "../src/gateway/types.js";
+import { InMemorySecretVault } from "../src/credentials/vault.js";
+import type { VaultEntry } from "../src/credentials/vault.js";
+import type { CredentialBroker } from "../src/credentials/types.js";
+import { runChatRequest } from "../src/transport/transport.js";
+import { TransportFailure } from "../src/transport/http.js";
+import type { ChatRequestInput, ChatRequestOutcome } from "../src/transport/transport.js";
+import type { NormalizedModelResponse, TransportWirePayload } from "../src/model/types.js";
+import { validateUsage } from "../src/state/types.js";
+import { startMockServer } from "./helpers.js";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+
+/**
+ * The model gateway (#765): capability verification, run-scoped budgets,
+ * provider-key isolation, #736-shaped usage recording, and transport
+ * equivalence with direct mode.
+ */
+
+const KEY_MATERIAL = "sk-vault-provider-key-0001";
+const SIGNING_KEY = "controller-signing-key-0123456789";
+const CAPS = validateBudgetLimits({ maxRequests: 40, maxTokens: 200_000, maxCostMicros: 5_000_000 });
+// The operator-trusted per-call reservation bound (never worker input);
+// sized well under the caps so a single request can reserve but many fit.
+const PER_REQUEST = { maxTokens: 20_000, maxCostMicros: 500_000 };
+const RUN_ID = "run-765";
+const PROFILE = "primary";
+
+function clock() {
+  let nowMs = 1_000_000;
+  return {
+    now: () => nowMs,
+    advance(ms: number) {
+      nowMs += ms;
+    },
+  };
+}
+
+function vaultEntry(material: string, profile = PROFILE): VaultEntry {
+  return {
+    reference: "model-primary",
+    scope: {
+      platform: "github",
+      installationId: "inst-1",
+      repoFullName: "o/r",
+      profileName: profile,
+      purpose: "model",
+      unscopedDimensions: [],
+    },
+    material: { value: material, expiresAtMs: 0 },
+  };
+}
+
+const PRICED_PROFILE: GatewayProfileEndpoint = {
+  baseUrl: "https://model.example.invalid/v1",
+  apiFormat: "openai",
+  anthropicVersion: "2023-06-01",
+  requestTimeoutSec: 5,
+  connectTimeoutSec: 5,
+  pricing: { inputMicrosPerMillion: 3_000_000, outputMicrosPerMillion: 15_000_000 },
+};
+
+function stubRunChat(response: NormalizedModelResponse, calls: ChatRequestInput[] = []) {
+  return async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    calls.push(input);
+    return { status: "ok", response, raw: response };
+  };
+}
+
+function okResponse(): NormalizedModelResponse {
+  return {
+    id: "resp-1",
+    object: "chat.completion",
+    model: "m",
+    content: "verdict text",
+    toolCalls: [],
+    finishReason: "stop",
+    usage: { promptTokens: 3, completionTokens: 2, totalTokens: 5 },
+    error: undefined,
+  };
+}
+
+interface Harness {
+  gateway: ModelGateway;
+  ledger: BudgetLedger;
+  calls: ChatRequestInput[];
+  clock: ReturnType<typeof clock>;
+  capability: ReturnType<typeof createGatewayCapabilityAuth>;
+  token: string;
+}
+
+function harness(overrides: {
+  profile?: GatewayProfileEndpoint;
+  profiles?: Record<string, GatewayProfileEndpoint>;
+  vaultEntries?: VaultEntry[];
+  runChat?: (input: ChatRequestInput) => Promise<ChatRequestOutcome>;
+  ledger?: BudgetLedger | undefined;
+  caps?: GatewayBudgetLimits | undefined;
+  perRequestBudget?: GatewayPerRequestBudget | undefined;
+  broker?: CredentialBroker | undefined;
+} = {}): Harness {
+  const time = clock();
+  const caps = overrides.caps ?? CAPS;
+  const perRequestBudget = overrides.perRequestBudget ?? PER_REQUEST;
+  const ledger = overrides.ledger ?? new InMemoryBudgetLedger(caps, { now: time.now });
+  const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now });
+  const profiles = overrides.profiles ?? { [PROFILE]: overrides.profile ?? PRICED_PROFILE };
+  const calls: ChatRequestInput[] = [];
+  const gateway = createModelGateway({
+    caps,
+    perRequestBudget,
+    ledger,
+    capability,
+    broker: overrides.broker ?? new InMemorySecretVault(overrides.vaultEntries ?? [vaultEntry(KEY_MATERIAL)], { now: time.now }),
+    modelCredentialRef: "model-primary",
+    profiles,
+    now: time.now,
+    runChat: overrides.runChat ?? stubRunChat(okResponse(), calls),
+  });
+  return {
+    gateway,
+    ledger,
+    calls,
+    clock: time,
+    capability,
+    token: capability.mint({ runId: RUN_ID, modelProfile: PROFILE, generation: ledger.generationFor(RUN_ID), limits: caps }).token,
+  };
+}
+
+function callInput(overrides: Partial<Parameters<ModelGateway["call"]>[0]> = {}): Parameters<ModelGateway["call"]>[0] {
+  return {
+    token: "",
+    runId: RUN_ID,
+    modelProfile: PROFILE,
+    role: "primary",
+    usageId: "run-765:1",
+    reservationId: "run-765:1",
+    platform: "github",
+    installationId: "inst-1",
+    repoFullName: "o/r",
+    payload: { endpointPath: "/chat/completions", body: { model: "m", stream: false, messages: [{ role: "user", content: "review this" }] } },
+    ...overrides,
+  };
+}
+
+test("gateway: a valid call verifies, reserves, resolves, calls the transport, records and commits", async () => {
+  const h = harness();
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  assert.equal(outcome.response.content, "verdict text");
+  assert.ok(outcome.usage);
+  assert.notEqual(validateUsage(outcome.usage), null, "the usage record must be durable-shaped");
+  assert.equal(outcome.usage.route, PROFILE);
+  assert.equal(outcome.usage.role, "primary");
+  assert.equal(outcome.usage.requestCount, 1);
+  assert.equal(outcome.usage.inputTokens, 3);
+  assert.equal(outcome.usage.outputTokens, 2);
+  assert.equal(outcome.usage.costMicros, 39, "(3*3e6 + 2*15e6)/1e6");
+  assert.equal(outcome.usage.costProvenance, "configured-estimate");
+  // The reservation settled with the ACTUALS, not the estimate.
+  assert.deepEqual(h.ledger.usage(), { requestCount: 1, tokens: 5, costMicros: 39 });
+  // The provider key reached the transport and nowhere else.
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0]!.apiKey, KEY_MATERIAL);
+});
+
+test("gateway: a local model with no monetary pricing records tokens at zero cost, provenance unknown", async () => {
+  const unpriced: GatewayProfileEndpoint = { ...PRICED_PROFILE, pricing: undefined };
+  const h = harness({ profile: unpriced });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  assert.notEqual(validateUsage(outcome.usage), null);
+  assert.equal(outcome.usage.inputTokens, 3);
+  assert.equal(outcome.usage.outputTokens, 2);
+  assert.equal(outcome.usage.costMicros, 0);
+  assert.equal(outcome.usage.costProvenance, "unknown");
+  assert.deepEqual(h.ledger.usage(), { requestCount: 1, tokens: 5, costMicros: 0 });
+});
+
+test("gateway: profile isolation — a request naming another profile is refused before any provider call", async () => {
+  const h = harness({
+    profiles: { [PROFILE]: PRICED_PROFILE, escalated: { ...PRICED_PROFILE, baseUrl: "https://other.example.invalid" } },
+  });
+  const outcome = await h.gateway.call(callInput({ token: h.token, modelProfile: "escalated", usageId: "run-765:2", reservationId: "run-765:2" }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "profile_mismatch");
+    assert.equal(outcome.usage, null);
+    assert.equal(outcome.transportFailure, null);
+  }
+  assert.equal(h.calls.length, 0, "the provider was never called");
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 });
+});
+
+test("gateway: an expired token is refused against the injected clock", async () => {
+  const h = harness();
+  h.clock.advance(3_600_001);
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.equal(outcome.code, "expired");
+  assert.equal(h.calls.length, 0);
+});
+
+test("gateway: a structurally garbage token is refused with invalid_token, never a throw", async () => {
+  const h = harness();
+  // An ABSENT token is invalid_request (structural); everything else that
+  // is structurally well-formed but fails verification is invalid_token.
+  const absent = await h.gateway.call(callInput({ token: "" }));
+  assert.equal(absent.ok, false);
+  if (!absent.ok) assert.equal(absent.code, "invalid_request");
+  for (const token of ["not-a-token", "v1.f4240.deadbeef", h.token.slice(0, -2) + "zz", `${h.token}!`]) {
+    const outcome = await h.gateway.call(callInput({ token }));
+    assert.equal(outcome.ok, false, JSON.stringify(token));
+    if (!outcome.ok) {
+      assert.equal(outcome.code, "invalid_token", token);
+      assert.equal(outcome.usage, null);
+      assert.equal(outcome.transportFailure, null);
+    }
+  }
+  assert.equal(h.calls.length, 0, "no provider call and no reservation");
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 });
+});
+
+test("gateway: an unauthenticated caller cannot enumerate configured profiles", async () => {
+  const h = harness({
+    profiles: { [PROFILE]: PRICED_PROFILE, escalated: { ...PRICED_PROFILE, baseUrl: "https://other.example.invalid" } },
+  });
+  // The same garbage token yields the SAME capability refusal whether the
+  // claimed profile is configured or not: profile existence is not an
+  // oracle before the token verifies.
+  for (const modelProfile of [PROFILE, "escalated", "never-configured"]) {
+    const outcome = await h.gateway.call(callInput({ token: "not-a-token", modelProfile }));
+    assert.equal(outcome.ok, false, modelProfile);
+    if (!outcome.ok) {
+      assert.notEqual(outcome.code, "unknown_profile", modelProfile);
+      assert.equal(outcome.code, "invalid_token", modelProfile);
+    }
+  }
+  assert.equal(h.calls.length, 0);
+});
+
+test("gateway: prototype-chain profile names are looked up on the null-prototype record, never a crash", async () => {
+  const h = harness();
+  for (const modelProfile of ["constructor", "toString", "hasOwnProperty"]) {
+    // A token minted FOR that profile name (the grammar accepts it) passes
+    // verification and must then miss the null-prototype lookup — refused
+    // `unknown_profile`, never a prototype hit or a crash.
+    const token = h.capability.mint({ runId: RUN_ID, modelProfile, generation: 1, limits: CAPS }).token;
+    const outcome = await h.gateway.call(callInput({ token, modelProfile, usageId: "run-765:9", reservationId: "run-765:9" }));
+    assert.equal(outcome.ok, false, modelProfile);
+    if (!outcome.ok) assert.equal(outcome.code, "unknown_profile", modelProfile);
+  }
+  assert.equal(h.calls.length, 0);
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 });
+});
+
+test("gateway: a cancelled run (generation bump) refuses its outstanding token", async () => {
+  const h = harness();
+  h.ledger.cancelRun(RUN_ID);
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "cancelled");
+    assert.equal(outcome.reason, "capability token is bound to a cancelled generation of this run");
+  }
+  assert.equal(h.calls.length, 0);
+});
+
+test("gateway: a token cannot drive another run", async () => {
+  const h = harness();
+  const outcome = await h.gateway.call(callInput({ token: h.token, runId: "run-other", usageId: "run-other:1", reservationId: "run-other:1" }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.equal(outcome.code, "wrong_run");
+  assert.equal(h.calls.length, 0);
+});
+
+test("gateway: budget refusal is its own closed stop reason — never a provider call, never a safety finding", async () => {
+  const h = harness();
+  // Exhaust the token cap with reservations that never settle.
+  assert.ok(h.ledger.reserve({ reservationId: "pre:1", runId: RUN_ID, generation: 1, modelProfile: PROFILE, estimatedTokens: 199_901, estimatedCostMicros: 0 }).ok);
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "budget_exhausted");
+    assert.ok((GATEWAY_REFUSAL_CODES as readonly string[]).includes("budget_exhausted"));
+    assert.equal(outcome.usage, null, "a refused call records no usage");
+    assert.equal(outcome.transportFailure, null);
+  // A refusal is a bounded reason string, not a finding shape: the outcome
+  // carries no severity/category/findings fields a safety verdict could
+  // be confused with.
+  assert.deepEqual(
+    Object.keys(outcome).sort(),
+    ["code", "ok", "reason", "transportFailure", "usage"],
+  );
+  }
+  assert.equal(h.calls.length, 0, "budget refusal happens before the wire");
+});
+
+test("gateway: admission reserves the operator per-call bound, never a worker figure", async () => {
+  const h = harness();
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  // The committed reservation row still carries the bound the gateway BOOKED
+  // for admission (the estimate) alongside the settled actuals. The booked
+  // bound is the operator's per-request budget — the worker no longer has a
+  // budget input at all, so there is nothing it can under-report.
+  const row = h.ledger.rows().find((r) => r.reservationId === "run-765:1");
+  assert.ok(row);
+  assert.equal(row!.estimatedTokens, PER_REQUEST.maxTokens, "admission reserved the operator bound");
+  assert.equal(row!.estimatedCostMicros, PER_REQUEST.maxCostMicros);
+  assert.equal(row!.actualTokens, 5, "but the accounting recorded the provider actuals");
+  assert.equal(row!.actualCostMicros, 39);
+});
+
+test("gateway: the budget is run-scoped — one run never consumes another's allowance", async () => {
+  // Tight caps shared by two runs through ONE ledger.
+  const tight = validateBudgetLimits({ maxRequests: 2, maxTokens: 100, maxCostMicros: 0 });
+  const time = clock();
+  const ledger1 = new InMemoryBudgetLedger(tight, { now: time.now });
+  const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now });
+  const gateway = createModelGateway({
+    caps: tight,
+    perRequestBudget: { maxTokens: 50, maxCostMicros: 0 },
+    ledger: ledger1,
+    capability,
+    broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: time.now }),
+    modelCredentialRef: "model-primary",
+    profiles: { [PROFILE]: { ...PRICED_PROFILE, pricing: undefined } },
+    now: time.now,
+    runChat: stubRunChat(okResponse()),
+  });
+  const tokenA = capability.mint({ runId: "run-a", modelProfile: PROFILE, generation: ledger1.generationFor("run-a"), limits: tight }).token;
+  const tokenB = capability.mint({ runId: "run-b", modelProfile: PROFILE, generation: ledger1.generationFor("run-b"), limits: tight }).token;
+  // Run A exhausts its own 2-request allowance.
+  assert.ok((await gateway.call(callInput({ token: tokenA, runId: "run-a", usageId: "run-a:1", reservationId: "run-a:1" }))).ok);
+  assert.ok((await gateway.call(callInput({ token: tokenA, runId: "run-a", usageId: "run-a:2", reservationId: "run-a:2" }))).ok);
+  const exhausted = await gateway.call(callInput({ token: tokenA, runId: "run-a", usageId: "run-a:3", reservationId: "run-a:3" }));
+  assert.equal(exhausted.ok, false);
+  if (!exhausted.ok) assert.equal(exhausted.code, "budget_exhausted");
+  // Run B still has its FULL allowance — run A's committed rows must not
+  // charge against it (the cross-run bug the review caught).
+  const runB = await gateway.call(callInput({ token: tokenB, runId: "run-b", usageId: "run-b:1", reservationId: "run-b:1" }));
+  assert.ok(runB.ok, JSON.stringify(runB));
+  assert.equal(ledger1.usageFor("run-a").requestCount, 2);
+  assert.equal(ledger1.usageFor("run-b").requestCount, 1);
+});
+
+test("gateway: a squatter pre-occupying another run's reservation id cannot block the victim's call (#1361)", async () => {
+  // An untrusted worker for another run guesses this run's deterministic
+  // reservation id and books it under its OWN run first. Idempotency is
+  // the (runId, reservationId) pair, so the victim's call reserves its own
+  // row and proceeds — the squatter neither mismatches, blocks, nor
+  // learns anything about the id's use by another run.
+  const h = harness();
+  assert.ok(
+    h.ledger.reserve({
+      reservationId: "run-765:1",
+      runId: "run-squatter",
+      generation: 1,
+      modelProfile: PROFILE,
+      estimatedTokens: 10,
+      estimatedCostMicros: 0,
+    }).ok,
+  );
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  assert.equal(h.calls.length, 1, "the provider was called exactly once for the victim run");
+  // The victim settled its OWN same-id row; the squatter's row stays live
+  // and is charged to the squatter's run only.
+  const rows = h.ledger.rows().filter((r) => r.reservationId === "run-765:1");
+  assert.equal(rows.length, 2);
+  assert.equal(rows.find((r) => r.runId === RUN_ID)?.state, "committed");
+  assert.equal(rows.find((r) => r.runId === "run-squatter")?.state, "reserved");
+  assert.deepEqual(h.ledger.usageFor("run-squatter"), { requestCount: 1, tokens: 10, costMicros: 0 });
+});
+
+test("gateway: the provider key never enters the worker-facing surface (serialization + refusal guards)", async () => {
+  // A vault whose model credential is bound to a DIFFERENT profile forces a
+  // credential refusal, exercising the refusal-reason path too.
+  const h = harness({ vaultEntries: [vaultEntry(KEY_MATERIAL, "escalated")] });
+  const refused = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(refused.ok, false);
+  if (!refused.ok) {
+    assert.equal(refused.code, "credential_refused");
+    assert.ok(refused.reason.includes("scope_mismatch"));
+    assert.ok(!refused.reason.includes(KEY_MATERIAL), "refusal reasons never echo material");
+    assert.ok(!JSON.stringify(refused).includes(KEY_MATERIAL));
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the failed handoff refunded");
+
+  const h2 = harness();
+  const outcome = await h2.gateway.call(callInput({ token: h2.token }));
+  assert.ok(outcome.ok);
+  const serialized = JSON.stringify(outcome) + JSON.stringify(h2.gateway) + JSON.stringify(h2.gateway.describe());
+  assert.ok(!serialized.includes(KEY_MATERIAL), "outcomes and gateway diagnostics never carry material");
+  assert.ok(!JSON.stringify(h2.ledger.rows()).includes(KEY_MATERIAL), "reservation rows never carry material");
+  // The transport received the key in its auth-header slot only.
+  assert.equal(h2.calls[0]!.apiKey, KEY_MATERIAL);
+});
+
+test("gateway: a failed request refunds its reservation and records the attempt honestly", async () => {
+  const failing = async (): Promise<ChatRequestOutcome> => ({
+    status: "failure",
+    failure: new TransportFailure("http_status", "upstream returned 503", { status: 503 }),
+  });
+  const h = harness({ runChat: failing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "transport_failure");
+    assert.equal(outcome.transportFailure?.kind, "http_status");
+    assert.notEqual(outcome.usage, null, "the attempt is recorded");
+    assert.notEqual(validateUsage(outcome.usage), null);
+    assert.equal(outcome.usage?.requestCount, 1);
+    assert.equal(outcome.usage?.inputTokens, 0);
+    assert.equal(outcome.usage?.outputTokens, 0);
+    assert.equal(outcome.usage?.costMicros, 0);
+    assert.equal(outcome.usage?.costProvenance, "unknown");
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the reservation was refunded");
+});
+
+test("gateway: a replayed settled reservation id refuses and never re-calls the provider (no double-charge)", async () => {
+  const h = harness();
+  const first = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(first.ok, JSON.stringify(first));
+  const totals = h.ledger.usage();
+  const second = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(second.ok, false);
+  if (!second.ok) {
+    assert.equal(second.code, "reservation_settled");
+    assert.equal(second.usage, null);
+  }
+  assert.equal(h.calls.length, 1, "the provider was called exactly once");
+  assert.deepEqual(h.ledger.usage(), totals, "the accounting did not move");
+});
+test("gateway: a concurrent replay of the same reservation joins the in-flight call — one dispatch, one broker resolve, one commit (#1397)", async () => {
+  // The #1397 reproduction shape: two concurrent `call`s with the SAME
+  // `(runId, reservationId)` while the row is still reserved. The
+  // broker and transport are both deferred so the owner is provably
+  // mid-flight before the replay is issued, and the caps leave room for
+  // exactly ONE request — the replay must never become a second one.
+  const caps = validateBudgetLimits({ maxRequests: 1, maxTokens: 100, maxCostMicros: 0 });
+  const time = clock();
+  const ledger = new InMemoryBudgetLedger(caps, { now: time.now });
+  const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now });
+  const token = capability
+    .mint({ runId: RUN_ID, modelProfile: PROFILE, generation: ledger.generationFor(RUN_ID), limits: caps })
+    .token;
+  let brokerResolves = 0;
+  let releaseBroker!: () => void;
+  const brokerGate = new Promise<void>((resolve) => {
+    releaseBroker = resolve;
+  });
+  const broker: CredentialBroker = {
+    resolve: async () => {
+      brokerResolves += 1;
+      await brokerGate;
+      return { ok: true as const, material: { value: KEY_MATERIAL, expiresAtMs: 0 } };
+    },
+    revoke: () => false,
+    describe: () => ["model-primary"],
+  };
+  const calls: ChatRequestInput[] = [];
+  let releaseTransport!: (outcome: ChatRequestOutcome) => void;
+  const transportGate = new Promise<ChatRequestOutcome>((resolve) => {
+    releaseTransport = resolve;
+  });
+  const runChat = async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    calls.push(input);
+    return transportGate;
+  };
+  const gateway = createModelGateway({
+    caps,
+    perRequestBudget: { maxTokens: 100, maxCostMicros: 0 },
+    ledger,
+    capability,
+    broker,
+    modelCredentialRef: "model-primary",
+    profiles: { [PROFILE]: { ...PRICED_PROFILE, pricing: undefined } },
+    now: time.now,
+    runChat,
+  });
+  const input = callInput({ token });
+  const first = gateway.call(input);
+  const second = gateway.call(input);
+  releaseBroker();
+  releaseTransport({ status: "ok", response: okResponse(), raw: okResponse() });
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(calls.length, 1, "at most one provider dispatch occurred");
+  assert.equal(brokerResolves, 1, "the broker resolved exactly once — the joiner never re-resolved the credential");
+  assert.ok(a.ok, JSON.stringify(a));
+  assert.ok(b.ok, JSON.stringify(b));
+  assert.strictEqual(a, b, "the duplicate caller shared the owner's in-flight outcome");
+  assert.deepEqual(ledger.usage(), { requestCount: 1, tokens: 5, costMicros: 0 }, "only one call was charged");
+  const rows = ledger.rows();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.state, "committed", "the owner's reservation was committed once");
+  assert.equal(rows[0]?.actualRequestCount, 1);
+});
+test("gateway: a concurrent replay with a mismatched reservation identity is refused, never joins (#1397)", async () => {
+  const calls: ChatRequestInput[] = [];
+  let releaseTransport!: (outcome: ChatRequestOutcome) => void;
+  const transportGate = new Promise<ChatRequestOutcome>((resolve) => {
+    releaseTransport = resolve;
+  });
+  const runChat = async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    calls.push(input);
+    return transportGate;
+  };
+  const h = harness({
+    runChat,
+    profiles: { [PROFILE]: PRICED_PROFILE, escalated: { ...PRICED_PROFILE, baseUrl: "https://other.example.invalid" } },
+  });
+  const escalatedToken = h.capability
+    .mint({ runId: RUN_ID, modelProfile: "escalated", generation: h.ledger.generationFor(RUN_ID), limits: CAPS })
+    .token;
+  const owner = h.gateway.call(callInput({ token: h.token }));
+  const replay = await h.gateway.call(
+    callInput({ token: escalatedToken, modelProfile: "escalated", usageId: "run-765:9", reservationId: "run-765:1" }),
+  );
+  assert.equal(replay.ok, false);
+  if (!replay.ok) {
+    assert.equal(replay.code, "reservation_mismatch", "the ledger's identity check stands between the replay and the join gate");
+    assert.equal(replay.usage, null);
+  }
+  assert.equal(calls.length, 1, "the mismatched replay dispatched nothing");
+  assert.equal(h.ledger.rows()[0]?.modelProfile, PROFILE, "the owner's row kept its own identity");
+  assert.equal(h.ledger.rows()[0]?.state, "reserved");
+  releaseTransport({ status: "ok", response: okResponse(), raw: okResponse() });
+  const ownerOutcome = await owner;
+  assert.ok(ownerOutcome.ok, JSON.stringify(ownerOutcome));
+  assert.deepEqual(h.ledger.usage(), { requestCount: 1, tokens: 5, costMicros: 39 });
+});
+test("gateway: a concurrent replay shares the owner's FAILURE without settling the reservation itself (#1397)", async () => {
+  const calls: ChatRequestInput[] = [];
+  let releaseTransport!: (outcome: ChatRequestOutcome) => void;
+  const transportGate = new Promise<ChatRequestOutcome>((resolve) => {
+    releaseTransport = resolve;
+  });
+  const runChat = async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    calls.push(input);
+    return transportGate;
+  };
+  const h = harness({ runChat });
+  const input = callInput({ token: h.token });
+  const first = h.gateway.call(input);
+  const second = h.gateway.call(input);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(calls.length, 1, "the replay did not dispatch a second provider call");
+  const row = h.ledger.rows()[0];
+  assert.equal(row?.state, "reserved", "the joiner's arrival did not settle the owner's reservation mid-flight");
+  releaseTransport({
+    status: "failure",
+    failure: new TransportFailure("http_status", "upstream returned 503", { status: 503 }),
+  });
+  const a = await first;
+  const b = await second;
+  assert.equal(calls.length, 1);
+  assert.equal(a.ok, false);
+  assert.equal(b.ok, false);
+  assert.strictEqual(a, b, "the joiner received the owner's transport-failure outcome");
+  if (!a.ok) {
+    assert.equal(a.code, "transport_failure");
+    assert.equal(a.transportFailure?.kind, "http_status");
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the owner's refund stands, applied once");
+  assert.equal(h.ledger.rows()[0]?.state, "refunded");
+  assert.equal(h.ledger.rows().length, 1, "the failure path created no second row");
+});
+test("gateway: different reservation ids of the same run account independently — no cross-call joining (#1397)", async () => {
+  const h = harness({ profile: { ...PRICED_PROFILE, pricing: undefined } });
+  const [a, b] = await Promise.all([
+    h.gateway.call(callInput({ token: h.token, reservationId: "run-765:r1", usageId: "run-765:1" })),
+    h.gateway.call(callInput({ token: h.token, reservationId: "run-765:r2", usageId: "run-765:2" })),
+  ]);
+  assert.ok(a.ok, JSON.stringify(a));
+  assert.ok(b.ok, JSON.stringify(b));
+  assert.notStrictEqual(a, b, "distinct reservations are distinct calls");
+  assert.equal(h.calls.length, 2, "each reservation dispatched its own provider call");
+  assert.deepEqual(h.ledger.usage(), { requestCount: 2, tokens: 10, costMicros: 0 });
+  assert.equal(h.ledger.rows().length, 2);
+});
+test("gateway: another run reusing the same reservation id while one is in flight dispatches independently (#1361 x #1397)", async () => {
+  const calls: ChatRequestInput[] = [];
+  let releaseTransport!: (outcome: ChatRequestOutcome) => void;
+  const transportGate = new Promise<ChatRequestOutcome>((resolve) => {
+    releaseTransport = resolve;
+  });
+  const runChat = async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    calls.push(input);
+    return transportGate;
+  };
+  const h = harness({ runChat, profile: { ...PRICED_PROFILE, pricing: undefined } });
+  const otherRun = "run-765-b";
+  const otherToken = h.capability
+    .mint({ runId: otherRun, modelProfile: PROFILE, generation: h.ledger.generationFor(otherRun), limits: CAPS })
+    .token;
+  const owner = h.gateway.call(callInput({ token: h.token }));
+  const foreign = h.gateway.call(callInput({ token: otherToken, runId: otherRun, usageId: "run-765-b:1", reservationId: "run-765:1" }));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(calls.length, 2, "the other run's identical reservation id dispatched its OWN provider call");
+  releaseTransport({ status: "ok", response: okResponse(), raw: okResponse() });
+  const [a, b] = await Promise.all([owner, foreign]);
+  assert.ok(a.ok, JSON.stringify(a));
+  assert.ok(b.ok, JSON.stringify(b));
+  assert.notStrictEqual(a, b, "cross-run callers never share an in-flight outcome");
+  assert.deepEqual(h.ledger.usageFor(RUN_ID), { requestCount: 1, tokens: 5, costMicros: 0 });
+  assert.deepEqual(h.ledger.usageFor(otherRun), { requestCount: 1, tokens: 5, costMicros: 0 });
+});
+
+test("gateway: restart/retry — a re-seeded ledger replays idempotently and keeps the caps binding", async () => {
+  const h = harness();
+  const first = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(first.ok, JSON.stringify(first));
+  // The controller restarts; the durable rows re-seed a fresh ledger.
+  const restarted = new InMemoryBudgetLedger(CAPS, { now: h.clock.now, state: h.ledger.durableState() });
+  const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: h.clock.now });
+  const calls: ChatRequestInput[] = [];
+  const gateway2 = createModelGateway({
+    caps: CAPS,
+    perRequestBudget: PER_REQUEST,
+    ledger: restarted,
+    capability,
+    broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: h.clock.now }),
+    modelCredentialRef: "model-primary",
+    profiles: { [PROFILE]: PRICED_PROFILE },
+    now: h.clock.now,
+    runChat: stubRunChat(okResponse(), calls),
+  });
+  const token2 = capability.mint({ runId: RUN_ID, modelProfile: PROFILE, generation: restarted.generationFor(RUN_ID), limits: CAPS }).token;
+  const replay = await gateway2.call(callInput({ token: token2 }));
+  assert.equal(replay.ok, false);
+  if (!replay.ok) assert.equal(replay.code, "reservation_settled");
+  assert.equal(calls.length, 0, "a replayed settled reservation never re-calls the provider");
+  assert.deepEqual(restarted.usage(), h.ledger.usage());
+  // The re-seeded caps still bind: with the run's token allowance nearly
+  // spent, a fresh gateway request — which reserves the operator per-call
+  // bound, never a worker figure — refuses on the token cap.
+  assert.ok(
+    restarted.reserve({ reservationId: "pre:2", runId: RUN_ID, generation: restarted.generationFor(RUN_ID), modelProfile: PROFILE, estimatedTokens: 180_000, estimatedCostMicros: 0 }).ok,
+  );
+  const fresh = await gateway2.call(
+    callInput({ token: token2, reservationId: "run-765:2", usageId: "run-765:2" }),
+  );
+  assert.equal(fresh.ok, false);
+  if (!fresh.ok) assert.equal(fresh.code, "budget_exhausted");
+  assert.equal(calls.length, 0);
+});
+
+test("gateway: direct mode vs gateway mode — the same wire request shape and outcome mapping", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.end(JSON.stringify({ id: "1", choices: [{ message: { content: "hi" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } }));
+  });
+  try {
+    const payload: TransportWirePayload = {
+      endpointPath: "/chat/completions",
+      body: { model: "m", stream: false, messages: [{ role: "user", content: "review this" }] },
+    };
+    const direct = await runChatRequest({
+      baseUrl: server.url,
+      apiFormat: "openai",
+      payload,
+      apiKey: KEY_MATERIAL,
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 5,
+      connectTimeoutSec: 5,
+    });
+    const time = clock();
+    const ledger = new InMemoryBudgetLedger(CAPS, { now: time.now });
+    const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now });
+    const gateway = createModelGateway({
+      caps: CAPS,
+      perRequestBudget: PER_REQUEST,
+      ledger,
+      capability,
+      broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: time.now }),
+      modelCredentialRef: "model-primary",
+      profiles: { [PROFILE]: { ...PRICED_PROFILE, baseUrl: server.url } },
+      now: time.now,
+    });
+    const token = capability.mint({ runId: RUN_ID, modelProfile: PROFILE, generation: 1, limits: CAPS }).token;
+    const throughGateway = await gateway.call(callInput({ token }));
+    assert.equal(direct.status, "ok");
+    assert.ok(throughGateway.ok, JSON.stringify(throughGateway));
+    assert.equal(server.requests.length, 2);
+    const [directReq, gatewayReq] = [server.requests[0]!, server.requests[1]!];
+    assert.equal(directReq.headers.authorization, `Bearer ${KEY_MATERIAL}`);
+    assert.equal(gatewayReq.headers.authorization, directReq.headers.authorization);
+    assert.deepEqual(JSON.parse(gatewayReq.body), JSON.parse(directReq.body));
+    // The key travels in the auth header only — never the URL or the body.
+    assert.ok(!gatewayReq.body.includes(KEY_MATERIAL));
+    if (direct.status === "ok" && throughGateway.ok) {
+      assert.equal(throughGateway.response.content, direct.response.content);
+      assert.deepEqual(throughGateway.response.usage, direct.response.usage);
+      assert.equal(throughGateway.usage.inputTokens, 3);
+      assert.equal(throughGateway.usage.outputTokens, 2);
+      assert.equal(throughGateway.usage.costProvenance, "configured-estimate");
+      assert.deepEqual(ledger.usage(), { requestCount: 1, tokens: 5, costMicros: 39 });
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("gateway: cancellation survives a restart — a gen-1 token still refuses after a re-seed", async () => {
+  const h = harness();
+  h.ledger.cancelRun(RUN_ID);
+  // The controller restarts and re-seeds from the durable rows + generation rows.
+  const restarted = new InMemoryBudgetLedger(CAPS, { now: h.clock.now, state: h.ledger.durableState() });
+  const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: h.clock.now });
+  const calls: ChatRequestInput[] = [];
+  const gateway2 = createModelGateway({
+    caps: CAPS,
+    perRequestBudget: PER_REQUEST,
+    ledger: restarted,
+    capability,
+    broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: h.clock.now }),
+    modelCredentialRef: "model-primary",
+    profiles: { [PROFILE]: PRICED_PROFILE },
+    now: h.clock.now,
+    runChat: stubRunChat(okResponse(), calls),
+  });
+  // The outstanding gen-1 token (the harness minted it before the bump).
+  const outcome = await gateway2.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "cancelled");
+    assert.equal(outcome.usage, null);
+  }
+  assert.equal(calls.length, 0, "a resurrected cancelled token never reaches the provider");
+  // And a freshly minted gen-2 token works on the re-seeded ledger.
+  const freshToken = capability.mint({ runId: RUN_ID, modelProfile: PROFILE, generation: restarted.generationFor(RUN_ID), limits: CAPS }).token;
+  const fresh = await gateway2.call(callInput({ token: freshToken, usageId: "run-765:2", reservationId: "run-765:2" }));
+  assert.ok(fresh.ok, JSON.stringify(fresh));
+  assert.equal(calls.length, 1);
+});
+
+test("gateway: a hostile provider usage shape fails closed — refund plus an honest attempt row", async () => {
+  const hostileUsage = {
+    ...okResponse(),
+    usage: { promptTokens: "5", completionTokens: 2, totalTokens: 7 },
+  } as unknown as NormalizedModelResponse;
+  const h = harness({ runChat: stubRunChat(hostileUsage) });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "usage_record_invalid");
+    assert.equal(outcome.transportFailure, null);
+    assert.notEqual(outcome.usage, null, "the provider-billed attempt is never erased from the accounting");
+    assert.notEqual(validateUsage(outcome.usage), null);
+    assert.equal(outcome.usage?.requestCount, 1);
+    assert.equal(outcome.usage?.inputTokens, 0);
+    assert.equal(outcome.usage?.costProvenance, "unknown");
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the reservation was refunded");
+});
+
+test("gateway: an unexpected transport-seam throw becomes a typed gateway_error refusal with refund (call never rejects)", async () => {
+  const throwing = async (): Promise<ChatRequestOutcome> => {
+    throw new Error("boom — internal seam failure");
+  };
+  const h = harness({ runChat: throwing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "gateway_error");
+    assert.ok(!outcome.reason.includes("boom"), "the refusal reason is fixed, never an echoed error");
+    assert.equal(outcome.usage, null);
+    assert.equal(outcome.transportFailure, null);
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the reservation was refunded");
+  // And a broker seam throw is converted the same way.
+  const throwingBroker = {
+    resolve: () => Promise.reject(new Error("vault exploded")),
+    revoke: () => false,
+    describe: () => [],
+  };
+  const h2 = harness();
+  const gateway2 = createModelGateway({
+    caps: CAPS,
+    perRequestBudget: PER_REQUEST,
+    ledger: h2.ledger,
+    capability: h2.capability,
+    broker: throwingBroker,
+    modelCredentialRef: "model-primary",
+    profiles: { [PROFILE]: PRICED_PROFILE },
+    now: h2.clock.now,
+    runChat: stubRunChat(okResponse(), h2.calls),
+  });
+  const refused = await gateway2.call(callInput({ token: h2.token }));
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.equal(refused.code, "gateway_error");
+  assert.deepEqual(h2.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 });
+});
+
+test("gateway: the catch-path refund never re-reads the caller's input — call stays total over a hostile input object", async () => {
+  // #1361 review: once the ledger has RECORDED the reservation, the
+  // catch-path refund must not depend on re-reading the caller-owned
+  // `input` — a getter-backed object that turns hostile after that point
+  // would turn the recovery path itself into a rejection. The wrapped
+  // ledger marks the moment a row exists; from then on every `runId`
+  // access on the input throws. The transport seam throws too, driving
+  // the catch path, which must refund from the run identity captured from
+  // the ledger's own frozen row instead of touching `input` again. A
+  // refund under the wrong key would leave the reservation live, so the
+  // zeroed usage proves the pair-scoped refund hit the row.
+  const inner = new InMemoryBudgetLedger(CAPS);
+  let armed = false;
+  const ledger: BudgetLedger = {
+    caps: () => inner.caps(),
+    reserve: (reserveInput) => {
+      const result = inner.reserve(reserveInput);
+      if (result.ok) armed = true;
+      return result;
+    },
+    commit: (runId, reservationId, actual) => inner.commit(runId, reservationId, actual),
+    refund: (runId, reservationId) => inner.refund(runId, reservationId),
+    usage: () => inner.usage(),
+    usageFor: (runId) => inner.usageFor(runId),
+    generationFor: (runId) => inner.generationFor(runId),
+    cancelRun: (runId) => inner.cancelRun(runId),
+    rows: () => inner.rows(),
+    generationRows: () => inner.generationRows(),
+    durableState: () => inner.durableState(),
+  };
+  let seamReached = false;
+  const throwing = async (): Promise<ChatRequestOutcome> => {
+    seamReached = true;
+    throw new Error("boom — internal seam failure");
+  };
+  const h = harness({ runChat: throwing, ledger });
+  const outcome = await h.gateway.call({
+    ...callInput({ token: h.token }),
+    get runId(): string {
+      if (armed) throw new Error("hostile re-read after reserve");
+      return RUN_ID;
+    },
+  });
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.equal(outcome.code, "gateway_error");
+  assert.equal(armed, true, "the reservation was recorded before the seam threw");
+  assert.equal(seamReached, true, "the transport seam was reached and threw");
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the reservation was refunded through the captured run identity");
+});
+
+test("gateway: the response-byte ceiling is operator config only — the worker cannot raise or set it", async () => {
+  const capped: GatewayProfileEndpoint = { ...PRICED_PROFILE, maxResponseBytes: 1024 };
+  const h = harness({ profile: capped });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  assert.equal(h.calls[0]!.maxResponseBytes, 1024, "the transport receives the operator's ceiling");
+  const uncapped = harness({ profile: { ...PRICED_PROFILE } });
+  await uncapped.gateway.call(callInput({ token: uncapped.token }));
+  assert.equal(uncapped.calls[0]!.maxResponseBytes, undefined, "no ceiling is invented for an unconfigured profile");
+});
+
+test("gateway: diagnostics serialize to names, caps, and references only", () => {
+  const h = harness();
+  const described = h.gateway.describe();
+  assert.deepEqual(described.caps, CAPS);
+  assert.deepEqual(described.perRequestBudget, PER_REQUEST, "the operator-bound the gateway books is observable");
+  assert.equal(described.modelCredentialRef, "model-primary");
+  assert.deepEqual(described.profileNames, [PROFILE]);
+  const asJson = JSON.parse(JSON.stringify(h.gateway)) as Record<string, unknown>;
+  assert.deepEqual(asJson, { gateway: "model", ...JSON.parse(JSON.stringify(described)) });
+});
+
+test("gateway: a token whose profile has no endpoint configuration is refused", async () => {
+  const h = harness({ profiles: {} });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.equal(outcome.code, "unknown_profile");
+  assert.equal(h.calls.length, 0);
+});
+
+test("gateway: malformed call inputs fail closed with invalid_request before anything runs", async () => {
+  const h = harness();
+  for (const malformed of [
+    callInput({ token: h.token, runId: "bad run id" }),
+    callInput({ token: h.token, modelProfile: "" }),
+    callInput({ token: h.token, role: "not-a-role" as never }),
+    callInput({ token: h.token, platform: "gitea" as never }),
+    callInput({ token: h.token, repoFullName: "" }),
+    callInput({ token: h.token, payload: null as never }),
+  ]) {
+    const outcome = await h.gateway.call(malformed);
+    assert.equal(outcome.ok, false);
+    if (!outcome.ok) {
+      assert.equal(outcome.code, "invalid_request", outcome.reason);
+      assert.equal(outcome.usage, null);
+    }
+  }
+  assert.equal(h.calls.length, 0);
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 });
+});
+
+test("gateway: construction fails closed on disagreeing caps, secret-shaped references, and bad endpoints", () => {
+  const time = clock();
+  const ledger = new InMemoryBudgetLedger(CAPS, { now: time.now });
+  const capability = createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now });
+  const base = {
+    perRequestBudget: PER_REQUEST,
+    ledger,
+    capability,
+    broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: time.now }),
+    modelCredentialRef: "model-primary",
+    profiles: { [PROFILE]: PRICED_PROFILE },
+    now: time.now,
+  };
+  assert.throws(
+    () => createModelGateway({ ...base, caps: validateBudgetLimits({ maxRequests: 41, maxTokens: 200_000, maxCostMicros: 5_000_000 }) }),
+    /caps/,
+  );
+  // The per-request reservation bound is validated against the run caps.
+  assert.throws(() => createModelGateway({ ...base, caps: CAPS, perRequestBudget: { maxTokens: 0, maxCostMicros: 0 } }), /per-request/);
+  assert.throws(() => createModelGateway({ ...base, caps: CAPS, perRequestBudget: { maxTokens: 200_001, maxCostMicros: 0 } }), /token cap/);
+  assert.throws(() => createModelGateway({ ...base, caps: CAPS, perRequestBudget: { maxTokens: 100, maxCostMicros: 5_000_001 } }), /cost cap/);
+  assert.throws(() => createModelGateway({ ...base, caps: CAPS, modelCredentialRef: "sk-literal-secret-123" }), /secret/);
+  assert.throws(
+    () =>
+      createModelGateway({
+        ...base,
+        caps: CAPS,
+        profiles: { [PROFILE]: { ...PRICED_PROFILE, baseUrl: "https://user:pass@model.example.invalid/v1" } },
+      }),
+      /baseUrl/,
+  );
+  assert.throws(
+    () =>
+      createModelGateway({
+        ...base,
+        caps: CAPS,
+        profiles: { [PROFILE]: { ...PRICED_PROFILE, baseUrl: "ftp://model.example.invalid" } },
+      }),
+      /baseUrl/,
+  );
+  assert.throws(
+    () => createModelGateway({ ...base, caps: CAPS, profiles: { [PROFILE]: { ...PRICED_PROFILE, requestTimeoutSec: 0 } } }),
+  );
+  assert.throws(
+    () =>
+      createModelGateway({
+        ...base,
+        caps: CAPS,
+        profiles: { [PROFILE]: { ...PRICED_PROFILE, pricing: { inputMicrosPerMillion: -1, outputMicrosPerMillion: 0 } } },
+      }),
+  );
+});
+
+test("gateway: a provider that reflects the credential into the raw body is masked before it reaches the worker", async () => {
+  // A provider (or a hostile endpoint posing as one) can quote the
+  // credential it was given straight back into its own answer. The raw body
+  // is a worker-facing surface, so the gateway masks it before it leaves.
+  const echoing = async (): Promise<ChatRequestOutcome> => ({
+    status: "ok",
+    response: okResponse(),
+    raw: {
+      echo: `your Authorization header was Bearer ${KEY_MATERIAL}`,
+      nested: { again: KEY_MATERIAL, list: [KEY_MATERIAL] },
+    },
+  });
+  const h = harness({ runChat: echoing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  const raw = JSON.stringify(outcome.raw);
+  assert.ok(!raw.includes(KEY_MATERIAL), "the reflected credential never reaches the worker-facing surface");
+  assert.ok(raw.includes("⟦•⟧"), "the reflection is masked in place, not silently dropped");
+  assert.ok(!JSON.stringify(outcome).includes(KEY_MATERIAL), "no outcome field carries the credential");
+  // The call itself still succeeded: masking a diagnostic surface never
+  // turns a provider answer into a refusal.
+  assert.equal(outcome.usage.inputTokens, 3);
+});
+
+test("gateway: a completion that carries the credential fails the call closed instead of publishing it", async () => {
+  const echoing = async (): Promise<ChatRequestOutcome> => ({
+    status: "ok",
+    response: { ...okResponse(), content: `the model key is ${KEY_MATERIAL}` },
+    raw: { content: "ok" },
+  });
+  const h = harness({ runChat: echoing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "provider_response_unsafe");
+    assert.ok(!JSON.stringify(outcome).includes(KEY_MATERIAL), "the refusal carries no credential");
+    assert.ok(!outcome.reason.includes(KEY_MATERIAL), "the refusal reason is fixed, never an echo");
+    // The provider billed the call: the attempt is recorded honestly.
+    assert.notEqual(outcome.usage, null);
+    assert.equal(outcome.usage?.requestCount, 1);
+    assert.equal(outcome.usage?.inputTokens, 0);
+    assert.equal(outcome.usage?.costProvenance, "unknown");
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the reservation was refunded");
+});
+
+test("gateway: a transport failure body that echoes the credential is masked", async () => {
+  const failing = async (): Promise<ChatRequestOutcome> => ({
+    status: "failure",
+    failure: new TransportFailure("http_status", `upstream rejected the request (${KEY_MATERIAL})`, {
+      status: 401,
+      body: JSON.stringify({ error: `invalid Authorization: Bearer ${KEY_MATERIAL}` }),
+    }),
+  });
+  const h = harness({ runChat: failing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "transport_failure");
+    assert.equal(outcome.transportFailure?.kind, "http_status");
+    assert.equal(outcome.transportFailure?.status, 401, "the typed failure shape is preserved");
+    assert.ok(!JSON.stringify(outcome).includes(KEY_MATERIAL), "the failure body never carries the credential");
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 });
+});
+
+test("gateway: operator extra headers reach the transport exactly as they do in direct mode", async () => {
+  const proxyToken = "proxy-token-abc-123";
+  const calls: ChatRequestInput[] = [];
+  const withHeaders: GatewayProfileEndpoint = {
+    ...PRICED_PROFILE,
+    extraHeaders: { "x-litellm-session-id": "sess-42", "x-proxy-token": proxyToken },
+  };
+  const echoing = async (input: ChatRequestInput): Promise<ChatRequestOutcome> => {
+    calls.push(input);
+    return { status: "ok", response: okResponse(), raw: { echoed: `proxy said ${proxyToken}` } };
+  };
+  const h = harness({ profile: withHeaders, runChat: echoing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  assert.deepEqual(
+    calls[0]!.extraHeaders,
+    { "x-litellm-session-id": "sess-42", "x-proxy-token": proxyToken },
+    "the transport receives the operator's headers",
+  );
+  // A header value is secret-shaped often enough (proxy tokens) that it is
+  // masked like the provider credential on every response surface.
+  assert.ok(!JSON.stringify(outcome.raw).includes(proxyToken), "an echoed header value never reaches the worker");
+  // A profile without configured headers sends none — nothing is invented.
+  const plain = harness();
+  await plain.gateway.call(callInput({ token: plain.token }));
+  assert.equal(plain.calls[0]!.extraHeaders, undefined);
+});
+
+test("gateway: an invalid operator extra-header set fails closed at construction", () => {  const time = clock();
+  const base = {
+    caps: CAPS,
+    perRequestBudget: PER_REQUEST,
+    ledger: new InMemoryBudgetLedger(CAPS, { now: time.now }),
+    capability: createGatewayCapabilityAuth({ key: SIGNING_KEY, now: time.now }),
+    broker: new InMemorySecretVault([vaultEntry(KEY_MATERIAL)], { now: time.now }),
+    modelCredentialRef: "model-primary",
+    now: time.now,
+  };
+  const withHeaders = (extraHeaders: Record<string, string>) =>
+    createModelGateway({ ...base, profiles: { [PROFILE]: { ...PRICED_PROFILE, extraHeaders } } });
+  // The transport's own fence: the auth header the gateway authenticates
+  // with can never be overridden by an operator's extra headers...
+  assert.throws(() => withHeaders({ authorization: "Bearer other" }), /extraHeaders/);
+  // ...a malformed header name fails...
+  assert.throws(() => withHeaders({ "bad name": "value" }), /extraHeaders/);
+  // ...a control character in a value fails (request splitting)...
+  assert.throws(() => withHeaders({ "x-a": "line\nbreak" }), /extraHeaders/);
+  // ...and a non-string value fails closed too.
+  assert.throws(() => withHeaders({ "x-a": 7 as unknown as string }), /extraHeaders/);
+});
+
+test("gateway: a provider that reflects the credential into the response metadata is refused, not published", async () => {
+  // `id`, `model` and `finishReason` are provider-authored strings copied
+  // verbatim out of the provider body — echo surfaces exactly like the
+  // completion text, so the content gate covers them too.
+  const echoing = async (): Promise<ChatRequestOutcome> => ({
+    status: "ok",
+    response: { ...okResponse(), id: `resp-${KEY_MATERIAL}`, model: KEY_MATERIAL, finishReason: KEY_MATERIAL },
+    raw: { ok: true },
+  });
+  const h = harness({ runChat: echoing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "provider_response_unsafe");
+    assert.ok(!JSON.stringify(outcome).includes(KEY_MATERIAL), "the echoed credential never reaches the worker");
+  }
+  assert.deepEqual(h.ledger.usage(), { requestCount: 0, tokens: 0, costMicros: 0 }, "the reservation was refunded");
+});
+
+test("gateway: a credential with a JSON-escaped character is caught wherever the provider writes it", async () => {
+  // A credential carrying a quote is written ESCAPED inside a JSON
+  // string, so neither the raw spelling nor a stringify-and-search finds
+  // it: the gateway scans leaf by leaf and masks the escaped spelling too.
+  const quoted = 'sk-vault-"quoted"-key-01';
+  const echoing = async (): Promise<ChatRequestOutcome> => ({
+    status: "ok",
+    response: {
+      ...okResponse(),
+      toolCalls: [{ id: "call-1", type: "function", function: { name: "read", arguments: JSON.stringify({ path: quoted }) } }],
+    },
+    raw: { echoed: JSON.stringify({ path: quoted }) },
+  });
+  const h = harness({ vaultEntries: [vaultEntry(quoted)], runChat: echoing });
+  const outcome = await h.gateway.call(callInput({ token: h.token }));
+  assert.equal(outcome.ok, false, "the escaped echo is caught, not published");
+  if (!outcome.ok) {
+    assert.equal(outcome.code, "provider_response_unsafe");
+    assert.ok(!JSON.stringify(outcome).includes(quoted), "the escaped credential never reaches the worker");
+  }
+  // The raw-body surface masks the escaped spelling too.
+  const rawOnly = async (): Promise<ChatRequestOutcome> => ({
+    status: "ok",
+    response: okResponse(),
+    raw: { echoed: JSON.stringify({ path: quoted }) },
+  });
+  const h2 = harness({ vaultEntries: [vaultEntry(quoted)], runChat: rawOnly });
+  const masked = await h2.gateway.call(callInput({ token: h2.token }));
+  assert.ok(masked.ok, JSON.stringify(masked));
+  assert.ok(!JSON.stringify(masked.raw).includes("quoted"), "the escaped credential is masked out of the raw body");
+});
+
+test("gateway: Action mode stays unaffected — nothing outside the library imports it", () => {
+  // "Gateway mode is not required by Action mode" is an acceptance
+  // criterion, so it gets a deterministic guard rather than a promise in
+  // the design doc: no file in the shipped runtime tree outside
+  // src/gateway/ may import the library, and neither the shipped action
+  // definition nor its contract may expose a gateway surface.
+  const repoRoot = resolve(__dirname, "..", "..");
+  const offenders: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (full === join(repoRoot, "src", "gateway")) continue;
+        walk(full);
+        continue;
+      }
+      if (!/\.(?:ts|mts|cts|js|mjs|cjs)$/.test(entry.name)) continue;
+      for (const specifier of importSpecifiers(readFileSync(full, "utf8"))) {
+        if (specifier.split("/").includes("gateway")) {
+          offenders.push(`${relative(repoRoot, full)} -> ${specifier}`);
+        }
+      }
+    }
+  };
+  walk(join(repoRoot, "src"));
+  assert.deepEqual(offenders, [], "the gateway library stays unwired from the shipped runtime tree");
+  for (const definition of ["action.yml", "contracts/action-v3.yml"]) {
+    const text = readFileSync(join(repoRoot, definition), "utf8");
+    assert.ok(!/gateway/i.test(text), `${definition} exposes no gateway surface`);
+  }
+});
+
+/** Every module specifier a source file imports, in every form the tree
+ * can use: a static `from "…"`, a bare `import "…"`, a dynamic
+ * `import("…")`, and a CommonJS `require("…")`, in either quote style. */
+function importSpecifiers(source: string): string[] {
+  const found: string[] = [];
+  const patterns = [
+    /\bfrom\s*["']([^"']+)["']/g,
+    /\bimport\s*["']([^"']+)["']/g,
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+    /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      if (match[1] !== undefined) found.push(match[1]);
+    }
+  }
+  return found;
+}
+

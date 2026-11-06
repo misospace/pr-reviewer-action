@@ -13,6 +13,7 @@ export {
   isTerminalState,
   prIdentityKey,
   canTransition,
+  transitionPath,
   newJobRecord,
   withState,
 } from "./types.js";
@@ -37,3 +38,6 @@ export type {
   EnqueueResult,
 } from "./scheduler.js";
 export { ReviewQueueController } from "./scheduler.js";
+
+export type { CompactionOptions } from "./compaction.js";
+export { compactQueueSnapshot } from "./compaction.js";

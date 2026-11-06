@@ -11,7 +11,7 @@
  * its body starts with the managed marker — never matched by author.
  */
 
-import { DEFAULT_MANAGED_MARKER, cleanBody, compareKeys, fence, headerField, parseTimestamp } from "./pr-thread.js";
+import { DEFAULT_MANAGED_MARKER, cleanBody, compareKeys, fence, headerField, parseTimestamp, truncateBody } from "./pr-thread.js";
 
 export const SCHEMA_VERSION = 1;
 export const MAX_REQUESTS_DEFAULT = 20;
@@ -150,14 +150,6 @@ export function selectOutstanding(
   return [outstanding.slice(0, Math.max(1, maxEntries)), outstanding.length];
 }
 
-function truncateBody(body: string): string {
-  if (Buffer.byteLength(body, "utf8") <= PER_BODY_MAX_BYTES) return body;
-  let clipped = Buffer.from(body, "utf8").subarray(0, PER_BODY_MAX_BYTES).toString("utf8");
-  const newline = clipped.lastIndexOf("\n");
-  if (newline >= 0) clipped = clipped.slice(0, newline);
-  return `${clipped.trimEnd()}\n[review truncated]`;
-}
-
 function entryHeading(entry: OutstandingHumanReview): string {
   const commit = entry.commitId;
   const commitDisplay = commit ? `\`${commit.slice(0, 12)}\`` : "unknown commit";
@@ -168,7 +160,7 @@ function entryHeading(entry: OutstandingHumanReview): string {
 }
 
 function renderEntry(entry: OutstandingHumanReview): string {
-  let body = truncateBody(cleanBody(entry.body));
+  let body = truncateBody(cleanBody(entry.body), PER_BODY_MAX_BYTES, "[review truncated]");
   if (body === "") body = "(empty after redaction)";
   return `${entryHeading(entry)}${fence(body)}\n`;
 }

@@ -3,9 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from pr_reviewer.http_safe import (  # noqa: E402
+    ConflictingCredentialChannels,
+    redact_url_userinfo,
+    resolve_credential_channel,
+    UnsafeEndpointUrl,
+)
 
 LANE_PLAN_VERSION = 1
 SUPPORTED_KINDS = ("primary_only", "same_model_specialists", "heterogeneous_specialists")
@@ -17,6 +29,10 @@ SPECIALIST_ENV_KEYS = (
     "AI_SPECIALIST_SECURITY_MODEL", "AI_SPECIALIST_TESTS_MODEL",
 )
 LANE_ID_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
+# Report-facing URL fields of the lane projection. An operator endpoint can
+# carry a credential in its userinfo, and the projection is recorded in shared
+# eval reports (#1417), so every URL in it is redacted before it is written.
+LANE_URL_FIELDS = frozenset({"base_url", "url", "endpoint"})
 
 
 class LaneConfigError(ValueError):
@@ -54,8 +70,12 @@ class ResolvedLane:
     id: str
     kind: str
     model: str
+    # #1417: the credential-free request target. The endpoint's identity
+    # (scheme, host, port, path) is unchanged; only the userinfo moved to
+    # the credential channel, so no credential rides in a request URL.
     base_url: str
     api_format: str
+    # The credential the request carries in its provider auth header.
     api_key: str = field(repr=False)
     deep_review: bool
     specialist_env: Mapping[str, str] = field(repr=False)
@@ -161,14 +181,78 @@ def select_lane(plan: LanePlan, lane_id: str | None) -> Lane:
 
 
 def _profile_public(profile: Profile, name: str) -> dict[str, str]:
-    return {"profile": name, "model": profile.model, "base_url": profile.base_url, "api_format": profile.api_format}
+    # #1417: the public projection is display/report state, so the profile's
+    # base URL is recorded with any userinfo redacted. The run itself uses
+    # the credential-free endpoint (ResolvedLane.base_url) and carries the
+    # credential in the auth-header channel.
+    return {
+        "profile": name,
+        "model": profile.model,
+        "base_url": redact_url_userinfo(profile.base_url),
+        "api_format": profile.api_format,
+    }
+
+
+def _resolve_profile_endpoint(
+    profile: Profile, environ: Mapping[str, str]
+) -> tuple[str, str]:
+    """Return the profile's credential-free request target and its credential.
+
+    #1417: a profile base URL may carry a credential in its userinfo. The
+    credential never rides in the request URL — it is resolved into the
+    credential channel, which the transport sends as the provider's HTTP
+    authentication header — and the request target keeps the endpoint's
+    identity, so the run still contacts the intended endpoint.
+
+    The profile's credential environment variable stays the declared
+    credential channel; a URL credential is used only when that variable
+    carries nothing, because one request carries one credential.
+    """
+    env_credential = environ.get(profile.api_key_env) or ""
+    try:
+        target, credential = resolve_credential_channel(profile.base_url, env_credential)
+    except UnsafeEndpointUrl as exc:
+        raise LaneConfigError(
+            f"profile {profile.name} base_url is not a usable endpoint: {exc}"
+        ) from None
+    except ConflictingCredentialChannels:
+        raise LaneConfigError(
+            f"profile {profile.name} base_url carries a credential and "
+            f"{profile.api_key_env} carries one too; one request carries one "
+            "credential, so remove one of them"
+        ) from None
+    if not credential:
+        raise LaneConfigError(
+            f"missing required credential environment variable {profile.api_key_env}"
+        )
+    return target, credential
+
+
+def lane_report_projection(public: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the report-facing lane projection with every URL's userinfo
+    redacted (#1417).
+
+    The harness records this mapping in the eval report, and a report is a
+    shared artifact: an operator endpoint can carry a credential in its
+    userinfo (``https://user:pass@host``). Redaction happens here, at the
+    report boundary, so no URL reaches the written report even if the
+    projection gains a new URL field later.
+    """
+    def _redact(value: Any, key: str | None) -> Any:
+        if isinstance(value, Mapping):
+            return {k: _redact(v, k) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_redact(item, key) for item in value]
+        if isinstance(value, str) and key in LANE_URL_FIELDS:
+            return redact_url_userinfo(value)
+        return value
+
+    return _redact(public, None)
 
 
 def resolve_lane(plan: LanePlan, lane: Lane, environ: Mapping[str, str]) -> ResolvedLane:
     primary = plan.profiles[lane.primary_profile]
-    api_key = environ.get(primary.api_key_env)
-    if not api_key:
-        raise LaneConfigError(f"missing required credential environment variable {primary.api_key_env}")
+    base_url, api_key = _resolve_profile_endpoint(primary, environ)
     deep_review = lane.kind != "primary_only"
     specialist_env: dict[str, str] = {}
     public: dict[str, Any] = {
@@ -178,19 +262,17 @@ def resolve_lane(plan: LanePlan, lane: Lane, environ: Mapping[str, str]) -> Reso
     }
     if lane.kind == "heterogeneous_specialists":
         specialist = plan.profiles[lane.specialist_profile]
-        specialist_key = environ.get(specialist.api_key_env)
-        if not specialist_key:
-            raise LaneConfigError(f"missing required credential environment variable {specialist.api_key_env}")
+        specialist_base_url, specialist_key = _resolve_profile_endpoint(specialist, environ)
         specialist_env = {
             "AI_SPECIALIST_MODEL": specialist.model,
-            "AI_SPECIALIST_BASE_URL": specialist.base_url,
+            "AI_SPECIALIST_BASE_URL": specialist_base_url,
             "AI_SPECIALIST_API_FORMAT": specialist.api_format,
             "AI_SPECIALIST_API_KEY": specialist_key,
         }
         specialist_env.update({f"AI_SPECIALIST_{role.upper()}_MODEL": model for role, model in lane.role_models.items()})
         public["specialist"] = _profile_public(specialist, lane.specialist_profile)
         public["role_models"] = dict(lane.role_models)
-    return ResolvedLane(lane.id, lane.kind, primary.model, primary.base_url, primary.api_format, api_key, deep_review, specialist_env, public)
+    return ResolvedLane(lane.id, lane.kind, primary.model, base_url, primary.api_format, api_key, deep_review, specialist_env, public)
 
 
 def lane_plan_public_summary(plan: LanePlan) -> list[dict[str, Any]]:

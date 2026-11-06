@@ -1,4 +1,4 @@
-import type { FetchLike } from "../platform/http.js";
+import { PlatformRequestError, type FetchLike } from "../platform/http.js";
 import type { GhApiResult, ManagedComment, ManagedReview, PlatformAdapter } from "../platform/types.js";
 import { canonicalUserId, type IdentityResolution } from "../platform/owner-identity.js";
 import { type LinkedIssue } from "../context/types.js";
@@ -33,6 +33,12 @@ export interface PrecheckFixture {
     diff_error?: boolean;
     pr?: unknown;
     pr_error?: boolean;
+    /** #1341: the cause the adapter reports for a `pr_error` PR read,
+     * shaped as a `PlatformRequestError` with this HTTP status (when a
+     * response arrived) or transport kind (when it did not). Omitted →
+     * `prReadFailure()` reports null, mirroring an adapter that recorded
+     * no cause. */
+    pr_error_cause?: { status?: number | null; kind?: string } | undefined;
     comments?: ManagedComment[];
     reviews?: ManagedReview[];
     /** #970: the login the fixture's token posts as (the value
@@ -59,6 +65,8 @@ export interface PrecheckFixture {
 export class FixtureAdapter implements PlatformAdapter {
   readonly platform: "github" | "forgejo";
   private readonly spec: PrecheckFixture["platform"];
+  /** #1341: the cause of the most recent `getPr()` failure, or null. */
+  private lastPrReadFailure: PlatformRequestError | null = null;
 
   constructor(platform: "github" | "forgejo", spec: PrecheckFixture["platform"]) {
     this.platform = platform;
@@ -66,8 +74,24 @@ export class FixtureAdapter implements PlatformAdapter {
   }
 
   async getPr(): Promise<unknown | null> {
-    if (this.spec.pr_error) return null;
+    this.lastPrReadFailure = null;
+    if (this.spec.pr_error) {
+      const cause = this.spec.pr_error_cause;
+      if (cause !== undefined && cause !== null) {
+        this.lastPrReadFailure = new PlatformRequestError(
+          "fixture PR read failure",
+          cause.status ?? null,
+          cause.kind ?? "request-failed",
+        );
+      }
+      return null;
+    }
     return this.spec.pr ?? null;
+  }
+
+  /** #1341: the cause of the most recent `getPr()` failure, or null. */
+  prReadFailure(): PlatformRequestError | null {
+    return this.lastPrReadFailure;
   }
 
   async getPrDiff(): Promise<string> {

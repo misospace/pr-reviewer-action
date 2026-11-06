@@ -185,9 +185,10 @@ export function createForgejoWebhookHandler(
           // The operator lane CONSUMES the canonical follow-up event here:
           // the router drives the shared follow-up consumer, so the delivery
           // is planned and answered instead of only being forwarded. The
-          // follow-up branch of the router never rejects (the consumer is
-          // total), but a rejection still degrades to the same fixed 500 as
-          // a throwing `onEvent` — the response contract is identical.
+          // follow-up branch settles its EFFECTS inside the consumer; a
+          // store contract violation out of the planner still degrades to
+          // the same fixed 500 as a throwing `onEvent` — the response
+          // contract is identical, and the forge redelivers.
           await router.handleEvent(event);
         } else {
           await options.onEvent(event);

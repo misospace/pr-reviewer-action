@@ -15,6 +15,14 @@ export {
   parsePrefixes,
 } from "../precheck/linear.js";
 export {
+  buildReReviewScopeMd,
+  computeReReviewDelta,
+  MAX_DELTA_COMMITS,
+  MAX_DELTA_FILES,
+  type DeltaCommit,
+  type ReReviewScopeDelta,
+} from "./rereview-scope.js";
+export {
   MAX_LINKED_ISSUES,
   extractLinkedIssueRefs,
   labelsOf,
@@ -65,7 +73,7 @@ export {
   renderPrThread,
   timestampSortKeyForTest,
 } from "./pr-thread.js";
-export { endsWithNewline, fenceDelimiterFor, longestBacktickRun } from "./fence.js";
+export { endsWithNewline, escapeCodeSpan, fenceDelimiterFor, longestBacktickRun } from "./fence.js";
 export {
   FINDING_TRAILER,
   MAX_BYTES_DEFAULT as REVIEW_THREADS_MAX_BYTES_DEFAULT,
@@ -137,6 +145,14 @@ export {
   imageTransportAllows,
   type ImageTransportOptions,
 } from "./image-transport.js";
+export {
+  MAX_DEPENDENCY_CHANGES,
+  buildDependencyCoverageContext,
+  dependencyCoverageKindEnabled,
+  parseTagChanges,
+  type BuildDependencyCoverageInput,
+  type DependencyChange,
+} from "./dependency-coverage.js";
 export { redactText } from "./redact.js";
 export {
   ARTIFACT_VERSION as CHANGE_ANCHORS_ARTIFACT_VERSION,

@@ -151,12 +151,18 @@ export function cleanBody(body: string): string {
   return redactPrTextLines(cleaned).trim();
 }
 
-function truncateBody(body: string): string {
-  if (Buffer.byteLength(body, "utf8") <= PER_COMMENT_MAX_BYTES) return body;
-  let clipped = Buffer.from(body, "utf8").subarray(0, PER_COMMENT_MAX_BYTES).toString("utf8");
+/** Shared body-truncation helper for the bounded conversation renders:
+ * if `body` fits `maxBytes` UTF-8 bytes it passes through unchanged;
+ * otherwise it is byte-clipped, snapped back to the last newline the clip
+ * contains, trimmed, and closed with `marker` on its own line. One
+ * implementation for the pr-thread / human-review / review-thread sections,
+ * which each previously carried a local copy over its own cap and marker. */
+export function truncateBody(body: string, maxBytes: number, marker: string): string {
+  if (Buffer.byteLength(body, "utf8") <= maxBytes) return body;
+  let clipped = Buffer.from(body, "utf8").subarray(0, maxBytes).toString("utf8");
   const newline = clipped.lastIndexOf("\n");
   if (newline >= 0) clipped = clipped.slice(0, newline);
-  return `${clipped.trimEnd()}\n[comment truncated]`;
+  return `${clipped.trimEnd()}\n${marker}`;
 }
 
 /** Wrap body in a fence its own backtick runs cannot terminate (canonical
@@ -221,7 +227,7 @@ export function renderPrThread(
   }
   const blocks: string[] = [];
   for (const comment of selected) {
-    let body = truncateBody(cleanBody(comment.body));
+    let body = truncateBody(cleanBody(comment.body), PER_COMMENT_MAX_BYTES, "[comment truncated]");
     if (body === "") body = "(empty after redaction)";
     const stamp = comment.createdAt || "unknown time";
     const superseded = predatesCutoff(comment.createdAt, supersededBefore)

@@ -46,6 +46,14 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
+      # scripts/forge_cli.py -- the adapter over the configured forge
+      # capability -- reads and writes the forge API with a pinned
+      # interpreter, so the converge steps below never depend on whatever
+      # python3 the runner image happens to ship.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
 
       # release-please locates the last release by its source-vX.Y.Z anchor
       # (#906). Publish the manifest version's anchor before release-please
@@ -108,7 +116,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '24'
+          node-version: '26'
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -151,6 +159,15 @@ jobs:
         with:
           ref: ${{ needs.release-please.outputs.sha }}
           token: ${{ steps.app-token.outputs.token }}
+
+      # scripts/forge_cli.py -- the adapter over the configured forge
+      # capability -- reads and writes the forge API with a pinned
+      # interpreter, so the converge step below never depends on whatever
+      # python3 the runner image happens to ship.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
 
       - name: Download dist
         if: needs.release-please.outputs.needs_build == 'true'

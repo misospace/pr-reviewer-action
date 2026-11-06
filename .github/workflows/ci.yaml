@@ -20,6 +20,7 @@ jobs:
       - validate-python
       - validate-static
       - validate-bash
+      - validate-runtime-floor
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -34,7 +35,8 @@ jobs:
             "validate-typescript ${{ needs.validate-typescript.result }}" \
             "validate-python ${{ needs.validate-python.result }}" \
             "validate-static ${{ needs.validate-static.result }}" \
-            "validate-bash ${{ needs.validate-bash.result }}"; do
+            "validate-bash ${{ needs.validate-bash.result }}" \
+            "validate-runtime-floor ${{ needs.validate-runtime-floor.result }}"; do
             job="${job_result%% *}"
             result="${job_result#* }"
             echo "$job: $result"
@@ -47,6 +49,25 @@ jobs:
 
   validate-typescript:
     runs-on: ubuntu-latest
+    # Disposable PostgreSQL for the #736 control-plane conformance battery
+    # (tests-v3/state-postgres.test.ts): its transaction/CAS/race semantics
+    # are only exercised against a real server, so CI provides one instead
+    # of leaving the battery skipped. The battery TRUNCATES every cp_ table
+    # — this database is ephemeral to the job and holds nothing.
+    services:
+      postgres:
+        image: postgres:18@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81
+        env:
+          POSTGRES_USER: pr_reviewer
+          POSTGRES_PASSWORD: pr_reviewer
+          POSTGRES_DB: pr_reviewer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pr_reviewer -d pr_reviewer_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,11 +75,13 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '24'
+          node-version: '26'
           cache: npm
           cache-dependency-path: package-lock.json
 
       - name: Validate v3 TypeScript runtime
+        env:
+          PR_REVIEWER_TEST_PG_DSN: postgres://pr_reviewer:pr_reviewer@localhost:5432/pr_reviewer_test
         run: |
           npm ci
           npm run typecheck
@@ -91,7 +114,7 @@ jobs:
         # and runs node --test; retained runtime integration tests also use Node.
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '24'
+          node-version: '26'
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -232,3 +255,27 @@ jobs:
             echo "::endgroup::"
           done
           exit "$failed"
+
+  # Typecheck and the toolchain run on the repo's Node 26 pin, and @types/node
+  # tracks that pin — so the typings alone could green-light an API the
+  # shipped runtime lacks. The action declares runs.using: node24 (the newest
+  # selector the Actions runner supports; there is no node26 runtime yet), so
+  # this job keeps the declared runtime honest: the full suite must also pass
+  # on Node 24.
+  validate-runtime-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Run full suite on the declared action runtime
+        run: |
+          npm ci
+          npm test

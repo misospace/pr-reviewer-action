@@ -44,6 +44,7 @@ build their own :class:`ForgeClient` explicitly.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import urllib.error
@@ -67,17 +68,33 @@ _ENV_TOKEN_NAMES = ("GITHUB_TOKEN", "GH_TOKEN")
 # use small fixed budgets; a single default keeps the seam uniform.
 DEFAULT_TIMEOUT_SEC = 30
 
+# Page-walk safety net. The list walk ends only when the forge answers an
+# EMPTY page (#1487: a forge that caps the page size -- Forgejo answers at
+# most ``MAX_RESPONSE_ITEMS``, 50 by default -- answers every full page short,
+# so a short page is never evidence the list ended). That rule needs a bound
+# to stop a forge that never answers an empty page, and the bound is the
+# safety net, not the walk rule. A walk the bound cut short is REPORTED,
+# never silently trusted as complete -- see :meth:`ForgeClient.get_pages_report`.
+DEFAULT_MAX_PAGES = 100
+
 
 class ForgeError(RuntimeError):
     """The forge could not be reached, rejected the request, or returned an
     unusable payload.
 
-    The ``message`` is a fixed string — never the raw response body, never
-    the token, and never a URL that contains the token. Callers can compare
-    the message against the ``kind`` attribute (``"transport"``,
-    ``"http_status"``, ``"redirect"``, ``"invalid_json"``) to distinguish
-    failure modes without parsing English text.
+    The ``message`` is a fixed string — never the raw response body, never the
+    token, and never a URL that contains the token.
+
+    The optional ``status`` attribute carries the HTTP status code when the
+    failure was an HTTP error (``404`` for a resource that does not exist,
+    for example) and is ``None`` for a transport failure, a refused redirect
+    or an unusable payload. A caller that must tell "absent" from "broken"
+    reads the attribute instead of parsing the message.
     """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "ip6-localhost", "ip6-loopback"})
@@ -247,11 +264,17 @@ class ForgeClient:
         string is uniform across transport and HTTP failures — the caller
         never sees the status line text, which can echo attacker-controlled
         URL components.
+
+        A malformed response is refused the same way: a truncated body
+        raises :class:`http.client.HTTPException`, whose text can carry
+        bytes the forge chose, so it never reaches the caller.
         """
         try:
             raw = response.read()
         except OSError as exc:
             raise ForgeError("forge response could not be read") from exc
+        except http.client.HTTPException as exc:
+            raise ForgeError("forge response could not be read") from None
         if not raw:
             return None
         try:
@@ -270,11 +293,20 @@ class ForgeClient:
         try:
             response = self._open("GET", url)
         except urllib.error.HTTPError as exc:
-            raise ForgeError(f"forge GET {path} returned HTTP {exc.code}") from None
+            raise ForgeError(f"forge GET {path} returned HTTP {exc.code}", status=exc.code) from None
         except urllib.error.URLError as exc:
             raise ForgeError(f"forge GET {path} unreachable: {type(exc.reason).__name__}") from None
         except OSError as exc:
             raise ForgeError(f"forge GET {path} unreachable: {type(exc).__name__}") from None
+        except http.client.HTTPException as exc:
+            # A malformed response (a forged status line, a truncated
+            # header) must not reach the caller as an exception: its text
+            # carries bytes the forge chose, and a forge that read the
+            # credential from the Authorization header can put it there.
+            # The message names the exception type only.
+            raise ForgeError(
+                f"forge GET {path} sent a malformed response: {type(exc).__name__}"
+            ) from None
         return self._read_json(response)
 
     def get_pages(
@@ -282,15 +314,94 @@ class ForgeClient:
         path: str,
         params: Mapping[str, Any] | None = None,
         per_page: int = 100,
+        max_pages: int | None = DEFAULT_MAX_PAGES,
     ) -> Iterable[Any]:
-        """Yield every item across all pages of a GitHub list endpoint.
+        """Yield every item across all pages of a forge list endpoint.
+
+        The walk ends when the forge answers an EMPTY page (or decodes a
+        payload that is not a list) -- never on a page that is merely
+        shorter than the requested ``per_page``. GitHub honors
+        ``per_page`` (up to 100), so a short page there is the last page;
+        a forge that caps the page size (Forgejo answers at most
+        ``MAX_RESPONSE_ITEMS``, 50 by default) answers a ``per_page=100``
+        request with 50 items on every full page, so stopping at a short
+        page would hand the caller an incomplete list (#1487).
 
         ``params.setdefault("per_page", per_page)`` is applied so callers
         who already set ``per_page`` keep their setting. ``page`` is set
-        per iteration. The generator stops when an empty page is returned
-        or a non-list payload is decoded; transport and HTTP failures
-        propagate as :class:`ForgeError`.
+        per iteration. Transport and HTTP failures propagate as
+        :class:`ForgeError`.
+
+        ``max_pages`` bounds the walk: the default
+        :data:`DEFAULT_MAX_PAGES` is the safety net against a forge that
+        never answers an empty page; ``None`` opts out and reads until
+        the forge does. A positive count stops after that many pages have
+        been READ, and zero or less reads no page at all. The bound is
+        validated before any request goes out, and a non-integer bound is
+        refused with a fixed error string -- a bound that is not a number
+        is a caller bug, not a page count to guess at. A generator cannot
+        report that the bound cut its walk short; a caller that must tell
+        a complete list from a cut one uses :meth:`get_pages_report`.
         """
+        limit = self._page_limit(max_pages)
+        for page_items, _truncated in self._walk_pages(path, params, per_page, limit):
+            yield from page_items
+
+    def get_pages_report(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        per_page: int = 100,
+        max_pages: int | None = DEFAULT_MAX_PAGES,
+    ) -> tuple[list[Any], bool]:
+        """Every item across all pages, and whether the page bound cut the walk.
+
+        The boolean is ``True`` when the walk stopped because it read
+        ``max_pages`` pages and the last of them was NOT empty: the list
+        may then hold items the walk never saw. A caller that must tell
+        "the forge has nothing more" from "the walk stopped early" needs
+        that difference -- a truncated list is not a complete one, and a
+        caller that treats it as complete will report present items as
+        missing.
+
+        Apart from the bound the walk ends on the forge's EMPTY answer or
+        on a decoded payload that is not a list. So ``False`` means the
+        bound did not cut the walk short; it does not certify that every
+        payload seen along the way was a list page.
+        """
+        limit = self._page_limit(max_pages)
+        items: list[Any] = []
+        truncated = False
+        for page_items, page_truncated in self._walk_pages(path, params, per_page, limit):
+            items.extend(page_items)
+            truncated = truncated or page_truncated
+        return items, truncated
+
+    @staticmethod
+    def _page_limit(max_pages: int | None) -> int | None:
+        """The validated page bound, or ``None`` for an unbounded walk."""
+        if max_pages is None:
+            return None
+        if isinstance(max_pages, bool) or not isinstance(max_pages, int):
+            raise ForgeError("invalid max_pages")
+        return max_pages
+
+    def _walk_pages(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None,
+        per_page: int,
+        max_pages: int | None,
+    ) -> Iterable[tuple[list[Any], bool]]:
+        """The page walk itself, bounded by an already-validated limit.
+
+        Each step yields the items of one page and whether the bound cut
+        the walk short at that page. An empty (or non-list) page ends the
+        walk untruncated; a non-empty page the bound fell on ends it
+        truncated.
+        """
+        if max_pages is not None and max_pages <= 0:
+            return
         merged: dict[str, Any] = dict(params or {})
         merged.setdefault("per_page", per_page)
         page = 1
@@ -298,11 +409,49 @@ class ForgeClient:
             merged["page"] = page
             data = self.get(path, merged)
             if not isinstance(data, list) or not data:
+                # The forge says the list ends here. This is the only
+                # natural end of the walk: a short page is not -- a
+                # page-size-capping forge answers every full page short
+                # (#1487).
                 return
-            yield from data
-            if len(data) < int(merged["per_page"]):
+            truncated = max_pages is not None and page >= max_pages
+            yield data, truncated
+            if truncated:
                 return
             page += 1
+
+    def delete(self, path: str) -> Any:
+        """Single DELETE; returns the parsed JSON payload.
+
+        Mirrors :meth:`get` exactly: the same validated base URL, the same
+        no-redirect opener, the same fixed header set, and the token only
+        in the ``Authorization`` header. A 404 is an ordinary
+        :class:`ForgeError` here — the caller decides whether "the
+        resource is already gone" is a failure or an expected outcome
+        (e.g. removing a label that is not present). A 3xx is refused
+        with the redirect error, so the bearer token can never follow a
+        redirect to another origin.
+
+        The error message is a fixed string: it names the request path
+        and the HTTP status, never the response body and never the
+        token.
+        """
+        url = self._url(path)
+        try:
+            response = self._open("DELETE", url)
+        except urllib.error.HTTPError as exc:
+            raise ForgeError(f"forge DELETE {path} returned HTTP {exc.code}", status=exc.code) from None
+        except urllib.error.URLError as exc:
+            raise ForgeError(f"forge DELETE {path} unreachable: {type(exc.reason).__name__}") from None
+        except OSError as exc:
+            raise ForgeError(f"forge DELETE {path} unreachable: {type(exc).__name__}") from None
+        except http.client.HTTPException as exc:
+            # Same rule as the read: a malformed response is refused with a
+            # fixed message, never with the forge's own bytes.
+            raise ForgeError(
+                f"forge DELETE {path} sent a malformed response: {type(exc).__name__}"
+            ) from None
+        return self._read_json(response)
 
     def post(self, path: str, payload: Any) -> Any:
         """Single POST; returns the parsed JSON payload.
@@ -327,11 +476,17 @@ class ForgeClient:
         except urllib.error.HTTPError as exc:
             if 300 <= exc.code < 400:
                 raise ForgeError("forge redirected; refusing to follow") from None
-            raise ForgeError(f"forge POST {path} returned HTTP {exc.code}") from None
+            raise ForgeError(f"forge POST {path} returned HTTP {exc.code}", status=exc.code) from None
         except urllib.error.URLError as exc:
             raise ForgeError(f"forge POST {path} unreachable: {type(exc.reason).__name__}") from None
         except OSError as exc:
             raise ForgeError(f"forge POST {path} unreachable: {type(exc).__name__}") from None
+        except http.client.HTTPException as exc:
+            # Same rule as the read: a malformed response is refused with a
+            # fixed message, never with the forge's own bytes.
+            raise ForgeError(
+                f"forge POST {path} sent a malformed response: {type(exc).__name__}"
+            ) from None
         return self._read_json(response)
 
 

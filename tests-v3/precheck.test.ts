@@ -20,6 +20,7 @@ import {
   computeDiffFingerprint,
   CREDENTIAL_AI_KEYS,
   EMPTY_DIFF_FINGERPRINT,
+  EXACT_CONFIG_KEYS,
   parseMarkerFingerprints,
 } from "../src/precheck/fingerprint.js";
 import { buildMetadataMarker, parseMetadata, pythonJsonStringify } from "../src/precheck/metadata.js";
@@ -38,6 +39,7 @@ import {
 } from "../src/precheck/decide.js";
 import { FixtureAdapter, fixtureLinearCollector, type PrecheckFixture } from "../src/precheck/fixture.js";
 import { ForgejoAdapter } from "../src/platform/forgejo.js";
+import { PlatformRequestError } from "../src/platform/http.js";
 import type { ManagedComment, ManagedReview } from "../src/platform/types.js";
 import { V3_CONTRACT } from "../.v3-generated/contract.generated.js";
 import { loadConfig } from "../src/config/load-config.js";
@@ -301,6 +303,25 @@ test("#1152: every api-key contract input is registered in the credential digest
   for (const name of CREDENTIAL_AI_KEYS) {
     assert.ok(contractCredentialEnvNames.includes(name), `${name} is not a contract credential; drop it from the set`);
   }
+});
+
+test("#1255: the fingerprint key allowlist carries no removed TOOL_PLANNING_* entries", () => {
+  // The v3 contract declares the tool_planning_* inputs removed and the
+  // runtime no longer honors their env names (#1255), so they must not stay
+  // in the exact config-key allowlist: a stale env var there would keep
+  // invalidating cached reviews for config that no longer affects the review.
+  // The live replacement names stay registered.
+  for (const removed of ["TOOL_PLANNING_TIMEOUT_SEC", "TOOL_PLANNING_MAX_CONTEXT_BYTES", "TOOL_PLANNING_MAX_TOKENS"]) {
+    assert.equal(EXACT_CONFIG_KEYS.includes(removed), false, `${removed} is a removed alias; drop it from EXACT_CONFIG_KEYS`);
+  }
+  for (const live of ["TOOL_TURN_TIMEOUT_SEC", "TOOL_CORPUS_MAX_BYTES", "TOOL_MAX_TOKENS_PER_TURN"]) {
+    assert.ok(EXACT_CONFIG_KEYS.includes(live), `${live} is the live replacement and must stay registered`);
+  }
+  // The behavioral property behind the list change: a stale alias env var
+  // contributes no config-hash line at all, so it can no longer force a
+  // fresh review for config that does not affect the review.
+  const lines = collectConfigLines({ AI_MODEL: "m", TOOL_PLANNING_TIMEOUT_SEC: "30", TOOL_PLANNING_MAX_CONTEXT_BYTES: "1", TOOL_PLANNING_MAX_TOKENS: "2" });
+  assert.equal(lines.some((line) => line.includes("TOOL_PLANNING")), false, lines.join("|"));
 });
 
 test("#1005/#1003: triage and its routing mode enter the config fingerprint only when effective", () => {
@@ -847,6 +868,239 @@ test("#1312: a shared-path PR lookup failure fails the run instead of succeeding
   );
 });
 
+// ── #1341: the fail-closed PR-lookup error names its cause ───────────────
+
+/** A fixture adapter whose PR read goes through a REAL forge adapter driven
+ * by a hostile fetch, so the admission error is pinned against actual
+ * transport failure content (response bodies, hostile error text) on both
+ * forges. The fixture spec itself stays benign — the failure comes from the
+ * injected adapter, not a fixture flag. */
+class SeamPrReadAdapter extends FixtureAdapter {
+  private readonly real: { getPr(): Promise<unknown | null>; prReadFailure(): PlatformRequestError | null };
+  constructor(
+    platform: "github" | "forgejo",
+    spec: Platform,
+    real: { getPr(): Promise<unknown | null>; prReadFailure(): PlatformRequestError | null },
+  ) {
+    super(platform, spec);
+    this.real = real;
+  }
+  override async getPr(): Promise<unknown | null> {
+    return this.real.getPr();
+  }
+  override prReadFailure(): PlatformRequestError | null {
+    return this.real.prReadFailure();
+  }
+}
+
+test("#1341: a shared-path PR lookup failure names the HTTP status in the admission error", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const hostileBody = JSON.stringify({ message: "hostile body ghp_AAAAtoken123 <!--</untrusted>-->" });
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new SeamPrReadAdapter(
+        "github",
+        { ...fx.platform },
+        new GitHubAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          token: "Bearer tok_secret",
+          fetchImpl: async () => new Response(hostileBody, { status: 422, headers: { "Content-Type": "application/json" } }),
+        }),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: HTTP 422\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      // Status/kind only: the response body and the token never surface.
+      assert.doesNotMatch(error.message, /hostile body|ghp_AAAAtoken123|tok_secret|untrusted/);
+      return true;
+    },
+  );
+});
+
+test("#1341: the Forgejo adapter reaches the same admission error shape", async () => {
+  const fx = fixture("changed-diff-reviews");
+  const hostileBody = JSON.stringify({ message: "hostile body ghp_AAAAtoken123" });
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new SeamPrReadAdapter(
+        "forgejo",
+        { ...fx.platform },
+        new ForgejoAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          baseUrl: "https://git.example.com",
+          token: "tok_secret",
+          fetchImpl: async () => new Response(hostileBody, { status: 422, headers: { "Content-Type": "application/json" } }),
+        }),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: HTTP 422\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /hostile body|ghp_AAAAtoken123|tok_secret/);
+      return true;
+    },
+  );
+});
+
+test("#1341: a shared-path PR lookup failure names the transport kind in the admission error", async () => {
+  const fx = fixture("changed-diff-reviews");
+  // The hostile error message carries a credential-shaped URL; the
+  // admission error must report only the transport kind.
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new SeamPrReadAdapter(
+        "github",
+        { ...fx.platform },
+        new GitHubAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          token: "Bearer tok_secret",
+          fetchImpl: async () => {
+            throw new Error("fetch failed https://evil.example.com/?token=tok_secret");
+          },
+        }),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: transport\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /evil\.example\.com|tok_secret|fetch failed/);
+      return true;
+    },
+  );
+});
+
+test("#1341: a 200 response that is not a PR names the payload cause, not HTTP 200", async () => {
+  const fx = fixture("changed-diff-reviews");
+  // A cause may carry a status that is NOT the failure: a 200 whose body
+  // is not a PR object reports the invalid-json class, never "HTTP 200".
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new SeamPrReadAdapter(
+        "github",
+        { ...fx.platform },
+        new GitHubAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          token: "Bearer tok_secret",
+          fetchImpl: async () => new Response("<html>hostile body ghp_AAAAtoken123</html>", { status: 200, headers: { "Content-Type": "text/html" } }),
+        }),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: invalid-json\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /HTTP 200|hostile body|ghp_AAAAtoken123|tok_secret/);
+      return true;
+    },
+  );
+});
+
+test("#1341: a 200 PR-less payload fails admission with the invalid-payload cause on both forges", async () => {
+  const fx = fixture("changed-diff-reviews");
+  // A 200 whose JSON body parses but is not a PR record (`{}`) is a failed
+  // read, not a reviewable PR: admission fails closed with the named
+  // invalid-payload cause instead of letting an unprovable payload proceed
+  // as a pr-state-unknown skip. The invalid-repo refusal stays pinned
+  // upstream (Forgejo throws before any request; platform-reads.test.ts).
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new SeamPrReadAdapter(
+        "github",
+        { ...fx.platform },
+        new GitHubAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          token: "Bearer tok_secret",
+          fetchImpl: async () => new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }),
+        }),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: invalid-payload\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /tok_secret/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new SeamPrReadAdapter(
+        "forgejo",
+        { ...fx.platform },
+        new ForgejoAdapter({
+          repo: "o/r",
+          prNumber: "42",
+          baseUrl: "https://git.example.com",
+          token: "tok_secret",
+          fetchImpl: async () => new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }),
+        }),
+      ),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo \(read failed: invalid-payload\); refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /tok_secret/);
+      return true;
+    },
+  );
+});
+
+test("#1341: a cause whose kind is not the HTTP-status class is never rendered as a status", async () => {
+  const fx = fixture("changed-diff-reviews");
+  // The fixture pins the formatter rule directly: a non-http-status kind
+  // with a status attached (e.g. invalid-json over a 200) renders the
+  // kind, and the http-status kind renders the failing status.
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true, pr_error_cause: { status: 200, kind: "invalid-json" } }),
+    }),
+    /Could not read pull request 42 for misospace\/demo \(read failed: invalid-json\);/,
+  );
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true, pr_error_cause: { status: 302, kind: "redirect-blocked" } }),
+    }),
+    /Could not read pull request 42 for misospace\/demo \(read failed: redirect-blocked\);/,
+  );
+  // An http-status kind without a numeric status must never render
+  // "HTTP null" — it falls back to the kind.
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true, pr_error_cause: { kind: "http-status" } }),
+    }),
+    /Could not read pull request 42 for misospace\/demo \(read failed: http-status\);/,
+  );
+});
+
+test("#1341: an adapter that records no cause keeps the unexplained admission error", async () => {
+  const fx = fixture("changed-diff-reviews");
+  await assert.rejects(
+    runPrecheck({
+      env: fx.env,
+      adapter: new FixtureAdapter("github", { ...fx.platform, pr_error: true }),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Could not read pull request 42 for misospace\/demo; refusing to treat a forge\/API lookup failure as a successful review skip/);
+      assert.doesNotMatch(error.message, /read failed:/);
+      return true;
+    },
+  );
+});
+
 test("#1312: missing, null, or non-boolean draft values fail closed as pr-draft-unknown", async () => {
   const fx = fixture("changed-diff-reviews");
   for (const draft of [null, "yes", 1]) {
@@ -1050,7 +1304,7 @@ test("runPrecheck refuses Forgejo publish paths conservatively", async () => {
 // #812: consistent re-reviews — the CI-aware skip re-check
 // ---------------------------------------------------------------------------
 
-import { TangledNotImplementedError } from "../src/platform/tangled.js";
+import { TangledNotImplementedError, tangledCapabilityError } from "../src/platform/tangled.js";
 import { GitHubAdapter } from "../src/platform/github.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { PlatformAdapter } from "../src/platform/types.js";
@@ -1256,12 +1510,21 @@ test("#812: externalChecksConclusion folds the check states", () => {
   assert.equal(externalChecksConclusion([]), "none");
 });
 
-test("precheck fails loudly on a resolved tangled platform before any backend op", async () => {
+test("#590: precheck routes a resolved tangled platform through the configured read capability (the pre-op guard is lifted)", async () => {
+  // The old rail proved the opposite: a resolved `tangled` platform threw
+  // BEFORE any adapter call, because no Tangled backend existed. #590 lifts
+  // that guard — a DID-resolved pull is now read through whatever capability
+  // the caller configured (`spec.adapter`, which `buildPlatformReadAdapter`
+  // builds as a TangledAdapter), exactly like GitHub and Forgejo. The run still
+  // fails closed: the Tangled diff read is not wired yet (#586), so it throws
+  // from INSIDE the adapter — not from a GitHub/Forgejo fallback. The only
+  // forge-specific write below (the Forgejo permission preflight) is gated on
+  // `resolvedPlatform === "forgejo"`, so a Tangled run never drives one.
   let adapterCalls = 0;
-  const counting: PlatformAdapter = {
-    platform: "github",
+  const capability: PlatformAdapter = {
+    platform: "github", // the object's tag is irrelevant: routing is by the resolved platform + spec.adapter, never by re-resolving a client here
     getPr: async () => { adapterCalls += 1; return null; },
-    getPrDiff: async () => { adapterCalls += 1; return ""; },
+    getPrDiff: async () => { adapterCalls += 1; throw tangledCapabilityError("pull diff reads (#586)"); },
     listIssueComments: async () => { adapterCalls += 1; return []; },
     listPrReviews: async () => { adapterCalls += 1; return []; },
     repoPermission: async () => { adapterCalls += 1; return "unknown"; },
@@ -1269,10 +1532,11 @@ test("precheck fails loudly on a resolved tangled platform before any backend op
     ghApi: async () => { adapterCalls += 1; return {}; },
   };
   await assert.rejects(
-    runPrecheck({ env: { REPO: "o/r", PR_NUMBER: "9", PLATFORM: "tangled", TANGLED_REPO_DID: "did:plc:repo" }, adapter: counting }),
+    runPrecheck({ env: { REPO: "did:plc:repo", PR_NUMBER: "feature", PLATFORM: "tangled", TANGLED_REPO_DID: "did:plc:repo" }, adapter: capability }),
     TangledNotImplementedError,
+    "the unwired Tangled diff capability fails the run closed inside the adapter",
   );
-  assert.equal(adapterCalls, 0, "no backend operation may run for tangled");
+  assert.ok(adapterCalls >= 1, "a resolved tangled platform now reaches the configured read capability instead of throwing before any backend op");
 });
 
 // ── #892: the label gate normalizes the real object label shape ──
@@ -1899,6 +2163,18 @@ test("#1073: the confidence-scorer family is fingerprint-conditional — disable
   const versionA = enabled.map((line) => (line.startsWith("SCORER_ACTION_VERSION=") ? "SCORER_ACTION_VERSION=v1.2.3" : line));
   const versionB = enabled.map((line) => (line.startsWith("SCORER_ACTION_VERSION=") ? "SCORER_ACTION_VERSION=v1.2.4" : line));
   assert.notEqual(computeConfigHash(versionA), computeConfigHash(versionB));
+  // #1369: the scoring-semantics rubric version rides the same enabled
+  // gate — a rubric change re-verifies even within one action release —
+  // and the disabled default emits no rubric line either, keeping the
+  // baseline hash byte-identical.
+  assert.ok(enabled.some((line) => line.startsWith("SCORER_RUBRIC_VERSION=")), "the enabled config omits SCORER_RUBRIC_VERSION");
+  assert.ok(!withDefaults.some((line) => line.startsWith("SCORER_RUBRIC_VERSION=")));
+  assert.ok(!baseline.some((line) => line.startsWith("SCORER_RUBRIC_VERSION=")));
+  // A rubric-version change over otherwise identical lines yields a new
+  // hash — rubric-change invalidation positively established.
+  const rubricA = enabled.map((line) => (line.startsWith("SCORER_RUBRIC_VERSION=") ? "SCORER_RUBRIC_VERSION=merge-readiness-verifier-v1" : line));
+  const rubricB = enabled.map((line) => (line.startsWith("SCORER_RUBRIC_VERSION=") ? "SCORER_RUBRIC_VERSION=merge-readiness-verifier-v2" : line));
+  assert.notEqual(computeConfigHash(rubricA), computeConfigHash(rubricB));
 
   // Changing the scorer's model changes the hash again.
   const otherModel = collectConfigLines({
@@ -1965,6 +2241,71 @@ test("#1073: the confidence-scorer family is fingerprint-conditional — disable
   assert.notEqual(computeConfigHash(timeoutChanged), computeConfigHash(enabled));
 });
 
+test("#1368: the scorer's budget/capability controls are fingerprint-conditional", () => {
+  const baseline = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
+  // Disabled (the default): the new controls contribute NOTHING — upgrade
+  // safety identical to the #1073 family's own rule.
+  const disabledWithBudgets = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MAX_TOKENS: "4096",
+    AI_CONFIDENCE_PROMPT_TOKENS: "98304",
+    AI_CONFIDENCE_MODEL_CONTEXT_TOKENS: "200000",
+    AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT: "true",
+    AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT: "true",
+  });
+  assert.deepEqual(disabledWithBudgets, baseline);
+
+  // Enabled: each non-empty control is carried on a config line, so a
+  // budget or capability change re-scores instead of serving a stale cache.
+  const enabled = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_MAX_TOKENS: "4096",
+  });
+  assert.ok(enabled.includes("AI_CONFIDENCE_MAX_TOKENS=4096"));
+  assert.notEqual(computeConfigHash(enabled), computeConfigHash(baseline));
+
+  // Changing the completion budget changes the hash again.
+  const budgetChanged = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_MAX_TOKENS: "8192",
+  });
+  assert.ok(budgetChanged.includes("AI_CONFIDENCE_MAX_TOKENS=8192"));
+  assert.notEqual(computeConfigHash(budgetChanged), computeConfigHash(enabled));
+
+  // The capability assertions ride the same conditional family.
+  const capabilityChanged = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_MAX_TOKENS: "4096",
+    AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT: "true",
+    AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT: "true",
+  });
+  assert.ok(capabilityChanged.includes("AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT=true"));
+  assert.ok(capabilityChanged.includes("AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT=true"));
+  assert.notEqual(computeConfigHash(capabilityChanged), computeConfigHash(enabled));
+
+  // An UNSET control contributes nothing even while the scorer is enabled
+  // (only non-empty values join the family): an operator who never names a
+  // budget keeps the enabled-without-controls bytes.
+  const enabledWithoutBudget = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  assert.ok(!enabledWithoutBudget.some((line) => line.startsWith("AI_CONFIDENCE_MAX_TOKENS")));
+  assert.equal(computeConfigHash(enabledWithoutBudget), computeConfigHash(collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  })));
+});
+
 test("#1073: the fork override contributes to the fingerprint only while the scorer is enabled", () => {
   const baseline = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
 
@@ -2008,4 +2349,198 @@ test("#1073: the fork override contributes to the fingerprint only while the sco
     AI_CONFIDENCE_ENABLE_FOR_FORKS: " true ",
   });
   assert.equal(computeConfigHash(sameOverride), computeConfigHash(overrideOn));
+});
+
+test("#1478: the isolation mode contributes to the fingerprint only while the confidence family is active", () => {
+  const baseline = collectConfigLines({ AI_MODEL: "m", AI_BASE_URL: "https://primary" });
+
+  // Disabled (the default): the isolation mode contributes NOTHING even
+  // though the contract default ("inherit-primary") is non-empty — the family
+  // gate keeps a scorer-less installation byte-identical to pre-#1478.
+  const disabledWithIsolation = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_ISOLATION: "inherit-primary",
+  });
+  assert.deepEqual(disabledWithIsolation, baseline);
+
+  // Enabled: the resolved mode is model-affecting config (require-dedicated
+  // turns a missing endpoint from silent inheritance into a visible refusal),
+  // so it must participate.
+  const inherit = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "inherit-primary",
+  });
+  assert.ok(inherit.includes("AI_CONFIDENCE_ISOLATION=inherit-primary"));
+
+  const requireDedicated = collectConfigLines({
+    AI_MODEL: "m",
+    AI_BASE_URL: "https://primary",
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.ok(requireDedicated.includes("AI_CONFIDENCE_ISOLATION=require-dedicated"));
+  assert.notEqual(computeConfigHash(requireDedicated), computeConfigHash(inherit));
+});
+
+test("#1481: a missing model under require-dedicated keeps the confidence family in the config hash", () => {
+  const baselineEnv = { AI_MODEL: "m", AI_BASE_URL: "https://primary" };
+  const baseline = collectConfigLines(baselineEnv);
+  const baselineHash = computeConfigHash(baseline);
+
+  // 1. Baseline: no confidence config at all contributes no family lines,
+  // so the hash stays byte-identical to a build without the feature.
+  assert.ok(baseline.every((line) => !line.startsWith("AI_CONFIDENCE_") && !line.startsWith("SCORER_")));
+  assert.equal(computeConfigHash(collectConfigLines({ ...baselineEnv, UNRELATED: "x" })), baselineHash);
+
+  // 2. No model + inherit-primary (the default) remains fingerprint-NEUTRAL:
+  // the resolver disables the lane (no model, no dedicated refusal), so the
+  // hash must equal the baseline and the default value must not churn it.
+  const disabledInherit = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_ISOLATION: "inherit-primary",
+  });
+  assert.deepEqual(disabledInherit, baseline);
+  assert.equal(computeConfigHash(disabledInherit), baselineHash);
+
+  // 3. No model + require-dedicated: the resolver keeps the lane logically
+  // active and publishes `unscored(dedicated_model_missing)`, so the family
+  // is behavior-relevant WITHOUT a model. The isolation line contributes and
+  // the hash moves off the baseline. The refused configuration makes no
+  // provider call, so the release/rubric version lines stay off too — their
+  // only consumer is the request body, and a refused run never builds one;
+  // reusing a cached review across an action upgrade is correct for this
+  // configuration because its published outcome is version-independent.
+  const refused = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.ok(refused.includes("AI_CONFIDENCE_ISOLATION=require-dedicated"));
+  assert.ok(!refused.some((line) => line.startsWith("AI_CONFIDENCE_MODEL")));
+  assert.ok(!refused.some((line) => line.startsWith("SCORER_")));
+  assert.notEqual(computeConfigHash(refused), baselineHash);
+
+  // 4. Model + require-dedicated keeps the established enabled shape: model
+  // line, isolation line, and the release/rubric version lines all
+  // contribute, and the hash differs from both the inherit-primary and the
+  // refused variants.
+  const enabledDedicated = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.ok(enabledDedicated.includes("AI_CONFIDENCE_MODEL=scorer-model"));
+  assert.ok(enabledDedicated.includes("AI_CONFIDENCE_ISOLATION=require-dedicated"));
+  assert.ok(enabledDedicated.some((line) => line.startsWith("SCORER_ACTION_VERSION=")));
+  assert.ok(enabledDedicated.some((line) => line.startsWith("SCORER_RUBRIC_VERSION=")));
+  const enabledInherit = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "inherit-primary",
+  });
+  assert.notEqual(computeConfigHash(enabledDedicated), computeConfigHash(enabledInherit));
+  assert.notEqual(computeConfigHash(enabledDedicated), computeConfigHash(refused));
+
+  // 5. Canonicalization matches the RESOLVED semantics, not a broader fold.
+  // The resolver consumes the trimmed, case-sensitive token
+  // (`trimmed(env, ...) === "require-dedicated"`, src/routing/tiers.ts), and
+  // config-load validation is case-sensitive over the two-token vocabulary
+  // (ENUM_INPUTS throws on anything else), so:
+  //   - surrounding whitespace activates the family and emits the canonical
+  //     trimmed line — identical bytes, identical hash;
+  //   - a case variant does NOT activate the family: the resolver treats any
+  //     non-vocabulary value as inherit-primary (and config load rejects it
+  //     outright), so fingerprinting it would model behavior that never
+  //     resolves.
+  const whitespaceIsolation = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_ISOLATION: "  require-dedicated  ",
+  });
+  assert.ok(whitespaceIsolation.includes("AI_CONFIDENCE_ISOLATION=require-dedicated"));
+  assert.equal(computeConfigHash(whitespaceIsolation), computeConfigHash(refused));
+
+  const wrongCase = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_ISOLATION: "Require-Dedicated",
+  });
+  assert.deepEqual(wrongCase, baseline);
+  assert.equal(computeConfigHash(wrongCase), baselineHash);
+
+  const whitespaceOnlyIsolation = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_ISOLATION: "   ",
+  });
+  assert.deepEqual(whitespaceOnlyIsolation, baseline);
+
+  // The same trim rule governs the model side: a whitespace-only model is
+  // unset for the resolver, but under require-dedicated the isolation value
+  // alone keeps the family active (the refused configuration).
+  const blankModelDedicated = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "   ",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.ok(blankModelDedicated.includes("AI_CONFIDENCE_ISOLATION=require-dedicated"));
+  assert.ok(!blankModelDedicated.some((line) => line.startsWith("AI_CONFIDENCE_MODEL")));
+  assert.equal(computeConfigHash(blankModelDedicated), computeConfigHash(refused));
+});
+
+test("#1481: the confidence token-limit field contributes only while the confidence family is active", () => {
+  const baselineEnv = { AI_MODEL: "m", AI_BASE_URL: "https://primary" };
+  const baseline = collectConfigLines(baselineEnv);
+
+  // Disabled family (the default): the scorer never runs, so the verifier's
+  // token field cannot change anything — even an explicit value contributes
+  // NOTHING, and the contract default (empty) never touches existing cached
+  // reviews on upgrade.
+  const disabled = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_TOKENS_PARAM: "max_completion_tokens",
+  });
+  assert.deepEqual(disabled, baseline);
+
+  // Enabled family: the resolved token field names the request's token-limit
+  // key, so it is model-affecting config and must invalidate a cached score
+  // computed against the other field.
+  const unset = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+  });
+  const explicit = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TOKENS_PARAM: "max_completion_tokens",
+  });
+  assert.ok(explicit.includes("AI_CONFIDENCE_TOKENS_PARAM=max_completion_tokens"));
+  assert.ok(!unset.some((line) => line.startsWith("AI_CONFIDENCE_TOKENS_PARAM")));
+  assert.notEqual(computeConfigHash(explicit), computeConfigHash(unset));
+
+  // Whitespace canonicalization matches the resolver's trim, and a
+  // whitespace-only value is unset for both — no line, unchanged hash.
+  const trimmedValue = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TOKENS_PARAM: "  max_completion_tokens  ",
+  });
+  assert.equal(computeConfigHash(trimmedValue), computeConfigHash(explicit));
+  const whitespaceOnly = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_TOKENS_PARAM: "   ",
+  });
+  assert.equal(computeConfigHash(whitespaceOnly), computeConfigHash(unset));
+
+  // require-dedicated with the field UNSET is behavior-relevant through the
+  // isolation line it already emits (the resolver answers verifier-owned
+  // max_tokens); the primary lane's own AI_TOKENS_PARAM still contributes
+  // through the unconditional sweep because it changes the REVIEW request —
+  // it just no longer decides the dedicated verifier's field.
+  const dedicated = collectConfigLines({
+    ...baselineEnv,
+    AI_CONFIDENCE_MODEL: "scorer-model",
+    AI_CONFIDENCE_ISOLATION: "require-dedicated",
+  });
+  assert.ok(!dedicated.some((line) => line.startsWith("AI_CONFIDENCE_TOKENS_PARAM")));
 });

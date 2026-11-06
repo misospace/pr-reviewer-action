@@ -4,5 +4,5 @@
     "noEmit": true,
     "rootDir": ".."
   },
-  "include": ["confidence_bridge.ts"]
+  "include": ["confidence_bridge.ts", "measure_predicate_signal.ts"]
 }

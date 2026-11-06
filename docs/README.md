@@ -18,6 +18,7 @@ Start with the [quick start](../README.md#-quick-start); the defaults are the re
 | [Repository config](repository-config.md) | The repository-owned config file that can narrow the operator's inputs |
 | [Required checks](required-checks.md) | Required-check completeness validation |
 | [Fork reviews](fork-review.md) | Privilege-separated reviews of fork pull requests |
+| [Tangled](tangled.md) | Experimental Tangled support: setup, configuration and the support matrix |
 | [v2 → v3 migration](v3-migration.md) | Upgrading from v2 |
 
 ## Contributing

@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig, buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
+import { ANTHROPIC_VERDICT_OUTPUT_FORMAT, buildAnthropicOutputConfig, buildModelRequest, OPENAI_VERDICT_JSON_SCHEMA, wireEffortOf } from "../src/model/request.js";
 import { resolveSpecialistProfiles, resolveTierProfiles } from "../src/routing/tiers.js";
-import type { ModelRequestConfig } from "../src/model/types.js";
+import type { ModelRequestConfig, TransportWirePayload } from "../src/model/types.js";
 
 // Frozen copy of the v2 `rf_json` bash literal (scripts/model_call.sh's
 // json_schema arm) as of the #706 wave-0 re-point. The shell file is deleted
@@ -360,6 +360,37 @@ test("#998: a hostile or malformed effort never reaches a request body", () => {
   assert.doesNotThrow(() => JSON.stringify(buildModelRequest(config()).body));
 });
 
+test("#998: the effort is read back from the family's OWN wire field", () => {
+  // OpenAI: `reasoning_effort` rides the body verbatim.
+  const openai = buildModelRequest(config({ reasoningEffort: "medium" }));
+  assert.equal(wireEffortOf(openai), "medium");
+  assert.equal(wireEffortOf(buildModelRequest(config())), "", "no effort configured, none on the wire");
+
+  // Anthropic: `output_config.effort`, only under the operator's opt-in.
+  const anthropic = buildModelRequest(config({
+    apiFormat: "anthropic",
+    reasoningEffort: "high",
+    anthropicEffortSupported: true,
+  }));
+  assert.equal(wireEffortOf(anthropic), "high");
+  assert.equal(
+    wireEffortOf(buildModelRequest(config({ apiFormat: "anthropic", reasoningEffort: "high" }))),
+    "",
+    "no opt-in, no effort on the Anthropic wire",
+  );
+
+  // The families are mutually exclusive on the wire...
+  assert.equal("output_config" in (openai.body as object), false);
+  assert.equal("reasoning_effort" in (anthropic.body as object), false);
+  // ...so the FAMILY decides which field is read: a body that (impossibly)
+  // carried both still answers with its own family's field.
+  const mixed = {
+    endpointPath: "/chat/completions",
+    body: { reasoning_effort: "low", output_config: { effort: "high" } },
+  } as unknown as TransportWirePayload;
+  assert.equal(wireEffortOf(mixed), "low");
+});
+
 test("request construction is provider-neutral: no branching on model names", () => {
   const a = buildModelRequest(config({ model: "gpt-9-mini" }));
   const b = buildModelRequest(config({ model: "qwen3-local@proxy" }));
@@ -373,17 +404,28 @@ test("the strict verdict schema matches the frozen v2 bash literal plus only the
   // #1003 adds exactly two properties (the human-review triage answer) and
   // two `required` entries on top of the frozen v2 literal. #1005 adds the
   // `review_triage_targets` logical-id selection alongside the #1003 pair.
-  // Strip every `review_triage_*` property and required entry and the pin is
-  // byte-for-byte the v2 snapshot again, so a future drift in anything else
-  // still fails here.
+  // #1337 adds the `dependency_coverage` accounting array alongside them.
+  // Strip every `review_triage_*` property and required entry, the
+  // #1337 array, and — #1381 — the `unmet` disposition status (the one
+  // v3 vocabulary addition inside a v2-carried enum), and — #1449 — the
+  // `required_check_dispositions` description (a prose annotation, not a
+  // shape change), and the pin is byte-for-byte the v2 snapshot again, so a
+  // future drift in anything else still fails here.
   const live = structuredClone(OPENAI_VERDICT_JSON_SCHEMA) as {
     json_schema: { schema: { properties: Record<string, unknown>; required: string[] } };
   };
   const schema = live.json_schema.schema;
   for (const key of Object.keys(schema.properties)) {
-    if (key.startsWith("review_triage_")) delete schema.properties[key];
+    if (key.startsWith("review_triage_") || key === "dependency_coverage") delete schema.properties[key];
   }
-  schema.required = schema.required.filter((name) => !name.startsWith("review_triage_"));
+  schema.required = schema.required.filter((name) => !name.startsWith("review_triage_") && name !== "dependency_coverage");
+  const dispositions = schema.properties.required_check_dispositions as {
+    description?: string;
+    items: { properties: { status: { enum: string[] } } };
+  };
+  delete dispositions.description;
+  const dispositionStatus = dispositions.items.properties.status;
+  dispositionStatus.enum = dispositionStatus.enum.filter((value) => value !== "unmet");
   assert.deepEqual(live, JSON.parse(V2_RF_JSON_SCHEMA_LITERAL));
 });
 
@@ -391,7 +433,10 @@ test("the strict verdict schema requires every property (OpenAI strict mode)", (
   const schema = (OPENAI_VERDICT_JSON_SCHEMA.json_schema as unknown as Record<string, unknown>).schema as unknown as Record<string, unknown>;
   assert.deepEqual(
     schema.required,
-    ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions"],
+    // #1337: `dependency_coverage` joins the strict required list (null
+    // permitted, so non-dependency PRs answer null) after
+    // `required_check_dispositions`.
+    ["verdict", "review_markdown", "smart_review_requested", "smart_review_reason", "review_triage_decision", "review_triage_reason", "review_triage_targets", "findings", "requirement_coverage", "required_check_dispositions", "dependency_coverage"],
   );
   const properties = schema.properties as unknown as Record<string, { type: unknown; enum?: string[] }>;
   assert.deepEqual(properties.smart_review_requested!.type, "boolean");
@@ -421,6 +466,125 @@ test("the strict verdict schema requires every property (OpenAI strict mode)", (
   assert.equal(dispositions.items.additionalProperties, false);
   assert.deepEqual(
     (dispositions.items.properties.status as { enum: string[] }).enum,
-    ["satisfied", "not_applicable", "unresolved"],
+    // #1381: `unmet` (a confirmed negative) joins the disposition vocabulary
+    // alongside the #750 tri-state.
+    ["satisfied", "not_applicable", "unresolved", "unmet"],
   );
+});
+
+// ── #1368: responseSchema — the caller's own schema instead of the verdict ─
+
+test("#1368: an OpenAI json_schema request with responseSchema carries the caller's schema, not the verdict's", () => {
+  const scorerSchema = { type: "object", properties: { score: { type: "integer" } }, required: ["score"], additionalProperties: false };
+  const payload = buildModelRequest(config({ responseFormat: "json_schema", responseSchema: scorerSchema }));
+  const body = payload.body as unknown as Record<string, unknown>;
+  assert.deepEqual(body.response_format, {
+    type: "json_schema",
+    json_schema: { name: "confidence_review", strict: true, schema: scorerSchema },
+  });
+  // The verdict schema never leaks.
+  assert.equal(JSON.stringify(body).includes("pr_review"), false);
+  assert.equal(JSON.stringify(body).includes("review_markdown"), false);
+});
+
+test("#1368: responseSchema absent keeps the OpenAI verdict schema byte-for-byte", () => {
+  const withSchema = buildModelRequest(config({ responseFormat: "json_schema" }));
+  assert.deepEqual(
+    (withSchema.body as unknown as Record<string, unknown>).response_format,
+    OPENAI_VERDICT_JSON_SCHEMA,
+  );
+  // And json_object ignores the schema entirely.
+  const jsonObject = buildModelRequest(config({ responseFormat: "json_object", responseSchema: { type: "object" } }));
+  assert.deepEqual(
+    (jsonObject.body as unknown as Record<string, unknown>).response_format,
+    { type: "json_object" },
+  );
+});
+
+test("#1368: an Anthropic json_schema request with responseSchema carries it inside output_config.format", () => {
+  const scorerSchema = {
+    type: "object",
+    properties: { score: { type: "integer" }, risk: { type: "string" } },
+    required: ["score", "risk"],
+    additionalProperties: false,
+  };
+  const payload = buildModelRequest(config({
+    apiFormat: "anthropic",
+    responseFormat: "json_schema",
+    anthropicStructuredOutputSupported: true,
+    responseSchema: scorerSchema,
+  }));
+  const body = payload.body as unknown as Record<string, unknown>;
+  assert.deepEqual((body.output_config as Record<string, unknown>).format, {
+    type: "json_schema",
+    schema: scorerSchema,
+  });
+  assert.equal(JSON.stringify(body).includes("verdict"), false);
+  assert.equal(JSON.stringify(body).includes("response_format"), false);
+});
+
+test("#1368: an unasserted or off-format Anthropic request ignores responseSchema (byte-compatible)", () => {
+  const scorerSchema = { type: "object", properties: {}, required: [], additionalProperties: false };
+  // No structured-output opt-in: nothing is sent, schema or not.
+  assert.deepEqual(
+    buildModelRequest(config({ apiFormat: "anthropic", responseFormat: "json_schema", responseSchema: scorerSchema })),
+    buildModelRequest(config({ apiFormat: "anthropic", responseFormat: "off" })),
+  );
+  // Opt-in but responseFormat off/json_object: still nothing.
+  for (const responseFormat of ["off", "json_object"] as const) {
+    assert.deepEqual(
+      buildModelRequest(config({ apiFormat: "anthropic", responseFormat, anthropicStructuredOutputSupported: true, responseSchema: scorerSchema })),
+      buildModelRequest(config({ apiFormat: "anthropic", responseFormat: "off" })),
+    );
+  }
+});
+
+// ── #1428: the one-credential rule at profile resolution ─────────────────
+test("#1428: an endpoint URL credential and a separate API key are refused at tier resolution", () => {
+  // Both channels on one lane: refused before any request could be made.
+  assert.throws(
+    () => resolveTierProfiles({ AI_BASE_URL: "https://user:pass@host/v1", AI_MODEL: "m", AI_API_KEY: "sk-key" }),
+    /AI_BASE_URL carries a credential in its userinfo and AI_API_KEY carries a separate model credential/,
+  );
+  // Lane overrides name their own keys in the refusal.
+  assert.throws(
+    () => resolveTierProfiles({
+      AI_BASE_URL: "https://host/v1", AI_MODEL: "m", AI_API_KEY: "sk-key",
+      AI_SMART_MODEL: "s", AI_SMART_BASE_URL: "https://u:p@host/v1", AI_SMART_API_KEY: "sk-smart",
+    }),
+    /AI_SMART_BASE_URL carries a credential in its userinfo and AI_SMART_API_KEY carries a separate model credential/,
+  );
+  // A URL credential alone is a valid single channel: resolution succeeds.
+  const urlCredentialed = resolveTierProfiles({ AI_BASE_URL: "https://user:pass@host/v1", AI_MODEL: "m" });
+  assert.equal(urlCredentialed.primary.baseUrl, "https://user:pass@host/v1");
+  assert.equal(urlCredentialed.primary.apiKey, "");
+  // A separate key alone is unchanged (the bearer path).
+  const keyed = resolveTierProfiles({ AI_BASE_URL: "https://host/v1", AI_MODEL: "m", AI_API_KEY: "sk-key" });
+  assert.equal(keyed.primary.apiKey, "sk-key");
+});
+
+test("#1428: the specialist lane refuses two credential channels at profile resolution", () => {
+  assert.throws(
+    () => resolveSpecialistProfiles({
+      AI_BASE_URL: "https://host/v1", AI_MODEL: "m",
+      AI_SPECIALIST_MODEL: "s", AI_SPECIALIST_BASE_URL: "https://u:p@host/v1", AI_SPECIALIST_API_KEY: "sk-s",
+    }),
+    /AI_SPECIALIST_BASE_URL carries a credential in its userinfo and AI_SPECIALIST_API_KEY carries a separate model credential/,
+  );
+  // An inherited endpoint's URL credential plus a separately configured
+  // specialist key is still two channels for one request.
+  assert.throws(
+    () => resolveSpecialistProfiles({
+      AI_BASE_URL: "https://u:p@host/v1", AI_MODEL: "m",
+      AI_SPECIALIST_MODEL: "s", AI_SPECIALIST_API_KEY: "sk-s",
+    }),
+    /AI_BASE_URL carries a credential in its userinfo and AI_SPECIALIST_API_KEY carries a separate model credential/,
+  );
+  // A specialist profile on a URL-credentialed endpoint with no separate key
+  // resolves fine — the transport sends that credential as Basic.
+  const resolved = resolveSpecialistProfiles({
+    AI_BASE_URL: "https://u:p@host/v1", AI_MODEL: "m", AI_SPECIALIST_MODEL: "s",
+  });
+  assert.equal(resolved.transport.baseUrl, "https://u:p@host/v1");
+  assert.equal(resolved.transport.apiKey, "");
 });

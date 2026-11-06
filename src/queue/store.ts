@@ -32,6 +32,7 @@ import { COMMENT_ID_PATTERN, INSTALLATION_ID_PATTERN } from "../events/normalize
 import type { ReviewJob, ReviewJobKind, ReviewTrigger } from "../jobs/types.js";
 import type { JobLifecycleState, JobRecord } from "./types.js";
 import { isActiveState, prIdentityKey } from "./types.js";
+import { isPlainObject } from "../platform/object.js";
 
 /** One durable snapshot: the whole queue as of a commit point. */
 export interface QueueSnapshot {
@@ -106,12 +107,6 @@ const CONFIG_FINGERPRINT_PATTERN = /^[0-9a-f]{8,64}$/;
 
 /** A nonce / adoption epoch: 1–64 chars of `[A-Za-z0-9._-]`. */
 const TOKEN_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
@@ -258,6 +253,18 @@ export function validateReviewJob(value: unknown): ReviewJob | null {
     return null;
   }
 
+  // Tolerant rehydration (#1440): the field did not exist in pre-#1440
+  // queue snapshots, so a MISSING field rehydrates as "" (those
+  // snapshots keep their old by-kind endpoint semantics); a PRESENT
+  // value must be a string, either "" or the canonical token form —
+  // anything else is a malformed record (reject, never guess).
+  const forgeIntegration =
+    value["forgeIntegration"] === undefined ? "" : value["forgeIntegration"];
+  if (!isString(forgeIntegration)) return null;
+  if (forgeIntegration !== "" && !TOKEN_PATTERN.test(forgeIntegration)) {
+    return null;
+  }
+
   const fork = value["fork"];
   if (!isBoolean(fork)) return null;
 
@@ -290,6 +297,7 @@ export function validateReviewJob(value: unknown): ReviewJob | null {
     nonce,
     adoptionEpoch,
     eventReference,
+    forgeIntegration,
     fork,
     deadlineAtMs,
     runId,
@@ -330,11 +338,11 @@ function checkSnapshotEnvelope(value: unknown): readonly unknown[] {
   }
   for (const key of Object.keys(value)) {
     if (!SNAPSHOT_KEYS.includes(key)) {
-      throw new Error(`queue snapshot: unknown top-level key "${key}"`);
+      throw new Error("queue snapshot: unknown top-level key present");
     }
   }
   if (value["version"] !== 1) {
-    throw new Error(`queue snapshot: version must be 1, got ${String(value["version"])}`);
+    throw new Error("queue snapshot: unsupported version");
   }
   const records = value["records"];
   if (!Array.isArray(records)) {
@@ -374,8 +382,12 @@ function parseSnapshotRecords(raw: readonly unknown[]): JobRecord[] {
 /** Validate a snapshot-shaped value and return a normalized, fully
  * frozen snapshot (every record rebuilt with exactly the `JobRecord`
  * fields, extras dropped, and the nested job rebuilt from the
- * validator). */
-function parseQueueSnapshot(value: unknown): QueueSnapshot {
+ * validator).
+ *
+ * Exported so the #736 compaction pass validates a snapshot with the
+ * SAME parser before dropping anything from it (one definition, no
+ * drift). */
+export function parseQueueSnapshot(value: unknown): QueueSnapshot {
   const raw = checkSnapshotEnvelope(value);
   const records = parseSnapshotRecords(raw);
   const snapshot: QueueSnapshot = {
@@ -526,7 +538,15 @@ export class JsonFileQueueStore implements QueueStore {
       }
       renameSync(tmp, this.filePath);
       try {
-        const dirFd = openSync(dir, "r");
+        // The explicit 0600 mode is required even though this open never
+        // CREATES anything (the mode applies only at creation, so it is
+        // inert for the read-only directory fd): the CWE-377
+        // insecure-temporary-file rule flags ANY `fs.open` on a path
+        // tainted by the OS temp dir unless the call carries a
+        // restrictive mode — and tests (and operators) hand this store
+        // `os.tmpdir()` paths. Same resolution as the durable rate-limit
+        // store's directory fsync (#1295, #1322).
+        const dirFd = openSync(dir, "r", 0o600);
         try {
           fsyncSync(dirFd);
         } finally {

@@ -55,6 +55,7 @@ import { runToolHarness, type HarnessDeps, type HarnessTransport, type TraceGapP
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
 import { extraHeadersForEnv } from "../transport/headers.js";
+import { attachTransportTiming, type TransportTiming } from "../transport/timing.js";
 import type { NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { TierBudgets } from "../corpus/budgets.js";
 import type { StageEnv } from "./env.js";
@@ -105,7 +106,18 @@ export function projectPr(prObject: unknown, prNumber: string): Record<string, u
   const user = (typeof record.user === "object" && record.user !== null ? record.user : {}) as Record<string, unknown>;
   const author = typeof user.login === "string" && user.login !== "" ? user.login : (typeof record.author === "string" ? record.author : "");
   return {
-    number: typeof record.number === "number" ? record.number : Number(prNumber),
+    // JSON has no `NaN`: a non-numeric pull locator (a Tangled pull is
+    // DID/branch-addressed and carries no number, #590) coerced with `Number()`
+    // yields `NaN`, which `pyJsonDumps` writes as the bare `NaN` token that the
+    // corpus metadata projection's `JSON.parse` then rejects. A finite numeric
+    // number is preserved (GitHub unchanged); any non-numeric locator becomes
+    // the `0` sentinel rather than poisoning the persisted projection.
+    number:
+      typeof record.number === "number" && Number.isFinite(record.number)
+        ? record.number
+        : Number.isFinite(Number(prNumber))
+          ? Number(prNumber)
+          : 0,
     title: typeof record.title === "string" ? record.title : "",
     body: typeof record.body === "string" ? record.body : "",
     headRefOid: typeof head.sha === "string" ? head.sha : "",
@@ -595,6 +607,8 @@ export function assembleCorpus(
       toolHarnessSmartMd: ws.read("tool-harness.smart.md"),
       evidenceProvidersMd: ws.read("evidence-providers.md"),
       imageDigestContextMd: ws.read("image-digest-context.md"),
+      dependencyCoverageMd: ws.read("dependency-coverage.md"),
+      reReviewScopeMd: ws.read("re-review-scope.md"),
       linkedSourcesMd: ws.read("linked-sources.md"),
       repoImpactTruncatedMd: ws.read("repo-impact.truncated.md"),
       repoHistoryTruncatedMd: ws.read("repo-history.truncated.md"),
@@ -605,6 +619,7 @@ export function assembleCorpus(
       standardsContextMd: ws.read("standards-context.md"),
       requirementLedgerMd: ws.read("requirement-ledger.md"),
       claimFalsificationMd: ws.read("claim-falsification.md"),
+      derivedObligationsMd: ws.read("derived-obligations.md"),
       specialistsMd: ws.read("specialists.md"),
       requirementLedgerPresent: ws.read("requirement-ledger-present.txt"),
       specialistLeadsPresent: ws.read("specialist-leads-present.txt"),
@@ -658,12 +673,17 @@ function ciChecksBytes(env: StageEnv): Uint8Array | null {
 // ---------------------------------------------------------------------------
 
 export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): HarnessTransport {
-  return async (baseUrl, apiFormat, payload, apiKey, timeoutSec) => {
+  return async (baseUrl, apiFormat, payload, apiKey, timeoutSec, maxRetryAttempts, attemptBudgetSec) => {
     // #1037: the tool-harness transport is a provider call like any other.
     // Parsed per request INSIDE the closure (as pre-fix) so a malformed set
     // stays fail-soft per request; unset config yields `undefined` and the
     // key is omitted entirely (byte-identical request, nothing to merge).
     const extra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
+    // #1466: count the request's ACTUAL wire calls. The #1200 hook fires once
+    // per wire call — including the ones a 429/5xx backoff, a #824 clamp or a
+    // #1047 strip discarded — so the count is the HTTP attempts the request
+    // really made, not the number of calls the loop believes it made.
+    let wireCalls = 0;
     const outcome = await runChatRequest({
       baseUrl,
       apiFormat: apiFormat === "anthropic" ? "anthropic" : "openai",
@@ -681,6 +701,9 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
       // #726 (engine cancellation): the harness's model turns bind to the
       // run's cancellation scope; unset signal keeps the request unchanged.
       ...(signal !== undefined ? { signal } : {}),
+      ...(maxRetryAttempts !== undefined ? { maxRetryAttempts } : {}),
+      ...(attemptBudgetSec !== undefined ? { attemptBudgetSec } : {}),
+      onWireCall: () => { wireCalls += 1; },
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the
     // ai-api-format hint on a 404) instead of the bare "model endpoint
@@ -693,7 +716,17 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     // provider JSON. The loop's tool-call extraction and usage accounting
     // read the OpenAI chat shape (as v2's reassembler produced), so project
     // it; a non-streamed turn's raw provider JSON passes through untouched.
-    return (payload as Record<string, unknown>).stream === true ? normalizedToOpenAiChat(outcome.response) : outcome.raw;
+    const body = (payload as Record<string, unknown>).stream === true ? normalizedToOpenAiChat(outcome.response) : outcome.raw;
+    // #1466: the transport probe rides the body the caller receives, on BOTH
+    // paths. The streamed projection is a NEW object, so the probe the
+    // transport attached to the reassembled response would be lost here —
+    // and a probe that never reaches the caller is a measurement nobody can
+    // attribute. The wire-call count is added on the way out: the transport
+    // measures ONE HTTP turn and does not know how many attempts its caller
+    // made.
+    const timing: TransportTiming | undefined = outcome.timing;
+    if (timing === undefined) return body;
+    return attachTransportTiming(body, { ...timing, wireCalls });
   };
 }
 

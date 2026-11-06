@@ -18,6 +18,7 @@
  * (`src/tools/harness.ts` `resolveReviewSystemPrompt`). */
 
 import { BUNDLED_PROMPT_ASSETS, rawFragment, type PromptAssets } from "./assets.js";
+import { DEPENDENCY_EVIDENCE_KINDS } from "../classification/classify.js";
 import { MAX_DISTRIBUTED_HINTS, MAX_GROUPS_PER_RULE, MAX_GROUP_NAME_CHARS } from "../enforcement/requirement-trace.js";
 import { bashCapture, bashLowerCapture, bashReadCapture, bashReplaceFirst, jqRawPrKind, type PromptWorkspace } from "./bash.js";
 
@@ -28,6 +29,10 @@ export const PROMPT_PRESENCE_FILES = {
   requirementLedger: "requirement-ledger-present.txt",
   specialistLeads: "specialist-leads-present.txt",
   classification: "classification.json",
+  /** #1337: the deterministic coverage-accounting section (empty unless the
+   * classification is dependency-shaped AND dependency changes were
+   * detected — the same presence the corpus gates on). */
+  dependencyCoverage: "dependency-coverage.md",
 } as const;
 
 /** The sentence v2 appends to every assembled default prompt. */
@@ -128,17 +133,46 @@ export function applySystemPromptFragments(
   if (state.isDefault && workspace.isFile(PROMPT_PRESENCE_FILES.classification)) {
     const bytes = workspace.readBytes(PROMPT_PRESENCE_FILES.classification);
     const kind = bytes === null ? "" : jqRawPrKind(bytes.toString("utf8"));
-    const infra = kind === "dependency_upgrade" || kind === "k8s_manifest";
-    const digest = kind === "renovate_digest_only" || kind === "image_digest_only";
+    // #1379: the infra set gains the vendor-agnostic dependency-update
+    // kinds — the same manifest-shaped update families as their Renovate
+    // twins without the forge-authorship gate.
+    const infra =
+      kind === "dependency_upgrade" ||
+      kind === "k8s_manifest" ||
+      kind === "renovate_chart_update" ||
+      kind === "renovate_image_update" ||
+      kind === "image_update" ||
+      kind === "chart_update" ||
+      kind === "platform_version_update" ||
+      kind === "action_update";
+    const digest =
+      kind === "renovate_digest_only" ||
+      kind === "image_digest_only" ||
+      kind === "renovate_image_update";
+    // #1379: upstream-evidence obligations for every dependency-update kind
+    // (the Renovate twins included — the gate only zero-selects specialists,
+    // the primary review's must_check still carries the obligations).
+    // Single source of truth with the tool-harness reserve gate: the same
+    // exported classification family (src/classification/classify.ts).
+    const depEvidence = DEPENDENCY_EVIDENCE_KINDS.has(kind);
     sub("VERSION_BUMP_GUIDANCE", infra ? guidance(assets, "version_bump") : "");
     sub("IMAGE_DIGEST_GUIDANCE", digest ? guidance(assets, "image_digest") : "");
     sub("RELEASE_NOTES_GUIDANCE", infra || digest ? guidance(assets, "release_notes") : "");
+    sub("DEPENDENCY_EVIDENCE_GUIDANCE", depEvidence ? guidance(assets, "dependency_evidence") : "");
+    // #1337: dependency-upgrade coverage accounting. Gated on the
+    // deterministic section being present (kind-shaped AND dependency
+    // changes detected), so the instructions never reference a section the
+    // corpus does not carry.
+    sub("COVERAGE_ACCOUNTING_GUIDANCE", workspace.isNonEmpty(PROMPT_PRESENCE_FILES.dependencyCoverage) ? guidance(assets, "coverage_accounting") : "");
   } else {
-    // Also runs on a replace-mode operator prompt: v2 strips these three
-    // placeholders (first occurrence) from any prompt text.
+    // Also runs on a replace-mode operator prompt: v2 strips these five
+    // placeholders (first occurrence) from any prompt text (#1379 added
+    // DEPENDENCY_EVIDENCE_GUIDANCE).
     sub("VERSION_BUMP_GUIDANCE", "");
     sub("IMAGE_DIGEST_GUIDANCE", "");
     sub("RELEASE_NOTES_GUIDANCE", "");
+    sub("DEPENDENCY_EVIDENCE_GUIDANCE", "");
+    sub("COVERAGE_ACCOUNTING_GUIDANCE", "");
   }
   if (state.addendum !== "") prompt = `${prompt}\n\n${state.addendum}`;
   return { ...state, systemPrompt: prompt };
@@ -175,7 +209,7 @@ export function applyRequirementTraceFragment(
   enabled: boolean,
   assets: PromptAssets = BUNDLED_PROMPT_ASSETS,
   scopeIds?: readonly string[],
-  distributedHints?: readonly { requirementId: string; groups: readonly string[] }[],
+  distributedHints?: readonly { requirementId: string; groups: readonly { name: string; owners?: readonly string[]; tests?: readonly string[] }[] }[],
 ): SystemPromptState {
   if (!state.isDefault || !enabled) return state;
   if (!workspace.isNonEmpty(PROMPT_PRESENCE_FILES.requirementLedger)) return state;
@@ -192,11 +226,24 @@ export function applyRequirementTraceFragment(
   }
   if (distributedHints && distributedHints.length > 0) {
     const cleanName = (name: string): string => name.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_GROUP_NAME_CHARS);
+    // #1519: the hints now carry FULL seam objects; the prompt line still
+    // renders the seam NAMES only (the rendered plan section is where the
+    // per-seam evidence paths live). A hint whose every seam name sanitizes
+    // away renders nothing and is dropped, never an empty `id →` tail.
     const hintLine = `Distributed requirements — cite one enforcement location and one matching test in each declared seam (a single location cannot satisfy them): ${distributedHints
       .slice(0, MAX_DISTRIBUTED_HINTS)
-      .map((hint) => `\`${cleanName(hint.requirementId)}\` → ${hint.groups.slice(0, MAX_GROUPS_PER_RULE).map(cleanName).join(", ")}`)
+      .map((hint) => {
+        const names = (hint.groups ?? [])
+          .slice(0, MAX_GROUPS_PER_RULE)
+          .map((group) => cleanName(group?.name ?? ""))
+          .filter((name) => name !== "");
+        return names.length === 0 ? null : `\`${cleanName(hint.requirementId)}\` → ${names.join(", ")}`;
+      })
+      .filter((rendered) => rendered !== null)
       .join("; ")}`;
-    trace += `\n${hintLine}`;
+    if (distributedHints.some((hint) => (hint.groups ?? []).some((group) => cleanName(group?.name ?? "") !== ""))) {
+      trace += `\n${hintLine}`;
+    }
   }
   if (state.systemPrompt.includes(trace)) return state;
   return { ...state, systemPrompt: `${state.systemPrompt}\n${trace}` };

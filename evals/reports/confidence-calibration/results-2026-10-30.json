@@ -1,0 +1,3898 @@
+{
+  "plan": "evals/confidence-calibration/sample-plan.json",
+  "plan_digest": "sha256:9cac323ae33dfbae",
+  "conditions": [
+    "same-model",
+    "heterogeneous"
+  ],
+  "repeats": 1,
+  "repeats_by_condition": {
+    "same-model": 2,
+    "heterogeneous": 1
+  },
+  "verdict_policy": "strict",
+  "rows": [
+    {
+      "pr_id": "pr-reviewer-action-16-61",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "82c4ebe8408cdab639d6e038b8841157e137842a",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 3,
+          "minor": 2,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 70,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 12905,
+      "prompt_bytes": 30394,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #16 added jq expressions in run_review.sh (TOOL_FAILURE_REASON, SUCCESSFUL_TOOL_REQUESTS) that read tool call status from `.tool_results[].result.status`, but run_tool_harness.py writes status at the top level of each result (`.tool_results[].status`), so every successful tool call was miscounted as a failure under fail-closed settings.",
+        "file": "scripts/run_review.sh",
+        "line_range": [
+          780,
+          808
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "scripts/run_tool_harness.py",
+          "line": 153,
+          "message": "The `gh_api` validator does not reject literal or percent-encoded dot segments, so a path under an allowed repository can pass the literal-prefix checks while normalizing toward a different repository route."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "scripts/run_tool_harness.py",
+          "line": null,
+          "message": "The sensitive-path regex is checked before symlink resolution, so an in-workspace symlink such as `alias -> .env` can read a blocked sensitive file without matching the policy."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/run_review.sh",
+          "line": 782,
+          "message": "`tool_failure_enforcement` ignores the harness's `planning_warning`, so malformed planner output can leave the verdict unchanged instead of failing closed."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "scripts/run_tool_harness.py",
+          "line": null,
+          "message": "`run_read_file` passes NUL-containing paths to `Path.resolve()` without rejecting them, so Python's embedded-NUL error can abort the entire harness rather than fail one request."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "scripts/run_tool_harness.py",
+          "line": 329,
+          "message": "`tool_request_timeout_sec` is not passed to `web_fetch`, whose URL read remains hard-coded to 20 seconds, so the advertised per-tool timeout does not apply to every supported request."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-16-61",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "82c4ebe8408cdab639d6e038b8841157e137842a",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 3,
+          "minor": 2,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7458,
+      "prompt_bytes": 30394,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #16 added jq expressions in run_review.sh (TOOL_FAILURE_REASON, SUCCESSFUL_TOOL_REQUESTS) that read tool call status from `.tool_results[].result.status`, but run_tool_harness.py writes status at the top level of each result (`.tool_results[].status`), so every successful tool call was miscounted as a failure under fail-closed settings.",
+        "file": "scripts/run_review.sh",
+        "line_range": [
+          780,
+          808
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "scripts/run_tool_harness.py",
+          "line": 153,
+          "message": "The `gh_api` validator does not reject literal or percent-encoded dot segments, so a path under an allowed repository can pass the literal-prefix checks while normalizing toward a different repository route."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "scripts/run_tool_harness.py",
+          "line": null,
+          "message": "The sensitive-path regex is checked before symlink resolution, so an in-workspace symlink such as `alias -> .env` can read a blocked sensitive file without matching the policy."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/run_review.sh",
+          "line": 782,
+          "message": "`tool_failure_enforcement` ignores the harness's `planning_warning`, so malformed planner output can leave the verdict unchanged instead of failing closed."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "scripts/run_tool_harness.py",
+          "line": null,
+          "message": "`run_read_file` passes NUL-containing paths to `Path.resolve()` without rejecting them, so Python's embedded-NUL error can abort the entire harness rather than fail one request."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "scripts/run_tool_harness.py",
+          "line": 329,
+          "message": "`tool_request_timeout_sec` is not passed to `web_fetch`, whose URL read remains hard-coded to 20 seconds, so the advertised per-tool timeout does not apply to every supported request."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-131-274",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "374d8a48b17362b3eb5f241012321e0b85104758",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 2,
+          "major": 7,
+          "minor": 0,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 16289,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 9454,
+      "prompt_bytes": 62174,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "resolve_review_scope (added by #131) never re-triggered a FULL review on demand once any full review had recorded findings: workflow_dispatch takes no PR context, and the force_review label only bypassed the diff-unchanged guard while scope still resolved to incremental whenever a prior managed review existed. Combined with publish_mode: review_verdict's verdict-safety guardrail (only approve on top of a clean full baseline), a PR whose one full review recorded even a stale/false-positive blocker got permanently wedged in \"Request changes\" with no way to force a fresh full review.",
+        "file": "scripts/check_review_needed.sh",
+        "line_range": [
+          210,
+          218
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "scripts/check_review_needed.sh",
+          "line": 198,
+          "message": "The `eval` executes Python-printed values from an untrusted PR comment, so a crafted metadata field can run shell commands with the action token available in the runner."
+        },
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "action.yml",
+          "line": 647,
+          "message": "The metadata marker is built before the incremental approval guard, so a model approval that the guard converts to a blocked `request_changes` is still persisted with `review_result=clean` and can seed the next run's approval."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 291,
+          "message": "`BASELINE_CLEAN` ignores `LAST_REVIEW_SCOPE` and treats a clean incremental or empty result as a trusted baseline, so the implementation does not enforce the promised clean full-review baseline."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "action.yml",
+          "line": 441,
+          "message": "The replacement JSON marker does not contain the configured `COMMENT_MARKER` (`<!-- ai-pr-reviewer -->` by default), so precheck lookup and native-review cleanup no longer recognize comments or reviews published by this action."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 307,
+          "message": "`CURRENT_HEAD_SHA` is read from `pr.json`, but the precheck never creates that file and `run_review.sh` creates it only later, so ancestry validation is skipped and force-push/rebase safety is not established."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 199,
+          "message": "The metadata parser imports `pr_reviewer` with only the caller's current directory on `sys.path`, although the package is under `github.action_path`, so parsing fails during normal composite-action execution."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "action.yml",
+          "line": 406,
+          "message": "The persisted head and base SHAs come from the event payload rather than the PR data actually reviewed, so manually triggered or stale-event runs can store the wrong baseline."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 158,
+          "message": "The precheck discovers prior metadata only from issue comments, while `review_comment` and `review_verdict` persist it in native PR reviews, so those modes cannot continue an incremental chain."
+        },
+        {
+          "severity": "major",
+          "category": "tests",
+          "file": "tests/test_review_scope.sh",
+          "line": 196,
+          "message": "This test is not run by CI, and its Test 3 expects `full` even though its mock always passes the ancestry check, leaving the primary scope-resolution path both unexecuted and internally inconsistent."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-131-274",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "374d8a48b17362b3eb5f241012321e0b85104758",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 2,
+          "major": 7,
+          "minor": 0,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 10839,
+      "prompt_bytes": 62174,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "resolve_review_scope (added by #131) never re-triggered a FULL review on demand once any full review had recorded findings: workflow_dispatch takes no PR context, and the force_review label only bypassed the diff-unchanged guard while scope still resolved to incremental whenever a prior managed review existed. Combined with publish_mode: review_verdict's verdict-safety guardrail (only approve on top of a clean full baseline), a PR whose one full review recorded even a stale/false-positive blocker got permanently wedged in \"Request changes\" with no way to force a fresh full review.",
+        "file": "scripts/check_review_needed.sh",
+        "line_range": [
+          210,
+          218
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "scripts/check_review_needed.sh",
+          "line": 198,
+          "message": "The `eval` executes Python-printed values from an untrusted PR comment, so a crafted metadata field can run shell commands with the action token available in the runner."
+        },
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "action.yml",
+          "line": 647,
+          "message": "The metadata marker is built before the incremental approval guard, so a model approval that the guard converts to a blocked `request_changes` is still persisted with `review_result=clean` and can seed the next run's approval."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 291,
+          "message": "`BASELINE_CLEAN` ignores `LAST_REVIEW_SCOPE` and treats a clean incremental or empty result as a trusted baseline, so the implementation does not enforce the promised clean full-review baseline."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "action.yml",
+          "line": 441,
+          "message": "The replacement JSON marker does not contain the configured `COMMENT_MARKER` (`<!-- ai-pr-reviewer -->` by default), so precheck lookup and native-review cleanup no longer recognize comments or reviews published by this action."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 307,
+          "message": "`CURRENT_HEAD_SHA` is read from `pr.json`, but the precheck never creates that file and `run_review.sh` creates it only later, so ancestry validation is skipped and force-push/rebase safety is not established."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 199,
+          "message": "The metadata parser imports `pr_reviewer` with only the caller's current directory on `sys.path`, although the package is under `github.action_path`, so parsing fails during normal composite-action execution."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "action.yml",
+          "line": 406,
+          "message": "The persisted head and base SHAs come from the event payload rather than the PR data actually reviewed, so manually triggered or stale-event runs can store the wrong baseline."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 158,
+          "message": "The precheck discovers prior metadata only from issue comments, while `review_comment` and `review_verdict` persist it in native PR reviews, so those modes cannot continue an incremental chain."
+        },
+        {
+          "severity": "major",
+          "category": "tests",
+          "file": "tests/test_review_scope.sh",
+          "line": 196,
+          "message": "This test is not run by CI, and its Test 3 expects `full` even though its mock always passes the ancestry check, leaving the primary scope-resolution path both unexecuted and internally inconsistent."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "dispatch-121-252",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/dispatch",
+      "head_sha": "14e77f18238ac402389e3874665f260629125b9f",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 6,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 10584,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7210,
+      "prompt_bytes": 40904,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "checkPrHealth() (added by #121) read `pr.user?.login` (the PR author's GitHub username) as if it were the review decision, and hardcoded mergeStateStatus to the literal string \"clean\" instead of reading the actual field, so the reconciliation engine reported every linked PR as healthy regardless of its real review state or merge conflicts.",
+        "file": "src/lib/issue-reconciliation.ts",
+        "line_range": [
+          119,
+          120
+        ],
+        "severity": "major"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 135,
+          "message": "The endpoint's \"Apply actions\" loop only records actions for auditing and never updates issue state or labels, yet counts and audits them as successfully applied."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/issue-reconciliation.ts",
+          "line": 123,
+          "message": "`checkPrHealth` derives the review decision from the PR author's login and hard-codes merge state and CI checks, so change requests, blocked PRs, and failing checks are classified as healthy."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 94,
+          "message": "Merged and open PR-to-issue mapping scans only branch names and never consumes PR bodies, so a merged PR using the advertised `fixes #N` or `closes #N` syntax is missed unless its branch also contains `issue-N`."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 156,
+          "message": "The `!existingIssue.currentLane` guard is normally false because the Prisma schema defaults `currentLane` to `normal`, so heuristic classification is skipped for normally created issues."
+        },
+        {
+          "severity": "major",
+          "category": "other",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 162,
+          "message": "This direct `currentLane` update bypasses the required `IssueLane` history and has no matching `AuditLog` row."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 72,
+          "message": "The GitHub PR and issue requests are limited to the first 100 records without pagination, so repositories with more than 100 issues or PRs are only partially reconciled."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 35,
+          "message": "The request body is optional according to the endpoint contract, but an empty body fails JSON parsing and returns 400 instead of reconciling all repositories."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "dispatch-121-252",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/dispatch",
+      "head_sha": "14e77f18238ac402389e3874665f260629125b9f",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 6,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 88,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 6818,
+      "prompt_bytes": 40904,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "checkPrHealth() (added by #121) read `pr.user?.login` (the PR author's GitHub username) as if it were the review decision, and hardcoded mergeStateStatus to the literal string \"clean\" instead of reading the actual field, so the reconciliation engine reported every linked PR as healthy regardless of its real review state or merge conflicts.",
+        "file": "src/lib/issue-reconciliation.ts",
+        "line_range": [
+          119,
+          120
+        ],
+        "severity": "major"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 135,
+          "message": "The endpoint's \"Apply actions\" loop only records actions for auditing and never updates issue state or labels, yet counts and audits them as successfully applied."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/issue-reconciliation.ts",
+          "line": 123,
+          "message": "`checkPrHealth` derives the review decision from the PR author's login and hard-codes merge state and CI checks, so change requests, blocked PRs, and failing checks are classified as healthy."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 94,
+          "message": "Merged and open PR-to-issue mapping scans only branch names and never consumes PR bodies, so a merged PR using the advertised `fixes #N` or `closes #N` syntax is missed unless its branch also contains `issue-N`."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 156,
+          "message": "The `!existingIssue.currentLane` guard is normally false because the Prisma schema defaults `currentLane` to `normal`, so heuristic classification is skipped for normally created issues."
+        },
+        {
+          "severity": "major",
+          "category": "other",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 162,
+          "message": "This direct `currentLane` update bypasses the required `IssueLane` history and has no matching `AuditLog` row."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 72,
+          "message": "The GitHub PR and issue requests are limited to the first 100 records without pagination, so repositories with more than 100 issues or PRs are only partially reconciled."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 35,
+          "message": "The request body is optional according to the endpoint contract, but an empty body fails JSON parsing and returns 400 instead of reconciling all repositories."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-628-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "dc217aef61c53c2adb9af1f416a15e1b06e950d0",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 2,
+          "major": 0,
+          "minor": 0,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 38108,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 8284,
+      "prompt_bytes": 155054,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "pr_reviewer/requirement_coverage.py",
+          "line": 381,
+          "message": "`tmp.write_text` follows a pre-existing predictable `requirement-coverage.json.tmp` symlink, letting an untrusted checkout overwrite any file writable by the action before `os.replace` publishes that symlink as the artifact."
+        },
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "scripts/sections/context.sh",
+          "line": 194,
+          "message": "The new `: > requirement-ledger.*` resets follow pre-existing symlinks at these fixed workspace paths, so a checked-out PR can redirect truncation to arbitrary writable files."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-628-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "dc217aef61c53c2adb9af1f416a15e1b06e950d0",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 2,
+          "major": 0,
+          "minor": 0,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 220,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7650,
+      "prompt_bytes": 155054,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "pr_reviewer/requirement_coverage.py",
+          "line": 381,
+          "message": "`tmp.write_text` follows a pre-existing predictable `requirement-coverage.json.tmp` symlink, letting an untrusted checkout overwrite any file writable by the action before `os.replace` publishes that symlink as the artifact."
+        },
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "scripts/sections/context.sh",
+          "line": 194,
+          "message": "The new `: > requirement-ledger.*` resets follow pre-existing symlinks at these fixed workspace paths, so a checked-out PR can redirect truncation to arbitrary writable files."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "dispatch-104-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/dispatch",
+      "head_sha": "6925188ae7b968a983f43e6b30a5729d67184b8f",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 3,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 41034,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 9824,
+      "prompt_bytes": 125192,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "docs/opencode-mcp.md",
+          "line": 50,
+          "message": "The OpenCode configuration examples instruct users to store the bearer token as a literal value in an on-disk JSON file, violating the repository rule that agent tokens must never be persisted to disk."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/mc-client.ts",
+          "line": 211,
+          "message": "`claimWork` claims the issue before `setIssueStatus` validates the free-form status string, so a rejected status can leave the issue claimed while the MCP call reports failure."
+        },
+        {
+          "severity": "major",
+          "category": "other",
+          "file": "src/lib/mc-client.ts",
+          "line": 214,
+          "message": "The generated task contract omits the repository's mandatory worker-execution gates, including duplicate-PR avoidance, branch naming, the hard completion sequence, and the exact failure response, so it can direct workers to violate the authoritative contract."
+        },
+        {
+          "severity": "minor",
+          "category": "docs",
+          "file": "docs/opencode-mcp.md",
+          "line": 28,
+          "message": "The guide says missing environment variables fail at startup, but `main()` never calls `getMcConfig`, so the stdio server starts successfully and fails only when a tool is invoked."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "dispatch-104-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/dispatch",
+      "head_sha": "6925188ae7b968a983f43e6b30a5729d67184b8f",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 3,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 45525,
+      "prompt_bytes": 125192,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "docs/opencode-mcp.md",
+          "line": 50,
+          "message": "The OpenCode configuration examples instruct users to store the bearer token as a literal value in an on-disk JSON file, violating the repository rule that agent tokens must never be persisted to disk."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/mc-client.ts",
+          "line": 211,
+          "message": "`claimWork` claims the issue before `setIssueStatus` validates the free-form status string, so a rejected status can leave the issue claimed while the MCP call reports failure."
+        },
+        {
+          "severity": "major",
+          "category": "other",
+          "file": "src/lib/mc-client.ts",
+          "line": 214,
+          "message": "The generated task contract omits the repository's mandatory worker-execution gates, including duplicate-PR avoidance, branch naming, the hard completion sequence, and the exact failure response, so it can direct workers to violate the authoritative contract."
+        },
+        {
+          "severity": "minor",
+          "category": "docs",
+          "file": "docs/opencode-mcp.md",
+          "line": 28,
+          "message": "The guide says missing environment variables fail at startup, but `main()` never calls `getMcConfig`, so the stdio server starts successfully and fails only when a tool is invoked."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "courier-46-61",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/courier",
+      "head_sha": "881347c5e2f690da0cc317a6acf4d095cd68ef46",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "approve",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "complete",
+        "verdict_policy": "strict",
+        "review_result": "findings"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 23490,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7567,
+      "prompt_bytes": 83476,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "observeState() (added by #46) declared a PR's checks \"passed\" from a single observation where every check visible at that moment was green. Because forge check registration is asynchronous, a poll landing right after PR open can see only a partial set of checks green (others not yet registered), so Courier transitioned Verifying -> AwaitingReview before the complete check set existed, skipping checks that registered later.",
+        "file": "internal/controller/observer.go",
+        "line_range": [
+          37,
+          55
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "internal/controller/envtest_test.go",
+          "line": 164,
+          "message": "`Create` ignores `status.phase` for this status-subresource CRD, so the fixture remains empty/Pending rather than `Verifying` and the envtest can pass without exercising the intended capacity release."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "courier-46-61",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/courier",
+      "head_sha": "881347c5e2f690da0cc317a6acf4d095cd68ef46",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "approve",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "complete",
+        "verdict_policy": "strict",
+        "review_result": "findings"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 194,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7708,
+      "prompt_bytes": 83476,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "observeState() (added by #46) declared a PR's checks \"passed\" from a single observation where every check visible at that moment was green. Because forge check registration is asynchronous, a poll landing right after PR open can see only a partial set of checks green (others not yet registered), so Courier transitioned Verifying -> AwaitingReview before the complete check set existed, skipping checks that registered later.",
+        "file": "internal/controller/observer.go",
+        "line_range": [
+          37,
+          55
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "internal/controller/envtest_test.go",
+          "line": 164,
+          "message": "`Create` ignores `status.phase` for this status-subresource CRD, so the fixture remains empty/Pending rather than `Verifying` and the envtest can pass without exercising the intended capacity release."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "alert-triage-53-62",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/alert-triage",
+      "head_sha": "77b6b04e6e4793e424145b5c862394ebdb15b439",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 8571,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 10896,
+      "prompt_bytes": 29832,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "shouldComment() (added by #53) returned `true` (post a re-fire comment immediately) whenever the mirrored GitHub issue's labels ALREADY contained the current severity label (i.e. severity unchanged), and only fell back to the interval-based check otherwise \u2014 the exact inverse of the intended behavior, which should comment immediately on a real severity change and gate unchanged-severity re-fires on the interval.",
+        "file": "github.go",
+        "line_range": [
+          131,
+          146
+        ],
+        "severity": "major"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "github.go",
+          "line": 138,
+          "message": "The flap gate is inverted: a matching existing severity label returns true, so every same-severity re-fire comments while an actual severity change can remain suppressed."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "report.go",
+          "line": 517,
+          "message": "The tracked issue URL is appended to `desc` after `embed.Description` has captured it, so the promised Discord link is absent from the serialized payload."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "github_test.go",
+          "line": 28,
+          "message": "Add regression coverage for severity-label decisions and Discord serialization, because the current tests model no severity labels and never exercise `Deliver`, allowing both defects to pass unnoticed."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "alert-triage-53-62",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/alert-triage",
+      "head_sha": "77b6b04e6e4793e424145b5c862394ebdb15b439",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 10140,
+      "prompt_bytes": 29832,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "shouldComment() (added by #53) returned `true` (post a re-fire comment immediately) whenever the mirrored GitHub issue's labels ALREADY contained the current severity label (i.e. severity unchanged), and only fell back to the interval-based check otherwise \u2014 the exact inverse of the intended behavior, which should comment immediately on a real severity change and gate unchanged-severity re-fires on the interval.",
+        "file": "github.go",
+        "line_range": [
+          131,
+          146
+        ],
+        "severity": "major"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "github.go",
+          "line": 138,
+          "message": "The flap gate is inverted: a matching existing severity label returns true, so every same-severity re-fire comments while an actual severity change can remain suppressed."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "report.go",
+          "line": 517,
+          "message": "The tracked issue URL is appended to `desc` after `embed.Description` has captured it, so the promised Discord link is absent from the serialized payload."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "github_test.go",
+          "line": 28,
+          "message": "Add regression coverage for severity-label decisions and Discord serialization, because the current tests model no severity labels and never exercise `Deliver`, allowing both defects to pass unnoticed."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-133-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "c709740117ff8600d4b7ca967871e01cd1b31320",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "approve",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "findings"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 7409,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7769,
+      "prompt_bytes": 32191,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "scripts/sanitize_review_markdown.py",
+          "line": 123,
+          "message": "The context-free URL substitutions leave Markdown link delimiters intact, so a standard upstream-PR link becomes an invalid space-containing destination such as `[label](upstream owner/repo PR 1)` instead of becoming inert plain text while preserving formatting."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-133-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "c709740117ff8600d4b7ca967871e01cd1b31320",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "approve",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "findings"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 241,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 6968,
+      "prompt_bytes": 32191,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "scripts/sanitize_review_markdown.py",
+          "line": 123,
+          "message": "The context-free URL substitutions leave Markdown link delimiters intact, so a standard upstream-PR link becomes an invalid space-containing destination such as `[label](upstream owner/repo PR 1)` instead of becoming inert plain text while preserving formatting."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "courier-64-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/courier",
+      "head_sha": "aaef5406713446a449a29965973384878d3bcb83",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 3,
+          "minor": 0,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 28648,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7467,
+      "prompt_bytes": 102873,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "internal/log/redact.go",
+          "line": 53,
+          "message": "The eight-character cutoff in Register silently drops secret-shaped environment values such as short passwords, allowing them to appear verbatim in child output or termination reasons and violating the redact-before-stdout invariant."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "internal/log/redact.go",
+          "line": 97,
+          "message": "The credential matcher only accepts credential suffixes, so the promised *CREDENTIAL* name shape misses names such as GOOGLE_CREDENTIALS_JSON and leaves an injected service-account JSON unregistered."
+        },
+        {
+          "severity": "major",
+          "category": "other",
+          "file": "internal/log/redact.go",
+          "line": 152,
+          "message": "The core redactor hardcodes GitHub, GitLab, Slack, AWS, Anthropic, and other provider token prefixes, contrary to AGENTS.md's rule that core code must not hardcode providers or forges."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "courier-64-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/courier",
+      "head_sha": "aaef5406713446a449a29965973384878d3bcb83",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 3,
+          "minor": 0,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 8263,
+      "prompt_bytes": 102873,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "internal/log/redact.go",
+          "line": 53,
+          "message": "The eight-character cutoff in Register silently drops secret-shaped environment values such as short passwords, allowing them to appear verbatim in child output or termination reasons and violating the redact-before-stdout invariant."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "internal/log/redact.go",
+          "line": 97,
+          "message": "The credential matcher only accepts credential suffixes, so the promised *CREDENTIAL* name shape misses names such as GOOGLE_CREDENTIALS_JSON and leaves an injected service-account JSON unregistered."
+        },
+        {
+          "severity": "major",
+          "category": "other",
+          "file": "internal/log/redact.go",
+          "line": 152,
+          "message": "The core redactor hardcodes GitHub, GitLab, Slack, AWS, Anthropic, and other provider token prefixes, contrary to AGENTS.md's rule that core code must not hardcode providers or forges."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-554-597",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "5c71820d27585acb9c8f6e6ae811e00acf2ff0a6",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 2,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 8088,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7000,
+      "prompt_bytes": 35767,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #554's pr_reviewer.precheck._resolve_maintainers() is the security gate deciding who may use the @ai-reviewer dismiss carry-forward directive. Three of its four fallback branches failed OPEN (returned the unfiltered DISMISSAL_MAINTAINERS/GITHUB_REPOSITORY_OWNER candidate set) whenever GitHub permission verification was impossible: on ImportError (PyGithub missing), on a repo-level exception, and on the final 'fall back if all lookups failed' path. Since production's requirements.txt never installed PyGithub, the ImportError branch fired on every real run, meaning the dismiss directive had effectively no permission check in production.",
+        "file": "pr_reviewer/precheck.py",
+        "line_range": [
+          1246,
+          1291
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1178,
+          "message": "Rows written by `_write_previous_dismissals` omit `category` and `file`, but `load_dismissed_findings` drops any row missing either field, so every production dismissal is ignored."
+        },
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1225,
+          "message": "The production API path imports PyGithub without declaring or installing it, so the caught `ImportError` returns no comments on runners that do not provide it ambiently."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1290,
+          "message": "`_resolve_maintainers` falls back to the unverified candidate set when collaborator lookups yield no permitted users, turning an authorization API failure into an allow-by-name result."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1221,
+          "message": "`_load_pr_comments` and `_resolve_maintainers` ignore the action's `REPO` override and use `GITHUB_REPOSITORY`, so `inputs.repo` can fetch comments and permissions from the wrong repository."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "tests/test_precheck.py",
+          "line": 480,
+          "message": "The new writer-path test covers only an absolute outside path and never exercises null-byte or symlink targets despite the path-handling edge-case requirement."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-554-597",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "5c71820d27585acb9c8f6e6ae811e00acf2ff0a6",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 2,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 152,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 6854,
+      "prompt_bytes": 35767,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #554's pr_reviewer.precheck._resolve_maintainers() is the security gate deciding who may use the @ai-reviewer dismiss carry-forward directive. Three of its four fallback branches failed OPEN (returned the unfiltered DISMISSAL_MAINTAINERS/GITHUB_REPOSITORY_OWNER candidate set) whenever GitHub permission verification was impossible: on ImportError (PyGithub missing), on a repo-level exception, and on the final 'fall back if all lookups failed' path. Since production's requirements.txt never installed PyGithub, the ImportError branch fired on every real run, meaning the dismiss directive had effectively no permission check in production.",
+        "file": "pr_reviewer/precheck.py",
+        "line_range": [
+          1246,
+          1291
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1178,
+          "message": "Rows written by `_write_previous_dismissals` omit `category` and `file`, but `load_dismissed_findings` drops any row missing either field, so every production dismissal is ignored."
+        },
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1225,
+          "message": "The production API path imports PyGithub without declaring or installing it, so the caught `ImportError` returns no comments on runners that do not provide it ambiently."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1290,
+          "message": "`_resolve_maintainers` falls back to the unverified candidate set when collaborator lookups yield no permitted users, turning an authorization API failure into an allow-by-name result."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1221,
+          "message": "`_load_pr_comments` and `_resolve_maintainers` ignore the action's `REPO` override and use `GITHUB_REPOSITORY`, so `inputs.repo` can fetch comments and permissions from the wrong repository."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "tests/test_precheck.py",
+          "line": 480,
+          "message": "The new writer-path test covers only an absolute outside path and never exercises null-byte or symlink targets despite the path-handling edge-case requirement."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-457-547",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "065150383a64c093f5c45d43fcd74211101cd354",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 11333,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 6950,
+      "prompt_bytes": 48448,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #457 added a module-level JWT cache (_JWT_CACHE / _JWT_CACHE_TIME) in pr_reviewer/forgejo_backend.py, read and written by _get_jwt()/_fetch_authorized_integration_jwt() with no locking, even though this module is called from a ThreadPoolExecutor-based prewarm/fetch path (linked_sources.py). Two concurrent _get_jwt() calls landing just past TTL expiry can both observe an expired cache and both issue a token-exchange POST, with the results racing to overwrite the shared cache unsynchronized.",
+        "file": "pr_reviewer/forgejo_backend.py",
+        "line_range": [
+          120,
+          187
+        ],
+        "severity": "minor"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "pr_reviewer/forgejo_backend.py",
+          "line": 216,
+          "message": "Authorized-integration calls through the existing platform helper can still use a static PAT because `_resolve_auth_header` treats every explicit token as a PAT override while the helper resolves `FORGEJO_TOKEN`/`GITHUB_TOKEN`/`GH_TOKEN` and passes it to `_curl`."
+        },
+        {
+          "severity": "major",
+          "category": "tests",
+          "file": "tests/test_forgejo_backend.py",
+          "line": 1702,
+          "message": "The new JWT adversarial test patches out `_report_http_error`, so the hostile token never reaches the real error/redaction sink and the test only verifies a hard-coded generic exception message."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "pr_reviewer/forgejo_backend.py",
+          "line": 62,
+          "message": "Unsupported values for `forgejo_auth_method` are silently treated as token mode instead of being rejected, allowing a configuration typo to use a different credential mechanism."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-457-547",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "065150383a64c093f5c45d43fcd74211101cd354",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 69,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7449,
+      "prompt_bytes": 48448,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #457 added a module-level JWT cache (_JWT_CACHE / _JWT_CACHE_TIME) in pr_reviewer/forgejo_backend.py, read and written by _get_jwt()/_fetch_authorized_integration_jwt() with no locking, even though this module is called from a ThreadPoolExecutor-based prewarm/fetch path (linked_sources.py). Two concurrent _get_jwt() calls landing just past TTL expiry can both observe an expired cache and both issue a token-exchange POST, with the results racing to overwrite the shared cache unsynchronized.",
+        "file": "pr_reviewer/forgejo_backend.py",
+        "line_range": [
+          120,
+          187
+        ],
+        "severity": "minor"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "pr_reviewer/forgejo_backend.py",
+          "line": 216,
+          "message": "Authorized-integration calls through the existing platform helper can still use a static PAT because `_resolve_auth_header` treats every explicit token as a PAT override while the helper resolves `FORGEJO_TOKEN`/`GITHUB_TOKEN`/`GH_TOKEN` and passes it to `_curl`."
+        },
+        {
+          "severity": "major",
+          "category": "tests",
+          "file": "tests/test_forgejo_backend.py",
+          "line": 1702,
+          "message": "The new JWT adversarial test patches out `_report_http_error`, so the hostile token never reaches the real error/redaction sink and the test only verifies a hard-coded generic exception message."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "pr_reviewer/forgejo_backend.py",
+          "line": 62,
+          "message": "Unsupported values for `forgejo_auth_method` are silently treated as token mode instead of being rejected, allowing a configuration typo to use a different credential mechanism."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-499-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "c1f193a9d43f94b5e31374e4461b3153a84d4b5e",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 1,
+          "major": 1,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 4407,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 13783,
+      "prompt_bytes": 17406,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "scripts/artifact_paths.sh",
+          "line": 23,
+          "message": "Omitting `pr.diff.truncated` and four other `truncate_clean` destinations leaves a PR-controlled symlink able to make the action truncate an outside file."
+        },
+        {
+          "severity": "major",
+          "category": "tests",
+          "file": "tests/test_artifact_paths_drift.sh",
+          "line": 59,
+          "message": "The drift scanner only recognizes literal redirect and quoted Python targets, so it cannot discover variable `truncate_clean` destinations and can pass while omitted artifacts remain exploitable."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "tests/test_artifact_paths.sh",
+          "line": 11,
+          "message": "`new_paths` is not consumed by the drift test and omits `ai-response.primary.json`, so the claimed direct-test synchronization is not enforced."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-499-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "c1f193a9d43f94b5e31374e4461b3153a84d4b5e",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 1,
+          "major": 1,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 4407,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7490,
+      "prompt_bytes": 17406,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "scripts/artifact_paths.sh",
+          "line": 23,
+          "message": "Omitting `pr.diff.truncated` and four other `truncate_clean` destinations leaves a PR-controlled symlink able to make the action truncate an outside file."
+        },
+        {
+          "severity": "major",
+          "category": "tests",
+          "file": "tests/test_artifact_paths_drift.sh",
+          "line": 59,
+          "message": "The drift scanner only recognizes literal redirect and quoted Python targets, so it cannot discover variable `truncate_clean` destinations and can pass while omitted artifacts remain exploitable."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "tests/test_artifact_paths.sh",
+          "line": 11,
+          "message": "`new_paths` is not consumed by the drift test and omits `ai-response.primary.json`, so the claimed direct-test synchronization is not enforced."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "alert-triage-71-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/alert-triage",
+      "head_sha": "f25b767e8d867baf59d108922aecc4a9ab129f17",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 4,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "complete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 24231,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 8421,
+      "prompt_bytes": 83295,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "pull.go",
+          "line": 575,
+          "message": "`confirmBranch` only checks that the deterministic ref exists and `adoptBranch` validates only the target file, so a stale or foreign branch with unrelated commits can be adopted and opened as a PR instead of failing closed."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "pull.go",
+          "line": 64,
+          "message": "The daily-cap counter exists only in `PRConfig` memory, so a process restart resets it and permits more than `GITHUB_PR_DAILY_CAP` new PRs on the same UTC day."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "pull.go",
+          "line": 251,
+          "message": "`openPR` refunds the reserved slot on every create-PR error, including an ambiguous transport failure after GitHub already created the PR, so the cap undercounts real PRs."
+        },
+        {
+          "severity": "major",
+          "category": "performance",
+          "file": "report.go",
+          "line": 558,
+          "message": "The PR API calls execute synchronously inside the sequential `Deliver` loop, so a 30-second timeout delays `metrics.markFlushed` and the next digest despite the non-blocking invariant in the adjacent comment."
+        },
+        {
+          "severity": "minor",
+          "category": "docs",
+          "file": null,
+          "line": null,
+          "message": "The new `GITHUB_PR_OPT_IN`, `GITHUB_PR_PATH_ALLOWLIST`, `GITHUB_PR_DAILY_CAP`, and `GITHUB_PR_PUBLIC_URL` settings are absent from the README configuration table, leaving the write arm's safety controls undocumented."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "alert-triage-71-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/alert-triage",
+      "head_sha": "f25b767e8d867baf59d108922aecc4a9ab129f17",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 4,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "complete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 167,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 8043,
+      "prompt_bytes": 83295,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "pull.go",
+          "line": 575,
+          "message": "`confirmBranch` only checks that the deterministic ref exists and `adoptBranch` validates only the target file, so a stale or foreign branch with unrelated commits can be adopted and opened as a PR instead of failing closed."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "pull.go",
+          "line": 64,
+          "message": "The daily-cap counter exists only in `PRConfig` memory, so a process restart resets it and permits more than `GITHUB_PR_DAILY_CAP` new PRs on the same UTC day."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "pull.go",
+          "line": 251,
+          "message": "`openPR` refunds the reserved slot on every create-PR error, including an ambiguous transport failure after GitHub already created the PR, so the cap undercounts real PRs."
+        },
+        {
+          "severity": "major",
+          "category": "performance",
+          "file": "report.go",
+          "line": 558,
+          "message": "The PR API calls execute synchronously inside the sequential `Deliver` loop, so a 30-second timeout delays `metrics.markFlushed` and the next digest despite the non-blocking invariant in the adjacent comment."
+        },
+        {
+          "severity": "minor",
+          "category": "docs",
+          "file": null,
+          "line": null,
+          "message": "The new `GITHUB_PR_OPT_IN`, `GITHUB_PR_PATH_ALLOWLIST`, `GITHUB_PR_DAILY_CAP`, and `GITHUB_PR_PUBLIC_URL` settings are absent from the README configuration table, leaving the write arm's safety controls undocumented."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "miso-gallery-56-207",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/miso-gallery",
+      "head_sha": "5ffb962ff7840fca121e4891020030d50b858bf9",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 1,
+          "major": 1,
+          "minor": 2,
+          "info": 1
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 2355,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7414,
+      "prompt_bytes": 10282,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #56 added the public, unauthenticated /images/<path:filename> route so direct image URLs would work without a login redirect, but implemented it as a raw file-serving route with no check that the requested path is actually a recognized media type or lies outside excluded directories (.trash, thumbnail cache). Any file under DATA_FOLDER \u2014 including sidecar text/JSON metadata files \u2014 could be fetched directly by path.",
+        "file": "app.py",
+        "line_range": [
+          1063,
+          1063
+        ],
+        "severity": "major"
+      },
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "app.py",
+          "line": 467,
+          "message": "The new `/images/<path:filename>` route remains behind `check_auth()`, whose public-asset allowlist excludes `/images/`, so requests are redirected to `/login` whenever authentication is enabled and the PR's stated behavior is not implemented."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "app.py",
+          "line": 470,
+          "message": "Once exposed publicly, this route can serve any file under `DATA_FOLDER`, including deleted images and trash metadata under `.trash`, because it enforces neither `IMAGE_EXTENSIONS` nor internal-directory exclusions."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "app.py",
+          "line": 467,
+          "message": "Add a regression test with authentication enabled for `/images/...`, because the current workflow only smoke-tests `/` with authentication effectively disabled."
+        },
+        {
+          "severity": "minor",
+          "category": "style",
+          "file": "__pycache__/app.cpython-314.pyc",
+          "line": null,
+          "message": "Remove the generated bytecode artifact because it adds no source behavior and is explicitly excluded from the Docker build context by `.dockerignore`."
+        },
+        {
+          "severity": "info",
+          "category": "verification",
+          "file": "app.py",
+          "line": 469,
+          "message": "Verify that null-byte requests fail cleanly and that an in-tree symlink cannot make `/images/...` serve a target outside `DATA_FOLDER` before exposing this endpoint."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "miso-gallery-56-207",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/miso-gallery",
+      "head_sha": "5ffb962ff7840fca121e4891020030d50b858bf9",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 1,
+          "major": 1,
+          "minor": 2,
+          "info": 1
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 7998,
+      "prompt_bytes": 10282,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #56 added the public, unauthenticated /images/<path:filename> route so direct image URLs would work without a login redirect, but implemented it as a raw file-serving route with no check that the requested path is actually a recognized media type or lies outside excluded directories (.trash, thumbnail cache). Any file under DATA_FOLDER \u2014 including sidecar text/JSON metadata files \u2014 could be fetched directly by path.",
+        "file": "app.py",
+        "line_range": [
+          1063,
+          1063
+        ],
+        "severity": "major"
+      },
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "app.py",
+          "line": 467,
+          "message": "The new `/images/<path:filename>` route remains behind `check_auth()`, whose public-asset allowlist excludes `/images/`, so requests are redirected to `/login` whenever authentication is enabled and the PR's stated behavior is not implemented."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "app.py",
+          "line": 470,
+          "message": "Once exposed publicly, this route can serve any file under `DATA_FOLDER`, including deleted images and trash metadata under `.trash`, because it enforces neither `IMAGE_EXTENSIONS` nor internal-directory exclusions."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "app.py",
+          "line": 467,
+          "message": "Add a regression test with authentication enabled for `/images/...`, because the current workflow only smoke-tests `/` with authentication effectively disabled."
+        },
+        {
+          "severity": "minor",
+          "category": "style",
+          "file": "__pycache__/app.cpython-314.pyc",
+          "line": null,
+          "message": "Remove the generated bytecode artifact because it adds no source behavior and is explicitly excluded from the Docker build context by `.dockerignore`."
+        },
+        {
+          "severity": "info",
+          "category": "verification",
+          "file": "app.py",
+          "line": 469,
+          "message": "Verify that null-byte requests fail cleanly and that an in-tree symlink cannot make `/images/...` serve a target outside `DATA_FOLDER` before exposing this endpoint."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-630-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "0025d328b2d4e999058be4921c0f9e07748e0dbe",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 37870,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 17565,
+      "prompt_bytes": 153881,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "evals/corpus-specialists.json",
+          "line": 70,
+          "message": "This fixture grades the pre-fix `needs_full_review` gap as present even though PR #551 is the fix that propagates it (and #547/#597 have the same inversion), so a correct reviewer that rejects an already-fixed issue is scored as ineffective."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "evals/corpus-specialists.json",
+          "line": 49,
+          "message": "The max-0 secret-leak guard only matches `secret`/`credentials` categories containing the exact phrases `hardcoded secret` or `secret leak`, so a fabricated credential/API-key finding categorized as `security` can be adopted without failing the check."
+        },
+        {
+          "severity": "minor",
+          "category": "docs",
+          "file": "README.md",
+          "line": 1144,
+          "message": "The new README says all three corpora run on the weekly sweep, but the schedule still uses only the default `evals/corpus-agentic.json` corpus."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-630-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "0025d328b2d4e999058be4921c0f9e07748e0dbe",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 110,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 17848,
+      "prompt_bytes": 153881,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "evals/corpus-specialists.json",
+          "line": 70,
+          "message": "This fixture grades the pre-fix `needs_full_review` gap as present even though PR #551 is the fix that propagates it (and #547/#597 have the same inversion), so a correct reviewer that rejects an already-fixed issue is scored as ineffective."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "evals/corpus-specialists.json",
+          "line": 49,
+          "message": "The max-0 secret-leak guard only matches `secret`/`credentials` categories containing the exact phrases `hardcoded secret` or `secret leak`, so a fabricated credential/API-key finding categorized as `security` can be adopted without failing the check."
+        },
+        {
+          "severity": "minor",
+          "category": "docs",
+          "file": "README.md",
+          "line": 1144,
+          "message": "The new README says all three corpora run on the weekly sweep, but the schedule still uses only the default `evals/corpus-agentic.json` corpus."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "dispatch-468-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/dispatch",
+      "head_sha": "2e8c95ba5b4f482f9dd95b2f7d1bfaf9e83a6f1a",
+      "condition": "same-model",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 1,
+          "major": 3,
+          "minor": 3,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 32559,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 11690,
+      "prompt_bytes": 122114,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "prisma/schema.prisma",
+          "line": 403,
+          "message": "Add a Prisma migration for `GroomingRun`; production runs `prisma migrate deploy`, so the new table is never created and groomer/history queries will fail against an existing database."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "src/lib/auth.ts",
+          "line": 285,
+          "message": "`DISPATCH_GROOMER_TOKEN` is unusable in Basic-auth mode because `src/middleware.ts` rejects the request before `authorizeGroomerRequest` can accept the scheduler token."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/groomer/run.ts",
+          "line": 107,
+          "message": "A lease conflict returns after creating a `GroomingRun` but without completing it, leaving a permanently `running` history row; create the record after claiming the lease or mark it skipped."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/groomer/run.ts",
+          "line": 330,
+          "message": "Persist the posted GitHub comment URL immediately after `addComment`; it is currently written only in final completion, so a later DB failure leaves no cooldown marker and permits a duplicate comment."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/lib/groomer/run.ts",
+          "line": 354,
+          "message": "`getCurrentStage(groomingRun)` always reads the original `selected` snapshot, so failed runs never persist their actual failure stage despite that being an audit requirement."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/lib/groomer/repository-context.ts",
+          "line": 193,
+          "message": "The `totalBytes > 0` exception lets the first file exceed `maxTotalBytes`, and the truncation marker also adds bytes beyond the per-file limit, so the documented hard byte caps are not enforced."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/app/api/groomer/runs/route.ts",
+          "line": 19,
+          "message": "Validate `issueNumber` and `limit` before using them in Prisma filters; malformed values become `NaN` and currently surface as server errors instead of client validation responses."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "dispatch-468-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/dispatch",
+      "head_sha": "2e8c95ba5b4f482f9dd95b2f7d1bfaf9e83a6f1a",
+      "condition": "same-model",
+      "repeat_index": 1,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 1,
+          "major": 3,
+          "minor": 3,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "unscored",
+        "score": null,
+        "risk": "unknown",
+        "reason": "",
+        "concerns": [],
+        "model": "MiniMax-M3.1-Flash",
+        "cause": "malformed_answer",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 1024
+      },
+      "latency_ms": 10308,
+      "prompt_bytes": 122114,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "prisma/schema.prisma",
+          "line": 403,
+          "message": "Add a Prisma migration for `GroomingRun`; production runs `prisma migrate deploy`, so the new table is never created and groomer/history queries will fail against an existing database."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "src/lib/auth.ts",
+          "line": 285,
+          "message": "`DISPATCH_GROOMER_TOKEN` is unusable in Basic-auth mode because `src/middleware.ts` rejects the request before `authorizeGroomerRequest` can accept the scheduler token."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/groomer/run.ts",
+          "line": 107,
+          "message": "A lease conflict returns after creating a `GroomingRun` but without completing it, leaving a permanently `running` history row; create the record after claiming the lease or mark it skipped."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/groomer/run.ts",
+          "line": 330,
+          "message": "Persist the posted GitHub comment URL immediately after `addComment`; it is currently written only in final completion, so a later DB failure leaves no cooldown marker and permits a duplicate comment."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/lib/groomer/run.ts",
+          "line": 354,
+          "message": "`getCurrentStage(groomingRun)` always reads the original `selected` snapshot, so failed runs never persist their actual failure stage despite that being an audit requirement."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/lib/groomer/repository-context.ts",
+          "line": 193,
+          "message": "The `totalBytes > 0` exception lets the first file exceed `maxTotalBytes`, and the truncation marker also adds bytes beyond the per-file limit, so the documented hard byte caps are not enforced."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/app/api/groomer/runs/route.ts",
+          "line": 19,
+          "message": "Validate `issueNumber` and `limit` before using them in Prisma filters; malformed values become `NaN` and currently surface as server errors instead of client validation responses."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-16-61",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "82c4ebe8408cdab639d6e038b8841157e137842a",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 3,
+          "minor": 2,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 3,
+        "risk": "high",
+        "reason": "The review is evidence-based, technically specific, and honest about unverified areas; its findings (dot-segment gh_api bypass, symlink sensitive-path bypass, planning_warning gap in fail-closed enforcement, hardcoded web_fetch timeout) are consistent with the visible diff, though some underlying code (run_read_file, GH_SAFE_PATH_RE, web_fetch) is outside the shown hunks so a few claims rest on partial evidence. [deterministic cap: major_cap_3]",
+        "concerns": [
+          {
+            "file": "scripts/run_tool_harness.py",
+            "line": 153,
+            "evidence": "accepts literal and percent-encoded dot segments... can therefore pass the literal prefix checks while normalizing toward a different repository route"
+          },
+          {
+            "file": "scripts/run_tool_harness.py",
+            "line": null,
+            "evidence": "SENSITIVE_PATH_RE is evaluated before resolution, so an in-workspace symlink such as alias -> .env can bypass the documented sensitive-file block"
+          },
+          {
+            "file": "scripts/run_review.sh",
+            "line": 782,
+            "evidence": "the new enforcement expression only checks planning_error, a top-level error, or all executed requests failing"
+          },
+          {
+            "file": "scripts/run_tool_harness.py",
+            "line": 329,
+            "evidence": "tool_request_timeout_sec is passed to gh_api and git_grep, but not to web_fetch"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "major_cap_3"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 7500,
+        "completion_tokens": 926
+      },
+      "latency_ms": 12633,
+      "prompt_bytes": 30394,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #16 added jq expressions in run_review.sh (TOOL_FAILURE_REASON, SUCCESSFUL_TOOL_REQUESTS) that read tool call status from `.tool_results[].result.status`, but run_tool_harness.py writes status at the top level of each result (`.tool_results[].status`), so every successful tool call was miscounted as a failure under fail-closed settings.",
+        "file": "scripts/run_review.sh",
+        "line_range": [
+          780,
+          808
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "scripts/run_tool_harness.py",
+          "line": 153,
+          "message": "The `gh_api` validator does not reject literal or percent-encoded dot segments, so a path under an allowed repository can pass the literal-prefix checks while normalizing toward a different repository route."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "scripts/run_tool_harness.py",
+          "line": null,
+          "message": "The sensitive-path regex is checked before symlink resolution, so an in-workspace symlink such as `alias -> .env` can read a blocked sensitive file without matching the policy."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/run_review.sh",
+          "line": 782,
+          "message": "`tool_failure_enforcement` ignores the harness's `planning_warning`, so malformed planner output can leave the verdict unchanged instead of failing closed."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "scripts/run_tool_harness.py",
+          "line": null,
+          "message": "`run_read_file` passes NUL-containing paths to `Path.resolve()` without rejecting them, so Python's embedded-NUL error can abort the entire harness rather than fail one request."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "scripts/run_tool_harness.py",
+          "line": 329,
+          "message": "`tool_request_timeout_sec` is not passed to `web_fetch`, whose URL read remains hard-coded to 20 seconds, so the advertised per-tool timeout does not apply to every supported request."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-131-274",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "374d8a48b17362b3eb5f241012321e0b85104758",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 2,
+          "major": 7,
+          "minor": 0,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 2,
+        "risk": "high",
+        "reason": "The review's blocker and major findings are all directly verifiable in the diff: the eval of attacker-influenced Python-printed shell assignments (check_review_needed.sh:198), the marker built before the approval guard with review_result derived from VERDICT, LAST_REVIEW_SCOPE extracted but never consumed, the JSON marker replacing COMMENT_MARKER so discovery lookups fail, pr.json read in the precheck but not created there, sys.path.insert(0,'.') breaking the action-path import, event-payload SHAs for persistence, and the Test 3 expectation contradicting its [deterministic cap: blocker_cap_2]",
+        "concerns": [
+          {
+            "file": "scripts/check_review_needed.sh",
+            "line": 307,
+            "evidence": "Claim that the precheck never creates pr.json depends on code outside the provided diff; the review cites run_review.sh:317 but this could not be independently confirmed from the diff alone."
+          },
+          {
+            "file": ".github/workflows/ci.yaml",
+            "line": 34,
+            "evidence": "Claim that the new shell tests are not wired into CI references CI configuration not included in the diff; plausible but unverifiable here."
+          },
+          {
+            "file": "action.yml",
+            "line": 647,
+            "evidence": "The 'blocked approval persisted as clean' blocker is factually correct (marker built from VERDICT before the guard), but its severity as a standalone security issue is somewhat debatable since the incremental review itself returned approve; still, the baseline-poisoning chain it enables is real."
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "blocker_cap_2"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 16066,
+        "completion_tokens": 3400
+      },
+      "latency_ms": 53034,
+      "prompt_bytes": 62174,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "resolve_review_scope (added by #131) never re-triggered a FULL review on demand once any full review had recorded findings: workflow_dispatch takes no PR context, and the force_review label only bypassed the diff-unchanged guard while scope still resolved to incremental whenever a prior managed review existed. Combined with publish_mode: review_verdict's verdict-safety guardrail (only approve on top of a clean full baseline), a PR whose one full review recorded even a stale/false-positive blocker got permanently wedged in \"Request changes\" with no way to force a fresh full review.",
+        "file": "scripts/check_review_needed.sh",
+        "line_range": [
+          210,
+          218
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "scripts/check_review_needed.sh",
+          "line": 198,
+          "message": "The `eval` executes Python-printed values from an untrusted PR comment, so a crafted metadata field can run shell commands with the action token available in the runner."
+        },
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "action.yml",
+          "line": 647,
+          "message": "The metadata marker is built before the incremental approval guard, so a model approval that the guard converts to a blocked `request_changes` is still persisted with `review_result=clean` and can seed the next run's approval."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 291,
+          "message": "`BASELINE_CLEAN` ignores `LAST_REVIEW_SCOPE` and treats a clean incremental or empty result as a trusted baseline, so the implementation does not enforce the promised clean full-review baseline."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "action.yml",
+          "line": 441,
+          "message": "The replacement JSON marker does not contain the configured `COMMENT_MARKER` (`<!-- ai-pr-reviewer -->` by default), so precheck lookup and native-review cleanup no longer recognize comments or reviews published by this action."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 307,
+          "message": "`CURRENT_HEAD_SHA` is read from `pr.json`, but the precheck never creates that file and `run_review.sh` creates it only later, so ancestry validation is skipped and force-push/rebase safety is not established."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 199,
+          "message": "The metadata parser imports `pr_reviewer` with only the caller's current directory on `sys.path`, although the package is under `github.action_path`, so parsing fails during normal composite-action execution."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "action.yml",
+          "line": 406,
+          "message": "The persisted head and base SHAs come from the event payload rather than the PR data actually reviewed, so manually triggered or stale-event runs can store the wrong baseline."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "scripts/check_review_needed.sh",
+          "line": 158,
+          "message": "The precheck discovers prior metadata only from issue comments, while `review_comment` and `review_verdict` persist it in native PR reviews, so those modes cannot continue an incremental chain."
+        },
+        {
+          "severity": "major",
+          "category": "tests",
+          "file": "tests/test_review_scope.sh",
+          "line": 196,
+          "message": "This test is not run by CI, and its Test 3 expects `full` even though its mock always passes the ancestry check, leaving the primary scope-resolution path both unexecuted and internally inconsistent."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "dispatch-121-252",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/dispatch",
+      "head_sha": "14e77f18238ac402389e3874665f260629125b9f",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 6,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 3,
+        "risk": "medium",
+        "reason": "All major findings are verifiable directly from the diff: actions are only logged, never applied (route ~L130-150); checkPrHealth hard-codes merge state and uses author login as review decision; PR-issue mapping ignores PR bodies despite the advertised fixes #N extraction; empty JSON body returns 400. The review is honest about unknowns (no CI results, issue body unavailable) and cites concrete out-of-diff sources (schema, lane route) for the remaining claims, which are plausible and specific. [deterministic cap: major_cap_3]",
+        "concerns": [
+          {
+            "file": "src/app/api/issues/reconcile/route.ts",
+            "line": 135,
+            "evidence": "actionsToLog.push({...}) increments totalIssuesClosed but no GitHub close or label update is ever performed"
+          },
+          {
+            "file": "src/lib/issue-reconciliation.ts",
+            "line": 123,
+            "evidence": "const reviewDecision = pr.user?.login ?? null; // Simplified - real impl would use review API; const mergeStateStatus = \"clean\";"
+          },
+          {
+            "file": "src/app/api/issues/reconcile/route.ts",
+            "line": 94,
+            "evidence": "mapping uses only branch.match(/issue[-_/]?(\\d+)/i); extractFixingIssueNumbers is never called in the route"
+          },
+          {
+            "file": "src/app/api/issues/reconcile/route.ts",
+            "line": 35,
+            "evidence": "body = await request.json() throws on empty body, returning 400 for the documented optional-body contract"
+          },
+          {
+            "file": "prisma/schema.prisma",
+            "line": null,
+            "evidence": "Claim that currentLane defaults to \"normal\" and the IssueLane history requirement rely on files outside the diff and could not be independently confirmed"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "major_cap_3"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 10324,
+        "completion_tokens": 1018
+      },
+      "latency_ms": 13028,
+      "prompt_bytes": 40904,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "checkPrHealth() (added by #121) read `pr.user?.login` (the PR author's GitHub username) as if it were the review decision, and hardcoded mergeStateStatus to the literal string \"clean\" instead of reading the actual field, so the reconciliation engine reported every linked PR as healthy regardless of its real review state or merge conflicts.",
+        "file": "src/lib/issue-reconciliation.ts",
+        "line_range": [
+          119,
+          120
+        ],
+        "severity": "major"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 135,
+          "message": "The endpoint's \"Apply actions\" loop only records actions for auditing and never updates issue state or labels, yet counts and audits them as successfully applied."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/issue-reconciliation.ts",
+          "line": 123,
+          "message": "`checkPrHealth` derives the review decision from the PR author's login and hard-codes merge state and CI checks, so change requests, blocked PRs, and failing checks are classified as healthy."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 94,
+          "message": "Merged and open PR-to-issue mapping scans only branch names and never consumes PR bodies, so a merged PR using the advertised `fixes #N` or `closes #N` syntax is missed unless its branch also contains `issue-N`."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 156,
+          "message": "The `!existingIssue.currentLane` guard is normally false because the Prisma schema defaults `currentLane` to `normal`, so heuristic classification is skipped for normally created issues."
+        },
+        {
+          "severity": "major",
+          "category": "other",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 162,
+          "message": "This direct `currentLane` update bypasses the required `IssueLane` history and has no matching `AuditLog` row."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 72,
+          "message": "The GitHub PR and issue requests are limited to the first 100 records without pagination, so repositories with more than 100 issues or PRs are only partially reconciled."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/app/api/issues/reconcile/route.ts",
+          "line": 35,
+          "message": "The request body is optional according to the endpoint contract, but an empty body fails JSON parsing and returns 400 instead of reconciling all repositories."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-628-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "dc217aef61c53c2adb9af1f416a15e1b06e950d0",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 2,
+          "major": 0,
+          "minor": 0,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 2,
+        "risk": "medium",
+        "reason": "The review's two blocking findings are technically sound and verifiable directly from the diff: `_write_atomic` uses `tmp.write_text(text, ...)` before `os.replace(tmp, target)`, and `Path.write_text` does follow a pre-existing symlink at the predictable `.tmp` name; likewise `: > requirement-ledger.json` etc. in context.sh truncate through symlinks. In a PR-checkout workspace these are a real attacker-redirect class, so flagging them as security issues is justified. The review is otherwise honest and evidence-grounded: it explicitly reports the tool budget e [deterministic cap: blocker_cap_2]",
+        "concerns": [
+          {
+            "file": "pr_reviewer/requirement_coverage.py",
+            "line": null,
+            "evidence": "tmp.write_text(text, encoding=\"utf-8\") ... os.replace(tmp, target) \u2014 write_text follows a pre-existing symlink at the predictable .tmp name; finding is diff-verifiable, but severity as 'blocker' for an advisory artifact is debatable"
+          },
+          {
+            "file": "AGENTS.md",
+            "line": null,
+            "evidence": "review asserts inconsistency with the repository's 'established symlink-safe workspace-file pattern' without quoting any existing mitigating code, leaving that standards claim unsupported"
+          },
+          {
+            "file": "tests/test_requirement_ledger.py",
+            "line": null,
+            "evidence": "coverage claim lists it as an unread file ('unread_files':[...,'tests/test_requirement_ledger.py']) while the 2305-passed test figure remains unverified \u2014 correctly reported, but leaves the suite's behavior unconfirmed"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "blocker_cap_2"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 38479,
+        "completion_tokens": 1630
+      },
+      "latency_ms": 45274,
+      "prompt_bytes": 155054,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "pr_reviewer/requirement_coverage.py",
+          "line": 381,
+          "message": "`tmp.write_text` follows a pre-existing predictable `requirement-coverage.json.tmp` symlink, letting an untrusted checkout overwrite any file writable by the action before `os.replace` publishes that symlink as the artifact."
+        },
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "scripts/sections/context.sh",
+          "line": 194,
+          "message": "The new `: > requirement-ledger.*` resets follow pre-existing symlinks at these fixed workspace paths, so a checked-out PR can redirect truncation to arbitrary writable files."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "dispatch-104-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/dispatch",
+      "head_sha": "6925188ae7b968a983f43e6b30a5729d67184b8f",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 3,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 3,
+        "risk": "medium",
+        "reason": "Findings are specific, file/line-cited, and cross-check against the diff: claimWork's claim-then-status ordering and missing status validation are verifiable in src/lib/mc-client.ts, main() indeed never calls getMcConfig, and the docs' env blocks do place the token in an on-disk config file (the third example's interpolation variant notwithstanding). The summary is honest about unresolved required checks, tool-budget exhaustion, and unverified claims rather than overstating confidence. Scored 4 rather than 5 because key findings depend on out-of-diff corpus fil [deterministic cap: major_cap_3]",
+        "concerns": [
+          {
+            "file": "docs/opencode-mcp.md",
+            "line": 50,
+            "evidence": "\"env\": { \"MISSION_CONTROL_URL\" ... [REDACTED] } \u2014 the token-in-config-file claim is plausible but the diff lines are redacted and the doc also offers an env-interpolation variant"
+          },
+          {
+            "file": "src/lib/mc-client.ts",
+            "line": 214,
+            "evidence": "Task-contract omission finding cites docs/worker-execution-contract.md, which is outside the provided diff and unverifiable"
+          },
+          {
+            "file": "package.json",
+            "line": null,
+            "evidence": "Required checks 'breaking API changes' and 'full test suite' remain unresolved per the review's own account, leaving dependency-risk conclusions incomplete"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "major_cap_3"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 41658,
+        "completion_tokens": 908
+      },
+      "latency_ms": 13965,
+      "prompt_bytes": 125192,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "docs/opencode-mcp.md",
+          "line": 50,
+          "message": "The OpenCode configuration examples instruct users to store the bearer token as a literal value in an on-disk JSON file, violating the repository rule that agent tokens must never be persisted to disk."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/mc-client.ts",
+          "line": 211,
+          "message": "`claimWork` claims the issue before `setIssueStatus` validates the free-form status string, so a rejected status can leave the issue claimed while the MCP call reports failure."
+        },
+        {
+          "severity": "major",
+          "category": "other",
+          "file": "src/lib/mc-client.ts",
+          "line": 214,
+          "message": "The generated task contract omits the repository's mandatory worker-execution gates, including duplicate-PR avoidance, branch naming, the hard completion sequence, and the exact failure response, so it can direct workers to violate the authoritative contract."
+        },
+        {
+          "severity": "minor",
+          "category": "docs",
+          "file": "docs/opencode-mcp.md",
+          "line": 28,
+          "message": "The guide says missing environment variables fail at startup, but `main()` never calls `getMcConfig`, so the stdio server starts successfully and fails only when a tool is invoked."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "courier-46-61",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/courier",
+      "head_sha": "881347c5e2f690da0cc317a6acf4d095cd68ef46",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "approve",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "complete",
+        "verdict_policy": "strict",
+        "review_result": "findings"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 4,
+        "risk": "medium",
+        "reason": "The review's sole finding is verifiable against the diff: envtest_test.go sets first.Status.Phase = PhaseVerifying on Create, and a CRD with a status subresource discards status on create, so the Verifying-capacity envtest can pass without exercising its intent. The summary's description of the lifecycle wiring (exit 0 \u2192 Verifying \u2192 observer gates AwaitingReview/NeedsHuman), the conservative error handling, the pagination guards, and the RBAC/health-check changes all match the diff accurately, and the review honestly discloses its exhausted harness budget and absent CI evidence rather than ove",
+        "concerns": [
+          {
+            "file": "internal/controller/envtest_test.go",
+            "line": 164,
+            "evidence": "creates a CoderRun with `status.phase=Verifying`, but the CRD's status subresource ignores status on create, so that test does not actually prove that a Verifying run releases lane capacity"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 23517,
+        "completion_tokens": 1894
+      },
+      "latency_ms": 34431,
+      "prompt_bytes": 83476,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "observeState() (added by #46) declared a PR's checks \"passed\" from a single observation where every check visible at that moment was green. Because forge check registration is asynchronous, a poll landing right after PR open can see only a partial set of checks green (others not yet registered), so Courier transitioned Verifying -> AwaitingReview before the complete check set existed, skipping checks that registered later.",
+        "file": "internal/controller/observer.go",
+        "line_range": [
+          37,
+          55
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "internal/controller/envtest_test.go",
+          "line": 164,
+          "message": "`Create` ignores `status.phase` for this status-subresource CRD, so the fixture remains empty/Pending rather than `Verifying` and the envtest can pass without exercising the intended capacity release."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "alert-triage-53-62",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/alert-triage",
+      "head_sha": "77b6b04e6e4793e424145b5c862394ebdb15b439",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 3,
+        "risk": "medium",
+        "reason": "Both major findings are concrete, code-anchored, and verifiable: the inverted severity-label check in shouldComment is directly visible in the diff (a matching label returns true, bypassing the interval, while a changed severity falls through to suppression), and the report.go ordering claim is a specific, mechanism-correct assertion. The review is candid about unverified items (gofmt gate, issue #14 body, no check runs) rather than overclaiming. Deduction because the report.go embed-ordering defect cannot be confirmed from the visible diff hunks, and the revie [deterministic cap: major_cap_3]",
+        "concerns": [
+          {
+            "file": "github.go",
+            "line": 138,
+            "evidence": "if l.Name == want { return true } \u2014 comment claims 'Severity change always warrants a note' but the code returns true on a label match"
+          },
+          {
+            "file": "report.go",
+            "line": 517,
+            "evidence": "Tracked-URL append to desc is claimed to occur after embed.Description is populated, but the diff hunks shown do not include the embed construction, so the claim is not independently verifiable"
+          },
+          {
+            "file": "github.go",
+            "line": 320,
+            "evidence": "for _, i := range raw { issues = append(issues, i) } \u2014 comment says PRs are dropped but the loop copies everything unfiltered"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "major_cap_3"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 8355,
+        "completion_tokens": 1273
+      },
+      "latency_ms": 19058,
+      "prompt_bytes": 29832,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "shouldComment() (added by #53) returned `true` (post a re-fire comment immediately) whenever the mirrored GitHub issue's labels ALREADY contained the current severity label (i.e. severity unchanged), and only fell back to the interval-based check otherwise \u2014 the exact inverse of the intended behavior, which should comment immediately on a real severity change and gate unchanged-severity re-fires on the interval.",
+        "file": "github.go",
+        "line_range": [
+          131,
+          146
+        ],
+        "severity": "major"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "github.go",
+          "line": 138,
+          "message": "The flap gate is inverted: a matching existing severity label returns true, so every same-severity re-fire comments while an actual severity change can remain suppressed."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "report.go",
+          "line": 517,
+          "message": "The tracked issue URL is appended to `desc` after `embed.Description` has captured it, so the promised Discord link is absent from the serialized payload."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "github_test.go",
+          "line": 28,
+          "message": "Add regression coverage for severity-label decisions and Discord serialization, because the current tests model no severity labels and never exercise `Deliver`, allowing both defects to pass unnoticed."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-133-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "c709740117ff8600d4b7ca967871e01cd1b31320",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "approve",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "findings"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 4,
+        "risk": "low",
+        "reason": "The review is evidence-based and internally consistent: it verified all three sanitizer invocation sites in action.yml, correctly identified a genuine defect (markdown links like [label](url) become invalid destinations with spaces after substitution), and honestly discloses unfetchable issue context and missing CI results rather than overclaiming. Minor gaps: it did not note that the compare-URL pattern can swallow trailing punctuation into the spec, nor the docstring/test inconsistency about sanitizing inside code blocks despite claiming code blocks are 'preserved'.",
+        "concerns": [
+          {
+            "file": "scripts/sanitize_review_markdown.py",
+            "line": null,
+            "evidence": "docstring claims 'Preserves: Markdown formatting (headers, lists, code blocks, etc.)' while tests assert URLs/refs inside code blocks are sanitized"
+          },
+          {
+            "file": "scripts/sanitize_review_markdown.py",
+            "line": null,
+            "evidence": "compare URL pattern r\"compare/([^ \\\"\\)]+)\" captures trailing punctuation, so 'compare/v1...v2.' retains the period inside the replacement"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": []
+      },
+      "usage": {
+        "prompt_tokens": 7805,
+        "completion_tokens": 1420
+      },
+      "latency_ms": 24931,
+      "prompt_bytes": 32191,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "scripts/sanitize_review_markdown.py",
+          "line": 123,
+          "message": "The context-free URL substitutions leave Markdown link delimiters intact, so a standard upstream-PR link becomes an invalid space-containing destination such as `[label](upstream owner/repo PR 1)` instead of becoming inert plain text while preserving formatting."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "courier-64-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/courier",
+      "head_sha": "aaef5406713446a449a29965973384878d3bcb83",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 3,
+          "minor": 0,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 3,
+        "risk": "high",
+        "reason": "The review's findings are concrete and verifiable against the diff: the 8-character Register cutoff (minRegisteredSecretLength), the suffix-only isSecretEnvName missing *CREDENTIAL* names like GOOGLE_CREDENTIALS_JSON, and the hardcoded provider prefix table in core are all directly evidenced. The summary is candid about coverage limits (tests not executed, issue #6 unavailable, unaddressed required check), which raises trust. Residual gaps: it missed that JSON-escaped secrets (values containing quotes/backslashes) evade literal ReplaceAll in serialized detail/p [deterministic cap: major_cap_3]",
+        "concerns": [
+          {
+            "file": "internal/log/events.go",
+            "line": null,
+            "evidence": "json.Marshal(event.Detail) then Redact(string(raw)): a registered secret containing quote/backslash characters appears JSON-escaped in the payload, so literal ReplaceAll matching fails and such secrets could survive redaction \u2014 not covered by the review's findings"
+          },
+          {
+            "file": "internal/log/redact.go",
+            "line": 53,
+            "evidence": "if len(secret) < minRegisteredSecretLength { return } \u2014 review correctly flags short secret-shaped env values being silently unregistered"
+          },
+          {
+            "file": "internal/log/redact.go",
+            "line": 97,
+            "evidence": "suffix-only match misses GOOGLE_CREDENTIALS_JSON; review's finding is supported by isSecretEnvName's HasSuffix-only logic"
+          },
+          {
+            "file": "internal/log/redact.go",
+            "line": 152,
+            "evidence": "gh[pousr]_, sk-, AKIA, xoxb prefixes hardcoded in core package; factual basis verifiable in diff, though the cited AGENTS.md rule was not independently confirmable"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "major_cap_3"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 28350,
+        "completion_tokens": 2050
+      },
+      "latency_ms": 35313,
+      "prompt_bytes": 102873,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "internal/log/redact.go",
+          "line": 53,
+          "message": "The eight-character cutoff in Register silently drops secret-shaped environment values such as short passwords, allowing them to appear verbatim in child output or termination reasons and violating the redact-before-stdout invariant."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "internal/log/redact.go",
+          "line": 97,
+          "message": "The credential matcher only accepts credential suffixes, so the promised *CREDENTIAL* name shape misses names such as GOOGLE_CREDENTIALS_JSON and leaves an injected service-account JSON unregistered."
+        },
+        {
+          "severity": "major",
+          "category": "other",
+          "file": "internal/log/redact.go",
+          "line": 152,
+          "message": "The core redactor hardcodes GitHub, GitLab, Slack, AWS, Anthropic, and other provider token prefixes, contrary to AGENTS.md's rule that core code must not hardcode providers or forges."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-554-597",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "5c71820d27585acb9c8f6e6ae811e00acf2ff0a6",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 2,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 2,
+        "risk": "medium",
+        "reason": "The review is evidence-based and mostly verifiable: the fail-open maintainer fallback (`return permitted or candidates`) and the writer's row schema (no `category`/`file`) are directly visible in the diff, and the end-to-end test fixture indeed hand-writes a complete row, supporting the schema-mismatch blocker. Claims about action.yml/requirements.txt and load_dismissed_findings internals rest on cited but diff-unverifiable sources, and the reviewer honestly flags unverified items (no test execution, unavailable issue body). Findings are concrete, non-generic [deterministic cap: blocker_cap_2]",
+        "concerns": [
+          {
+            "file": "pr_reviewer/precheck.py",
+            "line": 1290,
+            "evidence": "return permitted or candidates # fall back if all lookups failed"
+          },
+          {
+            "file": "pr_reviewer/precheck.py",
+            "line": 1178,
+            "evidence": "rows.append({\"id\": finding_id, \"reason\": reason, \"dismissed_by\": author, \"comment_id\": c.get(\"id\")})"
+          },
+          {
+            "file": "tests/test_carry_forward.py",
+            "line": null,
+            "evidence": "end-to-end test constructs the dismissal JSON fixture manually with category/file fields rather than exercising the new writer-to-reader path"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "blocker_cap_2"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 8318,
+        "completion_tokens": 947
+      },
+      "latency_ms": 14760,
+      "prompt_bytes": 35767,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #554's pr_reviewer.precheck._resolve_maintainers() is the security gate deciding who may use the @ai-reviewer dismiss carry-forward directive. Three of its four fallback branches failed OPEN (returned the unfiltered DISMISSAL_MAINTAINERS/GITHUB_REPOSITORY_OWNER candidate set) whenever GitHub permission verification was impossible: on ImportError (PyGithub missing), on a repo-level exception, and on the final 'fall back if all lookups failed' path. Since production's requirements.txt never installed PyGithub, the ImportError branch fired on every real run, meaning the dismiss directive had effectively no permission check in production.",
+        "file": "pr_reviewer/precheck.py",
+        "line_range": [
+          1246,
+          1291
+        ],
+        "severity": "blocker"
+      },
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1178,
+          "message": "Rows written by `_write_previous_dismissals` omit `category` and `file`, but `load_dismissed_findings` drops any row missing either field, so every production dismissal is ignored."
+        },
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1225,
+          "message": "The production API path imports PyGithub without declaring or installing it, so the caught `ImportError` returns no comments on runners that do not provide it ambiently."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1290,
+          "message": "`_resolve_maintainers` falls back to the unverified candidate set when collaborator lookups yield no permitted users, turning an authorization API failure into an allow-by-name result."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "pr_reviewer/precheck.py",
+          "line": 1221,
+          "message": "`_load_pr_comments` and `_resolve_maintainers` ignore the action's `REPO` override and use `GITHUB_REPOSITORY`, so `inputs.repo` can fetch comments and permissions from the wrong repository."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "tests/test_precheck.py",
+          "line": 480,
+          "message": "The new writer-path test covers only an absolute outside path and never exercises null-byte or symlink targets despite the path-handling edge-case requirement."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-457-547",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "065150383a64c093f5c45d43fcd74211101cd354",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 3,
+        "risk": "medium",
+        "reason": "Findings 2 and 3 are fully verifiable from the diff (the masking test patches out _report_http_error and asserts against a generic RuntimeError; _is_authorized_integration_mode only matches the exact string). Finding 1 is logically consistent with the visible _resolve_auth_header semantics and action.yml's unconditional FORGEJO_TOKEN export, but relies on platform.py context not present in the diff. The review is honest about skipped evidence providers and unverifiable claims, which raises confidence. [deterministic cap: major_cap_3]",
+        "concerns": [
+          {
+            "file": "pr_reviewer/platform.py",
+            "line": 298,
+            "evidence": "Supplied committed-source context for `pr_reviewer/platform.py:298-331` documents the FORGEJO_TOKEN/GITHUB_TOKEN/GH_TOKEN fallback \u2014 this context is not in the diff and cannot be independently verified"
+          },
+          {
+            "file": "<coverage_claim>",
+            "line": null,
+            "evidence": "Coverage claim says \"tool_loop_ran\": true while the summary states \"The tool harness was skipped for this cross-repository pull request\" \u2014 an internal inconsistency in self-reporting"
+          },
+          {
+            "file": "tests/test_forgejo_backend.py",
+            "line": 1702,
+            "evidence": "Finding 2 is correct: the test patches _report_http_error, so 'the hostile token never reaches the real error/redaction sink' \u2014 verifiable in the diff"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "major_cap_3"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 11418,
+        "completion_tokens": 1110
+      },
+      "latency_ms": 18436,
+      "prompt_bytes": 48448,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #457 added a module-level JWT cache (_JWT_CACHE / _JWT_CACHE_TIME) in pr_reviewer/forgejo_backend.py, read and written by _get_jwt()/_fetch_authorized_integration_jwt() with no locking, even though this module is called from a ThreadPoolExecutor-based prewarm/fetch path (linked_sources.py). Two concurrent _get_jwt() calls landing just past TTL expiry can both observe an expired cache and both issue a token-exchange POST, with the results racing to overwrite the shared cache unsynchronized.",
+        "file": "pr_reviewer/forgejo_backend.py",
+        "line_range": [
+          120,
+          187
+        ],
+        "severity": "minor"
+      },
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "pr_reviewer/forgejo_backend.py",
+          "line": 216,
+          "message": "Authorized-integration calls through the existing platform helper can still use a static PAT because `_resolve_auth_header` treats every explicit token as a PAT override while the helper resolves `FORGEJO_TOKEN`/`GITHUB_TOKEN`/`GH_TOKEN` and passes it to `_curl`."
+        },
+        {
+          "severity": "major",
+          "category": "tests",
+          "file": "tests/test_forgejo_backend.py",
+          "line": 1702,
+          "message": "The new JWT adversarial test patches out `_report_http_error`, so the hostile token never reaches the real error/redaction sink and the test only verifies a hard-coded generic exception message."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "pr_reviewer/forgejo_backend.py",
+          "line": 62,
+          "message": "Unsupported values for `forgejo_auth_method` are silently treated as token mode instead of being rejected, allowing a configuration typo to use a different credential mechanism."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-499-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "c1f193a9d43f94b5e31374e4461b3153a84d4b5e",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 1,
+          "major": 1,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 2,
+        "risk": "high",
+        "reason": "The review's claims are largely verifiable against the diff itself (drift scanner only matches literal redirects/quoted Python strings; new_paths omits ai-response.primary.json while it was added to the guard list), it cites specific source files for the truncate_clean blocker, and it is honest about unexecuted tests and the unretrievable issue body. Only the blocker's dependence on repo files not shown in the diff keeps it below a full sign-off. [deterministic cap: blocker_cap_2]",
+        "concerns": [
+          {
+            "file": "scripts/artifact_paths.sh",
+            "line": 23,
+            "evidence": "Omitting `pr.diff.truncated` and four other `truncate_clean` destinations leaves a PR-controlled symlink able to make the action truncate an outside file"
+          },
+          {
+            "file": "tests/test_artifact_paths_drift.sh",
+            "line": 59,
+            "evidence": "The drift scanner only recognizes literal redirect and quoted Python targets, so it cannot discover variable `truncate_clean` destinations"
+          },
+          {
+            "file": "tests/test_artifact_paths.sh",
+            "line": 11,
+            "evidence": "`new_paths` is not consumed by the drift test and omits `ai-response.primary.json`, so the claimed direct-test synchronization is not enforced"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "blocker_cap_2"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 4333,
+        "completion_tokens": 677
+      },
+      "latency_ms": 9082,
+      "prompt_bytes": 17406,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "security",
+          "file": "scripts/artifact_paths.sh",
+          "line": 23,
+          "message": "Omitting `pr.diff.truncated` and four other `truncate_clean` destinations leaves a PR-controlled symlink able to make the action truncate an outside file."
+        },
+        {
+          "severity": "major",
+          "category": "tests",
+          "file": "tests/test_artifact_paths_drift.sh",
+          "line": 59,
+          "message": "The drift scanner only recognizes literal redirect and quoted Python targets, so it cannot discover variable `truncate_clean` destinations and can pass while omitted artifacts remain exploitable."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "tests/test_artifact_paths.sh",
+          "line": 11,
+          "message": "`new_paths` is not consumed by the drift test and omits `ai-response.primary.json`, so the claimed direct-test synchronization is not enforced."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "alert-triage-71-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/alert-triage",
+      "head_sha": "f25b767e8d867baf59d108922aecc4a9ab129f17",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 4,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "complete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 3,
+        "risk": "medium",
+        "reason": "Findings are specific and verifiable against the diff: the branch-adoption gap (only the target file is validated, so extra commits on a same-name branch ride into the PR), the in-memory daily cap, the refund-after-ambiguous-create undercount, and the synchronous delay contradicting the adjacent non-blocking comment are all supportable from the code. The summary is candid about unverified items (issue 404, no builds/tests executed), which is honest but leaves runtime behavior unconfirmed, keeping it short of sign-off quality. [deterministic cap: major_cap_3]",
+        "concerns": [
+          {
+            "file": "pull.go",
+            "line": null,
+            "evidence": "Build, formatting, vet, unit-test, race-test, and CI outcomes at this head were not observed."
+          },
+          {
+            "file": "pull.go",
+            "line": 575,
+            "evidence": "`confirmBranch` only checks that the deterministic ref exists and `adoptBranch` validates only the target file"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "major_cap_3"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 24146,
+        "completion_tokens": 917
+      },
+      "latency_ms": 12098,
+      "prompt_bytes": 83295,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "pull.go",
+          "line": 575,
+          "message": "`confirmBranch` only checks that the deterministic ref exists and `adoptBranch` validates only the target file, so a stale or foreign branch with unrelated commits can be adopted and opened as a PR instead of failing closed."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "pull.go",
+          "line": 64,
+          "message": "The daily-cap counter exists only in `PRConfig` memory, so a process restart resets it and permits more than `GITHUB_PR_DAILY_CAP` new PRs on the same UTC day."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "pull.go",
+          "line": 251,
+          "message": "`openPR` refunds the reserved slot on every create-PR error, including an ambiguous transport failure after GitHub already created the PR, so the cap undercounts real PRs."
+        },
+        {
+          "severity": "major",
+          "category": "performance",
+          "file": "report.go",
+          "line": 558,
+          "message": "The PR API calls execute synchronously inside the sequential `Deliver` loop, so a 30-second timeout delays `metrics.markFlushed` and the next digest despite the non-blocking invariant in the adjacent comment."
+        },
+        {
+          "severity": "minor",
+          "category": "docs",
+          "file": null,
+          "line": null,
+          "message": "The new `GITHUB_PR_OPT_IN`, `GITHUB_PR_PATH_ALLOWLIST`, `GITHUB_PR_DAILY_CAP`, and `GITHUB_PR_PUBLIC_URL` settings are absent from the README configuration table, leaving the write arm's safety controls undocumented."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "miso-gallery-56-207",
+      "kind": "vulnerable",
+      "repo_full_name": "misospace/miso-gallery",
+      "head_sha": "5ffb962ff7840fca121e4891020030d50b858bf9",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 1,
+          "major": 1,
+          "minor": 2,
+          "info": 1
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 2,
+        "risk": "medium",
+        "reason": "The review is detailed and internally consistent, citing specific file/line sources for each claim (auth allowlist at app.py:354-369, gallery exclusion logic, trash layout, CI workflow). Its blocker claim (route still behind check_auth) is a strong factual assertion that cannot be fully verified from the diff alone, and it honestly discloses unexecuted required checks (traversal/symlink testing) and tool-budget limits rather than overclaiming. Evidence quality is high; only residual uncertainty about the unverifiable allowlist claim keeps it from 5. [deterministic cap: blocker_cap_2]",
+        "concerns": [
+          {
+            "file": "app.py",
+            "line": 467,
+            "evidence": "The new `/images/<path:filename>` route remains behind `check_auth()`, whose public-asset allowlist excludes `/images/` \u2014 asserted from app.py:354-369, not verifiable from the diff alone"
+          },
+          {
+            "file": "app.py",
+            "line": 470,
+            "evidence": "send_from_directory() alone serves any file under DATA_FOLDER, including files in the internal .trash directory \u2014 plausible but depends on unseen trash.py layout"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "blocker_cap_2"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 2320,
+        "completion_tokens": 670
+      },
+      "latency_ms": 7170,
+      "prompt_bytes": 10282,
+      "wire_attempts": 1,
+      "_defect": {
+        "description": "PR #56 added the public, unauthenticated /images/<path:filename> route so direct image URLs would work without a login redirect, but implemented it as a raw file-serving route with no check that the requested path is actually a recognized media type or lies outside excluded directories (.trash, thumbnail cache). Any file under DATA_FOLDER \u2014 including sidecar text/JSON metadata files \u2014 could be fetched directly by path.",
+        "file": "app.py",
+        "line_range": [
+          1063,
+          1063
+        ],
+        "severity": "major"
+      },
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "app.py",
+          "line": 467,
+          "message": "The new `/images/<path:filename>` route remains behind `check_auth()`, whose public-asset allowlist excludes `/images/`, so requests are redirected to `/login` whenever authentication is enabled and the PR's stated behavior is not implemented."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "app.py",
+          "line": 470,
+          "message": "Once exposed publicly, this route can serve any file under `DATA_FOLDER`, including deleted images and trash metadata under `.trash`, because it enforces neither `IMAGE_EXTENSIONS` nor internal-directory exclusions."
+        },
+        {
+          "severity": "minor",
+          "category": "tests",
+          "file": "app.py",
+          "line": 467,
+          "message": "Add a regression test with authentication enabled for `/images/...`, because the current workflow only smoke-tests `/` with authentication effectively disabled."
+        },
+        {
+          "severity": "minor",
+          "category": "style",
+          "file": "__pycache__/app.cpython-314.pyc",
+          "line": null,
+          "message": "Remove the generated bytecode artifact because it adds no source behavior and is explicitly excluded from the Docker build context by `.dockerignore`."
+        },
+        {
+          "severity": "info",
+          "category": "verification",
+          "file": "app.py",
+          "line": 469,
+          "message": "Verify that null-byte requests fail cleanly and that an in-tree symlink cannot make `/images/...` serve a target outside `DATA_FOLDER` before exposing this endpoint."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "pr-reviewer-action-630-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/pr-reviewer-action",
+      "head_sha": "0025d328b2d4e999058be4921c0f9e07748e0dbe",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 0,
+          "major": 2,
+          "minor": 1,
+          "info": 0
+        },
+        "required_checks": "none",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 3,
+        "risk": "low",
+        "reason": "The review's three findings are evidence-anchored in the diff: the fixture-inversion argument follows directly from the harness's refs/pull/<n>/head checkout plus the fix-PR titles (#547/#551/#597 are all 'fix(...)' PRs whose expected findings describe the pre-fix gap); the max-0 hallucination guard's AND-combined category/description predicates demonstrably miss a fabricated 'security'-category secret finding; and the README weekly-sweep wording conflicts with the workflow's default corpus. The review honestly discloses its limits (issue fetch failed, PR diffs [deterministic cap: major_cap_3]",
+        "concerns": [
+          {
+            "file": "evals/corpus-specialists.json",
+            "line": 70,
+            "evidence": "The #551 fixture is the fix for needs_full_review propagation, yet the harness checks out refs/pull/<pr>/head and expects a finding describing the un-propagated gap \u2014 inversion claim rests on PR titles and history, not diffed revisions"
+          },
+          {
+            "file": "evals/corpus-specialists.json",
+            "line": 49,
+            "evidence": "max-0 guard requires category in secret/secrets/credentials AND message containing 'hardcoded secret'/'secret leak'; a fabricated secret finding categorized 'security' with other wording passes"
+          },
+          {
+            "file": "README.md",
+            "line": 1144,
+            "evidence": "README says all three corpora run 'on the weekly scheduled sweep', but the workflow schedule uses only the default corpus-agentic.json"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "major_cap_3"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 37502,
+        "completion_tokens": 1520
+      },
+      "latency_ms": 39367,
+      "prompt_bytes": 153881,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "evals/corpus-specialists.json",
+          "line": 70,
+          "message": "This fixture grades the pre-fix `needs_full_review` gap as present even though PR #551 is the fix that propagates it (and #547/#597 have the same inversion), so a correct reviewer that rejects an already-fixed issue is scored as ineffective."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "evals/corpus-specialists.json",
+          "line": 49,
+          "message": "The max-0 secret-leak guard only matches `secret`/`credentials` categories containing the exact phrases `hardcoded secret` or `secret leak`, so a fabricated credential/API-key finding categorized as `security` can be adopted without failing the check."
+        },
+        {
+          "severity": "minor",
+          "category": "docs",
+          "file": "README.md",
+          "line": 1144,
+          "message": "The new README says all three corpora run on the weekly sweep, but the schedule still uses only the default `evals/corpus-agentic.json` corpus."
+        }
+      ],
+      "source": "corpus"
+    },
+    {
+      "pr_id": "dispatch-468-clean",
+      "kind": "clean",
+      "repo_full_name": "misospace/dispatch",
+      "head_sha": "2e8c95ba5b4f482f9dd95b2f7d1bfaf9e83a6f1a",
+      "condition": "heterogeneous",
+      "repeat_index": 0,
+      "evidence_state": "primary_ok",
+      "primary": {
+        "verdict": "request_changes",
+        "findings_by_severity": {
+          "blocker": 1,
+          "major": 3,
+          "minor": 3,
+          "info": 0
+        },
+        "required_checks": "incomplete",
+        "verdict_policy": "strict",
+        "review_result": "issues"
+      },
+      "scorer": {
+        "status": "scored",
+        "score": 2,
+        "risk": "high",
+        "reason": "Findings are specific and verifiable against the diff: the missing GroomingRun migration (no migration files in the diff), the abandoned 'running' record on lease conflict (create happens before the lease check and early return), commentUrl written only at final completion, stale getCurrentStage snapshot, the maxTotalBytes first-file exception, and NaN filter parsing all match the code. The middleware/auth-token claim is outside the diff but is backed by named sources and described tool verification. The review is honest about unresolved required checks and u [deterministic cap: blocker_cap_2]",
+        "concerns": [
+          {
+            "file": "src/middleware.ts",
+            "line": null,
+            "evidence": "src/middleware.ts only recognizes DISPATCH_AGENT_TOKEN or Basic credentials before the route handler runs"
+          },
+          {
+            "file": "src/lib/groomer/run.ts",
+            "line": 107,
+            "evidence": "leaving a permanently `running` history row"
+          },
+          {
+            "file": ".github/workflows/ci.yaml",
+            "line": null,
+            "evidence": "CI does not run `prisma migrate deploy`"
+          }
+        ],
+        "model": "glm-5.3-flash",
+        "cause": "",
+        "caps": [
+          "blocker_cap_2"
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 31924,
+        "completion_tokens": 926
+      },
+      "latency_ms": 11104,
+      "prompt_bytes": 122114,
+      "wire_attempts": 1,
+      "_defect": {},
+      "_primary_findings": [
+        {
+          "severity": "blocker",
+          "category": "bug",
+          "file": "prisma/schema.prisma",
+          "line": 403,
+          "message": "Add a Prisma migration for `GroomingRun`; production runs `prisma migrate deploy`, so the new table is never created and groomer/history queries will fail against an existing database."
+        },
+        {
+          "severity": "major",
+          "category": "security",
+          "file": "src/lib/auth.ts",
+          "line": 285,
+          "message": "`DISPATCH_GROOMER_TOKEN` is unusable in Basic-auth mode because `src/middleware.ts` rejects the request before `authorizeGroomerRequest` can accept the scheduler token."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/groomer/run.ts",
+          "line": 107,
+          "message": "A lease conflict returns after creating a `GroomingRun` but without completing it, leaving a permanently `running` history row; create the record after claiming the lease or mark it skipped."
+        },
+        {
+          "severity": "major",
+          "category": "bug",
+          "file": "src/lib/groomer/run.ts",
+          "line": 330,
+          "message": "Persist the posted GitHub comment URL immediately after `addComment`; it is currently written only in final completion, so a later DB failure leaves no cooldown marker and permits a duplicate comment."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/lib/groomer/run.ts",
+          "line": 354,
+          "message": "`getCurrentStage(groomingRun)` always reads the original `selected` snapshot, so failed runs never persist their actual failure stage despite that being an audit requirement."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/lib/groomer/repository-context.ts",
+          "line": 193,
+          "message": "The `totalBytes > 0` exception lets the first file exceed `maxTotalBytes`, and the truncation marker also adds bytes beyond the per-file limit, so the documented hard byte caps are not enforced."
+        },
+        {
+          "severity": "minor",
+          "category": "bug",
+          "file": "src/app/api/groomer/runs/route.ts",
+          "line": 19,
+          "message": "Validate `issueNumber` and `limit` before using them in Prisma filters; malformed values become `NaN` and currently surface as server errors instead of client validation responses."
+        }
+      ],
+      "source": "corpus"
+    }
+  ],
+  "budget_exhausted": false,
+  "budget_note": "",
+  "carried_wire_calls": 32,
+  "lifetime_wire_calls": 48,
+  "wall_time_sec_by_condition": {
+    "same-model": 331.558,
+    "heterogeneous": 363.684
+  },
+  "generated_at": "2026-10-30T21:22:53Z"
+}

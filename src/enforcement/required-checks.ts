@@ -20,6 +20,11 @@ import type { NormalizedRequiredCheckDisposition, RequiredCheckStatus } from "..
  * - `not_applicable` is a completed disposition only with a usable
  *   rationale — the determinstic layer enforces presence and shape, while
  *   semantic qualification (#750 eval corpus) judges groundedness;
+ * - `unmet` (#1381, alias `failed`) is a confirmed negative: the check was
+ *   performed and the requirement is NOT satisfied. It is recorded verbatim
+ *   with reason `ok` but never counts as clean coverage — completeness
+ *   still requires every row `satisfied` or `not_applicable`. Like
+ *   `not_applicable` it needs a usable rationale (else malformed);
  * - missing/malformed coverage fails conservatively (unresolved), and this
  *   module never produces or flips a verdict.
  *
@@ -67,17 +72,20 @@ function validateDisposition(
   const identity = checkIdentity(entry.check);
   if (identity === "") return null;
   const rawStatus = typeof entry.status === "string" ? entry.status.trim().toLowerCase() : "";
-  if (rawStatus !== "satisfied" && rawStatus !== "not_applicable" && rawStatus !== "unresolved") {
+  // #1381: `failed` is a prose alias for `unmet` (the same fold the parser
+  // applies); the defensive re-validation accepts it too.
+  const status = rawStatus === "failed" ? "unmet" : rawStatus;
+  if (status !== "satisfied" && status !== "not_applicable" && status !== "unresolved" && status !== "unmet") {
     return { identity, invalid: true };
   }
   const rationale = typeof entry.rationale === "string" ? entry.rationale : null;
-  if (rawStatus === "not_applicable" && (rationale === null || rationale.replace(CHECK_CONTROL, " ").trim() === "")) {
+  if ((status === "not_applicable" || status === "unmet") && (rationale === null || rationale.replace(CHECK_CONTROL, " ").trim() === "")) {
     return { identity, invalid: true };
   }
   // Rationale is passed through unchanged: the parser already sanitized and
   // bounded it, and the evaluator must not re-shape model text; the bytes
   // match pr_reviewer/completeness.py.
-  return { identity, invalid: false, status: rawStatus, rationale };
+  return { identity, invalid: false, status, rationale };
 }
 
 /**

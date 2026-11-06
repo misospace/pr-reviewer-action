@@ -53,6 +53,15 @@ export const CLAIM_EXTRACTION_SYSTEM_PROMPT =
   '"items":["path:symbol", "..."],"check":"..."}]}. At most 5 claims, at most 12 items per claim, ' +
   'most consequential claim first. If the PR makes no such claim, return {"claims":[]}.';
 
+/** #1380: appended to the system prompt only in dependency-update mode, so
+ * the model pass itself is told the deterministic metadata vocabulary is not
+ * claim material — on top of the deterministic post-filter applied to what
+ * it returns. */
+export const CLAIM_DEPENDENCY_METADATA_INSTRUCTION =
+  " This pull request is a dependency update. Machine-generated dependency metadata — exact " +
+  "version or tag changes, image digests, changed-file counts, automerge, branch-scheduling or " +
+  "rebase boilerplate — is deterministic data, not a claim: never emit it as one.";
+
 function fitUtf8(text: string, maxBytes: number): [string, boolean] {
   const raw = Buffer.from(text, "utf8");
   if (raw.length <= maxBytes) return [text, false];
@@ -244,6 +253,7 @@ export interface ClaimModelPassInput {
   body: string;
   files: unknown;
   diff: string;
+  dependencyUpdate?: boolean;
   config: ClaimModelPassConfig;
   requestFn: SpecialistRequestFn;
 }
@@ -260,6 +270,10 @@ export interface ClaimModelPassResult {
 /** Run the bounded fallback pass. Never throws: any failure is reported
  * through the returned `status`/`errorKind`, never as an exception. */
 export async function runClaimFalsificationModelPass(input: ClaimModelPassInput): Promise<ClaimModelPassResult> {
+  const systemPrompt =
+    input.dependencyUpdate === true
+      ? CLAIM_EXTRACTION_SYSTEM_PROMPT + CLAIM_DEPENDENCY_METADATA_INSTRUCTION
+      : CLAIM_EXTRACTION_SYSTEM_PROMPT;
   const [user, diffClipped] = buildClaimsUserMessage({
     title: input.title,
     body: input.body,
@@ -270,7 +284,7 @@ export async function runClaimFalsificationModelPass(input: ClaimModelPassInput)
   const payload: SpecialistPayload = buildSpecialistPayload({
     apiFormat: input.config.apiFormat,
     model: input.config.model,
-    system: CLAIM_EXTRACTION_SYSTEM_PROMPT,
+    system: systemPrompt,
     user,
     maxTokens: input.config.maxTokens,
     temperature: input.config.temperature,

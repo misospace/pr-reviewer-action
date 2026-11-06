@@ -20,7 +20,11 @@ import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, ren
 import { loopContextLimits, type HarnessDeps } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
-import { describeTransportFailure } from "../transport/http.js";
+import {
+  describeTransportFailure,
+  endpointUrlCredentialOrEmpty,
+  redactEndpointUrlCredential,
+} from "../transport/http.js";
 import { callKnownSecrets, extraHeadersForEnv } from "../transport/headers.js";
 import type { TerminalProviderReason } from "../transport/terminal.js";
 import { withCancellationSignal, type FetchLike } from "../platform/http.js";
@@ -34,6 +38,9 @@ import { buildStageEnv, validateStageEnv, type RunContext, type StageEnv } from 
 import { RunWorkspace } from "../run/workspace.js";
 import { trustFramingOverhead } from "../context/repo-map.js";
 import { generateRepoMap, renderRepoMapJson, renderRepoMapMarkdown } from "../context/repo-map.js";
+import { buildDependencyCoverageContext } from "../context/dependency-coverage.js";
+import { buildReReviewScopeMd, computeReReviewDelta } from "../context/rereview-scope.js";
+import { renderDependencyCoverageBlock } from "../model/dependency-coverage.js";
 import {
   buildLinkedIssueContext,
   buildManifestContext,
@@ -41,7 +48,8 @@ import {
 } from "../context/index.js";
 import { extractRequirementLedger, ledgerToArtifact, renderRequirementLedgerMarkdown } from "../requirements/ledger.js";
 import { requirementLedgerPresence } from "../requirements/presence.js";
-import { classifyPr, classificationToArtifact } from "../classification/classify.js";
+import { buildTracePlan, TRACE_PLAN_ARTIFACT } from "../requirements/trace-plan.js";
+import { classifyPr, classificationToArtifact, DEPENDENCY_UPDATE_KINDS } from "../classification/classify.js";
 import { resolveReviewRoute, resolveTierProfiles, resolveConfidenceProfile, tierRequestShape, anthropicEffortInactiveWarning, anthropicJsonObjectsPromptOnlyWarning, anthropicStructuredOutputInactiveWarning, effectiveWireEffort, effectiveWireResponseFormat, type TierProfiles } from "../routing/tiers.js";
 import { reviewerRequestedEscalation } from "../routing/escalation.js";
 import { buildSpecialistCorpus } from "../specialists/corpus.js";
@@ -51,6 +59,8 @@ import { runSpecialistsGate } from "../gates/specialists-gate.js";
 import { specialistRequestFn } from "../gates/specialist-transport.js";
 import { runClaimFalsificationPass } from "../claims/pass.js";
 import { renderClaimsSection } from "../claims/render.js";
+import { runDerivedObligationsPass } from "../derived/pass.js";
+import { renderDerivedSectionForStatus, renderDerivedUnavailable } from "../derived/render.js";
 import { buildModelRequest } from "../model/request.js";
 import { callModelTier, type TierProfile } from "../model/call.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
@@ -62,7 +72,8 @@ import { resolveReviewerRouting } from "../config/reviewer-routing.js";
 import { resolveHumanReviewRouting, type HumanReviewRoutingMode, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { buildConfidencePrompt, unresolvedConfidencePins } from "../confidence/prompt.js";
 import { runConfidenceScorer } from "../confidence/scorer.js";
-import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, confidenceCapNote, confidenceOutputFields, confidenceReasonWithoutCapNote, maskComposedConfidenceReason, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
+import { confidenceTelemetryOf, confidenceUsageWireShape, validConfidenceUsageTelemetry, type ConfidenceTelemetry, type ConfidenceUsageTelemetry } from "../confidence/telemetry.js";
+import { boundConfidenceField, boundConfidenceReason, CONFIDENCE_DISABLED, CONFIDENCE_RUBRIC_VERSION, confidenceCapNote, confidenceOutputFields, confidenceReasonWithoutCapNote, maskComposedConfidenceReason, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS, MAX_CONFIDENCE_CONCERN_FILE_CHARS, unscoredConfidenceResult, type ConfidenceResult } from "../confidence/result.js";
 import { annotateAnalysisEngine, analysisEngineBase, buildUserMessage, handleModelFailure, MODEL_UNAVAILABLE_ENGINE, applySystemPromptFragments, applySpecialistLeadsFragment, applySupersededDiscussionFragment, applyRequirementTraceFragment, applyReviewTriageFragment, resolveSystemPrompt, workspaceAt, type PromptWorkspace } from "../prompt/index.js";
 import { reviewArtifactFromParsed, type ArtifactFinding } from "../enforcement/artifact.js";
 import { applyStrictVerdictPolicy, applyVerdictPolicy, relaxCiOnlyVerdict, relaxUnverifiedBlockerVerdict, relaxVerificationOnlyVerdict } from "../enforcement/verdict-policy.js";
@@ -74,10 +85,12 @@ import { readWorkflowInputNamesByFile, resolveActionSlug } from "../enforcement/
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
 import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
-import { applyRequiredCheckValidation } from "../enforcement/completeness.js";
+import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
+import { candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
+import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
+import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, unresolvedTraceRequirementIds, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { createTraceGapProbe, traceGapContinuationSummary } from "../requirements/trace-gap-probe.js";
 import { runRequirementTraceRepairPass, traceRepairOutcomeSummary } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
@@ -160,6 +173,14 @@ export interface RunReviewResult {
   verdictPolicy: string;
   partialCoverage?: PartialCoverage;
   ciState?: string;
+  /** #1449: the run's derived-obligation state ("complete" | "unresolved" |
+   * "unavailable"), present ONLY when the derived-obligation feature is
+   * enabled — a disabled run has no state at all and keeps its pre-#1449
+   * published bytes exactly. The publish step carries it into the PUBLISHED
+   * metadata marker, so a reader of the review (not only of the run's own
+   * artifacts) can tell that a trusted approve was withheld because a
+   * derived architectural obligation stayed undischarged. */
+  derivedObligationState?: DerivedObligationState;
   /** #847: the #810/#702 tool-loop budget the marker recorded (mirrors the
    * harness's `tool_request_budget` for the route the marker was built
    * from); undefined when no tool harness ran. */
@@ -183,6 +204,18 @@ export interface RunReviewResult {
    * scorer produced a scored answer; the publish step renders them as
    * advisory bullets. */
   confidenceConcerns?: Array<{ file: string; line: number | null; evidence: string }>;
+  /** #1518: the requirement ids the deterministic enforcement pass could not
+   * discharge (unmet or unverifiable). These are the merge-gating ids of
+   * the enforcement pass, not model claims. */
+  unresolvedRequirementIds?: string[];
+  /** #1518: the required-check ids the deterministic enforcement pass could
+   * not resolve. These are the merge-gating ids of the enforcement pass, not
+   * model claims. */
+  unresolvedRequiredChecks?: string[];
+  /** #1455: the verifier's own telemetry — the unscored cause, the measured
+   * latency and the provider's token counts. The publish step carries it
+   * into the metadata marker; it is advisory and changes nothing else. */
+  confidenceTelemetry?: ConfidenceTelemetry;
   /** Wall-clock seconds for the whole run. */
   durationSec: number;
   /** #726: the engine-owned admission decision — present on BOTH the skip
@@ -223,6 +256,11 @@ const NO_GATE_OUTCOME = (gate: GateName): GateOutcome => ({
 
 /** Scratch file the CI gate child writes its step outputs to. */
 const CI_GATE_OUTPUT_FILE = "ci-gate-outputs.txt";
+
+/** #1426: the commit-sha shape a prior reviewed head must prove before it
+ * becomes a delta identity (the same rule the #975 carried pointer applies
+ * to marker head_sha — untrusted comment content until shape-checked). */
+const SHA_SHAPE = /^[0-9a-f]{7,64}$/i;
 
 /** #978: the annotation is a workflow-command line, so untrusted provider
  * body text must not be able to break out of it — a newline would emit a
@@ -403,6 +441,170 @@ export function createRunCancellation(request: ReviewRequest): RunCancellation {
  * artifact and the demotion note reflect every pass. Findings the first
  * pass processed are skipped inside the boundary itself, so the second
  * pass only reports newly settled findings. */
+/**
+ * Fold the run's review-owned required-evidence obligations (#1381).
+ *
+ * Rows come VERBATIM from the harness-authored candidates artifact (exactly
+ * what the model was shown), never re-derived here — identity drift between
+ * the harness and engine layers would make exact-text dispositions unmatched
+ * and permanently block. Absent candidates (fork/skipped-harness paths) fall
+ * back to must_check-only rows with harness-compatible ids. The derived
+ * unresolved cause is stamped ONLY on rows whose folded status is
+ * `unresolved` (#1381: an `unmet` row was resolved negatively — the check
+ * was performed and failed — so it carries no evidence-gathering cause; a
+ * `satisfied` row carries none either). The telemetry names every
+ * not-clean row regardless of which side of that line it fell on.
+ * `VALIDATE_REQUIRED_CHECKS=false` removes must_check rows from the contract
+ * at both layers (harness presentation and engine enforcement), so an
+ * operator who disabled #750 validation does not get #1381 forcing instead.
+ *
+ * #1449: the #1448 derived pre-pass output joins the SAME contract — the
+ * derived rows are appended BEFORE the dispositions are folded, so one fold
+ * covers every source. The derived rows are the engine's own (the pre-pass
+ * output is not harness-authored), and they are built by the pure resolver in
+ * `src/enforcement/derived-obligations.ts` from the artifact the pre-pass
+ * wrote. When the derived coverage is incomplete, exactly ONE synthetic
+ * coverage-marker row is added: it states that coverage is unavailable and
+ * why, it is never a defect claim, and it carries the `derivation-incomplete`
+ * cause (never the harness cause).
+ */
+function resolveReviewObligations(
+  classification: Record<string, unknown>,
+  review: Record<string, unknown>,
+  ws: RunWorkspace,
+  harnessArtifactName: string,
+  validateRequiredChecks: string | undefined,
+  derivedEnabled: boolean,
+): { obligations: ReviewObligation[]; derived: DerivedObligationResolution } {
+  const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
+  const includeMustCheck = mustCheckObligationsEnabled(validateRequiredChecks);
+  const candidateRows = (candidates?.injected === true && Array.isArray(candidates.obligations)
+    ? candidates.obligations as unknown[]
+    : []).filter((row) => includeMustCheck || (row as { source?: unknown } | null)?.source !== "must_check");
+  const obligations = candidateRowsToObligations(candidateRows, includeMustCheck ? stringList(classification.must_check) : []);
+  // #1449: the derived rows join the contract before the fold. The feature
+  // gate is the operator-only `derived-obligations` input — off means no
+  // rows, no coverage claim, and byte-identical behavior.
+  const derived = resolveDerivedObligations(safeJson(ws.read("derived-obligations.json")), derivedEnabled);
+  const derivedRows: ReviewObligation[] = derived.rows.map((row) => ({
+    id: row.id,
+    source: "derived",
+    text: row.text,
+    status: "unresolved",
+    cause: null,
+    anchors: row.anchors,
+  }));
+  if (derived.coverage === "incomplete") {
+    const coverageRow = derivedCoverageRow(derived);
+    if (coverageRow !== null) {
+      derivedRows.push({
+        id: coverageRow.id,
+        source: "derived",
+        text: coverageRow.text,
+        status: "unresolved",
+        cause: coverageRow.cause,
+      });
+    }
+  }
+  const dispositions = Array.isArray(review.required_check_dispositions)
+    ? review.required_check_dispositions as Array<{ check: string; status: string; rationale?: string | null }>
+    : null;
+  const folded = foldObligationDispositions([...obligations, ...derivedRows], dispositions);
+  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; executed_request_count?: unknown } | null;
+  const cause = deriveUnresolvedCause({
+    stopReason: typeof harness?.stop_reason === "string" ? harness.stop_reason : null,
+    harnessError: harness?.error != null ? String(harness.error) : null,
+    planningError: harness?.planning_error != null ? String(harness.planning_error) : null,
+    degraded: typeof harness?.executed_request_count === "number" && harness.executed_request_count === 0,
+  });
+  // Only an `unresolved` row carries the evidence-gathering cause; a
+  // `satisfied` row was resolved positively and an `unmet` row negatively.
+  // #1449: a row that already carries its own cause (the synthetic derived
+  // coverage marker) keeps it — the harness cause never describes a
+  // derivation that never ran.
+  return {
+    obligations: folded.map((obligation) => (
+      obligation.status === "unresolved" ? { ...obligation, cause: obligation.cause ?? cause } : obligation
+    )),
+    derived,
+  };
+}
+
+function persistReviewObligations(ws: RunWorkspace, obligations: ReviewObligation[], log: (line: string) => void): void {
+  if (obligations.length === 0) return;
+  ws.write("review-obligations.json", pyJsonDumps(reviewObligationsToArtifact(obligations)));
+  const unmet = obligations.filter((item) => item.status === "unmet").map((item) => `${item.id}=unmet`);
+  const unresolved = obligations.filter((item) => item.status === "unresolved").map((item) => `${item.id}=unresolved`);
+  const satisfied = obligations.filter((item) => item.status === "satisfied").length;
+  const notClean = [...unmet, ...unresolved];
+  const detail = notClean.length > 0 ? ` (${notClean.join(", ")})` : "";
+  // #1449: the derived counts ride the same line, and only when derived rows
+  // exist — a run without them keeps the #1381 line byte-for-byte.
+  const derived = obligations.filter((item) => item.source === "derived");
+  const derivedDetail = derived.length > 0
+    ? ` | derived: ${derived.length} total, ${derived.filter((item) => item.status === "satisfied").length} satisfied, ${derived.filter((item) => item.status === "unmet").length} unmet, ${derived.filter((item) => item.status === "unresolved").length} unresolved`
+    : "";
+  log(`Review obligations: ${obligations.length} total, ${satisfied} satisfied, ${unmet.length} unmet, ${unresolved.length} unresolved${detail}${derivedDetail}`);
+}
+
+/**
+ * #1449: the derived-obligation state artifact. Written ONLY when the
+ * feature is enabled (a disabled run must not create the file), and it
+ * records the coverage answer next to the rows that carry it — so an
+ * operator can tell "the derivation found nothing" from "the derivation
+ * never completed" without reading the pre-pass artifact.
+ *
+ * The `reason` field is the reason for the DISCLOSED state (see
+ * `derivedObligationStateReason`): the closed coverage reason when the
+ * derivation never completed, `not-discharged` when the coverage is
+ * complete but a row stayed open, and null when every row was discharged.
+ */
+function persistDerivedObligationState(
+  ws: RunWorkspace,
+  derived: DerivedObligationResolution,
+  obligations: readonly ReviewObligation[],
+  reason: string | null,
+): void {
+  if (!derived.enabled) return;
+  const rows = obligations
+    .filter((obligation) => obligation.source === "derived")
+    .map(({ id, source, text, status, cause }) => ({ id, source, text, status, cause }));
+  ws.write("derived-obligation-state.json", `${pyJsonDumps({
+    version: 1,
+    enabled: derived.enabled,
+    coverage: derived.coverage,
+    reason,
+    obligations: rows,
+  })}\n`);
+}
+
+/**
+ * #1449: the run's derived-obligation state — the one word a reader needs
+ * to tell WHY a trusted approve was withheld.
+ *
+ * - "unavailable": the derivation never completed (or never ran), so the
+ *   derived-obligation coverage is unknown — the synthetic coverage-marker
+ *   row is what withheld the approval;
+ * - "unresolved": the derivation completed, but at least one derived row
+ *   stayed undischarged;
+ * - "complete": the derivation completed and every derived row was
+ *   discharged — including the clean "no obligations" answer.
+ *
+ * A DISABLED run has no state at all (""): the marker and the coverage
+ * record then keep their pre-#1449 bytes exactly.
+ */
+export type DerivedObligationState = "complete" | "unresolved" | "unavailable";
+
+function derivedObligationState(
+  derived: DerivedObligationResolution,
+  obligations: readonly ReviewObligation[],
+): DerivedObligationState | "" {
+  if (!derived.enabled) return "";
+  if (derived.coverage === "incomplete") return "unavailable";
+  const rows = obligations.filter((obligation) => obligation.source === "derived");
+  return rows.every((obligation) => obligation.status === "satisfied") ? "complete" : "unresolved";
+}
+
 function mergeBlockerVerificationPasses(
   first: Awaited<ReturnType<typeof applyBlockerVerification>> | null,
   second: Awaited<ReturnType<typeof applyBlockerVerification>>,
@@ -430,6 +632,21 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
     await cancellation.finalize();
     cancellation.dispose();
   }
+}
+
+/** #1380 budget priority: on a dependency update the optional claim
+ * pre-pass must never compete ahead of the mandatory dependency-evidence
+ * obligations (#1379 provenance/release-delta/security work), so its launch
+ * is gated on the evidence phase settling. The evidence promise never
+ * rejects (the phase catches internally); the pass-through rejection handler
+ * keeps that fail-soft property explicit. Non-dependency PRs launch
+ * concurrently, unchanged. */
+export function claimsPrepassGate(
+  dependencyUpdate: boolean,
+  evidencePhase: Promise<unknown>,
+): Promise<void> {
+  if (!dependencyUpdate) return Promise.resolve();
+  return evidencePhase.then(() => undefined, () => undefined);
 }
 
 /** review.sh `run_review`: the pipeline body. Cancellation boundaries are the
@@ -595,6 +812,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // stage; a host that injects its own adapter binds the request signal at
   // construction — see docs/architecture/engine-boundary.md.
   const profiles: TierProfiles = resolveTierProfiles(env);
+  // #1465: the tier resolution's notices (a configured model value that
+  // holds only whitespace, for example). Advisory only, never fatal, and
+  // never a secret.
+  for (const warning of profiles.warnings) log(`WARNING: ${warning}`);
   const streamBool = (env.AI_STREAM ?? "true").toLowerCase() === "true";
 
   // Standards resolution + initial system prompt (config.sh).
@@ -799,6 +1020,26 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   ws.write("pr-files.truncated.json", truncateClean(Buffer.from(filesProjection(rawFilesList, totalChangedFiles)), budgets.primary.maxFiles, "…[file list truncated]"));
   ws.write("pr-body.txt", String(pr.body ?? ""));
 
+  // ── Re-review scope section (#1426) ──────────────────────────────────
+  // Two scopes, stated explicitly: the authoritative current PR
+  // (base→head) the verdict and summary describe, and the prior-head delta
+  // (previous-reviewed-head→current-head) that only prioritizes inspection.
+  // Written unconditionally — possibly empty — so a reused run directory
+  // never carries a previous run's section (the specialist-reset pattern
+  // above). The delta probe is fail-soft: a shallow checkout that no longer
+  // holds the force-pushed-away prior head still gets the identities-only
+  // section, never a guessed delta.
+  ws.write("re-review-scope.md", new Uint8Array(0));
+  const priorReviewedHead = typeof pre.prior_head_sha === "string" ? pre.prior_head_sha : "";
+  if (SHA_SHAPE.test(priorReviewedHead) && priorReviewedHead.toLowerCase() !== headSha.toLowerCase()) {
+    const delta = await computeReReviewDelta(workspace, priorReviewedHead, headSha);
+    const section = buildReReviewScopeMd(delta, { priorHeadSha: priorReviewedHead, headSha, baseSha: pre.base_sha });
+    if (section !== "") {
+      ws.write("re-review-scope.md", section);
+      log(`Re-review scope recorded: prior reviewed head ${priorReviewedHead.toLowerCase()} → current head ${headSha.toLowerCase()}`);
+    }
+  }
+
   // #885: the corpus note that this PR edits its own (base-ref-resolved)
   // standards file — its changes appear only in the diff under review, never
   // as a live rewrite of the rules the review enforces.
@@ -946,16 +1187,39 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // normalized here, exactly like the classification fixture path.
     linkedIssues: normalizeLinkedIssues(linked.linkedIssues, repo),
     metadataStatus: safeJson(ws.read("linked-metadata-status.json")),
+    // #1336: forge-reported Renovate-update metadata — author login, title,
+    // and head branch feed the deterministic update-kind/risk rules. PR-body
+    // content is never consulted (untrusted data).
+    prAuthor: String((pr.author as { login?: unknown } | undefined)?.login ?? ""),
+    prTitle: String(pr.title ?? ""),
+    headBranch: String(pr.headRefName ?? ""),
   });
   const classificationArtifact = classificationToArtifact(classification) as Record<string, unknown>;
   ws.write("classification.json", `${pythonJsonStringify(classificationArtifact)}\n`);
-  log(`PR classification complete: ${String(classificationArtifact.pr_kind ?? "unknown")}`);
+  const classificationFlags = Array.isArray(classificationArtifact.risk_flags)
+    ? (classificationArtifact.risk_flags as string[]).join(",")
+    : "none";
+  log(`PR classification complete: ${String(classificationArtifact.pr_kind ?? "unknown")} (risk_flags=${classificationFlags})`);
   // #871: substantialCodeChange isn't part of the persisted classification
   // artifact (see PRClassification's field doc); thread it to the
   // specialists gate through env instead, so role selection can force the
   // correctness lane for a substantial PR regardless of what pr_kind ended
   // up being.
   env.SUBSTANTIAL_CODE_CHANGE = classification.substantialCodeChange ? "true" : "false";
+
+  // ── Dependency-upgrade coverage accounting (#1337) ────────────────────
+  // Deterministic corpus section: what the harness established per
+  // coverage aspect vs what is explicitly not checked. Bounded, empty
+  // unless the classification is dependency-shaped and the diff carries
+  // dependency changes — other PRs keep today's corpus byte-for-byte.
+  ws.write(
+    "dependency-coverage.md",
+    buildDependencyCoverageContext({
+      prKind: String(classificationArtifact.pr_kind ?? "unknown"),
+      diffText,
+      prBody: typeof pr.body === "string" ? pr.body : null,
+    }),
+  );
 
   const { route, reason } = resolveReviewRoute({ routingMode: env.REVIEW_ROUTING_MODE ?? "off" });
   env.REVIEW_ROUTE = route;
@@ -1025,11 +1289,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   let corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
   ws.write("review-corpus.truncated.md", ws.read(corpusResult.outputName) ?? new Uint8Array(0));
 
-  // ── Claim falsification pre-pass (#785), in flight with the other gates ──
+  // ── Claim falsification pre-pass (#785) ────────────────────────────────
   // Fail-soft: any failure leaves claim-falsification.md empty and the
   // review proceeds unchanged. Deterministic scan first; the bounded model
   // pass on the primary route always runs when configured and merges on top
-  // of the scan's claims (#898).
+  // of the scan's claims (#898). Launched after the evidence phase has
+  // settled — on a dependency update the ordering is a hard budget-priority
+  // requirement (#1380), enforced by claimsPrepassGate below.
   ws.write("claim-falsification.md", new Uint8Array(0));
   let claimsPromise: Promise<void> = Promise.resolve();
   if ((env.CLAIM_FALSIFICATION ?? "false").toLowerCase() === "true") {
@@ -1047,11 +1313,22 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     const claimExtra = profiles.primary.baseUrl && profiles.primary.model
       ? extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "")
       : undefined;
-    claimsPromise = runClaimFalsificationPass({
+    // #1380 budget priority: on a dependency update the optional claim
+    // pre-pass must never start ahead of the mandatory dependency-evidence
+    // obligations (#1379 provenance/release-delta/security), which run in and
+    // after the evidence phase — so the pre-pass launches only once the
+    // evidence phase has settled. Fail-soft: that promise never rejects (the
+    // phase catches internally), and non-dependency PRs keep the concurrent
+    // launch unchanged.
+    claimsPromise = claimsPrepassGate(
+      DEPENDENCY_UPDATE_KINDS.has(classification.prKind),
+      evidencePromise,
+    ).then(() => runClaimFalsificationPass({
       title: String(pr.title ?? ""),
       body: String(pr.body ?? ""),
       files: safeJson(ws.read("pr-files.json")),
       diff: (ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? ""),
+      dependencyUpdate: DEPENDENCY_UPDATE_KINDS.has(classification.prKind),
       model:
         profiles.primary.baseUrl && profiles.primary.model
           ? {
@@ -1082,7 +1359,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
               }),
             }
           : undefined,
-    })
+    }))
       .then((result) => {
         const section =
           result.status === "ok"
@@ -1104,6 +1381,140 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       .catch((cause: unknown) => {
         log(`WARNING: claim falsification pre-pass failed; continuing without claims: ${cause instanceof Error ? cause.message : String(cause)}`);
         ws.write("claim-falsification.md", new Uint8Array(0));
+      });
+  }
+
+  // ── Derived architectural-obligation pre-pass (#1448) ──────────────────
+  // #1449: the operator-only feature gate, read ONCE — the pre-pass below
+  // and the enforcement half (#1449) must never disagree about whether the
+  // feature is on. The value is parsed EXACTLY like the harness parses it
+  // (`trim().toLowerCase()`), so the two readers can never disagree about
+  // a padded or mixed-case value.
+  const derivedObligationsEnabled = (env.DERIVED_OBLIGATIONS ?? "false").trim().toLowerCase() === "true";
+  // Fail-soft like the claims pre-pass above, but NOT silent on failure: a
+  // derivation that did not complete renders a visible "coverage
+  // unavailable" note, because this pass exists to surface obligations the
+  // PR never states — an absent section must never read as "nothing was
+  // implied". The JSON artifact records status/error kind so #1449 can tell
+  // `empty` (model ran, no obligation) from `error`/`timeout`/`malformed`
+  // (derivation incomplete). One bounded model call on the primary route.
+  // Shares the #1380 budget-priority gate: on a dependency update it
+  // launches only after the mandatory evidence phase settles.
+  //
+  // Input completeness (#1448 review: truncated-diff blinding): the pass is
+  // fed the COMPLETE diff (`pr.diff`) — the prioritized `pr.diff.truncated`
+  // slice can omit the very hunk that raises the obligation (the #909
+  // caveat, classification's own feed comment). The pass applies its own
+  // bounded selection/clipping on top, and the artifact records
+  // `diff_source`/`diff_clipped`/`input_complete` so #1449 can fail toward
+  // partial/needs-review instead of treating an `empty` over a clipped or
+  // sliced input as complete coverage. `pr.diff` is the complete fetched
+  // diff (a capped platform read throws rather than silently clipping);
+  // the truncated-slice fallback only fires when the full artifact is
+  // absent, and records exactly that.
+  const derivedDiffFull = ws.readText("pr.diff");
+  const derivedDiffSource: "full" | "truncated" | "none" = derivedDiffFull !== null
+    ? "full"
+    : ws.readText("pr.diff.truncated") !== null
+    ? "truncated"
+    : "none";
+  const derivedDiff = derivedDiffFull ?? ws.readText("pr.diff.truncated") ?? "";
+  ws.write("derived-obligations.md", new Uint8Array(0));
+  let derivedPromise: Promise<void> = Promise.resolve();
+  if (derivedObligationsEnabled) {
+    const rawDerivedTemp = (env.AI_TEMPERATURE ?? "").trim();
+    const derivedTemperature = rawDerivedTemp === "" || Number.isNaN(Number(rawDerivedTemp)) ? null : Number(rawDerivedTemp);
+    const derivedTimeoutSec = Math.min(
+      Number(env.DERIVED_OBLIGATIONS_TIMEOUT_SEC ?? "180") || 180,
+      Number(env.AI_REQUEST_TIMEOUT_SEC ?? "180") || 180,
+    );
+    // #1037 correlation headers ride the derivation call too, same rule as
+    // the claims pre-pass: resolved only when the primary route exists, and
+    // unset config omits the key.
+    const derivedExtra = profiles.primary.baseUrl && profiles.primary.model
+      ? extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "")
+      : undefined;
+    derivedPromise = claimsPrepassGate(
+      DEPENDENCY_UPDATE_KINDS.has(classification.prKind),
+      evidencePromise,
+    ).then(() => runDerivedObligationsPass({
+      title: String(pr.title ?? ""),
+      body: String(pr.body ?? ""),
+      files: safeJson(ws.read("pr-files.json")),
+      diff: derivedDiff,
+      diffComplete: derivedDiffSource === "full",
+      model:
+        profiles.primary.baseUrl && profiles.primary.model
+          ? {
+              config: {
+                apiFormat: profiles.primary.apiFormat,
+                model: profiles.primary.model,
+                baseUrl: profiles.primary.baseUrl,
+                apiKey: profiles.primary.apiKey,
+                maxTokens: Number(env.DERIVED_OBLIGATIONS_MAX_TOKENS ?? "4096") || 4096,
+                temperature: derivedTemperature,
+                responseFormat: profiles.primary.responseFormat,
+                tokensParam: env.AI_TOKENS_PARAM ?? "max_tokens",
+                stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
+                timeoutSec: derivedTimeoutSec,
+                inputMaxBytes: Number(env.DERIVED_OBLIGATIONS_INPUT_MAX_BYTES ?? "48000") || 48000,
+                // #998: the pre-pass runs on the primary route, so it uses
+                // the primary lane's resolved effort.
+                reasoningEffort: profiles.primary.reasoningEffort,
+                anthropicEffortSupported: profiles.primary.anthropicEffortSupported,
+              },
+              requestFn: specialistRequestFn({
+                baseUrl: profiles.primary.baseUrl,
+                apiKey: profiles.primary.apiKey,
+                anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
+                ...(derivedExtra !== undefined ? { extraHeaders: derivedExtra } : {}),
+              }),
+            }
+          : undefined,
+    }))
+      .then((result) => {
+        const section = renderDerivedSectionForStatus(result, Number(env.DERIVED_OBLIGATIONS_SECTION_MAX_BYTES ?? "8000") || 8000);
+        const record = {
+          status: result.status,
+          error_kind: result.errorKind,
+          error: result.error,
+          diff_source: derivedDiffSource,
+          diff_clipped: result.diffClipped,
+          input_complete: result.inputComplete,
+          method: result.artifact.method,
+          obligations: result.artifact.obligations,
+          truncated: result.artifact.truncated,
+          errors: result.artifact.errors,
+          section_bytes: Buffer.byteLength(section, "utf8"),
+        };
+        ws.write("derived-obligations.json", Buffer.from(`${pyJsonDumps(record)}\n`, "utf8"));
+        ws.write("derived-obligations.md", Buffer.from(section, "utf8"));
+      })
+      .catch((cause: unknown) => {
+        // The pass itself never throws; this only guards the artifact-write
+        // path. Even here the review proceeds, with an explicit unavailable
+        // note rather than a silent gap — and the JSON artifact is written
+        // too, so a #1449 consumer never sees "no artifact" (indistinguishable
+        // from a disabled run) while the corpus says a derivation happened.
+        log(`WARNING: derived-obligations pre-pass failed; continuing without derived obligations: ${cause instanceof Error ? cause.message : String(cause)}`);
+        const note = Buffer.from(renderDerivedUnavailable("internal"), "utf8");
+        ws.write("derived-obligations.md", note);
+        ws.write(
+          "derived-obligations.json",
+          Buffer.from(`${pyJsonDumps({
+            status: "error",
+            error_kind: "internal",
+            error: cause instanceof Error ? cause.message : String(cause),
+            diff_source: derivedDiffSource,
+            diff_clipped: false,
+            input_complete: false,
+            method: "none",
+            obligations: [],
+            truncated: false,
+            errors: [],
+            section_bytes: note.length,
+          })}\n`, "utf8"),
+        );
       });
   }
 
@@ -1147,6 +1558,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     cancellation.release(specialistFork);
   }
   await claimsPromise;
+  await derivedPromise;
   if (ciFork !== null) {
     const outcome = await ciFork.join();
     // Joined: the second (result-building) join reads the cached outcome and
@@ -1194,7 +1606,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
 
   // Rebuild the corpus with both branches resolved (finalized CI evidence
   // + any rendered specialist leads + refreshed PR metadata).
-  if (env.CI_GATE_ACTIVE === "true" || ws.isNonEmpty("specialists.md") || ws.isNonEmpty("claim-falsification.md")) {
+  if (env.CI_GATE_ACTIVE === "true" || ws.isNonEmpty("specialists.md") || ws.isNonEmpty("claim-falsification.md") || ws.isNonEmpty("derived-obligations.md")) {
     log("review gates resolved: rebuilding corpus with finalized CI evidence and specialist leads");
     corpusResult = assembleCorpus(ws, env, budgets, profileKey, "primary", generatedPaths, standards);
     ws.write("review-corpus.truncated.md", ws.read(corpusResult.outputName) ?? new Uint8Array(0));
@@ -1241,6 +1653,16 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   for (const warning of distributedRequirementWarnings(ledgerValue, traceOwnership.rules, traceScopeIds)) {
     errorLog(`requirement owners: ${warning}`);
   }
+  // #1506: the in-scope requirement trace plan, so the native loop's FIRST
+  // planning turn carries the requirement rows (and their distributed seam
+  // hints) the merge-gating evidence is built from. The artifact is written
+  // even when the feature is disabled — with ZERO rows — so a stale plan can
+  // never survive into a later run's planning context.
+  ws.write(TRACE_PLAN_ARTIFACT, Buffer.from(`${JSON.stringify(buildTracePlan({
+    ledger: requirementTraceEnabled ? ledgerValue : null,
+    scopeIds: requirementTraceEnabled ? traceScopeIds : [],
+    distributedHints,
+  }))}\n`, "utf8"));
   promptState = applyRequirementTraceFragment(promptState, ws, requirementTraceEnabled, undefined, traceScopeIds, distributedHints);
   // #1003 human-review triage: an operator-only, review-only opt-in. The
   // fragment adds ONE question to the reviewer and nothing else — no tool,
@@ -1416,8 +1838,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         const repairExtra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
         repaired = await runRequirementTraceRepairPass({
           requirements: repairRequirements.map((entry) => {
+            // #1519: the hints carry full seam objects now; the repair message
+            // still names the seams (the per-seam patterns live in the plan).
             const groups = distributedHints.find((hint) => hint.requirementId === entry.id)?.groups;
-            return { id: entry.id, text: entry.text, ...(groups ? { groups } : {}) };
+            return { id: entry.id, text: entry.text, ...(groups ? { groups: groups.map((group) => group.name) } : {}) };
           }),
           title: String(pr.title ?? ""),
           files: safeJson(ws.read("pr-files.json")),
@@ -1628,6 +2052,34 @@ secrets: [profiles.primary.apiKey],
     humanReviews: safeJsonArray(ws.read("human-reviews.json")) as never,
     verdictPolicy,
   };
+  // #1381: the folded review-owned obligation rows ride the enforcement
+  // inputs so the gate runs inside applyAllEnforcement (with the banner
+  // normalization) and the anti-relax signal is computed once, here.
+  // #1449: the derived pre-pass output joins the SAME rows — there is no
+  // second enforcement path: an unresolved derived row is disclosed by the
+  // same gate, withholds the trusted approval (at the publish boundary) and
+  // makes the review partial, but it never forces a verdict (it is coverage,
+  // not a defect — see `isForcingObligation`).
+  const resolvedObligations = resolveReviewObligations(
+    classificationArtifact,
+    reviewRecord,
+    ws,
+    enforcementHarness,
+    env.VALIDATE_REQUIRED_CHECKS,
+    derivedObligationsEnabled,
+  );
+  enforcementInputs.reviewObligations = resolvedObligations.obligations;
+  persistReviewObligations(ws, resolvedObligations.obligations, log);
+  // #1449: the run's derived-obligation state — "" when the feature is off,
+  // so a disabled run's coverage record and marker keep their pre-#1449
+  // bytes exactly.
+  const derivedState = derivedObligationState(resolvedObligations.derived, resolvedObligations.obligations);
+  // #1449: the reason that EXPLAINS the state: the closed coverage reason
+  // when the derivation never completed, `not-discharged` when the coverage
+  // is complete but a derived row stayed open, null when every row was
+  // discharged. The state alone never said why.
+  const derivedReason = derivedObligationStateReason(resolvedObligations.derived, resolvedObligations.obligations);
+  persistDerivedObligationState(ws, resolvedObligations.derived, resolvedObligations.obligations, derivedReason);
   // #874: the ledger (read above for the #959 trace scope) feeds the trace
   // escalation, which must be visible to the verdict mapping, not just
   // recorded afterward.
@@ -1686,6 +2138,20 @@ secrets: [profiles.primary.apiKey],
       }
       blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
     }
+    // #1449: the derived rows are COVERAGE rows, so only the FORCING sources
+    // (the operator's `must_check` checklist and the trusted base's
+    // `trusted_base_guidance` asks) reach the strict mapping's anti-relax
+    // signal. An undischarged derived obligation never demotes an approve
+    // into a blocking request (#1447: "preserve the existing distinction
+    // between found defect and review incomplete / abstain"); it withholds
+    // the trusted approval at the publish boundary instead. A run without
+    // derived rows keeps the #1381 text and its order byte-for-byte.
+    const unresolvedRequiredObligations = unresolvedReviewObligations(
+      resolvedObligations.obligations.filter((obligation) => isForcingObligation(obligation)),
+    );
+    // The obligation gate (#1381) ran inside applyAllEnforcement and rides
+    // failClosedEnforcementFired, so the strict mapping can never relax a
+    // verdict it forced.
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
     // #1016: the strict mapping computes the unknown-evidence forcing
@@ -1693,7 +2159,11 @@ secrets: [profiles.primary.apiKey],
     // demoted finding with `grounding_status === "unverified"` forces
     // `request_changes` with a #1016 attribution note so an approve cannot
     // silently certify a claim the verifier never checked.
-    applyStrictVerdictPolicy(reviewRecord as never, { modelVerdict, forced });
+    applyStrictVerdictPolicy(reviewRecord as never, {
+      modelVerdict,
+      forced,
+      unresolvedReviewObligations: unresolvedRequiredObligations,
+    });
     // The strict mapping can derive an approve after the enforcement banner
     // was written; reconcile the markdown with the final verdict.
     reconcileEnforcedReviewMarkdown(reviewRecord as never);
@@ -1746,20 +2216,39 @@ secrets: [profiles.primary.apiKey],
     // still-open finding is a verification ask and no independent
     // deterministic gate fired. The overlays above have already run, so
     // their blocks are visible here.
+    //
+    // #1449: only the FORCING obligation rows gate the relaxation — an
+    // undischarged derived obligation is missing coverage, not a defect, so
+    // it must not keep a relaxed (or relaxed-then-approved) review blocked
+    // on its own. The derived state still withholds the trusted approval at
+    // the publish boundary, so nothing here can certify an approve.
+    const unresolvedObligations = unresolvedReviewObligations(
+      resolvedObligations.obligations.filter((obligation) => isForcingObligation(obligation)),
+    );
+    // The obligation gate (#1381) ran inside applyAllEnforcement and rides
+    // failClosedEnforcementFired, so the relaxers below refuse when it fired.
     const forced = failClosedEnforcementFired(enforcementInputs)
       || (completenessResult.status === "incomplete" && completenessResult.mode === "fail");
-    relaxVerificationOnlyVerdict(reviewRecord as never, { forced });
-    relaxCiOnlyVerdict(reviewRecord as never, { forced });
+    relaxVerificationOnlyVerdict(reviewRecord as never, { forced, unresolvedReviewObligations: unresolvedObligations });
+    relaxCiOnlyVerdict(reviewRecord as never, { forced, unresolvedReviewObligations: unresolvedObligations });
     // #1016: relaxUnverifiedBlockerVerdict itself refuses to relax when any
     // demoted finding has `grounding_status === "unverified"` (unknown
     // evidence, not a refutation) — the verifier did not disprove the
     // claim, so a clean review cannot be certified.
-    relaxUnverifiedBlockerVerdict(reviewRecord as never, { forced });
+    relaxUnverifiedBlockerVerdict(reviewRecord as never, { forced, unresolvedReviewObligations: unresolvedObligations });
     // #977: the relaxation can flip the model's request_changes to approve
     // after the enforcement banner was written; reconcile the markdown with
     // the final verdict.
     reconcileEnforcedReviewMarkdown(reviewRecord as never);
   }
+  // #1518: the merge-gating ids of the deterministic enforcement pass. They
+  // are computed AFTER both enforcement branches, so the strict path and the
+  // non-strict path carry the same ids, and they name the obligations that
+  // stayed open (a required check the reviewer did not resolve, a
+  // requirement the trace could not discharge) rather than only that the
+  // coverage was incomplete.
+  const unresolvedRequiredChecks = completenessResult === null ? [] : unresolvedRequiredCheckIds(completenessResult);
+  const unresolvedRequirementIds = requirementTraceResult === null ? [] : unresolvedTraceRequirementIds(requirementTraceResult.trace);
   if (blockerVerification !== null && blockerVerification.demoted > 0) {
     ws.write("blocker-verification.json", Buffer.from(`${pyJsonDumps({
       version: 1,
@@ -1776,6 +2265,22 @@ secrets: [profiles.primary.apiKey],
     })}\n`, "utf8"));
     reviewRecord.review_markdown = String(reviewRecord.review_markdown ?? "")
       + `\n\n_${blockerVerification.demoted} finding(s) making source-backed claims that deterministic verification positively contradicted or could not substantiate are listed above as non-blocking. Deterministic enforcement gates are unaffected._`;
+  }
+  // #1337: the reviewer-reported coverage-accounting block is appended
+  // after every enforcement/reconcile pass (nothing re-scans it), the same
+  // post-reconcile append position the blocker-verification note uses.
+  // Gated on BOTH the deterministic detection having fired (the section is
+  // non-empty — a stray answer on a non-dependency PR never publishes) and
+  // the model having emitted a real `dependency_coverage` answer; the
+  // publish boundary still sanitizes the whole markdown afterwards.
+  const dependencyCoverageFired = (ws.read("dependency-coverage.md")?.length ?? 0) > 0;
+  const dependencyCoverageBlock = dependencyCoverageFired
+    ? renderDependencyCoverageBlock(
+      (reviewRecord as { dependency_coverage?: unknown }).dependency_coverage as never,
+    )
+    : "";
+  if (dependencyCoverageBlock !== "") {
+    reviewRecord.review_markdown = String(reviewRecord.review_markdown ?? "") + "\n\n" + dependencyCoverageBlock;
   }
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(reviewRecord)}\n`, "utf8"));
 
@@ -1859,6 +2364,16 @@ secrets: [profiles.primary.apiKey],
     partial_coverage: partialCoverage ?? null,
     required_checks: outputRequiredChecks,
     ...(incompleteReason !== "none" ? { incomplete_reason: incompleteReason } : {}),
+    // #1449: the derived-obligation state of THIS run — present only when
+    // the feature is enabled (a disabled run keeps the record
+    // byte-identical). The reason is the closed reason token that explains
+    // the state (the coverage reason when the derivation never completed,
+    // `not-discharged` when a row stayed open, null when all were
+    // discharged).
+    ...(derivedState !== "" ? {
+      derived_obligation_state: derivedState,
+      derived_obligation_reason: derivedReason,
+    } : {}),
     // #1145: the native loop's own bounded evidence-repair continuation
     // record (its outcome enum distinguishes a run continuation from
     // skipped_no_budget), when the probe fired or was skipped.
@@ -1873,17 +2388,20 @@ secrets: [profiles.primary.apiKey],
   // cancellation coverage for the stage.
   checkpoint();
 
-  // ── #1073: the independent post-review confidence scorer ─────────────
+  // ── #1073/#1369: the independent post-review merge-safety verifier ──
   // Advisory telemetry only. Runs once, after enforcement and the coverage
   // record are final and only when this run will actually publish a review:
-  // one bounded, tool-free model call grades how confident the finished
-  // review is. The result never alters the verdict, review_result, required
-  // checks, escalation reason, native review events, or approvals, and it
-  // never writes into any reviewRecord field the enforcement/marker
-  // pipeline reads — it flows only into its own outputs, step-summary row,
-  // published section, marker keys, and artifact. Disabled (the default)
-  // means none of that exists: no request, no artifacts, no section, no
-  // marker keys; the five confidence-* output assignments stay empty.
+  // one bounded, tool-free model call independently reads the PR diff and
+  // description and audits the finished review against the actual change —
+  // hunting for missed blocker/major defects and materially unsupported
+  // findings, and reporting its own structured concerns. The result never
+  // alters the verdict, review_result, required checks, escalation reason,
+  // native review events, or approvals, and it never writes into any
+  // reviewRecord field the enforcement/marker pipeline reads — it flows only
+  // into its own outputs, step-summary row, published section, marker keys,
+  // and artifact. Disabled (the default) means none of that exists: no
+  // request, no artifacts, no section, no marker keys; the five confidence-*
+  // output assignments stay empty.
   const confidenceResolution = resolveConfidenceProfile(env);
   for (const warning of confidenceResolution.warnings) log(`WARNING: ${warning}`);
   // The scorer's eligibility gate is now EXACTLY the `shouldPublish` decision
@@ -1895,6 +2413,27 @@ secrets: [profiles.primary.apiKey],
   // A run whose publish step is skipped still gets no privileged scorer call.
   const reviewWillPublish = publishStepRuns(env.PUBLISH_MODE);
   const confidenceProfile = confidenceResolution.profile;
+  // #1368: additive provenance for the confidence-score.json artifact — what
+  // the scorer's request was budgeted/asserted to carry. Included whenever
+  // the profile was enabled (scored and unscored paths alike); the disabled
+  // path writes no artifact at all.
+  //
+  // #998's truth-telling rule: `reasoning_effort_sent` is a WIRE fact, not a
+  // config fact. The scorer's outcome is the authority for it — the effort is
+  // read back from the body the transport sent — so a path that sent no
+  // request at all (the publish gates below, or the scorer's own pre-wire
+  // refusals) records false even when the configuration named an effort. A
+  // request the transport sent but the provider never answered still counts
+  // as sent: the bytes carried the effort.
+  const confidenceProvenance = (effortSent: boolean): ConfidenceRequestProvenance | undefined =>
+    confidenceProfile.enabled ? {
+      max_tokens: confidenceProfile.maxTokens,
+      prompt_tokens: confidenceProfile.promptTokens,
+      model_context_tokens: confidenceProfile.modelContextTokens,
+      reasoning_effort_sent: effortSent,
+      anthropic_effort_support: confidenceProfile.anthropicEffortSupported,
+      structured_output_support: confidenceProfile.structuredOutputSupported,
+    } : undefined;
   // #1155: the proof-context pins the scorer call is anchored to. An empty
   // one means the score would grade content (or an outcome) this run could
   // not identify — strictly worse than a low-confidence score, an unanchored
@@ -1911,9 +2450,22 @@ secrets: [profiles.primary.apiKey],
       findings: reviewRecord.findings,
       requiredChecks: outputRequiredChecks,
       partialCoverage,
+      degradedGateBypass,
+      // #1449: an undischarged derived obligation is missing coverage, so the
+      // review reads `partial` — never `clean`, and never a manufactured
+      // `issues`. Absent when the feature is off.
+      ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
     }),
   };
   const unresolvedProofPins = unresolvedConfidencePins(confidenceProofPins);
+  // #1455: the verifier's own telemetry — the unscored cause, the measured
+  // latency and the provider's token counts. Both the measured values stay
+  // null until the scorer's ONE wire attempt actually happened: the
+  // pre-wire gates below never call the model, so they carry neither, and a
+  // duration for a call that never happened would be a claim the run cannot
+  // back.
+  let confidenceLatencyMs: number | null = null;
+  let confidenceUsage: ConfidenceUsageTelemetry | null = null;
   let confidenceResult: ConfidenceResult;
   if (!confidenceProfile.enabled) {
     // Disabled: no request, no artifacts, no outputs.
@@ -1927,14 +2479,14 @@ secrets: [profiles.primary.apiKey],
     // tell "the publish step was skipped" from "the scorer call failed".
     confidenceResult = unscoredConfidenceResult("not_published");
     removeConfidenceWireArtifacts(ws);
-    writeConfidenceScoreArtifact(ws, confidenceResult);
+    writeConfidenceScoreArtifact(ws, confidenceResult, undefined, confidenceProvenance(false));
     log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else if (analysisEngine === MODEL_UNAVAILABLE_ENGINE || !(outputVerdict === "approve" || outputVerdict === "request_changes")) {
     // No real model review happened (a model-failure notice, or no verdict at
     // all): fail to unscored WITHOUT calling the model.
     confidenceResult = unscoredConfidenceResult("incomplete_review");
     removeConfidenceWireArtifacts(ws);
-    writeConfidenceScoreArtifact(ws, confidenceResult);
+    writeConfidenceScoreArtifact(ws, confidenceResult, undefined, confidenceProvenance(false));
     log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else if (unresolvedProofPins.length > 0) {
     // #1155: a required proof-context pin did not resolve. The prompt would
@@ -1945,7 +2497,7 @@ secrets: [profiles.primary.apiKey],
     // diagnostic (the cause's own machine tokens, no untrusted content).
     confidenceResult = unscoredConfidenceResult("incomplete_proof_context");
     removeConfidenceWireArtifacts(ws);
-    writeConfidenceScoreArtifact(ws, confidenceResult, `unresolved proof-context pins: ${unresolvedProofPins.join(",")}`);
+    writeConfidenceScoreArtifact(ws, confidenceResult, `unresolved proof-context pins: ${unresolvedProofPins.join(",")}`, confidenceProvenance(false));
     log(`confidence scorer: unscored (${confidenceResult.cause})`);
   } else {
     // #1140 review: every credential configured for this run, in ONE place.
@@ -1958,6 +2510,7 @@ secrets: [profiles.primary.apiKey],
     // must not ride to the scorer either.
     const confidenceSecrets = [
       confidenceProfile.apiKey,
+      endpointUrlCredentialOrEmpty(confidenceProfile.baseUrl),
       profiles.primary.apiKey,
       profiles.smart.apiKey,
       profiles.fallback.apiKey,
@@ -1973,6 +2526,9 @@ secrets: [profiles.primary.apiKey],
       requiredChecks: outputRequiredChecks,
       coverage: reviewCoverage,
       secrets: confidenceSecrets,
+      // #1368: the profile's overall prompt budget bounds the assembled
+      // prompt (bytes/4 estimate) with explicit in-band truncation.
+      promptTokens: confidenceProfile.promptTokens,
     });
     let confidenceOutcome: Awaited<ReturnType<typeof runConfidenceScorer>>;
     try {
@@ -1989,7 +2545,10 @@ secrets: [profiles.primary.apiKey],
         laneSecrets: confidenceSecrets,
         prompt: confidencePrompt,
         connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
-        tokensParam: (env.AI_TOKENS_PARAM ?? "max_tokens") as "max_tokens" | "max_completion_tokens",
+        // #1481: no tokensParam here — the token-limit field is resolved INTO
+        // the profile (routing/tiers.ts), so the scorer never receives the
+        // primary lane's/global AI_TOKENS_PARAM convention on a dedicated
+        // verifier.
         findings: reviewRecord.findings,
         coverage: reviewCoverage,
         // Cancellation rides the scorer call too: an aborted run tears the
@@ -2007,8 +2566,26 @@ secrets: [profiles.primary.apiKey],
         // straddling the 300-char boundary cannot leave a partial prefix in
         // the artifact or the log line. Masking AFTER truncation did.
         diagnostic: maskDiagnostic(cause instanceof Error ? cause.message : String(cause), confidenceSecrets),
+        // A crash inside the scorer leaves the dispatch state unknown: the
+        // artifact claims no effort was sent (#998: report what was SENT,
+        // never what the config named — and a claim it cannot back is not a
+        // claim).
+        wireEffort: "",
+        // #1455: a crash carries no latency and no usage — the run cannot
+        // say how long a call took, nor what it cost, when it does not know
+        // whether the call happened at all.
+        usage: null,
+        latencyMs: null,
       };
     }
+    // #1455: the scorer's own measurement of its ONE wire attempt — the
+    // wall-clock duration it observed and the token counts the provider
+    // reported. The scorer's pre-wire refusals (a disabled profile, a missing
+    // credential, a credential isolation refusal, a prompt over budget)
+    // report neither, so a run that never reached the provider carries no
+    // latency and no usage.
+    confidenceLatencyMs = confidenceOutcome.latencyMs;
+    confidenceUsage = confidenceOutcome.usage;
     // #1140 review: model-authored text (reason, concern file/evidence) is
     // masked against EVERY lane's credential BEFORE the canonical result
     // exists — every downstream consumer (persisted artifact, step outputs,
@@ -2048,14 +2625,20 @@ secrets: [profiles.primary.apiKey],
         confidenceSecrets,
       ),
       concerns: confidenceOutcome.result.concerns.map((concern) => ({
+        // Closed-vocabulary enum tokens (validated by the parser), not model
+        // free text — carried through unmasked, like `line`.
+        type: concern.type,
+        severity: concern.severity,
         file: maskConfidenceField(concern.file, MAX_CONFIDENCE_CONCERN_FILE_CHARS),
         line: concern.line,
         evidence: maskConfidenceField(concern.evidence, MAX_CONFIDENCE_CONCERN_EVIDENCE_CHARS),
       })),
     };
     // Persist the sanitized artifacts alongside ai-output.json /
-    // review-coverage.json.
-    writeConfidenceScoreArtifact(ws, confidenceResult, maskConfidenceText(confidenceOutcome.diagnostic));
+    // review-coverage.json. The telemetry rides the artifact too, so the
+    // publish step reads the verifier's own record (the same seam the
+    // standalone `publish` CLI reads) instead of re-deriving the values.
+    writeConfidenceScoreArtifact(ws, confidenceResult, maskConfidenceText(confidenceOutcome.diagnostic), confidenceProvenance(confidenceOutcome.wireEffort !== ""), confidenceLatencyMs, confidenceUsage);
     if (confidenceOutcome.requestPayload !== null) {
       // #1140 review: raw provider/agent JSON goes to disk through
       // `redactTextDeep`, not `maskKnownSecretsDeep` — configured-value
@@ -2081,10 +2664,27 @@ secrets: [profiles.primary.apiKey],
       const diagnosticNote = confidenceOutcome.diagnostic !== "" ? `: ${maskConfidenceText(confidenceOutcome.diagnostic)}` : "";
       log(`confidence scorer: unscored (${confidenceResult.cause})${diagnosticNote}`);
     } else if (confidenceResult.status === "scored") {
-      log(`confidence scorer: scored ${confidenceResult.score}/5 risk=${confidenceResult.risk} (advisory only)`);
+      log(`confidence scorer: verified ${confidenceResult.score}/5 risk=${confidenceResult.risk} (advisory only)`);
     }
   }
   const confidenceOutputs = confidenceOutputFields(confidenceResult);
+  // #1455: the verifier's telemetry, resolved ONCE by the single authority
+  // (`confidenceTelemetryOf`) that every published surface shares. The cause
+  // is the run's action-owned machine token — never provider text — and it is
+  // published only for an unscored run whose cause matches the conservative
+  // grammar; anything else is dropped rather than published, because the
+  // marker is a surface a collector reads and may only carry values this
+  // action can vouch for.
+  const confidenceTelemetry = confidenceTelemetryOf({
+    status: confidenceResult.status,
+    cause: confidenceResult.cause,
+    latencyMs: confidenceLatencyMs,
+    usage: confidenceUsage,
+  });
+  // A verifier that never ran carries no telemetry: the marker keeps its
+  // pre-#1455 bytes exactly. The same rule the standalone publish path
+  // applies to the artifact it reads, so both paths publish one record.
+  const publishedConfidenceTelemetry = confidenceTelemetry.status === "" ? undefined : confidenceTelemetry;
 
   // #1003: the triage outputs. Disabled means "" for BOTH — "did not run",
   // deliberately distinct from the fail-closed `unknown` answer, so a
@@ -2144,6 +2744,11 @@ secrets: [profiles.primary.apiKey],
       findings: reviewRecord.findings,
       requiredChecks: outputRequiredChecks,
       partialCoverage,
+      degradedGateBypass,
+      // #1449: an undischarged derived obligation is missing coverage, so the
+      // review reads `partial` — never `clean`, and never a manufactured
+      // `issues`. Absent when the feature is off.
+      ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
     }),
     reviewRoute: env.REVIEW_ROUTE ?? "legacy",
     escalationReason: escalationReasons,
@@ -2151,12 +2756,17 @@ secrets: [profiles.primary.apiKey],
     reviewTriageReason: triageReason,
     reviewTriageRouting: routingOutput,
     // #1073: all five empty when the scorer is disabled — never a spurious 0.
-    confidenceStatus: confidenceOutputs.status,
-    confidenceScore: confidenceOutputs.score,
-    confidenceRisk: confidenceOutputs.risk,
-    confidenceReason: confidenceOutputs.reason,
-    confidenceModel: confidenceOutputs.model,
-    reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
+confidenceStatus: confidenceOutputs.status,
+confidenceScore: confidenceOutputs.score,
+confidenceRisk: confidenceOutputs.risk,
+confidenceReason: confidenceOutputs.reason,
+confidenceModel: confidenceOutputs.model,
+      // #1337: "" when the model never emitted a real `dependency_coverage`
+      // answer (artifact key absent) OR the deterministic detection never
+      // fired — a run without an answer gains no summary row and no marker
+      // key.
+      dependencyCoverageStatus: dependencyCoverageFired && typeof reviewRecord.dependency_coverage_status === "string" ? reviewRecord.dependency_coverage_status : "",
+reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     findings: pyJsonDumps(Array.isArray(reviewRecord.findings) ? reviewRecord.findings : []),
     toolCalls,
     cacheHitRatio,
@@ -2217,8 +2827,22 @@ secrets: [profiles.primary.apiKey],
     ...(ciState !== undefined ? { ciState } : {}),
     // #1073: the scorer's marker keys, only when the scorer ran — disabled
     // and never-attempted runs keep the pre-#1073 marker bytes exactly.
-    ...(outputs.confidenceStatus !== "" ? { confidenceStatus: outputs.confidenceStatus } : {}),
-    ...(outputs.confidenceScore !== "" ? { confidenceScore: Number(outputs.confidenceScore) } : {}),
+...(outputs.confidenceStatus !== "" ? { confidenceStatus: outputs.confidenceStatus } : {}),
+...(outputs.confidenceScore !== "" ? { confidenceScore: Number(outputs.confidenceScore) } : {}),
+// #1337: the coverage rollup, only when the model emitted a
+// `dependency_coverage` answer — other runs keep pre-#1337 marker bytes.
+...(outputs.dependencyCoverageStatus === "complete" || outputs.dependencyCoverageStatus === "partial" || outputs.dependencyCoverageStatus === "unavailable"
+  ? { dependencyCoverage: outputs.dependencyCoverageStatus }
+  : {}),
+    // #1449: the derived-obligation state, only when the feature is enabled
+    // — a disabled run keeps the pre-#1449 marker bytes exactly. The value
+    // is the run's own state, resolved once above from the coverage answer
+    // and the folded rows.
+    ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
+    // #1455: the verifier's telemetry, only when the run measured it — a
+    // disabled verifier, or a call with no usage, keeps the pre-#1455
+    // marker bytes exactly.
+    ...(publishedConfidenceTelemetry !== undefined ? { confidenceTelemetry: publishedConfidenceTelemetry } : {}),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCalls: toolBudgetTelemetry.calls } : {}),
@@ -2246,6 +2870,12 @@ secrets: [profiles.primary.apiKey],
     verdictPolicy,
     ...(partialCoverage ? { partialCoverage } : {}),
     ...(ciState !== undefined ? { ciState } : {}),
+    // #1449: the run's derived-obligation state, only when the feature is
+    // enabled — a disabled run keeps its pre-#1449 published bytes exactly.
+    // The value is the run's own state, resolved once above from the
+    // derivation's coverage answer and the folded rows; it is never
+    // recomputed here.
+    ...(derivedState !== "" ? { derivedObligationState: derivedState } : {}),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCallsUsed: toolBudgetTelemetry.calls } : {}),
@@ -2265,6 +2895,15 @@ secrets: [profiles.primary.apiKey],
     admission: pre,
     // #1073: advisory concerns for the published section, scored answers only.
     ...(confidenceResult.status === "scored" ? { confidenceConcerns: confidenceResult.concerns } : {}),
+    // #1518: the enforcement pass's merge-gating ids, so the published
+    // handoff can name the obligations that stayed open. Both lists are
+    // always present here (empty when the enforcement pass found nothing);
+    // a run that never reviewed carries neither (the admission skip path).
+    unresolvedRequirementIds,
+    unresolvedRequiredChecks,
+    // #1455: the verifier's telemetry for the published marker — advisory
+    // only, never a verdict input.
+    ...(publishedConfidenceTelemetry !== undefined ? { confidenceTelemetry: publishedConfidenceTelemetry } : {}),
   };
 }
 
@@ -2533,15 +3172,55 @@ function removeConfidenceWireArtifacts(ws: RunWorkspace): void {
  * (`not_published`, `incomplete_review`, `incomplete_proof_context`) that
  * never reach the model call.
  * Without it, `confidence-status: unscored` is unexplainable: the operator
- * could not tell "the publish step was skipped" from "the call failed". */
-function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult, diagnostic?: string): void {
+ * could not tell "the publish step was skipped" from "the call failed".
+ *
+ * #1369: artifact `version` 2 adds the `rubric` field
+ * (`CONFIDENCE_RUBRIC_VERSION`). That version IS the migration marker: a
+ * version-1 artifact (no `rubric` field) is a pre-#1369 prose-quality
+ * confidence grade, and consumers must never reinterpret it as a
+ * merge-readiness verifier result — the two semantics are not comparable.
+ *
+ * #1368: `provenance` is an ADDITIVE record of the request budgets and
+ * capability assertions the enabled profile resolved; absent when disabled,
+ * and every pre-existing key stays byte-for-byte as before.
+ *
+ * #1455: `latencyMs` and `usage` are ADDITIVE records of the verifier's ONE
+ * wire attempt — the wall-clock duration it observed and the provider's
+ * normalized token usage. Both are absent when no call was attempted or when
+ * the provider reported no usage; every pre-existing key stays byte-for-byte
+ * as before and the artifact `version` stays 2 (the new keys are additive,
+ * not a semantic migration). */
+interface ConfidenceRequestProvenance {
+  max_tokens: number;
+  prompt_tokens: number;
+  model_context_tokens: number;
+  reasoning_effort_sent: boolean;
+  anthropic_effort_support: boolean;
+  structured_output_support: boolean;
+}
+
+function writeConfidenceScoreArtifact(
+  ws: RunWorkspace,
+  result: ConfidenceResult,
+  diagnostic?: string,
+  provenance?: ConfidenceRequestProvenance,
+  latencyMs?: number | null,
+  usage?: ConfidenceUsageTelemetry | null,
+): void {
+  // #1455: the usage goes through the SAME validation the marker builder
+  // applies, so the artifact and the published marker can never disagree
+  // about the same measurement.
+  const validUsage = validConfidenceUsageTelemetry(usage);
   ws.write("confidence-score.json", Buffer.from(`${pyJsonDumps({
-    version: 1,
+    version: 2,
+    rubric: CONFIDENCE_RUBRIC_VERSION,
     status: result.status,
     score: result.score,
     risk: result.risk,
     reason: result.reason,
     concerns: result.concerns.map((concern) => ({
+      type: concern.type,
+      severity: concern.severity,
       file: concern.file,
       line: concern.line,
       evidence: concern.evidence,
@@ -2549,7 +3228,18 @@ function writeConfidenceScoreArtifact(ws: RunWorkspace, result: ConfidenceResult
     model: result.model,
     cause: result.cause,
     caps: result.caps,
+    // #1369: action-owned parser notes (e.g. `concern_dropped_*` tokens) so a
+    // dropped concern — and the ceiling implication it would have carried —
+    // stays operator-visible instead of vanishing silently.
+    parser_notes: result.parserNotes,
     ...(diagnostic !== undefined && diagnostic !== "" ? { diagnostic } : {}),
+    ...(provenance !== undefined ? { request: provenance } : {}),
+    // #1455: the measured latency and the provider's token usage, in the
+    // same wire shape the metadata marker carries them. Both go through the
+    // SAME validation the marker builder applies, so the artifact and the
+    // published marker can never disagree about the same measurement.
+    ...(typeof latencyMs === "number" && Number.isInteger(latencyMs) && latencyMs >= 0 ? { latency_ms: latencyMs } : {}),
+    ...(validUsage !== null ? { usage: confidenceUsageWireShape(validUsage) } : {}),
   })}\n`, "utf8"));
 }
 
@@ -2736,7 +3426,7 @@ async function callTier(
   // extra-header VALUE is an outbound secret the provider can quote straight
   // back into its own response body, so it is masked here, where the body
   // enters artifact/diagnostic state, not only at each consumer.
-  const knownSecrets = callKnownSecrets(profile.apiKey, profile.extraHeaders);
+  const knownSecrets = callKnownSecrets(profile.apiKey, profile.extraHeaders, endpointUrlCredentialOrEmpty(profile.baseUrl));
 
   // #1305: wall-clock spend of this tier's attempts, reported on the
   // fallback-handoff line so the reason for leaving the lane and the time
@@ -2820,7 +3510,7 @@ async function callTier(
     const wireFormat = effectiveWireResponseFormat(profile.apiFormat, profile.responseFormat, profile.anthropicStructuredOutputSupported);
     const formatNote = wireFormat === "json_schema" && profile.apiFormat === "anthropic" && stripped === undefined ? ", format=json_schema" : "";
     const raisedNote = outcome.budgetRaisedTo !== undefined ? ` (completion budget raised to ${outcome.budgetRaisedTo} after a token-cap failure)` : "";
-    log(`${profile.label} model attempt ${outcome.attempts}: ${profile.model} @ ${profile.baseUrl} (${profile.apiFormat}${effortNote}${formatNote})${raisedNote}`);
+    log(`${profile.label} model attempt ${outcome.attempts}: ${profile.model} @ ${redactEndpointUrlCredential(profile.baseUrl)} (${profile.apiFormat}${effortNote}${formatNote})${raisedNote}`);
     const parsed = parseVerdictResponse(outcome.rawResponse, knownSecrets);
     // Deliberately NOT masked here: the parsed verdict is the review's own
     // content, and its structural fields (severity/category/file/line) drive
@@ -2940,7 +3630,15 @@ function configuredExtraHeaderValues(env: StageEnv): string[] {
  * there the summary). Both reuse parses now go through this one helper, so a
  * value the writing lane masked is never unmasked by a later re-parse. */
 export function configuredKnownSecrets(env: StageEnv, profiles: TierProfiles): string[] {
-  return [...new Set([...configuredApiKeys(env.AI_API_KEY, profiles), ...configuredExtraHeaderValues(env)])]
+  // #1428: a credential the endpoint URL carries in its userinfo is a
+  // configured credential too — masked wherever the configured-value mask
+  // set is applied (the raw URL itself is structurally redacted at the
+  // interpolation sites via `redactEndpointUrlCredential`; this value mask
+  // is the defense-in-depth layer for a decoded echo).
+  const urlCredentials = [profiles.primary.baseUrl, profiles.smart.baseUrl, profiles.fallback.baseUrl]
+    .map((baseUrl) => endpointUrlCredentialOrEmpty(baseUrl))
+    .filter((credential) => credential !== "");
+  return [...new Set([...configuredApiKeys(env.AI_API_KEY, profiles), ...configuredExtraHeaderValues(env), ...urlCredentials])]
     .sort((a, b) => b.length - a.length);
 }
 
@@ -2979,18 +3677,30 @@ async function producePrimaryReview(input: ReviewCallInput & {
     if (responseBytes !== null && responseBytes.length > 0) {
       log("native_loop produced an in-conversation verdict; using it and skipping the separate review call");
       try {
-        // The native loop calls the route-bound AI_* environment, which can
-        // differ from an explicit primary profile override, so mask every key
-        // AND every configured extra-header value (#1094: the same list the
-        // writing lane masked the persisted envelope against — a gateway can
-        // quote either straight back into this re-parse's thrown messages).
+        // The native loop dials the RESOLVED primary lane's transport
+        // (#1507 — the harness resolves the same `profiles.primary` this
+        // review call uses), whose values can differ from the route-bound
+        // AI_* environment, so mask every key AND every configured
+        // extra-header value (#1094: the same list the writing lane masked
+        // the persisted envelope against — a gateway can quote either
+        // straight back into this re-parse's thrown messages).
         const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredKnownSecrets(env, profiles));
         const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
         ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
         return {
           artifact,
           analysisEngine: annotateAnalysisEngine(
-            analysisEngineBase(env.AI_MODEL ?? "", env.AI_BASE_URL ?? "", env.AI_API_FORMAT ?? "openai"),
+            // #1507: name the lane the harness actually dialed — the resolved
+            // primary profile, not the raw AI_* base env, which in the
+            // default routing mode (off) can differ from the lane an
+            // ai-primary-* override selected.
+            // #1465: the profile's model is already the trimmed opaque id the
+            // harness sends, so the published engine names the model the
+            // provider actually saw.
+            // #1474 review round 3: the profile's apiFormat is the checked
+            // wire family (#1493), so the published family is exactly the
+            // one the verdict request was formatted for.
+            analysisEngineBase(profiles.primary.model, profiles.primary.baseUrl.trim(), profiles.primary.apiFormat),
             "primary",
             {
               ...(env.REVIEW_ROUTE !== undefined ? { reviewRoute: env.REVIEW_ROUTE } : {}),
@@ -3048,8 +3758,8 @@ async function producePrimaryReview(input: ReviewCallInput & {
   // enum-only, so the mask is belt-and-braces. The fallback keeps its own
   // independent profile and credentials either way.
   errorLog(primary.terminal !== undefined
-    ? `${firstProfile.label}: terminal=${primary.terminal}; bypassing retries; trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`
-    : maskKnownSecrets(`${firstProfile.label} model unavailable after ${primary.attempts ?? "?"} attempt(s) in ${primary.elapsedSec ?? "?"}s (last failure: ${primary.lastFailure ?? "unknown"}); trying fallback: ${profiles.fallback.model} @ ${profiles.fallback.baseUrl} (${profiles.fallback.apiFormat})`, configuredKnownSecrets(env, profiles)));
+    ? `${firstProfile.label}: terminal=${primary.terminal}; bypassing retries; trying fallback: ${profiles.fallback.model} @ ${redactEndpointUrlCredential(profiles.fallback.baseUrl)} (${profiles.fallback.apiFormat})`
+    : maskKnownSecrets(`${firstProfile.label} model unavailable after ${primary.attempts ?? "?"} attempt(s) in ${primary.elapsedSec ?? "?"}s (last failure: ${primary.lastFailure ?? "unknown"}); trying fallback: ${profiles.fallback.model} @ ${redactEndpointUrlCredential(profiles.fallback.baseUrl)} (${profiles.fallback.apiFormat})`, configuredKnownSecrets(env, profiles)));
   // #368: the fallback re-truncates the initial corpus. #940: the bound is
   // the declared fallback capacity — the fallback window can be smaller
   // than the primary tier's — never above the historical 120000-byte

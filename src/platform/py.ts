@@ -1,7 +1,7 @@
 /** Minimal Python semantics for the ports of `pr_reviewer/forgejo_backend.py`
  * normalizers (#706 PR 1): `dict.get` defaults, truthiness for `x or y`,
  * `str()` of JSON scalars, code-point string ordering, and
- * `urllib.parse.quote(s, safe=""), and bare `str.strip()`. A Python normalizer that would raise
+ * `urllib.parse.quote(s, safe=""), bare `str.strip()`, and Python `s[:limit]` code-point slicing. A Python normalizer that would raise
  * (e.g. `.get` on a non-dict) throws `PyError`; the v2 CLI then exits
  * nonzero, which the shell seam reports as a failed fetch. */
 
@@ -158,4 +158,14 @@ export function pyQuote(text: string): string {
     for (const byte of Buffer.from(ch, "utf8")) out += `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
   }
   return out;
+}
+
+/** Python `s[:limit]` string slicing: the first `limit` CODE POINTS, never
+ * UTF-16 units — Python strings are code-point sequences, so a `[:limit]`
+ * cut keeps astral-plane characters whole where a UTF-16-unit slice would
+ * split a surrogate pair. One canonical implementation for the bounded
+ * renders and adapters that each previously carried a local copy. */
+export function pyCodepointSlice(text: string, limit: number): string {
+  const points = Array.from(text);
+  return points.length <= limit ? text : points.slice(0, limit).join("");
 }

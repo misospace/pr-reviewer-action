@@ -170,12 +170,13 @@ jobs:
             --pr-number "$GATE_PR_NUMBER" \
             --expected-sha "$GATE_HEAD_SHA"
 
-      - name: Set up Node 24
-        # Only to build the bundle from the trusted checkout; the action runs
-        # on the runner's own node24 (`runs.using: node24`).
+      - name: Set up Node 26
+        # Only to build the bundle from the trusted checkout on the repo's
+        # Node pin; the action runs on the runner's own node24
+        # (`runs.using: node24`).
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 26
 
       - name: Build the action bundle
         env:

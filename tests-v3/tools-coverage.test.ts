@@ -4,6 +4,7 @@ import {
   computePartialCoverage,
   corpusDiffCoveredFiles,
   isBudgetStopReason,
+  isIncompleteInvestigationStopReason,
   loadChangedFilePaths,
   loadRemovedFilePaths,
   loadSpecialistLeadRefs,
@@ -11,7 +12,7 @@ import {
   type CoverageLeadRef,
 } from "../src/tools/coverage.js";
 import { prioritizeDiff } from "../src/corpus/diff-priority.js";
-import { STOP_BUDGET, STOP_MAX_ROUNDS, STOP_MODEL_DONE, STOP_NO_TOOL_CALLS, STOP_REQUEST_ERROR, STOP_WALL_CLOCK, type LoopOutcome } from "../src/tools/loop.js";
+import { STOP_BUDGET, STOP_MAX_ROUNDS, STOP_MODEL_DONE, STOP_NO_TOOL_CALLS, STOP_REQUEST_ERROR, STOP_WALL_CLOCK, STOP_WALL_CLOCK_RESERVE, type LoopOutcome } from "../src/tools/loop.js";
 
 function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
   return {
@@ -31,6 +32,13 @@ function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
     compactionSummarize: 0,
     compactionTruncate: 0,
     peakConversationTokens: 0,
+    requiredEvidenceRequestsHint: 0,
+    requiredEvidenceRefusals: 0,
+    requiredEvidenceRequired: 0,
+    requiredEvidenceCredits: [],
+    requiredEvidenceAttempts: 0,
+    requiredEvidenceWindowAttempts: 0,
+    requiredEvidenceReleased: false,
     ...overrides,
   };
 }
@@ -50,6 +58,44 @@ test("only the budget stop reasons count as budget stops", () => {
   assert.ok(!isBudgetStopReason(STOP_MODEL_DONE));
   assert.ok(!isBudgetStopReason(STOP_NO_TOOL_CALLS));
   assert.ok(!isBudgetStopReason(STOP_REQUEST_ERROR));
+});
+
+test("#1338: budget stops and request errors count as incomplete investigations; model-chosen stops do not", () => {
+  assert.ok(isIncompleteInvestigationStopReason(STOP_BUDGET));
+  assert.ok(isIncompleteInvestigationStopReason(STOP_MAX_ROUNDS));
+  assert.ok(isIncompleteInvestigationStopReason(STOP_WALL_CLOCK));
+  assert.ok(isIncompleteInvestigationStopReason(STOP_REQUEST_ERROR));
+  // #1464: the verdict-reserve stop is a budget-shaped stop too — the loop
+  // stopped early to hold wall clock for the verdict, so coverage honesty
+  // applies.
+  assert.ok(isIncompleteInvestigationStopReason(STOP_WALL_CLOCK_RESERVE));
+  assert.ok(!isIncompleteInvestigationStopReason(STOP_MODEL_DONE));
+  assert.ok(!isIncompleteInvestigationStopReason(STOP_NO_TOOL_CALLS));
+});
+
+test("#1464: the verdict-reserve stop is not a budget stop for the budget-stop-only surfaces", () => {
+  assert.ok(!isBudgetStopReason(STOP_WALL_CLOCK_RESERVE));
+});
+
+test("#1338: a request-error stop produces coverage too; one with nothing left unread stays complete", () => {
+  const executed = [okCall("read_file", { path: "src/a.ts" })];
+  const coverage = computePartialCoverage(outcome({ stopReason: STOP_REQUEST_ERROR, executed }), {
+    changedFiles: ["src/a.ts", "src/b.ts"],
+    leads: leads([["security", "src/b.ts", "x"]]),
+  });
+  assert.ok(coverage);
+  assert.equal(coverage.stop_reason, STOP_REQUEST_ERROR);
+  assert.deepEqual(coverage.unread_files, ["src/b.ts"]);
+  assert.deepEqual(coverage.unresolved_leads, [{ role: "security", file: "src/b.ts", excerpt: "x" }]);
+  // A request error AFTER all required evidence was gathered is complete
+  // coverage: no gap record, so a synthesized clean verdict stays possible.
+  assert.equal(
+    computePartialCoverage(outcome({ stopReason: STOP_REQUEST_ERROR, executed: [okCall("read_file", { path: "src/a.ts" })] }), {
+      changedFiles: ["src/a.ts"],
+      leads: leads([["security", "src/a.ts", "checked"]]),
+    }),
+    null,
+  );
 });
 
 test("unread files are exactly the manifest paths no successful call read", () => {

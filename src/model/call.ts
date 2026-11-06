@@ -15,7 +15,7 @@ import {
   type ResponseDiagnostics,
 } from "./response-diagnostics.js";
 import { runChatRequest, type ChatRequestOutcome, type StructuredOutputSurface } from "../transport/transport.js";
-import { describeTransportFailure, TransportFailure } from "../transport/http.js";
+import { describeTransportFailure, endpointUrlCredentialOrEmpty, TransportFailure } from "../transport/http.js";
 import { callKnownSecrets } from "../transport/headers.js";
 import { classifyTerminalProviderFailure, type TerminalProviderFailure } from "../transport/terminal.js";
 
@@ -204,7 +204,7 @@ function tierDiagnostics(
     streamed: profile.stream,
     // #1037: the lane's extra-header VALUES are known secrets on the response
     // side too — a provider can echo one into `finish_reason`.
-    secrets: callKnownSecrets(profile.apiKey, profile.extraHeaders),
+    secrets: callKnownSecrets(profile.apiKey, profile.extraHeaders, endpointUrlCredentialOrEmpty(profile.baseUrl)),
     ...(failure?.status !== undefined ? { httpStatus: failure.status } : {}),
     ...(failure?.kind !== undefined && failure.kind !== "" ? { failureKind: failure.kind } : {}),
   });
@@ -318,7 +318,7 @@ export async function callModelTier(
       // #1037: response-side known secrets — a 200 whose body carries an
       // error object can quote a configured extra-header value straight into
       // the thrown parse-failure message.
-      const verdict = parseVerdictResponse(outcome.raw, callKnownSecrets(profile.apiKey, profile.extraHeaders));
+      const verdict = parseVerdictResponse(outcome.raw, callKnownSecrets(profile.apiKey, profile.extraHeaders, endpointUrlCredentialOrEmpty(profile.baseUrl)));
       return {
         status: "ok",
         verdict,
@@ -425,7 +425,7 @@ export async function produceVerdict(
   // produces (in-body error message, unusable-response record, transport
   // detail), so a configured extra-header value is masked identically
   // wherever the provider body is quoted back.
-  const knownSecrets = callKnownSecrets(profile.apiKey, profile.extraHeaders);
+  const knownSecrets = callKnownSecrets(profile.apiKey, profile.extraHeaders, endpointUrlCredentialOrEmpty(profile.baseUrl));
 
   const evaluate = (outcome: ChatRequestOutcome): { ok: boolean; verdict: ParsedReviewVerdict | null; raw: unknown; reason: VerdictOutcome["reason"]; detail: string } => {
     if (outcome.status === "failure") {

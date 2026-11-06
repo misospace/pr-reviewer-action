@@ -415,6 +415,12 @@ export interface ReviewStepOutputs {
   confidenceRisk?: string;
   confidenceReason?: string;
   confidenceModel?: string;
+  /** #1337: deterministic dependency-coverage rollup
+   * ("complete | partial | unavailable (N/5 aspects checked)"), or ""
+   * when the model never emitted a `dependency_coverage` answer. Not a
+   * public step-output id: it surfaces in the step summary and the
+   * metadata marker only. */
+  dependencyCoverageStatus?: string;
   /** Compact JSON array of the normalized findings. */
   findings: string;
   /** Full review markdown (model-controlled text). */
@@ -650,6 +656,10 @@ export interface StepSummaryTelemetry {
    * when the scorer ran (`ai-confidence-model` set) — absent renders no
    * row, so a disabled run's summary is byte-identical to pre-#1073. */
   confidence?: { status: string; score: string; risk: string; reason: string; model: string };
+  /** #1337: dependency-upgrade coverage rollup ("complete | partial |
+   * unavailable (N/5 aspects checked)"), supplied only when the model
+   * emitted a `dependency_coverage` answer — absent renders no row. */
+  dependencyCoverage?: string;
   /** #633 deep-review telemetry row (rendered only when deep review ran). */
   deepReview?: { leads: string; errors: boolean; autoSelection?: { selected: number; skipped: number } };
   budget: string;
@@ -672,6 +682,9 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
   ];
   if (telemetry.requirementCoverage && telemetry.requirementCoverage.total !== 0) {
     rows.push(`| Requirement coverage | ${telemetry.requirementCoverage.total} requirement(s); unresolved: ${telemetry.requirementCoverage.unknown} |`);
+  }
+  if (telemetry.dependencyCoverage !== undefined && telemetry.dependencyCoverage !== "") {
+    rows.push(`| Dependency coverage | ${telemetry.dependencyCoverage} |`);
   }
   const primary = telemetry.primaryTools;
   rows.push(

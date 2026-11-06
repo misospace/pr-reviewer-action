@@ -39,9 +39,10 @@ function parsed(overrides: Partial<ParsedReviewVerdict> = {}): ParsedReviewVerdi
     threadDispositions: null, threadDispositionsEmitted: false,
     humanReviewDispositions: null, humanReviewDispositionsEmitted: false,
     smartReviewRequested: false, smartReviewReason: null,
-    reviewTriageDecision: "unknown", reviewTriageReason: "",
-    reviewTriageTargets: [],
-    extra: {}, ...overrides,
+reviewTriageDecision: "unknown", reviewTriageReason: "",
+reviewTriageTargets: [],
+dependencyCoverage: null, dependencyCoverageEmitted: false,
+extra: {}, ...overrides,
   };
 }
 const policyOptions = { nonBlockingCategories: new Set(["tests", "docs"]), securityFlagged: false };

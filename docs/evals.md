@@ -32,6 +32,11 @@ python scripts/eval_harness.py \
     --output eval-report/eval-report.json
 ```
 
+The harness reads the model API key from `AI_API_KEY` and the forge token
+from `GITHUB_TOKEN` or `GH_TOKEN`. Both values stay in the environment.
+The harness refuses `--api-key` and `--github-token` arguments (#1410).
+A secret in an argument list is visible to every other process on the host.
+
 The `--modes` flag accepts one or more modes (space-separated on the shell
 line, repeated `--modes x --modes y` works too). The default is
 `tools_off native_loop`.
@@ -226,12 +231,83 @@ CI and never affects a review verdict.
   Run it against an OpenAI-compatible endpoint:
 
   ```bash
+  export JUDGE_BASE_URL="https://judge.internal/v1"   # may carry a credential
   python3 scripts/run_judge_calibration.py \
-      --judge-model "$JUDGE_MODEL" --base-url "$JUDGE_BASE_URL" \
+      --judge-model "$JUDGE_MODEL" \
       --output judge-calibration-report.json
   ```
 
-  The judge key is read from `JUDGE_API_KEY`; never pass it on argv.
+  The judge key is read from `JUDGE_API_KEY` and must never be passed on argv.
+  Both `scripts/run_judge_calibration.py` and `scripts/live_judge_score.py` read
+  the judge key from the environment only. Both refuse a credential argument
+  and an argument they do not know. A refusal names the option only. It never
+  echoes an argument value, because a mistyped value may carry a secret.
+
+  The report records `base_url` with any URL userinfo redacted
+  (`https://***@host`). The runner records the resolved credential-free
+  endpoint, so a report from the command line shows no userinfo; the
+  redaction guards a caller that passes a credential-bearing URL directly.
+  The report binds the endpoint with `base_url_sha256`, the SHA-256 of the
+  normalized endpoint URL with any userinfo stripped (#1424). The digest
+  covers the credential-free request target that the transport resolves,
+  because reports are shared (#1414). A digest over the credential-bearing
+  URL would be an offline password oracle: a reader of the report could test
+  candidate endpoint passwords against it without ever contacting the
+  endpoint. The credential rides the `Authorization` header, so it does not
+  need to be part of the recorded identity.
+
+  Rotate the endpoint credential (the URL userinfo or `JUDGE_API_KEY`) and a
+  calibration artifact stays valid. The artifact no longer proves that the
+  live run uses the same credential, so make sure that a rotated credential
+  addresses the same judge model behind the endpoint. Change the endpoint
+  itself (the scheme, host, port, or path) and the artifact no longer
+  matches; run `scripts/run_judge_calibration.py` again to record the new
+  endpoint. An artifact recorded by tooling older than this change digested
+  the credential-bearing URL, so it never matches the current tooling; run
+  `scripts/run_judge_calibration.py` again to record it with the current
+  digest.
+
+  A credential rides exactly one channel, and that channel is always an HTTP
+  auth header: `JUDGE_API_KEY` becomes `Authorization: Bearer …`, while a
+  credential in the endpoint URL's userinfo is moved into
+  `Authorization: Basic …` before the request. It never rides in the request
+  URL — Python's urllib keeps a URL userinfo inside the request's `Host`
+  value, so it would reach the outbound request and every proxy log (#1414).
+  Supplying both channels at once is refused before any request is sent.
+
+  The endpoint URL may carry a credential, but never on the command line:
+  every other process on the host can read an argument list. A `--base-url`
+  that carries a URL userinfo — or an `@` its authority cannot claim — is
+  refused, in every form the flag can take. Put such an endpoint in
+  `JUDGE_BASE_URL` in the environment, as the example above does. The runner
+  reads the environment when the command line carries no endpoint, and the
+  command-line value wins when both are set.
+
+  The endpoint URL is itself refused when it is not an absolute http(s) URL,
+  carries a query or a fragment (the transport appends the completion path to
+  the base path), hides the credential behind an encoded `@` (urllib
+  unquotes the authority into the request's `Host` value, so an encoded
+  userinfo would ride the request just the same), or carries an `@` outside
+  its authority (a password with an unencoded `/` ends the authority early,
+  so the userinfo lands in the request path).
+
+  A credential can also ride in the endpoint URL's path — some gateway
+  providers hand out URLs like `https://host/<token>/v1`. A path segment
+  cannot be reliably distinguished from a legitimate path part, so the
+  endpoint resolution neither refuses nor strips one (#1429): the request
+  target keeps the path, the calibration report records it verbatim in
+  `base_url`, and `base_url_sha256` binds it — a digest over a path-embedded
+  secret is an offline oracle exactly like the userinfo digest #1424
+  removed. Refusing every suspect path would break an endpoint whose
+  authentication genuinely rides it, and redacting one would corrupt the
+  request target, so the runner warns instead: before the run, when the
+  endpoint path carries a long opaque segment that may be a credential, the
+  calibration runner prints a warning that never echoes the URL. The
+  heuristic is advisory — a short secret-shaped segment goes unwarned, and a
+  long legitimate segment draws a false warning. An operator who sees the
+  warning should move the credential to a channel the report cannot leak —
+  the endpoint URL's userinfo or `JUDGE_API_KEY` — when the provider
+  supports one, or accept that the shared report carries the path secret.
 
 - **`scripts/live_judge_score.py`** — scores blinded live A/B outputs
   (`--baseline` / `--treatment`, each `{"arm", "reps", "scenarios": [{"scenario",
@@ -240,11 +316,16 @@ CI and never affects a review verdict.
   negative-control false-positive rate. Two fail-closed guards: it refuses to
   score unless the arms are structurally comparable (each declares its
   `arm` role; identical scenario set; no duplicate scenario or rep ids; identical
-  rep ids/counts per scenario), and it requires a `--calibration-artifact`
-  (a `run_judge_calibration.py` report) proving 100% agreement with the *same*
-  judge identity — prompt version, model, settings, and calibration corpus
-  content hash — as this run. An unusable judge verdict is fail-closed and
-  counted as a miss, never a pass.
+   rep ids/counts per scenario), and it requires a `--calibration-artifact`
+   (a `run_judge_calibration.py` report) proving 100% agreement with the *same*
+   judge identity — prompt version, model, settings, calibration corpus
+   content hash, and judge endpoint (bound via the artifact's `base_url_sha256`
+   digest of the credential-free normalized endpoint URL, never the redacted
+   display string; a credential rotation compares equal, a different endpoint
+   does not (#1424)) — as this run. An unusable
+   judge verdict is fail-closed and counted as a miss, never a pass. It reads
+   the endpoint the same way as the calibration runner: a `--base-url` that
+   carries no credential, or `JUDGE_BASE_URL` from the environment.
 
 Model/endpoint caveats found while validating: reasoning judges need a generous
 completion budget (reasoning tokens count against it — a 1024-token budget
@@ -447,12 +528,31 @@ reports are the diffable artifacts, as elsewhere in this eval workflow.
 `same_model_specialists` enables deep review without overrides, so specialists
 inherit the primary model; `heterogeneous_specialists` enables deep review
 and projects the shared specialist profile and optional role models into the
-`AI_SPECIALIST_*` environment contract. Credentials are read only from the
-environment variable named by `api_key_env`: keys are never stored in the
-plan or report. Dry-run validates and prints a redacted plan without needing
+`AI_SPECIALIST_*` environment contract. Credentials come from the
+environment variable named by `api_key_env`, or from a credential carried in a
+profile base URL's userinfo: a key is never stored in the plan or the report.
+Dry-run validates and prints a redacted plan without needing
 credentials or contacting an endpoint. The report records resolved lane
 identity and redacted profile provenance under `metadata.lane`; existing
-`mode_summary` keys do not change. For lane runs, the harness clears ambient
+`mode_summary` keys do not change. A profile base URL is recorded with any
+URL userinfo redacted (`https://***@host/v1`). An operator endpoint can carry
+a credential in its userinfo, and reports are shared artifacts (#1417). The
+redaction covers every recorded copy of the endpoint: the lane projection
+under `metadata.lane`, the model string in each run record, and the failure
+message of a run that errored. It also covers the dry-run plan print.
+
+A credential never rides in a request URL. When a profile base URL carries a
+credential in its userinfo, the harness resolves it before the request: the
+request target keeps the endpoint's identity (scheme, host, port, path) and
+loses the userinfo, and the credential moves into the provider's HTTP
+authentication header — `AI_API_KEY` for the primary model,
+`AI_SPECIALIST_API_KEY` for the specialist profile. The lane therefore still
+contacts the intended endpoint, and the request URL carries no credential.
+The profile's credential environment variable stays the declared credential
+channel: a URL credential is used only when that variable carries nothing,
+because one request carries one credential, and supplying both is refused
+before any request is sent. The refusal names the environment variable and
+never echoes a value. For lane runs, the harness clears ambient
 `AI_SPECIALIST_*` variables so shell exports cannot leak between lanes, and
 each run receives its own private artifact directory.
 
@@ -765,3 +865,96 @@ then `score ... --condition heterogeneous --merge` (one live condition per
 sweep fits the 48-call ceiling with repeats) then `report`. Quality metrics
 render per condition, never pooled. Full runbook and the current dated
 result table: `evals/reports/confidence-calibration/README.md`.
+
+## Merge-safety verifier production-shape canary (#1370)
+
+One-shot acceptance check (2026-11-01) that the REPAIRED verifier (#1368
+budgets/reasoning controls, #1369 independent verifier semantics) works
+through its actual production request path before advisory dogfood. The
+driver's `canary` subcommand reuses RETAINED primary artifacts (no primary
+re-runs), resolves the declared `ai-confidence-*` config through the
+production profile resolver, and dispatches `runConfidenceScorer` via the
+bridge's `live-scorer` subcommand — no request-shape override exists, so
+effort, budgets, structured output, and timeouts are whatever the declared
+config resolves to. Verdict: **pass for advisory dogfood** (2/2 rows scored
+on the declared inherited MiniMax arm; the #1286 same-model 32/32
+`malformed_answer` viability failure is resolved by the #1368 shape; n=2,
+no gate-calibration claim, #1075 stays blocked). Plan, results, and the
+owning report: `evals/confidence-canary/plan.json`,
+`evals/reports/confidence-canary/README.md`.
+
+## Verifier advisory dogfood evidence (#1452)
+
+Ordinary live dogfood telemetry for the merge-safety verifier, collected from
+the repository's own published reviews and adjudicated per #1452's classes.
+Owning report and the bounded per-run evidence file:
+`evals/reports/confidence-dogfood/README.md`,
+`evals/reports/confidence-dogfood/evidence-2026-11-03.json`. Headline
+(2026-10-20 → 2026-11-03, 419 enabled runs / 166 PRs): 1 scored run, 418
+unscored (99.76%; only 2 published causes, both `http_403`), 0 live catches,
+0 false challenges, no usable result on any adjudicated known-miss PR.
+Recommendation recorded 2026-11-03: **remain advisory — do not proceed to
+gate design (#1075 stays blocked); do not remove from the critical path**,
+with re-evaluation conditions in the owning report. Ongoing per-run
+collection is `scripts/confidence_dogfood_evidence.py` (PR #1454).
+
+## Confidence verifier status after trusted-approval simplification (#1447)
+
+The confidence verifier remains available as an optional public feature for
+operators who want advisory second-model telemetry. It is **not** part of
+trusted-approval authority and is no longer enabled by this repository's
+dogfood workflow.
+
+PRA dogfood therefore supplies no `ai-confidence-*` inputs and makes no
+confidence model call. A native APPROVE is certified entirely by the
+authoritative review plus deterministic completion/coverage guardrails at the
+publication boundary. Historical confidence reports below remain retained as
+research evidence; no new manual canary, operator smoke test, or incremental
+confidence dataset is required for the trusted-approval contract.
+
+Requirement trace remains **enabled** in PRA dogfood because it is part of
+the trusted-approval contract exercised here. Recent self-review markers
+exposed a concrete starvation bug: primary runs repeatedly consumed the old
+24-call ceiling, then the #1145 evidence-repair continuation had no request
+capacity left to close a repairable trace gap. #1447 raises PRA's primary
+ceiling to 40 and gives the same authoritative reviewer a bounded four-request
+post-verdict trace-closure allowance. No second reviewer or confidence call is
+added.
+
+## Verifier dogfood evidence collector (#1452)
+
+`scripts/confidence_dogfood_evidence.py` assembles what the merge-safety
+verifier (#1369) actually PUBLISHED for one or more dogfood pull requests into
+a single bounded, redacted evidence file, so the adjudication pass reads the
+published record instead of the run directory (which dies with the runner). It
+reads the forge only through the configured forge capability
+(`pr_reviewer.forge` — never a raw HTTP client, never a forge CLI), never
+re-runs the verifier, never recomputes a score, and never touches a verdict,
+a marker, or a comment.
+
+```bash
+mise exec python@3.14 -- python3 scripts/confidence_dogfood_evidence.py \
+    --repo OWNER/NAME --pr 123 --pr 124 --out /tmp/verifier-evidence.json
+```
+
+The evidence file (`verifier-dogfood-evidence/v1`) carries, per pull request:
+the published pins (`head_sha`, `base_sha`), the primary verdict
+(`review_result`, `required_checks`), the diff and config fingerprints the
+published fingerprint marker carries, the verifier's own published answer
+(status, score, risk band, reason, model, and every published advisory
+concern), which published body the evidence came from (`published_body`:
+kind, id, timestamps — the dogfood publishes native reviews, which
+accumulate, so the NEWEST body is the current run's evidence and the oldest
+one would be silently stale), and an `unavailable` block naming, one short
+sentence each, every piece of evidence the published record does not carry
+(the unscored cause, the verifier token usage, the rubric version, the
+deterministic ceilings, the parser notes, the linkage to a later review) and
+where each one actually lives — the run-directory artifacts
+`confidence-score.json`, `confidence-response.json` and
+`finding-outcomes.json`. Exit codes: `0` every requested pull request
+produced a record; `1` at least one pull request was unreadable (the other
+records are still written); `2` the collection could not run at all.
+
+This collector does NOT close #1452: the issue still needs a human adjudicated
+pass over the collected evidence and a written recommendation on whether the
+verifier earns merge-gate authority.

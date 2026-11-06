@@ -8,7 +8,7 @@ export const BOOLEAN_INPUTS = new Set([
   "publish-review-comment", "allow-approve", "approve-forks", "repo-map-context", "pr-thread-context", "review-threads-context",
   "evidence-blocker-enforcement", "evidence-enable-for-forks", "tool-loop-summarize", "tool-failure-enforcement",
   "tool-enable-for-forks", "forgejo-skip-permission-preflight", "skip-if-diff-unchanged", "force-review",
-  "ci-status-check", "ci-skip-on-timeout", "claim-falsification", "review-triage", "repository-skills",
+  "ci-status-check", "ci-skip-on-timeout", "claim-falsification", "derived-obligations", "review-triage", "repository-skills",
   // #998: the operator's explicit assertion that the Anthropic-compatible
   // endpoint accepts `output_config.effort`. Default off; without it no
   // Anthropic request ever carries an effort field. Per-lane (#1049 review):
@@ -26,6 +26,10 @@ export const BOOLEAN_INPUTS = new Set([
   "ai-anthropic-structured-output-support",
   "ai-smart-anthropic-structured-output-support",
   "ai-fallback-anthropic-structured-output-support",
+  // #1368: the confidence scorer's own capability assertions. Operator-only,
+  // never inherited from any other lane, and never repo-configurable.
+  "ai-confidence-anthropic-effort-support",
+  "ai-confidence-structured-output-support",
 ]);
 
 export const INTEGER_INPUTS = new Set([
@@ -44,16 +48,40 @@ export const INTEGER_INPUTS = new Set([
   "ai-fallback-connect-timeout-sec", "ci-timeout-sec", "ci-interval-sec",
   // #1073: the confidence scorer's request timeout is a positive integer.
   "ai-confidence-timeout-sec",
+  // #1368: the confidence scorer's token budgets. All positive integers;
+  // ai-confidence-model-context-tokens defaults to empty (unknown) and the
+  // others have non-empty defaults resolved by the routing layer.
+  "ai-confidence-max-tokens",
+  "ai-confidence-prompt-tokens",
+  "ai-confidence-model-context-tokens",
 ]);
 
+/** #1493: the wire-family vocabulary every api-format input accepts — one
+ * list, shared by the config loader's enum check and the raw-environment
+ * resolution in `src/routing/tiers.ts`, so the contract path and the
+ * raw-environment path can never disagree about which values are valid wire
+ * families. Case-sensitive and exact: the loader rejects everything else,
+ * and the raw-environment check rejects the same values the same way. */
+export const API_FORMAT_VALUES: readonly string[] = Object.freeze(["openai", "anthropic"]);
+
 export const ENUM_INPUTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  "ai-api-format": ["openai", "anthropic"],
-  "ai-fallback-api-format": ["openai", "anthropic"],
-  "ai-primary-api-format": ["openai", "anthropic"],
-  "ai-smart-api-format": ["openai", "anthropic"],
+  "ai-api-format": API_FORMAT_VALUES,
+  "ai-fallback-api-format": API_FORMAT_VALUES,
+  "ai-primary-api-format": API_FORMAT_VALUES,
+  "ai-smart-api-format": API_FORMAT_VALUES,
   // #1073: the confidence scorer is its own lane; empty (the default) inherits
   // the primary lane's format rather than defaulting to openai.
-  "ai-confidence-api-format": ["openai", "anthropic"],
+  "ai-confidence-api-format": API_FORMAT_VALUES,
+  // #1478: how the scorer resolves a transport when ai-confidence-base-url is
+  // empty. An invalid value throws like every other typed input — a workflow
+  // authoring bug fails loudly at startup, never silently relaxes into the
+  // primary-lane inheritance an operator asked to refuse.
+  "ai-confidence-isolation": ["inherit-primary", "require-dedicated"],
+  // #1481: the confidence verifier's own OpenAI token-limit field. Empty (the
+  // default) is not "no value" but lane-resolved: inherit-primary keeps the
+  // run's ai-tokens-param convention, require-dedicated resolves the
+  // verifier-owned max_tokens and never inherits the review lane's setting.
+  "ai-confidence-tokens-param": ["max_tokens", "max_completion_tokens"],
   "ai-response-format": ["off", "json_object", "json_schema"],
   "ai-primary-response-format": ["off", "json_object", "json_schema"],
   "ai-smart-response-format": ["off", "json_object", "json_schema"],
@@ -112,8 +140,34 @@ export const POSITIVE_INTEGER_INPUTS = new Set([
   "ai-connect-timeout-sec", "ai-fallback-request-timeout-sec", "ai-fallback-connect-timeout-sec", "ci-timeout-sec",
   "ci-interval-sec",
   "ai-confidence-timeout-sec",
+  // #1368: same positive-integer rule for the scorer's token budgets.
+  "ai-confidence-max-tokens",
+  "ai-confidence-prompt-tokens",
+  "ai-confidence-model-context-tokens",
 ]);
 
 for (const id of ["repo-map-max-bytes", "pr-thread-max-bytes", "deep-review-corpus-max-bytes"]) {
   POSITIVE_INTEGER_INPUTS.delete(id);
 }
+
+/** Hygiene check shared by the config modules (#727/#1350): true when
+ * `value` contains any ASCII control character. Not a security guard — the
+ * config files are trusted operator input — but a control character in a
+ * name/path/URL is never what the operator meant and would only corrupt
+ * downstream diagnostics. Spelled as codepoint comparisons rather than a
+ * regex class so no literal control byte can ever land in this source file.
+ * Lives in this leaf module (not `instance-config.ts`) so the
+ * `namespace-policy.ts` ⇄ `instance-config.ts` pair stays cycle-free. */
+export function hasControlCharacters(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/** The trusted operator layers' fail-closed error. Lives here so
+ * `namespace-policy.ts` can subclass it without an import cycle through
+ * `instance-config.ts`; re-exported from `instance-config.ts` for the
+ * existing import sites. */
+export class InstanceConfigError extends Error {}

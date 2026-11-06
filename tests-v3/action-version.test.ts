@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse } from "yaml";
 import { buildPublishedBody } from "../src/publish/publish.js";
@@ -162,6 +162,37 @@ test("#915: build generator stamps release/dev versions and fails closed", () =>
     const unstamped = runGenerator({ PR_REVIEWER_BUILD_STAMP: "", GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567" });
     assert.equal(unstamped.status, 0, unstamped.stderr);
     assertGenerated("");
+  }
+});
+
+test("#1456: the contract generator keeps every source asset it does not own", () => {
+  const generatedDir = resolve(ROOT, ".v3-generated");
+  mkdirSync(generatedDir, { recursive: true });
+  // A source asset this generator does not own. The sentinel name is
+  // deliberately not an asset any module imports, so it cannot shadow a
+  // real module.
+  const sentinelAsset = resolve(generatedDir, "zz-node-sibling-sentinel.generated.ts");
+  const actionSourceAsset = resolve(generatedDir, "action-source.generated.ts");
+  const actionSourceExisted = existsSync(actionSourceAsset);
+  writeFileSync(sentinelAsset, "// #1456 sentinel: a source asset this generator does not own.\n");
+  try {
+    const run = spawnSync(
+      process.execPath,
+      ["scripts/generate-v3-contract.mjs"],
+      { cwd: ROOT, env: { ...process.env, PR_REVIEWER_BUILD_STAMP: "" }, encoding: "utf8" },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    // The node suite runs this generator in the repository root, so it must
+    // not delete the asset the Python suite compiles against right after
+    // (#1456): the whole-directory wipe removed action-source.generated.ts
+    // and the next Python suite run failed with "Cannot find module
+    // '../.v3-generated/action-source.generated.js'".
+    assert.ok(existsSync(sentinelAsset), "#1456: the generator deleted a source asset it does not own");
+    if (actionSourceExisted) {
+      assert.ok(existsSync(actionSourceAsset), "#1456: the generator deleted the action-source asset");
+    }
+  } finally {
+    rmSync(sentinelAsset, { force: true });
   }
 });
 

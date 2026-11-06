@@ -1,0 +1,103 @@
+# Copyable Spindle pull-review workflow for pr-reviewer-action (#591).
+#
+# Save this file in your Tangled repository as:
+#
+#     .tangled/workflows/ai-review.yml
+#
+# Status: Tangled support is experimental. The review runs on the
+# host-neutral Node runner added in #590 — `node dist/index.js tangled` —
+# not on `action.yml` (that is the GitHub Actions invocation surface) and
+# not through any shell or Python orchestration. End-to-end Tangled
+# pipeline enablement is still landing (issue #564): released builds
+# before the round-diff reads are connected to the runner fail closed at
+# the diff read, and publication itself stays fail-closed until a
+# trustworthy current-head read lands (#1165) — a run that cannot prove
+# the pull has not advanced refuses to publish and exits non-zero, by
+# design. Expect green runs only once those releases are in place.
+#
+# What Spindle provides
+#
+# Spindle injects the runtime context the runner reads through the typed
+# Tangled platform modules: `TANGLED_REPO_DID`, `TANGLED_REPO_REPO_DID`,
+# `TANGLED_REPO_NAME`, `TANGLED_REPO_KNOT`, and for a pull request the
+# `TANGLED_PR_SOURCE_BRANCH` / `TANGLED_PR_TARGET_BRANCH` /
+# `TANGLED_PR_SOURCE_SHA` tuple. Steps run with the pull request's round
+# checked out; set `TANGLED_BOBBIN_URL` to your knot's Bobbin endpoint
+# (shown below for the hosted tangled.sh knot). The review's diff and
+# changed files are designed to be read from the pull's latest round
+# patch over Bobbin and ATProto — not from local git history (that
+# connection is part of the enablement work noted above) — while the file
+# content around each diff hunk is read from this checkout.
+#
+# Private values
+#
+# `INPUT_AI-API-KEY`, `ATPROTO_HANDLE` and `ATPROTO_APP_PASSWORD` are
+# injected from the repository's Spindle settings as environment variables.
+# Never write their values into this file. Spindle does not pass secrets
+# to pipelines that run code from a fork, so the review step below skips
+# cleanly on fork pulls instead of failing on a missing key.
+#
+# What gets published
+#
+# One managed top-level review record (`dev.prreviewer.review`) in the bot
+# account's own AT-Proto repository, carrying the review markdown. A
+# re-review updates that record in place instead of posting a duplicate.
+# Tangled has no native pull-approval objects, inline review comments, or
+# reviewer requests; those features degrade explicitly and no GitHub or
+# Forgejo call is ever made on this path.
+
+when:
+  - event: ["pull_request"]
+    branch: ["main"]
+
+engine: microvm
+image: nixos
+
+dependencies:
+  # The runtime rejects Node older than 22; pin a newer nodejs build if
+  # your knot's default nodejs is older.
+  - nodejs
+
+environment:
+  # Pinned reviewer release. Release tags carry the built `dist/`, so no
+  # npm install or build step is needed. `v3` floats to the latest v3
+  # release; the `tangled` entrypoint requires the first release that
+  # includes the #590 host-neutral runner — releases before it do not
+  # have the subcommand. Pin an exact tag in production.
+  REVIEWER_REPO: https://github.com/misospace/pr-reviewer-action
+  REVIEWER_TAG: v3
+
+  # Your knot's Bobbin read endpoint.
+  TANGLED_BOBBIN_URL: https://bobbin.tangled.sh
+
+  # Model endpoint and model name (OpenAI- or Anthropic-compatible; cloud
+  # or self-hosted). The API key is a repository secret, not set here.
+  INPUT_AI-BASE-URL: https://api.example.com/v1
+  INPUT_AI-MODEL: your-review-model
+  INPUT_AI-STREAM: "false"
+
+  # Publish the review as the managed ATProto record.
+  INPUT_PUBLISH-MODE: comment
+
+  # The PDS of the bot account that signs the review record.
+  ATPROTO_HOST: https://pds.example.com
+
+steps:
+  - name: ai review
+    command: |
+      set -euo pipefail
+
+      # Fork pull requests run without secrets: no model key, no bot
+      # account. Skip cleanly instead of failing the pull.
+      if [ -z "$(printenv INPUT_AI-API-KEY || true)" ] || [ -z "$(printenv ATPROTO_APP_PASSWORD || true)" ]; then
+        echo "ai-review: private configuration unavailable (fork pull request?); skipping."
+        exit 0
+      fi
+
+      git clone --depth 1 --branch "$REVIEWER_TAG" "$REVIEWER_REPO" "$HOME/pr-reviewer"
+
+      # Host-neutral entrypoint: precheck, review, and publish in one
+      # Node process, with no GitHub Actions variables required. Exit
+      # codes: 0 published (or skipped), 1 a review or publication
+      # failure — including the fail-closed current-head refusal.
+      node "$HOME/pr-reviewer/dist/index.js" tangled

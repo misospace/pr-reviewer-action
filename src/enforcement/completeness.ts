@@ -25,6 +25,7 @@ import {
   evaluateRequiredCheckCoverage,
   type RequiredCheckCoverage,
 } from "./required-checks.js";
+import { boundedIdList } from "../context/id-lists.js";
 import type { NormalizedRequiredCheckDisposition } from "../model/types.js";
 
 export type RequiredCheckValidationMode = "warn" | "fail" | "metadata_only";
@@ -95,13 +96,20 @@ export function applyRequiredCheckValidation(
     // docstring): every check is conservatively unresolved.
     const coverage = structuredCoverage(mustCheck, artifact);
     status = coverage.status === "none" ? "none" : coverage.status;
-    const unresolved = coverage.checks.filter((row) => row.status === "unresolved").map((row) => row.check);
-    const resolved = coverage.checks.filter((row) => row.status !== "unresolved").map((row) => row.check);
+    // Not clean = unresolved, or dispositioned `unmet` (#1381: performed
+    // and failed — never clean coverage, so it is listed, never crash or
+    // silently counted as addressed).
+    const notClean = coverage.checks
+      .filter((row) => row.status === "unresolved" || row.status === "unmet")
+      .map((row) => row.check);
+    const resolved = coverage.checks
+      .filter((row) => row.status !== "unresolved" && row.status !== "unmet")
+      .map((row) => row.check);
     result = {
       status,
       mode,
       structured: coverage.structured,
-      missing: unresolved,
+      missing: notClean,
       addressed: resolved,
       checks: coverage.checks.map((row) => ({
         check: row.check,
@@ -113,13 +121,14 @@ export function applyRequiredCheckValidation(
     };
 
     if (status === "incomplete" && (mode === "warn" || mode === "fail")) {
-      const bullets = unresolved.map((item) => `- ${item}`).join("\n");
+      const bullets = notClean.map((item) => `- ${item}`).join("\n");
       artifact.review_markdown = (
         (artifact.review_markdown || "")
         + "\n\n### Unaddressed required checks\n"
         + "The classifier marked these checks as required for this PR's "
-        + "risk profile, but the review does not resolve or disposition "
-        + "them:\n\n"
+        + "risk profile, but the review does not establish clean coverage "
+        + "for them (unresolved, or dispositioned `unmet` — performed and "
+        + "failed):\n\n"
         + bullets
       );
     }
@@ -143,4 +152,20 @@ export function applyRequiredCheckValidation(
 
   artifact.required_checks = status;
   return { status, mode, result };
+}
+
+/**
+ * #1518: the required-check ids the deterministic enforcement pass could not
+ * resolve — the checks whose structured disposition is `unresolved` or
+ * `unmet` (the same set the `missing` list holds). They are the merge-gating
+ * ids the published handoff carries, so a controller can see WHICH obligation
+ * stayed open and not only that the coverage was incomplete.
+ *
+ * Defensive about the artifact shape: a missing or non-array `missing` list
+ * yields no ids instead of throwing, and the shared id cap bounds the list.
+ */
+export function unresolvedRequiredCheckIds(result: RequiredCheckValidationResult): string[] {
+  const missing = result?.result?.missing;
+  if (!Array.isArray(missing)) return [];
+  return boundedIdList(missing.filter((entry): entry is string => typeof entry === "string"));
 }

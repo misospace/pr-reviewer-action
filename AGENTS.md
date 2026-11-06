@@ -8,10 +8,10 @@ This file is the durable standards context injected into every agent and reviewe
 
 `pr-reviewer-action` must remain:
 
-- **Forge agnostic** — GitHub and Forgejo behind the platform seam (`src/platform/`). No forge-specific logic outside the adapters.
+- **Forge agnostic** — GitHub, Forgejo and (experimental) Tangled behind the platform seam (`src/platform/`). No forge-specific logic outside the adapters.
 - **Repository agnostic** — product behavior never special-cases this repository's identity, paths, or metadata.
 - **Provider/model agnostic** — OpenAI `POST /chat/completions` and Anthropic `POST /messages` wire formats; cloud and local/self-hosted endpoints are both first-class.
-- **Deployment/runtime compatible** — GitHub Actions and qualified Forgejo Actions runners use the native JavaScript Action (`runs.using: node24`). `dist/` is built by CI and packaged on release-tag commits, not committed to `main`.
+- **Deployment/runtime compatible** — GitHub Actions and qualified Forgejo Actions runners use the native JavaScript Action (`runs.using: node24`); the experimental Tangled host uses the host-neutral runner `node dist/index.js tangled`. `dist/` is built by CI and packaged on release-tag commits, not committed to `main`.
 - **Independent of the maintainer's infrastructure** — no dependency on the homelab, LiteLLM topology, Kubernetes, Flux, Courier, Dispatch, or home-ops.
 
 Do not freeze temporary v2 implementation details into permanent product rules. The completed v2→v3 migration is historical context, not policy — see `docs/v3-migration.md`.
@@ -41,6 +41,7 @@ Do not freeze temporary v2 implementation details into permanent product rules. 
 | `action.yml` | Shipped action definition, generated from `contracts/action-v3.yml` (`node24` JavaScript action; precheck → review → publish run in one process) |
 | `docs/inputs.md` | Inputs/outputs reference, generated from `contracts/action-v3.yml` + `scripts/docs/input-groups.json` by `node scripts/generate-inputs-doc.mjs` (a test fails when stale; add new inputs to a group) |
 | `src/` | The TypeScript runtime — the shipped production path (`node dist/index.js`, entry `src/run/action.ts`): `platform/`, `precheck/`, `prompt/`, `context/`, `classification/`, `requirements/`, `corpus/`, `model/`, `transport/`, `runtime/`, `gates/`, `evidence/` |
+| `src/platform/tangled*.ts`, `src/run/platform-action.ts` | Experimental Tangled boundary (#583–#591): Bobbin pull resolution, AT-Proto review records, and the host-neutral runner `node dist/index.js tangled`. Not `action.yml`. Every pull read and write goes through the platform seam, a missing capability fails closed, and no run falls back to GitHub or Forgejo. Setup and support matrix: `docs/tangled.md` |
 | `scripts/` | Repository tooling (eval, harvest, fork gate, judge, release, v3 build assets); not part of the action |
 | `pr_reviewer/` | Python modules for the semantic-eval and judge tooling; not part of the action |
 | `tests/`, `tests-v3/` | node:test for the shipped v3 runtime; pytest + shell for retained Python auxiliary tooling (eval, harvest, judge, fork gate) and repo/workflow structural gates; shared JSON fixtures under `tests/fixtures/` |
@@ -110,18 +111,28 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/architecture/v3-typescript-runtime.md`](docs/architecture/v3-typescript-runtime.md) — composite/Node runtime decision and platform boundary
 - [`docs/architecture/deep-review-execution-shape.md`](docs/architecture/deep-review-execution-shape.md) — specialist execution-shape ADR
 - [`docs/architecture/distributed-requirement-proof.md`](docs/architecture/distributed-requirement-proof.md) — #962 distributed-enforcement proof contract: trusted seam topology, collective validation, anti-abuse
+- [`docs/architecture/owner-anchored-enforcement-citation.md`](docs/architecture/owner-anchored-enforcement-citation.md) — #1343 owner-anchored enforcement-citation gate: declared-owner acceptance keeps the predicate and drops the lexical subject
 - [`docs/architecture/durable-review-queue.md`](docs/architecture/durable-review-queue.md) — #731 durable review-queue semantics: lifecycle state machine, supersession, leases, recovery (library for the future controller daemon)
+- [`docs/architecture/durable-control-plane-state.md`](docs/architecture/durable-control-plane-state.md) — #736 durable control-plane state: typed records, transactional store seam, PostgreSQL backend + forward migrations, usage/cost provenance (library for the future controller daemon)
+- [`docs/architecture/controller-admin-api.md`](docs/architecture/controller-admin-api.md) — #737 controller HTTP/admin API: listener separation, bearer admin auth, bounded-cardinality metrics, audited mutations, diagnostics redaction (library for the future controller daemon)
+- [`docs/architecture/operator-mcp-endpoint.md`](docs/architecture/operator-mcp-endpoint.md) — #1349 read-only operator MCP endpoint: scoped-capability auth, per-call per-repository authorization, three read-only tools, bounded payload projection, response caps
 - [`docs/architecture/executor-boundary.md`](docs/architecture/executor-boundary.md) — #733 executor boundary: execution submission/result contract, local reference backend, OCI worker-image contract, conformance suite (library for the future controller daemon)
+- [`docs/architecture/executor-admission-guardrails.md`](docs/architecture/executor-admission-guardrails.md) — #1423 admission guardrails: scope hooks, enforced invariants, rolling-upgrade rationale, Helm deferred to #738
+- [`docs/architecture/controller-daemon.md`](docs/architecture/controller-daemon.md) — #1348 controller daemon/runtime: the production composition of the operator libraries (`src/controller/`)
 - [`docs/architecture/source-evidence-provenance.md`](docs/architecture/source-evidence-provenance.md) — #1015 source-evidence provenance: committed vs sanitized representations, exact-revision authority, safe span verification
 - [`docs/architecture/syntax-aware-context.md`](docs/architecture/syntax-aware-context.md) — #764 optional syntax-aware context stage: provider seam, budgets, provenance, measured recall/noise
 - [`docs/fork-review.md`](docs/fork-review.md) — fork PR privilege separation, threat model, `FORK_*` configuration
+- [`docs/tangled.md`](docs/tangled.md) — #592 experimental Tangled support: setup, configuration, identity model, support matrix, guardrails
 - [`docs/v3-migration.md`](docs/v3-migration.md) — v2→v3 migration state and contract mapping
 - [`docs/repository-config.md`](docs/repository-config.md) — v3 repository config file: keys, base-side trust, narrowing precedence
 - [`docs/architecture/operator-config-and-adoption.md`](docs/architecture/operator-config-and-adoption.md) — #727 operator-mode contract: instance schema, repository config extension keys, adoption policy, effective-config fingerprint
 - [`docs/architecture/self-hosted-forgejo-ingress.md`](docs/architecture/self-hosted-forgejo-ingress.md) — #730 self-hosted Forgejo ingress: webhook trust boundary, endpoint/credential model, ledger dedupe, capability degradation
 - [`docs/architecture/repo-acquisition-workspaces.md`](docs/architecture/repo-acquisition-workspaces.md) — #732 repository acquisition: bare mirror cache, incremental bounded fetch over canonical PR head refs, isolated exact-head workspaces, credential/hook/symlink boundaries
 - [`docs/architecture/self-hosted-github-app-ingress.md`](docs/architecture/self-hosted-github-app-ingress.md) — #729 post-v3 self-hosted GitHub App ingress: App JWT / installation-token lifecycle, cache keying, publication idempotency
+- [`docs/architecture/credential-broker.md`](docs/architecture/credential-broker.md) — #735 credential broker and per-review secret scoping: opaque references in durable state, run-scoped worker allowlists, late all-or-nothing resolution, result-channel run binding, redaction
+- [`docs/review-bundle.md`](docs/review-bundle.md) — #1425 `review-bundle/v1` machine-readable review contract: lifecycle states, exact-head freshness, stable finding IDs, bounded/redacted by construction
 - [`docs/evals.md`](docs/evals.md) — eval harness runbook, merge-safety scoring, semantic judge, deep-review A/B
+- [`docs/self-hosted-deployment.md`](docs/self-hosted-deployment.md) — #738 self-hosted deployment runbook: controller/worker OCI images, the bjw-s `common`-based Helm chart, external PostgreSQL, forge credentials, metrics, upgrades
 - [`docs/release-notes.md`](docs/release-notes.md) — house style and process for turning release-please output into published release notes
 - `README.md` — action inputs/outputs, usage recipes, troubleshooting, versioning policy, security notes
 - [`SECURITY.md`](SECURITY.md) — threat model and operational security guidance

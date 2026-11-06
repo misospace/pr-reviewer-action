@@ -92,6 +92,19 @@ test("the findings table and counts row render for a findings verdict", () => {
   }
 });
 
+test("the step summary carries no fragment of an endpoint URL that holds internal whitespace (#1474)", () => {
+  const { dir, cleanup } = withDir();
+  try {
+    const path = join(dir, "summary.md");
+    writeStepSummary(path, baseInput({ analysisEngine: "m@https://llm.internal.test/v1 x (openai)" }));
+    const summary = readFileSync(path, "utf8");
+    assert.ok(summary.includes("| Engine | m (openai) |"), "the engine row names the model and the format only");
+    assert.ok(!summary.includes("llm.internal.test"), "the endpoint URL leaves the step summary whole");
+  } finally {
+    cleanup();
+  }
+});
+
 test("#1003: the triage row renders only when triage ran", () => {
   const { dir, cleanup } = withDir();
   try {

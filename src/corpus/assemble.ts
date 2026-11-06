@@ -77,6 +77,15 @@ export interface CorpusWorkspace {
   toolHarnessSmartMd: Uint8Array | null;
   evidenceProvidersMd: Uint8Array | null;
   imageDigestContextMd: Uint8Array | null;
+  /** #1337: the deterministic dependency-upgrade coverage accounting
+   * section (empty unless the run detected dependency changes). Optional
+   * so existing fixtures need no update: an absent field behaves like
+   * `null`. */
+  dependencyCoverageMd?: Uint8Array | null;
+  /** #1426: the re-review scope section (empty unless the run knows a prior
+   * reviewed head). Optional so existing fixtures need no update: an absent
+   * field behaves like `null`. */
+  reReviewScopeMd?: Uint8Array | null;
   linkedSourcesMd: Uint8Array | null;
   repoImpactTruncatedMd: Uint8Array | null;
   repoHistoryTruncatedMd: Uint8Array | null;
@@ -93,6 +102,12 @@ export interface CorpusWorkspace {
    * enabled and the pass produced at least one claim). Optional so existing
    * fixtures need no update: an absent field behaves like `null`. */
   claimFalsificationMd?: Uint8Array | null;
+  /** #1448: the "Derived Architectural Obligations" section rendered by the
+   * derived-obligation pre-pass (empty/absent unless `derived-obligations`
+   * is enabled and the pass derived at least one obligation, or recorded a
+   * visible unavailable note). Optional so existing fixtures need no
+   * update: an absent field behaves like `null`. */
+  derivedObligationsMd?: Uint8Array | null;
   specialistsMd: Uint8Array | null;
   requirementLedgerPresent: Uint8Array | null;
   specialistLeadsPresent: Uint8Array | null;
@@ -422,6 +437,13 @@ export function buildReviewCorpus(
     // body-budget truncation cannot hide the independently gated status.
     pushSection("# CI Check Results", bytes(ws.ciChecksContent));
   }
+  // #1426: the re-review scope framing rides ahead of the file list and diff
+  // so body-budget truncation can never drop the two-scope statement (full
+  // PR authoritative, prior-head delta advisory). Empty unless the run knows
+  // a prior reviewed head — no section boundary for anything else.
+  if (nonEmpty(ws.reReviewScopeMd)) {
+    pushSection(undefined, bytes(ws.reReviewScopeMd!));
+  }
   pushSection("# PR Files", filesContent, "json");
   pushSection(
     "# Version Hints from Diff",
@@ -462,6 +484,12 @@ export function buildReviewCorpus(
     pushSection("# Evidence Providers", bytes(ws.evidenceProvidersMd));
   }
   pushSection("# Image Digest Provenance", bytes(ws.imageDigestContextMd));
+  // #1337: deterministic coverage accounting rides right after the
+  // provenance evidence it references. Empty unless dependency changes
+  // were detected — no section boundary for anything else.
+  if (nonEmpty(ws.dependencyCoverageMd)) {
+    pushSection(undefined, bytes(ws.dependencyCoverageMd!));
+  }
   // Lowest-value sections last — first to be dropped on truncation.
   pushSection("# Linked Sources", bytes(ws.linkedSourcesMd));
   pushSection("# Repository Impact Scan", bytes(ws.repoImpactTruncatedMd));
@@ -525,31 +553,46 @@ export function buildReviewCorpus(
     }
   }
 
+  // ── Derived Architectural Obligations (#1448) — reserved, after claims ──
+  // derived-obligations.md is empty unless derived_obligations is on and the
+  // pre-pass either derived at least one obligation or recorded a visible
+  // unavailable note, so a disabled run is byte-identical to a pre-#1448
+  // build. Same fits-sanity as the ledger and claims: a section that cannot
+  // fit a sane reservation is dropped rather than truncated.
+  let derivedBytes = 0;
+  if (nonEmpty(ws.derivedObligationsMd)) {
+    const candidate = bytes(ws.derivedObligationsMd).length;
+    if (candidate < maxCorpus - standardsBytes - ledgerBytes - claimsBytes - BODY_FLOOR) {
+      derivedBytes = candidate;
+    }
+  }
+
   // ── Specialist Review Leads (#609) — reserved, but LAST ─────────────────
   // Advisory leads appended after the truncated body and after the ledger,
   // never truncated themselves (whole-section granularity). Authority order
   // is deliberate: standards (first) > explicit requirement ledger > claims
-  // to falsify > advisory leads (last), so specialist content can never
-  // evict higher-authority standards/ledger/claims material. The same
-  // fits-sanity the ledger applies (drop when it cannot fit a sane
-  // reservation) keeps this assembly and the specialist runner's presence
-  // signal in lockstep.
+  // to falsify > derived architectural obligations > advisory leads (last),
+  // so specialist content can never evict higher-authority
+  // standards/ledger/claims/derived material. The same fits-sanity the
+  // ledger applies (drop when it cannot fit a sane reservation) keeps this
+  // assembly and the specialist runner's presence signal in lockstep.
   let specialistBytes = 0;
   if (nonEmpty(ws.specialistsMd)) {
     const candidate = bytes(ws.specialistsMd).length;
-    if (candidate < maxCorpus - standardsBytes - ledgerBytes - claimsBytes - BODY_FLOOR) {
+    if (candidate < maxCorpus - standardsBytes - ledgerBytes - claimsBytes - derivedBytes - BODY_FLOOR) {
       specialistBytes = candidate;
     }
   }
 
   // The header and separators are outside the truncated body; reserve their
-  // exact bytes, including the newline after an appended claims/specialist
-  // section.
+  // exact bytes, including the newline after an appended
+  // claims/derived/specialist section.
   const framingBytes =
     Buffer.byteLength(`# Repository Standards and Conventions (${opts.standardsFile})\n\n`, "utf8") +
     (claimsBytes > 0 ? 1 : 0) +
+    (derivedBytes > 0 ? 1 : 0) +
     (specialistBytes > 0 ? 1 : 0);
-  let bodyBudget = maxCorpus - standardsBytes - ledgerBytes - claimsBytes - specialistBytes - framingBytes;
+  let bodyBudget = maxCorpus - standardsBytes - ledgerBytes - claimsBytes - derivedBytes - specialistBytes - framingBytes;
   if (bodyBudget < 0) bodyBudget = 0;
   const bodyTruncated = truncateClean(bodyMd, bodyBudget, BODY_MARKER);
   write("review-corpus.body.truncated.md", bodyTruncated);
@@ -567,8 +610,9 @@ export function buildReviewCorpus(
   // Prepend the (capped) standards section — first and highest-authority,
   // truncation-exempt — then the truncated body, then the reserved ledger
   // block, then the reserved claims-to-falsify block, then the reserved
-  // specialist-lead block (#609) last: lowest authority, appended after
-  // everything, never sliced by truncation.
+  // derived-obligations block (#1448), then the reserved specialist-lead
+  // block (#609) last: lowest authority, appended after everything, never
+  // sliced by truncation.
   const output = concat(
     enc(`# Repository Standards and Conventions (${opts.standardsFile})\n`),
     artifacts.get("standards-context.capped.md")!,
@@ -576,6 +620,7 @@ export function buildReviewCorpus(
     bodyTruncated,
     artifacts.get("requirement-ledger.section.md")!,
     claimsBytes > 0 ? concat(bytes(ws.claimFalsificationMd), enc("\n")) : new Uint8Array(0),
+    derivedBytes > 0 ? concat(bytes(ws.derivedObligationsMd), enc("\n")) : new Uint8Array(0),
     specialistBytes > 0 ? concat(bytes(ws.specialistsMd), enc("\n")) : new Uint8Array(0),
   );
   write(outputName, output);

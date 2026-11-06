@@ -1,7 +1,9 @@
 import type { NormalizedFinding, NormalizedHumanReviewDisposition, NormalizedRequiredCheckDisposition, NormalizedThreadDisposition, ParsedReviewVerdict, RequiredCheckStatus, ReviewTriageDecision, VerdictValue } from "./types.js";
 import { resolveReviewTriageDecision } from "./triage.js";
+import { normalizeDependencyCoverage } from "./dependency-coverage.js";
 import { VerdictParseFailure } from "./types.js";
 import { containsKnownSecret, maskDiagnostic } from "../context/redact.js";
+import { pyCodepointSlice } from "../platform/py.js";
 import { stripRevealedCapNoteTails } from "../confidence/result.js";
 
 /**
@@ -52,7 +54,18 @@ const MAX_REQUIRED_CHECKS = 50;
 const MAX_REQUIRED_CHECK_CHARS = 400;
 const MAX_RATIONALE_CHARS = 500;
 
-const REQUIRED_CHECK_STATUSES = new Set<string>(["satisfied", "not_applicable", "unresolved"]);
+// #750 + #1381: bounded required-check dispositions. `unmet` is a
+// confirmed negative — the check was performed and the requirement is NOT
+// satisfied — and `failed` is accepted as a prose alias folding to it (the
+// thread-disposition alias pattern). Both always need a grounded rationale,
+// exactly like `not_applicable`.
+const REQUIRED_CHECK_STATUS_ALIASES: Readonly<Record<string, RequiredCheckStatus>> = Object.freeze({
+  satisfied: "satisfied",
+  not_applicable: "not_applicable",
+  unresolved: "unresolved",
+  unmet: "unmet",
+  failed: "unmet",
+});
 const THREAD_DISPOSITION_ALIASES: Readonly<Record<string, NormalizedThreadDisposition["disposition"]>> = Object.freeze({
   fixed: "fixed",
   resolved: "fixed",
@@ -87,11 +100,12 @@ const MAX_HUMAN_REVIEW_EVIDENCE_CHARS = 1000;
  * Entries are preserved, never silently collapsed. An entry that cannot be
  * attributed to any check identity (non-object, non-string/empty/oversized
  * check text) is dropped; an attributable but malformed one — unknown
- * status prose alias, `not_applicable` without a usable rationale — is
- * preserved as `{check, status: "invalid", rationale: null}` so the
- * deterministic coverage evaluation invalidates the check (the same
- * fail-conservative precedent as requirement_coverage normalizing unusable
- * claims to `unknown`). Dropping a malformed duplicate must never turn a
+ * status prose alias, `not_applicable` or `unmet` (alias `failed`, which
+ * folds to `unmet`) without a usable rationale — is preserved as
+ * `{check, status: "invalid", rationale: null}` so the deterministic
+ * coverage evaluation invalidates the check (the same fail-conservative
+ * precedent as requirement_coverage normalizing unusable claims to
+ * `unknown`). Dropping a malformed duplicate must never turn a
  * valid+malformed double answer into a single valid disposition.
  */
 function normalizeRequiredCheckDispositions(
@@ -110,7 +124,8 @@ function normalizeRequiredCheckDispositions(
     if (check === "" || check.length > MAX_REQUIRED_CHECK_CHARS) continue;
 
     const rawStatus = typeof item.status === "string" ? item.status.trim().toLowerCase() : "";
-    if (!REQUIRED_CHECK_STATUSES.has(rawStatus)) {
+    const status = REQUIRED_CHECK_STATUS_ALIASES[rawStatus];
+    if (status === undefined) {
       dispositions.push({ check, status: "invalid", rationale: null });
       if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
       continue;
@@ -120,13 +135,13 @@ function normalizeRequiredCheckDispositions(
     if (typeof item.rationale === "string") {
       rationale = item.rationale.replace(SMART_REVIEW_REASON_CONTROL, " ").trim().slice(0, MAX_RATIONALE_CHARS) || null;
     }
-    if (rawStatus === "not_applicable" && rationale === null) {
+    if ((status === "not_applicable" || status === "unmet") && rationale === null) {
       dispositions.push({ check, status: "invalid", rationale: null });
       if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
       continue;
     }
 
-    dispositions.push({ check, status: rawStatus as RequiredCheckStatus, rationale });
+    dispositions.push({ check, status, rationale });
     if (dispositions.length >= MAX_REQUIRED_CHECKS) break;
   }
   return { present: true, dispositions };
@@ -134,11 +149,6 @@ function normalizeRequiredCheckDispositions(
 
 function codepointLength(text: string): number {
   return Array.from(text).length;
-}
-
-function codepointSlice(text: string, n: number): string {
-  const points = Array.from(text);
-  return points.length <= n ? text : points.slice(0, n).join("");
 }
 
 /** #766: port of `_normalize_thread_dispositions` — tri-state by key
@@ -161,7 +171,7 @@ function normalizeThreadDispositions(
     const disposition = THREAD_DISPOSITION_ALIASES[key] ?? "invalid";
     let evidence: string | null = null;
     if (typeof item.evidence === "string") {
-      evidence = codepointSlice(item.evidence.replace(SMART_REVIEW_REASON_CONTROL, " ").trim(), MAX_THREAD_EVIDENCE_CHARS) || null;
+      evidence = pyCodepointSlice(item.evidence.replace(SMART_REVIEW_REASON_CONTROL, " ").trim(), MAX_THREAD_EVIDENCE_CHARS) || null;
     }
     dispositions.push({ threadId, disposition, evidence });
     if (dispositions.length >= MAX_THREAD_DISPOSITIONS) break;
@@ -192,7 +202,7 @@ function normalizeHumanReviewDispositions(
       : "invalid";
     let evidence: string | null = null;
     if (typeof item.evidence === "string") {
-      evidence = codepointSlice(item.evidence.replace(SMART_REVIEW_REASON_CONTROL, " ").trim(), MAX_HUMAN_REVIEW_EVIDENCE_CHARS) || null;
+      evidence = pyCodepointSlice(item.evidence.replace(SMART_REVIEW_REASON_CONTROL, " ").trim(), MAX_HUMAN_REVIEW_EVIDENCE_CHARS) || null;
     }
     dispositions.push({ reviewId, disposition, evidence });
     if (dispositions.length >= MAX_HUMAN_REVIEW_DISPOSITIONS) break;
@@ -791,6 +801,10 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
       && key !== "required_check_dispositions"
       && key !== "thread_dispositions"
       && key !== "human_review_dispositions"
+      // #1337: known structured field, not a model extra — the coverage
+      // answer is read by the parser (fail-closed), never passed through
+      // unparsed.
+      && key !== "dependency_coverage"
     ) {
       extra[key] = value;
     }
@@ -809,6 +823,11 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     parsed.human_review_dispositions,
     "human_review_dispositions" in parsed,
   );
+  // #1337: structured dependency-upgrade coverage accounting (fail-closed).
+  const dependencyCoverage = normalizeDependencyCoverage(
+    parsed.dependency_coverage,
+    "dependency_coverage" in parsed,
+  );
   return {
     verdict,
     reviewMarkdown: markdown,
@@ -825,6 +844,8 @@ function parseVerdictResponseUnmasked(response: unknown): ParsedReviewVerdict {
     reviewTriageDecision: triage.decision,
     reviewTriageReason: triage.reason,
     reviewTriageTargets: normalizeReviewTriageTargets(parsed),
+    dependencyCoverage: dependencyCoverage.aspects,
+    dependencyCoverageEmitted: dependencyCoverage.present,
     extra,
   };
 }

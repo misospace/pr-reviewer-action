@@ -15,6 +15,9 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { actionMain } from "../src/run/action.js";
+import { parseMetadata } from "../src/precheck/metadata.js";
+import { buildRunMetadataMarker } from "../src/metadata/markers.js";
+import { publishInputFromEnv } from "../src/run/entrypoints.js";
 import { startMockServer, type CapturedRequest } from "./helpers.js";
 
 const SCORER_MODEL = "confidence-m";
@@ -121,10 +124,23 @@ interface CaseResult {
   confidenceArtifacts: string[];
   /** The persisted score artifact, when the run wrote one. */
   confidenceScoreArtifact: Record<string, unknown> | null;
+  /** The action's real run dir — the same directory the standalone
+   * `publish` CLI reads the verifier's artifact from. */
+  runDir: string;
   cleanup: () => Promise<void>;
 }
 
-async function runCase(options: { publishReviewComment: string }): Promise<CaseResult> {
+/** #1455: the verifier's own shape of a run. `scorerStatus` scripts the
+ * scorer's answer (429 = a typed transport failure, so the run ends
+ * unscored); `confidenceEnabled` false leaves the verifier off, so the run
+ * carries no verifier surface at all. */
+interface CaseOptions {
+  publishReviewComment: string;
+  scorerStatus?: number;
+  confidenceEnabled?: boolean;
+}
+
+async function runCase(options: CaseOptions): Promise<CaseResult> {
   const workspace = mkdtempSync(join(tmpdir(), "action-confidence-gate-workspace-"));
   const runnerTemp = mkdtempSync(join(tmpdir(), "action-confidence-gate-runner-temp-"));
   const model = await startMockServer((_req, _body, res) => {
@@ -132,6 +148,11 @@ async function runCase(options: { publishReviewComment: string }): Promise<CaseR
     res.end(verdictBody());
   });
   const scorer = await startMockServer((_req, _body, res) => {
+    if (options.scorerStatus !== undefined && options.scorerStatus !== 200) {
+      res.statusCode = options.scorerStatus;
+      res.end("rate limited");
+      return;
+    }
     res.setHeader("Content-Type", "application/json");
     res.end(scorerBody(4));
   });
@@ -166,8 +187,12 @@ async function runCase(options: { publishReviewComment: string }): Promise<CaseR
     "INPUT_CI-STATUS-CHECK": "false",
     "INPUT_PUBLISH-MODE": "comment",
     "INPUT_PUBLISH-REVIEW-COMMENT": options.publishReviewComment,
-    "INPUT_AI-CONFIDENCE-MODEL": SCORER_MODEL,
-    "INPUT_AI-CONFIDENCE-BASE-URL": scorer.url,
+    ...(options.confidenceEnabled === false
+      ? {}
+      : {
+        "INPUT_AI-CONFIDENCE-MODEL": SCORER_MODEL,
+        "INPUT_AI-CONFIDENCE-BASE-URL": scorer.url,
+      }),
   };
   const cleanup = async (): Promise<void> => {
     await model.close();
@@ -205,6 +230,7 @@ async function runCase(options: { publishReviewComment: string }): Promise<CaseR
     commentPosts: github.commentPosts,
     confidenceArtifacts,
     confidenceScoreArtifact,
+    runDir: runDirs[0]!,
     cleanup,
   };
 }
@@ -241,6 +267,9 @@ test("#1073/#1158 action: comment mode publishes the sticky comment and the scor
     }
     assert.equal(result.confidenceScoreArtifact?.status, "scored");
     assert.equal(result.confidenceScoreArtifact?.score, 4);
+    // #1369: the artifact carries the verifier rubric marker (version 2).
+    assert.equal(result.confidenceScoreArtifact?.version, 2);
+    assert.equal(result.confidenceScoreArtifact?.rubric, "merge-readiness-verifier-v1");
     // #1158: the publish step ran from the publish mode alone — the sticky
     // comment (with its confidence section) was published.
     assert.equal(result.commentPosts.length, 1, "the sticky comment did not publish");
@@ -276,5 +305,106 @@ test("#1073/#1158 action: comment mode with publish-review-comment set warns, pu
     }
   } finally {
     await unflagged.cleanup();
+  }
+});
+
+/** #1455: the metadata marker of the PUBLISHED sticky comment — the record
+ * a later collector reads once the runner is gone. */
+function publishedMarker(commentPost: string): Record<string, unknown> | null {
+  const body = (JSON.parse(commentPost) as { body?: string }).body ?? "";
+  return parseMetadata(body);
+}
+
+test("#1455 action: the published marker carries the verifier's latency and usage", async () => {
+  const result = await runCase({ publishReviewComment: "false" });
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.commentPosts.length, 1, "the sticky comment did not publish");
+    const marker = publishedMarker(result.commentPosts[0]!);
+    assert.ok(marker !== null, "the published comment carries no metadata marker");
+    // The measured latency of the scorer's one wire attempt, and the
+    // provider's own accounting for it.
+    assert.equal(typeof marker!.confidence_latency_ms, "number");
+    assert.ok((marker!.confidence_latency_ms as number) >= 0);
+    assert.equal(marker!.confidence_prompt_tokens, 10);
+    assert.equal(marker!.confidence_completion_tokens, 5);
+    assert.equal(marker!.confidence_total_tokens, 15);
+    // A scored run has no cause to explain.
+    assert.equal(marker!.confidence_status, "scored");
+    assert.equal(marker!.confidence_cause, undefined);
+  } finally {
+    await result.cleanup();
+  }
+});
+
+test("#1455 action: an unscored run publishes its action-owned cause", async () => {
+  const result = await runCase({ publishReviewComment: "false", scorerStatus: 429 });
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.commentPosts.length, 1, "the sticky comment did not publish");
+    const marker = publishedMarker(result.commentPosts[0]!);
+    assert.ok(marker !== null, "the published comment carries no metadata marker");
+    assert.equal(marker!.confidence_status, "unscored");
+    assert.equal(marker!.confidence_cause, "http_429");
+    assert.equal(typeof marker!.confidence_latency_ms, "number");
+    // A failed call reports no usage.
+    assert.equal(marker!.confidence_prompt_tokens, undefined);
+    assert.equal(marker!.confidence_total_tokens, undefined);
+  } finally {
+    await result.cleanup();
+  }
+});
+
+test("#1455 action: a run with the verifier off publishes none of the telemetry keys", async () => {
+  const result = await runCase({ publishReviewComment: "false", confidenceEnabled: false });
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.commentPosts.length, 1, "the sticky comment did not publish");
+    const marker = publishedMarker(result.commentPosts[0]!);
+    assert.ok(marker !== null, "the published comment carries no metadata marker");
+    // The absent keys are absent, not present and empty — the marker keeps
+    // its pre-#1455 bytes.
+    assert.equal(marker!.confidence_cause, undefined);
+    assert.equal(marker!.confidence_latency_ms, undefined);
+    assert.equal(marker!.confidence_prompt_tokens, undefined);
+    assert.equal(marker!.confidence_status, undefined);
+  } finally {
+    await result.cleanup();
+  }
+});
+
+test("#1455 action: the composite action and the standalone publish CLI publish the SAME telemetry", async () => {
+  // The standalone CLI reads the run dir's artifact; the composite action
+  // carries the same values in process. Both must publish one record — this
+  // is the claim the whole change rests on.
+  const result = await runCase({ publishReviewComment: "false" });
+  try {
+    assert.equal(result.exitCode, 0);
+    const published = publishedMarker(result.commentPosts[0]!);
+    assert.ok(published !== null, "the published comment carries no metadata marker");
+
+    // The standalone path: the same run dir, read through the publish seam.
+    const standalone = publishInputFromEnv({
+      PR_REVIEWER_RUN_DIR: result.runDir,
+      PUBLISH_MODE: "comment",
+    } as NodeJS.ProcessEnv, "github");
+    assert.ok(standalone.confidenceTelemetry !== undefined, "the standalone path read no telemetry");
+    const standaloneMarker = buildRunMetadataMarker({
+      headSha: "a".repeat(40),
+      baseSha: "b".repeat(40),
+      reviewResult: "clean",
+      ...(standalone.confidenceTelemetry !== undefined ? { confidenceTelemetry: standalone.confidenceTelemetry } : {}),
+    });
+    const standaloneParsed = parseMetadata(standaloneMarker);
+
+    // Every telemetry value the composite action published must be the value
+    // the standalone path publishes for the same run.
+    assert.equal(standaloneParsed?.confidence_latency_ms, published!.confidence_latency_ms);
+    assert.equal(standaloneParsed?.confidence_prompt_tokens, published!.confidence_prompt_tokens);
+    assert.equal(standaloneParsed?.confidence_completion_tokens, published!.confidence_completion_tokens);
+    assert.equal(standaloneParsed?.confidence_total_tokens, published!.confidence_total_tokens);
+    assert.equal(standaloneParsed?.confidence_cause, published!.confidence_cause);
+  } finally {
+    await result.cleanup();
   }
 });

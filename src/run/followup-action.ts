@@ -61,6 +61,7 @@ import type { IdentityResolution, TrustedOwnerIdentity } from "../platform/owner
 import { normalizeForgeEvent } from "../events/normalize.js";
 import { authorityReadingFromPayload, type AuthorityReading } from "../precheck/comment-authority.js";
 import { derivePrStateReading, type PrStateReading } from "../platform/pr.js";
+import { isPlainObject } from "../platform/jq.js";
 import { lastManagedBody } from "../precheck/decide.js";
 import { resolveTierProfiles } from "../routing/tiers.js";
 import { CONVERSATION_COMMENTS_SNAPSHOT_CAP } from "../platform/normalize.js";
@@ -114,8 +115,8 @@ export interface ActionFollowUpDeps {
    * window it cannot prove covered; an UNREADABLE thread proves no headroom
    * and denies the question: a budget source that cannot be read never
    * silently allows.
-   * The operator lane injects its own store (the durable cross-process store
-   * of #1295). */
+   * The operator lane injects its own store (the durable cross-process
+   * `DurableRateLimitStore` of #1295). */
   rateLimitStore: RateLimitStore;
 }
 
@@ -127,10 +128,6 @@ export interface ActionFollowUpDeps {
 export type ActionFollowUpResult =
   | { route: "follow-up"; outcome: FollowUpRunOutcome }
   | { route: "pipeline" };
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** The comment body the host already holds (the parsed webhook payload).
  * Action mode never injects a `readComment` dep: the body arrives on the
@@ -325,8 +322,10 @@ async function bindPlannerDeps(
 
 /** Route one Action webhook delivery through the shared follow-up consumer.
  * See the module header for the trust model and the route contract. The
- * follow-up path never throws (the consumer is total); a platform
- * resolution failure propagates exactly as the pipeline's own would. */
+ * follow-up path settles its effects (the consumer is total over them); a
+ * store contract violation out of the planner (a `record` that refuses an
+ * unpersistable charge) rejects exactly as a platform resolution failure
+ * would — the Action's error exit owns it. */
 export async function runActionFollowUp(
   stage: NodeJS.ProcessEnv,
   rawPayload: unknown,

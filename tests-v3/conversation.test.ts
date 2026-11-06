@@ -298,6 +298,9 @@ test("the strict verdict schema literal stays contractually identical", () => {
     "verdict", "review_markdown", "smart_review_requested", "smart_review_reason",
     "review_triage_decision", "review_triage_reason", "review_triage_targets",
     "findings", "requirement_coverage", "required_check_dispositions",
+    // #1337: dependency-upgrade coverage accounting (null permitted, so a
+    // non-dependency PR answers null under strict mode).
+    "dependency_coverage",
   ]);
   const props = schema.properties as Record<string, { enum?: string[]; type?: unknown }>;
   assert.deepEqual(props.verdict!.enum, ["approve", "request_changes"]);
@@ -313,7 +316,9 @@ test("the strict verdict schema literal stays contractually identical", () => {
     "string",
   );
   const dispositions = props.required_check_dispositions as { items: { properties: { status: { enum: string[] } } } };
-  assert.deepEqual(dispositions.items.properties.status.enum, ["satisfied", "not_applicable", "unresolved"]);
+  // #1381: `unmet` (a confirmed negative) joins the disposition vocabulary
+  // alongside the #750 tri-state.
+  assert.deepEqual(dispositions.items.properties.status.enum, ["satisfied", "not_applicable", "unresolved", "unmet"]);
   assert.equal(WEB_SEARCH_SCHEMA.name, "web_search");
 });
 

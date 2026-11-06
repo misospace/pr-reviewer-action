@@ -13,6 +13,15 @@ and own their own HTTP server, queue, and worker lifecycle;
 `operator-host.ts` (`createOperatorHost`) is the pre-bound handler — it
 constructs the operator event router (follow-up consumer included) and hands
 it to the webhook handler, so the daemon only supplies the listening socket.
+It also owns the Q&A budget's durable state (#1295): the daemon supplies its
+durable state location (`durableStateDir`, required) and the host builds the
+durable budget store over the ledger inside it, so the follow-up budget
+survives a daemon restart and the shipped operator path cannot run on a
+per-process budget. The daemon also owns the budget's IDEMPOTENCY horizon
+(`rateLimitIdempotencyRetentionMs`, optional): how long a request-identity
+record survives, i.e. how long a redelivery of an already-charged question
+is recognized and charged nothing (a value shorter than the budget retention
+is refused at construction).
 
 ## Module map
 
@@ -29,7 +38,7 @@ it to the webhook handler, so the daemon only supplies the listening socket.
 | `reconcile.ts` | Missed-webhook reconciliation poll across configured repositories |
 | `followup-host.ts` | Operator-mode follow-up consumer (#1294): one canonical `follow_up` event through the shared planner; all forge I/O through the injected `FollowUpForgeAdapter` |
 | `operator-router.ts` | Operator-mode canonical event router: `follow_up` → the follow-up consumer, every other kind → the daemon's dispatch seam (rejection propagates) |
-| `operator-host.ts` | Production host: constructs the router UNCONDITIONALLY and binds it into `webhook-handler.ts` — the in-repo production caller, so follow-up consumption is never an opt-in the wiring can forget |
+| `operator-host.ts` | Production host: constructs the router UNCONDITIONALLY and binds it into `webhook-handler.ts` — the in-repo production caller, so follow-up consumption is never an opt-in the wiring can forget — and owns the Q&A budget's durable backend (#1295): it builds the `DurableRateLimitStore` over the ledger inside the operator's durable state location (`durableStateDir`, required) and refuses a follow-up configuration that brings its own budget backend; the budget's idempotency horizon is the operator's configuration too (`rateLimitIdempotencyRetentionMs`, optional) |
 
 ## Trust boundaries (webhook ingress)
 
@@ -177,20 +186,26 @@ Because job identity is `deriveGenerationId`'s field set alone — trigger
 (`source`) and reason (`kind`) are excluded — a webhook delivery and a
 reconciliation poll of the same head/config mint the **same** `jobId`, so
 exactly one job survives — provided the identity metadata agrees: the
-poller must supply the same `installationId` the webhook carried, and both
+poller must supply the same `installationId` the webhook carried, both
 observations must carry the PR `id` (a missing `id` on one side sends
 `prId` 0-vs-N and splits the generation; see
-[forge-events-and-review-jobs.md](forge-events-and-review-jobs.md)); a new
+[forge-events-and-review-jobs.md](forge-events-and-review-jobs.md)), and
+both must carry the same forge-integration identity (the daemon's
+reconcile context resolves the poll's identity PER REPOSITORY through the
+daemon's own intake resolution — bound name, config fingerprint and
+adoption epoch alike — so the poll mints the generation the intake
+mints), and a new
 head or a material config-fingerprint change re-keys.
 `shouldSchedule` remains the single scheduling policy: `follow_up` and
 terminal kinds never mint review generations through dispatch.
-`reconcileForgejoRepositories` reuses the same identity path for its poll
+`reconcileRepositories` (the platform-agnostic missed-webhook pass — `platform: "forgejo"` here) reuses the same identity path for its poll
 and never throws — a failed repository is reported and the pass continues.
 
 `dispatchCanonicalEvent` reserves through `ledger.addIfAbsent`, the atomic
 reserve-and-check: a "scheduled" outcome means RESERVED, not enqueued, so
 a failed queue handoff must release the reservation via `ledger.remove`
-(durable lifecycle: #736).
+(durable lifecycle: #736 — the release is DURABLE, so the redelivery re-mints
+instead of waiting out the claim horizon).
 
 `gateJobPublication` is the publication gate: `isExpired` first (an
 expired job skips the head fetch entirely), then fetch the current head,

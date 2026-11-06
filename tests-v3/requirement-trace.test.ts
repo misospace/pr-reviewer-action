@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import { applyRequirementTraceFragment, workspaceAt } from "../src/prompt/index.js";
 import { traceChangedText } from "../src/run/review.js";
@@ -23,8 +23,10 @@ import {
   MAX_TRACE_REPAIR_SUMMARY_ID_CHARS,
   MAX_TRACE_REPAIR_SUMMARY_IDS,
   distributedRequirementHints,
-  extractRequirementTerms,
-  ledgerRequirementsById,
+extractRequirementTerms,
+filePredicateSignal,
+ledgerRequirementsById,
+linePredicateSignal,
   mergeTraceClaims,
   missingTraceRequirementIds,
   renderRequirementTraceMarkdown,
@@ -41,7 +43,7 @@ PENDING_DISPOSITION,
   type RequirementOwnership,
   type RequirementTraceArtifact,
 } from "../src/enforcement/requirement-trace.js";
-import { buildTraceRepairUserMessage, normalizeTraceRepairPayload, runRequirementTraceRepairPass, traceRepairOutcomeSummary, type TraceRepairPassResult } from "../src/requirements/trace-repair.js";
+import { buildTraceRepairUserMessage, normalizeTraceRepairPayload, runRequirementTraceRepairPass, traceRepairOutcomeSummary, TRACE_REPAIR_SYSTEM_PROMPT, type TraceRepairPassResult } from "../src/requirements/trace-repair.js";
 import { workspacePathHasSymlinkComponent } from "../src/context/workspace-path.js";
 
 function artifact(overrides: Record<string, unknown> = {}): ReviewArtifact {
@@ -70,6 +72,9 @@ function writeFile(workspace: string, relPath: string, lines: readonly string[])
 
 const SOURCE_SHA_REQUIREMENT = "Context resolution MUST compare the source SHA against the resolved pull.";
 const VALID_TEST_LOCATION = { file: "tests/real.test.ts", line: 1 };
+/** This repository's own checkout — the standards source and the shared
+ * escaping seam are read from it, exactly as a review reads them at head. */
+const REPO_ROOT = resolve(__dirname, "..", "..");
 
 test("validateRequirementTrace: empty ledger scope is a no-op", () => {
   const workspace = makeWorkspace();
@@ -228,6 +233,952 @@ test("#854 reproduction: met citing a line that exists and copies the value with
     assert.equal(outcome.reviewResult, "partial");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: a met citation into a declared owner with a real predicate needs no lexical term match", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The requirement's derived terms ("quux", "bandwidth", "stay", "below",
+    // "negotiated", "ceiling", …) appear NOWHERE in the enforcing file, so
+    // only the base-ref-trusted ownership declaration can anchor the
+    // citation. The predicate requirement is kept: the CITED line (line 2)
+    // is itself a real comparison guard.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export function applyGate(state) {",
+      "  if (state.requested > state.current) {",
+      "    throw new Error('rejected');",
+      "  }",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" }]);
+    const claim = metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: 2 }], [VALID_TEST_LOCATION]);
+    const ownership: RequirementOwnership[] = [{ match: ["quux", "bandwidth"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace([claim], ledger, workspace, undefined, { ownership });
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.deepEqual(trace.rows[0]?.notes, []);
+    assert.equal(trace.incomplete, false);
+
+    // Control: the identical claim without the ownership declaration is
+    // still downgraded — the declaration, not the predicate alone, did the
+    // work, so the gate did not become fail-open.
+    const withoutDeclaration = validateRequirementTrace([claim], ledger, workspace);
+    assertUnverifiableWithNotes(withoutDeclaration, "req-quux", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: a declared-owner citation still needs a real predicate on the cited line", () => {
+  const workspace = makeWorkspace();
+  try {
+    // Owner-anchored, but the cited line (and its whole window) only copies
+    // a value — no predicate shape at all — so the row is downgraded even
+    // though the lexical half would match ("ceiling" is on the line). The
+    // declaration replaces the subject check, never the predicate check.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export const applied = { ceiling: state.requested, };",
+    ]);
+    const ledger = ledgerWith([{ id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" }]);
+    const ownership: RequirementOwnership[] = [{ match: ["quux", "bandwidth"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: 1 }], [VALID_TEST_LOCATION])],
+      ledger,
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assertUnverifiableWithNotes(trace, "req-quux", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: an owner-anchored citation does not borrow a neighbouring line's predicate", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The cited line copies a value; the predicate lives on a neighbouring
+    // line of the same (declared owner) file. Owner-anchored rows drop the
+    // lexical subject half, so the predicate is the whole anti-copy core
+    // there and must sit ON the cited line — the issue's acceptance
+    // criterion ("a real predicate on the cited line") and the disclosed
+    // rule both say so. A window around the citation would let a copy-only
+    // cited line pass by borrowing an unrelated comparison; the legacy
+    // lexical half cannot rescue it either, because no line in the window
+    // carries both a requirement term and the predicate.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export const applied = { ceiling: state.requested, };",
+      "export function applyGate(state) {",
+      "  if (state.requested > state.current) {",
+      "    throw new Error('rejected');",
+      "  }",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" }]);
+    const ownership: RequirementOwnership[] = [{ match: ["quux", "bandwidth"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: 1 }], [VALID_TEST_LOCATION])],
+      ledger,
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assertUnverifiableWithNotes(trace, "req-quux", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: an owner rule whose match tokens do not appear in the requirement text does not anchor", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The glob points at the same predicate-bearing file as the accepted
+    // case, but this rule's tokens are absent from the requirement text, so
+    // it declares ownership of some OTHER requirement — reusing it here must
+    // not anchor the citation.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export function applyGate(state) {",
+      "  if (state.requested > state.current) {",
+      "    throw new Error('rejected');",
+      "  }",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" }]);
+    const ownership: RequirementOwnership[] = [{ match: ["unrelated", "boundary"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: 2 }], [VALID_TEST_LOCATION])],
+      ledger,
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assertUnverifiableWithNotes(trace, "req-quux", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: a rule's token association is shared — every requirement carrying all its tokens is anchored", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The slug-token association is deliberately shared (#958 scope, #962
+    // topology, and now this gate all use it): one rule anchors EVERY
+    // requirement whose text contains all of its tokens. Here a second
+    // requirement shares both tokens with the rule and shares no vocabulary
+    // with the enforcing file, so the declaration alone anchors it — pinned
+    // so the semantics are explicit and the config-authoring consequence
+    // (choose distinctive tokens) is on the record.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export function applyGate(state) {",
+      "  if (state.requested > state.current) {",
+      "    throw new Error('rejected');",
+      "  }",
+      "}",
+    ]);
+    const ledger = ledgerWith([
+      { id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" },
+      { id: "req-quux-metering", text: "Quux bandwidth metering must never be disabled in production.", kind: "normative" },
+    ]);
+    const ownership: RequirementOwnership[] = [{ match: ["quux", "bandwidth"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-quux-metering", [{ file: "src/boundary/gate.ts", line: 2 }], [VALID_TEST_LOCATION])],
+      ledger,
+      workspace,
+      undefined,
+      { ownership },
+    );
+    const row = trace.rows.find((candidate) => candidate.requirement_id === "req-quux-metering");
+    assert.equal(row?.disposition, "met");
+    assert.deepEqual(row?.notes, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: an all-stopword requirement keeps the documented empty-terms skip, declaration or not", () => {
+  const workspace = makeWorkspace();
+  try {
+    // Term extraction yields nothing usable, so the pre-existing documented
+    // skip stands: location validity alone passes. The declaration is
+    // irrelevant here — this pins that #1343 did not silently remove the
+    // skip (nor make it stricter) on either side of the owner split.
+    writeFile(workspace, "src/boundary/gate.ts", [
+      "export function applyGate(state) {",
+      "  return state.value;",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-stop", text: "The IT must the on.", kind: "normative" }]);
+    const ownership: RequirementOwnership[] = [{ match: ["must"], owners: ["src/boundary/gate.ts"] }];
+    const trace = validateRequirementTrace(
+      [metTraceClaim("req-stop", [{ file: "src/boundary/gate.ts", line: 1 }], [VALID_TEST_LOCATION])],
+      ledger,
+      workspace,
+      undefined,
+      { ownership },
+    );
+    assert.equal(trace.rows[0]?.disposition, "met");
+    assert.deepEqual(trace.rows[0]?.notes, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1343: the citation rule is disclosed where the reviewer is asked for claims", () => {
+  // The validator's rule is only satisfiable-by-construction if the reviewer
+  // can see it: both claim-asking surfaces must state the lexical half, the
+  // declared-owner exception, AND the cited-line predicate the owner-anchored
+  // path enforces (the disclosed rule and the enforced rule must agree).
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /carry a word from the requirement's own wording/);
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /declared owner/);
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /pr-reviewer-owners\.yml/);
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /the predicate must sit on the cited line itself/);
+  const fragment = readFileSync("scripts/prompt_fragments/requirement_trace.txt", "utf8");
+  assert.match(fragment, /carrying a word from the requirement's own wording/);
+  assert.match(fragment, /declared owner/);
+  assert.match(fragment, /pr-reviewer-owners\.yml/);
+  assert.match(fragment, /the cited line itself must carry the predicate/);
+});
+
+/**
+ * #1347: the accepted predicate *shape*.
+ *
+ * Once the lexical subject half is dropped for an owner-anchored citation
+ * (#1343), `linePredicateSignal` is the entire anti-copy core — and applied to
+  * raw text it accepted a line that merely *looks* predicate-shaped: an arrow
+  * function (`=>` or `->`) read as `>`, an optional chain, nullish coalesce or
+  * optional property marker read as `?`, an assertion-shaped word read inside
+  * an identifier, a comment or a string literal. Every excluded artifact below
+  * but the camelCase-identifier one carries the requirement's own word
+  * `ceiling` on the cited line, so it is the SHAPE that rejects the citation,
+  * not term extraction. The owner-anchored and legacy paths are both exercised
+  * here; the distributed path calls this same single helper
+  * (`predicateSignalFound`) and its own #962 seam fixtures cover the wiring, so
+  * the tightening cannot silently differ per consumer.
+  */
+function quuxLedger(): unknown {
+  return ledgerWith([{ id: "req-quux", text: "Quux bandwidth must stay below the negotiated ceiling.", kind: "normative" }]);
+}
+
+function quuxOwnership(): RequirementOwnership[] {
+  return [{ match: ["quux", "bandwidth"], owners: ["src/boundary/gate.ts"] }];
+}
+
+/** The disposition of a lone cited line, checked on the owner-anchored path
+ * (the declaration replaces the lexical half) or the legacy lexical path (term
+ * and predicate must share the line). */
+function dispositionOfQuuxCitation(line: string, ownerAnchored: boolean): string | undefined {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/boundary/gate.ts", [line]);
+    const claim = metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: 1 }], [VALID_TEST_LOCATION]);
+    const trace = ownerAnchored
+      ? validateRequirementTrace([claim], quuxLedger(), workspace, undefined, { ownership: quuxOwnership() })
+      : validateRequirementTrace([claim], quuxLedger(), workspace);
+    return trace.rows.find((row) => row.requirement_id === "req-quux")?.disposition;
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+}
+
+test("#1347: copy-only citations that merely look predicate-shaped are excluded", () => {
+  const artifacts: Array<[string, string]> = [
+    ["an arrow function", "export const readCeiling = (state) => state.ceiling;"],
+    ["a ->-spelled arrow", "const read = -> { ceiling };"],
+    ["optional chaining", "export const ceiling = state?.requested;"],
+    ["nullish coalescing", "export const ceiling = state.requested ?? fallback.requested;"],
+    ["an assertion word in a comment", "export const ceiling = state.requested; // must never be exceeded"],
+    ["an assertion word in a string literal", "export const note = 'must not exceed the ceiling';"],
+    ["an assertion word inside an identifier", "export const mustNotExceedTheCeiling = state.requested;"],
+    ["an optional property declaration", "readonly ceiling?: number;"],
+    // #1347 review follow-up: non-keyword assertion names are identifiers, so
+    // a bare occurrence is a copy into an assertion-shaped name, not
+    // enforcement — they need a call or member shape to count.
+    ["an assignment to a bare `expect` identifier", "const expect = ceiling.requested;"],
+    ["an assignment to a bare `reject` identifier", "const reject = ceiling.requested;"],
+    ["an assignment to a bare `invariant` identifier", "const invariant = ceiling.requested;"],
+    ["an assignment to a bare `assert` identifier", "const assert = ceiling.requested;"],
+    // Suffix inflections of the assertion names are English identifiers, not
+    // assertions: a member read off `expected`/`rejected` must not smuggle the
+    // call/member shape back in.
+    ["a member read off an `expected` identifier", "const target = expected.ceiling;"],
+    ["a member read off a `rejected` identifier", "const reason = rejected.cause;"],
+    // #1347 review follow-up (head e866d92): a member PROPERTY is not the
+    // keyword, and a member READ is not a member call — `state.throw` is an
+    // ordinary name (`throw` is not a reserved word in Python or Rust), and
+    // `expect.value` copies a value instead of enforcing one.
+    ["a member property named `throw`", "const ceiling = state.throw;"],
+    ["an optional-chain member property named `throw`", "const ceiling = state?.throw;"],
+    ["a member read off an `expect` identifier", "const ceiling = expect.value;"],
+    ["a member read off a `must` identifier", "const ceiling = must.not;"],
+  ];
+  // Every artifact carries the requirement's own word `ceiling` as a whole
+  // word on the line — except the camelCase-identifier one, which is pinned on
+  // the owner-anchored path alone, where no term is needed at all — so the
+  // legacy path's lexical half is satisfied and only the shape can refuse it.
+  const lexicalCarried = [
+    true, true, true, true, true, true, false, true,
+    true, true, true, true, true, false,
+    true, true, true, true,
+  ];
+  for (const [index, [label, line]] of artifacts.entries()) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "unverifiable",
+      `a copy-only owner-anchored citation shaped like ${label} must not pass as met: ${line}`,
+    );
+    if (lexicalCarried[index]) {
+      assert.equal(
+        dispositionOfQuuxCitation(line, false),
+        "unverifiable",
+        `the shared shape check must exclude ${label} on the legacy path too: ${line}`,
+      );
+    }
+  }
+});
+
+test("#1347: real predicates on the cited line are still accepted", () => {
+  // The false-downgrade direction: a stricter shape must not reject real
+  // enforcement, including where the excluded spellings sit NEXT TO a genuine
+  // predicate.
+  const real: Array<[string, string]> = [
+    ["a comparison", "export const allowed = state.requested <= ceiling;"],
+    ["a guard", "if (state.requested > ceiling) {"],
+    ["a ternary", "const applied = state.requested > ceiling ? ceiling : state.requested;"],
+    // A `?` before a digit-starting operand is a ternary, never an
+    // optional-member marker; blanking it would erase real enforcement.
+    ["a ternary with a leading-dot operand", "const ratio = flag ? .5 : 1.0;"],
+    // #1347 review follow-up: leading-dot expressions are valid beyond
+    // numeric literals (Swift contextual enum cases), so a spaced `? .name`
+    // is a ternary branch, never an optional-member marker.
+    ["a ternary whose branch is a leading-dot case", "let scale = wide ? .ceiling : .default;"],
+    // Both found by measuring the tightened shape against this repository's
+    // own sources: removing a literal span collapses a real ternary's `? … :`
+    // into `? :`, which must not then be erased as an optional-member marker.
+    ["a ternary whose branch is a template literal", "scope: clip(symbol ? `${block.path}:${symbol}` : block.path, MAX_SCOPE_CHARS),"],
+    ["a ternary whose branch is a string literal", "const errorKind = outcome.timeout ? 'timeout' : 'transport';"],
+    ["a throw beside an arrow", "const reject = (state) => { if (state.requested > ceiling) throw new Error('over'); };"],
+    ["an assert call", "assertEquals(state.requested, ceiling);"],
+    ["an assert member call", "assert.ok(state.requested <= ceiling);"],
+    // #1347 review follow-up (head e866d92): a member CALL reached through the
+    // bare assertion name still counts — the member read is what is refused,
+    // not the member access itself.
+    ["an assert member-chain call", "assert.deep.equal(state.requested, ceiling);"],
+    ["a must member call", "must.not.equal(state.requested, ceiling);"],
+    // #1347 review follow-up: the non-keyword assertion names pass on their
+    // call/member shape — which is what distinguishes enforcement from a copy
+    // into an assertion-shaped identifier.
+    ["an expect call", "expect(state.requested).toBeLessThanOrEqual(ceiling);"],
+    ["an invariant call", "invariant(Number.isFinite(ceiling), 'bad ceiling');"],
+    ["a promise-reject guard call", "if (state.requested > ceiling) reject(new RangeError('over ceiling'));"],
+    ["a bare throw keyword", "throw new RangeError('requested exceeds the ceiling');"],
+    ["a must-prefixed call", "mustBeLessThanOrEqual(state.requested, ceiling);"],
+    ["a match call", "if (kind.startsWith('ceiling')) { return ceiling; }"],
+    ["a private-field comparison", "if (this.#ceiling > state.requested) {"],
+    ["a comparison after a quoted URL", "const docs = 'https://example.com/ceiling'; if (state.requested > ceiling) {"],
+    ["a comparison after a block comment holding a quote", "/* 'must not exceed */ const ok = state.requested <= ceiling;"],
+  ];
+  for (const [label, line] of real) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "met",
+      `a real predicate (${label}) on the cited line must stay met: ${line}`,
+    );
+  }
+});
+
+test("#1347: a member property is not the keyword, and a member read is not a member call", () => {
+  // The review follow-up on head e866d92: two copy-only shapes still passed
+  // the anti-copy gate through the shared shape check.
+  //
+  // 1. `throw` is a keyword only where the language has one — Python and Rust
+  //    have no `throw` statement — so a PROPERTY named `throw` (`state.throw`,
+  //    `state?.throw`) is an ordinary name whose value is copied. The keyword
+  //    check therefore refuses a member read, including through an optional
+  //    chain, whose dot the operator blanker would otherwise erase.
+  // 2. A member READ off an assertion name (`expect.value`, `must.not`) copies
+  //    a value; only a member CALL (`assert.ok(…)`, `assert.deep.equal(…)`)
+  //    enforces one.
+  //
+  // Both are pinned on the owner-anchored path (no term needed) and on the
+  // legacy path (the line carries the requirement's own word `ceiling`, so
+  // only the shape can refuse the citation).
+  const copies: Array<[string, string]> = [
+    ["a member property named `throw`", "const ceiling = state.throw;"],
+    ["an optional-chain member property named `throw`", "const ceiling = state?.throw;"],
+    ["a member read off an `expect` identifier", "const ceiling = expect.value;"],
+    ["a member read off a `must` identifier", "const ceiling = must.not;"],
+    ["a member read off an `assert` identifier", "const ceiling = assert.value;"],
+    ["a member read off an `invariant` identifier", "const ceiling = invariant.value;"],
+    ["a member read off a `reject` identifier", "const ceiling = reject.reason;"],
+  ];
+  for (const [label, line] of copies) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "unverifiable",
+      `a copy-only owner-anchored citation shaped like ${label} must not pass as met: ${line}`,
+    );
+    assert.equal(
+      dispositionOfQuuxCitation(line, false),
+      "unverifiable",
+      `the shared shape check must exclude ${label} on the legacy path too: ${line}`,
+    );
+  }
+  // The false-downgrade direction: the keyword and the member call still
+  // count, including where a member read sits on the same line.
+  const real: Array<[string, string]> = [
+    ["a throw keyword", "throw new RangeError('requested exceeds the ceiling');"],
+    ["a throw keyword after a member read", "const value = state.read; throw new Error('over ceiling');"],
+    ["a member call on the bare assertion name", "assert.ok(state.requested <= ceiling);"],
+    ["a member-chain call on the bare assertion name", "assert.deep.equal(state.requested, ceiling);"],
+  ];
+  for (const [label, line] of real) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "met",
+      `a real predicate (${label}) on the cited line must stay met: ${line}`,
+    );
+  }
+  // Named residual (permissive): a bare `throw` outside statement position
+  // still reads as the keyword — `throw = 1` is a binding named `throw` in a
+  // language with no `throw` statement. Only the member-property case is
+  // distinguished; telling the remaining positions apart needs a parser. Pinned
+  // here so a later change cannot move it silently.
+  assert.equal(
+    dispositionOfQuuxCitation("const ceiling = throw = 1;", true),
+    "met",
+    "a bare `throw` binding still reads as the throw keyword (documented limit)",
+  );
+});
+
+test("#1347: the comment and string scrubber is fed its own delimiters", () => {
+  // #252: a sanitizer gets tested against the delimiter itself, not only
+  // against benign text. A predicate that exists ONLY inside a comment or an
+  // unterminated literal is prose; a predicate the delimiters merely touch
+  // must survive.
+  const cases: Array<[string, string, "met" | "unverifiable"]> = [
+    ["a comparison inside a line comment", "const ceiling = state.requested; // if (state.requested > 999) {", "unverifiable"],
+    ["a comparison inside a block comment", "const ceiling = state.requested; /* if (state.requested > 999) */", "unverifiable"],
+    ["a comparison inside a script-language comment", "const ceiling = state.requested;  # if state.requested > 999:", "unverifiable"],
+    ["a comparison after a block comment that holds a quote", "/* \"must not exceed */ if (state.requested > ceiling) {", "met"],
+    ["a quote escaped inside a string", "const ceiling = state.requested; const note = \"a \\\" must not exceed\";", "unverifiable"],
+    ["an unterminated string", "const ceiling = state.requested; const note = 'must not exceed", "unverifiable"],
+    ["a lone block-comment terminator", "*/ const ceiling = state.requested;", "unverifiable"],
+  ];
+  for (const [label, line, expected] of cases) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      expected,
+      `${label} must be ${expected} to the shape check: ${line}`,
+    );
+  }
+});
+
+test("#1347: the two named line-scan residuals are pinned rather than silently wrong", () => {
+  // `predicateCodeView` is a line-local scan, not a tokenizer, and these are
+  // the two boundaries where that shows. Both are documented in the helper and
+  // in docs/architecture/owner-anchored-enforcement-citation.md; the tests
+  // exist so a later change cannot move either one unnoticed.
+  //
+  // Permissive: a `#` glued directly to code is NOT treated as a comment,
+  // because `this.#ceiling > requested` is a private field and cutting at the
+  // `#` would erase a real comparison. The cost is that an inline
+  // script-language comment written without its space still reads as code.
+  assert.equal(
+    dispositionOfQuuxCitation("const max_items = 10#if state.requested > ceiling { raise }", true),
+    "met",
+    "a `#` glued to code must stay code so the private-field comparison survives",
+  );
+  // Strict: a quote character inside a regex literal opens a span that
+  // consumes the rest of the line, so a real comparison written after it is
+  // lost. Distinguishing that quote from a string opening needs a parser.
+  assert.equal(
+    dispositionOfQuuxCitation("const quoteRe = /\"/; if (state.requested > ceiling) {", true),
+    "unverifiable",
+    "a quote inside a regex literal is read as a string opening (documented limit)",
+  );
+  // Strict: `assert` lost its bare-word acceptance with the review follow-up,
+  // so a keyword-assert statement whose operand is a bare name — Python's
+  // `assert ceiling_ok` — is refused where an earlier shape accepted it.
+  // Assertions carrying a comparison (`assert x <= ceiling`) still pass.
+  assert.equal(
+    dispositionOfQuuxCitation("assert ceiling_ok", true),
+    "unverifiable",
+    "a bare-name keyword-assert operand is refused (documented limit)",
+  );
+  assert.equal(
+    dispositionOfQuuxCitation("assert ceiling_ok and state.requested <= ceiling", true),
+    "met",
+    "a keyword-assert carrying a real comparison must stay met",
+  );
+});
+
+/**
+ * #1347 (review follow-up, head e62d8dc): an open span is a span.
+ *
+ * The code view was line-local, so a multi-line block comment or template
+ * literal leaked: only the line that OPENED the span was scrubbed, and the
+ * lines inside it were read as code. A shape written inside such a span —
+ * `if (state.requested > ceiling)` or `mustNotExceed(…)` — then counted as
+ * enforcement, which is exactly the copy the anti-copy gate exists to refuse.
+ * The open-span state is now carried across the file's lines, so a span is a
+ * span on every line it covers.
+ */
+function dispositionOfQuuxFile(lines: readonly string[], citedLine: number, ownerAnchored = true): string | undefined {
+  const workspace = makeWorkspace();
+  try {
+    writeFile(workspace, "src/boundary/gate.ts", lines);
+    const claim = metTraceClaim("req-quux", [{ file: "src/boundary/gate.ts", line: citedLine }], [VALID_TEST_LOCATION]);
+    const trace = ownerAnchored
+      ? validateRequirementTrace([claim], quuxLedger(), workspace, undefined, { ownership: quuxOwnership() })
+      : validateRequirementTrace([claim], quuxLedger(), workspace);
+    return trace.rows.find((row) => row.requirement_id === "req-quux")?.disposition;
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+}
+
+test("#1347: a shape inside an open multi-line comment or template literal is prose, not enforcement", () => {
+  const spans: Array<[string, string[]]> = [
+    ["a block comment with `*` continuation lines", [
+      "/*",
+      " * if (state.requested > ceiling) { throw new Error('over'); }",
+      " */",
+    ]],
+    ["a block comment whose lines do not begin with `*`", [
+      "/*",
+      "if (state.requested > ceiling) { throw new Error('over'); }",
+      "*/",
+    ]],
+    ["a template literal", [
+      "const message = `",
+      "if (state.requested > ceiling) { throw new Error('over'); }",
+      "`;",
+    ]],
+    ["a template literal with an interpolation", [
+      "const message = `",
+      "  ${state.requested > ceiling}",
+      "`;",
+    ]],
+    // #252: the fence is fed its own delimiters — an unterminated span never
+    // closes, so every line after it is prose too.
+    ["an unterminated block comment", [
+      "/*",
+      "if (state.requested > ceiling) { throw new Error('over'); }",
+    ]],
+    ["an unterminated template literal", [
+      "const message = `",
+      "if (state.requested > ceiling) { throw new Error('over'); }",
+    ]],
+  ];
+  for (const [label, lines] of spans) {
+    assert.equal(
+      dispositionOfQuuxFile(lines, 2, true),
+      "unverifiable",
+      `a shape inside ${label} must not pass as enforcement on the owner-anchored path`,
+    );
+    assert.equal(
+      dispositionOfQuuxFile(lines, 2, false),
+      "unverifiable",
+      `the shared shape check must exclude ${label} on the legacy path too`,
+    );
+  }
+});
+
+test("#1347: the span tracking must not eat the code around the span", () => {
+  // The false-downgrade direction: carrying the span state across lines must
+  // not swallow the code BEFORE the span, the code AFTER it, or the code that
+  // follows a closing delimiter on the same line.
+  const real: Array<[string, string[], number]> = [
+    ["enforcement after a closed multi-line comment", [
+      "/* explanation of the rule",
+      "   continued explanation */",
+      "if (state.requested > ceiling) { throw new Error('over'); }",
+    ], 3],
+    ["code after the closing delimiter on the same line", [
+      "/* explanation",
+      "*/ const ok = state.requested <= ceiling;",
+    ], 2],
+    ["enforcement before a comment opens on the same line", [
+      "const ok = state.requested <= ceiling; /* trailing note",
+      "   more note */",
+    ], 1],
+    ["code after a template literal closes on the same line", [
+      "const message = `",
+      "  text",
+      "`; const ok = state.requested <= ceiling;",
+    ], 3],
+    ["a comparison beside a closed span", [
+      "/* note */ if (state.requested > ceiling) { throw new Error('over'); }",
+    ], 1],
+  ];
+  for (const [label, lines, cited] of real) {
+    assert.equal(
+      dispositionOfQuuxFile(lines, cited, true),
+      "met",
+      `real enforcement (${label}) must stay met on the owner-anchored path`,
+    );
+    assert.equal(
+      dispositionOfQuuxFile(lines, cited, false),
+      "met",
+      `real enforcement (${label}) must stay met on the legacy path too`,
+    );
+  }
+});
+
+test("#1347: a distributed seam citation inside an open span is refused like any other copy", () => {
+  // The distributed path calls the same shared helper (`predicateSignalFound`),
+  // so the copy must not pass by being cited through a declared seam: the
+  // shape inside the open span is prose on every line of that span.
+  const workspace = makeWorkspace();
+  try {
+    const seamFiles = ["src/context/redact.ts", "src/render/fence-safe.ts", "src/prompt/instruction-separation.ts"];
+    for (const file of seamFiles) {
+      writeFile(workspace, file, [
+        "/*",
+        "if (expectedValue !== guardValue) throw new Error('mismatch');",
+        "*/",
+      ]);
+    }
+    writeUntrustedTestFixtures(workspace);
+    const trace = validateRequirementTrace(
+      [metTraceClaim(
+        "req-untrusted",
+        seamFiles.map((file) => ({ file, line: 2 })),
+        UNTRUSTED_TEST_LOCATIONS,
+      )],
+      traceLedger("req-untrusted", STANDARDS_UNTRUSTED),
+      workspace,
+      undefined,
+      { ownership: UNTRUSTED_DISTRIBUTED_OWNERSHIP },
+    );
+    assertUnverifiableWithNotes(trace, "req-untrusted", ["enforcement-location-copies-without-comparing"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1347: the single-line entry point is the same shape as the file-level scan", () => {
+  // `linePredicateSignal` is the single-line view of the file-level scan, so
+  // the two cannot disagree — the retained measurement reads the file-level
+  // one, the suite reads both.
+  assert.equal(linePredicateSignal("const ok = state.requested <= ceiling;"), true);
+  assert.equal(linePredicateSignal("const ceiling = state.requested;"), false);
+  assert.equal(linePredicateSignal("const note = 'must not exceed the ceiling';"), false);
+  assert.deepEqual(filePredicateSignal([
+    "const message = `",
+    "if (state.requested > ceiling) { throw new Error('over'); }",
+    "`;",
+  ]), [false, false, false]);
+  assert.deepEqual(filePredicateSignal([
+    "/*",
+    "if (state.requested > ceiling) { throw new Error('over'); }",
+    "*/",
+  ]), [false, false, false]);
+});
+
+test("#1355: a generic argument list is not a comparison, and an unspaced comparison still is", () => {
+  // #1347 closed the arrow/optional-chain/nullish artifacts, but a generic
+  // argument list still read as a comparison — `COMPARISON_RE` matches the
+  // same `<`/`>` characters — so an owner-anchored copy-only citation such as
+  // `const ceiling = Map<string, number>;` passed as `met` (the major finding
+  // on #1352, where the residual was documented as deliberate). #1355 blanks
+  // the list before the comparison is read — but ONLY a span that closes as a
+  // type list, because a real comparison never closes one: the unspaced
+  // `a<b` has no matching `>`, `a<=b` carries `=`, and `a<b && c>d`,
+  // `a<b || c>d` and `a<b ? c>d : e` refuse at the operator. Refusing real
+  // enforcement is the one failure this gate cannot afford, so every
+  // operator-joined and spaced form below must keep passing.
+  const copies: Array<[string, string]> = [
+    ["a generic argument list", "const ceiling = Map<string, number>;"],
+    ["a nested generic argument list", "const ceiling = Map<string, Array<number>>;"],
+    ["a union type argument", "const ceiling = Array<string | number>;"],
+    ["a generic type annotation", "let ceiling: Map<string, number>;"],
+    ["a generic type alias", "type CeilingPair = Map<string, number>;"],
+  ];
+  // Every artifact carries the requirement's own word `ceiling` as a whole
+  // word, so the legacy path's lexical half is satisfied and only the shape
+  // can refuse the citation.
+  for (const [label, line] of copies) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "unverifiable",
+      `a copy-only owner-anchored citation shaped like ${label} must not pass as met: ${line}`,
+    );
+    assert.equal(
+      dispositionOfQuuxCitation(line, false),
+      "unverifiable",
+      `the shared shape check must exclude ${label} on the legacy path too: ${line}`,
+    );
+  }
+  // The false-downgrade direction: real comparisons survive, including glued
+  // to a name (the only form a generic list can be confused with) and beside
+  // a generic that is now blanked.
+  const real: Array<[string, string]> = [
+    ["an unspaced comparison", "const ok = ceiling<max;"],
+    ["an unspaced comparison with no closing angle", "if (a<b) throw new Error('over ceiling');"],
+    ["operator-joined comparisons", "if (a<b && c>d) {"],
+    ["logical-or-joined comparisons", "const both = a<b || c>d;"],
+    ["a ternary beside angled operands", "const pick = ceiling<upper ? upper : ceiling;"],
+    ["a spaced comparison", "for (const row of rows) { if (row.height < ceiling) {"],
+    ["a comparison beside a blanked generic", "const pairs = new Map<string, number>(); const grown = size >= ceiling;"],
+  ];
+  for (const [label, line] of real) {
+    assert.equal(
+      dispositionOfQuuxCitation(line, true),
+      "met",
+      `a real predicate (${label}) on the cited line must stay met: ${line}`,
+    );
+  }
+  // The single-line view of the same shipped scan, pinned directly: what is
+  // and is not blanked, in both directions.
+  assert.equal(linePredicateSignal("const ceiling = Map<string, number>;"), false);
+  assert.equal(linePredicateSignal("const ceiling = Map<string, Array<number>>;"), false);
+  assert.equal(linePredicateSignal("const cache = new Map<string, Map<string, number>>();"), false);
+  assert.equal(linePredicateSignal("const f = (): Map<string, number> => state.map;"), false);
+  assert.equal(linePredicateSignal("let p: Promise<void>;"), false);
+  assert.equal(linePredicateSignal("const ok = ceiling<max;"), true);
+  assert.equal(linePredicateSignal("if (a<b && c>d) {"), true);
+  assert.equal(linePredicateSignal("const pick = ceiling<upper ? upper : ceiling;"), true);
+  assert.equal(linePredicateSignal("const GT = />/;"), true);
+  // Per-line views stay independent: no cross-line state is introduced by the
+  // generic blanker, so a pure type line and the comparison after it read
+  // separately.
+  assert.deepEqual(filePredicateSignal([
+    "const cache = new Map<string, Array<number>>();",
+    "if (state.requested > ceiling) {",
+  ]), [false, true]);
+  // Boundary pins for the shapes the blanker deliberately eats (fed the
+  // hostile input itself, per the #252 standard): each is a GLUED chain whose
+  // span is indistinguishable from a generic argument list without a parser,
+  // so it is blanked with it. Pinning the refusal makes a later widening of
+  // the argument-list grammar a visible, deliberate change instead of a
+  // silent new downgrade.
+  assert.equal(linePredicateSignal("const x = a<b>c;"), false);
+  assert.equal(linePredicateSignal("const x = a<b, c>d;"), false);
+  assert.equal(linePredicateSignal("const x = a<b|c>d;"), false);
+  // A shift chain is refused, not blanked: `<<` never occurs inside a valid
+  // argument list, so both operators survive.
+  assert.equal(linePredicateSignal("const x = a<<b>>c;"), true);
+  // Blanking never adds an ACCEPTED shape — `expect<Foo>(x)` reads as an
+  // assertion call after `Foo` is blanked, but the `<` had already fired the
+  // comparison shape, so the accept status is unchanged either way.
+  assert.equal(linePredicateSignal("expect<Map<string, number>>(x);"), true);
+  // A generic list that WRAPS to the next line is run-scoped and not blanked:
+  // its opening line still passes as enforcement (the named residual — the
+  // alternative, an open-generic span carried across lines, would swallow the
+  // comparisons after an unclosed `<`).
+  assert.deepEqual(filePredicateSignal([
+    "const v: Map<",
+    "  string,",
+    "  number",
+    ">();",
+  ]), [true, false, false, true]);
+});
+
+test("#1347: a stray backtick in a regex literal must not swallow the rest of the file", () => {
+  // The unpaired-`/` rule, pinned in both directions. A backtick inside a
+  // regex literal (`/[|;&<>`$]/`) is not a template opener; treated as one it
+  // opened a span that swallowed the rest of the FILE and removed 1,781
+  // accepted lines from this repository's own sources — a false downgrade far
+  // worse than the leak it closes. The code before the backtick carries an
+  // unpaired `/`, so the template span stays line-local.
+  const stray = [
+    "const metachars = /[|;&<>`$]/;",
+    "const ok = state.requested <= ceiling;",
+  ];
+  assert.equal(
+    dispositionOfQuuxFile(stray, 2, true),
+    "met",
+    "a stray backtick in a regex literal must not swallow the enforcement that follows it",
+  );
+  // The even-parity counterpart: a template opener with no unpaired slash
+  // before it IS tracked across lines.
+  const tracked = [
+    "const message = `",
+    "if (state.requested > ceiling) { throw new Error('over'); }",
+    "`;",
+  ];
+  assert.equal(
+    dispositionOfQuuxFile(tracked, 2, true),
+    "unverifiable",
+    "a template opener with no unpaired slash before it must be tracked across lines",
+  );
+});
+
+test("#1347: the retained corpus measurement is a reproducible artifact over this repository's own sources", () => {
+  // The issue's constraint: the shape heuristic is shared with the legacy and
+  // distributed paths, so tightening it must be MEASURED against false
+  // downgrades — and the measurement must be a retained artifact, not an
+  // unretained one-off run. This runs the retained script and pins its
+  // accounting, so the requirement traces to a test instead of to prose.
+  const output = execFileSync(process.execPath, ["scripts/measure_predicate_signal.mjs"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const report = JSON.parse(output) as {
+    corpus_files: number;
+    corpus_lines: number;
+    baseline_accepted: number;
+    current_accepted: number;
+    removed: number;
+    removed_total: number;
+    newly_accepted_total: number;
+    newly_accepted_samples: string[];
+    line_local_accepted: number;
+    cross_line_removed: number;
+    cross_line_added: number;
+    generic_ignored_accepted: number;
+    generic_removed_total: number;
+    generic_removed_samples: string[];
+    generic_added_total: number;
+  };
+  assert.ok(report.corpus_files > 0, "the measurement corpus must not be empty");
+  assert.ok(report.corpus_lines > report.corpus_files, "the measurement corpus must carry lines");
+  // The counting identities: the net difference the report prints must be
+  // the removed lines minus the added ones, in both comparisons.
+  assert.equal(
+    report.removed_total - report.newly_accepted_total,
+    report.baseline_accepted - report.current_accepted,
+    "the removed count must be the removed lines minus the added ones",
+  );
+  assert.equal(
+    report.line_local_accepted - report.cross_line_removed,
+    report.current_accepted - report.cross_line_added,
+    "the cross-line delta must reconcile with both accepted counts",
+  );
+  assert.equal(report.removed, report.baseline_accepted - report.current_accepted);
+  assert.ok(
+    report.current_accepted < report.baseline_accepted,
+    "the tightened shape must accept fewer shapes than the pre-#1347 baseline",
+  );
+  // The false-downgrade rate of the cross-line refinement, measured on its
+  // own: carrying the open-span state across lines must not refuse a
+  // meaningful share of the shapes the line-local view accepted.
+  assert.ok(
+    report.cross_line_removed * 100 <= report.line_local_accepted,
+    `the cross-line refinement refused ${report.cross_line_removed} of ${report.line_local_accepted} accepted shapes`,
+  );
+  // The baseline is not a pure subset: the tightened call-shape rule accepts
+  // prefixed assertion calls the old bare-word regex could not match. Every
+  // sampled one must be such a call — a newly accepted line that is NOT
+  // call-shaped enforcement would mean the shape was loosened.
+  for (const sample of report.newly_accepted_samples) {
+    assert.match(
+      sample,
+      /\b(?:assert|must|expect|reject|invariant)[A-Za-z0-9_]*\s*\(/i,
+      `a newly accepted line must be a prefixed assertion-name call: ${sample}`,
+    );
+  }
+  // The production shape is the shipped one: the script bundles the working
+  // tree's source, so it cannot drift from the runtime.
+  const script = readFileSync(join(REPO_ROOT, "scripts/measure_predicate_signal.ts"), "utf8");
+  assert.match(script, /from "\.\.\/src\/enforcement\/requirement-trace\.js"/);
+  assert.match(script, /filePredicateSignal/);
+  // The #1355 refinement is measured on its own, against the pre-#1355
+  // production pipeline rather than a re-implementation of it.
+  assert.match(script, /filePredicateSignalIgnoringGenericArgumentLists/);
+  // Blanking a generic argument list only ever removes shapes (it inserts
+  // spaces and refuses assertion/parenthesis/quote syntax inside the span),
+  // so it must never ADD an accepted shape, and it must not be a no-op.
+  assert.equal(
+    report.generic_added_total,
+    0,
+    "the generic-argument-list blanker must only remove accepted shapes, never add one",
+  );
+  assert.ok(
+    report.generic_removed_total > 0,
+    "the generic-argument-list blanker must remove at least one accepted shape",
+  );
+  // The removed share must stay a bounded minority of the shapes the
+  // pre-#1355 pipeline accepted (measured at this head: 3,067 of 38,005,
+  // 8.1% — every sampled one a type annotation or generic declaration, none
+  // a comparison). The bound alarms on drift toward blanking real shapes.
+  assert.ok(
+    report.generic_removed_total * 10 < report.generic_ignored_accepted,
+    `the generic-argument-list blanker removed ${report.generic_removed_total} of ${report.generic_ignored_accepted} pre-#1355 accepted shapes`,
+  );
+  // Every sampled removed line carries an angle bracket: the shapes the
+  // blanker removes are exactly the generic-looking ones it decided to blank.
+  for (const sample of report.generic_removed_samples) {
+    assert.match(
+      sample,
+      /<.*>/,
+      `a line the generic-argument-list blanker removed must carry an angle-bracket span: ${sample}`,
+    );
+  }
+});
+
+/**
+ * #1340: the repository's own untrusted-content standard must stay traceable
+ * to the shared escaping seam.
+ *
+ * The deterministic trace (#874/#854) accepts a `met` claim only when the
+ * cited enforcement line carries a term from the requirement text NEXT TO a
+ * predicate. The seam's flattened intermediate was named `singleLine`, so no
+ * line inside `escapeCodeSpan` carried the standard's vocabulary: every
+ * citation into the function was downgraded to `unverifiable`
+ * (`enforcement-location-copies-without-comparing`), and three consecutive
+ * reviews of #1340 published `partial` coverage even though the enforcement
+ * and its #252 regression test both existed. The seam now names the trust
+ * level of the value it neutralizes; this test pins the property that EVERY
+ * citation into the implementation is accepted, so a later rename cannot
+ * silently make the standard untraceable again.
+ *
+  * The trust level must be named in CODE, not only in prose: the trace needs
+  * the standard's vocabulary on a predicate-shaped line, and since #1347 a
+  * comment is stripped before any shape is read, so a prose-only edit names
+  * nothing at all.
+ */
+test("#1340: the untrusted-content standard traces to the shared escaping seam", () => {
+  const standards = readFileSync(join(REPO_ROOT, "AGENTS.md"), "utf8");
+  assert.ok(
+    standards.includes(STANDARDS_UNTRUSTED),
+    "AGENTS.md must still carry the untrusted-content standards row this seam enforces",
+  );
+
+  const seam = readFileSync(join(REPO_ROOT, "src/context/fence.ts"), "utf8").split("\n");
+  const start = seam.findIndex((line) => line.startsWith("export function escapeCodeSpan"));
+  assert.ok(start >= 0, "the shared escaping seam must exist");
+  // The function's own closing brace is the only one at column 0, so a
+  // nested block inside the body cannot truncate the checked span.
+  const implementation: number[] = [];
+  for (let index = start; index < seam.length; index += 1) {
+    implementation.push(index + 1);
+    if (seam[index] === "}") break;
+  }
+  assert.ok(implementation.length >= 3, "the seam must have an implementation to cite");
+  const namedInCode = implementation.some((line) => {
+    const text = (seam[line - 1] ?? "").trim();
+    if (text.startsWith("*") || text.startsWith("//")) return false;
+    return /\bconst\s+untrusted\b/.test(text);
+  });
+  assert.ok(namedInCode, "the seam must name the untrusted value in code, not only in prose");
+
+  const fenceTest = readFileSync(join(REPO_ROOT, "tests-v3/fence.test.ts"), "utf8").split("\n");
+  const boundaryTestLine = fenceTest.findIndex((line) => line.includes("escapeCodeSpan strips the boundary tokens"));
+  assert.ok(boundaryTestLine >= 0, "the #252 boundary test must exist");
+
+  for (const line of implementation) {
+    const claims = [
+      metTraceClaim(
+        "req-untrusted",
+        [{ file: "src/context/fence.ts", line }],
+        [{ file: "tests-v3/fence.test.ts", line: boundaryTestLine + 1 }],
+      ),
+    ];
+    const result = validateRequirementTrace(
+      claims,
+      traceLedger("req-untrusted", STANDARDS_UNTRUSTED),
+      REPO_ROOT,
+    );
+    const row = result.rows.find((candidate) => candidate.requirement_id === "req-untrusted");
+    const noteText = row === undefined ? "no row" : row.notes.join(", ");
+    assert.equal(
+      row?.disposition,
+      "met",
+      `a citation at src/context/fence.ts:${line} must validate (${noteText})`,
+    );
   }
 });
 
@@ -1149,6 +2100,112 @@ test("#1000: a terminated span with embedded prose yields its identifier, not a 
   assert.deepEqual(scoped.inScope.map((e) => e.id), ["req-span"]);
 });
 
+// ── #1346: generic connective bigrams are not subject overlap ───────────
+
+/** The production leak (#1342, a Renovate classifier-kind change): the
+ * credential-transport standard's "travel only … must never appear" prose
+ * reached the trace on nothing but the diff's own comments — "only through"
+ * and "never appear" occur in ordinary English and name no credential or
+ * transport surface. */
+function pr1342ChangedText(): string {
+  return changedSubjectText(
+    [
+      "diff --git a/src/classification/kinds.ts b/src/classification/kinds.ts",
+      "+++ b/src/classification/kinds.ts",
+      "+  // A digest pin travels a different path than a version bump.",
+      "+  // Kinds are read only through the declared list: a kind must never appear in two buckets.",
+      '+  const KINDS = ["digested", "replacement", "pin"] as const;',
+      "-  // The old branch fell through every other kind.",
+    ].join("\n"),
+    ["src/classification/kinds.ts", "tests-v3/classification.test.ts"],
+  );
+}
+
+test("#1346: generic connective bigrams alone leave the credential standard out of scope", () => {
+  const ledger = { requirements: [
+    { id: "req-credential", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+  ] };
+  const changed = pr1342ChangedText();
+  // Both generic bigrams are really in the changed text, and they are the ONLY
+  // overlap. The guard is derived from the requirement itself rather than a
+  // hand-written word list, so a future edit to this fixture cannot silently
+  // reintroduce genuine subject overlap.
+  assert.ok(changed.includes("only through") && changed.includes("never appear"), "fixture carries the generic bigrams");
+  const repeated = requirementSubjectSignals(STANDARDS_CREDENTIAL).phrases
+    .filter((words) => {
+      const lower = words.map((word) => word.toLowerCase());
+      return changed.includes(lower.join(""))
+        || [lower.join(" "), lower.join("_"), lower.join("-"), lower.join("/")]
+          .some((variant) => new RegExp(`\\b${variant}\\b`).test(changed));
+    })
+    .map((words) => words.join(" "));
+  assert.deepEqual(repeated, [], `fixture overlap beyond the generic bigrams: ${JSON.stringify(repeated)}`);
+
+  const scope = requirementTraceScope(ledger, changed);
+  assert.deepEqual(scope.inScope, []);
+  assert.deepEqual(scope.outOfScope.map((o) => o.entry.id), ["req-credential"]);
+});
+
+test("#1346: the credential boundary's own files keep it in scope", () => {
+  // The fail-closed direction of the same tightening: a change to the
+  // transport surface still demands the standard even when its prose repeats
+  // nothing but generic connectives. Owners come from the shipped base-side
+  // map, so this also pins that `model-api-credentials` really declares the
+  // transport files.
+  const ledger = { requirements: [
+    { id: "req-credential", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] },
+  ] };
+  const parsed = parseRequirementOwners(
+    readFileSync(join(REPO_ROOT, ".github", "pr-reviewer-owners.yml"), "utf8"),
+    ".github/pr-reviewer-owners.yml",
+  );
+  assert.ok(!("malformed" in parsed));
+  if ("malformed" in parsed) return;
+  assert.ok(
+    parsed.rules.some((rule) => rule.match.join(" ") === "model api credentials" && rule.owners.includes("src/transport/http.ts")),
+    `shipped owner map declares the transport files: ${JSON.stringify(parsed.rules)}`,
+  );
+  const paths = ["src/transport/http.ts"];
+  const changed = changedSubjectText("+  // forward the request only through the seam; the token must never appear in logs\n", paths);
+  const scope = requirementTraceScope(ledger, changed, { ownership: parsed.rules, paths });
+  assert.deepEqual(scope.inScope.map((e) => e.id), ["req-credential"]);
+});
+
+test("#1346: requirementSubjectSignals drops connective pairs and keeps mixed pairs", () => {
+  const credential = requirementSubjectSignals(STANDARDS_CREDENTIAL).phrases.map((p) => p.join(" "));
+  assert.ok(!credential.includes("only through"), JSON.stringify(credential));
+  assert.ok(!credential.includes("never appear"), JSON.stringify(credential));
+  // The standard keeps its real subject signals.
+  assert.ok(credential.includes("auth headers") && credential.includes("src/transport"), JSON.stringify(credential));
+  // The narrowing is phrase-scoped: the standard's single-term signals are
+  // untouched (it has none — only the atomic code spans and its owner paths).
+  assert.deepEqual(requirementSubjectSignals(STANDARDS_CREDENTIAL).strongTerms, []);
+
+  // A pair is dropped only when BOTH halves are generic: a specific word on
+  // either side keeps the phrase counting.
+  assert.deepEqual(
+    requirementSubjectSignals("The value may appear verbatim.").phrases.map((p) => p.join(" ")),
+    ["value may", "appear verbatim"],
+  );
+  // The #957 pinned mixed pair survives unchanged.
+  assert.deepEqual(
+    requirementSubjectSignals("content is data, never instructions").phrases.map((p) => p.join(" ")),
+    ["data never", "never instructions"],
+  );
+});
+
+test("#1346: distinctive prose next to generic connectives still scopes in", () => {
+  const scoped = (changed: string): string[] =>
+    requirementTraceScope(
+      { requirements: [{ id: "req-creds", text: STANDARDS_CREDENTIAL, kind: "normative", provenance: [{ source: "standards", ref: "AGENTS.md", line: 3 }] }] },
+      changedSubjectText(changed, ["src/model/chat.ts"]),
+    ).inScope.map((e) => e.id);
+  // Genuine overlap: the boundary's own wording reaches the diff.
+  assert.deepEqual(scoped("+  // send the token only through the auth headers the provider defines\n"), ["req-creds"]);
+  // Generic connectives only: no overlap.
+  assert.deepEqual(scoped("+  // the legacy switch may not appear here, only through the old path\n"), []);
+});
+
 // ── #959: a verdict with zero trace claims ──────────────────────────────
 
 test("#959: a missing-claim row renders its own reason, not 'no valid enforcement location'", () => {
@@ -1807,9 +2864,21 @@ test("#962.6: an off-seam predicate cannot launder value copies across covered s
   }
 });
 
-test("#962.7: a model-supplied symbol cannot make copied seam values predicate evidence", () => {
+test("#962.7/#1343: a model-supplied symbol is irrelevant to a distributed row — the declared seam's own predicate decides", () => {
   const workspace = makeWorkspace();
   try {
+    // Pre-#1343 this fixture asserted `unverifiable`: the cited line 2 only
+    // copies a value, and the lexical half of the predicate gate demanded a
+    // requirement-derived term (or the symbol) next to the predicate line —
+    // vocabulary a prose standard's enforcing code never spells. #1343 drops
+    // the lexical co-occurrence for seam-anchored citations (every matched
+    // citation already points into a trusted declared seam), so the
+    // predicate alone decides. The predicate line deliberately does NOT
+    // carry the supplied symbol, so the pre-#1343 gate would still fail
+    // here: this test discriminates the two contracts, pinning that the
+    // symbol can change a distributed row's outcome neither way. The
+    // downgrade direction stays pinned by #962.6 (off-seam predicate) and
+    // #962.18 (no predicate inside the seams).
     const copyFiles = [
       "src/context/redact.ts",
       "src/render/fence-safe.ts",
@@ -1819,7 +2888,7 @@ test("#962.7: a model-supplied symbol cannot make copied seam values predicate e
       writeFile(workspace, file, [
         "export const record = {",
         "  opaqueValue: input.opaqueValue,",
-        "  if (opaqueValue !== expectedValue) throw new Error('mismatch');",
+        "  if (expectedValue !== guardValue) throw new Error('mismatch');",
       ]);
     }
     writeUntrustedTestFixtures(workspace);
@@ -1835,7 +2904,10 @@ test("#962.7: a model-supplied symbol cannot make copied seam values predicate e
       undefined,
       { ownership: UNTRUSTED_DISTRIBUTED_OWNERSHIP },
     );
-    assertUnverifiableWithNotes(trace, "req-untrusted", ["enforcement-location-copies-without-comparing"]);
+    const row = trace.rows.find((candidate) => candidate.requirement_id === "req-untrusted");
+    assert.equal(row?.disposition, "met");
+    assert.deepEqual(row?.notes, []);
+    assert.equal(trace.incomplete, false);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -1984,7 +3056,16 @@ test("#962.14: distributed hints include only distributed ids in the requested s
   ]);
   assert.deepEqual(
     distributedRequirementHints(ledger, FORK_DISTRIBUTED_OWNERSHIP, ["req-fork", "req-narrow", "req-missing"]),
-    [{ requirementId: "req-fork", groups: ["feature-defaults", "privileged-checkout", "secret-boundary"] }],
+    // #1519 (review): the hints carry the FULL seam objects — the trusted
+    // owner/test patterns ride with each seam name, sorted deterministically.
+    [{
+      requirementId: "req-fork",
+      groups: [
+        { name: "feature-defaults", owners: ["src/fork/feature-defaults.ts"], tests: ["tests-v3/fork-feature-defaults.test.ts"] },
+        { name: "privileged-checkout", owners: ["src/fork/privileged-checkout.ts"], tests: ["tests-v3/fork-privileged-checkout.test.ts"] },
+        { name: "secret-boundary", owners: ["src/fork/secret-boundary.ts"], tests: ["tests-v3/fork-secret-boundary.test.ts"] },
+      ],
+    }],
   );
 });
 
@@ -1994,7 +3075,16 @@ test("#962.15: prompt hints append seam names, while empty hints preserve the no
     writeFileSync(join(dir, "requirement-ledger-present.txt"), "1\n");
     const workspace = workspaceAt(dir);
     const base = { systemPrompt: "BASE", isDefault: true, addendum: "" };
-    const hints = [{ requirementId: "req-fork", groups: ["privileged-checkout", "feature-defaults", "secret-boundary"] }];
+    // #1519 (review): the hints carry full seam objects; the prompt line
+    // still renders the seam NAMES only.
+    const hints = [{
+      requirementId: "req-fork",
+      groups: [
+        { name: "privileged-checkout", owners: ["src/fork/privileged-checkout.ts"], tests: [] },
+        { name: "feature-defaults", owners: [], tests: ["tests-v3/fork-feature-defaults.test.ts"] },
+        { name: "secret-boundary", owners: [], tests: [] },
+      ],
+    }];
     const hinted = applyRequirementTraceFragment(base, workspace, true, undefined, ["req-fork"], hints).systemPrompt;
     const withoutHints = applyRequirementTraceFragment(base, workspace, true, undefined, ["req-fork"]).systemPrompt;
     const emptyHints = applyRequirementTraceFragment(base, workspace, true, undefined, ["req-fork"], []).systemPrompt;
@@ -2248,7 +3338,7 @@ test("#962.22: topology overflow fails closed despite a complete five-seam proof
   }
 });
 
-test("#962.23: distributed hints omit overflowed requirements from the same ledger", () => {
+test("#962.23: distributed hints keep overflowed requirements so the plan classifies them distributed", () => {
   const overflowGroups = Array.from({ length: 5 }, (_unused, index) => ({
     name: `overflow-seam-${index + 1}`,
     owners: [`src/overflow/seam-${index + 1}.ts`],
@@ -2262,9 +3352,27 @@ test("#962.23: distributed hints omit overflowed requirements from the same ledg
     { id: "req-overflow", text: "Overflow topology must remain protected.", kind: "normative" },
     { id: "req-fork", text: STANDARDS_FORK, kind: "normative" },
   ]);
+  // #1519 (review): the validator classifies an overflow-topology requirement
+  // DISTRIBUTED (`isDistributed` is computed before the overflow gate forces
+  // the row unverifiable), so the hints must keep it — dropping it made the
+  // plan budget runtime-shape attempts the validator's per-seam demand never
+  // asked for.
   assert.deepEqual(
     distributedRequirementHints(ledger, ownership, ["req-overflow", "req-fork"]),
-    [{ requirementId: "req-fork", groups: ["feature-defaults", "privileged-checkout", "secret-boundary"] }],
+    [
+      {
+        requirementId: "req-overflow",
+        groups: overflowGroups.map((group) => ({ name: group.name, owners: [...group.owners], tests: [...group.tests] })),
+      },
+      {
+        requirementId: "req-fork",
+        groups: [
+          { name: "feature-defaults", owners: ["src/fork/feature-defaults.ts"], tests: ["tests-v3/fork-feature-defaults.test.ts"] },
+          { name: "privileged-checkout", owners: ["src/fork/privileged-checkout.ts"], tests: ["tests-v3/fork-privileged-checkout.test.ts"] },
+          { name: "secret-boundary", owners: ["src/fork/secret-boundary.ts"], tests: ["tests-v3/fork-secret-boundary.test.ts"] },
+        ],
+      },
+    ],
   );
 });
 

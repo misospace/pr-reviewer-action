@@ -4,6 +4,10 @@
  * Boundaries enforced here, not negotiated:
  * - exactly ONE wire attempt (the transport's single-shot path — no 429/5xx
  *   backoff loop, no fallback lane, no second review);
+ * - a configuration the resolver itself refused (`ConfidenceProfile.refusalCause`,
+ *   #1478: the require-dedicated isolation mode without its dedicated
+ *   endpoint or without a dedicated model) publishes `unscored` with that
+ *   action-owned cause before the wire;
  * - credential isolation: the scorer's resolved `ConfidenceProfile` is the
  *   ONLY credential source; a distinct endpoint without its own key may only
  *   be a loopback address, and the primary lane's key must never ride a
@@ -11,17 +15,23 @@
  *   resolver already guarantees it);
  * - a failure of any kind (timeout, quota/429/5xx, network, malformed
  *   answer) degrades to `unscored` with a redacted, action-owned cause —
- *   the review itself still publishes unchanged.
+ *   the review itself still publishes unchanged;
+ * - the profile's declared budgets are actual bounds: a prompt that does not
+ *   fit `ConfidenceProfile.promptTokens` is refused before the wire, never
+ *   sent over the bound (#1368 review).
  */
 import type { ChatRequestInput, ChatRequestOutcome } from "../transport/transport.js";
 import { runChatRequestOnce } from "../transport/transport.js";
-import { describeTransportFailure } from "../transport/http.js";
+import { describeTransportFailure, endpointUrlCredentialOrEmpty } from "../transport/http.js";
+import type { TransportFailureKind } from "../transport/http.js";
+import { basicAuthorizationHeaderValue } from "../transport/headers.js";
 import { maskDiagnostic } from "../context/redact.js";
-import { buildModelRequest } from "../model/request.js";
-import type { TokensParam } from "../model/types.js";
+import { buildModelRequest, wireEffortOf } from "../model/request.js";
 import type { ConfidenceProfile } from "../routing/tiers.js";
+import { confidenceUsageFromProviderBody, type ConfidenceUsageTelemetry } from "./telemetry.js";
 import {
   applyConfidenceCeilings,
+  CONFIDENCE_ANSWER_JSON_SCHEMA,
   parseConfidenceAnswer,
   scoredConfidenceResult,
   unscoredConfidenceResult,
@@ -29,9 +39,23 @@ import {
 } from "./result.js";
 import type { ConfidencePromptInputs } from "./prompt.js";
 
-/** Completion budget for the scorer's answer: a bounded JSON object, not a
- * review. Small on purpose. */
-export const CONFIDENCE_MAX_TOKENS = 1024;
+/** DEFAULT completion budget for the scorer's answer: a bounded JSON object,
+ * not a review. A reasoning model may consume the whole budget thinking and
+ * return no JSON at all — the profile's configured budget
+ * (`ai-confidence-max-tokens`, resolved into `ConfidenceProfile.maxTokens`)
+ * is the real control, and provider accounting may include reasoning tokens
+ * inside it. This constant is the documented default — and the SINGLE
+ * source for it (#1387): `resolveConfidenceProfile` and the disabled
+ * profile in `src/routing/tiers.ts` resolve these same constants, so the
+ * calibration tooling's projected spend ceiling and the budgets production
+ * actually resolves cannot drift apart. */
+export const CONFIDENCE_MAX_TOKENS = 4096;
+
+/** DEFAULT prompt budget for the scorer's request, the sibling of
+ * `CONFIDENCE_MAX_TOKENS` and the same single source for it (#1387): the
+ * resolver's `promptTokens` default and the disabled profile both read
+ * this constant. */
+export const CONFIDENCE_PROMPT_TOKENS = 98304;
 
 /** Hosts a keyless distinct scorer endpoint may still point at: the
  * operator's own machine. Anything else without a credential is refused. */
@@ -62,9 +86,6 @@ export interface ConfidenceScorerInput {
   primaryApiKey: string;
   prompt: { system: string; user: string };
   connectTimeoutSec: number;
-  /** The primary lane's token-field convention, so self-hosted OpenAI
-   * proxies that only accept one field keep working. */
-  tokensParam?: TokensParam;
   transport?: (input: ChatRequestInput) => Promise<ChatRequestOutcome>;
   /** #726 (engine cancellation): caller-owned abort, propagated into the
    * transport so an aborted run tears the scorer's in-flight provider
@@ -92,6 +113,27 @@ export interface ConfidenceScorerOutcome {
   /** Bounded, secret-redacted transport-failure detail for the persisted
    * artifact; "" when the call succeeded (or never happened). */
   diagnostic: string;
+  /** The reasoning effort on the request this run SENT, read back from the
+   * built body rather than re-derived from the profile; "" when the run sent
+   * no request at all (a pre-wire refusal, or a transport that failed before
+   * a request existed) or when the sent request carried no effort field.
+   * #998's truth-telling rule: the run persists what was SENT, never what
+   * the configuration named. */
+  wireEffort: string;
+  /** #1455: the token counts the provider reported for this call, in the
+   * repo's canonical format-aware accounting. Null when the provider
+   * reported none, and null on every failure path (a failed call has no
+   * usage to report). The scorer is one-shot by contract, so this is one
+   * call's usage. */
+  usage: ConfidenceUsageTelemetry | null;
+  /** #1455: the wall-clock milliseconds the scorer's provider call took —
+   * the time the provider took to answer a request that demonstrably reached
+   * it. Null when no such call happened: a refusal before the wire (the
+   * pre-wire refusals above), a request that never left the machine (a
+   * connect timeout, a cancellation), or a transport that failed before a
+   * request existed. A latency for a call that never happened would be a
+   * claim the run cannot back. */
+  latencyMs: number | null;
 }
 
 /**
@@ -108,15 +150,40 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   const diagnosticSecrets: readonly (string | null | undefined)[] = [
     ...(input.laneSecrets ?? []),
     profile.apiKey,
+    // #1428 review: when the endpoint URL carries the credential, the wire
+    // sends `Authorization: Basic <base64>` (one shared builder, so this list
+    // can never drift from the header bytes); a provider echo of the exact
+    // header value must mask before any diagnostic or artifact is produced.
+    ...(
+      endpointUrlCredentialOrEmpty(profile.baseUrl)
+        ? [endpointUrlCredentialOrEmpty(profile.baseUrl), basicAuthorizationHeaderValue(endpointUrlCredentialOrEmpty(profile.baseUrl))]
+        : []
+    ),
     input.primaryApiKey,
   ];
   if (!profile.enabled) {
-    return { result: disabledResult(), requestPayload: null, rawResponse: null, diagnostic: "" };
+    return { result: disabledResult(), requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "", usage: null, latencyMs: null };
+  }
+  // #1478: a configuration the RESOLVER itself refused (the require-dedicated
+  // isolation mode with no dedicated endpoint configured, or with no
+  // dedicated model configured). Same contract as the refusals below: no
+  // wire attempt, no request artifact, an action-owned cause, and the review
+  // unaffected. The model identity stays empty on the result — nothing
+  // audited the review.
+  if (profile.refusalCause !== "") {
+    return {
+      result: unscoredConfidenceResult(profile.refusalCause),
+      requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",
+      usage: null, latencyMs: null,
+    };
   }
   // Credential isolation, asserted at call time (the resolver already
   // guarantees both, but this boundary fails closed rather than trusting
   // any upstream wiring):
-  // 1. a distinct endpoint with no explicit key may only be loopback;
+  // 1. a distinct endpoint with no explicit key may only be loopback, or
+  // carry its own credential in the URL userinfo (#1428: a URL credential
+  // IS the lane's credential, so the Basic request reaches the transport —
+  // and a URL whose credential cannot be attributed fails closed here);
   // 2. the primary lane's credential must never ride a distinct scorer URL.
   // Provenance-based, not value-based: an operator may deliberately reuse
   // the same secret on a distinct endpoint; only a resolver wiring bug
@@ -125,16 +192,42 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
   // ran: the model identity stays empty (the contract reserves a non-empty
   // `confidence-model` for a call that was actually attempted). Reporting the
   // configured model here would claim that model graded the review.
-  if (profile.apiKey === "" && !profile.inheritedTransport && !isLoopbackUrl(profile.baseUrl)) {
+  if (
+    profile.apiKey === "" &&
+    endpointUrlCredentialOrEmpty(profile.baseUrl) === "" &&
+    !profile.inheritedTransport &&
+    !isLoopbackUrl(profile.baseUrl)
+  ) {
     return {
       result: unscoredConfidenceResult("missing_credential"),
-      requestPayload: null, rawResponse: null, diagnostic: "",
+      requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",
+      usage: null, latencyMs: null,
     };
   }
   if (!profile.inheritedTransport && profile.credentialSource === "primary") {
     return {
       result: unscoredConfidenceResult("credential_isolation"),
-      requestPayload: null, rawResponse: null, diagnostic: "",
+      requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",
+      usage: null, latencyMs: null,
+    };
+  }
+  // #1368 review: the declared prompt budget is an ACTUAL bound. The prompt
+  // builder shrinks the diff section to hold it, but its 4,096-byte diff floor
+  // is the SMALLEST usable diff, not permission to overrun: once the fixed
+  // sections alone leave less than the floor, the assembled request is over
+  // the budget — and through the declared-context clamp, over the declared
+  // context window. Refuse it here: no wire attempt, no request artifact,
+  // `unscored` with an action-owned cause. `CONFIDENCE_MINIMUM_PROMPT_TOKENS`
+  // is the resolver's system-inclusive floor, so an empty-evidence prompt can
+  // never reach this branch; it fires only when the run's own evidence does
+  // not fit the budget the operator declared.
+  const promptBytes = Buffer.byteLength(input.prompt.system, "utf8")
+    + Buffer.byteLength(input.prompt.user, "utf8");
+  if (promptBytes > profile.promptTokens * 4) {
+    return {
+      result: unscoredConfidenceResult("prompt_over_budget"),
+      requestPayload: null, rawResponse: null, diagnostic: "", wireEffort: "",
+      usage: null, latencyMs: null,
     };
   }
   const payload = buildModelRequest({
@@ -146,20 +239,36 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     corpus: "",
     stream: false,
     shape: "default",
-    maxTokens: CONFIDENCE_MAX_TOKENS,
+    // #1368: the profile's configured budget, not the constant above.
+    maxTokens: profile.maxTokens,
     temperature: "",
-    // #1073: response format OFF — no verdict schema attaches, the scorer's
-    // answer is its own bounded JSON contract parsed tolerantly downstream.
-    responseFormat: "off",
-    tokensParam: input.tokensParam ?? "max_tokens",
+    // #1073/#1368: response format OFF by default — no schema attaches, the
+    // scorer's answer is its own bounded JSON contract parsed tolerantly
+    // downstream. Under the operator's structured-output assertion the
+    // scorer's OWN compact schema rides the wire (never the verdict schema).
+    responseFormat: profile.structuredOutputSupported ? "json_schema" : "off",
+    responseSchema: CONFIDENCE_ANSWER_JSON_SCHEMA,
+    // #1481: the token-limit field is the RESOLVED profile's own — the engine
+    // no longer feeds this lane the primary/global AI_TOKENS_PARAM state, so a
+    // require-dedicated verifier can never silently inherit the review lane's
+    // convention.
+    tokensParam: profile.tokensParam,
     reasoningEffort: profile.reasoningEffort,
-    // No lane opt-ins exist for the scorer: no Anthropic effort/format is
-    // ever sent on its wire.
-    anthropicEffortSupported: false,
-    anthropicStructuredOutputSupported: false,
+    // #1368: the scorer's OWN capability assertions — never another lane's.
+    // Unasserted, the Anthropic wire carries no effort/format at all.
+    anthropicEffortSupported: profile.anthropicEffortSupported,
+    anthropicStructuredOutputSupported: profile.structuredOutputSupported,
   });
+  // #998: the effort this dispatch carries, read back from the body the
+  // transport sends — never re-derived from the profile.
+  const wireEffort = wireEffortOf(payload);
   const call = input.transport ?? ((chatInput: ChatRequestInput) => runChatRequestOnce(chatInput));
   let outcome: ChatRequestOutcome;
+  // #1455: the wall-clock cost of the scorer's ONE wire attempt, measured
+  // around the awaited call. The pre-wire refusals above returned before
+  // this point, so they carry no latency at all — a duration for a call
+  // that never happened would be a claim the run cannot back.
+  const startedAt = Date.now();
   try {
     outcome = await call({
       baseUrl: profile.baseUrl,
@@ -176,13 +285,30 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
     // degrades to unscored, never fails the review. `maskDiagnostic` masks on
     // the FULL untruncated message before capping it, so a configured secret
     // straddling the 300-char boundary cannot leave a partial prefix behind.
+    //
+    // #998: a THROWN transport never produced a request — the endpoint URL
+    // never resolved, the headers never merged — so nothing was sent and the
+    // run reports no effort, whatever the body would have carried.
+    //
+    // #1455: the same truth bounds the latency: nothing reached the
+    // provider, so there is no provider-call duration to report. The time
+    // spent failing locally is not the provider's latency.
     return {
       result: unscoredConfidenceResult("transport_error", profile.model),
       requestPayload: null, rawResponse: null,
       diagnostic: maskDiagnostic(cause instanceof Error ? cause.message : String(cause), diagnosticSecrets),
+      wireEffort: "",
+      usage: null,
+      latencyMs: null,
     };
   }
+  const latencyMs = Date.now() - startedAt;
   if (outcome.status !== "ok") {
+    // #1455: the latency is the provider's answer time, so it rides the same
+    // predicate the effort provenance rides: a request that demonstrably
+    // reached the provider has an answer to wait for, and one that never
+    // left the machine (a connect timeout, a cancellation) has none. The
+    // cause already tells the consumer which of the two happened.
     return {
       result: unscoredConfidenceResult(
         transportCause(outcome.failure.kind, outcome.failure.status),
@@ -190,14 +316,30 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
       ),
       requestPayload: null, rawResponse: null,
       diagnostic: describeTransportFailure(outcome.failure, { secrets: diagnosticSecrets }),
+      wireEffort: failureReachedProvider(outcome.failure.kind) ? wireEffort : "",
+      usage: null,
+      latencyMs: failureReachedProvider(outcome.failure.kind) ? latencyMs : null,
     };
   }
   const parsed = parseConfidenceAnswer(outcome.response.content);
+  // #1455: the usage the provider reported for THIS call, read from the raw
+  // provider body in the wire format the run used. The raw body is the
+  // source on purpose: the transport's own projection is shape-only, so it
+  // sums a total the provider did not report and cannot see the Anthropic
+  // cache tokens the canonical accounting counts.
+  const usage = confidenceUsageFromProviderBody(outcome.raw, profile.apiFormat === "anthropic" ? "anthropic" : "openai");
   if (!parsed.ok) {
     return {
       result: unscoredConfidenceResult(parsed.cause, profile.model),
       requestPayload: payload.body, rawResponse: outcome.raw,
       diagnostic: "",
+      wireEffort,
+      // #1455: the provider DID answer and DID report its accounting for
+      // that answer — only the parse failed. The run spent those tokens, so
+      // the usage is reported; dropping it would understate the cost of a
+      // run that failed to read the answer, not save it.
+      usage,
+      latencyMs,
     };
   }
   const ceilings = applyConfidenceCeilings(parsed.answer, {
@@ -212,11 +354,38 @@ export async function runConfidenceScorer(input: ConfidenceScorerInput & Confide
       concerns: parsed.answer.concerns,
       model: profile.model,
       caps: ceilings.caps,
+      parserNotes: parsed.answer.notes,
     }),
     requestPayload: payload.body,
     rawResponse: outcome.raw,
     diagnostic: "",
+    wireEffort,
+    // #1455: the provider's own accounting for the one call that produced
+    // this answer — the transport normalized it, the scorer no longer drops
+    // it.
+    usage,
+    latencyMs,
   };
+}
+
+/**
+ * #998: whether a typed transport failure can have carried the dispatched
+ * request to the provider — the only question the effort-sent provenance
+ * turns on.
+ *
+ * - `connect_timeout` never opened a connection, so no request was
+ *   transmitted at all;
+ * - `cancelled` can fire before the body was written;
+ * - `http_status` and `response_too_large` are the provider's OWN answer, so
+ *   the request demonstrably arrived;
+ * - `request_timeout` is a written request whose answer was lost;
+ * - `network` is the transport's catch-all socket kind, and it also covers a
+ *   provider answer that was not JSON — so it cannot mean "never reached the
+ *   provider", and it keeps the dispatched effort (the conservative
+ *   direction for a spend-provenance field).
+ */
+function failureReachedProvider(kind: TransportFailureKind): boolean {
+  return kind !== "connect_timeout" && kind !== "cancelled";
 }
 
 function disabledResult(): ConfidenceResult {
@@ -229,6 +398,7 @@ function disabledResult(): ConfidenceResult {
     model: "",
     cause: "",
     caps: [],
+    parserNotes: [],
   };
 }
 

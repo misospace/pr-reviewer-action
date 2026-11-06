@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -148,6 +148,58 @@ test("runs the full review end to end: artifacts, outputs, marker", async () => 
     assert.match(output, /tool-calls=\[\]/);
     // Metadata marker bound to the head.
     assert.match(result.marker, /head_sha.{0,4}a{40}/);
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
+// #1428: an endpoint URL may carry its model credential in the userinfo; that
+// URL is then a resolved profile field, so EVERY diagnostic surface that
+// interpolates it — the per-attempt log line, the analysis-engine string, the
+// persisted artifacts — must carry the credential-free URL, and the wire
+// request must carry the credential only as HTTP Basic.
+test("#1428: a URL-credentialed endpoint never leaks its credential into a run diagnostic", async () => {
+  const server = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict()));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const logs: string[] = [];
+  try {
+    const credential = "lane-operator:hunter2";
+    const expectedBasic = `Basic ${Buffer.from(credential, "utf8").toString("base64")}`;
+    const result = await runReview({
+      env: {},
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url.replace("http://", `http://${credential}@`),
+        "ai-model": "m",
+        "ai-stream": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      persistArtifacts: true,
+      log: (line) => logs.push(line),
+    });
+    assert.equal(result.outputs.verdict, "approve");
+    // The credential rode the wire exactly once, as HTTP Basic.
+    const captured = server.requests.at(-1)!;
+    assert.equal(captured.headers.authorization, expectedBasic);
+    // The attempt line names the endpoint, minus its userinfo.
+    assert.ok(
+      logs.some((line) => line.includes("model attempt") && line.includes(server.url)),
+      logs.join(" | "),
+    );
+    // The analysis-engine output is the redacted URL too.
+    assert.equal(result.outputs.analysisEngine, `m@${server.url} (openai)`);
+    // No log line and no persisted artifact carries the raw credential.
+    for (const surface of [logs.join("\n"), ...readdirSync(runDir).filter((name) => statSync(join(runDir, name)).isFile()).map((name) => readFileSync(join(runDir, name), "utf8"))]) {
+      assert.ok(!surface.includes(credential), `a run diagnostic carried the URL credential: ${surface.slice(0, 200)}`);
+    }
   } finally {
     await server.close();
     cleanup();
@@ -1389,6 +1441,75 @@ test("#978: native-loop fallback request_changes without deterministic blockers 
   }
 });
 
+test("#1507: routing off — the tool loop dials the primary lane's wire, not the base's", async () => {
+  // The issue's exact scenario: the base lane stays OpenAI, the primary lane
+  // override dials Anthropic. The loop's verdict turn IS the review's verdict,
+  // so every model call — the native loop's included — must go to the lane
+  // endpoint on the lane's wire; the base endpoint must never be dialed.
+  const baseServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "base lane must not be dialed" }));
+  });
+  const lanePaths: string[] = [];
+  const laneServer = await startMockServer((req, body, res) => {
+    lanePaths.push(req.url ?? "");
+    const request = JSON.parse(body) as { tools?: unknown[]; system?: unknown };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      // The native loop's planning turn: no tool calls → corpus-only degrade.
+      res.end(JSON.stringify({
+        content: [{ type: "text", text: "no tools needed" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 10, output_tokens: 3 },
+      }));
+      return;
+    }
+    // The standard review call.
+    res.end(JSON.stringify({
+      id: "msg_1", model: "m", role: "assistant",
+      content: [{ type: "text", text: JSON.stringify(baseVerdict()) }],
+      stop_reason: "end_turn",
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        "ai-base-url": baseServer.url, "ai-model": "base-m", "ai-api-key": "base-key",
+        "ai-api-format": "openai",
+        "ai-primary-base-url": laneServer.url, "ai-primary-model": "lane-m",
+        "ai-primary-api-key": "lane-key", "ai-primary-api-format": "anthropic",
+        "ai-stream": "false", "review-routing-mode": "off", "tool-mode": "native_loop", "tool-max-requests": "1",
+        "verdict-policy": "model", "ai-primary-retries": "0", "deep-review": "false",
+        "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "2",
+      },
+      runDir, workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+    assert.equal(baseServer.requests.length, 0, "the base lane must never be dialed");
+    assert.equal(laneServer.requests.length, 2, "the lane serves the loop's planning turn and the review call");
+    // Both lane calls spoke the Anthropic wire endpoint.
+    assert.deepEqual(lanePaths, ["/messages", "/messages"]);
+    // The loop's planning turn named the lane's model.
+    const loopBody = JSON.parse(laneServer.requests[0]!.body) as Record<string, unknown>;
+    assert.equal(loopBody.model, "lane-m", "the loop must send the lane's model");
+    assert.equal(result.outputs.verdict, "approve");
+    // The published engine line names the lane the loop actually dialed.
+    assert.match(result.outputs.analysisEngine, /lane-m@/);
+    assert.match(result.outputs.analysisEngine, /\(anthropic\)/);
+  } finally {
+    await baseServer.close();
+    await laneServer.close();
+    cleanup();
+  }
+});
+
 test("#978: primary no-evidence review does not qualify for the fallback gate bypass", async () => {
   const server = await startMockServer((_req, body, res) => {
     const request = JSON.parse(body) as { tools?: unknown[] };
@@ -1869,22 +1990,24 @@ test("#965: auto native loop starts on primary with the primary context window",
 
 test("legacy native-loop verdict reports the routed model when a primary override differs", async () => {
   let toolCallSent = false;
-  const baseServer = await startMockServer((_req, body, res) => {
+  const baseServer = await startMockServer((_req, _body, res) => {
+    // #1507: the base lane must never be dialed — the loop speaks the
+    // resolved primary lane's transport in every routing mode, off included.
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "base lane must not be dialed" }));
+  });
+  const primaryServer = await startMockServer((_req, body, res) => {
     const request = JSON.parse(body) as { tools?: unknown[] };
     res.setHeader("Content-Type", "application/json");
     if (!toolCallSent && Array.isArray(request.tools) && request.tools.length > 0) {
       toolCallSent = true;
       res.end(JSON.stringify({
-        id: "c0", object: "chat.completion", model: "base-m",
+        id: "c0", object: "chat.completion", model: "primary-m",
         choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "read_file", arguments: '{"path":"README.md"}' } }] } }],
         usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
       }));
       return;
     }
-    res.end(verdictBody(baseVerdict()));
-  });
-  const primaryServer = await startMockServer((_req, _body, res) => {
-    res.setHeader("Content-Type", "application/json");
     res.end(verdictBody(baseVerdict()));
   });
   const { runDir, cleanup } = withRunDir();
@@ -1905,10 +2028,13 @@ test("legacy native-loop verdict reports the routed model when a primary overrid
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as { native_loop_verdict_produced?: boolean };
     assert.equal(harness.native_loop_verdict_produced, true, "the native verdict path must be exercised");
     assert.equal(result.outputs.reviewRoute, "legacy");
-    assert.equal(result.outputs.analysisEngine, `base-m@${baseServer.url} (openai)`);
-    assert.equal(primaryServer.requests.length, 0);
-    assert.ok(baseServer.requests.length >= 2);
-    assert.ok(baseServer.requests.every((request) => request.headers.authorization === "Bearer base-key"));
+    // #1507: the loop's verdict turn IS the review's verdict, and the loop
+    // dials the resolved primary lane — so the reuse path names the lane the
+    // loop actually dialed, not the raw AI_* base env.
+    assert.equal(result.outputs.analysisEngine, `primary-m@${primaryServer.url} (openai)`);
+    assert.equal(baseServer.requests.length, 0);
+    assert.ok(primaryServer.requests.length >= 2);
+    assert.ok(primaryServer.requests.every((request) => request.headers.authorization === "Bearer primary-key"));
   } finally {
     await baseServer.close();
     await primaryServer.close();
@@ -2228,16 +2354,21 @@ test("#873: required-check coverage incomplete + a model approve never publishes
   });
   const result = await runWithVerdictOn(platform, { verdict: "approve", findings: [] });
 
-  // The reproduction: exactly PR #854's shape.
-  assert.equal(result.outputs.verdict, "approve");
+  // PR #854's shape — model approve, no required_check_dispositions at all
+  // (conservatively unresolved, #750 key-absence semantics). #1381 reconciles
+  // the contract: the checklist items ARE review-owned obligation rows, and
+  // an unresolved review-owned row never certifies a native APPROVE — the
+  // obligation gate forces request_changes while warn-mode completeness keeps
+  // recording the incomplete coverage.
+  assert.equal(result.outputs.verdict, "request_changes");
   assert.equal(result.outputs.requiredChecks, "incomplete");
-  assert.match(result.marker, /"review_result":"partial"/);
+  assert.match(result.marker, /"review_result":"issues"/);
   assert.match(result.marker, /"required_checks":"incomplete"/);
 
-  // The invariant (#1145 restated): piping that exact shape through publish
-  // (review_verdict mode, allow_approve on) publishes the verdict's native
-  // event — but the run must NEVER read as clean: the marker keeps the
-  // partial/incomplete state and the published body names the gap.
+  // The invariant (#1145 strengthened by #1381): piping that exact shape
+  // through publish (review_verdict mode, allow_approve on) publishes a
+  // changes-requested event naming the unresolved obligation rows; the run
+  // never reads as clean.
   const api = new MinimalPublishApi("a".repeat(40));
   const publishResult = await publishReview({
     mode: "review_verdict",
@@ -2270,9 +2401,10 @@ test("#873: required-check coverage incomplete + a model approve never publishes
 
   assert.equal(publishResult.status, "published");
   assert.equal(api.submitted.length, 1);
-  assert.equal(api.submitted[0]!.event, "APPROVE");  // #1145: verdict mode publishes the verdict
-  assert.match(api.submitted[0]!.body, /Approval published with incomplete coverage/);
-  assert.match(api.submitted[0]!.body, /"review_result":"partial"/);
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+  assert.match(api.submitted[0]!.body, /Unresolved Required Review Evidence/);
+  assert.match(api.submitted[0]!.body, /Unaddressed required checks/);
+  assert.match(api.submitted[0]!.body, /"review_result":"issues"/);
   assert.match(api.submitted[0]!.body, /"required_checks":"incomplete"/);
 });
 
@@ -2423,8 +2555,11 @@ test("#930: primary review grants corpus-diff credit through the primary artifac
     assert.ok(existsSync(join(runDir, "pr.diff.truncated")), "the primary-profile build must have run");
     assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
     assert.equal(harness.partial_coverage, undefined, "complete coverage: the corpus credit resolves the only changed file");
-    assert.deepEqual(harness.corpus_diff_covered_files, ["src/auth.ts"]);
-    assert.equal(result.outputs.verdict, "approve");
+assert.deepEqual(harness.corpus_diff_covered_files, ["src/auth.ts"]);
+// #1381: the auth classification's must_check obligation rows are undisposed
+// by the scripted verdict, so the obligation gate forces request_changes.
+// This test pins coverage credit, which stays gap-free either way.
+assert.equal(result.outputs.verdict, "request_changes");
     // #847: a budget stop with no unread files stays out of `coverage` (no
     // gap) but is now visible in the marker through `tool_stop_reason` — the
     // case that made budget-exhaustion rates unmeasurable from telemetry.
@@ -2445,9 +2580,10 @@ test("#810: a large PR gets a size-scaled tool budget through the run entry", as
   try {
     writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
     gitInit(runDir);
-    // 54 files, +4346/-181: the #806 shape.
-    const files = Array.from({ length: 54 }, (_, i) => ({
-      filename: `src/f${i}.ts`, status: "modified", additions: i === 0 ? 4346 - 53 * 80 : 80, deletions: i === 0 ? 181 - 53 * 3 : 3, changes: 0,
+    // 100 files / 8,000 changed lines derive 45 calls, above the new
+    // primary floor of 40 but still below the hard ceiling.
+    const files = Array.from({ length: 100 }, (_, i) => ({
+      filename: `src/f${i}.ts`, status: "modified", additions: 80, deletions: 0, changes: 80,
     }));
     const result = await runReview({
       env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt"), IS_FORK_PR: "false" },
@@ -2463,18 +2599,18 @@ test("#810: a large PR gets a size-scaled tool budget through the run entry", as
       },
       runDir,
       workspace: runDir,
-      platformAdapter: mockPlatform({ files, additions: 4346, deletions: 181 }),
+      platformAdapter: mockPlatform({ files, additions: 8000, deletions: 0 }),
       persistArtifacts: true,
       quiet: true,
     });
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
-    assert.deepEqual(harness.tool_budget_size, { changed_files: 54, changed_lines: 4527, specialist_leads: 0 });
-    // ceil(54/4) + ceil(4527/400) = 14 + 12 = 26, above the primary floor of 16.
-    assert.equal(harness.tool_request_budget, 26);
+    assert.deepEqual(harness.tool_budget_size, { changed_files: 100, changed_lines: 8000, specialist_leads: 0 });
+    // ceil(100/4) + ceil(8000/400) = 25 + 20 = 45.
+    assert.equal(harness.tool_request_budget, 45);
     assert.equal(harness.tool_budget_source, "size-scaled");
     // #847: the same provenance reaches the published metadata marker, so the
     // size-scaled default is measurable from real reviews without artifacts.
-    assert.match(result.marker, /"tool_budget":26/);
+    assert.match(result.marker, /"tool_budget":45/);
     assert.match(result.marker, /"tool_budget_source":"size-scaled"/);
     assert.match(result.marker, /"tool_calls":\d+/);
     // #847: the loop's stop reason rides along for the size-scaled-vs-tier
@@ -3111,7 +3247,10 @@ test("a PR whose body keyword-links a fetched issue classifies without crashing"
       persistArtifacts: true,
       quiet: true,
     });
-    assert.equal(result.outputs.verdict, "approve");
+    // #1381: this test pins linked-issue collection/classification, not the
+    // verdict — the scripted verdict dispositions nothing, so the obligation
+    // gate forces request_changes over the mandated must_check rows.
+    assert.equal(result.outputs.verdict, "request_changes");
     const classification = JSON.parse(readFileSync(join(runDir, "classification.json"), "utf8")) as { risk_flags: string[]; linked_issue_labels: string[] };
     assert.deepEqual(classification.linked_issue_labels, ["enhancement", "priority/p1"]);
     assert.deepEqual(classification.risk_flags, ["linked_priority_p1"]);

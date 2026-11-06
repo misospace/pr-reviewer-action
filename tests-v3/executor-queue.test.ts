@@ -18,6 +18,7 @@ import {
 } from "../src/queue/index.js";
 import {
   toQueueJobExecutor,
+  type ExecutionCancelOutcome,
   type ExecutionHandle,
   type ExecutionReconcileOutcome,
   type ExecutionRequest,
@@ -48,6 +49,7 @@ function makeJob(jobId: string, overrides: Partial<ReviewJob> = {}): ReviewJob {
     nonce: "",
     adoptionEpoch: "",
     eventReference: "",
+    forgeIntegration: "",
     fork: false,
     deadlineAtMs: 0,
     runId: "",
@@ -75,6 +77,7 @@ function makeRequest(jobId: string, attempt: number): ExecutionRequest {
     attempt,
     kind: "review",
     platform: "github",
+    forgeApiUrl: "https://api.github.com",
     repoFullName: "owner/repo",
     prNumber: 7,
     headSha: HEAD_SHA,
@@ -173,6 +176,12 @@ class StubExecutor implements Executor {
 
   async reconcile(): Promise<ExecutionReconcileOutcome> {
     return { kind: "none" };
+  }
+
+  /** The correlation-keyed cancellation: the queue adapter never drives
+   * it, so the stub only has to satisfy the seam. */
+  async cancel(_request: ExecutionRequest): Promise<ExecutionCancelOutcome> {
+    return { kind: "terminated" };
   }
 }
 
@@ -404,6 +413,7 @@ test("the controller settles a dispatched job completed through the adapter", as
   const executor: Executor = {
     start: async (request: ExecutionRequest) => handleFor(completedResult(request)),
     reconcile: async () => ({ kind: "none" as const }),
+    cancel: async () => ({ kind: "terminated" as const }),
   };
   const controller = new ReviewQueueController(store, baseOptions(executor), () => clock.t);
   controller.recover();
@@ -421,6 +431,7 @@ test("the controller settles a dispatched job failed through the adapter", async
     start: async (request: ExecutionRequest) =>
       handleFor(failedResult(request, "worker_error", "the worker exited with code 3")),
     reconcile: async () => ({ kind: "none" as const }),
+    cancel: async () => ({ kind: "terminated" as const }),
   };
   const controller = new ReviewQueueController(
     store,

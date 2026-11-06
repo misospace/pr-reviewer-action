@@ -195,7 +195,7 @@ inputs:
     v2_id: validate_required_checks
     required: false
     default: "auto"
-    description: "Whether to validate the final review against the classifier's must_check items. 'auto' (default) validates whenever must_check is non-empty; 'true' and 'false' force it on or off. Since #750, validation is structured-first: the verdict's required_check_dispositions are folded against the deterministic check list, and a verdict carrying no usable dispositions leaves every check conservatively unresolved. The legacy v2 keyword match was removed (#1252); no keyword mention can substitute for a missing or malformed disposition."
+    description: "Whether to validate the final review against the classifier's must_check items. 'auto' (default) validates whenever must_check is non-empty; 'true' and 'false' force it on or off. Since #750, validation is structured-first: the verdict's required_check_dispositions are folded against the deterministic check list, and a verdict carrying no usable dispositions leaves every check conservatively unresolved. The legacy v2 keyword match was removed (#1252); no keyword mention can substitute for a missing or malformed disposition. Under #1381 must_check items are also review-owned obligation rows: while any stays unresolved the obligation gate forces request_changes regardless of required-check-validation-mode, and 'false' is the single operator opt-out that removes them from the obligation contract at both the harness and the engine."
     repo-configurable: true
     repo-policy: true
   - id: required-check-validation-mode
@@ -293,27 +293,55 @@ inputs:
   - id: ai-confidence-model
     required: false
     default: ""
-    description: "Model for the opt-in independent post-review confidence scorer (#1073). Empty (the default) disables the scorer entirely: no extra model call is made and every confidence-* output stays empty. When set, the scorer runs once after the completed review and grades how confident the review is (integer 0-5 plus a risk band and a short reason); the result is advisory telemetry only — it never affects the verdict, the findings, approval, or any merge gate."
+    description: "Model opt-in independent post-review merge-safety verifier (#1073, #1369). Empty (the default) disables the verifier entirely: no extra model call made and every confidence-* output stays empty. Set, the verifier runs once after the completed review, reads the PR description and diff itself, and audits the completed review against the actual change - hunting missed blocker/major defects (correctness, security, availability, data loss, CI/config, supply chain) and materially unsupported or contradicted blocker/major findings - reporting a merge-readiness score (integer 0-5), risk band, short reason, structured concerns (type missed_issue|unsupported_finding, severity blocker|major, file/line/evidence), and a cannot_verify fail-closed answer when the supplied evidence is too incomplete to verify. Result is advisory telemetry only - never affects verdict, findings, approval, or merge gate. The name goes to the provider as written, apart from surrounding whitespace, and a provider treats a model name as a case-sensitive identifier. Under ai-confidence-isolation=require-dedicated an empty value is a REFUSED configuration (confidence-status=unscored, cause dedicated_model_missing), never a fallback to the primary or smart lane's model (#1478)."
   - id: ai-confidence-base-url
     required: false
     default: ""
-    description: "Base URL of the confidence scorer's endpoint. Empty (the default) inherits the primary lane's endpoint AND its credential, which keeps configuration simple but makes the scoring less independent: the same endpoint that produced the review grades it, so shared blind spots and correlated errors go unnoticed. Set a distinct base URL to score against an independent backend. A distinct base URL NEVER implicitly inherits the primary API key — set ai-confidence-api-key explicitly."
+    description: "Base URL of the confidence verifier's endpoint. Empty (the default) inherits the primary lane's endpoint AND its credential, which keeps configuration simple but makes the scoring less independent: the same endpoint that produced the review audits it, so shared blind spots and correlated errors go unnoticed. Set a distinct base URL to verify against an independent backend. A distinct base URL NEVER implicitly inherits the primary API key — set ai-confidence-api-key explicitly."
   - id: ai-confidence-api-format
     required: false
     default: ""
-    description: "API request/response format for the confidence scorer's endpoint (openai or anthropic). Empty (the default) inherits the primary lane's format."
+    description: "API request/response format for the confidence verifier's endpoint (openai or anthropic). Empty (the default) inherits the primary lane's format. Under ai-confidence-isolation=require-dedicated the wire family is dedicated configuration like the endpoint, credential, and model: an empty value is a REFUSED configuration (confidence-status=unscored, cause dedicated_format_missing), never an inheritance of the primary lane's format (#1481)."
   - id: ai-confidence-api-key
     required: false
     default: ""
-    description: "API key for the confidence scorer's endpoint. Empty inherits the primary API key ONLY when ai-confidence-base-url is also empty (scorer on the same endpoint); with a distinct ai-confidence-base-url the scorer uses only its own key and never reuses the primary credential. An explicitly configured key is always used as-is."
+    description: "API key for the confidence verifier's endpoint. Empty inherits the primary API key ONLY when ai-confidence-base-url is also empty (verifier on the same endpoint); with a distinct ai-confidence-base-url the verifier uses only its own key and never reuses the primary credential. An explicitly configured key is always used as-is."
+  - id: ai-confidence-isolation
+    required: false
+    default: "inherit-primary"
+    description: "How the verifier resolves its transport when ai-confidence-base-url is empty. 'inherit-primary' (the default) keeps the same-endpoint convenience: the scorer dials the primary lane's endpoint under the primary lane's credential. 'require-dedicated' refuses that inheritance: a verifier model without its own ai-confidence-base-url is a misconfiguration, so the run publishes confidence-status=unscored with the action-owned cause dedicated_config_missing — no model call, the review itself unaffected — instead of silently scoring on the primary lane. The mode also requires a DEDICATED verifier model (#1478): an empty ai-confidence-model is refused the same way (cause dedicated_model_missing) and never falls back to the primary or smart lane's model, so an unset model variable cannot silently put the reviewing model on the verifier. It further refuses a missing dedicated wire family (#1481): an empty ai-confidence-api-format resolves cause dedicated_format_missing instead of inheriting the primary lane's format, and an unset ai-confidence-tokens-param resolves the verifier-owned max_tokens instead of inheriting the review lane's ai-tokens-param. Under 'require-dedicated' a SET ai-confidence-base-url behaves exactly as documented for ai-confidence-base-url/ai-confidence-api-key (a distinct endpoint never inherits the primary credential). Operator-only: never repo-configurable, matching the other ai-confidence-* inputs."
+  - id: ai-confidence-tokens-param
+    required: false
+    default: ""
+    description: "Token-limit field name the confidence verifier's OpenAI-format requests send: max_tokens or max_completion_tokens (required by newer OpenAI reasoning models). Ignored for the anthropic format, which always sends max_tokens. An explicit value always wins. Empty (the default): under ai-confidence-isolation=inherit-primary the verifier keeps the run's existing convention (ai-tokens-param, default max_tokens); under require-dedicated the token field is dedicated protocol configuration like the wire family and resolves to the verifier-owned max_tokens — a dedicated verifier never silently inherits whether the review lane sends max_tokens or max_completion_tokens (#1481). Operator-only: never repo-configurable, matching the other ai-confidence-* inputs."
   - id: ai-confidence-reasoning-effort
     required: false
     default: ""
-    description: "Reasoning effort for the confidence scorer's model call. Free-form, bounded string (lowercase letters, digits, '-', and '_'; up to 32 characters) passed through verbatim like ai-reasoning-effort — providers and proxies define their own effort vocabulary and none is imposed here. Unlike the review lanes, an empty value (the default) does NOT inherit ai-reasoning-effort: the scorer is an independent lane and omits the field entirely unless explicitly configured. A value that fails validation is dropped as unset with a warning naming the input. Operator-only: never repo-configurable, matching the other ai-* reasoning inputs."
+    description: "Reasoning effort for the confidence verifier's model call. Free-form, bounded string (lowercase letters, digits, '-', and '_'; up to 32 characters) passed through verbatim like ai-reasoning-effort — providers and proxies define their own effort vocabulary and none is imposed here. Unlike the review lanes, an empty value (the default) does NOT inherit ai-reasoning-effort: the verifier is an independent lane and omits the field entirely unless explicitly configured. A value that fails validation is dropped as unset with a warning naming the input. Operator-only: never repo-configurable, matching the other ai-* reasoning inputs."
   - id: ai-confidence-timeout-sec
     required: false
     default: "120"
-    description: "Wall-clock timeout in seconds for the confidence scorer's model request. Default 120; must be a positive integer. A scorer that times out or fails degrades to confidence-status=unscored and never affects the review itself."
+    description: "Wall-clock timeout in seconds for the confidence verifier's model request. Default 120; must be a positive integer. A verifier that times out or fails degrades to confidence-status=unscored and never affects the review itself."
+  - id: ai-confidence-max-tokens
+    required: false
+    default: "4096"
+    description: "Bounded output/completion token budget for the confidence scorer's answer. Provider accounting may include hidden reasoning/thinking tokens INSIDE this budget, so it must leave room for both the model's internal reasoning and the final structured JSON answer. Default 4096 (reasoning-safe: the previous hard-coded 1024 could be consumed entirely by thinking on a reasoning model, leaving nothing for the JSON answer). Positive integer. A scorer that exhausts its budget degrades to confidence-status=unscored and never affects the review itself."
+  - id: ai-confidence-prompt-tokens
+    required: false
+    default: "98304"
+    description: "Prompt budget in tokens (~96k default) for the confidence scorer's single call. The scorer receives enough of the diff and review evidence to independently judge merge readiness. Positive integer. A deterministic token estimate (bytes/4 — an approximation, not a tokenizer) bounds the assembled prompt with explicit in-band truncation when the budget is exceeded; the budget covers the whole prompt the provider request sends — the scorer's system prompt AND the user message — so a declared model-context clamp on prompt + completion bounds the real request. Degradation bound: the diff section keeps a small floor (4096 bytes) so a modestly small budget degrades visibly instead of starving the diff, and the budget stays an ACTUAL bound — when even the floor cannot fit the declared budget, the scorer refuses the call (confidence-status=unscored, cause prompt_over_budget) instead of sending a prompt over it."
+  - id: ai-confidence-model-context-tokens
+    required: false
+    default: ""
+    description: "Operator-declared context window in tokens of the confidence scorer's model, for deterministic budget validation when it is known. When set, ai-confidence-max-tokens and ai-confidence-prompt-tokens are clamped deterministically against it (each clamp announced with a warning, never fatal) so prompt plus completion always fits the window. The prompt floor the clamp respects is the smallest REAL request — the scorer's system prompt and section scaffolding plus the smallest usable diff — so a window too small for that minimum shape plus a positive completion budget fails the scorer closed (disabled for the run with a loud warning, no scorer call) instead of resolving budgets its every request would exceed. Empty (the default) means unknown and no clamping happens. Positive integer when set."
+  - id: ai-confidence-anthropic-effort-support
+    required: false
+    default: "false"
+    description: "Operator assertion that the confidence scorer's Anthropic-compatible endpoint accepts output_config.effort. Does NOT inherit any other lane's assertion — capability assertions never cross lanes. When not asserted (the default), an Anthropic-format scorer request carries no effort field byte-for-byte exactly as before, even when ai-confidence-reasoning-effort is set, and the run logs a WARNING naming this input. Never inferred from model names. Ignored for the openai format. Operator-only: never repo-configurable, matching the other ai-confidence-* inputs."
+  - id: ai-confidence-structured-output-support
+    required: false
+    default: "false"
+    description: "Operator assertion that the confidence scorer's endpoint (OpenAI-compatible OR Anthropic-compatible) accepts structured output with the scorer's own compact JSON schema. When true, OpenAI-format scorer requests carry response_format json_schema (name confidence_review, strict) and Anthropic-format requests carry output_config.format with that same schema. The schema IS the verifier's answer contract — every concern entry must carry the closed-vocabulary type (missed_issue/unsupported_finding) and severity (blocker/major), and the fail-closed cannot_verify answer has its own admissible branch (cannot_verify true with a null score and risk). When false (the default), scorer request bytes are unchanged from before. A provider incompatibility degrades safely via the scorer's existing one-call/fail-soft contract (confidence-status=unscored). Note: the schema also bounds score with minimum/maximum, concern strings with minLength, and the concern list with maxItems; a strict endpoint that rejects these keywords will fail the call (fail-soft, unscored) — set this only after confirming the endpoint accepts them. Operator-only: never repo-configurable, matching the other ai-confidence-* inputs."
   # The scorer's prompt carries PRIVILEGED review-derived output (the final
   # findings, summary, coverage account, review_result, required checks) and
   # sends it outward over a privileged credential, so on a cross-repository PR
@@ -324,7 +352,7 @@ inputs:
   - id: ai-confidence-enable-for-forks
     required: false
     default: "false"
-    description: "If true, allow the confidence scorer to run on cross-repository pull requests. Default false: on a fork PR the scorer's prompt would send the review's own privileged output (final findings, summary, coverage account, review_result, required checks) to a separate endpoint under a privileged credential. Off on forks means the run publishes no confidence surface at all (no model call, no artifacts, empty confidence-* outputs), with a WARNING naming this input. Set true only when the scorer endpoint is one that may see that review content."
+    description: "If true, allow the confidence verifier to run on cross-repository pull requests. Default false: on a fork PR the verifier's prompt would send the review's own privileged output (final findings, summary, coverage account, review_result, required checks) to a separate endpoint under a privileged credential. Off on forks means the run publishes no confidence surface at all (no model call, no artifacts, empty confidence-* outputs), with a WARNING naming this input. Set true only when the verifier endpoint is one that may see that review content."
   - id: ai-stream
     v2_id: ai_stream
     required: false
@@ -580,8 +608,15 @@ inputs:
     v2_id: claim_falsification
     required: false
     default: "false"
-    description: "Opt-in claim falsification pre-pass (#785): a deterministic scan of the PR body and its diff's added comments/docstrings for the PR's own quantified claims and invariants (every/only/never/identical/parity, authority boundaries, compatibility promises), each anchored to the concrete code it describes; falls back to one bounded model call on the primary route only when that scan finds nothing. The review corpus gets a Claims to Falsify section asking the reviewer to check every listed item and report counterexamples as findings. Fail-soft; never changes the verdict policy."
+    description: "Opt-in claim falsification pre-pass (#785): a deterministic scan of the PR body and its diff's added comments/docstrings for the PR's own quantified claims and invariants (every/only/never/identical/parity, authority boundaries, compatibility promises), each anchored to the concrete code it describes; one bounded model call on the primary route merges its claims after the deterministic ones. On a dependency-update PR, machine-generated metadata is filtered first: a mixed sentence keeps only its semantic clauses, and the model call is skipped entirely (status filtered) only when the filter actually scanned content and dropped every sentence as machine-generated metadata (generic update-list/generator scaffolding lines included); a remaining non-metadata sentence keeps the model pass even when the keyword scan found no candidate, and an unscanned body or text swallowed by an unclosed HTML comment counts as content, not as absence. The review corpus gets a Claims to Falsify section asking the reviewer to check every listed item and report counterexamples as findings. Fail-soft; never changes the verdict policy."
     repo-configurable: true
+  # #1448/#1449: operator-only by design (no repo-configurable key): a derived
+  # obligation CAN withhold trusted approval (#1449), so it must never be
+  # switchable from repository-controlled config; trusted workflow input only.
+  - id: derived-obligations
+    required: false
+    default: "false"
+    description: "Opt-in derived architectural-obligation pre-pass (#1448): one bounded model call on the primary route derives, from the diff itself, the cross-path obligations a change implies even when the PR never states them (identity/dedupe keys, converging producers, routing keys, persistence/recovery, retry/reconciliation/fallback, trust boundaries, ordering, compatibility), each grounded in the change that raises it with concrete path:symbol locations to check. Review corpus gets a Derived Architectural Obligations section the reviewer must disposition, and a derivation that did not complete renders a visible unavailable note instead of silence. Enforcement participation (#1449): each derived obligation is a review-owned obligation row (id derived-<n>) the reviewer discharges in required_check_dispositions, and a satisfied row's rationale must name one of the derived obligation's locations. An unresolved derived obligation withholds a trusted approve and is reported as incomplete coverage, never as a fabricated blocker finding; a counterexample is reported as an ordinary evidence-backed finding; a derivation that did not complete leaves the derived coverage unknown and withholds the approve the same way."
   # #1003: operator-only (no repo-configurable key — repository config must
   # never be able to switch a review behaviour on) and review-only (no
   # *-enable-for-forks sibling — it grants no tool, repository or access
@@ -674,11 +709,11 @@ inputs:
     v2_id: tool_loop_wall_clock_sec
     required: false
     default: "600"
-    description: "Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange (all model round-trips plus tool execution). Ignored for other modes."
+    description: "Wall-clock ceiling in seconds for the whole tool_mode=native_loop exchange (all model round-trips plus tool execution). Clamped to 10..900 seconds — an explicit value above 900 is capped at the hard ceiling, and one below 10 is raised to the floor. Ignored for other modes."
   - id: smart-tool-loop-wall-clock-sec
     required: false
     default: ""
-    description: "Wall-clock ceiling in seconds for the smart tier's tool-mode=native_loop exchange (the post-review escalation rerun) only. Empty (the default) inherits tool-loop-wall-clock-sec. An explicit value outranks tool-loop-wall-clock-sec on the smart tier and leaves the primary tier untouched. Ignored for other modes."
+    description: "Wall-clock ceiling in seconds for the smart tier's tool-mode=native_loop exchange (the post-review escalation rerun) only. Empty (the default) inherits tool-loop-wall-clock-sec. An explicit value outranks tool-loop-wall-clock-sec on the smart tier and leaves the primary tier untouched. Clamped to 10..900 seconds like tool-loop-wall-clock-sec. Ignored for other modes."
   - id: tool-loop-summarize
     v2_id: tool_loop_summarize
     required: false
@@ -693,12 +728,12 @@ inputs:
     v2_id: tool_max_requests
     required: false
     default: ""
-    description: "Maximum number of tool requests the harness executes when tool_mode is enabled. Empty (the default) resolves a tier-aware budget from the review route (#701) — ~24 for the primary route, ~32 for the smart route, up to 40 for the escalated (deep) path — scaled for the PR size (#810) from changed files, changed lines and specialist leads, floored at the tier default (small PRs keep the tier budget) and capped at the hard ceiling of 50; wall-clock and round budgets still bind. An explicit value overrides every tier and the scaling and is bounded to 1..50."
+    description: "Maximum number of tool requests the harness executes when tool_mode is enabled. Empty resolves a tier-aware budget from the review route (#701) — 40 for primary, 45 for smart, 50 for escalated — then scales upward for PR size (#810) up to the hard ceiling of 50. Explicit route-specific inputs outrank tool-max-requests; tool-max-requests otherwise overrides the derived tier budget. Wall-clock and round limits still bind."
   - id: primary-tool-max-requests
     v2_id: primary_tool_max_requests
     required: false
     default: ""
-    description: "Request budget for the primary route only, bounded to 1..50. Outranks tool_max_requests on that route and leaves the smart/escalated tiers untouched. Empty (the default) keeps the tier default."
+    description: "Request budget for the primary route only, bounded to 1..50. Outranks tool_max_requests on that route and leaves the smart/escalated tiers untouched. Empty keeps the primary tier default (40)."
   - id: smart-tool-max-requests
     v2_id: smart_tool_max_requests
     required: false
@@ -753,7 +788,7 @@ inputs:
     v2_id: tool_max_search_results
     required: false
     default: "5"
-    description: "Maximum results returned per web_search call"
+    description: "Maximum results returned per web_search call; bounded to 1..15"
   - id: tool-failure-enforcement
     v2_id: tool_failure_enforcement
     required: false
@@ -808,7 +843,7 @@ inputs:
     v2_id: platform
     required: false
     default: "auto"
-    description: "Target hosting platform for API capability gating and backend selection. 'auto' (default) detects from TANGLED_REPO_DID (the Tangled repository owner DID), GITHUB_SERVER_URL, and FORGEJO_API_URL: a set TANGLED_REPO_DID resolves to 'tangled' (checked before the GitHub/Forgejo signals); otherwise non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo'; otherwise 'github'. Set 'forgejo', 'github', or 'tangled' explicitly to override auto-detection; explicit 'tangled' requires a non-empty TANGLED_REPO_DID and fails with a descriptive error when it is missing. Tangled publishes one managed top-level ATProto review record (experimental; requires the ATPROTO_* environment configuration injected by Spindle; end-to-end Tangled pipeline enablement is still landing in follow-up work) and never routes through the GitHub/Forgejo publish APIs; native review verdicts, inline comments, thread operations, and reviewer requests are not supported and degrade without GitHub/Forgejo calls. On Forgejo, features requiring GitHub GraphQL (review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com regardless of this setting."
+    description: "Target hosting platform for API capability gating and backend selection. 'auto' (default) detects from TANGLED_REPO_DID (the Tangled repository owner DID), GITHUB_SERVER_URL, and FORGEJO_API_URL: a set TANGLED_REPO_DID resolves to 'tangled' (checked before the GitHub/Forgejo signals); otherwise non-github.com hosts or FORGEJO_API_URL set resolves to 'forgejo'; otherwise 'github'. Set 'forgejo', 'github', or 'tangled' explicitly to override auto-detection; explicit 'tangled' requires a non-empty TANGLED_REPO_DID and fails with a descriptive error when it is missing. Tangled support is experimental and runs on the host-neutral runner ('node dist/index.js tangled'), not on this GitHub Actions action. A Tangled run does not complete today: the pull metadata read works, the diff read stops the run, and publication fails closed until a trustworthy current-head read lands. Tangled publishes one managed top-level ATProto review record in the bot account's own repository. It needs the ATPROTO_* configuration that Spindle injects, and it never routes through the GitHub/Forgejo publish APIs. Native review verdicts, inline comments, thread operations, and reviewer requests are not supported, and they degrade without GitHub/Forgejo calls. See docs/tangled.md for the support matrix. On Forgejo, features requiring GitHub GraphQL (review minimization) degrade gracefully with a log line; the REST backend handles core PR operations. Linked-source enrichment always targets github.com regardless of this setting."
   - id: forgejo-api-url
     v2_id: forgejo_api_url
     required: false
@@ -891,7 +926,7 @@ outputs:
     description: "Required-check validation status ('complete', 'incomplete', or 'none' when validation did not run)"
   - id: review-result
     v2_id: review_result
-    description: "The metadata marker's review_result state ('clean', 'findings', 'partial', or 'issues'), from the same still-open findings and coverage the marker records. #873/#954: 'partial' means the review has an execution or requirement-traceability gap — 'verdict: approve' with 'review-result: partial' is not an approval; gate merges on both, never on verdict alone. Use incomplete-reason to distinguish the gap. Has no v2 equivalent."
+    description: "The metadata marker's review_result state ('clean', 'findings', 'partial', or 'issues'), from the same still-open findings and coverage the marker records. #873/#954: 'partial' means the review has an execution, requirement-traceability, or derived-obligation gap — 'verdict: approve' with 'review-result: partial' is not an approval; gate merges on both, never on verdict alone. Use incomplete-reason to distinguish the execution and requirement-trace gaps; a derived-obligation gap (#1449) is reported by the marker's derived_obligation_state instead."
   - id: incomplete-reason
     v2_id: incomplete_reason
     description: "Why the review's coverage is incomplete, distinguishing review-execution gaps from requirement-traceability gaps: 'execution' (tool-loop or required-check coverage did not finish), 'requirement_trace' (the review completed, but an in-scope requirement lacks verifiable enforcement/test evidence), 'both', or 'none' when complete. #954. Has no v2 equivalent."
@@ -920,19 +955,19 @@ outputs:
   # findings, or approval.
   - id: confidence-status
     v2_id: confidence_status
-    description: "Confidence scorer outcome (#1073): 'scored' when the scorer ran and produced a usable score, 'unscored' when it was enabled but the call failed, timed out, produced no usable score, the run would not publish at all (the publish-step-skipped defensive branch — config resolution rejects an unrecognized publish-mode before the review runs, so this branch should never fire: the scorer never calls the model for a review that will not publish), or a required proof-context pin (head SHA, base SHA, review_result) did not resolve (#1155 — the scorer never grades a prompt it cannot anchor), and empty when the scorer is disabled (ai-confidence-model unset)."
+    description: "Independent merge-safety verifier outcome (#1073, #1369): 'scored' when the verifier ran and produced a usable merge-readiness result, 'unscored' when enabled but the call failed, timed out, produced no usable score, the model declared cannot_verify (evidence too incomplete to verify the change - fails closed, never a guessed score), the assembled prompt did not fit the declared ai-confidence-prompt-tokens budget (prompt_over_budget - the bound is honored by refusing the call, never by exceeding it), the run would not publish at all (the publish-step-skipped defensive branch - config resolution rejects unrecognized publish-mode before review runs, branch should never fire: the verifier never calls the model for a review that will not publish), or a required proof-context pin (head SHA, base SHA, review_result) did not resolve (#1155 - the verifier never audits a prompt it cannot anchor); empty when the verifier is disabled (ai-confidence-model unset)."
   - id: confidence-score
     v2_id: confidence_score
-    description: "Integer 0-5 confidence score from the scorer; empty when the scorer is disabled or did not produce a usable score (never a spurious 0). Advisory telemetry only — never affects the verdict, findings, or approval."
+    description: "Integer 0-5 merge-readiness score from the independent verifier (#1369): 5 means no blocker/major finding stands and the verifier sees no material problem of its own, down to 0 = the change should not merge in anything close to its current form. Deterministic ceilings apply on top: a blocker finding caps 2, a major finding or incomplete coverage caps 3, and any verifier-raised concern caps 4. Empty when the verifier is disabled or did not produce a usable score (never a spurious 0). Advisory telemetry only - never affects verdict, findings, or approval."
   - id: confidence-risk
     v2_id: confidence_risk
-    description: "Risk band the scorer reported for the review ('low', 'medium', 'high', or 'critical') — the scorer's own band, not a value derived from the score; 'unknown' when the scorer ran but produced no usable score, or returned a risk band outside the closed enum; empty when the scorer is disabled."
+    description: "Risk band the verifier reported for the review ('low', 'medium', 'high', or 'critical') - the verifier's own blast-radius band, not a value derived from the score; 'unknown' when the verifier ran but produced no usable score, or returned a risk band outside the closed enum; empty when the verifier is disabled."
   - id: confidence-reason
     v2_id: confidence_reason
-    description: "Bounded text explanation from the scorer; possibly empty when the model gave none; empty when the scorer is disabled. Model-authored text, redacted before publication."
+    description: "Bounded text explanation from the verifier (its audit of the review against the diff); possibly empty when the model gave none; empty when the verifier is disabled. Model-authored text, redacted before publication."
   - id: confidence-model
     v2_id: confidence_model
-    description: "Model identity that produced the confidence score (which endpoint/model actually scored the review); empty when the scorer is disabled or did not run."
+    description: "Model identity that produced the confidence result (which endpoint/model actually audited the review); empty when the verifier is disabled or did not run."
   - id: findings
     v2_id: findings
     description: "Normalized structured findings as a JSON array (empty array when the model produced none)"
@@ -971,6 +1006,12 @@ outputs:
   - id: tool-calls
     v2_id: tool_calls
     description: "JSON array of read-only tools executed by the native tool harness, with tool names and statuses"
+  # #1425: the machine-readable review bundle — the automation surface that
+  # pairs with the rendered Markdown comment. Schema and field contract:
+  # docs/review-bundle.md.
+  - id: review-bundle
+    v2_id: review_bundle
+    description: "Single-line JSON 'review-bundle/v1' document for this run (#1425): lifecycle state ('complete', 'partial', 'skipped', 'failed', or 'superseded'), exact reviewed head SHA and base SHA, repository and PR number, per-run review ID, configuration/model identity (diff fingerprint, analysis engine, action version), the authoritative disposition (verdict, verdict source, required-check state, review result, incomplete reason, degraded flag), the publication outcome when attempted, the merge-gating ids of the deterministic enforcement pass (unresolved requirement ids and unresolved required-check ids), and normalized findings with stable cross-run finding IDs, severity, category and file/line anchors when a review produced a verdict. Bounded (64 KiB) and secret-redacted by construction; contains no transcripts, raw tool output, or rendered Markdown. Written on every run that reaches an output boundary, including skipped and failed runs; empty only when the process crashed before any output could be written. The findings array and the two id lists are present only for review-producing states, so an absent array means no verdict was produced (distinct from a review with zero findings). Schema doc: docs/review-bundle.md."
 removed:
   - kind: inputs
     v2_id: escalate_on_risk_flags
@@ -999,15 +1040,15 @@ removed:
   - kind: inputs
     v2_id: tool_planning_timeout_sec
     status: removed
-    reason: "Removed in v3; use tool_turn_timeout_sec."
+    reason: "Removed in v3; use tool_turn_timeout_sec. Since #1255 the runtime no longer honors the legacy TOOL_PLANNING_TIMEOUT_SEC env name either."
   - kind: inputs
     v2_id: tool_planning_max_context_bytes
     status: removed
-    reason: "Removed in v3; use tool_corpus_max_bytes."
+    reason: "Removed in v3; use tool_corpus_max_bytes. Since #1255 the runtime no longer honors the legacy TOOL_PLANNING_MAX_CONTEXT_BYTES env name either."
   - kind: inputs
     v2_id: tool_planning_max_tokens
     status: removed
-    reason: "Removed in v3; use tool_max_tokens_per_turn."
+    reason: "Removed in v3; use tool_max_tokens_per_turn. Since #1255 the runtime no longer honors the legacy TOOL_PLANNING_MAX_TOKENS env name either."
   - kind: inputs
     v2_id: review_scope
     status: removed

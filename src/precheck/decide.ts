@@ -3,7 +3,6 @@ import type { ExternalCheck } from "../platform/normalize.js";
 import { ownerMatchesIdentity, type IdentityResolution, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
 import { deriveDraftState, deriveIsFork, derivePrState, normalizePrIdentity } from "../platform/pr.js";
 import { resolvePlatform } from "../platform/resolve.js";
-import { requireImplementedBackend } from "../platform/tangled.js";
 import type { ManagedComment, ManagedReview, PlatformAdapter } from "../platform/types.js";
 import {
   buildMarkerFingerprint,
@@ -197,6 +196,13 @@ export interface PrecheckOutput {
   incomplete_reason?: string;
   /** #978: carried gate-bypass eligibility, consumed in-process by the gate. */
   degradedGateBypass?: boolean;
+  /** #1426: the previous reviewed head — the authenticated managed marker's
+   * `head_sha` — carried on the review path so the review context can state
+   * the prior-review delta identity explicitly. Empty when there is no
+   * authenticated managed body or the marker's head is not SHA-shaped; a
+   * diff-unchanged skip never carries it (its `head_sha` is the #975
+   * carried-pointer semantics, a different field). */
+  prior_head_sha?: string;
 }
 
 /** Extract the broad fingerprint from the last published comment body —
@@ -359,6 +365,7 @@ function platformOutputs(base: Partial<PrecheckOutput>, resolvedPlatform: string
     head_sha: "",
     base_sha: "",
     is_fork_pr: "",
+    prior_head_sha: "",
     resolved_platform: resolvedPlatform,
     effective_forgejo_api_url: forgejoUrl,
     ...base,
@@ -378,7 +385,19 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   }
 
   const resolvedPlatform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
-  requireImplementedBackend(resolvedPlatform);
+  // #590: a resolved `tangled` platform no longer fails loudly here. The read
+  // capability IS now Tangled-aware — the platform seam (`buildPlatformReadAdapter`)
+  // builds a `TangledAdapter` for a DID-resolved environment and never a
+  // GitHub or Forgejo client — so precheck reads whatever `spec.adapter` the
+  // caller configured, exactly as for GitHub and Forgejo. The invariant the
+  // old `requireImplementedBackend` throw protected (a Tangled run must never
+  // drive a GitHub/Forgejo backend) is now enforced at the factory: the only
+  // forge-specific write below (the Forgejo permission preflight) is gated on
+  // `resolvedPlatform === "forgejo"`, and no GitHub URL or client is ever
+  // assembled here. Every adapter method Tangled has not implemented yet
+  // (`getPrDiff`, comment/review reads, …) still fails closed inside the
+  // adapter — routing through the capability weakens none of them. GitHub and
+  // Forgejo resolution are untouched: the guard only ever threw for `tangled`.
   const effectiveForgejoApiUrl = resolvedPlatform === "forgejo" ? env.FORGEJO_API_URL ?? "" : "";
 
   // ── Label-driven re-review (#231) ─────────────────────────────────────
@@ -566,6 +585,15 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   const lastCommentBody = await selectAuthenticatedManagedBody(spec.adapter, comments, reviews, publishMode, commentMarker, diagnostics);
   const storedFingerprint = extractStoredFingerprint(lastCommentBody);
   const previousFingerprints = storedFingerprint ? [storedFingerprint] : [];
+  // #1426: one marker parse for both readers — the skip branch's #812/#975
+  // consumers below and the review path's prior-reviewed-head identity. Only
+  // the authenticated managed body ever reaches here, so the head it names is
+  // as trustworthy as the fingerprints and carried verdict already read from
+  // it; the SHA-shape guard keeps a malformed marker from ever becoming a
+  // delta identity.
+  const managedMarker = parseMetadata(lastCommentBody);
+  const managedMarkerHead = typeof managedMarker?.head_sha === "string" ? managedMarker.head_sha : "";
+  const priorHeadSha = /^[0-9a-f]{7,64}$/i.test(managedMarkerHead) ? managedMarkerHead : "";
 
   // ── #633 auto-selection inputs ────────────────────────────────────────
   const deepReview = (env.DEEP_REVIEW ?? "false").toLowerCase();
@@ -627,8 +655,9 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
     if (skipReason === "diff-unchanged") {
       const carried = carriedVerdict(lastCommentBody);
       // One marker parse for both readers below: the #812 CI-stale
-      // re-check and the #975 head acceptance.
-      const carriedMarker = parseMetadata(lastCommentBody);
+      // re-check and the #975 head acceptance. (The parse itself moved to
+      // the main flow above — #1426 — so the skip branch reuses it.)
+      const carriedMarker = managedMarker;
       // ── #812: the stale carried verdict ──────────────────────────────
       // A carried request_changes binds to the external-CI conclusion the
       // review saw (required-check coverage is not recomputed here). When
@@ -654,7 +683,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
             diagnostics(
               "warning: carried request_changes marker lacks " + (headSha === "" ? "head_sha" : "ci_state") + "; forcing a fresh review (fail closed)\n",
             );
-            return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict");
+            return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict", undefined, false, priorHeadSha);
           }
           const checks = await readAdapter.externalChecks(headSha).catch(() => null);
           const live = checks === null ? null : externalChecksConclusion(checks);
@@ -665,7 +694,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
             diagnostics(
               "warning: carried request_changes is CI-stale (stored: " + storedCiState + ", live: " + (live ?? "unknown") + "); forcing a fresh review\n",
             );
-            return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict");
+            return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "ci-stale-carried-verdict", undefined, false, priorHeadSha);
           }
         }
       }
@@ -705,7 +734,7 @@ export async function runPrecheck(spec: PrecheckSpec): Promise<PrecheckOutput> {
   // where it documents WHY the skip was refused (still should_review=true).
   // The authorized comment branch already fetched the PR for its fork gate;
   // reuse it rather than re-fetching (the PR object is identical by then).
-  return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "", commentPrObject, commentCommandPath);
+  return await reviewPathOutputs(spec, env, resolvedPlatform, effectiveForgejoApiUrl, broadFingerprint, "", commentPrObject, commentCommandPath, priorHeadSha);
 }
 
 async function reviewPathOutputs(
@@ -717,6 +746,7 @@ async function reviewPathOutputs(
   staleReason: string,
   preFetchedPr?: unknown,
   commentCommandPath = false,
+  priorHeadSha = "",
 ): Promise<PrecheckOutput> {
   const repo = env.REPO ?? "";
   const prObject = preFetchedPr ?? await spec.adapter.getPr();
@@ -727,8 +757,22 @@ async function reviewPathOutputs(
   // result. The human-triggered comment-command path keeps its earlier
   // fail-soft comment-pr-lookup-failed return before it reaches this seam.
   if (prObject === null || prObject === undefined) {
+    // #1341: name the cause class when the adapter recorded one. A cause
+    // whose kind is the HTTP-status class reports the failing status; any
+    // other kind reports the kind itself — a cause may carry a status
+    // that is NOT the failure (an invalid-json/too-large cause over a 200
+    // response), so the status is only shown when it IS the cause. Only
+    // `status`/`kind` are ever formatted, never the error message, so the
+    // admission error cannot carry response-body content or credential
+    // material even if an underlying transport message did.
+    const cause = spec.adapter.prReadFailure?.() ?? null;
+    const causeText = cause === null
+      ? ""
+      : cause.kind === "http-status" && typeof cause.status === "number"
+        ? ` (read failed: HTTP ${cause.status})`
+        : ` (read failed: ${cause.kind})`;
     throw new Error(
-      `ERROR: Could not read pull request ${env.PR_NUMBER ?? ""} for ${repo}; refusing to treat a forge/API lookup failure as a successful review skip.`,
+      `ERROR: Could not read pull request ${env.PR_NUMBER ?? ""} for ${repo}${causeText}; refusing to treat a forge/API lookup failure as a successful review skip.`,
     );
   }
   const identity = normalizePrIdentity(prObject);
@@ -841,6 +885,9 @@ async function reviewPathOutputs(
       head_sha: identity.headSha,
       base_sha: identity.baseSha,
       is_fork_pr: String(deriveIsFork(prObject ?? {})),
+      // #1426: the previous reviewed head, for the review context's explicit
+      // full-PR vs delta scope split. Only the review path carries it.
+      prior_head_sha: priorHeadSha,
     },
     resolvedPlatform,
     effectiveForgejoApiUrl,

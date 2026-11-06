@@ -87,12 +87,154 @@ DEFAULT_CORPUS_REAL = REPO_ROOT / "evals" / "corpus-real-prs.json"
 DEFAULT_CORPUS_HUMAN = REPO_ROOT / "evals" / "corpus-human-findings.json"
 BRIDGE_LAUNCHER = REPO_ROOT / "scripts" / "confidence_bridge.mjs"
 
-# The scorer's single bounded completion budget (mirrors
-# ``src/confidence/scorer.ts`` CONFIDENCE_MAX_TOKENS — the budget
-# projection below spends it, the live request sends the production
-# import through the bridge; pinned equal by
-# ``tests/test_confidence_calibration.py::test_scorer_max_tokens_matches_production``).
-SCORER_MAX_TOKENS = 1024
+# The scorer's documented DEFAULT completion budget, used as the projection
+# fallback when a run declares no ``ai-confidence-max-tokens``. #1387 made
+# this default single-sourced in production: ``src/routing/tiers.ts`` resolves
+# its profile defaults (and the disabled profile) from
+# ``src/confidence/scorer.ts`` CONFIDENCE_MAX_TOKENS — the constant named
+# below — so this fallback mirrors what production actually resolves, and
+# ``tests/test_confidence_calibration.py::test_scorer_budgets_match_production``
+# pins both the value and the resolver's use of that single source.
+SCORER_MAX_TOKENS = 4096
+
+# The scorer's documented DEFAULT PROMPT budget, the sibling of
+# SCORER_MAX_TOKENS above (#1387): it mirrors CONFIDENCE_PROMPT_TOKENS in
+# ``src/confidence/scorer.ts`` — the SINGLE source production's resolver
+# (``src/routing/tiers.ts``) reads for its ``promptTokens`` default and for
+# the disabled profile. The projection RECORDS this dimension; it never
+# spends against it (the hard ceilings stay on output tokens alone).
+# ``tests/test_confidence_calibration.py::test_scorer_budgets_match_production``
+# pins the two together, so the recorded PROMPT projection cannot drift from
+# what production actually resolves.
+SCORER_PROMPT_TOKENS = 98304
+
+# The characters JavaScript's ``String.prototype.trim`` removes: the
+# ECMAScript WhiteSpace set (TAB, VT, FF, SP, NBSP, ZWNBSP and the Unicode
+# Space_Separators) plus the LineTerminator set (LF, CR, LS, PS). Python's
+# ``str.strip()`` is NOT that set — it also removes the C0 separators
+# ``\x1c``-\x1f`` and ``\x85`` (which JavaScript keeps) and it keeps
+# ``\ufeff`` (which JavaScript removes). Trimming the JavaScript set exactly
+# keeps this projection's parse identical to production's
+# ``positiveIntFrom``, so a declaration production REJECTS is rejected here
+# too (#1387). Python's set would ACCEPT a value production rejects, which
+# under-projects the completion budget and under-binds the declared spend
+# ceiling.
+JS_TRIM_CHARS = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _declared_budget(confidence_env: Any, key: str, fallback: int) -> tuple[int, bool]:
+    """Resolve ONE declared budget the way production's resolver treats a
+    declared value (#1387).
+
+    ``positiveIntFrom`` (``src/routing/tiers.ts``) accepts only a
+    positive-integer string within JavaScript's safe-integer range and
+    otherwise keeps the documented default — so an unusable or absent
+    declaration projects at *fallback*, the same fallback the resolver
+    resolves. Returns ``(tokens, declared)``.
+    """
+    raw = str((confidence_env or {}).get(key, "")).strip(JS_TRIM_CHARS)
+    # [0-9], not \\d: JS /^\d+$/ is ASCII-only, and Python's \\d would
+    # accept Unicode decimal digits the resolver's regex rejects.
+    if re.fullmatch(r"[0-9]+", raw):
+        value = int(raw)
+        if 1 <= value <= 2**53 - 1:
+            return value, True
+    return fallback, False
+
+
+def _declared_completion_budget(confidence_env: Any) -> tuple[int, bool]:
+    """One condition's projected per-call COMPLETION budget (#1387)."""
+    return _declared_budget(confidence_env, "AI_CONFIDENCE_MAX_TOKENS", SCORER_MAX_TOKENS)
+
+
+def _declared_prompt_budget(confidence_env: Any) -> tuple[int, bool]:
+    """One condition's projected per-call PROMPT budget (#1387)."""
+    return _declared_budget(confidence_env, "AI_CONFIDENCE_PROMPT_TOKENS", SCORER_PROMPT_TOKENS)
+
+
+def project_spend_budget(conditions: list[dict[str, Any]]) -> dict[str, Any]:
+    """The per-call budgets the spend projection must use, plus a record of
+    WHICH budgets it projected against — per condition and in aggregate
+    (#1387).
+
+    The projection uses the run's configured budgets when they are known: a
+    condition's declared ``ai-confidence-max-tokens`` /
+    ``ai-confidence-prompt-tokens`` are what the live request actually uses,
+    because the bridge resolves declared ``ai-confidence-*`` config through
+    production's ``resolveConfidenceProfile``, whose defaults come from the
+    same single source this module's fallbacks mirror.
+
+    The COMPLETION dimension is the one the spend ceiling multiplies. The
+    PROMPT dimension is RECORDED only — this projection introduces no new
+    spend policy, and the hard ceilings stay on output tokens alone.
+
+    The record states the DECLARED budgets, before production's resolver
+    shapes them, and the two dimensions differ in what production can do to
+    them:
+
+    - COMPLETION: production's context-window clamps (#1368) can only LOWER a
+      resolved completion budget, never raise it, so the aggregate MAX below
+      is an upper bound of what one call can spend. The ceiling is safe.
+    - PROMPT: production RAISES a prompt budget that sits below the scorer's
+      prompt floor, so the recorded prompt value states the CONFIGURED
+      budget, not an upper bound of the resolved one.
+
+    Each dimension takes the MAX over conditions. Each basis names where
+    that dimension's VALUE came from: ``declared`` when a declaration is the
+    value itself, else ``documented-default``. The aggregate basis names
+    where the aggregate value came from — ``declared`` when a condition's
+    DECLARED value IS the aggregate maximum, ``documented-default`` when
+    the maximum is a documented default no declaration reached. The
+    per-condition entries carry each condition's own basis, so a reader can
+    still see which conditions declared a budget at all.
+    """
+    per_condition: list[dict[str, Any]] = []
+    projected_completion = 0
+    projected_prompt = 0
+    completion_max_is_declared = False
+    prompt_max_is_declared = False
+    for condition in conditions:
+        completion, completion_declared = _declared_completion_budget(
+            condition.get("confidence_env")
+        )
+        prompt, prompt_declared = _declared_prompt_budget(condition.get("confidence_env"))
+        per_condition.append({
+            "id": str(condition.get("id", "")),
+            "completion_tokens_per_call": completion,
+            "completion_basis": "declared" if completion_declared else "documented-default",
+            "prompt_tokens_per_call": prompt,
+            "prompt_basis": "declared" if prompt_declared else "documented-default",
+        })
+        # The aggregate basis follows the VALUE: the condition that HOLDS the
+        # maximum names where the aggregate came from. A declaration is the
+        # aggregate maximum only when that declared number is the maximum —
+        # a smaller declaration never makes a documented default look
+        # declared. A tie keeps "declared" when a declaration produced the
+        # shared maximum.
+        if completion > projected_completion:
+            projected_completion = completion
+            completion_max_is_declared = completion_declared
+        elif completion == projected_completion and completion_declared:
+            completion_max_is_declared = True
+        if prompt > projected_prompt:
+            projected_prompt = prompt
+            prompt_max_is_declared = prompt_declared
+        elif prompt == projected_prompt and prompt_declared:
+            prompt_max_is_declared = True
+    if not per_condition:
+        projected_completion = SCORER_MAX_TOKENS
+        projected_prompt = SCORER_PROMPT_TOKENS
+    return {
+        "completion_tokens_per_call": projected_completion,
+        "completion_basis": "declared" if completion_max_is_declared else "documented-default",
+        "prompt_tokens_per_call": projected_prompt,
+        "prompt_basis": "declared" if prompt_max_is_declared else "documented-default",
+        "per_condition": per_condition,
+    }
+
 
 # The per-pilot lifetime scorer-spend ledger, stored in the RUNS DIR (the
 # pilot instance): the scorer's call ceiling is a lifetime bound for that
@@ -1095,6 +1237,19 @@ def cmd_score(args: argparse.Namespace) -> int:
     # The running lifetime total persisted in the runs dir's spend ledger:
     # monotone, never below the carried spend.
     ledger_total = ledger_calls
+    # #1387: project against the budgets the run actually resolves. A pilot
+    # live condition declares no ai-confidence-* config, so every live arm
+    # projects at the single-source documented defaults the bridge's
+    # live-request sends; the record states BOTH dimensions (completion and
+    # prompt) per condition and in aggregate. The ceiling below spends only
+    # the COMPLETION dimension — the PROMPT dimension is recorded, never
+    # spent against. The pilot's live-request path carries no prompt budget
+    # of its own, so the recorded prompt dimension states the CONFIGURED
+    # budget, not an enforced bound.
+    projected_budget = project_spend_budget(
+        [all_conditions[cid] for cid in selected if all_conditions[cid]["backend"] == "live"]
+    )
+    projected_tokens = projected_budget["completion_tokens_per_call"]
     if carried_calls + planned_calls > ceilings["max_scorer_calls"]:
         print(
             f"score aborted: {carried_calls} already-spent wire attempts plus {planned_calls} "
@@ -1105,10 +1260,10 @@ def cmd_score(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_BUDGET_ABORT
-    if (carried_calls + planned_calls) * SCORER_MAX_TOKENS > ceilings["max_scorer_output_tokens"]:
+    if (carried_calls + planned_calls) * projected_tokens > ceilings["max_scorer_output_tokens"]:
         print(
             f"score aborted: {carried_calls} already-spent wire attempts plus {planned_calls} "
-            f"planned live calls at {SCORER_MAX_TOKENS} "
+            f"planned live calls at {projected_tokens} "
             f"completion tokens exceed ceilings.max_scorer_output_tokens="
             f"{ceilings['max_scorer_output_tokens']}; no call was made",
             file=sys.stderr,
@@ -1119,7 +1274,7 @@ def cmd_score(args: argparse.Namespace) -> int:
         """Progressive triggers checked before each scored call."""
         if calls_made >= ceilings["max_scorer_calls"]:
             return f"max_scorer_calls={ceilings['max_scorer_calls']} reached"
-        if calls_made * SCORER_MAX_TOKENS >= ceilings["max_scorer_output_tokens"]:
+        if calls_made * projected_tokens >= ceilings["max_scorer_output_tokens"]:
             return f"max_scorer_output_tokens={ceilings['max_scorer_output_tokens']} reached"
         if time.monotonic() - phase_start >= ceilings["wall_time_budget_sec"]["score"]:
             return f"wall_time_budget_sec.score={ceilings['wall_time_budget_sec']['score']} elapsed"
@@ -1461,6 +1616,7 @@ def cmd_score(args: argparse.Namespace) -> int:
         "budget_note": abort_note,
         "carried_wire_calls": carried_calls,
         "lifetime_wire_calls": calls_made,
+        "projected_budget": projected_budget,
         "wall_time_sec_by_condition": {cid: round(sec, 3) for cid, sec in wall_by_condition.items()},
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -1532,6 +1688,810 @@ def unscored_row(cause: str, model: str) -> dict[str, Any]:
         "cause": cause,
         "caps": [],
     }
+
+
+# ── #1370 production-shape canary ─────────────────────────────────────────
+#
+# A small, bounded live canary of the REPAIRED post-review merge-safety
+# verifier (#1368/#1369) over RETAINED primary-review artifacts, before
+# advisory dogfood. Acceptance check, not a calibration study (#1370):
+#
+# - The persisted primary reviews are REUSED (``--artifacts-dir`` points at
+#   a completed pilot work dir, read-only); no primary model is re-run.
+# - Every verifier call runs the PRODUCTION verifier path end to end via
+#   the bridge's ``live-scorer`` subcommand: ``resolveConfidenceProfile``
+#   over the plan-DECLARED ``ai-confidence-*`` config (ambient shell state
+#   stripped), the engine's eligibility gates, ``buildConfidencePrompt`` at
+#   the resolved budget, ``runConfidenceScorer`` itself, and the engine's
+#   credential-masking pass. No bridge-side request-shape override exists:
+#   effort, budgets, structured output, timeout, and the tokens-param
+#   convention are whatever the declared config resolves to.
+# - Labels stay blinded: verifier inputs carry only the run's own
+#   artifacts (diff, PR text, findings, summary, coverage, verdict state) —
+#   never the corpus defect anchor, which rides only in the offline
+#   ``_defect`` row enrichment for adjudication.
+# - Exactly one wire attempt per (entry, condition) pair, no retries. A
+#   declared FALLBACK condition runs for an entry ONLY when the primary
+#   condition's row came back not scored (the #1370 allowance: operational
+#   no-result is rerun, observations are not swept) — declared up front,
+#   never improvised.
+# - The verifier call ceiling is a LIFETIME bound for the canary work dir
+#   (the same spend-ledger mechanism as the pilot), and the exact retained
+#   artifacts are pinned by digest (runs.json + per-row artifact files) in
+#   the results record.
+
+CANARY_CONFIDENCE_ENV_KEYS = {
+    "AI_CONFIDENCE_MODEL",
+    "AI_CONFIDENCE_BASE_URL",
+    "AI_CONFIDENCE_API_FORMAT",
+    # Parity with the bridge's CONFIDENCE_ENV_KEYS (scripts/confidence_bridge.ts,
+    # #1481): a declared condition must be able to replay the production
+    # require-dedicated shape, so isolation mode and the verifier's own
+    # token-limit field are declared-confidence surface like the rest.
+    "AI_CONFIDENCE_ISOLATION",
+    "AI_CONFIDENCE_TOKENS_PARAM",
+    "AI_CONFIDENCE_REASONING_EFFORT",
+    "AI_CONFIDENCE_MAX_TOKENS",
+    "AI_CONFIDENCE_PROMPT_TOKENS",
+    "AI_CONFIDENCE_MODEL_CONTEXT_TOKENS",
+    "AI_CONFIDENCE_ANTHROPIC_EFFORT_SUPPORT",
+    "AI_CONFIDENCE_STRUCTURED_OUTPUT_SUPPORT",
+    "AI_CONFIDENCE_TIMEOUT_SEC",
+    "AI_CONFIDENCE_ENABLE_FOR_FORKS",
+}
+
+CANARY_CONDITION_FIELDS = {"id", "backend", "role", "fallback_for", "purpose", "confidence_env", "key_env", "secret_env_names"}
+CANARY_MAX_ENTRIES = 6
+CANARY_MAX_CONDITIONS = 4
+# The resolved publish modes the engine's confidence eligibility gate accepts
+# (src/publish/publish.ts publishStepRuns). The plan declares the exact
+# resolved mode of each retained production run — no retained artifact
+# records it, so plan declaration + validation IS the run-state proof; the
+# bridge passes the value verbatim to the same predicate, never a default.
+CANARY_PUBLISH_MODES = ("comment", "review_comment", "review_verdict", "review_blockers")
+
+
+def _validate_canary_plan(plan: Any, corpus: dict[str, dict[str, Any]]) -> list[str]:
+    """Validate the canary plan shape; returns a list of plan errors.
+
+    Deliberately narrower than the pilot plan: a canary is a small fixed
+    set with declared, observable verifier config — the validation enforces
+    exactly that shape and nothing else.
+    """
+    errors: list[str] = []
+    if not isinstance(plan, dict):
+        return ["plan must be a JSON object"]
+    if plan.get("plan_version") != 1:
+        errors.append("plan_version must be 1")
+    if plan.get("kind") != "production-shape canary":
+        errors.append("kind must be 'production-shape canary'")
+    if plan.get("blinded") is not True:
+        errors.append("blinded must be true (labels never reach the verifier inputs)")
+    rubric = plan.get("rubric")
+    if not (isinstance(rubric, dict) and rubric.get("id") == "merge-readiness-verifier-v1"):
+        errors.append("rubric.id must pin the production rubric 'merge-readiness-verifier-v1'")
+    if not isinstance(plan.get("production_shape"), str) or not plan["production_shape"]:
+        errors.append("production_shape must declare the verifier path (bridge live-scorer)")
+    if not isinstance(plan.get("corpus_shortfall"), str) or not plan["corpus_shortfall"]:
+        errors.append("corpus_shortfall must document the known-defective/clean shortfall")
+
+    entries = plan.get("entries")
+    if not (isinstance(entries, list) and 1 <= len(entries) <= CANARY_MAX_ENTRIES):
+        errors.append(f"entries must be a list of 1..{CANARY_MAX_ENTRIES} row ids")
+    else:
+        for entry in entries:
+            if not (isinstance(entry, dict) and isinstance(entry.get("pr_id"), str)):
+                errors.append("every entry must be an object with pr_id")
+                continue
+            corpus_entry = corpus.get(entry["pr_id"])
+            if corpus_entry is None:
+                errors.append(f"entry {entry['pr_id']} is not resolvable in the corpus")
+            else:
+                # Exact head/base pinning (#1370) starts at the plan: a row
+                # whose corpus record cannot prove both SHAs is not evidence
+                # about a PR, so it can never be a canary row.
+                for pin in ("head_sha", "base_sha"):
+                    if not str(corpus_entry.get(pin) or ""):
+                        errors.append(f"entry {entry['pr_id']} corpus record has no {pin} pin")
+            if not isinstance(entry.get("expectation"), str) or not entry["expectation"]:
+                errors.append(f"entry {entry.get('pr_id')} must declare its expectation label")
+            # The resolved publish mode of the retained production run: no
+            # retained artifact records it, so the plan declares it and this
+            # validation is the run-state proof. Unknown values are refused
+            # here — the bridge passes the value verbatim to the production
+            # predicate, and an unprovable mode must fail the PLAN, not the
+            # predicate.
+            if entry.get("publish_mode") not in CANARY_PUBLISH_MODES:
+                errors.append(
+                    f"entry {entry.get('pr_id')} must declare publish_mode as one of {list(CANARY_PUBLISH_MODES)} "
+                    "(the exact resolved mode of the retained production run)"
+                )
+
+    ceilings = plan.get("ceilings")
+    if not isinstance(ceilings, dict):
+        errors.append("ceilings must be an object")
+        ceilings = {}
+    for key in ("max_verifier_calls", "max_output_tokens", "wall_time_budget_sec", "request_timeout_sec"):
+        value = ceilings.get(key)
+        if not (isinstance(value, int) and not isinstance(value, bool) and value >= 1):
+            errors.append(f"ceilings.{key} must be a positive integer")
+    if isinstance(ceilings.get("max_verifier_calls"), int) and ceilings["max_verifier_calls"] > 12:
+        errors.append("ceilings.max_verifier_calls must stay <= 12 (a canary, not a sweep)")
+
+    conditions = plan.get("conditions")
+    condition_ids: list[str] = []
+    primary_ids: list[str] = []
+    if not (isinstance(conditions, list) and 1 <= len(conditions) <= CANARY_MAX_CONDITIONS):
+        errors.append(f"conditions must be a list of 1..{CANARY_MAX_CONDITIONS} declared conditions")
+        conditions = []
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            errors.append("every condition must be an object")
+            continue
+        unknown = set(condition) - CANARY_CONDITION_FIELDS
+        if unknown:
+            errors.append(f"condition has unknown fields: {sorted(unknown)}")
+        cid = condition.get("id")
+        if not isinstance(cid, str) or not cid:
+            errors.append("every condition needs a string id")
+            continue
+        try:
+            _safe_component(cid)
+        except ValueError:
+            errors.append(f"condition id is not a safe path component: {cid!r}")
+        if cid in condition_ids:
+            errors.append(f"duplicate condition id: {cid}")
+        condition_ids.append(cid)
+        if condition.get("backend") != "live":
+            errors.append(f"condition {cid}: canary conditions are live (backend=live)")
+        role = condition.get("role", "primary")
+        if role not in ("primary", "fallback"):
+            errors.append(f"condition {cid}: role must be primary or fallback")
+        if role == "fallback":
+            target = condition.get("fallback_for")
+            if not (isinstance(target, str) and target):
+                errors.append(f"condition {cid}: fallback needs fallback_for")
+            else:
+                primary_ids.append(f"__fallback_for__{target}")
+        else:
+            primary_ids.append(cid)
+        confidence_env = condition.get("confidence_env")
+        if not isinstance(confidence_env, dict) or not confidence_env:
+            errors.append(f"condition {cid}: confidence_env must be a non-empty object of declared ai-confidence-* values")
+            confidence_env = {}
+        for key, value in confidence_env.items():
+            if key not in CANARY_CONFIDENCE_ENV_KEYS:
+                errors.append(f"condition {cid}: confidence_env key is not a declared ai-confidence-* input: {key}")
+            elif not isinstance(value, str):
+                errors.append(f"condition {cid}: confidence_env value for {key} must be a string")
+            elif key == "AI_CONFIDENCE_API_KEY":
+                # The allowlist already rejects this name; the explicit check
+                # documents WHY: a credential value never travels in a plan.
+                errors.append(f"condition {cid}: confidence_env must never carry {key} (use key_env)")
+        if not str(confidence_env.get("AI_CONFIDENCE_MODEL", "")):
+            errors.append(f"condition {cid}: confidence_env must declare AI_CONFIDENCE_MODEL")
+        base_url = str(confidence_env.get("AI_CONFIDENCE_BASE_URL", ""))
+        if base_url and not condition.get("key_env"):
+            errors.append(
+                f"condition {cid}: a declared AI_CONFIDENCE_BASE_URL needs key_env "
+                "(a distinct endpoint never inherits the primary credential)"
+            )
+        timeout_raw = confidence_env.get("AI_CONFIDENCE_TIMEOUT_SEC")
+        if timeout_raw is not None:
+            try:
+                if int(timeout_raw) > int(ceilings.get("request_timeout_sec", 0)):
+                    errors.append(
+                        f"condition {cid}: declared AI_CONFIDENCE_TIMEOUT_SEC exceeds ceilings.request_timeout_sec"
+                    )
+            except (TypeError, ValueError):
+                errors.append(f"condition {cid}: AI_CONFIDENCE_TIMEOUT_SEC must be an integer")
+        # #1481: enum-valued declared keys carry production's typed vocabulary.
+        # In production a value outside the contract enum throws at config-load;
+        # in the bridge the declared value reaches resolveConfidenceProfile
+        # directly, where an out-of-vocabulary isolation/token-param/format would
+        # silently resolve to something the plan never declared (e.g. a typo'd
+        # isolation mode quietly meaning inherit-primary). A production-shape
+        # canary rejects the plan instead — literal values only; a "$NAME"
+        # reference resolves from the operator environment at run time and is
+        # shape-checked where it is written.
+        _enum_vocabulary = {
+            "AI_CONFIDENCE_API_FORMAT": ("openai", "anthropic"),
+            "AI_CONFIDENCE_ISOLATION": ("inherit-primary", "require-dedicated"),
+            "AI_CONFIDENCE_TOKENS_PARAM": ("max_tokens", "max_completion_tokens"),
+        }
+        for enum_key, vocabulary in _enum_vocabulary.items():
+            declared = confidence_env.get(enum_key)
+            if isinstance(declared, str) and declared and not declared.startswith("$") and declared not in vocabulary:
+                errors.append(
+                    f"condition {cid}: declared {enum_key} must be one of {vocabulary}, got {declared!r}"
+                )
+        # A require-dedicated condition replays the dogfood production shape,
+        # whose whole point is that NOTHING primary-derived rides the verifier.
+        # Declaring the mode without the endpoint/format the refusal contract
+        # requires would only ever produce unscored(dedicated_*_missing) rows —
+        # visible, but never the scored probe the canary exists to run — so the
+        # plan must declare the complete dedicated set up front. (The model is
+        # already required above; a declared BASE_URL already requires key_env.)
+        if confidence_env.get("AI_CONFIDENCE_ISOLATION") == "require-dedicated":
+            if not str(confidence_env.get("AI_CONFIDENCE_BASE_URL", "")):
+                errors.append(
+                    f"condition {cid}: AI_CONFIDENCE_ISOLATION=require-dedicated must declare "
+                    "AI_CONFIDENCE_BASE_URL (the verifier never inherits the primary endpoint)"
+                )
+            if not str(confidence_env.get("AI_CONFIDENCE_API_FORMAT", "")):
+                errors.append(
+                    f"condition {cid}: AI_CONFIDENCE_ISOLATION=require-dedicated must declare "
+                    "AI_CONFIDENCE_API_FORMAT (the verifier never inherits the primary wire family, #1481)"
+                )
+        key_env = condition.get("key_env")
+        if key_env is not None:
+            if not (isinstance(key_env, str) and ENV_VAR_NAME_RE.fullmatch(key_env)):
+                errors.append(f"condition {cid}: key_env must be an env-var NAME")
+        secret_env_names = condition.get("secret_env_names", [])
+        if not (isinstance(secret_env_names, list) and all(
+            isinstance(name, str) and ENV_VAR_NAME_RE.fullmatch(name) for name in secret_env_names
+        )):
+            errors.append(f"condition {cid}: secret_env_names must be a list of env-var NAMES")
+        # "$NAME" indirection: a confidence_env value that is exactly "$NAME"
+        # resolves from the operator environment at run time (endpoint URLs,
+        # model ids) so the committed plan carries no infrastructure values.
+        for key, value in confidence_env.items():
+            if isinstance(value, str) and value.startswith("$") and not ENV_VAR_NAME_RE.fullmatch(value[1:]):
+                errors.append(f"condition {cid}: {key} $-reference must name an env var, got {value!r}")
+    for marker in primary_ids:
+        if marker.startswith("__fallback_for__") and marker[len("__fallback_for__"):] not in primary_ids:
+            errors.append(f"fallback_for names an unknown primary condition: {marker[len('__fallback_for__'):]}")
+    return errors
+
+
+def live_scorer_via_bridge(request: dict[str, Any], work_dir: Path, timeout_sec: float) -> dict[str, Any]:
+    """One production-shape verifier call through the bridge's ``live-scorer``.
+
+    The bridge resolves the profile from the declared config, applies the
+    engine's gates, builds the prompt at the resolved budget, dispatches
+    ``runConfidenceScorer`` (exactly one wire attempt), and applies the
+    engine's masking pass — all production code. Returns the bridge's result
+    object; a malformed shape raises ``RuntimeError`` (the row degrades to
+    ``unscored`` with a recorded cause, never a crash).
+    """
+    result = _run_bridge("live-scorer", request, work_dir, timeout_sec=timeout_sec)
+    required = ("enabled", "rubric_version", "warnings", "review_result", "unresolved_pins", "profile", "result")
+    if not all(key in result for key in required):
+        raise RuntimeError("bridge live-scorer returned a malformed result (missing keys)")
+    if not isinstance(result["result"], dict) or "status" not in result["result"]:
+        raise RuntimeError("bridge live-scorer returned a malformed result (verifier result)")
+    if not isinstance(result["profile"], dict):
+        raise RuntimeError("bridge live-scorer returned a malformed result (profile)")
+    return result
+
+
+def _canary_row(
+    pr_id: str,
+    kind: str,
+    expectation: str,
+    condition: dict[str, Any],
+    evidence_state: str,
+    corpus_entry: dict[str, Any] | None,
+    run_info: dict[str, Any],
+    run_dir: Path | None,
+    verdict_policy: str,
+    ceilings: dict[str, Any],
+    work_dir: Path,
+    audit_dir: Path,
+    reserve_slot: Any,
+    publish_mode: str,
+) -> tuple[dict[str, Any], int]:
+    """Build and execute one canary row; returns (row, wire_attempts).
+
+    ``wire_attempts`` is 1 when a spend slot was RESERVED and the bridge was
+    dispatched — the reservation happens BEFORE the wire (write-first) and
+    stays consumed whatever happens after (provider failure, parse failure,
+    bridge crash) — and 0 for every no-dispatch path (unusable evidence,
+    pin verification failure, unavailable ledger). The caller owns the
+    ``reserve_slot`` callback: it durably records one call slot against the
+    lifetime ceiling and returns False when the ledger cannot be written.
+    ``publish_mode`` is the plan-declared resolved publish mode of the
+    retained production run (validated at plan level).
+    """
+    condition_id = condition["id"]
+    row: dict[str, Any] = {
+        "pr_id": pr_id,
+        "kind": kind,
+        "expectation": expectation,
+        "source": "corpus",
+        "condition": condition_id,
+        "role": condition.get("role", "primary"),
+        "evidence_state": evidence_state,
+        "head_sha": (corpus_entry or {}).get("head_sha", ""),
+        "base_sha": (corpus_entry or {}).get("base_sha", ""),
+        "retained_pins": None,
+        "is_fork_pr": None,
+        "publish_mode": publish_mode,
+        "primary": {"verdict_policy": verdict_policy},
+        "verifier": disabled_scorer_result(),
+        "profile": None,
+        "rubric_version": None,
+        "warnings": [],
+        "wire_effort": None,
+        "usage": None,
+        "latency_ms": None,
+        "prompt_bytes": None,
+        "diagnostic": "",
+        "wire_attempts": 0,
+        "artifact_digests": {},
+        # Report-internal adjudication enrichment: the corpus defect anchor
+        # NEVER enters the verifier inputs (blinding is structural — the
+        # bridge request carries only the run's own artifacts).
+        "_defect": (corpus_entry or {}).get("defect") or {},
+        "_primary_findings": [],
+    }
+    if evidence_state != "primary_ok":
+        return row, 0
+    assert run_dir is not None
+    primary_artifacts = read_primary_artifacts(run_dir)
+    findings = primary_artifacts["findings"] or []
+    verdict = primary_artifacts["verdict"] or ""
+    coverage = primary_artifacts["coverage"] or {}
+    row["_primary_findings"] = findings
+    row["primary"].update({
+        "verdict": verdict,
+        "findings_by_severity": findings_by_severity(findings),
+        "required_checks": primary_artifacts["required_checks"] or "none",
+    })
+    # Exact head+base pinning for REUSED artifacts (#1370): the retained run
+    # must be the review OF the corpus-pinned head AGAINST the corpus-pinned
+    # base, read from the runtime's OWN request record
+    # (`review-request.json`: `head_sha` + `base_ref` — the pins the retained
+    # review was actually produced against, not a replayed PR payload). The
+    # verifier row then carries the VERIFIED pins into its request. A missing
+    # or pinless record, or either mismatch, fails the row closed with ZERO
+    # wire calls: reused artifacts that cannot prove both pins are not
+    # evidence about that PR, whatever their diffs contain.
+    request_record = _read_json_soft(run_dir / "review-request.json")
+    retained_head = ""
+    retained_base = ""
+    if isinstance(request_record, dict):
+        retained_head = str(request_record.get("head_sha") or "")
+        retained_base = str(request_record.get("base_ref") or "")
+    row["retained_pins"] = {"head_sha": retained_head, "base_sha": retained_base}
+    if not retained_head or not retained_base:
+        row["verifier"] = unscored_row("retained_pins_unreadable", "")
+        row["diagnostic"] = "retained review-request.json is missing or pinless; head+base cannot be verified"
+        return row, 0
+    if retained_head != row["head_sha"]:
+        row["verifier"] = unscored_row("retained_head_mismatch", "")
+        row["diagnostic"] = f"retained head {retained_head[:12]} != corpus head {row['head_sha'][:12]}"
+        return row, 0
+    if retained_base != row["base_sha"]:
+        row["verifier"] = unscored_row("retained_base_mismatch", "")
+        row["diagnostic"] = f"retained base {retained_base[:12]} != corpus base {row['base_sha'][:12]}"
+        return row, 0
+    # The retained run's RESOLVED fork state — the same request record's
+    # `is_fork_pr`. The bridge must never guess: the resolver treats any
+    # non-"true" flag as same-repo, so an unknown value would silently send
+    # privileged review content to the scorer endpoint on what may be a fork
+    # PR. Unreadable state fails the row closed with ZERO wire calls.
+    retained_fork = str(request_record.get("is_fork_pr") or "")
+    if retained_fork not in ("true", "false"):
+        row["verifier"] = unscored_row("retained_fork_state_unknown", "")
+        row["diagnostic"] = f"retained is_fork_pr {retained_fork!r} is not exactly 'true'/'false'"
+        return row, 0
+    row["is_fork_pr"] = retained_fork
+    for artifact_name in ("ai-output.json", "review-coverage.json", "review-request.json", "pr.diff.truncated", "pr.json"):
+        artifact_path = run_dir / artifact_name
+        if artifact_path.is_file():
+            row["artifact_digests"][artifact_name] = f"sha256:{_sha256_file(artifact_path)[:16]}"
+    diff_text = ""
+    for diff_name in ("pr.diff.truncated", "pr.diff"):
+        try:
+            diff_text = (run_dir / diff_name).read_text(encoding="utf-8", errors="replace")
+            break
+        except OSError:
+            continue
+    try:
+        body_text = (run_dir / "pr-body.txt").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        body_text = ""
+    pr_object = _read_json_soft(run_dir / "pr.json")
+    title = str(pr_object.get("title") or "") if isinstance(pr_object, dict) else ""
+    if not title:
+        title = str((corpus_entry or {}).get("title") or run_info.get("title") or "")
+    secret_env_names = list(condition.get("secret_env_names") or [])
+    if "AI_API_KEY" not in secret_env_names:
+        secret_env_names.insert(0, "AI_API_KEY")
+    request = {
+        "row": {
+            # The VERIFIED pins: after the three fail-closed gates above,
+            # retained_head/retained_base equal the corpus pins — carry the
+            # retained record's own values so the request provably grades
+            # the verified revision pair.
+            "head_sha": retained_head,
+            "base_sha": retained_base,
+            "diff": diff_text,
+            "pr_title": title,
+            "pr_body": body_text,
+            "findings": findings,
+            "review_summary": primary_artifacts["review_markdown"] or "",
+            "required_checks": primary_artifacts["required_checks"] or "none",
+            "coverage": coverage,
+            "verdict": verdict,
+            "verdict_policy": verdict_policy,
+            "partial_coverage": bool(coverage.get("partial_coverage")),
+            # Retained run-state proof: the verified fork state (recovered
+            # from review-request.json, gated above) and the plan-declared
+            # resolved publish mode (validated at plan level). The bridge
+            # never synthesizes either.
+            "is_fork_pr": row["is_fork_pr"],
+            "publish_mode": publish_mode,
+        },
+        "confidence_env": condition["confidence_env"],
+        "confidence_key_env": condition.get("key_env") or "",
+        "secret_env_names": secret_env_names,
+    }
+    # Spend ceiling, not a successful-response counter: the slot is durably
+    # RESERVED before dispatch and stays consumed when the provider fails,
+    # parsing fails, or the bridge dies after dispatch — a crash after the
+    # wire must never leave a paid call unrecorded (the pilot's write-first
+    # discipline). A failed reservation dispatches NOTHING.
+    if not reserve_slot():
+        row["verifier"] = unscored_row("ledger_unavailable", "")
+        row["diagnostic"] = "spend ledger could not be written; no call was dispatched"
+        return row, 0
+    row["wire_attempts"] = 1
+    try:
+        outcome = live_scorer_via_bridge(
+            request, work_dir, float(ceilings["request_timeout_sec"]) + 30,
+        )
+    except Exception:  # noqa: BLE001 — any bridge failure degrades to unscored
+        row["verifier"] = unscored_row("bridge_live_scorer_failed", "")
+        return row, 1
+    row["verifier"] = outcome["result"]
+    row["profile"] = outcome["profile"]
+    row["rubric_version"] = outcome.get("rubric_version")
+    warnings = outcome.get("warnings")
+    row["warnings"] = warnings if isinstance(warnings, list) else []
+    row["review_result"] = outcome.get("review_result")
+    row["primary"]["review_result"] = outcome.get("review_result")
+    row["unresolved_pins"] = outcome.get("unresolved_pins")
+    row["wire_effort"] = outcome.get("wire_effort")
+    usage = outcome.get("usage")
+    row["usage"] = usage if isinstance(usage, dict) else None
+    latency = outcome.get("latency_ms")
+    row["latency_ms"] = latency if isinstance(latency, int) else None
+    prompt_bytes = outcome.get("prompt_bytes")
+    row["prompt_bytes"] = prompt_bytes if isinstance(prompt_bytes, int) else None
+    diagnostic = outcome.get("diagnostic")
+    row["diagnostic"] = _bounded_diagnostic(diagnostic) if isinstance(diagnostic, str) else ""
+    # Audit tree: the masked request/response copies the bridge produced with
+    # production's own redaction (the same artifacts the runtime writes as
+    # confidence-request.json / confidence-response.json).
+    audit_path = audit_dir / _safe_component(pr_id) / f"{_safe_component(condition_id)}-r0.txt"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    sections = []
+    request_masked = outcome.get("request_payload_masked")
+    if isinstance(request_masked, str):
+        sections.append(f"=== request (masked) ===\n{request_masked}")
+    response_masked = outcome.get("raw_response_masked")
+    if isinstance(response_masked, str):
+        sections.append(f"=== response (masked) ===\n{response_masked}")
+    note = ""
+    if row["verifier"].get("status") == "unscored":
+        note = f"unscored cause: {row['verifier'].get('cause', '')}"
+        if row["diagnostic"]:
+            note += f" — diagnostic: {row['diagnostic']}"
+    if note:
+        sections.append(f"=== note ===\n{note}")
+    audit_path.write_text("\n\n".join(sections) + "\n", encoding="utf-8")
+    return row, 1
+
+
+def cmd_canary(args: argparse.Namespace) -> int:
+    plan_path = Path(args.plan).resolve()
+    plan = _read_json_soft(plan_path)
+    corpus = load_corpus_entries(Path(args.corpus_real).resolve())
+    errors = _validate_canary_plan(plan, corpus)
+    if errors:
+        _die_plan_errors(errors)
+    assert isinstance(plan, dict)
+    ceilings = plan["ceilings"]
+    conditions = {condition["id"]: condition for condition in plan["conditions"]}
+    selected_ids = args.condition or list(conditions)
+    for cid in selected_ids:
+        try:
+            _safe_component(cid)
+        except ValueError as exc:
+            print(f"canary error: {exc}", file=sys.stderr)
+            return EXIT_INVALID_PLAN
+        if cid not in conditions:
+            print(f"canary error: unknown condition id: {cid}", file=sys.stderr)
+            return EXIT_INVALID_PLAN
+
+    artifacts_dir = Path(args.artifacts_dir).resolve()
+    runs_payload = _read_json_soft(artifacts_dir / "runs.json")
+    if not (isinstance(runs_payload, dict) and isinstance(runs_payload.get("entries"), list)):
+        print(
+            f"canary error: no readable runs.json under {_repo_rel(str(artifacts_dir))}; "
+            "the canary REUSES retained primary artifacts and never re-runs a primary",
+            file=sys.stderr,
+        )
+        return EXIT_INVALID_PLAN
+    run_entries = {
+        record["pr_id"]: record
+        for record in runs_payload["entries"]
+        if isinstance(record, dict) and record.get("pr_id")
+    }
+
+    # Credential preflight (NAMES only; values are read inside the bridge).
+    # The primary lane credential must exist for the inherited-transport
+    # shape and the masking set; each declared condition key must exist.
+    if not os.environ.get("AI_API_KEY"):
+        print(
+            "canary aborted: AI_API_KEY is not set (the primary lane credential the "
+            "verifier may inherit and the masking set both require it)",
+            file=sys.stderr,
+        )
+        return EXIT_MISSING_CREDENTIALS
+    for cid in selected_ids:
+        key_env = conditions[cid].get("key_env")
+        if key_env and not os.environ.get(key_env):
+            print(
+                f"canary aborted: condition {cid} key env not set: {key_env} (values are never printed)",
+                file=sys.stderr,
+            )
+            return EXIT_MISSING_CREDENTIALS
+        for key, value in conditions[cid]["confidence_env"].items():
+            if isinstance(value, str) and value.startswith("$") and not os.environ.get(value[1:]):
+                print(
+                    f"canary aborted: condition {cid} {key} references unset env var {value[1:]}",
+                    file=sys.stderr,
+                )
+                return EXIT_MISSING_CREDENTIALS
+
+    # Resolve "$NAME" indirection in the declared config: the bridge receives
+    # resolved values (it is the production resolver's input), while the
+    # plan and the results record keep the DECLARED references.
+    conditions = {
+        cid: {
+            **condition,
+            "confidence_env": {
+                key: (os.environ[value[1:]] if isinstance(value, str) and value.startswith("$") else value)
+                for key, value in condition["confidence_env"].items()
+            },
+        }
+        for cid, condition in conditions.items()
+    }
+
+    work_dir = Path(args.work_dir).resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    audit_dir = work_dir / "audit"
+    out_path = Path(args.out).resolve()
+
+    # Lifetime spend ledger for the canary work dir (the pilot's mechanism):
+    # unreadable fails closed, and slots are RESERVED write-first — before
+    # the wire they account for.
+    spend_path = work_dir / SCORER_SPEND_FILENAME
+    carried_calls = 0
+    if spend_path.is_file():
+        ledger = _read_json_soft(spend_path)
+        counter = ledger.get("lifetime_wire_calls") if isinstance(ledger, dict) else None
+        if not isinstance(counter, int) or isinstance(counter, bool) or counter < 0:
+            print(
+                f"canary aborted: {spend_path} exists but is unreadable or malformed; "
+                "prior spend cannot be accounted, so no call was made",
+                file=sys.stderr,
+            )
+            return EXIT_BUDGET_ABORT
+        carried_calls = counter
+
+    verdict_policy = plan.get("verdict_policy", "strict")
+    # #1387: project against the budgets the run actually resolves — each
+    # condition's declared ai-confidence-max-tokens / ai-confidence-prompt-tokens
+    # as production's resolver would take them, the single-source documented
+    # defaults otherwise — and record which budgets the projection used. The
+    # ceiling below spends only the COMPLETION dimension; the PROMPT dimension
+    # is recorded, never spent against. The projection covers EVERY condition
+    # in the plan, not only the selected ones: the pre-flight ceiling is the
+    # worst case over the whole plan, so a condition that will not run still
+    # bounds it.
+    projected_budget = project_spend_budget(list(conditions.values()))
+    declared_max_tokens = projected_budget["completion_tokens_per_call"]
+    # Conservative projection: every selected condition may fire for every
+    # entry (a fallback triggers only on a not-scored primary row, but the
+    # ceiling must bound the worst case BEFORE any spend).
+    planned_calls = len(plan["entries"]) * len(selected_ids)
+    if carried_calls + planned_calls > ceilings["max_verifier_calls"]:
+        print(
+            f"canary aborted: {carried_calls} spent + {planned_calls} planned calls exceed "
+            f"ceilings.max_verifier_calls={ceilings['max_verifier_calls']}; no call was made",
+            file=sys.stderr,
+        )
+        return EXIT_BUDGET_ABORT
+    if (carried_calls + planned_calls) * declared_max_tokens > ceilings["max_output_tokens"]:
+        print(
+            f"canary aborted: {carried_calls} spent + {planned_calls} planned calls at "
+            f"{declared_max_tokens} completion tokens exceed "
+            f"ceilings.max_output_tokens={ceilings['max_output_tokens']}; no call was made",
+            file=sys.stderr,
+        )
+        return EXIT_BUDGET_ABORT
+
+    rows: list[dict[str, Any]] = []
+    calls_made = carried_calls
+    phase_start = time.monotonic()
+
+    def budget_exhaustion() -> str | None:
+        if calls_made >= ceilings["max_verifier_calls"]:
+            return f"max_verifier_calls={ceilings['max_verifier_calls']} reached"
+        if calls_made * declared_max_tokens >= ceilings["max_output_tokens"]:
+            return f"max_output_tokens={ceilings['max_output_tokens']} reached"
+        if time.monotonic() - phase_start >= ceilings["wall_time_budget_sec"]:
+            return f"wall_time_budget_sec={ceilings['wall_time_budget_sec']} elapsed"
+        return None
+
+    ledger_failure: list[str] = []
+
+    def reserve_slot() -> bool:
+        """Durably reserve ONE verifier call slot BEFORE provider dispatch.
+
+        This is a spend ceiling, not a successful-response counter: the slot
+        stays consumed when the provider fails, parsing fails, or the bridge
+        dies after dispatch, so a crash after the wire can never leave a
+        paid call unrecorded and a later invocation can never exceed the
+        declared lifetime ceiling. A failed write dispatches nothing: the
+        in-memory counter rolls back so the ledger and the results record
+        agree, the run aborts, and zero provider calls happen.
+        """
+        nonlocal calls_made
+        calls_made += 1
+        try:
+            _write_scorer_spend(spend_path, calls_made)
+        except OSError as exc:
+            calls_made -= 1
+            ledger_failure.append(
+                f"the spend ledger could not be written ({type(exc).__name__}); "
+                "no call was dispatched and the run aborted"
+            )
+            return False
+        return True
+
+    budget_exhausted = False
+    abort_note = ""
+    for entry in plan["entries"]:
+        pr_id = entry["pr_id"]
+        expectation = entry.get("expectation", "")
+        corpus_entry = corpus.get(pr_id)
+        run_info = run_entries.get(pr_id, {})
+        run_dir = _resolve_run_dir(artifacts_dir, run_info)
+        evidence_state = primary_evidence_state(run_info, run_dir)
+        kind = corpus_entry["_pilot_kind"] if corpus_entry else run_info.get("kind", "unknown")
+        scored: dict[str, bool] = {}
+        for cid in selected_ids:
+            condition = conditions[cid]
+            role = condition.get("role", "primary")
+            if role == "fallback":
+                target = condition.get("fallback_for", "")
+                if scored.get(target, False):
+                    # The primary condition produced a usable result: the
+                    # declared fallback does NOT fire (no repeated sweeps).
+                    rows.append({
+                        "pr_id": pr_id, "kind": kind, "expectation": expectation,
+                        "source": "corpus", "condition": cid, "role": role,
+                        "evidence_state": evidence_state,
+                        "head_sha": (corpus_entry or {}).get("head_sha", ""),
+                        "base_sha": (corpus_entry or {}).get("base_sha", ""),
+                        "retained_pins": None, "is_fork_pr": None,
+                        "publish_mode": entry["publish_mode"],
+                        "primary": {}, "verifier": disabled_scorer_result(),
+                        "profile": None, "rubric_version": None, "warnings": [],
+                        "wire_effort": None, "usage": None, "latency_ms": None,
+                        "prompt_bytes": None, "diagnostic": "", "wire_attempts": 0,
+                        "artifact_digests": {}, "_defect": (corpus_entry or {}).get("defect") or {},
+                        "_primary_findings": [], "not_run": f"fallback_for {target} scored",
+                    })
+                    continue
+            if budget_exhausted:
+                break
+            exhaustion = budget_exhaustion()
+            if exhaustion is not None:
+                budget_exhausted = True
+                abort_note = exhaustion
+                break
+            row, attempts = _canary_row(
+                pr_id, kind, expectation, condition, evidence_state, corpus_entry,
+                run_info, run_dir, verdict_policy, ceilings, work_dir, audit_dir,
+                reserve_slot, entry["publish_mode"],
+            )
+            rows.append(row)
+            if row["verifier"].get("cause") == "ledger_unavailable":
+                # The slot could not be durably reserved: nothing was
+                # dispatched, nothing is counted, the run stops here.
+                budget_exhausted = True
+                abort_note = ledger_failure[0] if ledger_failure else abort_note
+                scored[cid] = False
+                break
+            scored[cid] = attempts > 0 and row["verifier"].get("status") == "scored"
+            status = row["verifier"].get("status", "?")
+            detail = (
+                f"score={row['verifier'].get('score')} risk={row['verifier'].get('risk')}"
+                if status == "scored" else f"cause={row['verifier'].get('cause', '')}"
+            )
+            print(f"canary row: {pr_id} [{cid}] {status} ({detail})")
+        if budget_exhausted:
+            break
+
+    if budget_exhausted:
+        # No silent drops: every (entry, condition) combination this
+        # invocation owned but did not reach gets an explicit row — never
+        # silently dropped, never treated as an observation.
+        present = {(row["pr_id"], row["condition"]) for row in rows}
+        for entry in plan["entries"]:
+            for cid in selected_ids:
+                if (entry["pr_id"], cid) in present:
+                    continue
+                corpus_entry = corpus.get(entry["pr_id"])
+                run_info = run_entries.get(entry["pr_id"], {})
+                evidence_state = primary_evidence_state(
+                    run_info, _resolve_run_dir(artifacts_dir, run_info),
+                )
+                rows.append({
+                    "pr_id": entry["pr_id"],
+                    "kind": corpus_entry["_pilot_kind"] if corpus_entry else run_info.get("kind", "unknown"),
+                    "expectation": entry.get("expectation", ""),
+                    "source": "corpus", "condition": cid,
+                    "role": conditions[cid].get("role", "primary"),
+                    "evidence_state": evidence_state,
+                    "head_sha": (corpus_entry or {}).get("head_sha", ""),
+                    "base_sha": (corpus_entry or {}).get("base_sha", ""),
+                    "retained_pins": None, "is_fork_pr": None,
+                    "publish_mode": entry["publish_mode"],
+                    "primary": {}, "verifier": unscored_row("budget_exhausted", ""),
+                    "profile": None, "rubric_version": None, "warnings": [],
+                    "wire_effort": None, "usage": None, "latency_ms": None,
+                    "prompt_bytes": None, "diagnostic": "", "wire_attempts": 0,
+                    "artifact_digests": {}, "_defect": (corpus_entry or {}).get("defect") or {},
+                    "_primary_findings": [],
+                })
+
+    results = {
+        "plan": str(plan_path),
+        "plan_digest": f"sha256:{_sha256_file(plan_path)[:16]}",
+        "artifacts_dir": str(artifacts_dir),
+        "artifacts_runs_digest": f"sha256:{_sha256_file(artifacts_dir / 'runs.json')[:16]}",
+        "production_shape": plan["production_shape"],
+        "verdict_policy": verdict_policy,
+        "declared_conditions": [
+            {
+                "id": condition["id"],
+                "role": condition.get("role", "primary"),
+                "confidence_env": condition["confidence_env"],
+                "key_env": condition.get("key_env") or None,
+                "secret_env_names": condition.get("secret_env_names") or [],
+            }
+            for condition in plan["conditions"]
+        ],
+        "ceilings": ceilings,
+        "projected_budget": projected_budget,
+        "rows": rows,
+        "budget_exhausted": budget_exhausted,
+        "budget_note": abort_note,
+        "lifetime_wire_calls": calls_made,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    scored_count = sum(1 for row in rows if row["verifier"].get("status") == "scored")
+    print(
+        f"canary complete: {scored_count}/{len(rows)} rows scored, "
+        f"{calls_made} wire calls -> {_repo_rel(str(out_path))}"
+        + (" [budget_exhausted: " + abort_note + "]" if budget_exhausted else "")
+    )
+    if ledger_failure:
+        # A failed reservation aborted the run: the results-so-far are
+        # written for observability, but the exit is the budget-abort code —
+        # spend that cannot be accounted for is never treated as spent room.
+        print(f"canary aborted: {ledger_failure[0]}", file=sys.stderr)
+        return EXIT_BUDGET_ABORT
+    return 0
 
 
 # ── Report metrics (pure functions; importable) ──────────────────────────
@@ -1877,6 +2837,22 @@ def build_parser() -> argparse.ArgumentParser:
     report_p.add_argument("--results", required=True)
     report_p.add_argument("--out", default=None)
     report_p.set_defaults(func=cmd_report)
+
+    canary_p = sub.add_parser(
+        "canary",
+        help="#1370: bounded production-shape verifier canary over RETAINED primary artifacts "
+             "(no primary re-runs; one wire attempt per entry x declared condition)",
+    )
+    canary_p.add_argument("--plan", required=True, help="canary plan JSON (declared verifier config + ceilings)")
+    canary_p.add_argument("--artifacts-dir", required=True,
+                          help="runs dir holding the RETAINED primary artifacts (runs.json + run dirs); read-only")
+    canary_p.add_argument("--out", required=True, help="results JSON path")
+    canary_p.add_argument("--work-dir", required=True,
+                          help="canary work dir: bridge temp files, audit tree, and the lifetime spend ledger")
+    canary_p.add_argument("--condition", action="append", default=None,
+                          help="restrict to specific condition ids (default: every declared condition)")
+    canary_p.add_argument("--corpus-real", default=str(DEFAULT_CORPUS_REAL))
+    canary_p.set_defaults(func=cmd_canary)
     return parser
 
 
