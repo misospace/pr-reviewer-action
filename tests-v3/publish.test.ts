@@ -16,6 +16,7 @@ import {
 } from "../src/publish/publish.js";
 import { cleanupManagedReviews, retireManagedInlineComments, resolveSupersededThreads, hideSupersededManagedReviews } from "../src/publish/cleanup.js";
 import { buildComments, prescriptionKey, prescriptionKeyDigest, FEEDBACK_AFFORDANCE, INLINE_DISCLAIMER } from "../src/publish/inline-findings.js";
+import { parseReviewHandoffBlock } from "../src/publish/handoff.js";
 import { analysisEngineBase } from "../src/prompt/index.js";
 import { enforcementView, normalizeThread } from "../src/context/review-threads.js";
 import { applyReviewThreadEnforcement } from "../src/enforcement/threads.js";
@@ -1137,10 +1138,78 @@ test("failed and plain fallback native submissions preserve previous findings", 
 });
 
 // ---------------------------------------------------------------------------
-// #1249: a body-only fallback (a rejected commit-bound submission — e.g. an
-// anchor batch that raced a new push) must not drop the findings the inline
-// comments carried. Under a non-strict verdict policy the findings table is
-// not part of the native review body, so the fallback body carries the
+// #1518: a published remediation handoff must never advertise a suggestion
+// the run did not actually publish as a review comment. The handoff rides
+// the body, and the body can be published BEFORE (sticky recovery) or
+// WITHOUT (body-only fallback) the inline submission succeeding — every
+// such path carries the suggestion-free handoff variant.
+// ---------------------------------------------------------------------------
+test("#1518: a failed inline submission withdraws the handoff suggestions from the published body", async () => {
+  const api = new MockPublishApi();
+  api.reviewResults = [{ ok: false, error: "nope" }];
+  const findings = [{ file: "a.ts", line: 2, severity: "major", message: "A finding", suggestion: "REPL" }];
+  const result = await publishReview(
+    input({ mode: "review_comment", reviewId: "0123456789abcdef", inlineFindings: true, findings }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.ok(api.sticky.length >= 2, "the failed submission re-publishes the sticky body");
+  const before = parseReviewHandoffBlock(api.sticky[0]!.body);
+  const after = parseReviewHandoffBlock(api.sticky[api.sticky.length - 1]!.body);
+  assert.ok(before !== null && after !== null, "both published bodies carry a parseable handoff");
+  assert.equal(before!.items[0]!.suggestion, "REPL", "the first publication advertised the replacement");
+  assert.equal(after!.items[0]!.suggestion, undefined, "the withdrawal removes the suggestion no review comment backs");
+  assert.ok(
+    result.messages.some((line) => line.includes("with the findings summary appended to the review body")),
+    "the step messages disclose the non-strict compensation (summary appended, suggestions gone)",
+  );
+
+  // Strict policy: the body already renders the findings table, so the only
+  // change the withdrawal makes is the suggestion-free handoff variant —
+  // and that alone is worth re-publishing.
+  const strictApi = new MockPublishApi();
+  strictApi.reviewResults = [{ ok: false, error: "nope" }];
+  const strictResult = await publishReview(
+    input({ mode: "review_comment", reviewId: "0123456789abcdef", verdictPolicy: "strict", inlineFindings: true, findings }),
+    strictApi,
+    { diffText: DIFF },
+  );
+  assert.equal(strictResult.status, "published");
+  assert.ok(strictApi.sticky.length >= 2, "the strict policy still re-publishes to withdraw the suggestions");
+  const strictAfter = parseReviewHandoffBlock(strictApi.sticky[strictApi.sticky.length - 1]!.body);
+  assert.ok(strictAfter !== null);
+  assert.equal(strictAfter!.items[0]!.suggestion, undefined, "the strict publication carries no unbacked suggestion");
+  assert.ok(
+    strictResult.messages.some((line) => line.includes("with the remediation handoff suggestions withdrawn")),
+    "the step messages disclose the withdrawal",
+  );
+});
+
+test("#1518: the body-only fallback review carries no published prescription", async () => {
+  const api = new MockPublishApi();
+  api.reviewResults = [{ ok: false, error: "race" }, { ok: true }];
+  const findings = [{ file: "a.ts", line: 2, severity: "major", message: "A finding", suggestion: "REPL" }];
+  const result = await publishReview(
+    input({ mode: "review_verdict", reviewId: "0123456789abcdef", verdict: "request_changes", inlineFindings: true, findings }),
+    api,
+    { diffText: DIFF },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted.length, 2, "the rejected commit-bound batch falls back body-only");
+  const rejected = parseReviewHandoffBlock(api.submitted[0]!.body);
+  const fallback = parseReviewHandoffBlock(api.submitted[1]!.body);
+  assert.ok(rejected !== null && fallback !== null, "both bodies carry a parseable handoff");
+  assert.equal(rejected!.items[0]!.suggestion, "REPL", "the rejected batch went out with the inline comments that carried the replacement");
+  assert.equal(fallback!.items[0]!.suggestion, undefined, "the fallback published no inline comment, so it advertises none");
+  assert.equal(fallback!.items[0]!.message, "A finding", "the finding itself still rides the fallback handoff");
+});
+
+// ---------------------------------------------------------------------------
+// #1249: body-only fallback (a rejected commit-bound submission — e.g. an
+// anchor batch raced a new push) must not drop findings the inline
+// comments carried. Under a non-strict verdict policy the findings table
+// is not part of the native review body, so the fallback body carries a
 // bounded findings summary; under strict the body already renders it, so no
 // duplicate table may appear.
 // ---------------------------------------------------------------------------

@@ -457,7 +457,10 @@ async function runActionPipeline(
     // publish's own rerunLabel strip would fire on every run, not just
     // label-triggered ones.
     const { rerunLabel: _rerunLabel, ...publishInput } = publishInputFromEnv(publishEnv as NodeJS.ProcessEnv, seam.platform);
-    const input = { ...publishInput, ...reviewDerivedPublishFields(review) };
+    // #1518: the run's own review id rides the publish input, so the
+    // published handoff names the same review the `review-bundle` output
+    // names (one id per run, paired with the reviewed head).
+    const input = { ...publishInput, ...reviewDerivedPublishFields(review), reviewId };
     const publish = await publishWithOutcome(input, seam, runDir);
     // #1257: the review-step outputs describe the review this run PRODUCED;
     // a superseded publication exits 0 exactly like a published one, so this
@@ -498,6 +501,10 @@ async function runActionPipeline(
     },
     ...(publishStatus !== undefined ? { publication: { status: publishStatus } } : {}),
     findings: review.outputs.findings,
+    // #1518: the enforcement pass's merge-gating ids ride the local bundle
+    // too, on the same presence rule as the findings set.
+    ...(review.unresolvedRequirementIds !== undefined ? { unresolvedRequirementIds: review.unresolvedRequirementIds } : {}),
+    ...(review.unresolvedRequiredChecks !== undefined ? { unresolvedRequiredChecks: review.unresolvedRequiredChecks } : {}),
   });
 
   // ── Re-review label ───────────────────────────────────────────────────

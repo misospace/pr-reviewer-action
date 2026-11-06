@@ -76,6 +76,7 @@ import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
+import { boundedIdList } from "../context/id-lists.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
 
@@ -2075,8 +2076,11 @@ interface CompiledOwnership {
 
 /** Compile one narrow owner glob to a full-path regex. Only `*` (within a
  * path segment) and `?` are wildcards; `**` and absolute/`..` patterns are
- * rejected at config-parse time, so this never sees them. */
-function ownerPatternRegex(pattern: string): RegExp {
+ * rejected at config-parse time, so this never sees them. #1519: exported so
+ * the trace-plan's slot helpers attribute a repository read to a seam with
+ * the SAME glob semantics the validator applies to citations — the loop and
+ * the validator must never disagree about what a seam's evidence path is. */
+export function ownerPatternRegex(pattern: string): RegExp {
   const source = pattern
     .split("*")
     .map((part) => part.split("?").map((chunk) => escapeRegExp(chunk)).join("[^/]"))
@@ -2134,23 +2138,36 @@ function distributedGroupsForText(
   };
 }
 
-/** Resolve trusted distributed topology for the requested ledger ids. */
+/** Resolve trusted distributed topology for the requested ledger ids. #1519:
+ * the hints carry the FULL seam objects (name plus the trusted owner/test
+ * glob patterns) instead of name-only strings, so the trace plan and the
+ * loop's slot attribution can match evidence per seam exactly the way
+ * `validateRequirementTrace` does. #1519 (review): a requirement whose
+ * topology OVERFLOWS the representable seam cap is NOT dropped here — the
+ * validator still classifies it distributed (`isDistributed` is computed
+ * before the overflow gate, which then forces the row `unverifiable`), so
+ * the plan must classify it distributed too; dropping the hints would make
+ * the plan budget runtime-shape attempts the validator's per-seam demand
+ * never asked for. */
 export function distributedRequirementHints(
   ledger: unknown,
   ownership: readonly RequirementOwnership[] | undefined,
   scopeIds: readonly string[],
-): { requirementId: string; groups: readonly string[] }[] {
+): { requirementId: string; groups: { name: string; owners: string[]; tests: string[] }[] }[] {
   const entries = new Map(ledgerEntriesInScope(ledger).map((entry) => [entry.id, entry]));
-  const hints: { requirementId: string; groups: readonly string[] }[] = [];
+  const hints: { requirementId: string; groups: { name: string; owners: string[]; tests: string[] }[] }[] = [];
   const seenScopeIds = new Set<string>();
   for (const requirementId of scopeIds) {
     if (seenScopeIds.has(requirementId)) continue;
     seenScopeIds.add(requirementId);
     const entry = entries.get(requirementId);
     if (!entry) continue;
-    const { groups, overflow } = distributedGroupsForText(entry.text, ownership);
-    if (overflow || groups.length < MIN_DISTRIBUTED_GROUPS) continue;
-    hints.push({ requirementId, groups: groups.map((group) => group.name) });
+    const { groups } = distributedGroupsForText(entry.text, ownership);
+    if (groups.length < MIN_DISTRIBUTED_GROUPS) continue;
+    hints.push({
+      requirementId,
+      groups: groups.map((group) => ({ name: group.name, owners: [...group.owners], tests: [...group.tests] })),
+    });
     if (hints.length >= MAX_DISTRIBUTED_HINTS) break;
   }
   return hints;
@@ -2695,6 +2712,27 @@ const MAX_RENDERED_ROWS = 20;
  * more than this many in-scope requirements — the issue's "do not dump an
  * enormous matrix into the public review" ask. */
 const COLLAPSE_THRESHOLD = 5;
+
+/**
+ * #1518: the requirement ids the trace could not discharge — every row whose
+ * disposition is `unmet` or `unverifiable`. Those are exactly the rows that
+ * set the trace's `incomplete` flag (the `validateRequirementTrace` rule) and
+ * exactly the rows the published markdown reports as notable, so the id list
+ * names the same obligations the reviewer was told about.
+ *
+ * The list is deduplicated, keeps the trace's order, and is bounded by the
+ * shared id cap, so a large ledger cannot flood the published handoff.
+ */
+export function unresolvedTraceRequirementIds(trace: RequirementTraceArtifact): string[] {
+  if (trace === null || typeof trace !== "object" || !Array.isArray(trace.rows)) return [];
+  const ids: string[] = [];
+  for (const row of trace.rows) {
+    if (row.disposition !== "unmet" && row.disposition !== "unverifiable") continue;
+    if (typeof row.requirement_id !== "string" || row.requirement_id === "") continue;
+    ids.push(row.requirement_id);
+  }
+  return boundedIdList(ids);
+}
 
 /**
  * Render the published-body "Requirement trace" section: only the
