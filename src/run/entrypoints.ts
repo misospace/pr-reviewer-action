@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { resolvePlatform } from "../platform/resolve.js";
@@ -407,9 +407,61 @@ function confidenceTelemetryFromRunDir(env: NodeJS.ProcessEnv): ConfidenceTeleme
   return telemetry;
 }
 
+/** #1520: the reviewed diff the publish step anchors inline findings against,
+ * read from the run dir's own `pr.diff` artifact — the exact bytes the engine
+ * reviewed (redacted, complete; `review.ts` writes it before any finding
+ * exists). The publish boundary takes its other run-dir artifacts
+ * (`review-coverage.json`, `confidence-score.json`) from the same source and
+ * for the same reason: a FRESH forge read of the CURRENT head races a push,
+ * and the #451 publication-boundary head re-check runs inside
+ * `publishReview` — so the anchor map must be built from the revision the
+ * review actually covered, never from whatever the forge serves at publish
+ * time.
+ *
+ * `undefined` means "no reviewed diff available" (no run dir, or a missing/
+ * unreadable artifact) and the caller falls back to its historical
+ * per-platform source. A present-but-empty file IS the reviewed diff (an
+ * empty anchor map — nothing can anchor) and is returned as "".
+ *
+ * The artifact is opened once with no-follow semantics (the same regular-file
+ * guarantee as the other security-sensitive reads in `change-anchors.ts` /
+ * `mirror.ts`): a symlinked `pr.diff` is refused, never followed, and a run
+ * dir containing a NUL byte fails closed — both are "no reviewed diff
+ * available" (fallback), never a read through the link. `O_NONBLOCK` keeps a
+ * planted FIFO from blocking the open (the regular-file check then refuses
+ * it). Where `O_NOFOLLOW` is undefined (Windows: Node exposes the constant
+ * only under `#ifdef O_NOFOLLOW` and the Windows CRT has no such flag) the
+ * no-follow guarantee degrades to the platform default — intentional and
+ * unreachable on a supported deployment: the v3 runner contract is
+ * POSIX-only (#679, `src/runtime/platform.ts`), Windows was never
+ * demonstrated, and the review's tree-owning children fail closed there, so
+ * no shipped run ever produces a run dir whose `pr.diff` could be followed.
+ * The sibling no-follow reads (`mirror.ts`, `executor/paths.ts`) state the
+ * same accepted degradation. */
+function reviewedDiffFromRunDir(runDir: string | undefined): string | undefined {
+  if (runDir === undefined) return undefined;
+  let fd: number;
+  try {
+    fd = openSync(join(runDir, "pr.diff"), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK);
+  } catch {
+    return undefined;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return undefined;
+    return readFileSync(fd, "utf8");
+  } catch {
+    return undefined;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** The platform publish seam (GitHub REST/GraphQL, Forgejo /api/v1, or the
- * Tangled ATProto record client). */
-export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
+ * Tangled ATProto record client). `runDir` is the same run directory the
+ * caller hands to `publishWithOutcome`; the Forgejo inline-position
+ * re-validation anchors against the reviewed diff from THAT run dir and from
+ * no other source. */
+export function buildPublishApi(env: NodeJS.ProcessEnv, runDir?: string): { api: PublishPlatformApi; platform: string; diffProvider: () => Promise<string> } {
   const repo = env.REPO ?? "";
   const prNumber = env.PR_NUMBER ?? "";
   const platform = resolvePlatform(env.PLATFORM, env.FORGEJO_API_URL ?? "", env.GITHUB_SERVER_URL ?? "", env.TANGLED_REPO_DID ?? "");
@@ -442,7 +494,18 @@ export function buildPublishApi(env: NodeJS.ProcessEnv): { api: PublishPlatformA
     ...(token ? { token: platform === "forgejo" ? token : `Bearer ${token}` } : {}),
     ...(platform === "github" && env.GITHUB_API_URL ? { baseUrl: env.GITHUB_API_URL } : {}),
   };
-  const diffProvider = async (): Promise<string> => buildAdapter(env).getPrDiff();
+  const diffProvider = async (): Promise<string> =>
+    // #1520: the Forgejo adapter's inline-position re-validation anchors
+    // against the REVIEWED diff when the caller's run dir carries it — a
+    // fresh read here would let a comment anchor on content this run never
+    // reviewed. The forge's own server-side re-validation against the
+    // current head stays the final arbiter and drops what no longer anchors
+    // (fail closed). Single source of truth: the run dir enters ONLY through
+    // the `runDir` parameter — the same value the caller hands to
+    // `publishWithOutcome` — so the two anchor decisions cannot diverge by
+    // construction; ambient `PR_REVIEWER_RUN_DIR` is never consulted here.
+    // A caller that passes no run dir gets only the fresh-read fallback.
+    reviewedDiffFromRunDir(runDir) ?? buildAdapter(env).getPrDiff();
   const api: PublishPlatformApi = platform === "forgejo"
     ? new ForgejoPublishApi({
       ...apiOptions,
@@ -599,9 +662,16 @@ export interface PublishOutcome {
 /** Runs one publication, persists the #1027 findings ledger, relays the
  * step messages, and reports the outcome. */
 export async function publishWithOutcome(input: PublishInput, seam: ReturnType<typeof buildPublishApi>, runDir?: string): Promise<PublishOutcome> {
-  const result: PublishResult = await publishReview(input, seam.api, {
-    diffText: seam.platform === "forgejo" ? await seam.diffProvider() : "",
-  });
+  // #1520: hand the REVIEWED diff to the publish step on EVERY platform. The
+  // anchor map `buildComments` derives from it is what makes the contract's
+  // `inline-findings` promise real on GitHub (native line-anchored review
+  // comments) and lets `hasPublishablePrescription` see the prescriptions, so
+  // the #762 usefulness-feedback read runs there too and #1518's handoff can
+  // carry a `suggestion`. The historical per-platform sources below remain
+  // only as the fallback for a caller with no run dir / no `pr.diff` artifact.
+  const diffText = reviewedDiffFromRunDir(runDir)
+    ?? (seam.platform === "forgejo" ? await seam.diffProvider() : "");
+  const result: PublishResult = await publishReview(input, seam.api, { diffText });
   // #1027: the artifact is written only for a review that was actually
   // published (or superseded): a failed publication never published the
   // current findings, so their `reported` events must not reach the ledger.
@@ -655,14 +725,15 @@ function writePublishStatusOutput(env: NodeJS.ProcessEnv, status: PublishResult[
  * cannot distinguish published from superseded (both exit 0), so this step
  * also writes the `publish-status` output. */
 export async function publishMain(env: NodeJS.ProcessEnv): Promise<number> {
-  const seam = buildPublishApi(env);
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  const seam = buildPublishApi(env, runDir);
   // #1518: this path publishes its own handoff, so it needs its own per-run
   // review id — the same random id the Action entry and the Tangled runner
   // generate. A publisher that carried no review id would publish a handoff
   // that names no review, and the strict parser refuses such a document.
   const reviewId = randomBytes(8).toString("hex");
   const publishInput = { ...publishInputFromEnv(env, seam.platform), reviewId };
-  const outcome = await publishWithOutcome(publishInput, seam, nonEmpty(env.PR_REVIEWER_RUN_DIR));
+  const outcome = await publishWithOutcome(publishInput, seam, runDir);
   writePublishStatusOutput(env, outcome.status);
   return outcome.exitCode;
 }
