@@ -132,6 +132,150 @@ export interface ProviderSpec {
   [key: string]: unknown;
 }
 
+// ── #1517: the negative-evidence declaration ─────────────────────────────
+// A provider spec MAY carry a `negative_evidence` object declaring what a
+// CLEAN run of that provider is authoritative negative evidence for. The
+// declaration lives ONLY in the operator-managed providers config (the same
+// trust source as the command itself — see the module docblock: provider
+// specs come from operator-managed workflow configuration, never from
+// PR-controlled content), and nothing a provider PRINTS can create or widen
+// one: external/untrusted status text cannot self-declare negative-evidence
+// authority. Parsing is fail-closed — any shape that is not exactly the
+// declared schema yields null, and a null spec produces no rule.
+
+export type NegativeEvidenceDomain = "formatter" | "lint" | "schema";
+
+export const NEGATIVE_EVIDENCE_DOMAINS: ReadonlySet<string> = new Set(["formatter", "lint", "schema"]);
+
+/**
+ * The finding categories a negative-evidence rule may contradict: the model
+ * category allowlist (src/model/verdict.ts FINDING_CATEGORIES) MINUS
+ * `security` — a clean deterministic tool run is never evidence that
+ * security properties hold, so a security-capable rule is refused at parse
+ * time. `requirements` is not a model category (it is synthesized by the
+ * deterministic enforcement layer, see
+ * src/enforcement/blocker-verification.ts DETERMINISTIC_FINDING_CATEGORIES)
+ * and is refused for the same reason.
+ */
+export const NEGATIVE_EVIDENCE_CATEGORIES: ReadonlySet<string> = new Set([
+  "bug", "performance", "style", "docs", "tests", "question", "other", "verification",
+]);
+
+/** Severity ceilings a rule may declare; `blocker` is deliberately absent —
+ * blocker findings are never contradicted by negative evidence. */
+export const NEGATIVE_EVIDENCE_MAX_SEVERITIES: ReadonlySet<string> = new Set(["major", "minor", "info"]);
+
+export const MAX_NEGATIVE_EVIDENCE_PATHS = 64;
+export const MAX_NEGATIVE_EVIDENCE_PATH_CHARS = 256;
+export const MAX_NEGATIVE_EVIDENCE_RULES = 64;
+
+export interface NegativeEvidenceSpec {
+  domain: NegativeEvidenceDomain;
+  /** Repo-relative POSIX path patterns the clean run covers. A pattern with
+   * no `/`-metacharacter semantics covers the exact path and everything
+   * beneath it; `*`/`**` globs are honored (see
+   * src/enforcement/negative-evidence.ts). */
+  paths: string[];
+  /** Finding categories the rule may contradict (subset of
+   * NEGATIVE_EVIDENCE_CATEGORIES). */
+  categories: string[];
+  /** The most severe finding severity the rule may contradict. */
+  max_severity: "major" | "minor" | "info";
+  /** The tool identity a lint/schema claim must name; null means "the
+   * provider's own id". */
+  identity: string | null;
+  /** Exact rule ids (lint rule family / schema rule) a claim may cite. */
+  rules: string[];
+}
+
+/** A repo-relative POSIX path pattern: no absolute, drive, backslash, NUL,
+ * or traversal segments; bounded count and length. One trailing `/` is the
+ * directory form the matcher treats as the covered subtree. */
+function validRulePath(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const path = raw.trim();
+  if (path === "" || path.length > MAX_NEGATIVE_EVIDENCE_PATH_CHARS) return null;
+  if (path.includes("\0") || path.includes("\\") || path.startsWith("/")) return null;
+  const trimmed = path.endsWith("/") && path.length > 1 ? path.slice(0, -1) : path;
+  if (trimmed === "") return null;
+  for (const segment of trimmed.split("/")) {
+    if (segment === "" || segment === "." || segment === "..") return null;
+  }
+  return path;
+}
+
+function stringListField(value: unknown, allowed: ReadonlySet<string> | null, max: number, maxChars: number): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") return null;
+    const text = item.trim();
+    if (text === "" || text.length > maxChars) return null;
+    if (allowed !== null && !allowed.has(text)) return null;
+    if (seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+    if (out.length > max) return null;
+  }
+  return out;
+}
+
+/**
+ * Parse the `negative_evidence` key of a provider spec. Returns null when
+ * the key is absent or anything about the value is not exactly the declared
+ * schema — fail-closed: an unparsable declaration is no declaration, and the
+ * provider keeps its plain advisory-finding behavior.
+ */
+export function parseNegativeEvidenceSpec(raw: unknown): NegativeEvidenceSpec | null {
+  if (raw === null || raw === undefined) return null;
+  if (!isPyDict(raw)) return null;
+
+  const domainValue = dictGet(raw, "domain");
+  if (typeof domainValue !== "string" || !NEGATIVE_EVIDENCE_DOMAINS.has(domainValue)) return null;
+
+  const paths = stringListField(dictGet(raw, "paths"), null, MAX_NEGATIVE_EVIDENCE_PATHS, MAX_NEGATIVE_EVIDENCE_PATH_CHARS);
+  if (paths === null || paths.length === 0) return null;
+  const validPaths: string[] = [];
+  for (const path of paths) {
+    const valid = validRulePath(path);
+    if (valid === null) return null;
+    validPaths.push(valid);
+  }
+
+  const categories = stringListField(dictGet(raw, "categories"), NEGATIVE_EVIDENCE_CATEGORIES, NEGATIVE_EVIDENCE_CATEGORIES.size, 32);
+  if (categories === null || categories.length === 0) return null;
+
+  let maxSeverity: NegativeEvidenceSpec["max_severity"] = "major";
+  const rawMaxSeverity = dictGet(raw, "max_severity");
+  if (rawMaxSeverity !== undefined && rawMaxSeverity !== null) {
+    if (typeof rawMaxSeverity !== "string" || !NEGATIVE_EVIDENCE_MAX_SEVERITIES.has(rawMaxSeverity)) return null;
+    maxSeverity = rawMaxSeverity as NegativeEvidenceSpec["max_severity"];
+  }
+
+  let identity: string | null = null;
+  const rawIdentity = dictGet(raw, "identity");
+  if (rawIdentity !== undefined && rawIdentity !== null) {
+    if (typeof rawIdentity !== "string") return null;
+    const identityText = rawIdentity.trim();
+    if (identityText === "" || identityText.length > 128) return null;
+    identity = identityText;
+  }
+
+  const rawRules = dictGet(raw, "rules");
+  const ruleIds = rawRules === undefined || rawRules === null
+    ? []
+    : stringListField(rawRules, null, MAX_NEGATIVE_EVIDENCE_RULES, 128);
+  if (ruleIds === null) return null;
+
+  const allowed = new Set(["domain", "paths", "categories", "max_severity", "identity", "rules"]);
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) return null;
+  }
+
+  return { domain: domainValue as NegativeEvidenceDomain, paths: validPaths, categories, max_severity: maxSeverity, identity, rules: ruleIds };
+}
+
 export interface RunEvidenceProviderOptions {
   /** 1-based config position; names the entry `provider-<index>` when the
    * spec carries no usable id. */

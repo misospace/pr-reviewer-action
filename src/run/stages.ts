@@ -342,7 +342,9 @@ export async function runEvidencePhase(ws: RunWorkspace, env: StageEnv, forkFlag
   });
   // The phase writes evidence-providers.{md,json} itself (v2 cwd
   // semantics); refresh the bus so the corpus reads this run's values.
-  for (const name of ["evidence-providers.md", "evidence-providers.json"]) ws.refresh(name);
+  // The #1517 negative-evidence sidecar is written alongside on every
+  // outcome, so it is always this run's own derivation.
+  for (const name of ["evidence-providers.md", "evidence-providers.json", "evidence-negative-evidence.json"]) ws.refresh(name);
   return outcome;
 }
 

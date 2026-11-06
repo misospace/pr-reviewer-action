@@ -83,6 +83,8 @@ import { createPinnedActionWitness, resolvePinnedActionRevision } from "../enfor
 import { createHeadSourceReader } from "../enforcement/source-verifier.js";
 import { readWorkflowInputNamesByFile, resolveActionSlug } from "../enforcement/workflow-inputs.js";
 import { capCiEvidenceFindings } from "../enforcement/ci-evidence.js";
+import { applyNegativeEvidenceToRecord, negativeEvidenceRulesFromArtifact } from "../enforcement/negative-evidence.js";
+import { EVIDENCE_NEGATIVE_EVIDENCE_FILE } from "../evidence/negative-evidence.js";
 import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enforcement/completeness.js";
@@ -2031,6 +2033,17 @@ secrets: [profiles.primary.apiKey],
     };
     blockerVerification = await applyBlockerVerification(reviewRecord.findings as ArtifactFinding[], verificationOptions);
   }
+  // #1517: the negative-evidence rules this run's evidence phase derived
+  // (clean trusted provider runs whose operator spec declared a covered
+  // domain). Freshness is re-checked HERE against the exact head under
+  // review: a rule (or sidecar) whose recorded head differs from this run's
+  // validated revision is stale evidence and is dropped, never applied. No
+  // rules — the normal case for every run whose providers declare no
+  // negative_evidence — leaves the review path byte-identical to before.
+  const negativeEvidence = negativeEvidenceRulesFromArtifact(
+    safeJson(ws.read(EVIDENCE_NEGATIVE_EVIDENCE_FILE)),
+    expectedRevision,
+  );
   const verdictPolicy = env.VERDICT_POLICY ?? "strict";
   // Captured before any layer mutates it: the strict mapping (#811) takes the
   // model verdict as an input, not as the final answer.
@@ -2138,6 +2151,12 @@ secrets: [profiles.primary.apiKey],
       }
       blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
     }
+    // #1517: deterministic negative evidence runs after BOTH verification
+    // passes (so a verifier `unverified` status is never overwritten by a
+    // demotion — a contradictory clean tool signal and an uncheckable source
+    // claim keep the fail-closed strict mapping) and before the strict
+    // mapping, which sees the final severities. Covers thread re-emissions.
+    applyNegativeEvidenceToRecord(reviewRecord, negativeEvidence.rules, negativeEvidence.stale);
     // #1449: the derived rows are COVERAGE rows, so only the FORCING sources
     // (the operator's `must_check` checklist and the trusted base's
     // `trusted_base_guidance` asks) reach the strict mapping's anti-relax
@@ -2212,6 +2231,10 @@ secrets: [profiles.primary.apiKey],
       }
       blockerVerification = mergeBlockerVerificationPasses(blockerVerification, settledPass);
     }
+    // #1517: deterministic negative evidence (same placement rationale as
+    // the strict branch: after both verification passes, before the verdict
+    // relaxers see the final severities).
+    applyNegativeEvidenceToRecord(reviewRecord, negativeEvidence.rules, negativeEvidence.stale);
     // #977: the model's own request_changes is relaxed only when every
     // still-open finding is a verification ask and no independent
     // deterministic gate fired. The overlays above have already run, so
