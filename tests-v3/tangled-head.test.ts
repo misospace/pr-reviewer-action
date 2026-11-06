@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readTangledCurrentHead, resolveTangledTicketIdentity, selectNewestPatchHead } from "../src/platform/tangled-head.js";
+import { readTangledCurrentHead, readTangledCurrentHeadForContext, resolveTangledTicketIdentity, selectNewestPatchHead } from "../src/platform/tangled-head.js";
 import type { FetchLike } from "../src/platform/http.js";
 import type { TangledContext } from "../src/platform/tangled.js";
 import type { TangledPullIdentity } from "../src/platform/tangled-bobbin.js";
@@ -99,6 +99,31 @@ test("selector: a createdAt tie with different heads is ambiguous (null)", () =>
 test("selector: a createdAt tie with the same head is not ambiguous", () => {
   const items = [patchItem({}), patchItem({ cid: "bafypatch2" })];
   assert.equal(selectNewestPatchHead(items, TICKET_RKEY, TICKET_URI), HEAD1);
+});
+
+test("selector: 64-hex SHA-256 head OIDs are accepted (new Tangled repos)", () => {
+  const sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  assert.equal(sha256.length, 64);
+  const items = [patchItem({ head: { oid: sha256 } })];
+  assert.equal(selectNewestPatchHead(items, TICKET_RKEY, TICKET_URI), sha256);
+  // 41-hex and other lengths are still rejected.
+  assert.equal(selectNewestPatchHead([patchItem({ head: { oid: "a".repeat(41) } })], TICKET_RKEY, TICKET_URI), null);
+});
+
+test("combined: multiple open PRs to the same target resolve by source branch", async () => {
+  const mine = patchItem({ ticket: "3mine", head: { oid: HEAD1 }, source: { branch: "feat/x", repo: REPO_DID } });
+  const other = patchItem({ cid: "bafyother", ticket: "3other", head: { oid: HEAD2 }, source: { branch: "feat/other", repo: REPO_DID } });
+  const { fetchImpl } = makeFetch([mine, other]);
+  // ctx.sourceBranch is "feat/x" — the combined reader must pick mine,
+  // even though two tickets exist for the (implicit) same target.
+  assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), HEAD1);
+});
+
+test("combined: ambiguous correlation across tickets fails closed", async () => {
+  const a = patchItem({ ticket: "3a", head: { oid: HEAD1 }, source: { branch: "feat/x", repo: REPO_DID } });
+  const b = patchItem({ cid: "bafyb", ticket: "3b", head: { oid: HEAD2 }, source: { branch: "feat/x", repo: REPO_DID } });
+  const { fetchImpl } = makeFetch([a, b]);
+  assert.equal(await readTangledCurrentHeadForContext(makeCtx(), { fetchImpl }), null);
 });
 
 test("selector: a patch with a missing or malformed ticket fails closed (not ignored)", () => {

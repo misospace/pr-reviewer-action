@@ -36,7 +36,7 @@ const PAGE_LIMIT = 100;
 const MAX_PAGES = 10;
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
-const SHA_RE = /^[0-9a-f]{40}$/i;
+const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -253,4 +253,90 @@ export async function readTangledCurrentHead(
   } catch {
     return null;
   }
+}
+
+/** Bounded listRecords read of the patch collection; null on any failure. */
+async function listPatchItems(
+  ctx: TangledContext,
+  options?: ReadTangledCurrentHeadOptions,
+): Promise<TangledPatchRecordItem[] | null> {
+  try {
+    const knot = knotBase(ctx);
+    const repoDid = ctx.repoDid;
+    if (knot === null || repoDid === undefined || repoDid.trim() === "") return null;
+    const items: TangledPatchRecordItem[] = [];
+    let cursor: string | undefined;
+    for (let page = 1; ; page += 1) {
+      if (page > MAX_PAGES) return null;
+      const u = new URL(`${knot.base}/xrpc/${XRPC_LIST_RECORDS}`);
+      u.searchParams.set("repo", repoDid.trim());
+      u.searchParams.set("collection", TANGLED_PATCH_COLLECTION);
+      u.searchParams.set("limit", String(PAGE_LIMIT));
+      if (cursor !== undefined) u.searchParams.set("cursor", cursor);
+      const result = await requestJson(u.toString(), {
+        allowedOrigin: knot.origin,
+        fetchImpl: options?.fetchImpl,
+        timeoutMs: options?.timeoutMs,
+      });
+      if (result.status < 200 || result.status >= 300) return null;
+      const resp = asRecord(result.data);
+      if (resp === undefined || !Array.isArray(resp.records)) return null;
+      for (const raw of resp.records) {
+        const item = asRecord(raw);
+        if (item === undefined) return null;
+        const uri = str(item.uri);
+        const value = asRecord(item.value);
+        if (uri === undefined || uri === "" || value === undefined) return null;
+        try {
+          const parsed = parseTangledAtUri(uri);
+          if (parsed.collection !== TANGLED_PATCH_COLLECTION) return null;
+          if (parsed.did !== repoDid.trim()) return null;
+        } catch {
+          return null;
+        }
+        items.push({ uri, cid: str(item.cid), value });
+      }
+      const nextCursor = str(resp.cursor);
+      if (nextCursor === undefined || nextCursor === "") break;
+      cursor = nextCursor;
+    }
+    return items;
+  } catch {
+    return null;
+  }
+}
+
+const MAX_TICKET_CANDIDATES = 10;
+
+/**
+ * Combined production read (#1165): correlate ticket and head in one
+ * pass, so a repo with multiple open PRs to the same target branch
+ * still works.
+ *
+ * Patch items are grouped by `ticket` key; each ticket key yields a
+ * head only if its newest source-branch-correlated patch selection
+ * succeeds. Exactly one ticket must yield a head, else `null`
+ * (ambiguous or unknown → publication refused). Malformed patch state
+ * (missing ticket key, bad repo binding) fails closed.
+ */
+export async function readTangledCurrentHeadForContext(
+  ctx: TangledContext,
+  options?: ReadTangledCurrentHeadOptions,
+): Promise<string | null> {
+  const items = await listPatchItems(ctx, options);
+  if (items === null) return null;
+  const ticketKeys = new Set<string>();
+  for (const item of items) {
+    const ticket = str(item.value.ticket);
+    if (ticket === undefined) return null;
+    ticketKeys.add(ticket);
+  }
+  if (ticketKeys.size === 0 || ticketKeys.size > MAX_TICKET_CANDIDATES) return null;
+  const heads = new Map<string, string>();
+  for (const key of ticketKeys) {
+    const head = selectNewestPatchHead(items, key, key, ctx.sourceBranch);
+    if (head !== null) heads.set(key, head);
+  }
+  if (heads.size !== 1) return null;
+  return [...heads.values()][0] ?? null;
 }

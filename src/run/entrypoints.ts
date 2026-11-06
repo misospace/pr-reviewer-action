@@ -10,7 +10,7 @@ import type { PlatformAdapter } from "../platform/types.js";
 import { GitHubPublishApi } from "../platform/publish-api.js";
 import { ForgejoPublishApi } from "../platform/publish-api.js";
 import { TangledPublishApi } from "../platform/tangled-publish.js";
-import { readTangledCurrentHead, resolveTangledTicketIdentity } from "../platform/tangled-head.js";
+import { readTangledCurrentHeadForContext } from "../platform/tangled-head.js";
 import { TangledAtprotoClient, atprotoConfigFromEnv } from "../platform/tangled-atproto.js";
 import { tangledContextFromEnv } from "../platform/tangled.js";
 import { eventLabelName } from "../precheck/decide.js";
@@ -482,19 +482,12 @@ export function buildPublishApi(env: NodeJS.ProcessEnv, runDir?: string): { api:
     const api = new TangledPublishApi({
       context,
       atproto: new TangledAtprotoClient(atprotoConfigFromEnv(env)),
-      currentHeadSha: async () => {
-        // Patch records are keyed by the org.tangled.track.ticket rkey,
-        // not by the legacy sh.tangled.repo.pull identity, so resolve the
-        // ticket from the knot first. Unknown/ambiguous ticket -> null.
-        const ticket = await resolveTangledTicketIdentity(context, {});
-        if (ticket === null) return null;
-        const identity = {
-          uri: ticket.uri,
-          rkey: ticket.rkey,
-          repoDid: context.repoDid ?? "",
-        } as unknown as Parameters<typeof readTangledCurrentHead>[1];
-        return readTangledCurrentHead(context, identity, {});
-      },
+      // The combined reader correlates the ticket and head in one pass:
+      // patch records are keyed by org.tangled.track.ticket, and the
+      // source-branch correlation (not target-branch uniqueness) picks
+      // this pull's ticket among several open PRs to the same target.
+      // Ambiguous/unknown -> null (publication refused).
+      currentHeadSha: () => readTangledCurrentHeadForContext(context, {}),
     });
     const diffProvider = async (): Promise<string> => buildPlatformReadAdapter(env).getPrDiff();
     return { api, platform, diffProvider };
