@@ -48,7 +48,7 @@
 
 import type { NegativeEvidenceRule } from "../evidence/negative-evidence.js";
 import { NEGATIVE_EVIDENCE_SCHEMA } from "../evidence/negative-evidence.js";
-import { isGenericNegativeEvidenceToken } from "../evidence/providers.js";
+import { isGenericNegativeEvidenceToken, validRulePath } from "../evidence/providers.js";
 import type { ArtifactFinding } from "./artifact.js";
 import { DETERMINISTIC_FINDING_CATEGORIES, canonicalTreePath, safeFile } from "./blocker-verification.js";
 
@@ -142,7 +142,16 @@ function parsePersistedRule(raw: unknown): NegativeEvidenceRule | null {
   if (typeof provider !== "string" || provider === "" || provider.length > 128) return null;
   if (domain !== "formatter" && domain !== "lint" && domain !== "schema") return null;
   if (!isBoundedStringArray(record.paths, 64, 256) || record.paths.length === 0) return null;
+  // The same path rule the spec parser enforced at derivation (absolute,
+  // drive-absolute, backslash, NUL, traversal) — a tampered or legacy
+  // sidecar cannot widen coverage past the declaration contract.
+  for (const pattern of record.paths) {
+    if (validRulePath(pattern) === null) return null;
+  }
   if (!isBoundedStringArray(record.categories, 16, 32) || record.categories.length === 0) return null;
+  // The same structural formatter boundary the spec parser enforced (#1529
+  // review): a formatter rule claims style categories only.
+  if (domain === "formatter" && record.categories.some((category) => category !== "style")) return null;
   if (record.max_severity !== "major" && record.max_severity !== "minor" && record.max_severity !== "info") return null;
   if (typeof record.identity !== "string" || record.identity === "" || record.identity.length > 128) return null;
   if (record.identity.trim() !== record.identity) return null;
@@ -328,6 +337,12 @@ function matchFinding(finding: ArtifactFinding, rules: readonly NegativeEvidence
   const message = typeof finding.message === "string" ? finding.message : "";
   for (const rule of rules) {
     if (!rule.categories.includes(category)) continue;
+    // #1529 review (structural formatter boundary, second independent cap):
+    // a formatter-clean run speaks for STYLE claims only — a semantic bug
+    // is category `bug`, whatever its message says. The spec parser already
+    // refuses a formatter declaration claiming other categories; this is
+    // the second cap, like the blocker one in applyNegativeEvidence.
+    if (rule.domain === "formatter" && category !== "style") continue;
     // Severity admissibility: a rule may contradict severities at or below
     // its ceiling (rank grows as severity shrinks). A `blocker` finding is
     // admitted past this check only so the caller can record the refusal —

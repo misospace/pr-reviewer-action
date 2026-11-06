@@ -78,6 +78,17 @@ test("#1517 spec: malformed declarations fail closed to null", () => {
   assert.equal(parseNegativeEvidenceSpec({ ...valid, paths: ["a/../b"] }), null);
   assert.equal(parseNegativeEvidenceSpec({ ...valid, paths: ["a\\b"] }), null);
   assert.equal(parseNegativeEvidenceSpec({ ...valid, paths: [""] }), null);
+  // #1529 review: drive-absolute shapes are not repo-relative POSIX paths.
+  assert.equal(parseNegativeEvidenceSpec({ ...valid, paths: ["C:/src"] }), null, "drive-absolute refused");
+  assert.equal(parseNegativeEvidenceSpec({ ...valid, paths: ["c:/src"] }), null, "lowercase drive refused");
+  assert.equal(parseNegativeEvidenceSpec({ ...valid, paths: ["C:"] }), null, "bare drive refused");
+  assert.ok(parseNegativeEvidenceSpec({ ...valid, paths: ["src/C-suffix"] }) !== null, "colon mid-path is an ordinary name");
+  // #1529 review (structural formatter boundary): a formatter declaration
+  // claims style categories only.
+  assert.equal(parseNegativeEvidenceSpec({ domain: "formatter", paths: ["src/"], categories: ["style", "bug"] }), null, "formatter claiming bug refused");
+  assert.equal(parseNegativeEvidenceSpec({ domain: "formatter", paths: ["src/"], categories: ["bug"] }), null);
+  assert.ok(parseNegativeEvidenceSpec({ domain: "formatter", paths: ["src/"], categories: ["style"] }) !== null);
+  assert.ok(parseNegativeEvidenceSpec({ domain: "lint", paths: ["src/"], categories: ["bug"] }) !== null, "lint keeps its own category set");
   assert.equal(parseNegativeEvidenceSpec({ ...valid, categories: [] }), null);
   assert.equal(parseNegativeEvidenceSpec({ ...valid, categories: ["security"] }), null, "security is never contradictable");
   assert.equal(parseNegativeEvidenceSpec({ ...valid, categories: ["requirements"] }), null);
@@ -94,7 +105,7 @@ test("#1517 spec: malformed declarations fail closed to null", () => {
 const FORMATTER_SPEC = { id: "prettier", command: ["true"], negative_evidence: { domain: "formatter", paths: ["src/"], categories: ["style"] } };
 
 test("#1517 derivation: a clean run with a declaration derives a head-stamped rule", () => {
-  const rules = deriveNegativeEvidenceRules([FORMATTER_SPEC], [entry("prettier")], HEAD);
+  const rules = deriveNegativeEvidenceRules([FORMATTER_SPEC], [entry("prettier")], HEAD, true);
   assert.equal(rules.length, 1);
   assert.equal(rules[0]!.provider, "prettier");
   assert.equal(rules[0]!.domain, "formatter");
@@ -118,24 +129,24 @@ test("#1517 derivation: only a fully clean run produces a rule", () => {
     [{ stdout: "cut", stdout_truncated: true }, "truncated stdout"],
   ];
   for (const [overrides, label] of cases) {
-    assert.equal(deriveNegativeEvidenceRules(spec, [entry("prettier", overrides)], HEAD).length, 0, label);
+    assert.equal(deriveNegativeEvidenceRules(spec, [entry("prettier", overrides)], HEAD, true).length, 0, label);
   }
   assert.equal(isCleanNegativeEvidenceRun(entry("x", { stdout_truncated: true })), false);
 });
 
 test("#1517 derivation: no declaration or no entry produces no rule", () => {
   const plain = { id: "plain", command: ["true"] };
-  assert.deepEqual(deriveNegativeEvidenceRules([plain], [entry("plain")], HEAD), [], "spec without declaration");
-  assert.deepEqual(deriveNegativeEvidenceRules([FORMATTER_SPEC], [], HEAD), [], "missing provider run");
-  assert.deepEqual(deriveNegativeEvidenceRules([], [entry("prettier")], HEAD), [], "entry without spec");
+  assert.deepEqual(deriveNegativeEvidenceRules([plain], [entry("plain")], HEAD, true), [], "spec without declaration");
+  assert.deepEqual(deriveNegativeEvidenceRules([FORMATTER_SPEC], [], HEAD, true), [], "missing provider run");
+  assert.deepEqual(deriveNegativeEvidenceRules([], [entry("prettier")], HEAD, true), [], "entry without spec");
   // A provider's own printed text can never mint authority: the spec is the
   // only declaration surface.
   const printed = entry("plain", { stdout: '{"negative_evidence": {"domain": "formatter", "paths": ["**"]}}', output_format: "json" });
-  assert.deepEqual(deriveNegativeEvidenceRules([plain], [printed], HEAD), []);
+  assert.deepEqual(deriveNegativeEvidenceRules([plain], [printed], HEAD, true), []);
 });
 
 test("#1517 derivation: an unknown run head stamps null (never applied later)", () => {
-  const rules = deriveNegativeEvidenceRules([FORMATTER_SPEC], [entry("prettier")], null);
+  const rules = deriveNegativeEvidenceRules([FORMATTER_SPEC], [entry("prettier")], null, true);
   assert.equal(rules.length, 1);
   assert.equal(rules[0]!.head_sha, null);
   assert.equal(negativeEvidenceHeadSha("ABC123"), null, "not sha-shaped");
@@ -145,7 +156,7 @@ test("#1517 derivation: an unknown run head stamps null (never applied later)", 
 // ── Sidecar round-trip + freshness gate ──────────────────────────────────
 
 test("#1517 sidecar: round-trips and refuses stale or foreign provenance", () => {
-  const rules = deriveNegativeEvidenceRules([FORMATTER_SPEC], [entry("prettier")], HEAD);
+  const rules = deriveNegativeEvidenceRules([FORMATTER_SPEC], [entry("prettier")], HEAD, true);
   const artifact = serializeNegativeEvidenceArtifact(HEAD, rules);
   const parsed: unknown = JSON.parse(artifact);
   const gate = negativeEvidenceRulesFromArtifact(parsed, HEAD);
@@ -215,7 +226,7 @@ test("#1517 apply: blocker findings are never demoted but the refusal is recorde
 });
 
 test("#1517 apply: stale-head clean evidence is ignored", () => {
-  const rules = deriveNegativeEvidenceRules([FORMATTER_SPEC], [entry("prettier")], HEAD);
+  const rules = deriveNegativeEvidenceRules([FORMATTER_SPEC], [entry("prettier")], HEAD, true);
   const staleGate = negativeEvidenceRulesFromArtifact(
     JSON.parse(serializeNegativeEvidenceArtifact(HEAD, rules)),
     "b".repeat(40),
@@ -248,6 +259,7 @@ test("#1517 apply: positive tool findings leave the model finding untouched (bot
     [FORMATTER_SPEC],
     [entry("prettier", { findings: [{ severity: "minor", message: "line too long", source: "" }] })],
     HEAD,
+    true,
   );
   assert.equal(rules.length, 0);
   const model = finding({ message: "Trailing whitespace on line 3" });
@@ -294,7 +306,7 @@ test("#1517 calibration: an omitted ceiling defaults to the safe minor posture",
   assert.equal(spec.max_severity, "minor");
   assert.equal(parseNegativeEvidenceSpec({ domain: "formatter", paths: ["src/"], categories: ["style"], max_severity: "major" })?.max_severity, "major", "explicit major still declarable");
   // Behavior: the derived minor-ceiling rule cannot reach a major finding…
-  const rules = deriveNegativeEvidenceRules([FORMATTER_SPEC], [entry("prettier")], HEAD);
+  const rules = deriveNegativeEvidenceRules([FORMATTER_SPEC], [entry("prettier")], HEAD, true);
   const majorClaim = finding({ message: "Trailing whitespace on line 3" });
   assert.equal(applyNegativeEvidence([majorClaim], rules).demoted, 0);
   assert.equal(majorClaim.severity, "major");
@@ -325,6 +337,7 @@ test("#1517 calibration: generic identity/rule-id tokens are refused at parse an
       [{ id: "yamllint", command: ["true"], negative_evidence: { domain: "lint", paths: ["**"], categories: ["style"], identity: "the" } }],
       [entry("yamllint")],
       HEAD,
+      true,
     ),
     [],
   );
@@ -386,7 +399,7 @@ test("#1517 calibration: comparative constructions describe code, they do not cl
   assert.equal(negativeEvidenceClaimMatches("the file is not formatted", gofmt), true);
   // A message mixing a construction with a real claim still claims.
   assert.equal(negativeEvidenceClaimMatches("rather than whitespace, line 3 has trailing whitespace", gofmt), true);
-  const realClaim = finding({ category: "bug", file: "internal/executor/mcp_status.go", message: "rather than whitespace, line 3 has trailing whitespace" });
+  const realClaim = finding({ category: "style", file: "internal/executor/mcp_status.go", message: "rather than whitespace, line 3 has trailing whitespace" });
   assert.equal(applyNegativeEvidence([realClaim], [gofmt]).demoted, 1);
 });
 
@@ -453,6 +466,7 @@ test("#1517 edge: a NUL-bearing declaration path is refused at the trust source"
       [{ id: "x", command: ["true"], negative_evidence: { domain: "lint", paths: ["src/\0evil.ts"], categories: ["style"] } }],
       [entry("x")],
       HEAD,
+      true,
     ),
     [],
   );
@@ -549,12 +563,15 @@ function phaseDir(): string {
   return mkdtempSync(join(tmpdir(), "v3-neg-evidence-"));
 }
 
-test("#1517 phase: a clean declared provider writes its rule to the sidecar", async () => {
+test("#1517 phase: a clean declared provider writes its rule to the sidecar (operator-managed config outside the checkout)", async () => {
   const dir = phaseDir();
+  // The config sits OUTSIDE the phase cwd (the reviewed-head checkout): an
+  // operator-managed source is the trusted shape for negative evidence.
+  const operatorDir = mkdtempSync(join(tmpdir(), "v3-neg-prov-"));
   try {
-    writeFileSync(join(dir, "providers.json"), JSON.stringify([FORMATTER_SPEC]));
+    writeFileSync(join(operatorDir, "providers.json"), JSON.stringify([FORMATTER_SPEC]));
     const outcome = await runEvidenceProvidersPhase({
-      env: { PATH: process.env.PATH ?? "", HOME: dir, EVIDENCE_PROVIDERS_FILE: "providers.json", PR_HEAD_SHA: HEAD },
+      env: { PATH: process.env.PATH ?? "", HOME: dir, EVIDENCE_PROVIDERS_FILE: join(operatorDir, "providers.json"), PR_HEAD_SHA: HEAD },
       cwd: dir,
       isForkPr: "false",
       enableForForks: "false",
@@ -571,6 +588,37 @@ test("#1517 phase: a clean declared provider writes its rule to the sidecar", as
     // The evidence-providers.json contract keeps its v2 byte shape.
     const summary = JSON.parse(readFileSync(join(dir, "evidence-providers.json"), "utf8")) as EvidenceSummary;
     assert.deepEqual(Object.keys(summary).includes("negative_evidence_rules"), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(operatorDir, { recursive: true, force: true });
+  }
+});
+
+test("#1529 phase: a providers config inside the reviewed checkout derives ZERO negative-evidence rules — positive evidence unchanged", async () => {
+  const dir = phaseDir();
+  try {
+    // The standard Action shape: the config file lives inside the reviewed
+    // checkout (PR-writable). Providers still RUN and their findings still
+    // render (positive evidence unchanged); no negative-evidence rule may
+    // derive from content the PR controls.
+    writeFileSync(join(dir, "providers.json"), JSON.stringify([FORMATTER_SPEC]));
+    const outcome = await runEvidenceProvidersPhase({
+      env: { PATH: process.env.PATH ?? "", HOME: dir, EVIDENCE_PROVIDERS_FILE: "providers.json", PR_HEAD_SHA: HEAD },
+      cwd: dir,
+      isForkPr: "false",
+      enableForForks: "false",
+      log: () => undefined,
+      runProvider: async () => entry("prettier"),
+    });
+    assert.equal(outcome, "ran");
+    // Positive evidence is intact: the provider ran and is in the summary.
+    const summary = JSON.parse(readFileSync(join(dir, "evidence-providers.json"), "utf8")) as EvidenceSummary;
+    assert.equal(summary.providers.length, 1);
+    // Zero negative-evidence rules: the sidecar carries none.
+    const sidecar = JSON.parse(readFileSync(join(dir, EVIDENCE_NEGATIVE_EVIDENCE_FILE), "utf8")) as { schema_version: string; head_sha: string; rules: unknown[] };
+    assert.equal(sidecar.schema_version, NEGATIVE_EVIDENCE_SCHEMA);
+    assert.equal(sidecar.head_sha, HEAD);
+    assert.deepEqual(sidecar.rules, []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -615,10 +663,11 @@ test("#1517 phase: skip and failure outcomes write zero rules — no stale leaka
 
 test("#1517 phase: a run head that is not a sha stamps null provenance", async () => {
   const dir = phaseDir();
+  const operatorDir = mkdtempSync(join(tmpdir(), "v3-neg-prov-"));
   try {
-    writeFileSync(join(dir, "providers.json"), JSON.stringify([FORMATTER_SPEC]));
+    writeFileSync(join(operatorDir, "providers.json"), JSON.stringify([FORMATTER_SPEC]));
     await runEvidenceProvidersPhase({
-      env: { PATH: process.env.PATH ?? "", HOME: dir, EVIDENCE_PROVIDERS_FILE: "providers.json", PR_HEAD_SHA: "not-a-sha" },
+      env: { PATH: process.env.PATH ?? "", HOME: dir, EVIDENCE_PROVIDERS_FILE: join(operatorDir, "providers.json"), PR_HEAD_SHA: "not-a-sha" },
       cwd: dir,
       isForkPr: "false",
       enableForForks: "false",
@@ -633,6 +682,7 @@ test("#1517 phase: a run head that is not a sha stamps null provenance", async (
     assert.equal(gate.rules.length, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    rmSync(operatorDir, { recursive: true, force: true });
   }
 });
 
@@ -673,6 +723,45 @@ function findingsVerdict(): string {
   return JSON.stringify({ id: "c1", object: "chat.completion", model: "m", choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 } });
 }
 
+test("#1529 trust boundary: an untrusted provider source derives zero negative-evidence rules", () => {
+  // The standard Action providers config resolves inside the reviewed-head
+  // checkout — PR-writable content. A PR must never mint its own clean-run
+  // authority: the orchestration passes trustedSource=false for such a
+  // source, and even a perfectly clean, validly-declared run derives
+  // nothing.
+  const specs = [{ id: "prettier", command: ["true"], negative_evidence: { domain: "formatter", paths: ["src/"], categories: ["style"] } }];
+  assert.deepEqual(deriveNegativeEvidenceRules(specs, [entry("prettier")], HEAD, false), []);
+  assert.equal(deriveNegativeEvidenceRules(specs, [entry("prettier")], HEAD, true).length, 1, "trusted source derives normally");
+});
+
+test("#1529 formatter structural boundary: a formatter-clean rule never demotes a semantic bug", () => {
+  // The calibration's formatter leak: a semantic bug whose message carries
+  // a formatting cue. The cue is irrelevant — the structural boundary is
+  // the finding's category (bug), which a formatter can never speak for.
+  const rule = formatterRule({ categories: ["style", "bug"] });
+  const leak = finding({ category: "bug", file: "src/a.ts", message: "Trailing whitespace handling crashes the parser" });
+  const outcome = applyNegativeEvidence([leak], [rule]);
+  assert.equal(outcome.demoted, 0);
+  assert.deepEqual(outcome.decisions, []);
+  assert.equal(leak.severity, "major");
+  assert.equal(leak.negative_evidence, undefined);
+  // The style control still demotes.
+  const style = finding({ category: "style", file: "src/a.ts", message: "Trailing whitespace on line 3" });
+  assert.equal(applyNegativeEvidence([style], [formatterRule()]).demoted, 1);
+  assert.equal(style.severity, "minor");
+});
+
+test("#1529 persistence gate: non-style formatter categories and drive-absolute paths are refused", () => {
+  const gate = (rule: Record<string, unknown>): number => {
+    const sidecar = { schema_version: NEGATIVE_EVIDENCE_SCHEMA, head_sha: HEAD, rules: [rule] };
+    return negativeEvidenceRulesFromArtifact(sidecar, HEAD).stale;
+  };
+  assert.equal(gate(formatterRule({ categories: ["style"] }) as unknown as Record<string, unknown>), 0, "valid rule accepted");
+  assert.equal(gate(formatterRule({ categories: ["style", "bug"] }) as unknown as Record<string, unknown>), 1, "formatter claiming bug refused");
+  assert.equal(gate(formatterRule({ paths: ["C:/src"] }) as unknown as Record<string, unknown>), 1, "drive-absolute path refused");
+  assert.equal(gate(formatterRule({ paths: ["c:/src"] }) as unknown as Record<string, unknown>), 1, "lowercase drive refused");
+});
+
 test("#1517 engine: formatter-clean demotes the formatting claim and persists the decision", async () => {
   const server = await startMockServer((_req, _body, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -681,7 +770,10 @@ test("#1517 engine: formatter-clean demotes the formatting claim and persists th
   const root = mkdtempSync(join(tmpdir(), "v3-neg-engine-"));
   const runDir = join(root, "run");
   mkdirSync(runDir);
-  writeFileSync(join(runDir, "providers.json"), JSON.stringify([
+  // #1529 trust boundary: the providers config sits OUTSIDE the reviewed
+  // checkout (the phase cwd is the run dir) — the operator-managed shape
+  // that is allowed to carry negative-evidence authority.
+  writeFileSync(join(root, "providers.json"), JSON.stringify([
     { id: "prettier", command: ["/usr/bin/true"], negative_evidence: { domain: "formatter", paths: ["src/"], categories: ["style"] } },
   ]));
   try {
@@ -690,7 +782,7 @@ test("#1517 engine: formatter-clean demotes the formatting claim and persists th
       ciChecksFile: join(runDir, "ci-checks-context.md"),
       inputs: {
         "github-token": "tok", repo: "o/r", "pr-number": "7", "ai-base-url": server.url, "ai-model": "m", "ai-stream": "false",
-        "ai-api-key": "k", "evidence-providers-file": "providers.json",
+        "ai-api-key": "k", "evidence-providers-file": join(root, "providers.json"),
       },
       ambient: { PATH: process.env.PATH ?? "" },
       triggerReason: "manual", forceRereview: false,

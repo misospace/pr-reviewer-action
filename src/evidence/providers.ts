@@ -30,7 +30,15 @@ import { pyStrip } from "../platform/py.js";
  * like v2. Provenance constraint: provider specs come from operator-managed
  * workflow configuration (the `evidence_providers_file` input), never from
  * PR-controlled content — a future caller must not wire PR/issue-derived
- * specs into this executor without adding its own allowlist layer. The
+ * specs into this executor without adding its own allowlist layer. On the
+ * standard Action path that input resolves INSIDE the reviewed-head
+ * checkout, so the file's content is PR-writable there: the orchestration
+ * treats such a source as untrusted for NEGATIVE evidence (a PR must never
+ * mint its own clean-run authority) while ordinary positive evidence keeps
+ * its existing behavior (#1529 review). The
+ * executed child owns a process group, so a provider that outlives its
+ * deadline cannot leave transport children behind — the whole tree is
+ * terminated (the v2 `subprocess.run(timeout=)` path only killed the direct
  * executed child owns a process group, so a provider that outlives its
  * deadline cannot leave transport children behind — the whole tree is
  * terminated (the v2 `subprocess.run(timeout=)` path only killed the direct
@@ -240,12 +248,19 @@ export interface NegativeEvidenceSpec {
 
 /** A repo-relative POSIX path pattern: no absolute, drive, backslash, NUL,
  * or traversal segments; bounded count and length. One trailing `/` is the
- * directory form the matcher treats as the covered subtree. */
-function validRulePath(raw: unknown): string | null {
+ * directory form the matcher treats as the covered subtree. Exported for
+ * the persistence gate, which re-validates every rule path with the same
+ * rule the spec parser enforced at derivation. */
+export function validRulePath(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const path = raw.trim();
   if (path === "" || path.length > MAX_NEGATIVE_EVIDENCE_PATH_CHARS) return null;
   if (path.includes("\0") || path.includes("\\") || path.startsWith("/")) return null;
+  // Windows drive-absolute shapes (`C:/src`, `c:/src`, `C:`) are not
+  // repo-relative POSIX paths — refuse the drive-letter-colon prefix
+  // outright (anchored: a colon inside a deeper segment is an ordinary,
+  // if unusual, filename).
+  if (/^[A-Za-z]:/.test(path)) return null;
   const trimmed = path.endsWith("/") && path.length > 1 ? path.slice(0, -1) : path;
   if (trimmed === "") return null;
   for (const segment of trimmed.split("/")) {
@@ -298,6 +313,13 @@ export function parseNegativeEvidenceSpec(raw: unknown): NegativeEvidenceSpec | 
 
   const categories = stringListField(dictGet(raw, "categories"), NEGATIVE_EVIDENCE_CATEGORIES, NEGATIVE_EVIDENCE_CATEGORIES.size, 32);
   if (categories === null || categories.length === 0) return null;
+  // #1529 review (structural formatter boundary): a formatter-clean run is
+  // authoritative negative evidence for STYLE-class claims only. A semantic
+  // bug is category `bug`, never `style`, so a formatter declaration that
+  // claims any other category is refused outright — the structural
+  // boundary that keeps formatter cues from ever reaching semantic
+  // findings, independent of the message's wording.
+  if (domainValue === "formatter" && categories.some((category) => category !== "style")) return null;
 
   let maxSeverity: NegativeEvidenceSpec["max_severity"] = "minor";
   const rawMaxSeverity = dictGet(raw, "max_severity");

@@ -105,7 +105,17 @@ export function deriveNegativeEvidenceRules(
   specs: readonly unknown[],
   entries: readonly EvidenceProviderEntry[],
   headSha: string | null,
+  /** #1529 review (trust boundary): whether the provider definitions came
+   * from a TRUSTED operator/base source. The standard providers config
+   * resolves inside the reviewed-head checkout — PR-writable content — and
+   * a PR must never be able to mint its own clean-run authority: an
+   * untrusted source derives ZERO negative-evidence rules (ordinary
+   * positive evidence keeps its existing behavior). The caller decides
+   * from where the config actually resolved; nothing a provider printed
+   * or executed can flip this. */
+  trustedSource: boolean,
 ): NegativeEvidenceRule[] {
+  if (!trustedSource) return [];
   const rules: NegativeEvidenceRule[] = [];
   const count = Math.min(specs.length, entries.length);
   for (let i = 0; i < count; i += 1) {

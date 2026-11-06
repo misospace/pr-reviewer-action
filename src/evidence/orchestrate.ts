@@ -220,7 +220,37 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
 
   let providers: unknown[] = [];
   let configError = "";
-  if (configPathRaw) ({ providers, error: configError } = loadConfig(configPathRaw, cwd));
+  // #1529 review (trust boundary): the config path resolves against the
+  // phase cwd — the reviewed-head checkout — so a path that lands inside it
+  // is PR-writable content. Negative evidence derives ONLY from a trusted
+  // operator/base source: an in-checkout config derives ZERO
+  // negative-evidence rules (ordinary positive evidence keeps its existing
+  // behavior). The check is lexical against the checkout's realpath, so a
+  // checkout-relative symlink pointing outside cannot launder a PR file
+  // into trusted authority.
+  let providersTrustedForNegativeEvidence = false;
+  if (configPathRaw) {
+    ({ providers, error: configError } = loadConfig(configPathRaw, cwd));
+    const boundary = safeRealpath(cwd);
+    const configResolved = resolvePath(cwd, configPathRaw);
+    const insideLexical = configResolved === boundary || configResolved.startsWith(`${boundary}/`);
+    // The boundary comparison runs on BOTH the lexical resolution and the
+    // realpath: the lexical check keeps a checkout-internal symlink from
+    // laundering a PR file into trusted authority, and the realpath check
+    // keeps a symlinked checkout root (tmpdir shapes) from misdetecting.
+    let insideReal = false;
+    try {
+      const configReal = safeRealpath(configResolved);
+      insideReal = configReal === boundary || configReal.startsWith(`${boundary}/`);
+    } catch {
+      // Unresolvable/missing config: no providers ran, so the side is moot.
+      insideReal = insideLexical;
+    }
+    providersTrustedForNegativeEvidence = !insideLexical && !insideReal;
+    if (!providersTrustedForNegativeEvidence) {
+      options.log?.("negative evidence: providers config resolves inside the reviewed checkout; no negative-evidence rules derive from it (#1529 review)");
+    }
+  }
 
   if (configError) summary.error = configError;
   summary.configured = true;
@@ -270,6 +300,7 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
     providers.slice(0, MAX_CONFIGURED_PROVIDERS),
     entries,
     headSha,
+    providersTrustedForNegativeEvidence,
   );
 
   for (const entry of entries) {
