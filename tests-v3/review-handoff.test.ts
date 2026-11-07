@@ -797,14 +797,25 @@ test("#1521: the parser fails closed on a malformed obligation member and accept
     null,
     "a derived coverage row is not a blocking obligation",
   );
-  assert.equal(
-    parseReviewHandoff(JSON.stringify({
-      ...base,
-      unresolved_review_obligations: [{ id: "must-check-1", source: "must_check", text: "done", status: "satisfied", cause: null }],
-    })),
-    null,
-    "a discharged row blocked nothing",
-  );
+assert.equal(
+parseReviewHandoff(JSON.stringify({
+...base,
+unresolved_review_obligations: [{ id: "must-check-1", source: "must_check", text: "done", status: "satisfied", cause: null }],
+})),
+null,
+"a discharged row blocked nothing",
+);
+// #1505: an `unresolved` row is an availability failure — coverage, never
+// a defect — so a document that lists one as a blocking obligation claims a
+// block the deterministic layer decided never happened, and it is refused.
+assert.equal(
+parseReviewHandoff(JSON.stringify({
+...base,
+unresolved_review_obligations: [{ id: "must-check-1", source: "must_check", text: "unfinished", status: "unresolved", cause: "budget-exhausted" }],
+})),
+null,
+"an unresolved row is coverage, never a block",
+);
   assert.equal(
     parseReviewHandoff(JSON.stringify({
       ...base,

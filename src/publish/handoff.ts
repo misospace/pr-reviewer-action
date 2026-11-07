@@ -162,9 +162,9 @@ export interface ReviewHandoffItem {
  * untrusted text: every string in it is redacted, stripped of the reserved
  * marker grammar and capped before serialization.
  *
- * `source` and `status` are plain strings here because the PARSER accepts
- * any string for them (the wire shape is what the parser guarantees); the
- * BUILDER only ever publishes the closed vocabularies below.
+ * `source` and `status` are plain strings here because the wire shape is
+ * what the parser guarantees: it refuses a row outside the closed
+ * vocabularies below, and the BUILDER only ever publishes rows inside them.
  */
 export interface ReviewObligationRow {
   id: string;
@@ -180,10 +180,13 @@ export interface ReviewObligationRow {
  * closed. */
 const PUBLISHED_OBLIGATION_SOURCES = ["must_check", "trusted_base_guidance"] as const;
 
-/** #1521: the statuses a published row may carry. `satisfied` never rides
- * (it blocked nothing); anything else that is not `unmet` is published as
- * `unresolved`, the conservative reading. */
-const PUBLISHED_OBLIGATION_STATUSES = ["unmet", "unresolved"] as const;
+/** #1521/#1505: the ONLY status a published blocking row carries. A block
+ * is a confirmed negative — the check was performed and did not hold
+ * (`unmet`). A `satisfied` row blocked nothing and an `unresolved` row is
+ * an availability failure (coverage, never a defect), so neither ever
+ * rides a block, and the parser refuses a document that lists either one
+ * as blocking. */
+const PUBLISHED_OBLIGATION_STATUSES = ["unmet"] as const;
 
 /** #1521: the closed cause vocabulary (the enforcement layer's own). The
  * cause EXPLAINS a block, it never decides one, so an unknown cause is
@@ -219,12 +222,6 @@ function isPublishedObligationStatus(value: unknown): boolean {
 
 function isPublishedObligationCause(value: unknown): boolean {
   return value === null || (typeof value === "string" && (PUBLISHED_OBLIGATION_CAUSES as readonly string[]).includes(value));
-}
-
-function publishedObligationStatus(value: unknown): string {
-  return typeof value === "string" && (PUBLISHED_OBLIGATION_STATUSES as readonly string[]).includes(value)
-    ? value
-    : "unresolved";
 }
 
 function publishedObligationCause(value: unknown): string | null {
@@ -292,7 +289,8 @@ export function boundedObligationRows(obligations: readonly ReviewObligation[] |
     rows.push({
       id,
       source: obligation.source,
-      status: publishedObligationStatus(obligation.status),
+      // The filter above proved it: a riding row is exactly `unmet`.
+      status: obligation.status,
       cause: publishedObligationCause(obligation.cause),
       text: bounded(obligation.text, REVIEW_HANDOFF_MAX_OBLIGATION_TEXT_CHARS),
     });
@@ -627,10 +625,11 @@ function idCountersAgree(ids: string[], total: number | null, truncated: boolean
  * never read a half-formed row as a blocking obligation.
  *
  * The three vocabularies are checked too, not only the types. A `derived`
- * row is a COVERAGE statement and a `satisfied` row blocked nothing, so a
- * document that carries either one as a blocking obligation tells the
- * consumer the review was blocked by something it was not. The builder
- * never emits such a row, so a document that does carry one was not
+ * row is a COVERAGE statement, a `satisfied` row blocked nothing, and an
+ * `unresolved` row is an availability failure — coverage, never a defect
+ * (#1505) — so a document that carries any of them as a blocking obligation
+ * tells the consumer the review was blocked by something it was not. The
+ * builder never emits such a row, so a document that does carry one was not
  * produced by this action, and it is refused rather than read.
  */
 export function parseObligationRow(value: unknown): ReviewObligationRow | null {

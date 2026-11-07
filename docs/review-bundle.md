@@ -82,7 +82,7 @@ here for readability — real output has no newlines):
       "id": "must-check-1",
       "source": "must_check",
       "status": "unmet",
-      "cause": "contradicted",
+      "cause": "missing-source-evidence",
       "text": "verify the changelog entry"
     }
   ],
@@ -132,8 +132,8 @@ The bundle names each blocking row in `unresolved_review_obligations`.
 {
   "id": "must-check-1",
   "source": "must_check",
-  "status": "unresolved",
-  "cause": "budget-exhausted",
+  "status": "unmet",
+  "cause": null,
   "text": "verify the changelog entry"
 }
 ```
@@ -142,8 +142,9 @@ The bundle names each blocking row in `unresolved_review_obligations`.
 - `source` names the rule that made the row blocking. It is `must_check` for
   the operator's checklist. It is `trusted_base_guidance` for an ask the
   trusted base stated. Those two are the only values a row carries.
-- `status` is `unmet` or `unresolved`. An `unmet` row was checked, and the
-  requirement did not hold. An `unresolved` row was never closed.
+- `status` is always `unmet` (#1505): the row was checked, and the
+  requirement did not hold — a confirmed negative. An `unresolved` row is an
+  availability failure: coverage, never a defect, so it never rides here.
 - `cause` explains the block. It is `tool-capability`, `budget-exhausted`,
   `provider-failure`, `missing-source-evidence` or `derivation-incomplete`,
   or null when the run knows no cause. The cause never decides a block.
@@ -177,9 +178,9 @@ nothing.
 
 The parser treats the four members as optional. A bundle written before
 #1521 carries none of them, and it stays parseable. A row whose `source`,
-`status` or `cause` is outside the published vocabulary is refused, because
-a `derived` row is a coverage statement and a `satisfied` row blocked
-nothing.
+`status` or `cause` is outside the published vocabulary is refused: a
+`derived` row is a coverage statement, a `satisfied` row blocked nothing,
+and an `unresolved` row is an availability failure, never a defect (#1505).
 
 The obligation counters are cross-checked against the rows they carry, and
 not only type-checked. A document that lists more blocking rows than it
@@ -331,9 +332,10 @@ A consumer MUST:
   shape-checked, and the obligation counters are cross-checked the same way
   as the item counters.
 - Refuse a row whose `source`, `status` or `cause` is outside the published
-  vocabulary. A `derived` row is a coverage statement, and a `satisfied` row
-  blocked nothing. A document that carries either one as a blocking
-  obligation did not come from this action, so it is refused.
+  vocabulary. A `derived` row is a coverage statement, a `satisfied` row
+  blocked nothing, and an `unresolved` row is an availability failure —
+  coverage, never a defect (#1505). A document that carries any of them as a
+  blocking obligation did not come from this action, so it is refused.
 ### Document shape
 
 The document is one line of JSON with a fixed key order. Example (wrapped
@@ -373,7 +375,7 @@ here for readability, real output has no newlines):
       "id": "must-check-1",
       "source": "must_check",
       "status": "unmet",
-      "cause": "contradicted",
+      "cause": "missing-source-evidence",
       "text": "verify the changelog entry"
     }
   ],
