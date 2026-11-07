@@ -3,16 +3,16 @@ import assert from "node:assert/strict";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import {
   applyReviewObligationEnforcement,
+  blockingReviewObligations,
   candidateRowsToObligations,
   deriveUnresolvedCause,
   extractApprovalPrerequisites,
   foldObligationDispositions,
   mustCheckObligationsEnabled,
   obligationAdmissionTokens,
-unresolvedReviewObligations,
-reviewObligationsToArtifact,
-reviewObligationsFromArtifact,
-blockingReviewObligations,
+  reviewObligationsFromArtifact,
+  reviewObligationsToArtifact,
+  unresolvedReviewObligations,
   REVIEWER_GATHERABLE_CUE,
   type ReviewObligation,
 } from "../src/enforcement/review-obligations.js";
