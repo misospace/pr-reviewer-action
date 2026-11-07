@@ -1,7 +1,8 @@
 /** `InClusterCredentialStore` against an in-file fake Kubernetes API over
  * loopback http (the `tests-v3/controller-main.test.ts` fake pattern):
  * projection shape, create-then-replace, pending ownerReference binding
- * swept to exactly one PATCH, the lifetime sweep, idempotent deletes,
+ * swept to exactly one PATCH with the sweeper passes serialized against a
+ * slow PATCH (#1535), the lifetime sweep, idempotent deletes,
  * listing projection/bounds, the fail-closed lifetime refusal, the
  * #252 adversarial-boundary probe (a 500 body carrying material and the
  * token must not leak into the error), and the bearer/construction
@@ -54,6 +55,13 @@ interface FakeCluster {
   readonly jobs: Map<string, Record<string, unknown>>;
   readonly secrets: Map<string, Record<string, unknown>>;
   readonly overrides: Override[];
+  /** Arm a one-shot gate: the NEXT PATCH whose path contains
+   * `pathIncludes` waits for the returned release before responding —
+   * the seam a slow API creates, letting a test hold one sweeper pass in
+   * flight across several interval ticks. A gate the test body never
+   * releases is drained by `close()`, so a failed assertion cannot leave
+   * the held response hanging on teardown. */
+  readonly holdNextPatch: (pathIncludes: string) => () => void;
 }
 
 /** A loopback fake of the Jobs GET verb and the core/v1 Secret verbs the
@@ -63,6 +71,23 @@ async function startFakeCluster(): Promise<FakeCluster> {
   const jobs = new Map<string, Record<string, unknown>>();
   const secrets = new Map<string, Record<string, unknown>>();
   const overrides: Override[] = [];
+  let patchGate: { readonly needle: string; readonly promise: Promise<void> } | null = null;
+  /** Release handlers for gates armed but never released by the test
+   * body; `close()` drains them (see `holdNextPatch`). */
+  const pendingGateReleases = new Set<() => void>();
+  const holdNextPatch = (pathIncludes: string): (() => void) => {
+    const gate = { release: (): void => {} };
+    const promise = new Promise<void>((resolve) => {
+      gate.release = resolve;
+    });
+    patchGate = { needle: pathIncludes, promise };
+    const release = (): void => {
+      pendingGateReleases.delete(release);
+      gate.release();
+    };
+    pendingGateReleases.add(release);
+    return release;
+  };
   let counter = 0;
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     let raw = "";
@@ -158,13 +183,35 @@ async function startFakeCluster(): Promise<FakeCluster> {
         }
         if (method === "PATCH") {
           if (existing === undefined) return respond(404, "{}");
-          const patch = JSON.parse(raw) as Record<string, unknown>;
-          const patchMetadata = (patch.metadata ?? {}) as Record<string, unknown>;
-          const metadata = existing.metadata as Record<string, unknown>;
-          if (patchMetadata.ownerReferences !== undefined) {
-            metadata.ownerReferences = patchMetadata.ownerReferences;
+          const finish = (): void => {
+            const patch = JSON.parse(raw) as Record<string, unknown>;
+            const patchMetadata = (patch.metadata ?? {}) as Record<string, unknown>;
+            const metadata = existing.metadata as Record<string, unknown>;
+            if (patchMetadata.ownerReferences !== undefined) {
+              metadata.ownerReferences = patchMetadata.ownerReferences;
+            }
+            respond(200, JSON.stringify(existing));
+          };
+          // One-shot gate (#1535): hold exactly the next PATCH response
+          // for the armed path, so a test can keep one sweeper pass in
+          // flight across ticks. A `finish` that throws (a body this
+          // fake cannot parse) rides a bounded 500, never a hang.
+          const gate =
+            patchGate !== null && path.includes(patchGate.needle) ? patchGate : null;
+          if (gate !== null) patchGate = null;
+          if (gate === null) {
+            finish();
+            return;
           }
-          return respond(200, JSON.stringify(existing));
+          gate.promise.then(finish, () => {
+            try {
+              respond(500, "{}");
+            } catch {
+              // The client is already gone: there is no response to
+              // deliver, and the store's own timeout bounds its wait.
+            }
+          });
+          return;
         }
         if (method === "DELETE") {
           if (existing === undefined) return respond(404, "{}");
@@ -178,11 +225,15 @@ async function startFakeCluster(): Promise<FakeCluster> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   return {
     port: (server.address() as AddressInfo).port,
-    close: () => new Promise((resolve) => server.close(() => resolve())),
+    close: () => {
+      for (const release of [...pendingGateReleases]) release();
+      return new Promise((resolve) => server.close(() => resolve()));
+    },
     requests,
     jobs,
     secrets,
     overrides,
+    holdNextPatch,
   };
 }
 
@@ -439,6 +490,57 @@ test("an unknown owning Job leaves the Secret unbound and the sweeper patches th
   });
   await sleep(60); // several more passes: the binding must not be replayed
   assert.equal(patches().length, 1, "the pending binding is dropped after the PATCH succeeds");
+  assert.deepEqual(failures, []);
+});
+
+test("a PATCH slower than the interval holds exactly one pass: later ticks skip, the binding is still patched exactly once", async (t) => {
+  const failures: string[] = [];
+  const { fake, store } = await makeStore(t, { sweepIntervalMs: 5, onSweepFailure: (m) => failures.push(m) });
+  const secret = sampleSecret();
+  seedJob(fake, "review-workers", secret.ownerJobName, null);
+  await store.putSecret(secret);
+
+  // The Job appears with a uid, and the API goes SLOW on PATCH: the pass
+  // that resolves the uid waits for its PATCH response across many
+  // interval ticks. #1535: without pass serialization every tick during
+  // the hold snapshots the still-pending binding (`pending.delete` runs
+  // only after the awaited PATCH completes) and races its own PATCH, so
+  // the sibling "patched exactly once" assertion above flakes under load.
+  seedJob(fake, "review-workers", secret.ownerJobName, "job-uid-late");
+  const patches = (): FakeRequest[] =>
+    fake.requests.filter((entry) => entry.method === "PATCH" && entry.path.includes(`/secrets/${secret.name}`));
+  const release = fake.holdNextPatch(`/secrets/${secret.name}`);
+
+  await waitFor(() => patches().length >= 1, "the first pass issues the ownerReference PATCH");
+  await sleep(60); // many ticks fire while the first pass is still in flight
+  assert.equal(patches().length, 1, "no overlapping pass replays the PATCH while one is in flight");
+
+  release();
+  await waitFor(
+    () => JSON.stringify(fake.secrets.get(`review-workers/${secret.name}`)).includes("job-uid-late"),
+    "the held PATCH lands and binds the Secret",
+  );
+  // Positive proof the skipped ticks left the sweeper functional, not
+  // wedged: freshly expired own material is reaped by the later passes.
+  const staleName = `prv-cred-${"f".repeat(24)}`;
+  fake.secrets.set(`review-workers/${staleName}`, {
+    apiVersion: "v1",
+    kind: "Secret",
+    type: "Opaque",
+    metadata: {
+      name: staleName,
+      namespace: "review-workers",
+      labels: { "app.kubernetes.io/managed-by": "pr-reviewer-action" },
+      annotations: { [CREDENTIAL_EXPIRES_AT_MS_ANNOTATION]: "1" },
+    },
+    data: { "api-key": "aGVsbG8=" },
+  });
+  await waitFor(
+    () => !fake.secrets.has(`review-workers/${staleName}`),
+    "the sweeper resumed after the skipped ticks",
+  );
+  await sleep(40); // several more passes on a drained pending set
+  assert.equal(patches().length, 1, "the landed binding is never replayed");
   assert.deepEqual(failures, []);
 });
 

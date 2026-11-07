@@ -28,8 +28,11 @@
  * dies, and the sweeper deletes own-prefix material whose bound has
  * passed. The sweeper is armed at startup when trusted worker namespaces
  * are supplied, otherwise on the first successful write; it is unref'd,
- * bounded per pass, and its failures never throw out of a pass — they
- * surface through `onSweepFailure` with a bounded message.
+ * bounded per pass, runs at most ONE pass at a time (a tick that fires
+ * while a pass is still in flight is skipped, so two passes can never
+ * snapshot the same pending binding and rebind it twice), and its
+ * failures never throw out of a pass — they surface through
+ * `onSweepFailure` with a bounded message.
  */
 
 import {
@@ -215,6 +218,11 @@ export class InClusterCredentialStore implements KubernetesCredentialStore {
    * Never widened by a read. */
   private readonly trackedNamespaces = new Set<string>();
   private sweeperTimer: ReturnType<typeof setInterval> | null = null;
+  /** Whether a sweep pass is currently in flight. Passes are serialized
+   * at the timer seam (see `armSweeper`): an overlapping pass would
+   * snapshot a pending binding the running pass has already taken and
+   * PATCH it a second time before the first PATCH can delete it. */
+  private sweepPassRunning = false;
 
   constructor(options: InClusterCredentialStoreOptions = {}) {
     // Same fail-closed construction gate as `InClusterKubernetesApi`:
@@ -409,14 +417,28 @@ export class InClusterCredentialStore implements KubernetesCredentialStore {
   private armSweeper(): void {
     if (this.sweepIntervalMs === 0 || this.sweeperTimer !== null) return;
     this.sweeperTimer = setInterval(() => {
-      void this.sweepPass();
+      // Serialize passes: a pass slower than the interval (a slow or
+      // overloaded API) must not overlap the next tick. Two overlapping
+      // passes snapshot the SAME pending binding — `pending.delete` runs
+      // only after the awaited PATCH completes — and both PATCH it: the
+      // merge-patch is idempotent at the API, but the replayed write is
+      // exactly the load a slow endpoint cannot absorb, and concurrency
+      // defeats the per-pass bound. The right reaction to a running pass
+      // is to SKIP the tick, not to queue it: the next tick after the
+      // running pass settles sees the post-pass state.
+      if (this.sweepPassRunning) return;
+      this.sweepPassRunning = true;
+      void this.sweepPass().finally(() => {
+        this.sweepPassRunning = false;
+      });
     }, this.sweepIntervalMs);
     // The sweeper must never hold the process open on its own.
     this.sweeperTimer.unref();
   }
 
   /** One bounded pass: rebind pending owners, then delete expired own
-   * material. Failures never throw out of a pass. */
+   * material. Passes never overlap — `armSweeper` skips a tick while one
+   * is in flight. Failures never throw out of a pass. */
   private async sweepPass(): Promise<void> {
     try {
       await this.sweepPendingBindings();
