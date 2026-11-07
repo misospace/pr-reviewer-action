@@ -103,7 +103,7 @@ import { markerReviewResult, publishStepRuns } from "../publish/publish.js";
 import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enforcement/completeness.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
-import { candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
+import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, unresolvedTraceRequirementIds, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
@@ -236,6 +236,15 @@ export interface RunReviewResult {
    * not resolve. These are the merge-gating ids of the enforcement pass, not
    * model claims. */
   unresolvedRequiredChecks?: string[];
+  /** #1521: the review-obligation rows that BLOCKED this review — the
+   * deterministic enforcement pass's own rows (never model claims). A row is
+   * present iff it is forcing per #1505: a review-owned
+   * (`must_check`, `trusted_base_guidance`) row with status `unmet`.
+   * An `unresolved` row is an availability failure (coverage, never a
+   * defect) and a `derived` row is coverage, so neither rides here. The published handoff and the local
+   * bundle name these rows so a controller sees WHAT blocked the review, not
+   * only an opaque id. */
+  unresolvedReviewObligations?: ReviewObligation[];
   /** #1455: the verifier's own telemetry — the unscored cause, the measured
    * latency and the provider's token counts. The publish step carries it
    * into the metadata marker; it is advisory and changes nothing else. */
@@ -2470,6 +2479,21 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // coverage was incomplete.
   const unresolvedRequiredChecks = completenessResult === null ? [] : unresolvedRequiredCheckIds(completenessResult);
   const unresolvedRequirementIds = requirementTraceResult === null ? [] : unresolvedTraceRequirementIds(requirementTraceResult.trace);
+  // #1521: the obligation rows that BLOCKED this review, computed AFTER both
+  // enforcement branches for the same reason the two id lists above are:
+  // the strict path and the non-strict path carry the SAME rows, and the
+  // rows are the enforcement pass's own output — never a model claim. A
+  // `derived` row is coverage, not a block, so it never rides here.
+  //
+  // The model-unavailable path runs NO enforcement overlay (its block is the
+  // notice's own request_changes), so no obligation row blocked that review.
+  // The rows would otherwise be the fallback must_check rows the engine
+  // builds when the harness never wrote the candidates artifact, and a
+  // published handoff that names them would tell a controller the review
+  // was blocked by checks the review never performed.
+  const blockingObligationRows = analysisEngine === MODEL_UNAVAILABLE_ENGINE
+    ? []
+    : blockingReviewObligations(resolvedObligations.obligations);
   if (blockerVerification !== null && blockerVerification.demoted > 0) {
     ws.write("blocker-verification.json", Buffer.from(`${pyJsonDumps({
       version: 1,
@@ -3156,6 +3180,11 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     // a run that never reviewed carries neither (the admission skip path).
     unresolvedRequirementIds,
     unresolvedRequiredChecks,
+    // #1521: the obligation ROWS that blocked this review, on the same
+    // presence rule as the two id lists above — always present on the
+    // review path (empty when nothing blocked), never on the admission skip
+    // path (a run that never reviewed blocked nothing).
+    unresolvedReviewObligations: blockingObligationRows,
     // #1455: the verifier's telemetry for the published marker — advisory
     // only, never a verdict input.
     ...(publishedConfidenceTelemetry !== undefined ? { confidenceTelemetry: publishedConfidenceTelemetry } : {}),

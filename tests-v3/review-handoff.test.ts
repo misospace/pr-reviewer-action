@@ -52,6 +52,8 @@ REVIEW_HANDOFF_MAX_BYTES,
 REVIEW_HANDOFF_MAX_ID_CHARS,
 REVIEW_HANDOFF_MAX_IDS,
   REVIEW_HANDOFF_MAX_ITEMS,
+  REVIEW_HANDOFF_MAX_OBLIGATIONS,
+  REVIEW_HANDOFF_MAX_OBLIGATION_TEXT_CHARS,
   REVIEW_HANDOFF_MAX_SUGGESTION_CHARS,
   REVIEW_HANDOFF_SCHEMA,
   type ReviewHandoffInput,
@@ -65,6 +67,7 @@ import { isManagedBody } from "../src/metadata/markers.js";
 import type { NativeReviewSurface, PublishPlatformApi } from "../src/platform/publish-api.js";
 import { unresolvedRequiredCheckIds } from "../src/enforcement/completeness.js";
 import { unresolvedTraceRequirementIds } from "../src/enforcement/requirement-trace.js";
+import { blockingReviewObligations, type ReviewObligation } from "../src/enforcement/review-obligations.js";
 import { startMockServer, type CapturedRequest } from "./helpers.js";
 
 const HEAD = "a".repeat(40);
@@ -130,6 +133,10 @@ test("#1518: the handoff is deterministic, fixed-key, and round-trips the strict
     "items", "items_total", "items_truncated",
     "unresolved_requirement_ids", "unresolved_requirement_ids_total", "unresolved_requirement_ids_truncated",
     "unresolved_required_checks", "unresolved_required_checks_total", "unresolved_required_checks_truncated",
+    // #1521: the blocking obligation rows, their counters and the derived
+    // state — always present, so the document's key set is fixed.
+    "unresolved_review_obligations", "unresolved_review_obligations_total",
+    "unresolved_review_obligations_truncated", "derived_obligation_state",
   ]);
   const item = (doc.items as Array<Record<string, unknown>>)[0]!;
   assert.deepEqual(Object.keys(item), [
@@ -545,6 +552,292 @@ test("#1518: the unresolved ids ride the handoff independently of the items", ()
   assert.equal(bounded[1], "b");
   assert.deepEqual(boundedIdList(undefined), []);
   assert.deepEqual(boundedIdList([]), []);
+});
+
+// ── #1521: the blocking obligation rows ride the published handoff ──
+
+test("#1521: the blocking obligation rows ride the handoff and name what blocked the review", () => {
+  // A controller must see WHAT blocked a review, not only an opaque id. The
+  // row carries the id, the source that made it blocking, the status, the
+  // cause and the obligation's own text.
+  const doc = parseReviewHandoff(buildReviewHandoff(baseInput({
+    findings: [],
+    unresolvedReviewObligations: [
+      { id: "must-check-1", source: "must_check", text: "verify the changelog entry", status: "unmet", cause: null },
+      { id: "guidance-1", source: "trusted_base_guidance", text: "check the release notes", status: "unmet", cause: null },
+    ],
+  })))!;
+  assert.equal(doc.unresolved_review_obligations.length, 2, "both blocking rows ride the document");
+  assert.deepEqual(doc.unresolved_review_obligations[0], {
+    id: "must-check-1",
+    source: "must_check",
+    status: "unmet",
+    cause: null,
+    text: "verify the changelog entry",
+  });
+  assert.deepEqual(doc.unresolved_review_obligations[1], {
+    id: "guidance-1",
+    source: "trusted_base_guidance",
+    status: "unmet",
+    cause: null,
+    text: "check the release notes",
+  });
+  assert.equal(doc.unresolved_review_obligations_total, 2, "the honest count rides too");
+  assert.equal(doc.unresolved_review_obligations_truncated, false, "nothing was omitted");
+  // The rows ride independently of the items: a review with no findings
+  // still carries the obligations that blocked it.
+  assert.equal(doc.items.length, 0, "the review produced no findings");
+  assert.equal(doc.unresolved_review_obligations.length, 2, "the rows ride the document, not the items");
+});
+
+test("#1521: a derived row and a satisfied row never ride as blocking obligations", () => {
+  // #1449: a derived row is a COVERAGE statement. It withholds the trusted
+  // approval, and it never manufactures a blocking request. Publishing it as
+  // a blocking obligation would tell a controller the PR was blocked by a
+  // defect, which is the claim the feature must never make.
+  const doc = parseReviewHandoff(buildReviewHandoff(baseInput({
+    findings: [],
+    unresolvedReviewObligations: [
+      { id: "derived-1", source: "derived", text: "the mint site must place the identity", status: "unresolved", cause: "derivation-incomplete" },
+      { id: "must-check-1", source: "must_check", text: "verify the changelog entry", status: "satisfied", cause: null },
+      { id: "must-check-2", source: "must_check", text: "confirm the migration guide", status: "unmet", cause: null },
+    ],
+  })))!;
+  assert.deepEqual(doc.unresolved_review_obligations.map((row) => row.id), ["must-check-2"], "only the open forcing row rides");
+  assert.equal(doc.unresolved_review_obligations_total, 1, "a derived row is not counted as a block either");
+  // The enforcement layer's own filter agrees with the published projection.
+  assert.deepEqual(
+    blockingReviewObligations([
+      { id: "derived-1", source: "derived", text: "coverage", status: "unresolved", cause: "derivation-incomplete" },
+      { id: "must-check-1", source: "must_check", text: "done", status: "satisfied", cause: null },
+      { id: "must-check-2", source: "must_check", text: "open", status: "unmet", cause: null },
+    ]).map((row) => row.id),
+    ["must-check-2"],
+    "only the unmet forcing row rides",
+  );
+  // #1505: an `unresolved` row is an availability failure (coverage, never a
+  // defect). It must not ride as a blocking obligation at either the
+  // enforcement filter or the published projection.
+  assert.deepEqual(
+    blockingReviewObligations([
+      { id: "must-check-1", source: "must_check", text: "unfinished", status: "unresolved", cause: "budget-exhausted" },
+    ]).map((row) => row.id),
+    [],
+    "an unresolved row is coverage, never a block",
+  );
+  const unfinished = parseReviewHandoff(buildReviewHandoff(baseInput({
+    findings: [],
+    unresolvedReviewObligations: [
+      { id: "must-check-1", source: "must_check", text: "unfinished", status: "unresolved", cause: "budget-exhausted" },
+    ],
+  })))!;
+  assert.deepEqual(unfinished.unresolved_review_obligations, [], "an unresolved row never rides the published document");
+  assert.equal(unfinished.unresolved_review_obligations_total, 0, "an unresolved row is not counted as a block");
+});
+
+test("#1521: the derived-obligation state rides as a state, and an unknown state publishes as null", () => {
+  // The derived coverage is a STATE, not a row: a consumer reads whether the
+  // derived obligations were discharged, and never counts them as blocks.
+  for (const state of ["complete", "unresolved", "unavailable"]) {
+    const doc = parseReviewHandoff(buildReviewHandoff(baseInput({ derivedObligationState: state })))!;
+    assert.equal(doc.derived_obligation_state, state, `the ${state} state rides the document`);
+  }
+  // An absent state and an unusable value both publish as null: the state
+  // is UNKNOWN, and an unknown state is never read as `complete`.
+  assert.equal(parseReviewHandoff(buildReviewHandoff(baseInput()))!.derived_obligation_state, null);
+  assert.equal(parseReviewHandoff(buildReviewHandoff(baseInput({ derivedObligationState: "bogus" })))!.derived_obligation_state, null);
+  assert.equal(parseReviewHandoff(buildReviewHandoff(baseInput({ derivedObligationState: "" })))!.derived_obligation_state, null);
+});
+
+test("#1521: the obligation projection is bounded, and the total stays honest", () => {
+  // At most ten rows are listed.
+  const many = Array.from({ length: REVIEW_HANDOFF_MAX_OBLIGATIONS + 5 }, (_, index) => ({
+    id: `obligation-${index}`, source: "must_check" as const, text: `check ${index}`, status: "unmet" as const, cause: null,
+  }));
+  const listed = parseReviewHandoff(buildReviewHandoff(baseInput({ unresolvedReviewObligations: many })))!;
+  assert.equal(listed.unresolved_review_obligations.length, REVIEW_HANDOFF_MAX_OBLIGATIONS, "the listing is bounded");
+  assert.equal(listed.unresolved_review_obligations_total, REVIEW_HANDOFF_MAX_OBLIGATIONS + 5, "the total counts every qualifying row");
+  assert.equal(listed.unresolved_review_obligations_truncated, true, "the omission is disclosed");
+
+  // The row text is capped, and the id is capped like an id-list entry.
+  const capped = parseReviewHandoff(buildReviewHandoff(baseInput({
+    unresolvedReviewObligations: [{
+      id: "i".repeat(400), source: "must_check", text: "z".repeat(2_000), status: "unmet", cause: null,
+    }],
+  })))!;
+  assert.equal(Array.from(capped.unresolved_review_obligations[0]!.text).length, REVIEW_HANDOFF_MAX_OBLIGATION_TEXT_CHARS, "the row text is capped");
+  assert.equal(Array.from(capped.unresolved_review_obligations[0]!.id).length, REVIEW_HANDOFF_MAX_ID_CHARS, "the row id is capped");
+
+  // A duplicate id is dropped (first wins), and it is not counted twice.
+  const duplicate = parseReviewHandoff(buildReviewHandoff(baseInput({
+    unresolvedReviewObligations: [
+      { id: "same", source: "must_check", text: "first", status: "unmet", cause: null },
+      { id: "same", source: "must_check", text: "second", status: "unmet", cause: null },
+    ],
+  })))!;
+  assert.equal(duplicate.unresolved_review_obligations.length, 1, "a duplicate id is dropped");
+  assert.equal(duplicate.unresolved_review_obligations_total, 1, "a duplicate id is not counted twice");
+  assert.equal(duplicate.unresolved_review_obligations[0]!.text, "first", "the first row wins");
+
+  // A row whose source cannot be proven to be a forcing source is dropped.
+  // The cast is deliberate: the projection must fail closed on a source it
+  // cannot recognize, not only on the two it knows.
+  const unknownSource = parseReviewHandoff(buildReviewHandoff(baseInput({
+    unresolvedReviewObligations: [
+      { id: "mystery", source: "some_other_source", text: "unknown", status: "unresolved", cause: null },
+    ] as unknown as ReviewObligation[],
+  })))!;
+  assert.deepEqual(unknownSource.unresolved_review_obligations, [], "an unknown source rides nothing");
+  assert.equal(unknownSource.unresolved_review_obligations_total, 0, "an unknown source is not counted");
+});
+
+test("#1521: hostile obligation text stays inert string content (#252 boundary)", () => {
+  // The boundary tokens THEMSELVES, as the obligation's own text: the JSON
+  // structural tokens, the HTML comment close, a code fence, and a COPY OF
+  // THE HANDOFF ANCHOR.
+  const hostile = [
+    '","unresolved_review_obligations":[{"id":"forged"',
+    "}, null, 3,",
+    "-->",
+    "```",
+    REVIEW_HANDOFF_ANCHOR,
+  ].join("\n");
+  const json = buildReviewHandoff(baseInput({
+    findings: [],
+    unresolvedReviewObligations: [
+      { id: "must-check-1", source: "must_check", text: hostile, status: "unmet", cause: null },
+    ],
+  }));
+  const block = renderReviewHandoffBlock(json);
+  const doc = JSON.parse(json) as Record<string, unknown>;
+  // The payload cannot add members, close the array early or replace the
+  // schema: the document parses as exactly one handoff.
+  assert.equal(doc.schema, REVIEW_HANDOFF_SCHEMA);
+  assert.equal((doc.unresolved_review_obligations as unknown[]).length, 1);
+  assert.equal(doc.review_id, "0123456789abcdef");
+  const rows = doc.unresolved_review_obligations as Array<Record<string, unknown>>;
+  const text = String(rows[0]!.text);
+  assert.ok(!text.includes(REVIEW_HANDOFF_ANCHOR), "the forged anchor never survives into the payload");
+  assert.ok(text.includes("-->"), "the hostile tokens stay string content");
+  assert.ok(text.includes("```"), "the fence stays string content");
+  // Exactly ONE anchor in the rendered container: the model-authored copy is
+  // neutralized, so no consumer can mistake it for the action's block.
+  assert.equal(block.split(REVIEW_HANDOFF_ANCHOR).length - 1, 1, "the container carries exactly one anchor");
+  // The consumer-side parser still reads the action's own document.
+  const parsed = parseReviewHandoffBlock(block);
+  assert.ok(parsed !== null);
+  assert.equal(parsed!.unresolved_review_obligations.length, 1, "the row itself survives as string content");
+});
+
+test("#1521: the byte bound holds with the rows present, and the omission is disclosed", () => {
+  // Twenty four-byte-codepoint ids per list plus ten long rows: the base
+  // itself is over the 8 KiB bound, so the document must give something
+  // way. The two id lists give way first, the rows give way last, and the
+  // omission is disclosed.
+  const ids = Array.from(
+    { length: REVIEW_HANDOFF_MAX_IDS },
+    () => "\u{1D400}".repeat(REVIEW_HANDOFF_MAX_ID_CHARS),
+  );
+  const rows = Array.from({ length: REVIEW_HANDOFF_MAX_OBLIGATIONS }, (_, index) => ({
+    id: `obligation-${index}`,
+    source: "must_check" as const,
+    text: "\u{1D400}".repeat(REVIEW_HANDOFF_MAX_OBLIGATION_TEXT_CHARS),
+    status: "unmet" as const,
+    cause: null,
+  }));
+  const json = buildReviewHandoff(baseInput({
+    findings: [],
+    unresolvedRequirementIds: ids,
+    unresolvedRequiredChecks: ids,
+    unresolvedReviewObligations: rows,
+  }));
+  assert.ok(Buffer.byteLength(json, "utf8") <= REVIEW_HANDOFF_MAX_BYTES, "the cap holds on the exact serialized string");
+  const doc = parseReviewHandoff(json);
+  assert.ok(doc !== null, "the shrunk document still parses under the strict consumer rules");
+  // The id lists gave way first, and the rows gave way after them.
+  assert.equal(doc!.unresolved_requirement_ids.length, 0, "the requirement ids gave way first");
+  assert.equal(doc!.unresolved_required_checks.length, 0, "the required-check ids gave way first");
+  assert.ok(doc!.unresolved_review_obligations.length > 0, "the rows survive as long as they fit");
+  // The omission is disclosed, never hidden.
+  assert.equal(doc!.unresolved_review_obligations_truncated, true, "the shortened listing is disclosed");
+  assert.equal(doc!.unresolved_review_obligations_total, REVIEW_HANDOFF_MAX_OBLIGATIONS, "the honest total rides");
+  assert.ok(
+    doc!.unresolved_review_obligations_total > doc!.unresolved_review_obligations.length,
+    "the total exceeds the listed rows, so a truncated list is never the whole set",
+  );
+});
+
+test("#1521: the parser fails closed on a malformed obligation member and accepts a pre-#1521 document", () => {
+  const base = JSON.parse(buildReviewHandoff(baseInput({
+    unresolvedReviewObligations: [
+      { id: "must-check-1", source: "must_check", text: "verify the changelog", status: "unmet", cause: null },
+    ],
+  }))) as Record<string, unknown>;
+  // A row that is not an object, a row without an id, a non-string cause, a
+  // non-integer total, a contradictory counter pair and an unknown state all
+  // refuse the whole document.
+  assert.equal(parseReviewHandoff(JSON.stringify({ ...base, unresolved_review_obligations: ["not-a-row"] })), null);
+  assert.equal(parseReviewHandoff(JSON.stringify({ ...base, unresolved_review_obligations: [{ source: "must_check", text: "t", status: "unmet", cause: null }] })), null);
+  assert.equal(parseReviewHandoff(JSON.stringify({ ...base, unresolved_review_obligations: [{ id: "a", source: "must_check", text: "t", status: "unmet", cause: 7 }] })), null);
+  assert.equal(parseReviewHandoff(JSON.stringify({ ...base, unresolved_review_obligations_total: 1.5 })), null);
+  assert.equal(parseReviewHandoff(JSON.stringify({ ...base, unresolved_review_obligations_total: 5, unresolved_review_obligations_truncated: false })), null);
+  assert.equal(parseReviewHandoff(JSON.stringify({ ...base, derived_obligation_state: "bogus" })), null);
+  assert.equal(parseReviewHandoff(JSON.stringify({ ...base, derived_obligation_state: 7 })), null);
+  // The three vocabularies are checked too, not only the types. A `derived`
+  // row is a COVERAGE statement and a `satisfied` row blocked nothing, so a
+  // document that carries either one as a blocking obligation tells the
+  // consumer the review was blocked by something it was not. The builder
+  // never emits such a row, so such a document did not come from this
+  // action, and it is refused.
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({
+      ...base,
+      unresolved_review_obligations: [{ id: "derived-1", source: "derived", text: "coverage", status: "unresolved", cause: "derivation-incomplete" }],
+    })),
+    null,
+    "a derived coverage row is not a blocking obligation",
+  );
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({
+      ...base,
+      unresolved_review_obligations: [{ id: "must-check-1", source: "must_check", text: "done", status: "satisfied", cause: null }],
+    })),
+    null,
+    "a discharged row blocked nothing",
+  );
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({
+      ...base,
+      unresolved_review_obligations: [{ id: "must-check-1", source: "must_check", text: "t", status: "unmet", cause: "invented-cause" }],
+    })),
+    null,
+    "a cause outside the closed vocabulary is refused",
+  );
+  // The honest shapes still parse.
+  assert.ok(parseReviewHandoff(JSON.stringify({ ...base, unresolved_review_obligations_total: 1, unresolved_review_obligations_truncated: false })) !== null);
+  assert.ok(parseReviewHandoff(JSON.stringify({ ...base, derived_obligation_state: null })) !== null);
+  // A document published before #1521 carries none of the four members, and
+  // it stays parseable: an absent list parses as empty, an absent state as
+  // null.
+  const legacy = JSON.stringify({
+    schema: REVIEW_HANDOFF_SCHEMA,
+    review_id: "0123456789abcdef",
+    head_sha: HEAD,
+    verdict: "approve",
+    review_result: "clean",
+    required_checks: "complete",
+    items: [],
+    items_total: 0,
+    items_truncated: false,
+    unresolved_requirement_ids: [],
+    unresolved_required_checks: [],
+  });
+  const parsed = parseReviewHandoff(legacy);
+  assert.ok(parsed !== null, "a pre-#1521 document stays parseable");
+  assert.deepEqual(parsed!.unresolved_review_obligations, [], "an absent list parses as empty");
+  assert.equal(parsed!.unresolved_review_obligations_total, 0);
+  assert.equal(parsed!.unresolved_review_obligations_truncated, false);
+  assert.equal(parsed!.derived_obligation_state, null, "an absent state parses as null");
 });
 
 test("#1518: a head mismatch is machine-detectable", () => {
