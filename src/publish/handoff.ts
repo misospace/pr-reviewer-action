@@ -397,8 +397,8 @@ function parseHandoffItem(value: unknown): ReviewHandoffItem | null {
 }
 
 /**
- * #1538: the id-list disclosure counters must agree with the list they
- * describe.
+ * #1538 / #1547: the disclosure counters must agree with the list they
+ * describe — the items list and both id lists alike, one rule for all three.
  *
  * A count below the listed length, a count that disagrees with the list
  * while the document claims no truncation, and a truncation claim whose count
@@ -407,10 +407,10 @@ function parseHandoffItem(value: unknown): ReviewHandoffItem | null {
  * before #1538) is never a contradiction: the document simply discloses
  * nothing, and nothing is read from it.
  */
-function idCountersAgree(ids: string[], total: number | null, truncated: boolean | null): boolean {
-  if (total !== null && total < ids.length) return false;
-  if (truncated === false && total !== null && total !== ids.length) return false;
-  if (truncated === true && total !== null && total === ids.length) return false;
+function countersAgreeWithList(listLength: number, total: number | null, truncated: boolean | null): boolean {
+  if (total !== null && total < listLength) return false;
+  if (truncated === false && total !== null && total !== listLength) return false;
+  if (truncated === true && total !== null && total === listLength) return false;
   return true;
 }
 
@@ -420,8 +420,9 @@ function idCountersAgree(ids: string[], total: number | null, truncated: boolean
  * as absent.
  *
  * The counters are cross-checked, not just typed: a document that claims
- * fewer items than it lists, or that claims no truncation while its total
- * disagrees with the list it carries, is contradictory and refused. An
+ * fewer items than it lists, that claims no truncation while its total
+ * disagrees with the list it carries, or that claims a truncation while its
+ * total matches the list exactly (#1547), is contradictory and refused. An
  * empty `review_id` is refused too — a handoff that cannot name its review
  * names nothing (the bundle's parser refuses the same).
  *
@@ -477,14 +478,15 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
     if (item === null) return null;
     items.push(item);
   }
-  // The counters must agree with the list: a document that lists more items
+  // The counters must agree with the list. A document that lists more items
   // than it counts, or that claims no truncation while its total disagrees
-  // with the list, contradicts itself.
-  if (record.items_total < items.length) return null;
-  if (record.items_truncated === false && record.items_total !== items.length) return null;
+  // with the list, contradicts itself — and so does one that claims a
+  // truncation whose total matches the list exactly (#1547): it says it
+  // dropped an item and proves it dropped none.
+  if (!countersAgreeWithList(items.length, record.items_total, record.items_truncated)) return null;
   // #1538: the same cross-check for the two id lists.
-  if (!idCountersAgree(record.unresolved_requirement_ids, requirementTotal, requirementTruncated)) return null;
-  if (!idCountersAgree(record.unresolved_required_checks, checkTotal, checkTruncated)) return null;
+  if (!countersAgreeWithList(record.unresolved_requirement_ids.length, requirementTotal, requirementTruncated)) return null;
+  if (!countersAgreeWithList(record.unresolved_required_checks.length, checkTotal, checkTruncated)) return null;
   return {
     schema: REVIEW_HANDOFF_SCHEMA,
     review_id: record.review_id,

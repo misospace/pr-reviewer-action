@@ -231,13 +231,15 @@ A consumer MUST:
 - Refuse a document whose `schema` is not exactly `review-handoff/v1`, and
   treat anything `parseReviewHandoff` refuses as absent. The parser refuses
   an empty `review_id`, and it cross-checks the item counters. A document
-  that lists more items than it counts, or that claims no truncation while
-  its total disagrees with the list it carries, contradicts itself and is
+  that lists more items than it counts, that claims no truncation while
+  its total disagrees with the list it carries, or that claims a truncation
+  whose total matches the list exactly (#1547), contradicts itself and is
   refused. The two id lists carry the same cross-check (#1538): a count
   below the listed length, a count that disagrees with the list while the
   document claims no truncation, and a truncation claim whose count matches
   the list exactly are all contradictions, and a contradictory document is
-  refused.
+  refused. One rule checks all three lists (#1547) — the same rule
+  `review-bundle/v1` applies to its findings counters (#1542).
 - Treat an unknown id-list disclosure as an incomplete list. A `null`
   `*_truncated` flag means that the document discloses no truncation, so the
   list may be short. A count larger than the listed length means the list is
@@ -318,7 +320,9 @@ here for readability, real output has no newlines):
   comments, such as `publish-mode: comment`.
 - `items_total` counts every finding the review produced, and
   `items_truncated` says whether some of them are not listed. Never read a
-  truncated set as the whole set.
+  truncated set as the whole set. The two must agree with `items`, and the
+  parser refuses a document that breaks that agreement — including a
+  truncation claim whose total equals the listed length (#1547).
 - `unresolved_requirement_ids` and `unresolved_required_checks` carry the
   same ids as the bundle, on the same presence rule. They name the
   obligations the deterministic enforcement pass could not discharge.

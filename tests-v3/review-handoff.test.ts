@@ -569,13 +569,19 @@ test("#1518: the parser fails closed on a foreign schema or a malformed document
   // parser refuses an empty `review_id`.
   assert.equal(parseReviewHandoff(JSON.stringify({ ...foreign, review_id: "" })), null);
   // The counters are cross-checked, not just typed: a document that lists
-  // more items than it counts, or that claims no truncation while its total
-  // disagrees with the list it carries, contradicts itself.
+  // more items than it counts, that claims no truncation while its total
+  // disagrees with the list it carries, or that claims a truncation while its
+  // total matches the list exactly (#1547), contradicts itself.
   const oneItem = JSON.parse(buildReviewHandoff(baseInput({
     findings: [{ severity: "major", category: "bug", file: "src/a.ts", line: 2, message: "m" }],
   }))) as Record<string, unknown>;
   assert.equal(parseReviewHandoff(JSON.stringify({ ...oneItem, items_total: 0 })), null);
   assert.equal(parseReviewHandoff(JSON.stringify({ ...oneItem, items_total: 5, items_truncated: false })), null);
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({ ...oneItem, items_total: 1, items_truncated: true })),
+    null,
+    "#1547: a truncation claim whose total matches the listed length contradicts itself",
+  );
   // The honest shapes still parse.
   assert.ok(parseReviewHandoff(JSON.stringify({ ...oneItem, items_total: 1, items_truncated: false })) !== null);
   assert.ok(parseReviewHandoff(JSON.stringify({ ...oneItem, items_total: 5, items_truncated: true })) !== null);
