@@ -2,7 +2,8 @@
  * loopback http (the `tests-v3/controller-main.test.ts` fake pattern):
  * projection shape, create-then-replace, pending ownerReference binding
  * swept to exactly one PATCH with the sweeper passes serialized against a
- * slow PATCH (#1535), the lifetime sweep, idempotent deletes,
+ * slow PATCH (#1535), the bounded sweep-failure reporting sink, the
+ * lifetime sweep, idempotent deletes,
  * listing projection/bounds, the fail-closed lifetime refusal, the
  * #252 adversarial-boundary probe (a 500 body carrying material and the
  * token must not leak into the error), and the bearer/construction
@@ -195,22 +196,28 @@ async function startFakeCluster(): Promise<FakeCluster> {
           // One-shot gate (#1535): hold exactly the next PATCH response
           // for the armed path, so a test can keep one sweeper pass in
           // flight across ticks. A `finish` that throws (a body this
-          // fake cannot parse) rides a bounded 500, never a hang.
+          // fake cannot parse) rides a bounded 500 on either path,
+          // never a hang and never an unhandled rejection.
+          const settle = (): void => {
+            try {
+              finish();
+            } catch {
+              try {
+                respond(500, "{}");
+              } catch {
+                // The client is already gone: there is no response to
+                // deliver, and the store's own timeout bounds its wait.
+              }
+            }
+          };
           const gate =
             patchGate !== null && path.includes(patchGate.needle) ? patchGate : null;
           if (gate !== null) patchGate = null;
           if (gate === null) {
-            finish();
+            settle();
             return;
           }
-          gate.promise.then(finish, () => {
-            try {
-              respond(500, "{}");
-            } catch {
-              // The client is already gone: there is no response to
-              // deliver, and the store's own timeout bounds its wait.
-            }
-          });
+          gate.promise.then(settle, settle);
           return;
         }
         if (method === "DELETE") {
@@ -542,6 +549,63 @@ test("a PATCH slower than the interval holds exactly one pass: later ticks skip,
   await sleep(40); // several more passes on a drained pending set
   assert.equal(patches().length, 1, "the landed binding is never replayed");
   assert.deepEqual(failures, []);
+});
+
+test("a throwing onSweepFailure sink never rejects a pass and never wedges the sweeper", async (t) => {
+  const failures: string[] = [];
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  t.after(() => {
+    process.off("unhandledRejection", onUnhandled);
+    assert.deepEqual(unhandled, [], "no pass rejection escaped unhandled");
+  });
+  const { fake, store } = await makeStore(t, {
+    sweepIntervalMs: 5,
+    onSweepFailure: (message) => {
+      failures.push(message);
+      throw new Error("hostile diagnostic sink");
+    },
+  });
+  const secret = sampleSecret();
+  seedJob(fake, "review-workers", secret.ownerJobName, null);
+  await store.putSecret(secret);
+
+  // The Job resolves with a uid and the API goes down on the rebind
+  // PATCH: every pass reports the failure into a sink that throws.
+  // Without the swallow in `reportSweepFailure` the throw escapes
+  // `sweepPass` — breaking its never-rejects invariant — and leaves
+  // the timer's `void ... .finally()` promise unhandled.
+  fake.overrides.push({
+    method: "PATCH",
+    pathIncludes: `/secrets/${secret.name}`,
+    status: 500,
+    body: "{}",
+  });
+  seedJob(fake, "review-workers", secret.ownerJobName, "job-uid-late");
+  await waitFor(() => failures.length >= 2, "the throwing sink is reached on repeated passes");
+
+  // Still functional through the hostile sink: expired own material
+  // is reaped by the later passes.
+  const staleName = `prv-cred-${"e".repeat(24)}`;
+  fake.secrets.set(`review-workers/${staleName}`, {
+    apiVersion: "v1",
+    kind: "Secret",
+    type: "Opaque",
+    metadata: {
+      name: staleName,
+      namespace: "review-workers",
+      labels: { "app.kubernetes.io/managed-by": "pr-reviewer-action" },
+      annotations: { [CREDENTIAL_EXPIRES_AT_MS_ANNOTATION]: "1" },
+    },
+    data: { "api-key": "aGVsbG8=" },
+  });
+  await waitFor(
+    () => !fake.secrets.has(`review-workers/${staleName}`),
+    "the sweeper kept running through the throwing sink",
+  );
 });
 
 test("the sweeper deletes expired and unbounded prv-cred material and leaves the rest alone", async (t) => {

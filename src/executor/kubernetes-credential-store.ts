@@ -539,13 +539,20 @@ export class InClusterCredentialStore implements KubernetesCredentialStore {
   }
 
   /** The bounded, credential-free failure surface: a fixed phrase, the
-   * phase, and at most a numeric status. */
+   * phase, and at most a numeric status. A throwing observer is a
+   * broken diagnostic sink, not a sweep error: its exception is
+   * swallowed so the never-rejects invariant of `sweepPass` cannot
+   * depend on caller-supplied code. */
   private reportSweepFailure(phase: "rebind" | "lifetime" | "sweep", status: number | null): void {
     if (this.onSweepFailure === null) return;
-    this.onSweepFailure(
-      `the credential Secret sweeper failed during the ${phase} phase`
-      + (status === null ? " (the API call did not complete)" : ` with status ${status}`),
-    );
+    try {
+      this.onSweepFailure(
+        `the credential Secret sweeper failed during the ${phase} phase`
+        + (status === null ? " (the API call did not complete)" : ` with status ${status}`),
+      );
+    } catch {
+      // Diagnostics never travel back into the sweep path.
+    }
   }
 }
 
