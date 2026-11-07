@@ -1,9 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PyFloat, runEvidenceProvidersPhase, type EvidenceProviderEntry } from "../src/evidence/index.js";
+import { execPath } from "node:process";
+import {
+  FAILURE_FALLBACK_JSON,
+  FAILURE_FALLBACK_MARKDOWN,
+  PyFloat,
+  runEvidenceProvider,
+  runEvidenceProvidersPhase,
+  type EvidenceProviderEntry,
+} from "../src/evidence/index.js";
 
 function providerEntry(id: string): EvidenceProviderEntry {
   return {
@@ -318,5 +326,153 @@ test("#1531: negative evidence is classified against the reviewed workspace boun
   } finally {
     rmSync(parent, { recursive: true, force: true });
     rmSync(reviewed, { recursive: true, force: true });
+  }
+});
+
+// The provider's argv writes `process.cwd()` into `cwd-marker.txt`, so the
+// marker's location (and content) prove the working directory the command
+// ran in. The config path is absolute so the resolution of the
+// `evidence-providers-file` binding itself never decides this test.
+const CWD_MARKER_SCRIPT = "require('node:fs').writeFileSync('cwd-marker.txt', process.cwd())";
+
+function markerProviderConfig(): string {
+  return JSON.stringify({ providers: [{ id: "cwd-marker", command: [execPath, "-e", CWD_MARKER_SCRIPT] }] });
+}
+
+test("provider commands run in the reviewed workspace, artifacts stay in the run dir (#1532)", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "evidence-rundir-1532-"));
+  const workspace = mkdtempSync(join(tmpdir(), "evidence-workspace-1532-"));
+  try {
+    writeFileSync(join(runDir, "providers.json"), markerProviderConfig());
+    const outcome = await runEvidenceProvidersPhase({
+      env: { PATH: process.env.PATH ?? "", GITHUB_WORKSPACE: workspace, EVIDENCE_PROVIDERS_FILE: join(runDir, "providers.json") },
+      cwd: runDir,
+      isForkPr: "false",
+      enableForForks: "false",
+      log: () => undefined,
+    });
+
+    assert.equal(outcome, "ran");
+    assert.equal(existsSync(join(runDir, "cwd-marker.txt")), false, "the provider must not run in the phase run dir");
+    assert.equal(readFileSync(join(workspace, "cwd-marker.txt"), "utf8"), realpathSync(workspace));
+    // Artifacts land in the run dir, unchanged.
+    const artifact = JSON.parse(readFileSync(join(runDir, "evidence-providers.json"), "utf8")) as {
+      providers: Array<{ id: string; status: string; exit_code: number | null }>;
+    };
+    assert.deepEqual(artifact.providers.map((provider) => [provider.id, provider.status, provider.exit_code]), [["cwd-marker", "ok", 0]]);
+    assert.match(readFileSync(join(runDir, "evidence-providers.md"), "utf8"), /Evidence providers executed before final review synthesis\./);
+    assert.equal(existsSync(join(workspace, "evidence-providers.json")), false, "artifacts must not be written into the workspace");
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a dangling GITHUB_WORKSPACE fails the phase with the fallback artifacts, not a silent cwd", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "evidence-rundir-dangling-1532-"));
+  try {
+    writeFileSync(join(runDir, "providers.json"), markerProviderConfig());
+    const lines: string[] = [];
+    const outcome = await runEvidenceProvidersPhase({
+      env: { PATH: process.env.PATH ?? "", GITHUB_WORKSPACE: join(runDir, "no-such-checkout"), EVIDENCE_PROVIDERS_FILE: join(runDir, "providers.json") },
+      cwd: runDir,
+      isForkPr: "false",
+      enableForForks: "false",
+      log: (line) => lines.push(line),
+    });
+
+    // Same policy as v2: a cwd the provider cannot start in raises past
+    // run_provider, the phase reports failure, and the fallback artifacts
+    // land in the run dir — never a silent run somewhere else.
+    assert.equal(outcome, "failed");
+    assert.equal(existsSync(join(runDir, "cwd-marker.txt")), false);
+    assert.equal(readFileSync(join(runDir, "evidence-providers.json"), "utf8"), FAILURE_FALLBACK_JSON);
+    assert.equal(readFileSync(join(runDir, "evidence-providers.md"), "utf8"), FAILURE_FALLBACK_MARKDOWN);
+    assert.match(lines.join("\n"), /ERROR: Evidence provider execution failed/);
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+// Edge-case paths for the #1532 workspace binding (PR 1534 required-check):
+// a malformed binding must fail closed like any un-spawnable cwd, and a
+// symlinked binding must execute in the canonicalized target, not through
+// the link, so cwd provenance is always a real path.
+test("a null byte in GITHUB_WORKSPACE fails the phase through the fail-closed spawn path", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "evidence-rundir-nullbyte-1532-"));
+  try {
+    writeFileSync(join(runDir, "providers.json"), markerProviderConfig());
+    const lines: string[] = [];
+    const outcome = await runEvidenceProvidersPhase({
+      env: { PATH: process.env.PATH ?? "", GITHUB_WORKSPACE: `${join(runDir, "checkout")}\0`, EVIDENCE_PROVIDERS_FILE: join(runDir, "providers.json") },
+      cwd: runDir,
+      isForkPr: "false",
+      enableForForks: "false",
+      log: (line) => lines.push(line),
+    });
+
+    // Same policy as the dangling binding: the malformed cwd is never
+    // silently repaired or fallen back to — the spawn raises, the phase
+    // reports failure, and the fallback artifacts land in the run dir.
+    assert.equal(outcome, "failed");
+    assert.equal(existsSync(join(runDir, "cwd-marker.txt")), false);
+    assert.equal(readFileSync(join(runDir, "evidence-providers.json"), "utf8"), FAILURE_FALLBACK_JSON);
+    assert.equal(readFileSync(join(runDir, "evidence-providers.md"), "utf8"), FAILURE_FALLBACK_MARKDOWN);
+    assert.match(lines.join("\n"), /ERROR: Evidence provider execution failed/);
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+test("a symlinked GITHUB_WORKSPACE runs providers in the canonicalized target", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "evidence-symlink-1532-"));
+  try {
+    const workspace = join(parent, "checkout");
+    const link = join(parent, "checkout-link");
+    mkdirSync(workspace);
+    symlinkSync(workspace, link);
+    writeFileSync(join(parent, "providers.json"), markerProviderConfig());
+    const seenCwd: Array<string | undefined> = [];
+    const outcome = await runEvidenceProvidersPhase({
+      env: { PATH: process.env.PATH ?? "", GITHUB_WORKSPACE: link, EVIDENCE_PROVIDERS_FILE: join(parent, "providers.json") },
+      cwd: parent,
+      isForkPr: "false",
+      enableForForks: "false",
+      log: () => undefined,
+      runProvider: async (provider, providerOptions) => {
+        seenCwd.push(providerOptions.cwd);
+        // Run the real marker command so the spawn itself proves the cwd.
+        return runEvidenceProvider(provider, providerOptions);
+      },
+    });
+
+    // safeRealpath canonicalizes before execution: the executor seam sees
+    // the resolved real workspace, never the link path, and the command
+    // runs against the real workspace tree.
+    assert.equal(outcome, "ran");
+    assert.deepEqual(seenCwd, [realpathSync(workspace)]);
+    assert.equal(readFileSync(join(workspace, "cwd-marker.txt"), "utf8"), realpathSync(workspace));
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("without the GITHUB_WORKSPACE binding providers fall back to the phase run dir", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "evidence-rundir-fallback-1532-"));
+  try {
+    writeFileSync(join(runDir, "providers.json"), markerProviderConfig());
+    const outcome = await runEvidenceProvidersPhase({
+      env: { PATH: process.env.PATH ?? "", EVIDENCE_PROVIDERS_FILE: join(runDir, "providers.json") },
+      cwd: runDir,
+      isForkPr: "false",
+      enableForForks: "false",
+      log: () => undefined,
+    });
+
+    assert.equal(outcome, "ran");
+    assert.equal(readFileSync(join(runDir, "cwd-marker.txt"), "utf8"), realpathSync(runDir));
+    assert.equal(existsSync(join(runDir, "evidence-providers.json")), true);
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
   }
 });
