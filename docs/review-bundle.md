@@ -10,7 +10,8 @@ acting on the latest review of the current head.
 - Producer: `src/publish/bundle.ts` (`buildReviewBundle`), wired in
   `src/run/action.ts`.
 - Parser: `parseReviewBundle` (same module) fails closed — refuse anything
-  it does not fully recognize.
+  it does not fully recognize. It also cross-checks the findings counters
+  against the findings list they carry (#1542).
 - Issue: #1425.
 
 ## How to consume it
@@ -29,6 +30,11 @@ A consumer MUST:
   — never guess.
 - Compare `head_sha` with the PR's current head before acting. A bundle is
   only authoritative for the exact head it names.
+- Compare the findings counters with the findings list they describe. A
+  count below the listed length, a count that disagrees with the list while
+  the document claims no truncation, and a truncation claim whose count
+  matches the list exactly are contradictions. Refuse such a document
+  (#1542).
 
 ## Document shape
 
@@ -135,6 +141,16 @@ characters.
 - `findings_total` counts every finding the review produced;
   `findings_truncated` says whether some are not listed. Never read a
   truncated bundle as the whole set.
+- The parser cross-checks those two counters against the `findings` array
+  (#1542). It refuses a document that lists more findings than it counts, a
+  document that claims no truncation while its total disagrees with the
+  list it carries, and a document that claims a truncation while its total
+  matches the list exactly. The published handoff refuses the same three
+  contradictions for its id lists (#1538), and the first two for its item
+  counters.
+- The counters and the `findings` array are one unit. The parser refuses a
+  document that carries a counter without the array, and a document that
+  carries the array without both counters.
 
 ### Identity and disposition
 
