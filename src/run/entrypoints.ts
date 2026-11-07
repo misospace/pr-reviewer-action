@@ -27,6 +27,11 @@ import { formatOutputAssignment, isIncompleteReason, type IncompleteReason } fro
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import { confidenceTelemetryFromArtifact, type ConfidenceTelemetry } from "../confidence/telemetry.js";
 import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
+import { blockingReviewObligations, reviewObligationsFromArtifact } from "../enforcement/review-obligations.js";
+import { structuredCoverage } from "../enforcement/completeness.js";
+import { unresolvedTraceRequirementIds } from "../enforcement/requirement-trace.js";
+import { boundedIdList } from "../context/id-lists.js";
+import { MODEL_UNAVAILABLE_ENGINE } from "../prompt/failure.js";
 
 /**
  * Production entrypoints for the #706 composite cutover: the precheck and
@@ -384,6 +389,94 @@ function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undef
   return featureEnabled ? "unavailable" : undefined;
 }
 
+/**
+ * #1537: the three merge-gating members the Action path holds in memory
+ * (`reviewDerivedPublishFields`) read back from the run directory's OWN
+ * artifacts — the obligation rows that blocked the review (#1381/#1521), the
+ * open requirement ids (#874), and the unresolved required-check ids (#750/
+ * #1518). Without them a review the obligation gate blocked with
+ * `request_changes` published a handoff whose empty lists read as "nothing
+ * blocked the review". Same doctrine as every other run-dir read here:
+ * the run dir, never cwd; an unreadable member stays ABSENT, never a guess
+ * (the handoff's own `?? []` keeps the published document identical, and no
+ * policy branch reads these lists — they are disclosure).
+ *
+ * Per-member sources and their fail-closed rules:
+ * - `review-obligations.json` — the folded rows, parsed strictly by
+ *   `reviewObligationsFromArtifact`; a structurally unrecognizable artifact
+ *   publishes nothing. `blockingReviewObligations` keeps only the forcing rows,
+ *   non-satisfied rows — exactly what the engine's #1521 in-memory pass names.
+ * - `requirement-trace.json` — the trace artifact, written ONLY when the
+ *   trace applied; its absence is the review path's own empty list (an
+ *   unapplied trace has no rows). Rows are shape-checked here rather than
+ *   trusted: `unresolvedTraceRequirementIds` reads a property of every row
+ *   directly, and a run-dir artifact is a file any earlier tool could have
+ *   written — a non-object row must yield no ids, never an exception.
+ * - the required-check ids are NOT persisted on their own; the #750 fold is
+ *   recomputed from the run's OWN inputs — the classifier's `must_check` list
+ *   (`classification.json`) and the artifact's `required_check_dispositions`
+ *   (`ai-output.json`) — but only when the run's coverage record says the
+ *   required-check dimension is `incomplete`. The recomputation can then
+ *   never contradict what the review published, and a run whose fold was
+ *   clean or never validated publishes nothing instead of guessing. A flip
+ *   whose only reason is the requirement trace (`incomplete_reason:
+ *   "requirement_trace"`) means the completeness fold itself was clean — the
+ *   execution reasons include its incompleteness — so there are no open fold
+ *   ids either, and nothing is recomputed.
+ *
+ * The model-unavailable notice path runs NONE of these folds (#1521): its
+ * `request_changes` is the notice's own, and the engine still persisted its
+ * FALLBACK `must_check` rows to `review-obligations.json`. Reading them back
+ * would name checks a review that never reached the model never performed,
+ * so the whole set stays absent for a notice run. `analysis_engine.txt` is
+ * the run's own record of that path, written by every run that reached the
+ * review tail; a run dir without a readable one has no merge-gating state to
+ * read back (the admission-skip path writes none of these artifacts).
+ */
+function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInput> {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return {};
+  let engine: string;
+  try {
+    engine = readFileSync(join(runDir, "analysis_engine.txt"), "utf8").trim();
+  } catch {
+    return {};
+  }
+  if (engine === MODEL_UNAVAILABLE_ENGINE) return {};
+  const fields: Partial<PublishInput> = {};
+
+  const obligations = reviewObligationsFromArtifact(readJsonObject(join(runDir, "review-obligations.json")));
+  if (obligations !== null) fields.unresolvedReviewObligations = blockingReviewObligations(obligations);
+
+  const trace = readJsonObject(join(runDir, "requirement-trace.json"));
+  if (trace !== null && Array.isArray(trace.rows)
+    && trace.rows.every((row) => row !== null && typeof row === "object" && !Array.isArray(row))) {
+    fields.unresolvedRequirementIds = unresolvedTraceRequirementIds(trace as never);
+  }
+
+  const coverageRecord = readJsonObject(join(runDir, "review-coverage.json"));
+  const requiredChecks = coverageRecord === null ? undefined : validateRequiredChecks(coverageRecord.required_checks);
+  const incompleteReason = coverageRecord !== null && isIncompleteReason(coverageRecord.incomplete_reason)
+    ? coverageRecord.incomplete_reason
+    : undefined;
+  if (requiredChecks === "incomplete" && incompleteReason !== "requirement_trace") {
+    const classification = readJsonObject(join(runDir, "classification.json"));
+    const output = readJsonObject(join(runDir, "ai-output.json"));
+    if (classification !== null && output !== null) {
+      const mustCheck = Array.isArray(classification.must_check)
+        ? classification.must_check.filter((item): item is string => typeof item === "string")
+        : [];
+      const checkCoverage = structuredCoverage(mustCheck, output as never);
+      fields.unresolvedRequiredChecks = boundedIdList(
+        checkCoverage.checks
+          .filter((row) => row.status === "unresolved" || row.status === "unmet")
+          .map((row) => row.check),
+      );
+    }
+  }
+  return fields;
+}
+
 /** #1005: read the persisted reviewer-routing plan from the run dir (never
  * cwd). A missing, unparseable, or structurally unrecognizable plan yields
  * `undefined` (no routing) so an uncertain plan can never mutate the forge. */
@@ -678,6 +771,13 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     // as "it was clean".
     ...(coverage.partialCoverage ? { partialCoverage: coverage.partialCoverage } : {}),
     ...(coverage.unknown ? { coverageUnknown: true } : {}),
+    // #1537: the merge-gating members the Action path derives in memory —
+    // the blocking obligation rows, the open requirement ids, and the
+    // unresolved required-check ids — read back from the run's own artifacts,
+    // so a standalone `publish` of an obligation-blocked review names what
+    // blocked it instead of claiming the empty lists did. Unreadable members
+    // stay absent, never guessed (see `mergeGatingFieldsFromRunDir`).
+    ...mergeGatingFieldsFromRunDir(env),
     forgejoPositions: platform === "forgejo",
   };
 }

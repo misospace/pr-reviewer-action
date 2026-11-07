@@ -1193,3 +1193,202 @@ test("readEvent degrades a junky issue_comment payload gracefully (never throws)
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// #1537: the standalone `publish` path must carry the merge-gating members
+// the Action path derives in memory — the blocking obligation rows, the open
+// requirement ids, and the unresolved required-check ids — read back from the
+// run's own artifacts. A run the obligation gate blocked with request_changes
+// must never publish a handoff whose empty lists read as "nothing blocked the
+// review", and an unreadable member stays absent rather than becoming a guess.
+// ---------------------------------------------------------------------------
+
+const ENGINE_OK = "openai:review-model (primary)";
+
+/** Writes the run-dir engine record every reviewed run writes at its tail;
+ * without it `mergeGatingFieldsFromRunDir` reads "no reviewed run here". */
+function writeEngineRecord(dir: string, engine: string = ENGINE_OK): void {
+  writeFileSync(join(dir, "analysis_engine.txt"), `${engine}\n`);
+}
+
+test("#1537: publishInputFromEnv names the blocking obligation rows from the run dir", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeFileSync(join(dir, "review-obligations.json"), JSON.stringify({
+      version: 1,
+      obligations: [
+        { id: "mc-1", source: "must_check", text: "Verify the auth path", status: "unresolved", cause: "tool-capability" },
+        { id: "tb-1", source: "trusted_base_guidance", text: "Confirm the migration plan", status: "satisfied", cause: null },
+        { id: "dv-1", source: "derived", text: "Cross-path relationship", status: "unresolved", cause: null, anchors: ["src/a.ts:1"] },
+      ],
+    }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    // Only the forcing, non-satisfied rows block: the satisfied row and the
+    // derived coverage row (#1447/#1521) never reach the published handoff.
+    assert.deepEqual(input.unresolvedReviewObligations, [
+      { id: "mc-1", source: "must_check", text: "Verify the auth path", status: "unresolved", cause: "tool-capability" },
+    ]);
+  });
+});
+
+test("#1537: an all-satisfied or absent obligations artifact publishes no blocking rows", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.unresolvedReviewObligations, undefined);
+    writeFileSync(join(dir, "review-obligations.json"), JSON.stringify({
+      version: 1,
+      obligations: [{ id: "mc-1", source: "must_check", text: "Verify the auth path", status: "satisfied", cause: null }],
+    }));
+    const clean = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(clean.unresolvedReviewObligations, []);
+  });
+});
+
+test("#1537: a malformed obligations artifact is never half-trusted", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    // A row outside the closed source vocabulary refuses the WHOLE artifact —
+    // the #1521 parser rule: a half-trusted row must not reach the handoff.
+    writeFileSync(join(dir, "review-obligations.json"), JSON.stringify({
+      version: 1,
+      obligations: [
+        { id: "mc-1", source: "must_check", text: "fine", status: "unresolved", cause: null },
+        { id: "x-1", source: "model_claim", text: "forged", status: "unmet", cause: null },
+      ],
+    }));
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedReviewObligations, undefined);
+    // A non-object row, an empty file, and a foreign version likewise.
+    for (const body of [
+      JSON.stringify({ version: 1, obligations: [null] }),
+      "",
+      JSON.stringify({ version: 2, obligations: [] }),
+    ]) {
+      writeFileSync(join(dir, "review-obligations.json"), body);
+      assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedReviewObligations, undefined);
+    }
+  });
+});
+
+test("#1537: publishInputFromEnv reads the open requirement ids back from the trace artifact", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeFileSync(join(dir, "requirement-trace.json"), JSON.stringify({
+      version: 1,
+      rows: [
+        { requirement_id: "req-a", disposition: "unmet", proof: "", enforcement: [], test: [], reason: "no proof", notes: [] },
+        { requirement_id: "req-b", disposition: "met", proof: "src/a.ts", enforcement: [], test: [], reason: "", notes: [] },
+        { requirement_id: "req-c", disposition: "unverifiable", proof: "", enforcement: [], test: [], reason: "unreadable", notes: [] },
+      ],
+      incomplete: true,
+      errors: [],
+    }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(input.unresolvedRequirementIds, ["req-a", "req-c"]);
+  });
+});
+
+test("#1537: an absent, empty, or malformed trace artifact publishes no requirement ids", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    const absent = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(absent.unresolvedRequirementIds, undefined);
+    // The engine writes the file zero bytes when the trace never applied.
+    writeFileSync(join(dir, "requirement-trace.json"), "");
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequirementIds, undefined);
+    // A non-object row would make `unresolvedTraceRequirementIds` throw on a
+    // property read: the read-back shape-checks rows and yields nothing.
+    writeFileSync(join(dir, "requirement-trace.json"), JSON.stringify({ version: 1, rows: [null], incomplete: false, errors: [] }));
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequirementIds, undefined);
+  });
+});
+
+test("#1537: required-check ids are recomputed from the run's own fold inputs", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeCoverageArtifact(dir, { required_checks: "incomplete" });
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path", "Check the rollback story"] }));
+    // No dispositions at all: the fold conservatively leaves every check
+    // unresolved (the same #750 the engine ran).
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({ verdict: "request_changes" }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(input.unresolvedRequiredChecks, ["Check the auth path", "Check the rollback story"]);
+    // One satisfied, one unmet: only the unmet row is not clean.
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({
+      verdict: "request_changes",
+      required_check_dispositions: [
+        { check: "Check the auth path", status: "satisfied", rationale: "covered by tests" },
+        { check: "Check the rollback story", status: "unmet", rationale: "none exists" },
+      ],
+    }));
+    const folded = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.deepEqual(folded.unresolvedRequiredChecks, ["Check the rollback story"]);
+  });
+});
+
+test("#1537: required-check ids are recomputed only when the fold itself was incomplete", () => {
+  withRunDir((dir) => {
+    writeEngineRecord(dir);
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path"] }));
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({ verdict: "approve" }));
+    // A clean fold: nothing open, nothing to name, nothing recomputed.
+    writeCoverageArtifact(dir, { required_checks: "complete" });
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
+    // A required_checks flip whose ONLY reason is the requirement trace means
+    // the completeness fold itself was clean: the fold ids stay absent too.
+    writeCoverageArtifact(dir, { required_checks: "incomplete", incomplete_reason: "requirement_trace" });
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
+    // An unreadable fold input cannot be recomputed: absent, never guessed.
+    writeCoverageArtifact(dir, { required_checks: "incomplete" });
+    rmSync(join(dir, "classification.json"));
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
+    // An unrecognizable coverage status likewise.
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path"] }));
+    writeCoverageArtifact(dir, { required_checks: "yes-very-incomplete" });
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
+  });
+});
+
+test("#1537: a model-unavailable notice run names no merge-gating members", () => {
+  withRunDir((dir) => {
+    // The notice path runs none of the folds but still persists its FALLBACK
+    // must_check rows (#1521). Reading them back would name checks a review
+    // that never reached the model never performed.
+    writeEngineRecord(dir, "(model unavailable)");
+    writeCoverageArtifact(dir, { required_checks: "incomplete" });
+    writeFileSync(join(dir, "review-obligations.json"), JSON.stringify({
+      version: 1,
+      obligations: [{ id: "obligation-1", source: "must_check", text: "Check the auth path", status: "unresolved", cause: null }],
+    }));
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path"] }));
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({ verdict: "request_changes" }));
+    writeFileSync(join(dir, "requirement-trace.json"), JSON.stringify({ version: 1, rows: [{ requirement_id: "req-a", disposition: "unmet" }], incomplete: true, errors: [] }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.unresolvedReviewObligations, undefined);
+    assert.equal(input.unresolvedRequirementIds, undefined);
+    assert.equal(input.unresolvedRequiredChecks, undefined);
+  });
+});
+
+test("#1537: no run dir (or no engine record) means no merge-gating state", () => {
+  const noRunDir = publishInputFromEnv({ PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+  assert.equal(noRunDir.unresolvedReviewObligations, undefined);
+  assert.equal(noRunDir.unresolvedRequirementIds, undefined);
+  assert.equal(noRunDir.unresolvedRequiredChecks, undefined);
+  withRunDir((dir) => {
+    // Every artifact is present and readable, but a run dir without the
+    // engine's own tail record cannot prove which path produced them.
+    writeCoverageArtifact(dir, { required_checks: "incomplete" });
+    writeFileSync(join(dir, "review-obligations.json"), JSON.stringify({
+      version: 1,
+      obligations: [{ id: "mc-1", source: "must_check", text: "x", status: "unresolved", cause: null }],
+    }));
+    writeFileSync(join(dir, "requirement-trace.json"), JSON.stringify({ version: 1, rows: [{ requirement_id: "req-a", disposition: "unmet" }], incomplete: true, errors: [] }));
+    writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["x"] }));
+    writeFileSync(join(dir, "ai-output.json"), JSON.stringify({ verdict: "request_changes" }));
+    const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
+    assert.equal(input.unresolvedReviewObligations, undefined);
+    assert.equal(input.unresolvedRequirementIds, undefined);
+    assert.equal(input.unresolvedRequiredChecks, undefined);
+  });
+});
