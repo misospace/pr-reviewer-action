@@ -850,8 +850,14 @@ test("sweepIntervalMs 0 never arms; stopSweeper is idempotent and safe before an
   seedJob(armed.fake, "review-workers", kubernetesJobName("run-42"), "job-uid-1");
   await armed.store.putSecret(sampleSecret());
   await sleep(20); // a few passes ran
-  const before = armed.fake.requests.length;
   armed.store.stopSweeper();
+  // A pass whose interval fired just before stopSweeper is still in flight
+  // against the real loopback fake, so its later requests must not be
+  // counted against the stop. Baseline only after the store quiesced, then
+  // prove no further pass starts: a surviving 5ms timer cannot stay quiet
+  // across two 40ms windows.
   await sleep(40);
-  assert.equal(armed.fake.requests.length, before, "no timer remains after stopSweeper");
+  const settled = armed.fake.requests.length;
+  await sleep(40);
+  assert.equal(armed.fake.requests.length, settled, "no timer remains after stopSweeper");
 });
