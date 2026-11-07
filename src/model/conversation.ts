@@ -1189,6 +1189,39 @@ export class Conversation {
     return messages;
   }
 
+  /** #1552: structural wire-safety probe for one MORE `user` event — mirrors
+   * `renderAnthropicMessages`' batching WITHOUT mutating state. A further
+   * user event would be ADJACENT (Anthropic rejects adjacent user turns)
+   * exactly when it would render as a STANDALONE user message right after
+   * another standalone user message: a `tool_result` opens the pending
+   * batch, `assistant_text`/`assistant_tool_calls` flush+close it, and a
+   * `user`/`turn_note` event either merges into the open batch (leaving it
+   * open, lastRole unchanged) or renders standalone when the batch is
+   * closed. The #1539 shape — the repair round stops on `no-tool-calls`, so
+   * the tail is still the open batch carrying the tool_results + verdict +
+   * repair instruction as trailing text blocks — merges a further user event
+   * and is therefore wire-SAFE; a closed batch whose last rendered message
+   * was a standalone user turn is not, and the caller must suppress the
+   * trace-only turn there. */
+  appendingUserWouldBeAdjacent(): boolean {
+    let pendingBatch = false;
+    let lastRole: "user" | "assistant" | null = null;
+    for (const e of this.events) {
+      if (e.kind === "tool_result") {
+        pendingBatch = true;
+      } else if (e.kind === "assistant_text" || e.kind === "assistant_tool_calls") {
+        pendingBatch = false;
+        lastRole = "assistant";
+      } else if (e.kind === "user" || e.kind === "turn_note") {
+        // A user event into the OPEN batch rides it as a trailing text block:
+        // the batch stays open and the rendered message's role is unchanged.
+        if (!pendingBatch) lastRole = "user";
+      }
+      // system_note is verdict-turn only — never rendered here.
+    }
+    return lastRole === "user" && !pendingBatch;
+  }
+
   /** Build the single system note summarising prior turns for the verdict.
    * Used when `keepFullHistoryOnVerdict` is false: the verdict turn sees one
    * consolidated system note instead of the full prior conversation. The note

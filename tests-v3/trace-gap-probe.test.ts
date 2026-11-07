@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validateRequirementTrace } from "../src/enforcement/requirement-trace.js";
+import { validateRequirementTrace, CONFIRMED_UNMET_REFUTATION_NOTES } from "../src/enforcement/requirement-trace.js";
 import {
   computeTraceGapContinuation,
   createTraceGapProbe,
   traceGapContinuationSummary,
+  classifyTraceRepairRows,
   type TraceGapProbeContext,
 } from "../src/requirements/trace-gap-probe.js";
 import { buildTraceGapContinuationMessage, MAX_TRACE_REPAIR_CLAIMS } from "../src/requirements/trace-repair.js";
@@ -438,4 +439,129 @@ test("#1145: summary — skipped record carries ids but trace claims stay unmerg
     },
   });
   assert.deepEqual(summary, { outcome: "skipped_no_budget", unresolved_ids: ["R1"], trace_claims_merged: false, claims_merged: 0 });
+});
+
+// ---------------------------------------------------------------------------
+// #1552: classifyTraceRepairRows — the standalone pass's repair-state model
+// ---------------------------------------------------------------------------
+
+/** Minimal rows as the validator emits them — the classifier reads only
+ * `requirement_id`, `disposition`, and `notes`. */
+const row = (id: string, disposition: string, notes: string[] = []) => ({ requirement_id: id, disposition, notes });
+const fakeTrace = (rows: Array<ReturnType<typeof row>>) => ({ rows }) as unknown as ReturnType<typeof validateRequirementTrace>;
+
+test("#1552: classify — missing ids and present-but-unverifiable rows, in scope order", () => {
+  const trace = fakeTrace([
+    row("req-met", "met"),
+    row("req-unv", "unverifiable", ["downgraded-no-valid-enforcement-location"]),
+    row("req-unmet", "unmet", ["gap"]),
+    row("req-pending", "pending", ["external-state-pending", "provenance:pr-body"]),
+  ]);
+  const out = classifyTraceRepairRows({
+    coverage: [{ requirement_id: "req-met" }, { requirement_id: "req-unv" }, { requirement_id: "req-unmet" }, { requirement_id: "req-pending" }],
+    trace,
+    scopeIds: ["req-missing", "req-unv", "req-met", "req-unmet", "req-pending"],
+  });
+  assert.deepEqual(out, [
+    { id: "req-missing", state: "missing", reason: "not-traced-by-reviewer" },
+    { id: "req-unv", state: "insufficient_claim", reason: "downgraded-no-valid-enforcement-location" },
+  ]);
+});
+
+test("#1552: classify — environmental-only notes mark evidence_unverified; mixed notes mark insufficient_claim", () => {
+  const trace = fakeTrace([
+    row("req-env", "unverifiable", ["external-state-ci:pending", "provenance:ledger"]),
+    row("req-mixed", "unverifiable", ["external-state-ci:pending", "disposition-invalid"]),
+    row("req-empty", "unverifiable", []),
+  ]);
+  const out = classifyTraceRepairRows({
+    coverage: [{ requirement_id: "req-env" }, { requirement_id: "req-mixed" }, { requirement_id: "req-empty" }],
+    trace,
+    scopeIds: ["req-env", "req-mixed", "req-empty"],
+  });
+  assert.deepEqual(out, [
+    { id: "req-env", state: "evidence_unverified", reason: "unverifiable" },
+    { id: "req-mixed", state: "insufficient_claim", reason: "disposition-invalid" },
+    { id: "req-empty", state: "insufficient_claim", reason: "unverifiable" },
+  ]);
+});
+
+test("#1552: classify — confirmed-unmet refutation rows are excluded like the probe excludes them", () => {
+  for (const note of CONFIRMED_UNMET_REFUTATION_NOTES) {
+    const trace = fakeTrace([row("req-x", "unverifiable", [note])]);
+    const out = classifyTraceRepairRows({ coverage: [{ requirement_id: "req-x" }], trace, scopeIds: ["req-x"] });
+    assert.deepEqual(out, [], `note ${note} must exclude the row`);
+  }
+});
+
+test("#1552: classify — hostile coverage payload and degenerate trace never throw", () => {
+  const out = classifyTraceRepairRows({
+    coverage: ["junk", 42, null, { no_id: true }, { requirement_id: "req-1" }],
+    trace: fakeTrace([]),
+    scopeIds: ["req-1"],
+  });
+  assert.deepEqual(out, [{ id: "req-1", state: "missing", reason: "not-traced-by-reviewer" }]);
+});
+
+test("#1552: classify — duplicate scope ids collapse; reason caps at three labels", () => {
+  const trace = fakeTrace([
+    row("req-x", "unverifiable", ["disposition-invalid", "missing-reason", "structural-citation-line-out-of-range", "trace-repair-ran-no-claims"]),
+  ]);
+  const out = classifyTraceRepairRows({ coverage: [{ requirement_id: "req-x" }], trace, scopeIds: ["req-x", "req-x"] });
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.state, "insufficient_claim");
+  assert.equal(out[0]!.reason, "disposition-invalid; missing-reason; structural-citation-line-out-of-range");
+});
+
+// ---------------------------------------------------------------------------
+// #1552: traceGapContinuationSummary — the bounded repair-round fields
+// ---------------------------------------------------------------------------
+
+test("#1552: summary — bounded fields forward when the record carries them", () => {
+  const summary = traceGapContinuationSummary({
+    trace_repair_continuation: {
+      attempted: true,
+      outcome: "continued",
+      unresolved_ids: ["R1"],
+      stop_reason: "no-tool-calls",
+      tool_calls: 0,
+      repair_requests_remaining: 27,
+    },
+  });
+  assert.deepEqual(summary, {
+    outcome: "continued",
+    unresolved_ids: ["R1"],
+    trace_claims_merged: false,
+    claims_merged: 0,
+    stop_reason: "no-tool-calls",
+    tool_calls: 0,
+    repair_requests_remaining: 27,
+  });
+});
+
+test("#1552: summary — skipped fields sanitize: control chars stripped, capped, hostile dropped", () => {
+  const summary = traceGapContinuationSummary({
+    trace_repair_continuation: {
+      attempted: true,
+      outcome: "skipped_no_evidence",
+      unresolved_ids: ["R1"],
+      stop_reason: "no-tool-calls",
+      tool_calls: -5,
+      repair_requests_remaining: Number.POSITIVE_INFINITY,
+      trace_skipped_reason: "wire_unsafe\x00forged",
+    },
+  });
+  assert.equal(summary?.stop_reason, "no-tool-calls");
+  assert.equal(summary?.tool_calls, 0);
+  assert.equal(summary?.repair_requests_remaining, undefined, "non-finite count is dropped");
+  assert.equal(summary?.trace_skipped_reason, "wire_unsafeforged");
+});
+
+test("#1552: summary — records without the new fields keep their exact old shape", () => {
+  assert.deepEqual(
+    traceGapContinuationSummary({
+      trace_repair_continuation: { attempted: true, outcome: "skipped_no_budget", unresolved_ids: ["R1"] },
+    }),
+    { outcome: "skipped_no_budget", unresolved_ids: ["R1"], trace_claims_merged: false, claims_merged: 0 },
+  );
 });

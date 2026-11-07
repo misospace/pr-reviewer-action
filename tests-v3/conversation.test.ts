@@ -335,3 +335,74 @@ test("anthropic verdict turn after tool results joins the pending tool_result me
   assert.deepEqual(last.map((b) => b.type), ["tool_result", "text"]);
   assert.equal(last[1]!.text, "Produce the final review verdict now.");
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// #1552: appendingUserWouldBeAdjacent — the STRUCTURAL gate for the
+// trace-only repair turn. It mirrors renderAnthropicMessages' batching
+// without mutating state: a further user event is adjacent exactly when it
+// would render standalone right after another standalone user message. Each
+// case below pins the predicate against the renderer's actual output.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** The #1539 shape: an open tool_result batch at the tail (the loop broke
+ * after its results; the verdict + repair instruction ride it as trailing
+ * text blocks). A further user event MERGES — wire-safe. */
+test("#1552: tail = tool_results (open batch) is wire-safe for one more user event", () => {
+  const c = new Conversation();
+  c.addAssistantToolCalls([{ id: "a", name: "read_file", arguments: "{}" }]);
+  c.addToolResult("a", "result body");
+  c.addUser("verdict instruction");
+  c.addUser("repair instruction");
+  // The renderer proves the merge: ONE trailing user message still carries
+  // the tool_result, and appending would join it.
+  const messages = c.renderAnthropicMessages() as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+  assert.equal(messages.at(-1)!.role, "user");
+  assert.equal(c.appendingUserWouldBeAdjacent(), false);
+});
+
+test("#1552: tail = [tool_results, user, user] stays merged — still wire-safe", () => {
+  const c = new Conversation();
+  c.addAssistantToolCalls([{ id: "a", name: "read_file", arguments: "{}" }]);
+  c.addToolResult("a", "result body");
+  c.addUser("verdict instruction");
+  c.addUser("repair instruction");
+  c.addUser("trace instruction");
+  const messages = c.renderAnthropicMessages() as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+  assert.equal(messages.length, 2); // assistant + ONE merged user message
+  assert.equal(c.appendingUserWouldBeAdjacent(), false);
+});
+
+test("#1552: tail = [user, user] with no tool results IS adjacent", () => {
+  const c = new Conversation();
+  c.addUser("verdict instruction");
+  c.addUser("repair instruction");
+  const messages = c.renderAnthropicMessages() as Array<{ role: string; content: unknown }>;
+  assert.deepEqual(messages.map((m) => m.role), ["user", "user"]);
+  assert.equal(c.appendingUserWouldBeAdjacent(), true);
+});
+
+test("#1552: tail = assistant_text is never adjacent", () => {
+  const c = new Conversation();
+  c.addAssistantToolCalls([{ id: "a", name: "read_file", arguments: "{}" }]);
+  c.addToolResult("a", "result body");
+  c.addAssistantText("closing text (the loop's zero-tool-call stop does NOT append this)");
+  assert.equal(c.appendingUserWouldBeAdjacent(), false);
+  // A bare user turn after assistant text is also fine.
+  c.addUser("repair instruction");
+  assert.equal(c.appendingUserWouldBeAdjacent(), true);
+});
+
+test("#1552: tail = turn_note after tool results merges (batch stays open) — wire-safe", () => {
+  const c = new Conversation();
+  c.addAssistantToolCalls([{ id: "a", name: "read_file", arguments: "{}" }]);
+  c.addToolResult("a", "result body");
+  c.addTurnNote("driver note");
+  const messages = c.renderAnthropicMessages() as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+  assert.deepEqual(messages.at(-1)!.content.map((b) => b.type), ["tool_result", "text"]);
+  assert.equal(c.appendingUserWouldBeAdjacent(), false);
+  // A STANDALONE turn_note (no pending results) renders its own user message,
+  // so a further user event would be adjacent.
+  const standalone = new Conversation();
+  standalone.addTurnNote("driver note");
+  assert.equal(standalone.appendingUserWouldBeAdjacent(), true);
+});

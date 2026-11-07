@@ -284,6 +284,9 @@ test("#1447: trace repair still runs after the exploration call ceiling is exhau
     tool_calls: 1,
     claims_merged: 1,
     trace_claims_merged: true,
+    // #1552: the 1-request exploration ceiling left 0 + the 4-call extra,
+    // minus the 1 call the round issued.
+    repair_requests_remaining: 3,
   });
   // The merge set is the RAW probe ids; the parser drops any payload id that
   // is not an exact raw match, so only R1 merges (the sanitized "R2forged"
@@ -340,6 +343,9 @@ test("#1145: the happy path — one bounded repair round, folded telemetry, trac
     tool_calls: 1,
     claims_merged: 1,
     trace_claims_merged: true,
+    // #1552: base remainder 23 + the 4-call trace-closure extra, minus the
+    // 1 call the round issued.
+    repair_requests_remaining: 26,
   });
   // The repair call folded into the trace; the original loop's fields stand.
   const traceCalls = result.tool_calls as Array<Record<string, unknown>>;
@@ -535,6 +541,9 @@ test("#1145: a repair round that stops on a request error records skipped_refres
     tool_calls: 0,
     claims_merged: 0,
     trace_claims_merged: false,
+    // #1552: the round died on its first request — nothing issued, so the
+    // full allowance (23 + 4) remains.
+    repair_requests_remaining: 27,
   });
   // The standing verdict is untouched.
   assert.equal(result.native_loop_verdict_status, "accepted");
@@ -721,6 +730,9 @@ test("#1447: trace repair gets one bounded round even after exploration hits max
     tool_calls: 1,
     claims_merged: 1,
     trace_claims_merged: true,
+    // #1552: base remainder 22 (two executed exploration calls) + 4, minus
+    // the 1 call the round issued.
+    repair_requests_remaining: 25,
   });
   // Repair closed the notes.md gap; other.ts remains honestly partial.
   const coverage = result.partial_coverage as { stop_reason: string; unread_files: string[] };
@@ -729,16 +741,18 @@ test("#1447: trace repair gets one bounded round even after exploration hits max
   assert.deepEqual(coverage.unread_files, ["other.ts"]);
 });
 
-test("#1145: a repair round that issues no tool call is skipped_no_evidence, never continued", async () => {
+test("#1552: a repair round that issues no tool call still earns the trace-only turn (#1539 shape)", async () => {
   const { root, deps } = workspace();
   seedWorkspace(root);
   // Default budgets: the loop stops early (model-stopped, one round of its
   // round budget spent), so the repair round starts — but the model answers
-  // the repair instruction with plain text and NO tool call. No evidence was
-  // inspected, so no refresh is attempted and the outcome must not read as a
-  // completed evidence repair.
+  // the repair instruction with plain text and NO tool call. The round
+  // inspected no NEW evidence, yet the evidence the EARLIER loop rounds
+  // gathered is already in the conversation: the trace-only turn is still
+  // justified (#1539), so the gap is filled instead of stranded.
   const scripted = baseScripted([
     openAiText("I cannot verify requirement R1 from memory alone."),
+    tracePayload(["R1"]),
   ]);
   let calls = 0;
   const result = freshResult();
@@ -752,25 +766,33 @@ test("#1145: a repair round that issues no tool call is skipped_no_evidence, nev
     }),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 4); // loop(2) + verdict(1) + repair(1); NO trace-only request
+  assert.equal(calls, 5); // loop(2) + verdict(1) + repair(1 text-only) + trace-only(1)
   assert.deepEqual(result.trace_repair_continuation, {
     attempted: true,
-    outcome: "skipped_no_evidence",
+    outcome: "continued_trace_only",
     unresolved_ids: ["R1"],
     stop_reason: "no-tool-calls",
     rounds: 1,
     tool_calls: 0,
-    claims_merged: 0,
-    trace_claims_merged: false,
+    claims_merged: 1,
+    trace_claims_merged: true,
+    // #1552: the round issued nothing, so the full allowance (base remainder
+    // 23 + the 4-call trace-closure extra) remains.
+    repair_requests_remaining: 27,
   });
-  // The standing verdict and its artifact are byte-intact.
+  // The standing verdict keeps its original body; the trace claim merged in.
   assert.equal(result.native_loop_verdict_produced, true);
   assert.equal(result.native_loop_verdict_status, "accepted");
   const persisted = JSON.parse(
     fs.readFileSync(path.join(root, "ai-response.primary.json"), "utf8"),
   ) as Record<string, unknown>;
   const choice = (persisted.choices as Array<Record<string, unknown>>)[0]!;
-  assert.equal(JSON.parse(String((choice.message as Record<string, unknown>).content)).review_markdown, "## Review\noriginal");
+  const body = JSON.parse(String((choice.message as Record<string, unknown>).content));
+  assert.equal(body.review_markdown, "## Review\noriginal");
+  const coverage = body.requirement_coverage as Array<Record<string, unknown>>;
+  assert.equal(coverage.length, 1);
+  assert.equal(coverage[0]!.requirement_id, "R1");
+  assert.equal(coverage[0]!.disposition, "met");
 });
 
 test("#1145 wiring: runToolHarness forwards deps.traceGapProbe to the native loop", async () => {

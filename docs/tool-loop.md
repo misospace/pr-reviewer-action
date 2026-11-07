@@ -296,10 +296,13 @@ runs the repair rounds under the remaining budgets (no new tools, permissions,
 or call capacity beyond the original totals — the instruction explicitly
 forbids them), and then (#1503) runs a trace-only repair turn instead of
 re-requesting the verdict. Every failure path keeps the original verdict:
-a throwing probe, a budget/deadline stop, a failed repair round, or a repair
-round that issued no tool call records `skipped_probe_error`,
-`skipped_no_budget`, `skipped_refresh_failed`, or `skipped_no_evidence` on the
-harness's `trace_repair_continuation` instead of continuing.
+a throwing probe, a budget/deadline stop, or a failed repair round records
+`skipped_probe_error`, `skipped_no_budget`, or `skipped_refresh_failed` on the
+harness's `trace_repair_continuation` instead of continuing. #1552: a repair
+round that issued no tool call no longer suppresses the trace-only turn — the
+evidence the earlier rounds gathered is already in the conversation, so the
+turn still runs (outcome `continued_trace_only`, `stop_reason: no-tool-calls`,
+`tool_calls: 0` keep the record honest about what the round did).
 
 A row the validator has already refuted against the checkout
 (`structural-proof-unconfirmed`, #985) is never a repair target — reading more
@@ -342,22 +345,35 @@ trace-only instruction instead re-lists exactly the ids that were unresolved
 when the repair began and asks only for `requirement_coverage` entries — the
 same shape and the same parser (`normalizeTraceRepairPayload`) as the no-tools
 #959 repair pass. The returned claims merge into the accepted verdict artifact
-through `mergeTraceClaims`: only ids that carried no claim are filled, an
-existing claim (even one with unusable locations) is never overwritten, and
-findings, severities, the recommendation/verdict, escalation state, required
-check dispositions, and every other artifact field are unchanged. The merged
+through `mergeTraceRepairClaims` (#1552): ids that carried no claim are
+filled, and — inside the validator-derived target set only — an existing row
+the validator left `unverifiable` is replaced in place even when its stored
+disposition says `met` (a downgrade), because inside that set a stored
+`met`/`not_applicable` row is exactly the invalid coverage the repair targets.
+A stored `unmet` row is the reviewer's own affirmative finding (#1095) and is
+never replaced, ids outside the target set are never touched, and findings,
+severities, the recommendation/verdict, escalation state, required check
+dispositions, and every other artifact field are unchanged. `claims_merged`
+counts appended + replaced rows. The merged
 artifact then flows through the unchanged publication-time validator; ids the
 trace-only turn did not fill stay incomplete and fall to the #1492
 fail-closed publication boundary and the #959 pass as before. A malformed,
 empty, or failed trace-only response never damages the standing verdict. The
-turn never re-appends the review corpus and, like the old refresh, needs a
-fresh tool result before it runs, so the Anthropic wire stays valid. The
-repair round is also honest about what it achieved: a round that issued no
-tool call inspected no evidence and is recorded `skipped_no_evidence` (never a
-completed `continued`), an errored round is `skipped_refresh_failed`, and a
-round that executed at least one read is `continued` — with `claims_merged`
-and `trace_claims_merged` recording how many requirement ids the trace-only
-turn actually filled.
+turn never re-appends the review corpus, and #1552 gates it on a structural
+Anthropic wire-safety check (`appendingUserWouldBeAdjacent`): the instruction
+is appended only when it cannot render as an adjacent user turn — in the
+ordinary shape it merges into the trailing tool-result user message, and a
+conversation whose tail is a standalone user message suppresses the turn
+(`skipped_wire_unsafe`, `trace_skipped_reason: wire_unsafe`) and leaves
+recovery to the #959 pass. The repair round is also honest about what it
+achieved: a round that issued no tool call is `continued_trace_only` when the
+trace-only turn ran against the conversation's existing evidence (and never
+reads as a completed evidence repair — `tool_calls: 0` and the stop reason
+say what happened), an errored round is `skipped_refresh_failed`, and a round
+that executed at least one read is `continued` — with `claims_merged`,
+`trace_claims_merged`, and `repair_requests_remaining` recording how many
+requirement ids the trace-only turn actually filled and what allowance
+remained.
 
 The continuation is primary-tier only (the smart tier keeps its pre-#1145
 shape) and never overrides the loop's own stop reason. What happened is
