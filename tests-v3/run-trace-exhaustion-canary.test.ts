@@ -23,6 +23,11 @@ import type { NativeReviewRequest, NativeReviewSurface, PublishCommentRef, Publi
 // coverage is recovered and the approval converges to a clean review; (2)
 // when both the trace-only repair and the standalone fallback return no
 // claims, the dropped coverage fails closed and the approval is withheld.
+// The fixture makes the repair round LOAD-BEARING: the ordinary
+// investigation only ever LOCATES the two requirements' targets, so the
+// evidence the trace-only turn cites can only have come from the bounded
+// repair reads (#1505's "the bounded repair reads produce evidence for
+// those ids").
 // The helpers below are self-contained copies of the ones in run.test.ts
 // (mockPlatform, baseVerdict, the OpenAI wire builders, the fragment-id
 // extractor, gitInit) so this file never imports across test files.
@@ -67,9 +72,16 @@ function mockPlatform(options: { diff?: string; files?: unknown[]; title?: strin
 
 /** The same linked-issue PR, but the issue body carries TWO MUST lines, so
  * the ledger holds two in-scope requirements the trace-only repair can fill
- * (or, in the #1488 shape, fail to fill). */
+ * (or, in the #1488 shape, fail to fill).
+ *
+ * The PR body stays minimal on purpose: the corpus's impact scan greps the
+ * checkout for the PR body's vocabulary, so a body that named the
+ * requirement's words would pull the evidence files' own lines into the
+ * corpus — and the evidence bytes would then reach the conversation without
+ * any repair read. With this body, the ONLY way the evidence reaches the
+ * model is the bounded repair round's own reads. */
 function twoRequirementTracePlatform(): PlatformReadAdapter {
-  const platform = mockPlatform({ body: "Closes #824.\n\nResolve review context from the right identity.\n" });
+  const platform = mockPlatform({ body: "Closes #824.\n" });
   platform.getIssue = async () => ({
     ok: true,
     data: {
@@ -119,24 +131,57 @@ function openAiText(content: string): Record<string, unknown> {
   return { id: "c1", object: "chat.completion", model: "primary-m", choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } };
 }
 
-function openAiToolCall(id: string, name: string, args: string): Record<string, unknown> {
-  return { id: "c2", object: "chat.completion", model: "primary-m", choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: [{ id, type: "function", function: { name, arguments: args } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } };
-}
-
-/** Two parallel read_file calls in one turn — the effective turn (round)
- * ceiling is smaller than the request ceiling, so the investigation spends
- * TWO calls per turn and the CALL ceiling is what binds (stop_reason
- * `tool-call-budget-exhausted`, the #1488 shape). */
-function openAiToolCallPair(idA: string, pathA: string, idB: string, pathB: string): Record<string, unknown> {
+/** One model turn issuing the given tool calls in order. The call ids are
+ *  prefixed per turn, so every call in the conversation is unique. */
+function openAiToolCalls(
+  prefix: string,
+  calls: ReadonlyArray<{ name: string; args: Record<string, unknown> }>,
+): Record<string, unknown> {
   return {
     id: "c2", object: "chat.completion", model: "primary-m",
-    choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: [
-      { id: idA, type: "function", function: { name: "read_file", arguments: `{"path":${JSON.stringify(pathA)}}` } },
-      { id: idB, type: "function", function: { name: "read_file", arguments: `{"path":${JSON.stringify(pathB)}}` } },
-    ] }, finish_reason: "tool_calls" }],
+    choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: calls.map((call, index) => ({
+      id: `${prefix}${index + 1}`,
+      type: "function",
+      function: { name: call.name, arguments: JSON.stringify(call.args) },
+    })) }, finish_reason: "tool_calls" }],
     usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
   };
 }
+
+/** The configured investigation ceiling the canary runs the ordinary loop
+ *  at. Production ran #1488's starvation on the default 40; the canary
+ *  pins the same shape on a small deterministic ceiling — the failure mode
+ *  is "reached the configured ceiling", not the number 40. */
+const CONFIGURED_CALL_CEILING = 8;
+
+/** The evidence the two missing requirement ids need: each one's
+ *  enforcement location and its regression test. The BOUNDED REPAIR round
+ *  reads exactly these four files; the ordinary investigation never opens
+ *  them, and the fixture's PR body carries no vocabulary that would pull
+ *  their lines into the corpus's impact scan — so their content in the
+ *  conversation is proof that the bounded repair reads produced the missing
+ *  evidence (#1505 step 5). */
+const TRACE_EVIDENCE_PATHS: readonly string[] = [
+  "src/context-resolution.ts",
+  "tests/context-resolution.test.ts",
+  "src/publish-gate.ts",
+  "tests/publish-gate.test.ts",
+];
+
+/** The tool-call ids the bounded repair round's four evidence reads carry.
+ *  Their tool results must ride in the trace-only turn's context: that is
+ *  the seam the repair reads cross to reach the serializer. */
+const REPAIR_READ_CALL_IDS: readonly string[] = ["r11", "r12", "r21", "r22"];
+
+/** A distinctive line of each evidence file. The trace-only turn may cite
+ *  evidence only when the conversation carries it — and only the bounded
+ *  repair round's own reads ever put these bytes there. */
+const TRACE_EVIDENCE_NEEDLES: readonly string[] = [
+  "record.sourceSha !== ctx.sourceSha",
+  "record.publishTimestamp !== ctx.gateTimestamp",
+  "context resolution binds to the repository identity and the source SHA",
+  "publish gate compares the publish timestamp against the gate timestamp",
+];
 
 /** The requirement id the requirement-trace fragment rendered for its
  * `- req-… (normative, …): <text>` line containing `marker` — the shape the
@@ -242,12 +287,19 @@ function writeTraceWorkspace(runDir: string): void {
       "}",
     ].join("\n"),
   );
-  writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
-  writeFileSync(join(runDir, "tests", "publish-gate.test.ts"), "test('placeholder', () => {});\n");
+  writeFileSync(
+    join(runDir, "tests", "context-resolution.test.ts"),
+    "test('context resolution binds to the repository identity and the source SHA', () => {});\n",
+  );
+  writeFileSync(
+    join(runDir, "tests", "publish-gate.test.ts"),
+    "test('publish gate compares the publish timestamp against the gate timestamp', () => {});\n",
+  );
   writeFileSync(join(runDir, "README.md"), "hello\nworld\n");
   // Unrelated tracked files the investigation burns its call ceiling on —
   // the #1488 shape: the ordinary loop spends every request on general
-  // exploration and never discharges the trace rows before the verdict.
+  // exploration and never opens the requirements' evidence before the
+  // verdict.
   for (let i = 1; i <= 7; i += 1) {
     mkdirSync(join(runDir, "docs"), { recursive: true });
     writeFileSync(join(runDir, "docs", `explore-0${i}.md`), `explore note ${i}\n`);
@@ -260,40 +312,63 @@ interface TraceServerState {
   idSecond: string;
   standaloneRequests: number;
   unexpected: string[];
+  grounded: boolean;
 }
 
 /** One lane serving the whole native-loop conversation. Tools-carrying
- * requests are scripted positionally: eight reads burning the configured
- * call ceiling (the loop then stops on the ceiling, not on a model stop),
- * then the bounded repair round's read and its stop text. Tool-less
- * requests are discriminated by their marker: the in-conversation trace-only
- * repair turn ("Requirement ids to trace:"), the standalone fallback
- * ("Requirements to trace:"), and the in-conversation verdict (everything
- * else). */
+ * requests are scripted positionally: the ordinary investigation spends the
+ * whole configured call ceiling (8 calls) on exploration and on LOCATING the
+ * two requirements' targets, then the bounded repair round's four dedicated
+ * reads pull the missing evidence itself. Tool-less requests are
+ * discriminated by their marker: the in-conversation trace-only repair turn
+ * ("Requirement ids to trace:"), the standalone fallback ("Requirements to
+ * trace:"), and the in-conversation verdict (everything else). */
 async function startTraceServer(mode: "positive" | "negative"): Promise<{ server: MockServer; state: TraceServerState }> {
-  const state: TraceServerState = { idFirst: "", idSecond: "", standaloneRequests: 0, unexpected: [] };
+  const state: TraceServerState = { idFirst: "", idSecond: "", standaloneRequests: 0, unexpected: [], grounded: false };
   let toolTurn = 0;
   const server = await startMockServer((_req, body, res) => {
     const text = String(body);
     res.setHeader("Content-Type", "application/json");
-    const request = JSON.parse(text) as { tools?: unknown[] };
+    const request = JSON.parse(text) as { tools?: unknown[]; messages?: unknown[] };
     if (Array.isArray(request.tools) && request.tools.length > 0) {
       const scripted = [
         // The ordinary investigation burns the FULL configured ceiling (8)
-        // without ever serializing the trace, and stops on the ceiling — not
-        // on the model's own stop. The reserved tail (#1506) admits the
-        // trace-targeted reads, so the evidence IS in the conversation by
-        // the end — the production #1488 finding was that the review prose
-        // showed the evidence had been found and the verdict STILL dropped
-        // the coverage rows.
-        openAiToolCallPair("c1", "README.md", "c2", "docs/explore-01.md"),
-        openAiToolCallPair("c3", "docs/explore-02.md", "c4", "docs/explore-03.md"),
-        openAiToolCallPair("c5", "src/context-resolution.ts", "c6", "src/publish-gate.ts"),
-        openAiToolCallPair("c7", "tests/context-resolution.test.ts", "c8", "tests/publish-gate.test.ts"),
-        // The bounded trace-repair continuation (4 dedicated calls): one
-        // targeted read, then the model stops the repair rounds.
-        openAiToolCall("c9", "read_file", '{"path":"docs/explore-04.md"}'),
-        openAiText("repair round done"),
+        // WITHOUT reading the requirements' evidence. It explores, and it
+        // LOCATES each requirement's targets: the reserved tail (#1506)
+        // admits the calls that name the requirement's vocabulary — plain
+        // exploration reads in that tail would be REFUSED — and those
+        // locator calls are what discharges the rows. The loop still never
+        // opens the files: the budget runs out before the evidence is in
+        // hand, which is the production #1488 shape (the verdict came back
+        // with no coverage rows at all).
+        openAiToolCalls("m1", [
+          { name: "read_file", args: { path: "README.md" } },
+          { name: "read_file", args: { path: "docs/explore-01.md" } },
+        ]),
+        openAiToolCalls("m2", [
+          { name: "read_file", args: { path: "docs/explore-02.md" } },
+          { name: "read_file", args: { path: "docs/explore-03.md" } },
+        ]),
+        openAiToolCalls("m3", [
+          { name: "find_files", args: { pattern: "*context-resolution*" } },
+          { name: "find_files", args: { pattern: "*publish-gate*" } },
+        ]),
+        openAiToolCalls("m4", [
+          { name: "find_files", args: { pattern: "tests/context-resolution*.test.ts" } },
+          { name: "find_files", args: { pattern: "tests/publish-gate*.test.ts" } },
+        ]),
+        // The bounded trace-repair continuation (4 dedicated calls): it reads
+        // EXACTLY the evidence the two missing ids need — each one's
+        // enforcement location and its regression test. Nothing else: a
+        // lookalike document would leave the trace-only turn ungrounded.
+        openAiToolCalls("r1", [
+          { name: "read_file", args: { path: "src/context-resolution.ts" } },
+          { name: "read_file", args: { path: "tests/context-resolution.test.ts" } },
+        ]),
+        openAiToolCalls("r2", [
+          { name: "read_file", args: { path: "src/publish-gate.ts" } },
+          { name: "read_file", args: { path: "tests/publish-gate.test.ts" } },
+        ]),
       ];
       const response = scripted[toolTurn];
       toolTurn += 1;
@@ -318,7 +393,22 @@ async function startTraceServer(mode: "positive" | "negative"): Promise<{ server
       // standalone retry message (buildTraceRepairRetryMessage) carries the
       // same heading — unreachable here because the scripted standalone
       // payload parses, so no serialization retry is ever issued.
-      if (mode === "positive") {
+      //
+      // The turn may only cite evidence the conversation carries, and the
+      // ordinary investigation never read those files (and the fixture's PR
+      // body keeps the corpus's impact scan from carrying them either): the
+      // evidence is in the conversation ONLY when the bounded repair round
+      // produced it. The repair round's tool RESULTS must ride along too —
+      // that is the seam the reads cross to reach the serializer.
+      const repairToolResults = (Array.isArray(request.messages) ? request.messages : []).filter((message) => {
+        if (typeof message !== "object" || message === null) return false;
+        const record = message as { role?: unknown; tool_call_id?: unknown };
+        return record.role === "tool" && REPAIR_READ_CALL_IDS.includes(String(record.tool_call_id ?? ""));
+      });
+      state.grounded =
+        TRACE_EVIDENCE_NEEDLES.every((needle) => text.includes(needle))
+        && repairToolResults.length === REPAIR_READ_CALL_IDS.length;
+      if (mode === "positive" && state.grounded) {
         const payload = {
           requirement_coverage: [
             {
@@ -339,7 +429,9 @@ async function startTraceServer(mode: "positive" | "negative"): Promise<{ server
         };
         res.end(JSON.stringify(openAiText("```json\n" + JSON.stringify(payload) + "\n```")));
       } else {
-        // The #1488 serialization failure: the turn produced no claim.
+        // The #1488 serialization failure: the turn produced no claim. The
+        // negative twin reaches this branch with the evidence already in
+        // hand — the failure is the serialization, not the evidence.
         res.end(JSON.stringify(openAiText('{"requirement_coverage":[]}')));
       }
       return;
@@ -367,11 +459,7 @@ test("#1488 canary: a native-loop verdict that drops requirement coverage conver
         "github-token": "tok", repo: "o/r", "pr-number": "7",
         "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "k",
         "ai-stream": "false", "review-routing-mode": "off",         "tool-mode": "native_loop",
-        // Configured investigation ceiling. Production ran #1488's starvation
-        // on the default 40; the canary pins the same shape on a small
-        // deterministic ceiling — the failure mode is "reached the configured
-        // ceiling", not the number 40.
-        "tool-max-requests": "8", "deep-review": "false",
+        "tool-max-requests": String(CONFIGURED_CALL_CEILING), "deep-review": "false",
         "verdict-policy": "model", "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "5",
         "ci-status-check": "false", "requirement-trace": "true",
       },
@@ -391,26 +479,54 @@ test("#1488 canary: a native-loop verdict that drops requirement coverage conver
       stop_reason?: string;
       executed_request_count?: number;
       partial_coverage?: unknown;
+      tool_calls?: Array<{ tool?: string; args?: { path?: string }; status?: string }>;
       trace_repair_continuation?: {
         outcome?: string; claims_merged?: number; trace_claims_merged?: boolean;
         unresolved_ids?: string[]; tool_calls?: number;
       };
     };
     assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
-    // 8 calls to the configured ceiling, plus the one bounded repair read
-    // (the continuation's executed calls join the run's total).
-    assert.equal(harness.executed_request_count, 9);
+    // 8 calls to the configured ceiling, plus the bounded repair round's
+    // four dedicated evidence reads (the continuation's executed calls join
+    // the run's total).
+    assert.equal(harness.executed_request_count, 12);
 
     // (2) Execution coverage itself is otherwise adequate: the budget stop
     // left no strictly-unread changed file, and the post-repair recomputation
     // records no partial coverage either.
     assert.equal(harness.partial_coverage, undefined);
 
-    // (2-4) The probe's bounded repair round ran on EXACTLY the two omitted
-    // ids and executed its targeted read.
+    // (3) The bounded repair round produced the MISSING EVIDENCE: it read
+    // exactly the two omitted ids' enforcement location and regression test,
+    // and the ordinary investigation touched none of them — so the evidence
+    // the trace-only turn cites could ONLY have come from the repair
+    // round's reads (a lookalike document would leave the turn ungrounded).
+    const executed = harness.tool_calls ?? [];
+    const ordinaryCalls = executed.slice(0, CONFIGURED_CALL_CEILING);
+    assert.equal(ordinaryCalls.length, CONFIGURED_CALL_CEILING, "the ordinary investigation ran the whole configured ceiling");
+    const repairReads = executed
+      .slice(CONFIGURED_CALL_CEILING)
+      .filter((call) => call.tool === "read_file")
+      .map((call) => call.args?.path ?? "");
+    assert.deepEqual(
+      [...repairReads].sort(),
+      [...TRACE_EVIDENCE_PATHS].sort(),
+      "the bounded repair round read exactly the two missing requirements' evidence",
+    );
+    assert.ok(
+      !ordinaryCalls.some((call) => {
+        const target = JSON.stringify(call.args ?? {});
+        return TRACE_EVIDENCE_PATHS.some((path) => target.includes(path));
+      }),
+      "the ordinary investigation never touched the evidence the bounded repair round gathered",
+    );
+    assert.equal(state.grounded, true, "the trace-only turn saw the evidence the bounded repair reads produced");
+
+    // (4) The probe's bounded repair round ran on EXACTLY the two omitted
+    // ids and executed its targeted reads.
     assert.equal(harness.trace_repair_continuation?.outcome, "continued");
     assert.deepEqual(harness.trace_repair_continuation?.unresolved_ids, [state.idFirst, state.idSecond]);
-    assert.ok((harness.trace_repair_continuation?.tool_calls ?? 0) >= 1, "the repair round executed its bounded targeted read");
+    assert.equal(harness.trace_repair_continuation?.tool_calls, 4, "the repair round executed its bounded targeted reads");
     // (5-6) The trace-only turn returned valid claims for both ids and they
     // merged into the standing verdict.
     assert.equal(harness.trace_repair_continuation?.claims_merged, 2);
@@ -477,11 +593,7 @@ test("#1488 canary (negative twin): when the probe's trace-only repair and the s
         "github-token": "tok", repo: "o/r", "pr-number": "7",
         "ai-base-url": server.url, "ai-model": "primary-m", "ai-api-key": "k",
         "ai-stream": "false", "review-routing-mode": "off",         "tool-mode": "native_loop",
-        // Configured investigation ceiling. Production ran #1488's starvation
-        // on the default 40; the canary pins the same shape on a small
-        // deterministic ceiling — the failure mode is "reached the configured
-        // ceiling", not the number 40.
-        "tool-max-requests": "8", "deep-review": "false",
+        "tool-max-requests": String(CONFIGURED_CALL_CEILING), "deep-review": "false",
         "verdict-policy": "model", "ai-connect-timeout-sec": "2", "ai-request-timeout-sec": "5",
         "ci-status-check": "false", "requirement-trace": "true",
       },
@@ -501,17 +613,38 @@ test("#1488 canary (negative twin): when the probe's trace-only repair and the s
     const harness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as {
       stop_reason?: string;
       executed_request_count?: number;
+      tool_calls?: Array<{ tool?: string; args?: { path?: string }; status?: string }>;
       trace_repair_continuation?: {
         outcome?: string; claims_merged?: number; trace_claims_merged?: boolean;
-        unresolved_ids?: string[];
+        unresolved_ids?: string[]; tool_calls?: number;
       };
     };
     assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
-    assert.equal(harness.executed_request_count, 9);
+    assert.equal(harness.executed_request_count, 12);
     assert.equal(harness.trace_repair_continuation?.outcome, "continued");
     assert.deepEqual(harness.trace_repair_continuation?.unresolved_ids, [state.idFirst, state.idSecond]);
+    assert.equal(harness.trace_repair_continuation?.tool_calls, 4, "the repair round executed its bounded targeted reads");
     assert.equal(harness.trace_repair_continuation?.claims_merged, 0);
     assert.equal(harness.trace_repair_continuation?.trace_claims_merged, false);
+
+    // The twin starts from the SAME state as the positive canary: the
+    // bounded repair round gathered the missing evidence (the trace-only
+    // turn saw it), and the failure is the serialization, not the evidence.
+    const executed = harness.tool_calls ?? [];
+    const ordinaryCalls = executed.slice(0, CONFIGURED_CALL_CEILING);
+    const repairReads = executed
+      .slice(CONFIGURED_CALL_CEILING)
+      .filter((call) => call.tool === "read_file")
+      .map((call) => call.args?.path ?? "");
+    assert.deepEqual([...repairReads].sort(), [...TRACE_EVIDENCE_PATHS].sort());
+    assert.ok(
+      !ordinaryCalls.some((call) => {
+        const target = JSON.stringify(call.args ?? {});
+        return TRACE_EVIDENCE_PATHS.some((path) => target.includes(path));
+      }),
+      "the ordinary investigation never touched the evidence the bounded repair round gathered",
+    );
+    assert.equal(state.grounded, true, "the trace-only turn saw the evidence the bounded repair reads produced");
 
     // The standalone fallback fired (the recovery path for a zero-claim
     // in-conversation repair) but also returned no claims.
