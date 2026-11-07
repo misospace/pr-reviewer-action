@@ -52,6 +52,7 @@ import { pythonJsonStringify } from "../precheck/metadata.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { runEvidenceProvidersPhase } from "../evidence/index.js";
 import { runToolHarness, type HarnessDeps, type HarnessTransport, type TraceGapProbe } from "../tools/harness.js";
+import { GOVERNOR_PRIORITY_AUTHORITATIVE, GOVERNOR_PRIORITY_RECOVERY, GovernorCancelledError, inferenceEndpointKey, sharedRunInferenceGovernor } from "../model/governor.js";
 import { runChatRequest } from "../transport/transport.js";
 import { describeTransportFailure } from "../transport/http.js";
 import { extraHeadersForEnv } from "../transport/headers.js";
@@ -681,31 +682,55 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     // stays fail-soft per request; unset config yields `undefined` and the
     // key is omitted entirely (byte-identical request, nothing to merge).
     const extra = extraHeadersForEnv(env.AI_EXTRA_HEADERS ?? "");
+    // #1515: the native loop's model turns are the authoritative review
+    // (class 1) — the smart escalation's loop is the recovery class (3), the
+    // same split the corpus review tier calls use. The turn admits through
+    // the run-wide governor before any wire attempt; the wire format and
+    // model of THIS turn are the scheduling identity (never the credential).
+    // A request cancelled while queued throws here, which the loop treats
+    // exactly like any other thrown transport (degradation, never a crash).
+    const harnessTier = env.TOOL_HARNESS_TIER || "primary";
+    const wireFormat = apiFormat === "anthropic" ? "anthropic" : "openai";
+    const harnessModel = typeof (payload as Record<string, unknown> | undefined)?.model === "string"
+      ? (payload as Record<string, unknown>).model as string
+      : "";
     // #1466: count the request's ACTUAL wire calls. The #1200 hook fires once
     // per wire call — including the ones a 429/5xx backoff, a #824 clamp or a
     // #1047 strip discarded — so the count is the HTTP attempts the request
     // really made, not the number of calls the loop believes it made.
     let wireCalls = 0;
-    const outcome = await runChatRequest({
-      baseUrl,
-      apiFormat: apiFormat === "anthropic" ? "anthropic" : "openai",
-      payload: {
-        endpointPath: apiFormat === "anthropic" ? "/messages" : "/chat/completions",
-        body: payload as unknown as TransportWirePayload["body"],
+    const outcome = await sharedRunInferenceGovernor().admit(
+      {
+        priority: harnessTier === "smart" ? GOVERNOR_PRIORITY_RECOVERY : GOVERNOR_PRIORITY_AUTHORITATIVE,
+        endpointKey: inferenceEndpointKey({ baseUrl, apiFormat: wireFormat, model: harnessModel }),
+        ...(signal !== undefined ? { signal } : {}),
       },
-      apiKey,
-      anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
-      requestTimeoutSec: Math.max(1, Math.trunc(timeoutSec)),
-      connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
-      // #1037: unset config omits the key entirely (byte-identical request,
-      // nothing to merge).
-      ...(extra !== undefined ? { extraHeaders: extra } : {}),
-      // #726 (engine cancellation): the harness's model turns bind to the
-      // run's cancellation scope; unset signal keeps the request unchanged.
-      ...(signal !== undefined ? { signal } : {}),
-      ...(maxRetryAttempts !== undefined ? { maxRetryAttempts } : {}),
-      ...(attemptBudgetSec !== undefined ? { attemptBudgetSec } : {}),
-      onWireCall: () => { wireCalls += 1; },
+      () => runChatRequest({
+        baseUrl,
+        apiFormat: wireFormat,
+        payload: {
+          endpointPath: apiFormat === "anthropic" ? "/messages" : "/chat/completions",
+          body: payload as unknown as TransportWirePayload["body"],
+        },
+        apiKey,
+        anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
+        requestTimeoutSec: Math.max(1, Math.trunc(timeoutSec)),
+        connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
+        // #1037: unset config omits the key entirely (byte-identical request,
+        // nothing to merge).
+        ...(extra !== undefined ? { extraHeaders: extra } : {}),
+        // #726 (engine cancellation): the harness's model turns bind to the
+        // run's cancellation scope; unset signal keeps the request unchanged.
+        ...(signal !== undefined ? { signal } : {}),
+        ...(maxRetryAttempts !== undefined ? { maxRetryAttempts } : {}),
+        ...(attemptBudgetSec !== undefined ? { attemptBudgetSec } : {}),
+        onWireCall: () => { wireCalls += 1; },
+      }),
+    ).catch((cause: unknown) => {
+      // #1515: the harness transport contract throws plain Errors (the loop
+      // degrades on them, never crashes); a queued cancel becomes one too.
+      if (cause instanceof GovernorCancelledError) throw new Error(cause.message);
+      throw cause;
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the
     // ai-api-format hint on a 404) instead of the bare "model endpoint

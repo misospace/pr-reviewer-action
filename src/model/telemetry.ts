@@ -206,3 +206,92 @@ export function cacheHitRatio(usage: UsageTelemetry): number | null {
   if (usage.cachedTokens === null || usage.promptTokens === null || usage.promptTokens <= 0) return null;
   return Math.round((usage.cachedTokens / usage.promptTokens) * 1000) / 1000;
 }
+
+// ── #1515: run-wide inference-governor admission telemetry ──────────────────
+// The governor (src/model/governor.ts) decides WHEN a model request may reach
+// the wire; this is the bounded record of each decision. The fields are the
+// four the #1515 contract names — queue wait, priority, active count, and
+// whether a request was cancelled before dispatch — plus the scheduling
+// identity the request queued under. The record is observability only: it
+// never feeds a verdict, a route decision, or a retry budget.
+
+/** One admission decision the run-wide inference governor made (#1515). */
+export interface GovernorQueueTelemetry {
+  /** The request's priority class: 1 authoritative, 2 required pre-pass,
+   * 3 smart/fallback recovery, 4 advisory (the #1515 classes, highest first). */
+  priority: number;
+  /** The deterministic scheduling identity the request queued under —
+   * endpoint URL + wire format + model. A credential is structurally absent:
+   * the key builder takes no credential-bearing input, so no secret can
+   * participate in scheduling identity (#1515). */
+  endpointKey: string;
+  /** Wall-clock milliseconds from `admit()` to dispatch. 0 for a request
+   * admitted immediately (a slot was free). */
+  queueWaitMs: number;
+  /** In-flight requests (INCLUDING this one) at the moment of dispatch. */
+  activeCount: number;
+  /** `true` when the request was removed from the queue by a caller
+   * cancellation or a deadline expiry — it never dispatched, so it consumed
+   * no provider attempt and no retry budget. */
+  cancelledBeforeDispatch: boolean;
+}
+
+/** The bounded per-run summary of the governor's admission records. */
+export interface GovernorTelemetrySummary {
+  dispatched: number;
+  cancelledBeforeDispatch: number;
+  /** The longest wait any request spent queued before dispatch (0 when none queued). */
+  maxQueueWaitMs: number;
+  /** One row per priority class that saw activity, highest priority first. */
+  byPriority: Array<{ priority: number; dispatched: number; cancelledBeforeDispatch: number; maxQueueWaitMs: number }>;
+}
+
+/** Fold admission records into the per-run summary. Priority rows are ordered
+ * 1 → 4 and include only classes that saw activity, so a disabled or idle
+ * class adds no row. */
+export function summarizeGovernorTelemetry(records: readonly GovernorQueueTelemetry[]): GovernorTelemetrySummary {
+  const rows = new Map<number, { dispatched: number; cancelledBeforeDispatch: number; maxQueueWaitMs: number }>();
+  let dispatched = 0;
+  let cancelled = 0;
+  let maxWait = 0;
+  for (const record of records) {
+    if (record.cancelledBeforeDispatch) {
+      cancelled++;
+    } else {
+      dispatched++;
+    }
+    if (record.queueWaitMs > maxWait) maxWait = record.queueWaitMs;
+    const row = rows.get(record.priority) ?? { dispatched: 0, cancelledBeforeDispatch: 0, maxQueueWaitMs: 0 };
+    if (record.cancelledBeforeDispatch) row.cancelledBeforeDispatch++;
+    else row.dispatched++;
+    if (record.queueWaitMs > row.maxQueueWaitMs) row.maxQueueWaitMs = record.queueWaitMs;
+    rows.set(record.priority, row);
+  }
+  const byPriority = [...rows.keys()].sort((a, b) => a - b).map((priority) => {
+    const row = rows.get(priority)!;
+    return { priority, dispatched: row.dispatched, cancelledBeforeDispatch: row.cancelledBeforeDispatch, maxQueueWaitMs: row.maxQueueWaitMs };
+  });
+  return { dispatched, cancelledBeforeDispatch: cancelled, maxQueueWaitMs: maxWait, byPriority };
+}
+
+/** The one bounded log line the review pipeline emits at pipeline end.
+ * Priority class names are the #1515 class labels; only active classes appear. */
+const GOVERNOR_PRIORITY_NAMES: Record<number, string> = {
+  1: "authoritative",
+  2: "required-prepass",
+  3: "recovery",
+  4: "advisory",
+};
+
+export function renderGovernorTelemetryLine(summary: GovernorTelemetrySummary): string {
+  const parts = [
+    `dispatched=${summary.dispatched}`,
+    `cancelled_before_dispatch=${summary.cancelledBeforeDispatch}`,
+    `max_queue_wait_ms=${summary.maxQueueWaitMs}`,
+  ];
+  for (const row of summary.byPriority) {
+    parts.push(`p${row.priority}(${GOVERNOR_PRIORITY_NAMES[row.priority] ?? "unknown"}): dispatched=${row.dispatched}`
+      + ` cancelled_before_dispatch=${row.cancelledBeforeDispatch} max_queue_wait_ms=${row.maxQueueWaitMs}`);
+  }
+  return parts.join("; ");
+}

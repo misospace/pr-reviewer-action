@@ -1,6 +1,7 @@
 import { maskKnownSecrets, redactText } from "../context/redact.js";
 import { pyCodepointSlice } from "../platform/py.js";
 import type { ApiFormat, NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
+import { GOVERNOR_PRIORITY_ADVISORY, GovernorCancelledError, inferenceEndpointKey, sharedRunInferenceGovernor, type GovernorPriority, type InferenceGovernor } from "../model/governor.js";
 import type { SpecialistDiscardedWireAttempt, SpecialistRequestFn, SpecialistTransportOutcome } from "../specialists/runner.js";
 import { assertSingleCredentialChannel, describeTransportFailure, endpointUrlCredential, endpointUrlCredentialOrEmpty, resolveEndpoint, TransportFailure } from "../transport/http.js";
 import { applyExtraHeaders } from "../transport/headers.js";
@@ -45,6 +46,27 @@ export interface SpecialistTransportConfig {
   /** #1080: the per-process terminal-lane latch. Defaults to the shared
    * module-scoped instance (one process = one run); a test injects its own. */
   terminalLatch?: TerminalLaneLatch;
+  /** #1515: the #1515 priority class this lane's requests queue under when
+   * the run-wide inference governor is enabled. Defaults to advisory (4) —
+   * this adapter's primary user is the specialist roles; the required
+   * pre-passes pass 2 and the requirement-trace repair passes 1 at their own
+   * construction sites. Admission never rewrites the lane's route. */
+  priority?: GovernorPriority;
+  /** #1515: the run-scoped inference governor. Defaults to the shared
+   * module-scoped instance (one process = one run), which is DISABLED unless
+   * the run configured a cap; a test injects its own. */
+  governor?: InferenceGovernor;
+  /** #1515: the run's cancellation scope, bound to the QUEUE WAIT as well —
+   * a queued request whose signal aborts leaves the queue with
+   * `wire_attempted: false` and never reaches the transport (#726 pattern:
+   * the run's cancellation scope rides every model request of the run). */
+  signal?: AbortSignal;
+  /** #1515 (review fix): the phase deadline as an absolute wall-clock
+   * instant (ms since epoch). Each admission converts it to the remaining
+   * `deadlineMs` queue-wait bound, so a role whose phase deadline expires
+   * while it sits queued leaves the queue instead of dispatching after the
+   * phase it belongs to has ended. */
+  admissionDeadlineAtMs?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -203,6 +225,10 @@ function credentialIdentity(apiKey: string): string {
 export function specialistRequestFn(config: SpecialistTransportConfig): SpecialistRequestFn {
   const runChat = config.runChat ?? runChatRequest;
   const latch = config.terminalLatch ?? sharedTerminalLaneLatch();
+  // #1515: admission rides between the pre-flight fences and the wire — a
+  // latched or refused lane never queues for a slot it would never use.
+  const governor = config.governor ?? sharedRunInferenceGovernor();
+  const priority = config.priority ?? GOVERNOR_PRIORITY_ADVISORY;
   return async (payload, apiFormat, timeoutSec): Promise<SpecialistTransportOutcome> => {
     const format: ApiFormat = apiFormat === "anthropic" ? "anthropic" : "openai";
 const wire = {
@@ -270,26 +296,47 @@ const wire = {
           }
         : base;
     try {
-      outcome = await runChat({
-        baseUrl: config.baseUrl,
-        apiFormat: format,
-        payload: wire,
-        apiKey: config.apiKey,
-        anthropicVersion: config.anthropicVersion,
-        requestTimeoutSec: timeoutSec,
-        // curl --max-time bounds the whole attempt in v2, connect included.
-        connectTimeoutSec: timeoutSec,
-        ...(config.extraHeaders !== undefined ? { extraHeaders: config.extraHeaders } : {}),
-        ...(config.sleep !== undefined ? { sleep: config.sleep } : {}),
-        onWireCall: (report) => {
-          wireReported = true;
-          if (report.discarded) {
-            discardedWireAttempts.push({ elapsed_sec: report.elapsedSec, max_tokens: report.maxTokens });
-          }
-          wireSentMaxTokens = report.maxTokens;
+      // #1515: the run-wide inference governor admits this dispatch before
+      // any wire attempt. A request cancelled (or deadline-expired) while
+      // queued never reaches `runChat` — `wire_attempted` stays false, the
+      // lane's telemetry counts no provider attempt, and the caller's own
+      // retry accounting (which begins on returned failures) never starts.
+      // The scheduling identity is the lane's endpoint/format/model — never
+      // the credential.
+      outcome = await governor.admit(
+        {
+          priority,
+          endpointKey: inferenceEndpointKey({ baseUrl: config.baseUrl, apiFormat: format, model: laneModel }),
+          ...(config.signal !== undefined ? { signal: config.signal } : {}),
+          // #1515 (review fix): the phase deadline bounds the queue WAIT —
+          // computed per admission, so a request that waited most of the
+          // phase out expires with the phase, not phase-length-plus-wait.
+          ...(config.admissionDeadlineAtMs !== undefined ? { deadlineMs: Math.max(0, config.admissionDeadlineAtMs - Date.now()) } : {}),
         },
-      });
+        () => runChat({
+          baseUrl: config.baseUrl,
+          apiFormat: format,
+          payload: wire,
+          apiKey: config.apiKey,
+          anthropicVersion: config.anthropicVersion,
+          requestTimeoutSec: timeoutSec,
+          // curl --max-time bounds the whole attempt in v2, connect included.
+          connectTimeoutSec: timeoutSec,
+          ...(config.extraHeaders !== undefined ? { extraHeaders: config.extraHeaders } : {}),
+          ...(config.sleep !== undefined ? { sleep: config.sleep } : {}),
+          onWireCall: (report) => {
+            wireReported = true;
+            if (report.discarded) {
+              discardedWireAttempts.push({ elapsed_sec: report.elapsedSec, max_tokens: report.maxTokens });
+            }
+            wireSentMaxTokens = report.maxTokens;
+          },
+        }),
+      );
     } catch (error) {
+      if (error instanceof GovernorCancelledError) {
+        return wireTelemetry({ ok: false, errorMessage: error.message, wire_attempted: false });
+      }
       // #1080: a throwing adapter can still hand back a typed transport
       // failure; classify and latch it exactly like the returned one.
       if (error instanceof TransportFailure) {

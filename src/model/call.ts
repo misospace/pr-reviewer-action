@@ -14,10 +14,19 @@ import {
   shouldRaiseCompletionBudget,
   type ResponseDiagnostics,
 } from "./response-diagnostics.js";
-import { runChatRequest, type ChatRequestOutcome, type StructuredOutputSurface } from "../transport/transport.js";
+import { runChatRequest, runChatRequestOnce, type ChatRequestInput, type ChatRequestOutcome, type StructuredOutputSurface } from "../transport/transport.js";
 import { describeTransportFailure, endpointUrlCredentialOrEmpty, TransportFailure } from "../transport/http.js";
 import { callKnownSecrets } from "../transport/headers.js";
 import { classifyTerminalProviderFailure, type TerminalProviderFailure } from "../transport/terminal.js";
+import {
+  GOVERNOR_PRIORITY_ADVISORY,
+  GOVERNOR_PRIORITY_AUTHORITATIVE,
+  GovernorCancelledError,
+  inferenceEndpointKey,
+  sharedRunInferenceGovernor,
+  type GovernorPriority,
+  type InferenceGovernor,
+} from "./governor.js";
 
 /**
  * Port of the v2 `call_model_tier` retry loop (scripts/model_call.sh): one
@@ -149,6 +158,97 @@ export interface ModelCallDeps {
   sleep?: (seconds: number) => Promise<void>;
   /** Injectable transport for deterministic tests. */
   call?: typeof runChatRequest;
+  /** #1515: the run-scoped inference governor this call admits through.
+   * Defaults to the shared run governor, which is DISABLED unless the run
+   * configured a cap — the disabled governor admits directly, so an unset
+   * cap keeps every existing single-call path behavior-identical. */
+  governor?: InferenceGovernor;
+  /** #1515: the #1515 priority class this lane queues under when the
+   * governor is enabled. Defaults to authoritative (1) — the review verdict
+   * production this module owns is the class-1 work; the recovery lanes
+   * (fallback/smart) pass 3. Admission never rewrites the request itself. */
+  priority?: GovernorPriority;
+  /** #1515: the run's cancellation scope, binding the WAIT as well: a queued
+   * request whose signal aborts leaves the queue with a `cancelled` transport
+   * failure and never dispatches (the per-request signal on the chat input
+   * still rides the transport itself once dispatched). */
+  signal?: AbortSignal;
+}
+
+/**
+ * #1515: admit ONE transport dispatch through the run-wide inference
+ * governor. The wrapper is transparent when the governor is disabled (the
+ * default): the task runs directly, nothing records, nothing queues. When
+ * enabled, the dispatch waits for its slot here — BEFORE any wire attempt —
+ * so a request that waits in the queue has not dispatched and has consumed
+ * no attempt of the caller's retry budget: the tier loop's attempt counters
+ * only advance on returned outcomes, and a queued request returns none.
+ * A request cancelled (or deadline-expired) while queued becomes the same
+ * typed `cancelled` transport failure the transport itself produces (#726),
+ * which the tier treats as terminal — never retried.
+ */
+async function admittedCall(
+  governor: InferenceGovernor,
+  priority: GovernorPriority,
+  endpointKey: string,
+  signal: AbortSignal | undefined,
+  doCall: (input: ChatRequestInput) => Promise<ChatRequestOutcome>,
+  chatInput: ChatRequestInput,
+): Promise<ChatRequestOutcome> {
+  try {
+    return await governor.admit(
+      {
+        priority,
+        endpointKey,
+        ...(signal !== undefined ? { signal } : {}),
+      },
+      () => doCall(chatInput),
+    );
+  } catch (error) {
+    if (error instanceof GovernorCancelledError) {
+      return { status: "failure", failure: new TransportFailure("cancelled", "model request cancelled while queued for an inference slot") };
+    }
+    throw error;
+  }
+}
+
+/**
+ * #1515 (review fix): the confidence scorer's governed transport. The scorer
+ * is advisory work (class 4) and admits through the run-wide governor before
+ * any wire attempt, carrying the run's cancellation scope ON THE ADMISSION
+ * REQUEST — the scorer's own input signal only reaches the transport after
+ * admission, so without it a queued scorer could dispatch after cancellation,
+ * violating the governor's cancellation-aware-while-queued property for an
+ * explicitly governed model path. A queued cancel surfaces here as the same
+ * typed `cancelled` transport failure `admittedCall` produces, which the
+ * scorer degrades to unscored on (never `internal_error`, and no provider
+ * latency is reported for a request that never left the queue).
+ */
+export function governedScorerTransport(
+  signal: AbortSignal | undefined,
+  call: (input: ChatRequestInput) => Promise<ChatRequestOutcome> = runChatRequestOnce,
+): (input: ChatRequestInput) => Promise<ChatRequestOutcome> {
+  return async (chatInput) => {
+    try {
+      return await sharedRunInferenceGovernor().admit(
+        {
+          priority: GOVERNOR_PRIORITY_ADVISORY,
+          endpointKey: inferenceEndpointKey({
+            baseUrl: chatInput.baseUrl,
+            apiFormat: chatInput.apiFormat,
+            model: chatInput.payload.body.model,
+          }),
+          ...(signal !== undefined ? { signal } : {}),
+        },
+        () => call(chatInput),
+      );
+    } catch (error) {
+      if (error instanceof GovernorCancelledError) {
+        return { status: "failure", failure: new TransportFailure("cancelled", "model request cancelled while queued for an inference slot") };
+      }
+      throw error;
+    }
+  };
 }
 
 export type ModelCallOutcome =
@@ -241,6 +341,14 @@ export async function callModelTier(
 ): Promise<ModelCallOutcome> {
   const sleep = deps.sleep ?? defaultSleep;
   const doCall = deps.call ?? runChatRequest;
+  // #1515: every attempt of this tier admits through the run governor before
+  // any wire attempt; the scheduling identity is the lane's endpoint/format/
+  // model — never its credential.
+  const governor = deps.governor ?? sharedRunInferenceGovernor();
+  const priority = deps.priority ?? GOVERNOR_PRIORITY_AUTHORITATIVE;
+  const endpointKey = inferenceEndpointKey({ baseUrl: profile.baseUrl, apiFormat: profile.apiFormat, model: profile.model });
+  const dispatch = (chatInput: ChatRequestInput): Promise<ChatRequestOutcome> =>
+    admittedCall(governor, priority, endpointKey, deps.signal, doCall, chatInput);
 
   let parseFails = 0;
   let attempt = 1;
@@ -267,7 +375,7 @@ export async function callModelTier(
   const totalAttempts = Math.max(1, profile.retries);
   while (attempt <= totalAttempts) {
     const payload = buildModelRequest(requestConfig(profile, context, profile.stream, raisedTokens ?? undefined));
-    const outcome = await doCall({
+    const outcome = await dispatch({
       baseUrl: profile.baseUrl,
       apiFormat: profile.apiFormat,
       payload,
@@ -421,6 +529,14 @@ export async function produceVerdict(
   deps: ModelCallDeps = {},
 ): Promise<VerdictOutcome> {
   const doCall = deps.call ?? runChatRequest;
+  // #1515: the verdict production path admits through the run governor like
+  // every tier attempt (authoritative class by default), with the same
+  // credential-free scheduling identity.
+  const governor = deps.governor ?? sharedRunInferenceGovernor();
+  const priority = deps.priority ?? GOVERNOR_PRIORITY_AUTHORITATIVE;
+  const endpointKey = inferenceEndpointKey({ baseUrl: profile.baseUrl, apiFormat: profile.apiFormat, model: profile.model });
+  const dispatch = (chatInput: ChatRequestInput): Promise<ChatRequestOutcome> =>
+    admittedCall(governor, priority, endpointKey, deps.signal, doCall, chatInput);
   // #1037: ONE known-secret list for every response surface this verdict
   // produces (in-body error message, unusable-response record, transport
   // detail), so a configured extra-header value is masked identically
@@ -455,7 +571,7 @@ export async function produceVerdict(
 
   const firstPayload = buildModelRequest(requestConfig(profile, context, profile.stream));
   const attemptedStream = profile.stream;
-  const first = evaluate(await doCall({
+  const first = evaluate(await dispatch({
     baseUrl: profile.baseUrl,
     apiFormat: profile.apiFormat,
     payload: firstPayload,
@@ -499,7 +615,7 @@ export async function produceVerdict(
       }
     }
     const retryPayload = buildModelRequest(requestConfig(profile, context, false, budgetRaisedTo));
-    current = evaluate(await doCall({
+    current = evaluate(await dispatch({
       baseUrl: profile.baseUrl,
       apiFormat: profile.apiFormat,
       payload: retryPayload,

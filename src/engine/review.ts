@@ -62,7 +62,21 @@ import { renderClaimsSection } from "../claims/render.js";
 import { runDerivedObligationsPass } from "../derived/pass.js";
 import { renderDerivedSectionForStatus, renderDerivedUnavailable } from "../derived/render.js";
 import { buildModelRequest } from "../model/request.js";
-import { callModelTier, type TierProfile } from "../model/call.js";
+import { callModelTier, governedScorerTransport, type TierProfile } from "../model/call.js";
+import {
+  DEFAULT_MAX_CONCURRENT_REQUESTS,
+  GOVERNOR_PRIORITY_AUTHORITATIVE,
+  GOVERNOR_PRIORITY_RECOVERY,
+  GOVERNOR_PRIORITY_REQUIRED_PREPASS,
+  MAX_CONFIGURABLE_CONCURRENCY,
+  RUN_INFERENCE_CAP_ENV,
+  configureSharedRunInferenceGovernor,
+  drainSharedRunInferenceGovernor,
+  inferenceGovernorFromEnv,
+  parseRunInferenceCap,
+  renderRunInferenceTelemetryLine,
+  sharedRunInferenceGovernor,
+} from "../model/governor.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
 import { maskDiagnostic, maskKnownSecrets, redactTextDeep } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
@@ -678,6 +692,27 @@ function mergeBlockerVerificationPasses(
 export async function runReviewEngine(request: ReviewRequest, dependencies: ReviewDependencies): Promise<RunReviewResult> {
   if (request.signal !== undefined && request.signal.aborted) throw new RunReviewError("review request cancelled before start", 1);
   const cancellation = createRunCancellation(request);
+  // ── #1515: the run-scoped inference governor ──────────────────────────
+  // ONE run-wide admission point for the model request paths (tier calls,
+  // native-loop turns, specialist/pre-pass/trace-repair transports, the
+  // confidence scorer). The cap comes from the ambient
+  // `AI_MAX_CONCURRENT_MODEL_REQUESTS` env-only knob; UNSET/EMPTY enables the
+  // conservative DEFAULT cap (#1515 review fix: "bounded configurable
+  // concurrency with a conservative default" — the unconfigured burst is the
+  // one the knob exists to bound), an explicit `0` is the operator's opt-out
+  // (the disabled compatibility posture, in which `admit` runs each request
+  // directly and existing single-call paths are behavior-identical), and an
+  // invalid value warns by name and falls back to the conservative default —
+  // a typo never silently unbounds the run. Installed here and cleared in the
+  // finally, so one run can never inherit another run's policy.
+  const capConfig = parseRunInferenceCap(request.ambient[RUN_INFERENCE_CAP_ENV]);
+  const governor = inferenceGovernorFromEnv(request.ambient);
+  if (capConfig.kind === "enabled" && dependencies.quiet !== true) {
+    dependencies.log(`inference governor: run-wide cap ${capConfig.cap} concurrent model request(s)`);
+  } else if (capConfig.kind === "invalid") {
+    dependencies.error(`WARNING: ${RUN_INFERENCE_CAP_ENV}=${JSON.stringify(capConfig.raw)} is not a positive integer up to ${MAX_CONFIGURABLE_CONCURRENCY}; using the default run-wide cap of ${DEFAULT_MAX_CONCURRENT_REQUESTS}`);
+  }
+  configureSharedRunInferenceGovernor(governor);
   try {
     const run = runReviewStages(request, dependencies, cancellation);
     // Cancellation abandons this promise mid-flight; its outcome is already
@@ -693,6 +728,10 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
     // gone by the time the caller learns the run was cancelled.
     await cancellation.finalize();
     cancellation.dispose();
+    // #1515: the governor is run-scoped — drop this run's policy before the
+    // process could serve anything else (and so a reused process or a test
+    // can never inherit it).
+    configureSharedRunInferenceGovernor(null);
   }
 }
 
@@ -1424,6 +1463,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
                 // #1037: correlation headers ride specialist/pre-pass calls too;
                 // unset config omits the key.
                 ...(claimExtra !== undefined ? { extraHeaders: claimExtra } : {}),
+                // #1515: the claim-falsification pass is a required pre-pass
+                // (class 2) — it queues ahead of advisory work but never ahead
+                // of the authoritative review. The run's cancellation scope
+                // bounds the queue wait too.
+                priority: GOVERNOR_PRIORITY_REQUIRED_PREPASS,
+                signal: cancellation.scope.signal,
               }),
             }
           : undefined,
@@ -1536,6 +1581,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
                 apiKey: profiles.primary.apiKey,
                 anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
                 ...(derivedExtra !== undefined ? { extraHeaders: derivedExtra } : {}),
+                // #1515: the derived-obligation pass is a required pre-pass
+                // (class 2), same as the claim-falsification pass.
+                priority: GOVERNOR_PRIORITY_REQUIRED_PREPASS,
+                signal: cancellation.scope.signal,
               }),
             }
           : undefined,
@@ -1617,6 +1666,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         // in the run dir this workspace reads, not GITHUB_WORKSPACE.
         argv: ["--corpus", "specialist-corpus.md", "--workspace-root", runDir, ...equivalentPathsArgv],
         cwd: runDir,
+        // #1515 (review fix): this gate runs IN THIS PROCESS — it must reuse
+        // the run's already-configured governor (a second governor from env
+        // would split the run-wide cap while the claim/derived pre-passes are
+        // still in flight) and bind the run's cancellation scope into every
+        // role's admission, so a queued role never dispatches after
+        // cancellation or past the phase deadline.
+        governor: sharedRunInferenceGovernor(),
+        signal: cancellation.scope.signal,
         stdout: (line) => log(line),
         stderr: (line) => errorLog(line),
         ...(dependencies.sleep !== undefined ? { sleep: dependencies.sleep } : {}),
@@ -1995,6 +2052,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
             // #1037: correlation headers ride specialist/pre-pass calls too;
             // unset config omits the key.
             ...(repairExtra !== undefined ? { extraHeaders: repairExtra } : {}),
+            // #1515: the requirement-trace repair is authoritative work
+            // (class 1) — a repair arriving behind advisory specialists takes
+            // the next available slot ahead of them. The run's cancellation
+            // scope bounds the queue wait too.
+            priority: GOVERNOR_PRIORITY_AUTHORITATIVE,
+            signal: cancellation.scope.signal,
           }),
         });
       } catch (cause) {
@@ -2715,6 +2778,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         laneSecrets: confidenceSecrets,
         prompt: confidencePrompt,
         connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
+        // #1515: the scorer is advisory work (class 4) — it admits through
+        // the run-wide governor like every other model request path, WITH the
+        // run's cancellation scope on the admission request itself (review
+        // fix: the scorer's own signal only reaches the transport after
+        // admission, so a queued scorer could otherwise dispatch after
+        // cancellation). A queued-cancel surfaces as the scorer's typed
+        // transport-failure path, which already degrades to unscored.
+        transport: governedScorerTransport(cancellation.scope.signal),
         // #1481: no tokensParam here — the token-limit field is resolved INTO
         // the profile (routing/tiers.ts), so the scorer never receives the
         // primary lane's/global AI_TOKENS_PARAM convention on a dedicated
@@ -3031,6 +3102,10 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     actionVersion: ACTION_VERSION,
     degradedGateBypass: outputs.degradedGateBypass,
   });
+  // #1515: the last act of the pipeline — drain and log the run-wide
+  // inference governor's admission telemetry (a no-op line when the run
+  // never enabled the cap).
+  logInferenceGovernorTelemetry(dependencies);
   return {
     outputs,
     runDir,
@@ -3090,6 +3165,20 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
 // ---------------------------------------------------------------------------
 // Stage helpers bound to the pipeline
 // ---------------------------------------------------------------------------
+
+/** #1515: drain the run-wide inference governor's admission telemetry once at
+ * pipeline end and log the one bounded summary line (dispatched /
+ * cancelled-before-dispatch / max queue wait, by priority class). Observability
+ * only: never a verdict, route, or retry input. A run with no enabled governor
+ * (the default posture) logs nothing and gains no field. */
+export function logInferenceGovernorTelemetry(
+  dependencies: Pick<ReviewDependencies, "log" | "quiet">,
+): void {
+  const summary = drainSharedRunInferenceGovernor();
+  if (summary === null) return;
+  if (dependencies.quiet) return;
+  dependencies.log(renderRunInferenceTelemetryLine(summary));
+}
 
 /** #726: the result an admission SKIP returns — the decision fields are the
  * point; no review stage ran, so the verdict surfaces stay neutral and the
@@ -3619,6 +3708,14 @@ async function callTier(
     corpus: corpusText,
   }, {
     ...(input.sleep !== undefined ? { sleep: input.sleep } : {}),
+    // #1515: the primary review is the authoritative class; the fallback and
+    // smart lanes are the recovery class ("smart/fallback recovery when it
+    // owns the authoritative result"). Admission never rewrites the lane —
+    // the profile reaches the transport exactly as resolved.
+    priority: tier === "primary" ? GOVERNOR_PRIORITY_AUTHORITATIVE : GOVERNOR_PRIORITY_RECOVERY,
+    // #726: the run's cancellation scope also bounds the QUEUE WAIT — a run
+    // abandoned while its request sat queued never dispatches it.
+    ...(input.signal !== undefined ? { signal: input.signal } : {}),
     call: async (chatInput) => {
       // #1058: the injected clock must reach the transport's own 429/5xx
       // backoff too (that loop counts in ms, the model-tier one in seconds),

@@ -226,3 +226,120 @@ a reviewer can check a row without re-deriving it.
 | Gateway mode is not a lesser endpoint (operator extra headers reach the provider) | `GatewayProfileEndpoint.extraHeaders` (operator config), validated through the transport's own fence and passed to `runChatRequest`; a worker supplies none | `gateway: operator extra headers reach the transport exactly as they do in direct mode`; `gateway: an invalid operator extra-header set fails closed at construction` |
 | The durable payload is ONE object (a controller cannot persist the accounting and forget the cancellation) | `BudgetLedger.durableState()` / `InMemoryBudgetLedger({ state })` — reservation rows AND per-run generations together | `budget: the durable payload is ONE object — a restart from it keeps the cancellation`; `budget: cancellation survives a restart — generation rows are part of the durable re-seed payload`; `gateway: cancellation survives a restart — a gen-1 token still refuses after a re-seed` |
 | Action mode remains unaffected (the library is unwired) | no source file outside `src/gateway/` imports the library; `action.yml` exposes no gateway input | `gateway: Action mode stays unaffected — nothing outside the library imports it` |
+
+---
+
+## Run-wide inference governor (#1515)
+
+This section documents a different, SHIPPED boundary that shares the doc
+because it answers the same question — "how much model traffic may one run
+generate?" — from the concurrency side. `src/gateway/` (above) is an
+unwired library; the governor below is wired into the action pipeline.
+
+`src/model/governor.ts` is ONE run-scoped admission point the model request
+paths flow through before any wire attempt, sized by the ambient env knob
+`AI_MAX_CONCURRENT_MODEL_REQUESTS` (env-only, not a contract input — the
+same class of operator knob as `DEEP_REVIEW_EXECUTION`).
+
+### The knob and the default posture
+
+The #1515 contract is "bounded configurable concurrency with a conservative
+default" — so the unconfigured run is bounded too; the compatibility posture
+is an explicit opt-out, not the default:
+
+- **Unset / empty** → the governor is ENABLED at the conservative default cap
+  `DEFAULT_MAX_CONCURRENT_REQUESTS` (2). The unconfigured burst is exactly
+  the one the knob exists to bound, so it must not stay unbounded; 2 keeps a
+  lone tier call, a one-shot scorer, or a single specialist behavior
+  identical (one request dispatches immediately, nothing queues) while a
+  multi-stage burst is capped.
+- **An explicit `0`** → the operator's opt-out: the governor is DISABLED.
+  `admit` runs the request directly: no queue, no scheduling, no telemetry
+  records, one boolean branch per request — the disabled compatibility
+  posture, preserved for operators who need the old behavior exactly.
+- **A positive integer `1..256`** → the run-wide cap: at most that many
+  provider requests from this run are in flight at once; the rest queue.
+  The cap bounds the CONCURRENT BURST one run can produce; it does not add
+  retries, does not raise any budget, and does not change what the verdict
+  authority is.
+- **Anything else** → invalid; the run warns with the exact value by name
+  and falls back to the conservative default cap. A typo therefore never
+  silently unbounds the run (it also never aborts a review): the value is
+  refused rather than clamped to a huge cap, and the fallback is the same
+  bounded default an unset env gets.
+
+### Priority classes (highest first, per #1515)
+
+| class | name | paths admitted at it |
+|---|---|---|
+| 1 | authoritative | the primary tier review call (`callModelTier`), the native tool loop's model turns on the primary tier (`harnessTransportAdapter`), verdict production (`produceVerdict`), the requirement-trace repair pass |
+| 2 | required pre-pass | the claim-falsification and derived-obligation pre-passes |
+| 3 | recovery | the fallback and smart tier review calls, the smart escalation's native loop — the lanes that run only when they own the authoritative result |
+| 4 | advisory | specialist roles, the confidence scorer, optional enrichment |
+
+Scheduling: strict priority — a freed slot goes to the highest-priority
+waiter; within one class, FIFO by arrival. No starvation per the #1515
+definition: lower-priority queued work runs as soon as no higher-priority
+work is contending, and bounded concurrency means in-flight requests
+finish, so slots keep being offered. Cancellation/deadline: a request
+carries the run's cancellation scope (and optionally a deadline); a signal
+already aborted at submission is refused in BOTH paths (immediate dispatch
+and queue — an aborted request never reaches the transport and records as
+cancelled-before-dispatch), and an abort or expiry while queued removes the
+request from the queue and rejects it — it NEVER dispatches, so it spends
+no provider attempt, no wire bytes, and no retry budget (the tier's attempt
+counters only advance on returned outcomes, and a queued request returns
+none; a 429's retry accounting therefore begins only after actual
+dispatch). Once dispatched, the caller's signal keeps riding the transport
+itself.
+
+### Route ownership and scheduling identity
+
+Admission never rewrites routing: a request queues under the identity its
+caller already chose, and the wire payload reaches the transport verbatim —
+primary/smart/fallback/provider selection is untouched, and the resolved
+`TierProfile` a governed call sends is the same object an ungoverned one
+sends. The scheduling identity (`inferenceEndpointKey`) is endpoint URL +
+wire format + model ONLY; the function takes no credential-bearing input,
+so an API key or an extra-header value structurally cannot enter the
+queue, the telemetry records, or the log line. Distinct endpoints/models
+schedule under distinct identities (visible in telemetry) beneath the one
+run-wide cap; per-endpoint sub-buckets remain a possible future refinement,
+deliberately not shipped — one run-wide number keeps the contract
+deterministic and testable.
+
+### Telemetry and wiring surface
+
+The governor records, per admission: queue wait (ms), priority, the
+active-in-flight count at dispatch, and whether the request was cancelled
+before dispatch (`GovernorQueueTelemetry` in `src/model/telemetry.ts`,
+folded by `summarizeGovernorTelemetry`). The review pipeline drains it once
+at pipeline end and logs one bounded line; it is observability only and
+never feeds a verdict, a route, or a retry decision.
+
+Governed paths: `callModelTier`/`produceVerdict` (`src/model/call.ts`),
+the native-loop transport adapter (`src/run/stages.ts`), every
+`specialistRequestFn` lane (`src/gates/specialist-transport.ts` — priority
+defaulting to advisory 4 there; the trace repair passes 1, the two
+required pre-passes pass 2), and the confidence scorer's transport
+(`governedScorerTransport` in `src/model/call.ts`, which carries the run's
+cancellation scope on the ADMISSION request — the scorer's own signal only
+reaches the transport after admission, so a queued scorer leaves the queue
+on cancellation and never dispatches after it). The specialist gate is one
+admission surface with two postures: run IN-PROCESS (the engine's #634
+workload branch), it REUSES the run's already-configured governor and binds
+the run's cancellation scope into every role's admission; run as a genuine
+standalone subprocess, it configures an isolated governor from its own
+(allowlisted) env. Either way, every role's queue wait is bounded by the
+remaining phase deadline, so a role the runner reaps or a run cancelled
+mid-wait never dispatches after its phase or run has ended. NOT governed:
+the controller/follow-up daemon entry points (separate runs with their own
+model traffic, wired when that surface lands).
+
+### Non-goals (per #1515)
+
+Hard quota/token-plan exhaustion (the #1513 MiniMax 429) is NOT a
+concurrency problem — a terminal provider condition bypasses retries
+through the #1080 classifier and is unchanged here. The governor adds no
+retries, raises no review/model budgets, and leaves verdict authority
+exactly where it was.

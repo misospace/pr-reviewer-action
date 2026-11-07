@@ -18,6 +18,15 @@ import {
 } from "../specialists/runner.js";
 import { DEFAULT_SPECIALIST_MAX_TOKENS, MAX_INPUT_BYTES, SPECIALIST_ROLES_ORDER, type SpecialistArtifact } from "../specialists/types.js";
 import { guardedWrite, resolveArtifactPath, resolveRoot } from "./guarded-write.js";
+import {
+  DEFAULT_MAX_CONCURRENT_REQUESTS,
+  MAX_CONFIGURABLE_CONCURRENCY,
+  RUN_INFERENCE_CAP_ENV,
+  configureSharedRunInferenceGovernor,
+  inferenceGovernorFromEnv,
+  parseRunInferenceCap,
+  type InferenceGovernor,
+} from "../model/governor.js";
 import { specialistRequestFn } from "./specialist-transport.js";
 import { extraHeadersForEnv } from "../transport/headers.js";
 import { resolveSpecialistProfiles, anthropicJsonObjectsPromptOnlyWarning, tierResponseFormat } from "../routing/tiers.js";
@@ -72,6 +81,20 @@ export interface SpecialistsGateDeps {
   cwd?: string;
   /** Injected transport (tests); defaults to the v3 model transport. */
   requestFn?: SpecialistRequestFn;
+  /** #1515 (review fix): the run's ALREADY-CONFIGURED inference governor.
+   * An in-process gate (the engine's #634 workload branch runs this gate in
+   * the engine's own process) MUST reuse it — configuring a second governor
+   * from env would split the run-wide cap across independent counters while
+   * the engine's pre-passes are still in flight, and would lose the engine's
+   * admission telemetry. A genuine standalone subprocess omits this and is
+   * configured from its own (allowlisted) env below. */
+  governor?: InferenceGovernor;
+  /** #1515 (review fix): the run's cancellation scope. Rides every role's
+   * admission request, so a queued role leaves the queue when the run is
+   * cancelled instead of dispatching after the run has ended. A standalone
+   * subprocess has no parent signal — its phase deadline still bounds the
+   * wait. */
+  signal?: AbortSignal;
   stdout?: (line: string) => void;
   stderr?: (line: string) => void;
   now?: () => number;
@@ -311,6 +334,25 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
   const stderr = deps.stderr ?? ((line: string) => process.stderr.write(`${line}\n`));
   const args = parseSpecialistsArgs(deps.argv);
 
+  // #1515: the specialist phase either REUSES the run's governor (an
+  // in-process gate — the engine's run-scoped policy is the only run-wide
+  // cap) or, as a genuine standalone subprocess with its own process,
+  // configures one from this child's (allowlisted) env. Unset/empty enables
+  // the conservative default cap (the concurrent specialist roles are exactly
+  // the advisory burst the cap exists to bound); an explicit `0` opts out.
+  // Only the standalone path announces — the engine already announced its cap.
+  if (deps.governor !== undefined) {
+    configureSharedRunInferenceGovernor(deps.governor);
+  } else {
+    const capConfig = parseRunInferenceCap(envStr(env, RUN_INFERENCE_CAP_ENV));
+    configureSharedRunInferenceGovernor(inferenceGovernorFromEnv(env));
+    if (capConfig.kind === "enabled") {
+      stdout(`inference governor: run-wide cap ${capConfig.cap} concurrent model request(s)`);
+    } else if (capConfig.kind === "invalid") {
+      stderr(`WARNING: ${RUN_INFERENCE_CAP_ENV}=${pyReprStr(capConfig.raw)} is not a positive integer up to ${MAX_CONFIGURABLE_CONCURRENCY}; using the default run-wide cap of ${DEFAULT_MAX_CONCURRENT_REQUESTS}`);
+    }
+  }
+
   const deepMode = envStr(env, "DEEP_REVIEW", "false").trim().toLowerCase();
   if (deepMode !== "true" && deepMode !== "auto") {
     stdout("deep_review disabled; no specialist passes run");
@@ -385,6 +427,11 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
   const stream = envStr(env, "AI_STREAM", "true").trim().toLowerCase() === "true";
   const roleTimeoutSec = envInt(env, "AI_REQUEST_TIMEOUT_SEC", 300);
   const phaseTimeoutSec = envInt(env, "DEEP_REVIEW_TIMEOUT_SEC", 600);
+  // #1515 (review fix): the phase deadline as an absolute instant. Every
+  // role's admission converts it to a remaining queue-wait bound, so a role
+  // queued when the phase deadline expires leaves the queue instead of
+  // dispatching into a phase the runner has already reaped.
+  const phaseDeadlineAtMs = Date.now() + phaseTimeoutSec * 1000;
 
   const corpus = readCorpus(args.corpus, cwd);
   let adversarial: CorpusRead = { text: "", error: null, bytes: 0 };
@@ -446,6 +493,14 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
     apiKey,
     anthropicVersion: envStr(env, "ANTHROPIC_VERSION", "2023-06-01"),
     ...(extra !== undefined ? { extraHeaders: extra } : {}),
+    // #1515 (review fix): the run's cancellation scope rides every role's
+    // ADMISSION request, and the queue wait is bounded by the remaining
+    // phase deadline — a queued role that the run cancels or whose phase
+    // expires never dispatches (wire_attempted stays false, no provider
+    // attempt, no retry budget).
+    ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+    ...(deps.governor !== undefined ? { governor: deps.governor } : {}),
+    admissionDeadlineAtMs: phaseDeadlineAtMs,
   });
 
   const timers = cancellableSleep();

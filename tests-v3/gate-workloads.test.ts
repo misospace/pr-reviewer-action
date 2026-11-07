@@ -150,7 +150,12 @@ test("abnormal exit: parent cancellation terminates both workload trees mid-flig
       ci: ciGateBranch({ entry: ENTRY }),
       specialists: specialistGateBranch({ entry: ENTRY, args: ["--corpus", "specialist-corpus.md"], cwd: dir }),
       scope,
-      ambientEnv: { ...env, GITHUB_API_URL: github.url, AI_BASE_URL: `${model.url}/v1` },
+      // #1515: the unset knob now enables the conservative default cap (2),
+      // which would queue the third specialist behind the two in flight and
+      // park it there forever against this never-answering endpoint. This
+      // test's premise is three calls IN FLIGHT when the parent cancels, so
+      // it raises the cap above its burst — still governed, just non-binding.
+      ambientEnv: { ...env, GITHUB_API_URL: github.url, AI_BASE_URL: `${model.url}/v1`, AI_MAX_CONCURRENT_MODEL_REQUESTS: "8" },
     });
     const deadline = Date.now() + 15_000;
     while ((github.hits.length < 2 || model.hits.length < 3) && Date.now() < deadline) {
