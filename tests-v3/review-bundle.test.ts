@@ -250,7 +250,7 @@ test("#1521: the bundle parser refuses the members on a state that proves no rev
     identity: { diff_fingerprint: "", analysis_engine: "" },
     ...extra,
   });
-  const row = { id: "must-check-1", source: "must_check", status: "unresolved", cause: null, text: "verify the changelog" };
+  const row = { id: "must-check-1", source: "must_check", status: "unmet", cause: null, text: "verify the changelog" };
   // A state that proves no review may not claim what blocked a review it
   // never produced.
   assert.equal(parseReviewBundle(make("skipped", { unresolved_review_obligations: [row] })), null);
@@ -261,8 +261,15 @@ test("#1521: the bundle parser refuses the members on a state that proves no rev
   assert.equal(parseReviewBundle(make("skipped", { derived_obligation_state: null })), null);
   // A malformed member refuses the whole document.
   assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: ["not-a-row"] })), null);
-  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ source: "must_check", status: "unresolved", cause: null, text: "t" }] })), null);
-  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ id: "a", source: "must_check", status: "unresolved", cause: 7, text: "t" }] })), null);
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ source: "must_check", status: "unmet", cause: null, text: "t" }] })), null);
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ id: "a", source: "must_check", status: "unmet", cause: 7, text: "t" }] })), null);
+  // #1505: a blocking row is a confirmed negative. An `unresolved` row is
+  // availability (coverage, never a defect) and a `satisfied` row blocked
+  // nothing, so a document listing either as a blocking obligation is
+  // refused, not read.
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ id: "a", source: "must_check", status: "unresolved", cause: null, text: "t" }] })), null, "an unresolved row is coverage, never a block");
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ id: "a", source: "must_check", status: "satisfied", cause: null, text: "t" }] })), null, "a discharged row blocked nothing");
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ id: "a", source: "derived", status: "unmet", cause: null, text: "t" }] })), null, "a derived row is coverage, never a block");
   assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations_total: 1.5 })), null);
   assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations_truncated: "yes" })), null);
   assert.equal(parseReviewBundle(make("complete", { derived_obligation_state: "bogus" })), null);
@@ -290,7 +297,7 @@ test("#1521: the bundle parser cross-checks the obligation counters against the 
     identity: { diff_fingerprint: "", analysis_engine: "" },
     ...extra,
   });
-  const row = { id: "must-check-1", source: "must_check", status: "unresolved", cause: null, text: "verify the changelog" };
+  const row = { id: "must-check-1", source: "must_check", status: "unmet", cause: null, text: "verify the changelog" };
   const rows = [row, { ...row, id: "must-check-2" }];
   // A total below the listed row count contradicts the list it carries.
   assert.equal(
