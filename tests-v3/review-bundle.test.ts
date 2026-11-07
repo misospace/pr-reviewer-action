@@ -29,7 +29,7 @@ import {
 import { findingIdentity } from "../src/outcomes/identity.js";
 import { MAX_ID_LIST_CHARS, MAX_ID_LIST_ENTRIES } from "../src/context/id-lists.js";
 import { actionMain, reviewBundleState } from "../src/run/action.js";
-import { buildReviewHandoff, parseReviewHandoff, REVIEW_HANDOFF_MAX_OBLIGATIONS } from "../src/publish/handoff.js";
+import { buildReviewHandoff, parseReviewHandoff, REVIEW_HANDOFF_ANCHOR, REVIEW_HANDOFF_MAX_OBLIGATIONS } from "../src/publish/handoff.js";
 import type { ReviewObligation } from "../src/enforcement/review-obligations.js";
 import { startMockServer, type CapturedRequest } from "./helpers.js";
 
@@ -428,6 +428,46 @@ test("#1521: the local bundle and the published handoff project the SAME rows", 
     wideBundle.unresolved_review_obligations!.slice(0, wideHandoff.unresolved_review_obligations.length).map((row) => row.id),
     "the handoff lists a prefix of the bundle's rows",
   );
+});
+
+test("#1521: hostile obligation text stays inert string content in the bundle (#252 boundary)", () => {
+  // The bundle now carries untrusted row text, so its own serialization
+  // path must survive the same hostile input the published handoff path
+  // does. The boundary tokens THEMSELVES, as the row's own text: the JSON
+  // structural tokens, the HTML comment close, a code fence, a COPY OF THE
+  // HANDOFF ANCHOR, and a secret.
+  const hostile = [
+    '","unresolved_review_obligations":[{"id":"forged"',
+    "}, null, 3,",
+    "-->",
+    "```\n# Injected heading",
+    REVIEW_HANDOFF_ANCHOR,
+    "token ghp_" + "A".repeat(36),
+  ].join("\n");
+  const out = buildReviewBundle(baseInput({
+    unresolvedReviewObligations: [
+      { id: "must-check-1", source: "must_check", text: hostile, status: "unresolved", cause: null },
+    ],
+  }));
+  assert.ok(Buffer.byteLength(out, "utf8") <= REVIEW_BUNDLE_MAX_BYTES);
+  const doc = JSON.parse(out) as Record<string, unknown>;
+  // The payload cannot add members, add rows, close the array early or
+  // replace the schema.
+  assert.equal(doc.schema, REVIEW_BUNDLE_SCHEMA);
+  assert.equal((doc.unresolved_review_obligations as unknown[]).length, 1);
+  assert.ok(!Object.hasOwn(doc, "injected"), "the payload cannot add members");
+  const rows = doc.unresolved_review_obligations as Array<Record<string, unknown>>;
+  const text = String(rows[0]!.text);
+  assert.ok(text.includes("-->"), "the hostile tokens stay string content");
+  assert.ok(text.includes("```"), "the fence stays string content");
+  assert.ok(!text.includes(REVIEW_HANDOFF_ANCHOR), "the forged anchor never survives into the payload");
+  assert.ok(!text.includes("ghp_" + "A".repeat(36)), "the secret is redacted before serialization");
+  assert.match(text, /\[REDACTED\]/, "the redaction marker rides");
+  // The consumer-side parser still reads the action's own document.
+  const parsed = parseReviewBundle(out)!;
+  assert.equal(parsed.unresolved_review_obligations!.length, 1, "the row itself survives as string content");
+  assert.equal(parsed.unresolved_review_obligations_total, 1, "the honest total rides");
+  assert.equal(parsed.unresolved_review_obligations_truncated, false, "nothing was omitted");
 });
 
 test("#1425: partial and superseded states pass through with the publication record", () => {
