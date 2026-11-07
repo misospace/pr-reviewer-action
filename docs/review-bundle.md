@@ -531,7 +531,13 @@ derived state.
   (`REVIEW_HANDOFF_MAX_SUGGESTION_CHARS`). A longer replacement is omitted
   rather than cut off.
 - The published body grows by at most the 8 KiB document plus the container
-  that holds it.
+  that holds it, and the whole published body is bounded at 65,536 UTF-8
+  bytes (`MAX_PUBLISHED_BODY_BYTES`) — the byte form of the forge's
+  65,536-character comment ceiling (#1554). At the publish boundary only the
+  model-authored review prose is ever trimmed to fit; the machine documents
+  and action-owned notices are never trimmed, and any trim is disclosed in
+  the body's final line. The prose always has room because every
+  action-owned block's own bounds keep it far below the ceiling.
 - Every text field passes secret redaction and a length cap before it is
   serialized. The HTML characters are written as JSON escapes, so the
   published body never carries a raw tag out of the payload.

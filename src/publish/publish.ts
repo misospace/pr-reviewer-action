@@ -368,6 +368,91 @@ export function resolveIncompleteReason(input: {
     : "none";
 }
 
+/** #1554: the forge's comment-body ceiling — 65,536 characters on GitHub and
+ * Forgejo — applied as a BYTE bound. This guard counts UTF-8 bytes, the
+ * stricter measure for a body carrying multi-byte text: a body within the
+ * character ceiling can still exceed it in bytes, and a publication that
+ * fails past the ceiling publishes nothing at all. The machine documents are
+ * individually bounded (`REVIEW_HANDOFF_MAX_BYTES`, `FINDINGS_SUMMARY_MAX_BYTES`),
+ * but the model-authored review prose was not — so the aggregate guard at the
+ * publish boundary trims only that prose and discloses the trim in the body. */
+export const MAX_PUBLISHED_BODY_BYTES = 65_536;
+
+/** #1554: one fence delimiter line — a line whose trimmed start is a run of
+ * 3+ backticks or 3+ tildes. The `info` field is what follows the run
+ * (whitespace-trimmed): an opener may carry an info string; a closer must
+ * carry none. */
+function fenceDelimiterLine(line: string): { char: "`" | "~"; run: number; info: string } | null {
+  const match = /^(`{3,}|~{3,})(.*)$/.exec(line.trimStart());
+  if (match === null) return null;
+  return { char: match[1]![0] as "`" | "~", run: match[1]!.length, info: match[2]!.trim() };
+}
+
+/** #1554: the byte offset where an unclosed fenced code block OPENS in
+ * `text`, or -1 when every fence the text opens is closed. Single-level
+ * fence state (markdown fences do not nest): a delimiter line closes the
+ * open fence only when it uses the same character, a run at least as long
+ * as the opener's, and no info string. A backtick opener whose info string
+ * itself contains a backtick is paragraph text, never a fence (CommonMark),
+ * so it cannot open a block a hostile line could then abuse. */
+function unclosedFenceStart(text: string): number {
+  let open: { char: "`" | "~"; run: number; start: number } | null = null;
+  let offset = 0;
+  for (const line of text.split("\n")) {
+    const start = offset;
+    offset += line.length + 1;
+    const delimiter = fenceDelimiterLine(line);
+    if (open === null) {
+      if (delimiter !== null && !(delimiter.char === "`" && delimiter.info.includes("`"))) {
+        open = { char: delimiter.char, run: delimiter.run, start };
+      }
+    } else if (
+      delimiter !== null
+      && delimiter.char === open.char
+      && delimiter.run >= open.run
+      && delimiter.info === ""
+    ) {
+      open = null;
+    }
+  }
+  return open === null ? -1 : open.start;
+}
+
+/**
+ * #1554: fit model-authored review prose into a UTF-8 byte budget for the
+ * publish-boundary aggregate guard.
+ *
+ * Returns the longest prose prefix that fits `maxBytes` bytes, cutting at a
+ * UTF-8 codepoint boundary (a multi-byte codepoint is never split) and —
+ * when the kept prose would otherwise end INSIDE a fenced code block —
+ * cutting back to just before the fence's opening line, so the published
+ * prose never ends inside an open fence. The dropped unfinished block counts
+ * toward the dropped characters. `dropped` is the number of Unicode
+ * codepoints the cut removed, exactly what the body's disclosure note names.
+ */
+export function fitReviewProseToBytes(markdown: string, maxBytes: number): { text: string; dropped: number } {
+  const limit = Math.max(0, maxBytes);
+  if (Buffer.byteLength(markdown, "utf8") <= limit) return { text: markdown, dropped: 0 };
+  const bytes = Buffer.from(markdown, "utf8");
+  let cut = Math.min(limit, bytes.length);
+  // Back up to the last codepoint boundary: `bytes[cut]` is a continuation
+  // byte exactly when the cut splits a multi-byte codepoint.
+  while (cut > 0 && (bytes[cut]! & 0xc0) === 0x80) cut -= 1;
+  let text = bytes.subarray(0, cut).toString("utf8");
+  const openAt = unclosedFenceStart(text);
+  if (openAt >= 0) text = text.slice(0, openAt);
+  const dropped = [...markdown].length - [...text].length;
+  return { text, dropped };
+}
+
+/** #1554: the disclosure note templates. The partial variant's digit run is
+ * filled with the dropped codepoint count at render time; the reserve in
+ * `buildPublishedBody` sizes the worst case so the note can never push the
+ * body back past the ceiling it just enforced. */
+const PROSE_TRUNCATED_NOTE_PREFIX = "_Review prose truncated to fit the forge's comment ceiling: ";
+const PROSE_TRUNCATED_NOTE_SUFFIX = " character(s) dropped. The verdict, coverage notices, and machine documents above are complete._";
+const PROSE_OMITTED_NOTE = "_The review prose did not fit the forge's comment ceiling and was omitted. The verdict, coverage notices, and machine documents above are complete._";
+
 /** Build the published body: marker preamble + engine line + the optional
  * action-owned #810 coverage notice + the strict state block (#811, when
  * present) + the optional #1003 human-review triage section + sanitized
@@ -379,7 +464,24 @@ export function resolveIncompleteReason(input: {
  * marker preamble, so it is the first anchored block in the body. The
  * preamble is action-owned and precedes every model-authored surface, so a
  * consumer that reads the FIRST anchored block always reads this action's
- * container and never a model-authored copy of it. */
+ * container and never a model-authored copy of it.
+ *
+ * #1554: `tailBlock` is appended VERBATIM after the review prose — raw
+ * concatenation semantics (`returned body + tailBlock`), never trimmed or
+ * transformed, so a caller that used to append a notice to the finished body
+ * can pass the same string here and get byte-identical output. The whole
+ * body then passes the aggregate publish-boundary guard
+ * (`MAX_PUBLISHED_BODY_BYTES`): a fitting body is byte-identical to the
+ * unguarded build; an overflowing body trims ONLY `sanitizedMarkdown` — the
+ * model-authored review prose — to the bytes left after every action-owned
+ * block and the tail block, cutting UTF-8-safe and never ending inside an
+ * open fence (`fitReviewProseToBytes`), and discloses the trim in a final
+ * action-owned note. The machine documents and every action-owned block are
+ * never trimmed: their inputs are individually bounded, so the prose is the
+ * one surface whose trim can always absorb the overflow. The guard is
+ * best-effort only in the corner where the action-owned blocks alone already
+ * exceed the ceiling — there is nothing legal left to trim — which their own
+ * bounds make unreachable in practice. */
 export function buildPublishedBody(options: {
   markers: string;
   /** #1518: the rendered `review-handoff/v1` container (anchor + fenced
@@ -401,6 +503,11 @@ export function buildPublishedBody(options: {
   /** #1073: rendered independent-confidence section (only when the scorer
    * ran). */
   confidenceBlock?: string | undefined;
+  /** #1554: raw suffix appended VERBATIM after the review prose — the exact
+   * string a caller used to `body += …` after the build (leading and trailing
+   * newlines included), never trimmed or transformed. Counts toward the
+   * aggregate ceiling as an action-owned (never-trimmed) byte cost. */
+  tailBlock?: string;
   /** #915: defaults to the build-time stamp; explicit "" forces unstamped. */
   actionVersion?: string;
 }): string {
@@ -433,7 +540,42 @@ export function buildPublishedBody(options: {
     lines.push(options.confidenceBlock, "");
   }
   lines.push(options.sanitizedMarkdown);
-  return `${lines.join("\n")}\n`;
+  // #1554: raw-concatenation tail — the prefix above is exactly the body the
+  // unguarded build returned (`lines.join("\n") + "\n"`), so appending the
+  // tail block to it reproduces a caller's old `body += tail` bytes exactly.
+  const prefix = lines.slice(0, -1).join("\n");
+  const prose = options.sanitizedMarkdown;
+  const tailBlock = options.tailBlock ?? "";
+  const untrimmed = `${prefix}\n${prose}\n${tailBlock}`;
+  if (Buffer.byteLength(untrimmed, "utf8") <= MAX_PUBLISHED_BODY_BYTES) return untrimmed;
+  // #1554: overflow — trim ONLY the model-authored prose. The byte cost of
+  // everything else is fixed: the prefix (marker preamble, handoff container,
+  // header, note, engine line, coverage notice, state/triage/routing/
+  // confidence blocks), the two newlines that wrap the prose, the tail
+  // block, and the disclosure note itself (reserved at its worst-case size,
+  // so the note can never push the body back past the ceiling it just
+  // enforced). The +1 covers the final newline after the note.
+  const tailSeparator = tailBlock !== "" && !tailBlock.endsWith("\n") ? "\n" : "";
+  const noteReserve = Buffer.byteLength(PROSE_TRUNCATED_NOTE_PREFIX, "utf8")
+    + Buffer.byteLength(PROSE_TRUNCATED_NOTE_SUFFIX, "utf8")
+    // The dropped count never exceeds the prose's own codepoint count, so
+    // this digit run bounds the rendered note exactly.
+    + String([...prose].length).length
+    + 1;
+  const budget = Math.max(0,
+    MAX_PUBLISHED_BODY_BYTES
+      - (Buffer.byteLength(prefix, "utf8") + 2 + Buffer.byteLength(tailBlock, "utf8")
+        + Buffer.byteLength(tailSeparator, "utf8") + noteReserve));
+  const fitted = fitReviewProseToBytes(prose, budget);
+  // Nothing trimmable (no prose at all): the overflow lives in bytes this
+  // guard must never touch, so the body publishes unchanged — the corner the
+  // action-owned blocks' own bounds make unreachable.
+  if (fitted.dropped === 0) return untrimmed;
+  if (fitted.text === "") {
+    // No prose fits at all: the full-omission variant, prose line dropped.
+    return `${prefix}\n${tailBlock}${tailSeparator}${PROSE_OMITTED_NOTE}\n`;
+  }
+  return `${prefix}\n${fitted.text}\n${tailBlock}${tailSeparator}${PROSE_TRUNCATED_NOTE_PREFIX}${fitted.dropped}${PROSE_TRUNCATED_NOTE_SUFFIX}\n`;
 }
 
 /** #1003: the three literal triage decisions live with the other publish-layer
@@ -1853,10 +1995,6 @@ export async function publishReview(
       derivedObligationState: input.derivedObligationState,
       publishedPrescriptions: new Map(),
     }));
-  const bodySansPublishedSuggestions = (body: string): string =>
-    handoffBlock === handoffBlockSansSuggestions
-      ? body
-      : body.split(handoffBlock).join(handoffBlockSansSuggestions);
 
   const cleanupRequested = input.mode !== "comment"
     && resolveCleanupFlag(input.cleanupPreviousNativeReviews, input.mode) === "true";
@@ -1985,8 +2123,29 @@ export async function publishReview(
             // suggestion) re-publishes nothing — the #1282 behavior.
             const compensated = !strict;
             let recovered = false;
-            const recoveryBody = bodySansPublishedSuggestions(body)
-              + (compensated ? renderFindingsSummary(input.findings, input.upstreamLinkMode) : "");
+            // #1554: the recovery body is rebuilt through the SAME guarded
+            // builder as the primary body, with the suggestion-free handoff
+            // variant and (non-strict) the bounded findings summary as the
+            // tail block — the raw-concatenation tail semantics make this
+            // byte-identical to the old
+            // `bodySansPublishedSuggestions(body) + summary` formula whenever
+            // the body fits, and it bounds the recovery publication under the
+            // same aggregate ceiling. The suggestion-free variant is the ONLY
+            // thing that differs from the primary build: the withheld-notice
+            // tail does not exist in this mode and the prose is identical.
+            const recoveryBody = buildPublishedBody({
+              markers,
+              handoffBlock: handoffBlockSansSuggestions,
+              header: "# AI Automated Review",
+              analysisEngine: input.analysisEngine,
+              sanitizedMarkdown: sanitized,
+              coverageNotice,
+              stateBlock: stateSection(platformNotice),
+              triageBlock: triageBlock || undefined,
+              routingBlock: routingBlock || undefined,
+              confidenceBlock: confidenceBlock || undefined,
+              tailBlock: compensated ? renderFindingsSummary(input.findings, input.upstreamLinkMode) : "",
+            });
             if (recoveryBody !== body) {
               const recovery = await api.upsertStickyComment(input.commentMarker, recoveryBody);
               if (recovery.ok) {
@@ -2066,19 +2225,15 @@ export async function publishReview(
         : validVerdict && (input.verdict === "request_changes" || canApprove)
           ? `\n> **Automated recommendation: ${input.verdict === "request_changes" ? "REQUEST CHANGES" : "APPROVE"}** — advisory only: ${surfaceReason}. The review is published as a managed top-level review record; no native approval, blocking request, or inline comment was submitted.\n`
           : `\n> **Native review verdicts are unavailable on this platform**: ${surfaceReason}. The review is published as a managed top-level review record; no native approval, blocking request, or inline comment was submitted.\n`;
-      let body = buildPublishedBody({
-        markers,
-        handoffBlock,
-        header: "# AI Automated Review",
-        note: "_Full PR review._",
-        analysisEngine: input.analysisEngine,
-        sanitizedMarkdown: sanitized,
-        coverageNotice,
-        stateBlock: stateSection(platformNotice),
-        triageBlock: triageBlock || undefined,
-        routingBlock: routingBlock || undefined,
-        confidenceBlock: confidenceBlock || undefined,
-      });
+      // #1554: the withholding notices below used to be appended to the
+      // finished body; they are now decided BEFORE the build and ride it as
+      // the tail block, so the aggregate publish-boundary guard counts their
+      // bytes too and a trimmed review prose can never push a notice past
+      // the forge's comment ceiling. Exactly one notice fires, or none — the
+      // branches stay mutually exclusive exactly as the appends were, and
+      // each branch passes the same string literal the append used, so a
+      // fitting body keeps today's bytes exactly.
+      let withheldNotice = "";
       if (!validVerdict) {
         // #1161: a missing or invalid verdict is a failed run, not a clean
         // review — it must never publish as an approval or as a blocking
@@ -2086,7 +2241,7 @@ export async function publishReview(
         // (#1145: in `review_verdict` this run already failed above — the
         // branch is reachable only in the blockers-only mode, whose published
         // output is an advisory comment.)
-        body += "\n> **No review verdict**: this run produced no valid verdict (model failure or an invalid verdict payload), so neither an approval nor a blocking request is published.\n";
+        withheldNotice = "\n> **No review verdict**: this run produced no valid verdict (model failure or an invalid verdict payload), so neither an approval nor a blocking request is published.\n";
         messages.push(`Publishing advisory review for #${input.prNumber} (no valid verdict produced)`);
       } else if (input.mode === "review_verdict" && input.verdict === "approve" && guardrails.scopeBlocked) {
         // #1161: the cross-repository scope policy is the only thing that
@@ -2102,7 +2257,7 @@ export async function publishReview(
         const advisory = reviewResult === "clean"
           ? "this clean review is advisory"
           : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
-        body += `\n> **Approval withheld by scope policy**: ${scope} and native approvals for fork pull requests are disabled (\`approve-forks: ${input.approveForks}\`), so ${advisory}.\n`;
+        withheldNotice = `\n> **Approval withheld by scope policy**: ${scope} and native approvals for fork pull requests are disabled (\`approve-forks: ${input.approveForks}\`), so ${advisory}.\n`;
         messages.push(
           `Withholding native approval for #${input.prNumber} (cross-repository PR, approve_forks=${input.approveForks}, is_fork=${guardrails.isForkPr ?? "unknown"})`,
         );
@@ -2122,7 +2277,7 @@ export async function publishReview(
         const advisory = reviewResult === "clean"
           ? "this clean review is advisory"
           : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
-        body += `\n> **Approval withheld by derived-obligation state**: ${gap}, so ${advisory}.\n`;
+        withheldNotice = `\n> **Approval withheld by derived-obligation state**: ${gap}, so ${advisory}.\n`;
         messages.push(
           `Withholding native approval for #${input.prNumber} (derived obligation state: ${state})`,
         );
@@ -2143,14 +2298,14 @@ export async function publishReview(
         const advisory = reviewResult === "clean"
           ? "this clean review is advisory"
           : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
-        body += `\n> **Approval withheld by required-evidence state**: ${gap}, so ${advisory}.\n`;
+        withheldNotice = `\n> **Approval withheld by required-evidence state**: ${gap}, so ${advisory}.\n`;
         messages.push(
           `Withholding native approval for #${input.prNumber} (required-evidence state: ${state})`,
         );
       } else if (input.mode === "review_verdict" && input.verdict === "approve" && input.degradedGateBypass === true) {
         // #1447: degraded review state is an abstention, never a trusted
         // native approval, even if the surviving coverage fields look clean.
-        body += "\n> **Approval withheld by degraded review state**: this run bypassed a normal review gate, so it needs review; no native approval is certified.\n";
+        withheldNotice = "\n> **Approval withheld by degraded review state**: this run bypassed a normal review gate, so it needs review; no native approval is certified.\n";
         messages.push(
           `Withholding native approval for #${input.prNumber} (degraded review state)`,
         );
@@ -2167,7 +2322,7 @@ export async function publishReview(
             : input.coverageUnknown
               ? "this review's tool-loop coverage could not be verified (the run directory or its coverage artifact was unavailable to confirm it)"
               : "required-check coverage or the tool-loop investigation did not finish";
-        body += `\n> **Approval withheld by incomplete review coverage**: ${gap}. This run needs review; no native approval is certified.\n`;
+        withheldNotice = `\n> **Approval withheld by incomplete review coverage**: ${gap}. This run needs review; no native approval is certified.\n`;
         messages.push(
           `Withholding native approval for #${input.prNumber} (incomplete review coverage; reason=${incompleteReason})`,
         );
@@ -2177,9 +2332,26 @@ export async function publishReview(
         // published as an advisory comment and never as an approval. (A
         // missing/invalid verdict is covered by the "No review verdict"
         // notice above: it is a failed run, not a clean review.)
-        body += `\n> **Advisory review (blockers-only mode)**: \`publish-mode: review_blockers\` publishes blocking findings only; a clean review is published as an ${advisoryNoun} and is never published as an approval.\n`;
+        withheldNotice = `\n> **Advisory review (blockers-only mode)**: \`publish-mode: review_blockers\` publishes blocking findings only; a clean review is published as an ${advisoryNoun} and is never published as an approval.\n`;
         messages.push(`Publishing advisory review for #${input.prNumber} (blockers-only mode; no approval published)`);
       }
+      const body = buildPublishedBody({
+        markers,
+        handoffBlock,
+        header: "# AI Automated Review",
+        note: "_Full PR review._",
+        analysisEngine: input.analysisEngine,
+        sanitizedMarkdown: sanitized,
+        coverageNotice,
+        stateBlock: stateSection(platformNotice),
+        triageBlock: triageBlock || undefined,
+        routingBlock: routingBlock || undefined,
+        confidenceBlock: confidenceBlock || undefined,
+        // #1554: the withheld notice (exactly the string the append used,
+        // leading and trailing newlines included) rides the guarded build, so
+        // a prose trim can never push it past the forge's comment ceiling.
+        tailBlock: withheldNotice,
+      });
       if (!nativeSurface.supported) {
         // #588: the platform has no native pull-review surface, so the
         // review is published as its managed top-level record. The body's
@@ -2215,9 +2387,29 @@ export async function publishReview(
         // #1518: the fallback review carries NO inline comments, so its body
         // must not advertise any published prescription either — the
         // suggestion-free handoff variant rides it instead.
-        const fallbackBody = strict
-          ? bodySansPublishedSuggestions(body)
-          : bodySansPublishedSuggestions(body) + renderFindingsSummary(input.findings, input.upstreamLinkMode);
+        // #1554: the fallback body is rebuilt through the SAME guarded
+        // builder as the primary body, with the suggestion-free handoff
+        // variant and (non-strict) the bounded findings summary joined to the
+        // withheld notice as the tail block — the raw-concatenation tail
+        // semantics make this byte-identical to the old
+        // `bodySansPublishedSuggestions(body) + summary` formula whenever the
+        // body fits, and it bounds the fallback publication under the same
+        // aggregate ceiling. (The notice rides the fallback because it rode
+        // the primary body the old formula derived the fallback from.)
+        const fallbackBody = buildPublishedBody({
+          markers,
+          handoffBlock: handoffBlockSansSuggestions,
+          header: "# AI Automated Review",
+          note: "_Full PR review._",
+          analysisEngine: input.analysisEngine,
+          sanitizedMarkdown: sanitized,
+          coverageNotice,
+          stateBlock: stateSection(platformNotice),
+          triageBlock: triageBlock || undefined,
+          routingBlock: routingBlock || undefined,
+          confidenceBlock: confidenceBlock || undefined,
+          tailBlock: strict ? withheldNotice : withheldNotice + renderFindingsSummary(input.findings, input.upstreamLinkMode),
+        });
         if (canApprove) {
           messages.push(`Submitting native approval for #${input.prNumber}`);
         } else if (event === "REQUEST_CHANGES") {
