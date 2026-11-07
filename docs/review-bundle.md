@@ -538,10 +538,13 @@ derived state.
   and action-owned notices are never trimmed, and any trim is disclosed in
   the body's final line. The trim-time fence scan recognizes fence
   delimiters behind blockquote and list-item container prefixes, so an
-  unfinished fence opened inside a container is dropped whole too; its
-  closer rules are deliberately stricter than its opener rules, so an
-  uncertain fence state always trims back to the opener rather than leaving
-  hostile prose inside a live fence. The prose always has room because every
+  unfinished fence opened inside a container is dropped whole too. Its
+  opener and closer rules are indent-disciplined in both directions — a
+  too-deep delimiter is indented code, never a fence; a closer is never
+  less indented than its opener; a container that ends mid-fence makes
+  every later delimiter a new opener — so an uncertain fence state trims
+  back to the opener rather than leaving hostile prose inside a live
+  fence. The prose always has room because every
   action-owned block's own bounds keep it far below the ceiling.
 - Every text field passes secret redaction and a length cap before it is
   serialized. The HTML characters are written as JSON escapes, so the

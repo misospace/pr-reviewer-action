@@ -233,11 +233,62 @@ test("#1554: hostile fence openers inside blockquotes and list items are dropped
   // a scan that misses it would let an unfinished hostile fence survive
   // truncation and swallow the action-owned blocks after the prose. Each
   // kept prose must end before the opener, with the block dropped whole.
-  for (const opener of ["> ```js", "- ```js", "1. ```js", "> - ```js", "* ```js"]) {
-    const prose = `ok\n${opener}\n${"x".repeat(500_000)}\n`;
+  // Blockquote fence content carries the `>` continuation itself.
+  for (const opener of ["> ```js", "- ```js", "1. ```js", "1) ```js", "> - ```js", "* ```js"]) {
+    const content = opener.startsWith(">") ? "> let x = 1;" : "  let x = 1;";
+    const prose = `ok\n${opener}\n${content}\n${"x".repeat(500_000)}\n`;
     const fitted = fitReviewProseToBytes(prose, Buffer.byteLength(prose) - 1);
     assert.deepEqual(fitted, { text: "ok\n", dropped: codepoints(prose) - codepoints("ok\n") }, opener);
   }
+});
+
+test("#1554: an indented-code decoy never opens a phantom fence", () => {
+  // `    ``` is indented code in CommonMark, never a fence. A scan that
+  // opened a phantom fence there would consume the real flush-left opener
+  // below as its closer and let the prose after it survive inside a live
+  // fence; the scan must ignore the decoy and cut back to the real opener.
+  const prose = "intro\n\n    ```\nnot a fence\n```\nswallowed now\n";
+  const kept = "intro\n\n    ```\nnot a fence\n";
+  assert.deepEqual(
+    fitReviewProseToBytes(prose, Buffer.byteLength(prose) - 1),
+    { text: kept, dropped: codepoints(prose) - codepoints(kept) },
+  );
+  // A tab-indented delimiter line is indented code the same way.
+  const tabbed = "intro\n\n\t```js\nnot a fence\n```\nswallowed now\n";
+  const keptTabbed = "intro\n\n\t```js\nnot a fence\n";
+  assert.deepEqual(
+    fitReviewProseToBytes(tabbed, Buffer.byteLength(tabbed) - 1),
+    { text: keptTabbed, dropped: codepoints(tabbed) - codepoints(keptTabbed) },
+  );
+  // A 4-space-indented delimiter line inside a live top-level fence is
+  // indented code, never a closer: the fence stays open and the cut drops
+  // the block whole.
+  const deep = "ok\n```\ncode\n    ```\nmore\n";
+  assert.deepEqual(
+    fitReviewProseToBytes(deep, Buffer.byteLength(deep) - 1),
+    { text: "ok\n", dropped: codepoints(deep) - codepoints("ok\n") },
+  );
+});
+
+test("#1554: a fence opened on a list-item continuation line never closes on a flush delimiter", () => {
+  // `  ```js is a fence inside the list item (container inherited from the
+  // marker line); the flush-left ``` is a NEW top-level fence opener in the
+  // renderer, never that fence's closer. The scan must stay open from the
+  // item fence's opener.
+  const prose = "intro\n\n- foo\n  ```js\nnot a fence\n```\nswallowed now\n";
+  const kept = "intro\n\n- foo\n";
+  assert.deepEqual(
+    fitReviewProseToBytes(prose, Buffer.byteLength(prose) - 1),
+    { text: kept, dropped: codepoints(prose) - codepoints(kept) },
+  );
+  // A flush-left closer after an indented opener is the same shape: the
+  // scan keeps the indent floor and over-trims (disclosed) rather than
+  // risk a live fence.
+  const flushCloser = "ok\n  ```js\ncode\n```\nmore\n";
+  assert.deepEqual(
+    fitReviewProseToBytes(flushCloser, Buffer.byteLength(flushCloser) - 1),
+    { text: "ok\n", dropped: codepoints(flushCloser) - codepoints("ok\n") },
+  );
 });
 
 test("#1554: a container delimiter inside an open top-level fence never closes it", () => {
@@ -251,27 +302,52 @@ test("#1554: a container delimiter inside an open top-level fence never closes i
   );
 });
 
-test("#1554: closed blockquote fences survive trim and over-indented delimiters never close", () => {
-  // A legitimately closed blockquote fence is recognized as closed: a cut
-  // landing after its closer keeps the whole block.
-  const closedQuote = "a\n> ```\ncode\n> ```\nb";
+test("#1554: closed container fences survive trim; a deeper marker never closes a shallower one", () => {
+  // A legitimately closed blockquote fence (every content line carries the
+  // `>` continuation) is recognized as closed: a cut landing after its
+  // closer keeps the whole block.
+  const closedQuote = "a\n> ```\n> code\n> ```\nb";
   assert.deepEqual(
     fitReviewProseToBytes(closedQuote, Buffer.byteLength(closedQuote) - 1),
-    { text: "a\n> ```\ncode\n> ```\n", dropped: 1 },
+    { text: "a\n> ```\n> code\n> ```\n", dropped: 1 },
   );
-  // A 4-space-indented delimiter line is indented code in CommonMark, never
-  // a closer: the top-level fence stays open and the cut drops it whole.
-  const deep = "ok\n```\ncode\n    ```\nmore\n";
+  // Same for an indented top-level fence closed at its own indent.
+  const closedIndented = "a\n  ```js\n  code\n  ```\nb";
   assert.deepEqual(
-    fitReviewProseToBytes(deep, Buffer.byteLength(deep) - 1),
-    { text: "ok\n", dropped: codepoints(deep) - codepoints("ok\n") },
+    fitReviewProseToBytes(closedIndented, Buffer.byteLength(closedIndented) - 1),
+    { text: "a\n  ```js\n  code\n  ```\n", dropped: 1 },
   );
-  // A same-marker delimiter at column 0 after a list-item opener is a NEW
-  // sibling item's opener, never this fence's closer: the scan stays open.
-  const sibling = "ok\n- ```js\nlet x = 1;\n- ```\nmore\n";
+  // A level-1 `> ``` line does not close a level-2 `>>` fence.
+  const hostile = "ok\n>> ```js\n> ```\nswallowed\n";
   assert.deepEqual(
-    fitReviewProseToBytes(sibling, Buffer.byteLength(sibling) - 1),
-    { text: "ok\n", dropped: codepoints(sibling) - codepoints("ok\n") },
+    fitReviewProseToBytes(hostile, Buffer.byteLength(hostile) - 1),
+    { text: "ok\n", dropped: codepoints(hostile) - codepoints("ok\n") },
+  );
+  const closedNested = "a\n>> ```\n> code\n>> ```\nb";
+  assert.deepEqual(
+    fitReviewProseToBytes(closedNested, Buffer.byteLength(closedNested) - 1),
+    { text: "a\n>> ```\n> code\n>> ```\n", dropped: 1 },
+  );
+});
+
+test("#1554: a blank line ends a blockquote fence, making a later delimiter a new opener", () => {
+  // The blank line ends the blockquote, so the trailing `> ``` is a NEW
+  // unclosed opener in the renderer. The scan must stay open from the
+  // FIRST opener and trim back past it instead of trusting the later
+  // delimiter as a closer.
+  const prose = "ok\n> ```js\n> code\n\nmore\n\n> ```\nswallowed\n";
+  assert.deepEqual(
+    fitReviewProseToBytes(prose, Buffer.byteLength(prose) - 1),
+    { text: "ok\n", dropped: codepoints(prose) - codepoints("ok\n") },
+  );
+});
+
+test("#1554: a backtick in the info string is paragraph text, even behind a container", () => {
+  const prose = "ok\n> ``` a`b\ncode\n```\ntail";
+  const kept = "ok\n> ``` a`b\ncode\n";
+  assert.deepEqual(
+    fitReviewProseToBytes(prose, Buffer.byteLength(prose) - 1),
+    { text: kept, dropped: codepoints(prose) - codepoints(kept) },
   );
 });
 

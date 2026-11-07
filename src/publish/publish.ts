@@ -395,52 +395,55 @@ function fenceDelimiterLine(line: string): { char: "`" | "~"; run: number; info:
  * that only recognizes line-start delimiters lets such an opener survive
  * truncation and swallow the action-owned blocks that follow the prose.
  *
- * `prefix` is the normalized marker sequence (markers joined by single
- * spaces; whitespace amounts between markers collapsed), `rest` is the
- * content after the last marker INCLUDING its leading whitespace run (the
- * closer rules measure it), and `deepIndent` says the whitespace run before
- * the first marker — or a tab anywhere in the leading runs — already
- * exceeds the 3-space fence-indent limit. Opener recognition is lenient
- * (it ignores `deepIndent`), which can only make the scanner see MORE
- * fences than a renderer does — over-trimming, the safe direction; the
- * closer rules below carry the precision. */
-function containerScan(line: string): { deepIndent: boolean; prefix: string; rest: string } {
+ * Returns, for one line: `leadIndent` — the whitespace width BEFORE the
+ * first marker, or the whole leading run when the line has no markers
+ * (spaces count 1, a tab counts 4); `prefix` — the normalized marker
+ * sequence (markers joined by single spaces, whitespace amounts between
+ * markers collapsed); `rest` — the content after the last marker, its
+ * leading whitespace run preserved for the closer's indent checks; and
+ * `deep` — a tab or a >3-space run in any marker-separating whitespace
+ * after the first marker. A blockquote marker consumes exactly one
+ * optional separator character, so the run `rest` measures is exactly the
+ * content indent CommonMark's ≤3-space fence-indent rule applies to. */
+function containerScan(line: string): { leadIndent: number; deep: boolean; prefix: string; rest: string } {
   let index = 0;
   const tokens: string[] = [];
-  let deepIndent = false;
-  let runSpaces = 0;
+  let deep = false;
+  let leadIndent = -1;
   for (;;) {
-    while (index < line.length && (line[index] === " " || line[index] === "\t")) {
-      if (line[index] === "\t") deepIndent = true;
-      else runSpaces += 1;
-      index += 1;
+    const runStart = index;
+    while (index < line.length && (line[index] === " " || line[index] === "\t")) index += 1;
+    const run = line.slice(runStart, index);
+    if (leadIndent < 0) {
+      // Before any marker: this run is the lead indent — or, when the line
+      // ends up having no markers, the top-level indent of the content.
+      if (run.includes("\t")) deep = true;
+      leadIndent = run.includes("\t") ? 4 : run.length;
+    } else if (run.length > 0 && (run.includes("\t") || run.length > 3)) {
+      deep = true;
     }
     if (line[index] === ">") {
       tokens.push(">");
       index += 1;
-      deepIndent = deepIndent || runSpaces > 3;
-      runSpaces = 0;
+      if (line[index] === " " || line[index] === "\t") {
+        if (line[index] === "\t") deep = true;
+        index += 1;
+      }
       continue;
     }
     const list = /^([-+*]|\d{1,9}[.)])[ \t]+/.exec(line.slice(index));
     if (list !== null) {
       tokens.push(list[1]!);
       index += list[0].length;
-      deepIndent = deepIndent || runSpaces > 3;
-      runSpaces = 0;
       continue;
     }
-    // No further marker: `rest` is the content after the last marker, its
-    // leading whitespace run preserved for the ≤3-space closer check. With
-    // no markers at all that run IS the top-level indent, where 4+ spaces
-    // (or a tab) means indented code, never a fence delimiter.
-    return { deepIndent, prefix: tokens.join(" "), rest: line.slice(index - runSpaces) };
+    return { leadIndent, deep, prefix: tokens.join(" "), rest: line.slice(runStart) };
   }
 }
 
 /** Leading whitespace width of `rest`: spaces count 1, a tab counts as a
  * full indent step (4) and is never ≤ 3, matching CommonMark where a tab or
- * 4+ spaces makes the line indented code, never a closing fence. */
+ * 4+ spaces makes the line indented code, never a fence delimiter. */
 function leadingIndent(rest: string): number {
   let indent = 0;
   for (const ch of rest) {
@@ -462,49 +465,111 @@ function leadingIndent(rest: string): number {
  * Fence openers are recognized behind container prefixes too (#1554 review
  * follow-up): `> ```js` opens a fence inside a blockquote and `- ```js`
  * inside a list item, so the scan strips `containerScan` prefixes before
- * matching. Closers are deliberately stricter than openers, because a
- * false closer is the unsafe direction (the scanner would call a fence
- * closed while the renderer keeps it open, letting hostile prose swallow
- * the action-owned blocks after it):
+ * matching. Both directions are indent-disciplined, because each direction
+ * has an unsafe failure mode:
  *
- * - A top-level fence (no markers) closes only on a bare delimiter with at
- *   most 3 leading spaces; a deeper-indented delimiter is indented code
- *   and stays literal fence content.
- * - A blockquote fence closes only on a bare delimiter behind the same
- *   `>` marker sequence. A blockquote has no sibling-container confusion,
- *   so this is exact.
- * - A fence opened inside a list item gets NO closer at all: a same-marker
- *   delimiter at column 0 is a NEW sibling list item's opener in
- *   CommonMark, not this fence's closer, and telling the two apart needs
- *   the full list-item indent model. The scan instead stays open — the
- *   uncertain state trims back to the opener (over-trim, disclosed), never
- *   leaves hostile prose inside a live fence. */
+ * - A false OPENER makes the next real delimiter line close a phantom
+ *   fence, so the scan would call closed what the renderer keeps open. A
+ *   delimiter indented more than 3 spaces (or past a tab) is indented code
+ *   in CommonMark — never a fence at top level or in a blockquote — so an
+ *   opener requires `leadIndent ≤ 3`.
+ * - A false CLOSER hides a live fence behind a "closed" verdict. A fence
+ *   therefore closes only on a bare delimiter behind the same marker
+ *   prefix, indented within 3 spaces of the container markers and never
+ *   LESS indented (before the markers) than the opener itself: an opener
+ *   with a positive indent may live in a container inherited from an
+ *   earlier line (a list-item continuation), where a flush-left delimiter
+ *   is a NEW fence's opener, never this fence's closer.
+ * - Container intactness: a container can END in the middle of what the
+ *   scan models as one fence (a blockquote ends at the first line without
+ *   a legal `>` continuation — blank lines included; a list-item
+ *   continuation fence ends at the first non-blank line less indented
+ *   than the opener). After that, any later delimiter line is a NEW
+ *   opener in the renderer, so the scan stops trusting closers and stays
+ *   open from the original opener — the uncertain state trims back to the
+ *   opener (over-trim, disclosed) and the kept prose can never end inside
+ *   a live fence.
+ * - A fence whose opener line carries a list marker gets NO closer at all:
+ *   a same-marker delimiter at column 0 is a sibling list item's opener,
+ *   and telling it from a real closer needs the full list-item indent
+ *   model. It stays open — over-trim, never under-trim.
+ * - Residual infidelity, closed the same way: a list item's content indent
+ *   is unbounded, so after any list-marker line a delimiter at ANY indent
+ *   could be a fence inside that item. The scan opens such a delimiter as
+ *   a never-closable fence — the prose after it trims back to it instead
+ *   of risking a live fence. */
 function unclosedFenceStart(text: string): number {
-  let open: { char: "`" | "~"; run: number; start: number; prefix: string } | null = null;
+  let open: {
+    char: "`" | "~";
+    run: number;
+    start: number;
+    prefix: string;
+    leadIndent: number;
+    closable: boolean;
+  } | null = null;
+  let listSeen = false;
   let offset = 0;
   for (const line of text.split("\n")) {
     const start = offset;
     offset += line.length + 1;
-    const { deepIndent, prefix, rest } = containerScan(line);
+    const { leadIndent, deep, prefix, rest } = containerScan(line);
+    if (/[-+*\d]/.test(prefix)) listSeen = true;
+    const delimiter = fenceDelimiterLine(rest);
+    const openerShape =
+      delimiter !== null && !(delimiter.char === "`" && delimiter.info.includes("`"));
     if (open === null) {
-      const delimiter = fenceDelimiterLine(rest);
-      if (delimiter !== null && !(delimiter.char === "`" && delimiter.info.includes("`"))) {
-        open = { char: delimiter.char, run: delimiter.run, start, prefix };
+      if (openerShape && leadIndent <= 3) {
+        open = {
+          char: delimiter!.char,
+          run: delimiter!.run,
+          start,
+          prefix,
+          leadIndent,
+          closable: !/[-+*\d]/.test(prefix),
+        };
+      } else if (openerShape && listSeen) {
+        open = {
+          char: delimiter!.char,
+          run: delimiter!.run,
+          start,
+          prefix,
+          leadIndent,
+          closable: false,
+        };
       }
-    } else if (
-      !/[-+*\d]/.test(open.prefix)
-      && prefix === open.prefix
-      && !deepIndent
-      && leadingIndent(rest) <= 3
-    ) {
-      const delimiter = fenceDelimiterLine(rest);
-      if (
-        delimiter !== null
-        && delimiter.char === open.char
-        && delimiter.run >= open.run
-        && delimiter.info === ""
-      ) {
-        open = null;
+    } else if (open !== null && open.closable) {
+      const current: NonNullable<typeof open> = open;
+      const blank = line.trim() === "";
+      let intact: boolean;
+      if (current.prefix === "") {
+        // Top-level or list-item fence: a blank line stays fence content
+        // under every reading; a non-blank line less indented than the
+        // opener ends the list-item container (and is literal fence
+        // content in the top-level reading) — either way, closers stop
+        // being trustworthy from here on.
+        intact = blank || leadIndent >= current.leadIndent;
+      } else {
+        // Blockquote fence: every line — blank ones included — must carry
+        // a legally indented `>` continuation, or the blockquote (and the
+        // fence inside it) has ended.
+        intact = !blank && prefix.startsWith(">") && leadIndent <= 3 && !deep;
+      }
+      if (intact) {
+        const closer =
+          leadIndent >= current.leadIndent && leadingIndent(rest) <= 3
+            ? fenceDelimiterLine(rest)
+            : null;
+        if (
+          closer !== null
+          && prefix === current.prefix
+          && closer.char === current.char
+          && closer.run >= current.run
+          && closer.info === ""
+        ) {
+          open = null;
+        }
+      } else {
+        open = { ...current, closable: false };
       }
     }
   }
