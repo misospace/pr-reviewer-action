@@ -119,6 +119,79 @@ function knotBase(ctx: TangledContext): { base: string; origin: string } | null 
   return { base, origin: base };
 }
 
+/** One listed record: the parsed AT-URI identity plus the record value. The
+ * `uri` is the canonical `at://did/collection/rkey` form rebuilt from the
+ * parsed record uri, so every consumer matches against the same shape. */
+interface ListedRecord {
+  uri: string;
+  cid: string | undefined;
+  value: Record<string, unknown>;
+  rkey: string;
+}
+
+/** Bounded listRecords read of one collection; null on any failure. The
+ * single pagination+parse loop behind every knot read in this module: page
+ * cap, per-item fail-closed validation, and repository binding live here
+ * once so the public readers cannot drift. */
+async function listCollectionRecords(
+  ctx: TangledContext,
+  collection: string,
+  options?: ReadTangledCurrentHeadOptions,
+): Promise<ListedRecord[] | null> {
+  try {
+    const knot = knotBase(ctx);
+    const repoDid = ctx.repoDid;
+    if (knot === null || repoDid === undefined || repoDid.trim() === "") return null;
+    const items: ListedRecord[] = [];
+    let cursor: string | undefined;
+    for (let page = 1; ; page += 1) {
+      if (page > MAX_PAGES) return null;
+      const u = new URL(`${knot.base}/xrpc/${XRPC_LIST_RECORDS}`);
+      u.searchParams.set("repo", repoDid.trim());
+      u.searchParams.set("collection", collection);
+      u.searchParams.set("limit", String(PAGE_LIMIT));
+      if (cursor !== undefined) u.searchParams.set("cursor", cursor);
+      const result = await requestJson(u.toString(), {
+        allowedOrigin: knot.origin,
+        fetchImpl: options?.fetchImpl,
+        timeoutMs: options?.timeoutMs,
+      });
+      if (result.status < 200 || result.status >= 300) return null;
+      const resp = asRecord(result.data);
+      if (resp === undefined || !Array.isArray(resp.records)) return null;
+      for (const raw of resp.records) {
+        const item = asRecord(raw);
+        if (item === undefined) return null;
+        const uri = str(item.uri);
+        const value = asRecord(item.value);
+        if (uri === undefined || uri === "" || value === undefined) return null;
+        try {
+          const parsed = parseTangledAtUri(uri);
+          if (parsed.collection !== collection) return null;
+          // Repository binding: the record must live in the requested
+          // repository's account, not another repo's (a malformed response
+          // must not supply a foreign record).
+          if (parsed.did !== repoDid.trim()) return null;
+          items.push({
+            uri: `at://${parsed.did}/${parsed.collection}/${parsed.rkey}`,
+            cid: str(item.cid),
+            value,
+            rkey: parsed.rkey,
+          });
+        } catch {
+          return null;
+        }
+      }
+      const nextCursor = str(resp.cursor);
+      if (nextCursor === undefined || nextCursor === "") break;
+      cursor = nextCursor;
+    }
+    return items;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Resolve the ticket identity (`org.tangled.track.ticket` rkey + URI) that
  * patch records are keyed by. Production pull resolution yields the legacy
@@ -136,51 +209,15 @@ export async function resolveTangledTicketIdentity(
   options?: ReadTangledCurrentHeadOptions,
 ): Promise<{ rkey: string; uri: string } | null> {
   try {
-    const repoDid = ctx.repoDid;
-    if (repoDid === undefined || repoDid.trim() === "") return null;
-    const knot = knotBase(ctx);
-    if (knot === null) return null;
+    const tickets = await listCollectionRecords(ctx, TANGLED_TICKET_COLLECTION, options);
+    if (tickets === null) return null;
     const matches: Array<{ rkey: string; uri: string }> = [];
-    let cursor: string | undefined;
-    for (let page = 1; ; page += 1) {
-      if (page > MAX_PAGES) return null;
-      const u = new URL(`${knot.base}/xrpc/${XRPC_LIST_RECORDS}`);
-      u.searchParams.set("repo", repoDid.trim());
-      u.searchParams.set("collection", TANGLED_TICKET_COLLECTION);
-      u.searchParams.set("limit", String(PAGE_LIMIT));
-      if (cursor !== undefined) u.searchParams.set("cursor", cursor);
-      const result = await requestJson(u.toString(), {
-        allowedOrigin: knot.origin,
-        fetchImpl: options?.fetchImpl,
-        timeoutMs: options?.timeoutMs,
-      });
-      if (result.status < 200 || result.status >= 300) return null;
-      const resp = asRecord(result.data);
-      if (resp === undefined || !Array.isArray(resp.records)) return null;
-      for (const raw of resp.records) {
-        const item = asRecord(raw);
-        if (item === undefined) return null;
-        const uri = str(item.uri);
-        const value = asRecord(item.value);
-        if (uri === undefined || uri === "" || value === undefined) return null;
-        let parsed: ReturnType<typeof parseTangledAtUri>;
-        try {
-          parsed = parseTangledAtUri(uri);
-        } catch {
-          return null;
-        }
-        if (parsed.collection !== TANGLED_TICKET_COLLECTION) return null;
-        if (parsed.did !== repoDid.trim()) return null;
-        const state = str(value.state);
-        const targetBranch = str(value.targetBranch);
-        if (state !== "open") continue;
-        if (ctx.targetBranch !== undefined && targetBranch !== ctx.targetBranch) continue;
-        const entry = { rkey: parsed.rkey, uri: `at://${parsed.did}/${parsed.collection}/${parsed.rkey}` };
-        if (!matches.some((m) => m.uri === entry.uri)) matches.push(entry);
-      }
-      const nextCursor = str(resp.cursor);
-      if (nextCursor === undefined || nextCursor === "") break;
-      cursor = nextCursor;
+    for (const ticket of tickets) {
+      const state = str(ticket.value.state);
+      if (state !== "open") continue;
+      if (ctx.targetBranch !== undefined && str(ticket.value.targetBranch) !== ctx.targetBranch) continue;
+      const entry = { rkey: ticket.rkey, uri: ticket.uri };
+      if (!matches.some((m) => m.uri === entry.uri)) matches.push(entry);
     }
     return matches.length === 1 ? (matches[0] ?? null) : null;
   } catch {
@@ -198,161 +235,9 @@ export async function readTangledCurrentHead(
   options?: ReadTangledCurrentHeadOptions,
 ): Promise<string | null> {
   try {
-    const knotHost = ctx.knotHost;
-    const repoDid = ctx.repoDid;
-    if (knotHost === undefined || knotHost.trim() === "") return null;
-    if (repoDid === undefined || repoDid.trim() === "") return null;
-
-    const host = knotHost.trim().toLowerCase();
-    const scheme = LOOPBACK_HOSTS.has(host) ? "http" : "https";
-    const base = `${scheme}://${host}`;
-    const origin = base;
-
-    const items: TangledPatchRecordItem[] = [];
-    let cursor: string | undefined;
-    for (let page = 1; ; page += 1) {
-      if (page > MAX_PAGES) return null;
-      const u = new URL(`${base}/xrpc/${XRPC_LIST_RECORDS}`);
-      u.searchParams.set("repo", repoDid.trim());
-      u.searchParams.set("collection", TANGLED_PATCH_COLLECTION);
-      u.searchParams.set("limit", String(PAGE_LIMIT));
-      if (cursor !== undefined) u.searchParams.set("cursor", cursor);
-      const result = await requestJson(u.toString(), {
-        allowedOrigin: origin,
-        fetchImpl: options?.fetchImpl,
-        timeoutMs: options?.timeoutMs,
-      });
-      if (result.status < 200 || result.status >= 300) return null;
-      const resp = asRecord(result.data);
-      if (resp === undefined) return null;
-      const records = resp.records;
-      if (!Array.isArray(records)) return null;
-      for (const raw of records) {
-        const item = asRecord(raw);
-        if (item === undefined) return null;
-        const uri = str(item.uri);
-        const value = asRecord(item.value);
-        if (uri === undefined || uri === "" || value === undefined) return null;
-        try {
-          const parsed = parseTangledAtUri(uri);
-          if (parsed.collection !== TANGLED_PATCH_COLLECTION) return null;
-          // Repository binding: the patch must live in the requested
-          // repository's account, not another repo's (a malformed response
-          // must not supply a foreign patch).
-          if (parsed.did !== repoDid.trim()) return null;
-        } catch {
-          return null;
-        }
-        items.push({ uri, cid: str(item.cid), value });
-      }
-      const nextCursor = str(resp.cursor);
-      if (nextCursor === undefined || nextCursor === "") break;
-      cursor = nextCursor;
-    }
+    const items = await listCollectionRecords(ctx, TANGLED_PATCH_COLLECTION, options);
+    if (items === null) return null;
     return selectNewestPatchHead(items, identity.rkey, identity.uri, ctx.sourceBranch);
-  } catch {
-    return null;
-  }
-}
-
-/** Bounded listRecords read of the patch collection; null on any failure. */
-async function listPatchItems(
-  ctx: TangledContext,
-  options?: ReadTangledCurrentHeadOptions,
-): Promise<TangledPatchRecordItem[] | null> {
-  try {
-    const knot = knotBase(ctx);
-    const repoDid = ctx.repoDid;
-    if (knot === null || repoDid === undefined || repoDid.trim() === "") return null;
-    const items: TangledPatchRecordItem[] = [];
-    let cursor: string | undefined;
-    for (let page = 1; ; page += 1) {
-      if (page > MAX_PAGES) return null;
-      const u = new URL(`${knot.base}/xrpc/${XRPC_LIST_RECORDS}`);
-      u.searchParams.set("repo", repoDid.trim());
-      u.searchParams.set("collection", TANGLED_PATCH_COLLECTION);
-      u.searchParams.set("limit", String(PAGE_LIMIT));
-      if (cursor !== undefined) u.searchParams.set("cursor", cursor);
-      const result = await requestJson(u.toString(), {
-        allowedOrigin: knot.origin,
-        fetchImpl: options?.fetchImpl,
-        timeoutMs: options?.timeoutMs,
-      });
-      if (result.status < 200 || result.status >= 300) return null;
-      const resp = asRecord(result.data);
-      if (resp === undefined || !Array.isArray(resp.records)) return null;
-      for (const raw of resp.records) {
-        const item = asRecord(raw);
-        if (item === undefined) return null;
-        const uri = str(item.uri);
-        const value = asRecord(item.value);
-        if (uri === undefined || uri === "" || value === undefined) return null;
-        try {
-          const parsed = parseTangledAtUri(uri);
-          if (parsed.collection !== TANGLED_PATCH_COLLECTION) return null;
-          if (parsed.did !== repoDid.trim()) return null;
-        } catch {
-          return null;
-        }
-        items.push({ uri, cid: str(item.cid), value });
-      }
-      const nextCursor = str(resp.cursor);
-      if (nextCursor === undefined || nextCursor === "") break;
-      cursor = nextCursor;
-    }
-    return items;
-  } catch {
-    return null;
-  }
-}
-
-/** Bounded listRecords read of ticket records; null on any failure. */
-async function listTicketItems(
-  ctx: TangledContext,
-  options?: ReadTangledCurrentHeadOptions,
-): Promise<Array<{ rkey: string; uri: string; value: Record<string, unknown> }> | null> {
-  try {
-    const knot = knotBase(ctx);
-    const repoDid = ctx.repoDid;
-    if (knot === null || repoDid === undefined || repoDid.trim() === "") return null;
-    const items: Array<{ rkey: string; uri: string; value: Record<string, unknown> }> = [];
-    let cursor: string | undefined;
-    for (let page = 1; ; page += 1) {
-      if (page > MAX_PAGES) return null;
-      const u = new URL(`${knot.base}/xrpc/${XRPC_LIST_RECORDS}`);
-      u.searchParams.set("repo", repoDid.trim());
-      u.searchParams.set("collection", TANGLED_TICKET_COLLECTION);
-      u.searchParams.set("limit", String(PAGE_LIMIT));
-      if (cursor !== undefined) u.searchParams.set("cursor", cursor);
-      const result = await requestJson(u.toString(), {
-        allowedOrigin: knot.origin,
-        fetchImpl: options?.fetchImpl,
-        timeoutMs: options?.timeoutMs,
-      });
-      if (result.status < 200 || result.status >= 300) return null;
-      const resp = asRecord(result.data);
-      if (resp === undefined || !Array.isArray(resp.records)) return null;
-      for (const raw of resp.records) {
-        const item = asRecord(raw);
-        if (item === undefined) return null;
-        const uri = str(item.uri);
-        const value = asRecord(item.value);
-        if (uri === undefined || uri === "" || value === undefined) return null;
-        let parsed: ReturnType<typeof parseTangledAtUri>;
-        try {
-          parsed = parseTangledAtUri(uri);
-        } catch {
-          return null;
-        }
-        if (parsed.collection !== TANGLED_TICKET_COLLECTION) return null;
-        if (parsed.did !== repoDid.trim()) return null;
-        items.push({ rkey: parsed.rkey, uri: `at://${parsed.did}/${parsed.collection}/${parsed.rkey}`, value });
-      }
-      const nextCursor = str(resp.cursor);
-      if (nextCursor === undefined || nextCursor === "") break;
-      cursor = nextCursor;
-    }
-    return items;
   } catch {
     return null;
   }
@@ -392,9 +277,9 @@ export async function readTangledCurrentHeadForContext(
   ctx: TangledContext,
   options?: ReadTangledCurrentHeadOptions,
 ): Promise<string | null> {
-  const tickets = await listTicketItems(ctx, options);
+  const tickets = await listCollectionRecords(ctx, TANGLED_TICKET_COLLECTION, options);
   if (tickets === null) return null;
-  const items = await listPatchItems(ctx, options);
+  const items = await listCollectionRecords(ctx, TANGLED_PATCH_COLLECTION, options);
   if (items === null) return null;
   const candidates = tickets.filter((t) => {
     if (str(t.value.state) !== "open") return false;
