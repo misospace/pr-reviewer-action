@@ -1332,8 +1332,8 @@ function derivedEvidenceRow(row: DerivedObligationRow): string {
  * those rows do.
  *
  * A row with NO usable anchor contributes no admission row: it has no
- * vocabulary to admit a call by (it still forces the verdict while
- * unresolved).
+ * vocabulary to admit a call by (an unmet row still forces the verdict;
+ * an unresolved row is coverage, never a block).
  */
 export function derivedAdmissionRows(rows: readonly DerivedObligationRow[]): RequiredEvidenceRow[] {
   const admission: RequiredEvidenceRow[] = [];

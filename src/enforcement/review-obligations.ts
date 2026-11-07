@@ -44,12 +44,15 @@
  * matches and it carries the rationale its source contract requires (see
  * `foldObligationDispositions`); whether a rationale is semantically
  * grounded is judged elsewhere (eval corpus / review readers).
- * The hard-force gate fires for ANY unresolved FORCING row — the
- * `must_check` and `trusted_base_guidance` sources are review-owned required
- * checks the reviewer was expected and equipped to perform, so those two
- * never carry different approval semantics (#1381 review); the strict
- * mapping's anti-relaxation signal remains as the standalone guard for
- * direct callers.
+ * The hard-force gate fires only for an `unmet` (confirmed-negative)
+ * FORCING row (#1505, status-based): the `must_check` and
+ * `trusted_base_guidance` sources are review-owned required checks the
+ * reviewer was expected and equipped to perform, so those two never carry
+ * different approval semantics (#1381 review) — but an `unresolved` row is
+ * incomplete coverage, never a defect: it withholds the trusted approve
+ * at the publish boundary and marks the review partial instead of forcing
+ * a block. The strict mapping's anti-relaxation signal remains as the
+ * standalone guard for direct callers.
  */
 import type { ReviewArtifact } from "./artifact.js";
 import { forceRequestChanges } from "./enforce.js";
@@ -231,7 +234,7 @@ export function sharedAdmissionTokens(text: string): string[] | null {
  * history archaeology. `null` when the row names no reviewer-gatherable
  * surface at all — generic checklist prose like "verify correctness
  * carefully" cannot be targeted by any specific call, so it must never gate
- * admission (it still forces the verdict while unresolved). */
+ * admission (an unmet row still forces the verdict; an unresolved row is coverage, never a block). */
 export function obligationAdmissionTokens(text: string): string[] | null {
   if (!REVIEWER_GATHERABLE_CUE.test(text)) return null;
   return sharedAdmissionTokens(text);
@@ -278,7 +281,7 @@ function pathSegmentStem(segment: string): string {
  *
  * `null` when the row has no usable anchor: a row that names no location
  * has no vocabulary to admit a call by, so it must never gate the reserved
- * window (it still forces the verdict while unresolved).
+ * window (an unmet row still forces the verdict; an unresolved row is coverage, never a block).
  */
 export function anchorAdmissionTokens(anchors: readonly string[]): string[] | null {
   const tokens = new Set<string>();

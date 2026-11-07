@@ -499,7 +499,9 @@ test("#1388: resolveReviewObligations stamps a cause on unresolved rows only —
     };
     const logLines: string[] = [];
     const result = await runReviewEngine(request(server.url, f.runDir), { ...engineDeps(f.root, f.runDir, { adapter }), quiet: false, log: (line) => logLines.push(line) });
-    // Both the unmet row and the undisposed row are forcing: no model approve.
+    // The unmet row forces request_changes (a confirmed negative); the
+    // undisposed rows are unresolved COVERAGE (#1505) — they withhold the
+    // trusted approve but do not force the block themselves.
     assert.equal(result.outputs.verdict, "request_changes");
     const persisted = JSON.parse(readFileSync(join(f.runDir, "review-obligations.json"), "utf8")) as {
       obligations: Array<{ id: string; source: string; text: string; status: string; cause: string | null }>;
