@@ -2376,13 +2376,35 @@ export interface TraceGapContinuationSummary {
  * would cycle. */
 export interface RequirementTraceRepairOutcome {
   attempted: boolean;
-  outcome: "no_missing_ids" | "skipped_by_gate" | "no_claims" | "errored" | "timeout" | "merged";
+  /** #1504: `suppressed_native_loop` records the documented no-op — the
+   * native loop's own trace-only repair already merged parseable claims into
+   * this artifact, so the standalone pass must not fire merely because some
+   * rows remain unresolved. */
+  outcome: "no_missing_ids" | "skipped_by_gate" | "suppressed_native_loop" | "no_claims" | "errored" | "timeout" | "merged";
   missing_ids: string[];
   claims: number;
   status?: string;
   error_kind?: string | null;
   error?: string | null;
   diff_clipped?: boolean;
+  /** #1504: the tier whose profile the repair used (or would have used) —
+   * `primary` | `fallback` | `smart`. The repair lane is the tier that
+   * produced the authoritative accepted review artifact, never a lane already
+   * known terminal for the run; recorded on every outcome so a wrong-lane
+   * routing cannot regress invisibly. Enum-validated, never provider text. */
+  route?: string;
+  /** #1504: why the standalone pass was invoked or suppressed —
+   * `no_native_loop_repair` (tools-off / no native-loop repair attempt for
+   * this artifact), `native_loop_no_trace_claims` (the loop's repair produced
+   * no mergeable trace claims), or `native_loop_repair_merged_claims`
+   * (suppressed). Enum-validated, never provider text. */
+  invocation_reason?: string;
+  /** #1504: the first attempt's serialization-failure class when the single
+   * bounded retry fired — `empty` (HTTP success, no extractable content) or
+   * `malformed` (unparsable JSON/shape); null when no retry was needed. */
+  first_failure_class?: string | null;
+  /** #1504: whether the one bounded serialization retry was used. */
+  serialization_retry?: boolean;
   /** #1145: present when the native loop's own continuation ran or was
    * skipped (absent for runs where no probe fired at all). */
   continuation?: TraceGapContinuationSummary;
