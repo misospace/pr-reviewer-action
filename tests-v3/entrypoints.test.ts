@@ -298,6 +298,7 @@ function writeCoverageArtifact(dir: string, overrides: Partial<{
   route: string;
   partial_coverage: unknown;
   required_checks: string | undefined;
+  required_check_fold_status: string | undefined;
   incomplete_reason: string;
 }> = {}): void {
   const artifact = {
@@ -307,6 +308,7 @@ function writeCoverageArtifact(dir: string, overrides: Partial<{
     route: "primary",
     partial_coverage: null,
     required_checks: "complete",
+    required_check_fold_status: "complete",
     ...overrides,
   };
   writeFileSync(join(dir, "review-coverage.json"), JSON.stringify(artifact));
@@ -1306,7 +1308,7 @@ test("#1537: an absent, empty, or malformed trace artifact publishes no requirem
 test("#1537: required-check ids are recomputed from the run's own fold inputs", () => {
   withRunDir((dir) => {
     writeEngineRecord(dir);
-    writeCoverageArtifact(dir, { required_checks: "incomplete" });
+    writeCoverageArtifact(dir, { required_checks: "incomplete", required_check_fold_status: "incomplete" });
     writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path", "Check the rollback story"] }));
     // No dispositions at all: the fold conservatively leaves every check
     // unresolved (the same #750 the engine ran).
@@ -1339,12 +1341,21 @@ test("#1537: required-check ids are recomputed only when the fold itself was inc
     writeCoverageArtifact(dir, { required_checks: "incomplete", incomplete_reason: "requirement_trace" });
     assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
     // An unreadable fold input cannot be recomputed: absent, never guessed.
-    writeCoverageArtifact(dir, { required_checks: "incomplete" });
+    writeCoverageArtifact(dir, { required_checks: "incomplete", required_check_fold_status: "incomplete" });
     rmSync(join(dir, "classification.json"));
     assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
-    // An unrecognizable coverage status likewise.
+    // An unrecognizable recorded fold status is never half-trusted: with the
+    // published dimension also unrecognizable (a pre-#1543 artifact would
+    // fail its own heuristic too), nothing recomputes.
     writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path"] }));
-    writeCoverageArtifact(dir, { required_checks: "yes-very-incomplete" });
+    writeCoverageArtifact(dir, { required_checks: "yes-very-incomplete", required_check_fold_status: "yes-very-incomplete" });
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
+    // A run dir predating #1543 carries no fold-status field: the recorded-
+    // dimension inference still decides (incomplete names, trace-only does
+    // not), so the pre-existing artifacts keep their #1537 behavior.
+    writeCoverageArtifact(dir, { required_checks: "incomplete", required_check_fold_status: undefined });
+    assert.deepEqual(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, ["Check the auth path"]);
+    writeCoverageArtifact(dir, { required_checks: "incomplete", incomplete_reason: "requirement_trace", required_check_fold_status: undefined });
     assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
   });
 });
@@ -1393,23 +1404,41 @@ test("#1537: no run dir (or no engine record) means no merge-gating state", () =
   });
 });
 
-test("#1537: the recorded opt-out fold state cannot be detected, so the recompute stands (follow-up #1543)", () => {
+test("#1543: the recorded fold status stops the recompute for a fold that never gated", () => {
   withRunDir((dir) => {
     writeEngineRecord(dir);
-    // An operator's `validate-required-checks: false` is recorded in NO
-    // artifact, and a trace flip plus a tool-loop gap makes the recorded
-    // reason `both`, so this ambiguous state cannot be distinguished from a
-    // genuinely incomplete fold. The read-back recomputes from the run's own
-    // fold inputs; #1543 tracks recording the fold's status so it can stop
-    // naming `must_check` items the opt-out fold never gated.
+    // The review finding's exact state: an operator's
+    // `validate-required-checks: false` (fold status `none`), a #874 trace
+    // flip that made the published dimension `incomplete`, and a tool-loop
+    // gap that made the recorded reason `both`. The fold named nothing in
+    // memory, so the standalone handoff names nothing either — the recorded
+    // fold status, not the published dimension, decides.
     writeCoverageArtifact(dir, {
       required_checks: "incomplete",
+      required_check_fold_status: "none",
       incomplete_reason: "both",
       partial_coverage: PARTIAL_COVERAGE,
     });
     writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path"] }));
     writeFileSync(join(dir, "ai-output.json"), JSON.stringify({ verdict: "request_changes" }));
     const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
-    assert.deepEqual(input.unresolvedRequiredChecks, ["Check the auth path"]);
+    assert.equal(input.unresolvedRequiredChecks, undefined);
+    // A recorded `complete` likewise outranks an ambiguous published
+    // dimension: the fold ran clean, so no ids existed to name.
+    writeCoverageArtifact(dir, {
+      required_checks: "incomplete",
+      required_check_fold_status: "complete",
+      incomplete_reason: "execution",
+      partial_coverage: PARTIAL_COVERAGE,
+    });
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
+    // A recorded `incomplete` is the ONE status that recomputes.
+    writeCoverageArtifact(dir, {
+      required_checks: "incomplete",
+      required_check_fold_status: "incomplete",
+      incomplete_reason: "both",
+      partial_coverage: PARTIAL_COVERAGE,
+    });
+    assert.deepEqual(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, ["Check the auth path"]);
   });
 });
