@@ -328,7 +328,14 @@ export interface ReviewBundle {
 
 /** Fail-closed parse of a bundle document: exact schema string, closed
  * state vocabulary, and required field types, or null. A consumer of the
- * `review-bundle` output must treat anything this refuses as absent. */
+ * `review-bundle` output must treat anything this refuses as absent.
+ *
+ * #1542: the findings counters are cross-checked against the findings list
+ * they carry. A document that lists more findings than it counts, that
+ * claims no truncation while its total disagrees with the list, or that
+ * claims a truncation while its total matches the list, contradicts itself
+ * and is refused. The published handoff refuses the same contradictions for
+ * its id lists (#1538) and the first two for its item counters. */
 export function parseReviewBundle(text: string): ReviewBundle | null {
   let value: unknown;
   try {
@@ -363,7 +370,29 @@ export function parseReviewBundle(text: string): ReviewBundle | null {
   if (record.findings !== undefined) {
     if (!reviewProducing) return null;
     if (!Array.isArray(record.findings)) return null;
-    if (typeof record.findings_total !== "number" || typeof record.findings_truncated !== "boolean") return null;
+    // #1542: the two counters are a count and a flag, so both must be
+    // there and the count must be a whole number.
+    if (typeof record.findings_total !== "number" || !Number.isInteger(record.findings_total)) return null;
+    if (typeof record.findings_truncated !== "boolean") return null;
+    const findings = record.findings;
+    const total = record.findings_total;
+    const truncated = record.findings_truncated;
+    // #1542: the counters must agree with the list they describe. A
+    // document that lists more findings than it counts, that claims no
+    // truncation while its total disagrees with the list it carries, or
+    // that claims a truncation while its total matches the list exactly,
+    // contradicts itself and is refused. The published handoff refuses the
+    // same contradictions for its id lists (#1538) and the first two for
+    // its item counters.
+    if (total < findings.length) return null;
+    if (truncated === false && total !== findings.length) return null;
+    if (truncated === true && total === findings.length) return null;
+  } else if (record.findings_total !== undefined || record.findings_truncated !== undefined) {
+    // #1542: a counter with no list to check against is a claim the
+    // document cannot back. A skipped or failed run proves no review, and
+    // a review-producing state with no `findings` key proves no findings
+    // list. The counters and the list are one unit.
+    return null;
   }
   // #1518: the merge-gating id lists follow the same presence rule as the
   // findings set — a state that proves no review may not claim unresolved

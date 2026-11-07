@@ -379,6 +379,80 @@ test("#1425: the parser enforces the state-specific key rules too", () => {
   assert.ok(parseReviewBundle(make("complete", { findings: [], findings_total: 0, findings_truncated: false })) !== null);
 });
 
+test("#1542: the parser refuses findings counters that contradict the findings list", () => {
+  const make = (extra: Record<string, unknown>): string => JSON.stringify({
+    schema: REVIEW_BUNDLE_SCHEMA,
+    state: "complete",
+    review_id: "r1",
+    generated_at: "2026-11-02T12:00:00.000Z",
+    repository: "o/r",
+    pr_number: 7,
+    head_sha: "a".repeat(40),
+    base_sha: "b".repeat(40),
+    identity: { diff_fingerprint: "", analysis_engine: "" },
+    ...extra,
+  });
+  const three = [
+    { severity: "info", category: "bug", file: "a.ts", line: 1, message: "one" },
+    { severity: "info", category: "bug", file: "b.ts", line: 2, message: "two" },
+    { severity: "info", category: "bug", file: "c.ts", line: 3, message: "three" },
+  ];
+
+  // A document that lists three findings while it counts zero contradicts
+  // itself: a consumer would read the listed set as the whole set.
+  assert.equal(parseReviewBundle(make({ findings: three, findings_total: 0, findings_truncated: false })), null);
+  // The same contradiction with a count above the list.
+  assert.equal(parseReviewBundle(make({ findings: three, findings_total: 1, findings_truncated: false })), null);
+  // A document that claims no truncation while its total disagrees with the
+  // list it carries contradicts itself.
+  assert.equal(parseReviewBundle(make({ findings: three, findings_total: 5, findings_truncated: false })), null);
+  // A document that claims a truncation while its total matches the list
+  // exactly contradicts itself too: nothing was omitted.
+  assert.equal(parseReviewBundle(make({ findings: three, findings_total: 3, findings_truncated: true })), null);
+  assert.equal(parseReviewBundle(make({ findings: [], findings_total: 0, findings_truncated: true })), null);
+  // A count that is not a count. The type pin predates this change; it stays
+  // pinned here so the cross-check never weakens it.
+  assert.equal(parseReviewBundle(make({ findings: three, findings_total: 3.5, findings_truncated: false })), null);
+  assert.equal(parseReviewBundle(make({ findings: three, findings_total: "3", findings_truncated: false })), null);
+  // A counter with no list to check against: the counters and the list are
+  // one unit, so a count alone is refused.
+  assert.equal(parseReviewBundle(make({ findings_total: 3, findings_truncated: false })), null);
+  assert.equal(parseReviewBundle(make({ findings_truncated: false })), null);
+  // A skipped run proves no review, so it may not carry the counters. A
+  // failed run proves no review either.
+  assert.equal(parseReviewBundle(make({
+    state: "skipped", skip_reason: "already-reviewed", findings_total: 0, findings_truncated: false,
+  })), null);
+  assert.equal(parseReviewBundle(make({
+    state: "failed", failure_reason: "boom", findings_total: 0, findings_truncated: false,
+  })), null);
+
+  // The honest shapes still parse: the whole list with no truncation, an
+  // empty list, and a disclosed prefix with a larger total.
+  assert.ok(parseReviewBundle(make({ findings: three, findings_total: 3, findings_truncated: false })) !== null);
+  assert.ok(parseReviewBundle(make({ findings: [], findings_total: 0, findings_truncated: false })) !== null);
+  assert.ok(parseReviewBundle(make({ findings: three, findings_total: 9, findings_truncated: true })) !== null);
+});
+
+test("#1542: the builder's own document always satisfies the counter cross-check", () => {
+  // The builder is honest by construction: `findings_total` counts the
+  // candidates, `findings_truncated` says whether the listing dropped one,
+  // and the parser's cross-check must never refuse what the builder wrote.
+  const many = Array.from({ length: REVIEW_BUNDLE_MAX_FINDINGS + 50 }, (_, i) => ({
+    severity: "info", category: "style", file: `src/f${i}.ts`, line: i, message: `finding ${i}`,
+  }));
+  for (const findings of [[], many, [{ severity: "info", category: "bug", file: "a.ts", line: 1, message: "one" }]]) {
+    const doc = parseReviewBundle(buildReviewBundle(baseInput({ findings })));
+    assert.ok(doc !== null, "the builder must not write a document its own parser refuses");
+    const listed = (doc!.findings as unknown[]).length;
+    if (doc!.findings_truncated) {
+      assert.ok(doc!.findings_total! > listed, "a disclosed omission is counted");
+    } else {
+      assert.equal(doc!.findings_total, listed, "no truncation means the whole list");
+    }
+  }
+});
+
 // ── Integration: the real action entry emits exactly one bundle per run ──
 
 function verdictBody(findings: unknown[], extra: Record<string, unknown> = {}): string {
