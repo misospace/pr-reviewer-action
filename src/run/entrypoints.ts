@@ -427,12 +427,16 @@ function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undef
  *   `none` there while the trace pass still flips the published
  *   `required_checks` dimension) publishes nothing instead of naming
  *   `must_check` items the fold never gated. A run dir written before the
- *   field existed falls back to the recorded-dimension inference —
- *   `required_checks: "incomplete"` for a reason that is not solely
- *   `requirement_trace` (a trace-only flip means the fold itself was clean,
- *   since the execution reasons include its incompleteness) — the same rule
- *   the recomputation shipped with, kept only for artifacts that cannot
- *   carry recorded truth.
+ *   field existed — the field ABSENT — falls back to the recorded-dimension
+ *   inference: `required_checks: "incomplete"` for a reason that is not
+ *   solely `requirement_trace` (a trace-only flip means the fold itself was
+ *   clean, since the execution reasons include its incompleteness) — the
+ *   same rule the recomputation shipped with, kept only for artifacts that
+ *   cannot carry recorded truth. A PRESENT value outside the status
+ *   vocabulary is never read as that absence: the artifact declares the
+ *   field, so its meaning is unrecognizable rather than historical, and the
+ *   recompute fails closed (nothing is recomputed) instead of falling back
+ *   to an inference the artifact does not actually support.
  *
  * The model-unavailable notice path runs NONE of these folds (#1521): its
  * `request_changes` is the notice's own, and the engine still persisted its
@@ -469,16 +473,21 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
   const incompleteReason = coverageRecord !== null && isIncompleteReason(coverageRecord.incomplete_reason)
     ? coverageRecord.incomplete_reason
     : undefined;
-  // #1543: the fold's OWN recorded status decides whenever it exists (its
-  // value set is exactly the required-check status vocabulary). A recorded
-  // status of `none`/`complete` means the fold named nothing in memory, so
-  // nothing is recomputed even when the #874 trace flip made the published
-  // dimension read `incomplete`. Only a run dir predating the field falls
-  // back to the recorded-dimension inference above.
-  const foldStatus = coverageRecord === null ? undefined : validateRequiredChecks(coverageRecord.required_check_fold_status);
-  const foldWasIncomplete = foldStatus !== undefined
-    ? foldStatus === "incomplete"
-    : requiredChecks === "incomplete" && incompleteReason !== "requirement_trace";
+  // #1543: the fold's OWN recorded status decides whenever the field exists
+  // (its value set is exactly the required-check status vocabulary). A
+  // recorded status of `none`/`complete` means the fold named nothing in
+  // memory, so nothing is recomputed even when the #874 trace flip made the
+  // published dimension read `incomplete`. A recorded value outside that
+  // vocabulary is never half-trusted and never read as the pre-#1543
+  // absence: the field is present, so the artifact declares a fold status
+  // this runtime cannot interpret, and the recompute fails closed instead
+  // of falling back to the dimension inference. Only a run dir predating
+  // the field — the field ABSENT — falls back to the recorded-dimension
+  // inference above.
+  const rawFoldStatus = coverageRecord === null ? undefined : coverageRecord.required_check_fold_status;
+  const foldWasIncomplete = rawFoldStatus === undefined
+    ? requiredChecks === "incomplete" && incompleteReason !== "requirement_trace"
+    : validateRequiredChecks(rawFoldStatus) === "incomplete";
   if (foldWasIncomplete) {
     const classification = readJsonObject(join(runDir, "classification.json"));
     const output = readJsonObject(join(runDir, "ai-output.json"));

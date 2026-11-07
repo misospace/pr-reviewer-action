@@ -733,7 +733,12 @@ const OBLIGATION_CAUSES: ReadonlySet<string> = new Set([
  * guess). A row whose source, status or cause is outside the closed
  * vocabulary refuses the WHOLE artifact — the same rule #1521's handoff
  * parser applies to a published document, so a half-trusted row can never
- * reach the published handoff through this seam.
+ * reach the published handoff through this seam. The same rule covers the
+ * row's SHAPE: `reviewObligationsToArtifact` writes exactly the keys `id`,
+ * `source`, `text`, `status`, `cause` (plus the optional #1449 `anchors`),
+ * and always records `cause` (a vocabulary string, or `null` for a row with
+ * no cause), so a row carrying any other property — or omitting `cause` —
+ * is not a row this runtime wrote and refuses the artifact too.
  *
  * `anchors` round-trips when present (the #1449 derived rows). The publish
  * layer projects rows through `blockingReviewObligations` before rendering,
@@ -748,12 +753,14 @@ export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[
   for (const raw of record.obligations) {
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
     const row = raw as Record<string, unknown>;
+    for (const key of Object.keys(row)) {
+      if (key !== "id" && key !== "source" && key !== "text" && key !== "status" && key !== "cause" && key !== "anchors") return null;
+    }
     if (typeof row.id !== "string" || row.id === "") return null;
     if (typeof row.source !== "string" || !OBLIGATION_SOURCES.has(row.source)) return null;
     if (typeof row.text !== "string") return null;
     if (typeof row.status !== "string" || !OBLIGATION_STATUSES.has(row.status)) return null;
-    if (row.cause !== null && row.cause !== undefined
-      && !(typeof row.cause === "string" && OBLIGATION_CAUSES.has(row.cause))) return null;
+    if (!(row.cause === null || (typeof row.cause === "string" && OBLIGATION_CAUSES.has(row.cause)))) return null;
     if (row.anchors !== undefined
       && !(Array.isArray(row.anchors) && row.anchors.every((anchor) => typeof anchor === "string"))) return null;
     rows.push({
