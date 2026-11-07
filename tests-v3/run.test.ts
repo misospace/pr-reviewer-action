@@ -3268,6 +3268,14 @@ test("a PR whose body keyword-links a fetched issue classifies without crashing"
     const classification = JSON.parse(readFileSync(join(runDir, "classification.json"), "utf8")) as { risk_flags: string[]; linked_issue_labels: string[] };
     assert.deepEqual(classification.linked_issue_labels, ["enhancement", "priority/p1"]);
     assert.deepEqual(classification.risk_flags, ["linked_priority_p1"]);
+    // #1543 writer side: this run mandates must_check items and the scripted
+    // verdict emits no `required_check_dispositions`, so the #750 fold itself
+    // ends `incomplete` (conservative key absence) — and its OWN status is
+    // recorded in the coverage artifact, which is what the standalone
+    // publish read-back (#1537) gates its required-check id recomputation on.
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    const foldCoverage = JSON.parse(readFileSync(join(runDir, "review-coverage.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(foldCoverage.required_check_fold_status, "incomplete");
   } finally {
     await server.close();
     cleanup();
