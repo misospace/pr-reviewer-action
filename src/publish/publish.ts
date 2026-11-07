@@ -388,31 +388,124 @@ function fenceDelimiterLine(line: string): { char: "`" | "~"; run: number; info:
   return { char: match[1]![0] as "`" | "~", run: match[1]!.length, info: match[2]!.trim() };
 }
 
+/** #1554 (review follow-up): the container prefixes a fenced code block can
+ * live behind — blockquote `>` markers and list markers, in any order, each
+ * optionally separated by whitespace. Hostile prose can open a fence from
+ * inside a blockquote (`> ```js`) or a list item (`- ```js`), and a scan
+ * that only recognizes line-start delimiters lets such an opener survive
+ * truncation and swallow the action-owned blocks that follow the prose.
+ *
+ * `prefix` is the normalized marker sequence (markers joined by single
+ * spaces; whitespace amounts between markers collapsed), `rest` is the
+ * content after the last marker INCLUDING its leading whitespace run (the
+ * closer rules measure it), and `deepIndent` says the whitespace run before
+ * the first marker — or a tab anywhere in the leading runs — already
+ * exceeds the 3-space fence-indent limit. Opener recognition is lenient
+ * (it ignores `deepIndent`), which can only make the scanner see MORE
+ * fences than a renderer does — over-trimming, the safe direction; the
+ * closer rules below carry the precision. */
+function containerScan(line: string): { deepIndent: boolean; prefix: string; rest: string } {
+  let index = 0;
+  const tokens: string[] = [];
+  let deepIndent = false;
+  let runSpaces = 0;
+  for (;;) {
+    while (index < line.length && (line[index] === " " || line[index] === "\t")) {
+      if (line[index] === "\t") deepIndent = true;
+      else runSpaces += 1;
+      index += 1;
+    }
+    if (line[index] === ">") {
+      tokens.push(">");
+      index += 1;
+      deepIndent = deepIndent || runSpaces > 3;
+      runSpaces = 0;
+      continue;
+    }
+    const list = /^([-+*]|\d{1,9}[.)])[ \t]+/.exec(line.slice(index));
+    if (list !== null) {
+      tokens.push(list[1]!);
+      index += list[0].length;
+      deepIndent = deepIndent || runSpaces > 3;
+      runSpaces = 0;
+      continue;
+    }
+    // No further marker: `rest` is the content after the last marker, its
+    // leading whitespace run preserved for the ≤3-space closer check. With
+    // no markers at all that run IS the top-level indent, where 4+ spaces
+    // (or a tab) means indented code, never a fence delimiter.
+    return { deepIndent, prefix: tokens.join(" "), rest: line.slice(index - runSpaces) };
+  }
+}
+
+/** Leading whitespace width of `rest`: spaces count 1, a tab counts as a
+ * full indent step (4) and is never ≤ 3, matching CommonMark where a tab or
+ * 4+ spaces makes the line indented code, never a closing fence. */
+function leadingIndent(rest: string): number {
+  let indent = 0;
+  for (const ch of rest) {
+    if (ch === " ") indent += 1;
+    else if (ch === "\t") return indent + 4;
+    else break;
+  }
+  return indent;
+}
+
 /** #1554: the byte offset where an unclosed fenced code block OPENS in
  * `text`, or -1 when every fence the text opens is closed. Single-level
  * fence state (markdown fences do not nest): a delimiter line closes the
  * open fence only when it uses the same character, a run at least as long
  * as the opener's, and no info string. A backtick opener whose info string
  * itself contains a backtick is paragraph text, never a fence (CommonMark),
- * so it cannot open a block a hostile line could then abuse. */
+ * so it cannot open a block a hostile line could then abuse.
+ *
+ * Fence openers are recognized behind container prefixes too (#1554 review
+ * follow-up): `> ```js` opens a fence inside a blockquote and `- ```js`
+ * inside a list item, so the scan strips `containerScan` prefixes before
+ * matching. Closers are deliberately stricter than openers, because a
+ * false closer is the unsafe direction (the scanner would call a fence
+ * closed while the renderer keeps it open, letting hostile prose swallow
+ * the action-owned blocks after it):
+ *
+ * - A top-level fence (no markers) closes only on a bare delimiter with at
+ *   most 3 leading spaces; a deeper-indented delimiter is indented code
+ *   and stays literal fence content.
+ * - A blockquote fence closes only on a bare delimiter behind the same
+ *   `>` marker sequence. A blockquote has no sibling-container confusion,
+ *   so this is exact.
+ * - A fence opened inside a list item gets NO closer at all: a same-marker
+ *   delimiter at column 0 is a NEW sibling list item's opener in
+ *   CommonMark, not this fence's closer, and telling the two apart needs
+ *   the full list-item indent model. The scan instead stays open — the
+ *   uncertain state trims back to the opener (over-trim, disclosed), never
+ *   leaves hostile prose inside a live fence. */
 function unclosedFenceStart(text: string): number {
-  let open: { char: "`" | "~"; run: number; start: number } | null = null;
+  let open: { char: "`" | "~"; run: number; start: number; prefix: string } | null = null;
   let offset = 0;
   for (const line of text.split("\n")) {
     const start = offset;
     offset += line.length + 1;
-    const delimiter = fenceDelimiterLine(line);
+    const { deepIndent, prefix, rest } = containerScan(line);
     if (open === null) {
+      const delimiter = fenceDelimiterLine(rest);
       if (delimiter !== null && !(delimiter.char === "`" && delimiter.info.includes("`"))) {
-        open = { char: delimiter.char, run: delimiter.run, start };
+        open = { char: delimiter.char, run: delimiter.run, start, prefix };
       }
     } else if (
-      delimiter !== null
-      && delimiter.char === open.char
-      && delimiter.run >= open.run
-      && delimiter.info === ""
+      !/[-+*\d]/.test(open.prefix)
+      && prefix === open.prefix
+      && !deepIndent
+      && leadingIndent(rest) <= 3
     ) {
-      open = null;
+      const delimiter = fenceDelimiterLine(rest);
+      if (
+        delimiter !== null
+        && delimiter.char === open.char
+        && delimiter.run >= open.run
+        && delimiter.info === ""
+      ) {
+        open = null;
+      }
     }
   }
   return open === null ? -1 : open.start;

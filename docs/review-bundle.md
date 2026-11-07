@@ -536,7 +536,12 @@ derived state.
   65,536-character comment ceiling (#1554). At the publish boundary only the
   model-authored review prose is ever trimmed to fit; the machine documents
   and action-owned notices are never trimmed, and any trim is disclosed in
-  the body's final line. The prose always has room because every
+  the body's final line. The trim-time fence scan recognizes fence
+  delimiters behind blockquote and list-item container prefixes, so an
+  unfinished fence opened inside a container is dropped whole too; its
+  closer rules are deliberately stricter than its opener rules, so an
+  uncertain fence state always trims back to the opener rather than leaving
+  hostile prose inside a live fence. The prose always has room because every
   action-owned block's own bounds keep it far below the ceiling.
 - Every text field passes secret redaction and a length cap before it is
   serialized. The HTML characters are written as JSON escapes, so the

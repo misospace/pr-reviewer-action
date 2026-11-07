@@ -228,6 +228,53 @@ test("#1554: fences in the middle of prose are preserved when nothing is trimmed
   assert.ok(body.endsWith(`${prose}\n`));
 });
 
+test("#1554: hostile fence openers inside blockquotes and list items are dropped whole on trim", () => {
+  // A fence opener behind a container prefix is a real opener in CommonMark;
+  // a scan that misses it would let an unfinished hostile fence survive
+  // truncation and swallow the action-owned blocks after the prose. Each
+  // kept prose must end before the opener, with the block dropped whole.
+  for (const opener of ["> ```js", "- ```js", "1. ```js", "> - ```js", "* ```js"]) {
+    const prose = `ok\n${opener}\n${"x".repeat(500_000)}\n`;
+    const fitted = fitReviewProseToBytes(prose, Buffer.byteLength(prose) - 1);
+    assert.deepEqual(fitted, { text: "ok\n", dropped: codepoints(prose) - codepoints("ok\n") }, opener);
+  }
+});
+
+test("#1554: a container delimiter inside an open top-level fence never closes it", () => {
+  // Hostile `> ``` inside a live top-level fence is literal fence content,
+  // never a closer: the scan must stay open and cut back to the real opener
+  // instead of letting the prose after the hostile line look fence-safe.
+  const hostile = "ok\n```\n> ```\nhidden\n";
+  assert.deepEqual(
+    fitReviewProseToBytes(hostile, Buffer.byteLength(hostile) - 1),
+    { text: "ok\n", dropped: codepoints(hostile) - codepoints("ok\n") },
+  );
+});
+
+test("#1554: closed blockquote fences survive trim and over-indented delimiters never close", () => {
+  // A legitimately closed blockquote fence is recognized as closed: a cut
+  // landing after its closer keeps the whole block.
+  const closedQuote = "a\n> ```\ncode\n> ```\nb";
+  assert.deepEqual(
+    fitReviewProseToBytes(closedQuote, Buffer.byteLength(closedQuote) - 1),
+    { text: "a\n> ```\ncode\n> ```\n", dropped: 1 },
+  );
+  // A 4-space-indented delimiter line is indented code in CommonMark, never
+  // a closer: the top-level fence stays open and the cut drops it whole.
+  const deep = "ok\n```\ncode\n    ```\nmore\n";
+  assert.deepEqual(
+    fitReviewProseToBytes(deep, Buffer.byteLength(deep) - 1),
+    { text: "ok\n", dropped: codepoints(deep) - codepoints("ok\n") },
+  );
+  // A same-marker delimiter at column 0 after a list-item opener is a NEW
+  // sibling item's opener, never this fence's closer: the scan stays open.
+  const sibling = "ok\n- ```js\nlet x = 1;\n- ```\nmore\n";
+  assert.deepEqual(
+    fitReviewProseToBytes(sibling, Buffer.byteLength(sibling) - 1),
+    { text: "ok\n", dropped: codepoints(sibling) - codepoints("ok\n") },
+  );
+});
+
 test("#1554: fallback body is byte-identical to the old primary + findings-summary formula", async () => {
   const api = new MockPublishApi();
   api.reviewResults = [{ ok: false }, { ok: true }];
