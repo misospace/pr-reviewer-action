@@ -2608,6 +2608,17 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     route: env.REVIEW_ROUTE ?? "legacy",
     partial_coverage: partialCoverage ?? null,
     required_checks: outputRequiredChecks,
+    // #1543: the #750 fold's OWN status, before any #874 trace flip — the
+    // final `required_checks` above can read `incomplete` on a run whose fold
+    // never validated (`validate-required-checks: false`, or `auto` with an
+    // empty must_check list, records `none` here while the trace pass still
+    // flips the published dimension). The standalone publish read-back
+    // (#1537) gates its required-check id recomputation on THIS field, so a
+    // fold that never gated the review can never have its `must_check` items
+    // named. The model-unavailable notice path never assigns
+    // `completenessStatus`, so it records `none` like any non-validating run
+    // (its whole read-back is gated out earlier by the engine record).
+    required_check_fold_status: completenessStatus,
     ...(incompleteReason !== "none" ? { incomplete_reason: incompleteReason } : {}),
     // #1449: the derived-obligation state of THIS run — present only when
     // the feature is enabled (a disabled run keeps the record

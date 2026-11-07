@@ -3,14 +3,16 @@ import assert from "node:assert/strict";
 import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 import {
   applyReviewObligationEnforcement,
+  blockingReviewObligations,
   candidateRowsToObligations,
   deriveUnresolvedCause,
   extractApprovalPrerequisites,
   foldObligationDispositions,
   mustCheckObligationsEnabled,
   obligationAdmissionTokens,
-  unresolvedReviewObligations,
+  reviewObligationsFromArtifact,
   reviewObligationsToArtifact,
+  unresolvedReviewObligations,
   REVIEWER_GATHERABLE_CUE,
   type ReviewObligation,
 } from "../src/enforcement/review-obligations.js";
@@ -658,4 +660,48 @@ test("harness and engine agree on obligation identity: candidates rows flow thro
   assert.deepEqual(folded.map((item) => item.source), ["must_check", "trusted_base_guidance"]);
   // The section shown to the model lists the same texts the engine folds.
   for (const obligation of folded) assert.ok(planning.text.includes(obligation.text));
+});
+
+// ---------------------------------------------------------------------------
+// #1537: the strict artifact reader the standalone `publish` CLI uses to read
+// the folded rows back from `review-obligations.json`.
+// ---------------------------------------------------------------------------
+
+test("#1537: reviewObligationsFromArtifact round-trips exactly what reviewObligationsToArtifact wrote", () => {
+  const rows: ReviewObligation[] = [
+    { id: "mc-1", source: "must_check", text: "Verify the auth path", status: "unmet", cause: null },
+    { id: "mc-2", source: "must_check", text: "Unfinished availability gap", status: "unresolved", cause: "tool-capability" },
+    { id: "tb-1", source: "trusted_base_guidance", text: "Confirm the plan", status: "satisfied", cause: null },
+    { id: "dv-1", source: "derived", text: "Cross-path", status: "unmet", cause: "derivation-incomplete", anchors: ["src/a.ts:1"] },
+  ];
+  assert.deepEqual(reviewObligationsFromArtifact(JSON.parse(JSON.stringify(reviewObligationsToArtifact(rows)))), rows);
+  // The blocking filter over read-back rows names exactly the forcing `unmet`
+  // rows — #1505: an `unresolved` row is coverage, never a block; derived
+  // coverage never blocks (#1447/#1521).
+  assert.deepEqual(blockingReviewObligations(rows as ReviewObligation[]).map((row) => row.id), ["mc-1"]);
+});
+
+test("#1537: reviewObligationsFromArtifact refuses anything this runtime did not write", () => {
+  assert.equal(reviewObligationsFromArtifact(null), null);
+  assert.equal(reviewObligationsFromArtifact([]), null);
+  assert.equal(reviewObligationsFromArtifact({ version: 2, obligations: [] }), null);
+  assert.equal(reviewObligationsFromArtifact({ version: 1 }), null);
+  // Out-of-vocabulary source, status, cause — each refuses the WHOLE artifact,
+  // never just the row (#1521 parser rule).
+  const base = { id: "x", source: "must_check", text: "t", status: "unresolved", cause: null };
+  for (const row of [
+    { ...base, source: "model_claim" },
+    { ...base, status: "blocked" },
+    { ...base, cause: "because-i-said-so" },
+    // The writer always records `cause` (string or `null`), so an omitted
+    // `cause` is not a row this runtime wrote — refused, never normalized.
+    { ...base, cause: undefined },
+    // A property the writer never emits refuses the row (and the artifact).
+    { ...base, rationale: "half-trusted" },
+    { ...base, id: "" },
+    { ...base, anchors: [1] },
+    null,
+  ]) {
+    assert.equal(reviewObligationsFromArtifact({ version: 1, obligations: [base, row] }), null);
+  }
 });
