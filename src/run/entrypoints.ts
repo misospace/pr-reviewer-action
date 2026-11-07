@@ -908,6 +908,11 @@ export function reviewDerivedPublishFields(review: RunReviewResult): Partial<Pub
     // so such a run keeps the pre-#1518 publish-input shape.
     ...(review.unresolvedRequirementIds !== undefined ? { unresolvedRequirementIds: review.unresolvedRequirementIds } : {}),
     ...(review.unresolvedRequiredChecks !== undefined ? { unresolvedRequiredChecks: review.unresolvedRequiredChecks } : {}),
+    // #1521: the obligation ROWS that blocked the review, so the published
+    // handoff names WHAT blocked it and not only an opaque id. Absent when
+    // the run never reviewed (the admission skip path), on the same presence
+    // rule as the two id lists above.
+    ...(review.unresolvedReviewObligations !== undefined ? { unresolvedReviewObligations: review.unresolvedReviewObligations } : {}),
     // #1003: the human-review triage answer reaches the published body only
     // when triage ran ("" when off), so a disabled run's review is
     // byte-identical to pre-#1003. Triage grants no capability.

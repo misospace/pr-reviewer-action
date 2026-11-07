@@ -505,6 +505,11 @@ async function runActionPipeline(
     // too, on the same presence rule as the findings set.
     ...(review.unresolvedRequirementIds !== undefined ? { unresolvedRequirementIds: review.unresolvedRequirementIds } : {}),
     ...(review.unresolvedRequiredChecks !== undefined ? { unresolvedRequiredChecks: review.unresolvedRequiredChecks } : {}),
+    // #1521: the obligation ROWS that blocked the review, plus the run's
+    // derived-obligation state — the local bundle names what blocked the
+    // review exactly like the published handoff does.
+    ...(review.unresolvedReviewObligations !== undefined ? { unresolvedReviewObligations: review.unresolvedReviewObligations } : {}),
+    ...(review.derivedObligationState !== undefined ? { derivedObligationState: review.derivedObligationState } : {}),
   });
 
   // ── Re-review label ───────────────────────────────────────────────────

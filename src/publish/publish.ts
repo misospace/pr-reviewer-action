@@ -32,6 +32,7 @@ import { aggregateOutcomeEvents } from "../outcomes/report.js";
 import { resolveSupersededThreads, cleanupManagedReviews, resolveCleanupFlag, retireManagedInlineComments, resolvePublishTrustedOwner, selectManagedReviews, hideSupersededManagedReviews, type CleanupLog } from "./cleanup.js";
 import { ownerMatchesIdentity, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
 import { strictReviewResult } from "../enforcement/verdict-policy.js";
+import type { ReviewObligation } from "../enforcement/review-obligations.js";
 import { escapeTableCell } from "../gates/ci-wait.js";
 import { COVERAGE_NOTICE_MAX_ITEMS, type PartialCoverage } from "../tools/coverage.js";
 import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, MAX_REVIEW_TRIAGE_REASON_CHARS, publishedConfidenceReason, type IncompleteReason } from "./outputs.js";
@@ -97,6 +98,12 @@ export interface PublishInput {
   /** #1518: the required-check ids the deterministic enforcement pass could
    * not resolve. They ride the published handoff. */
   unresolvedRequiredChecks?: readonly string[];
+  /** #1521: the review-obligation rows that BLOCKED the review. They ride
+   * the published handoff so a controller sees WHAT blocked the review (the
+   * id, the source, the status, the cause and the obligation's own text),
+   * not only an opaque id. Only the forcing sources ride — a `derived` row
+   * is coverage, never a block. */
+  unresolvedReviewObligations?: readonly ReviewObligation[];
   cleanupPreviousNativeReviews: string;
   /** #1161: DEPRECATED and inert. The input stays accepted for backward
    * compatibility, but it gates nothing and changes no published event —
@@ -1813,6 +1820,11 @@ export async function publishReview(
     findings: input.findings,
     unresolvedRequirementIds: input.unresolvedRequirementIds ?? [],
     unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
+    // #1521: the blocking obligation rows and the derived-obligation state
+    // ride the published handoff, so a controller sees what blocked the
+    // review and how complete the derived coverage was.
+    unresolvedReviewObligations: input.unresolvedReviewObligations ?? [],
+    derivedObligationState: input.derivedObligationState,
     publishedPrescriptions,
   }));
   // #1518: a suggestion may ride the handoff ONLY after the inline review
@@ -1834,6 +1846,11 @@ export async function publishReview(
       findings: input.findings,
       unresolvedRequirementIds: input.unresolvedRequirementIds ?? [],
       unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
+      // #1521: the same rows and state as the suggestion-carrying variant
+      // above — the two documents must never disagree about what blocked
+      // the review.
+      unresolvedReviewObligations: input.unresolvedReviewObligations ?? [],
+      derivedObligationState: input.derivedObligationState,
       publishedPrescriptions: new Map(),
     }));
   const bodySansPublishedSuggestions = (body: string): string =>

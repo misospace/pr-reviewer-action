@@ -219,6 +219,78 @@ test("#1380: dependency-update classification drives the claim pass dependency m
   }
 });
 
+test("#1521: the engine result carries the obligation rows that blocked the review", async () => {
+  // The same dependency-update fixture the #1380 test above uses. Under
+  // #1505 its undisposed `must_check` rows are `unresolved` (an availability
+  // failure — coverage, never a defect): they withhold the trusted approval
+  // but never manufacture a blocking request, so the verdict is NOT forced to
+  // `request_changes` and NO row rides as a blocking obligation. (The unmet
+  // case that does force `request_changes` and does ride is pinned by the
+  // #1380 test's unmet run below.) A controller must be able to name WHAT
+  // blocked a review, not only count it.
+  const server = await startMockServer((_req, _body, res) => { res.setHeader("Content-Type", "application/json"); res.end(verdictBody()); });
+  const f = fixture();
+  try {
+    const adapter: PlatformReadAdapter = {
+      ...mockPlatform(),
+      getPr: async () => ({
+        number: 7, title: "chore(deps): bump lodash from 1.2.3 to 4.5.6",
+        body: "Only one file changed. No CRDs changed and the CRD schema is unchanged.",
+        state: "open", draft: false, head: { sha: "a".repeat(40), ref: "renovate/lodash-4.x" }, base: { ref: "main" },
+        user: { login: "someone" }, changed_files: 1, additions: 2, deletions: 2,
+      }),
+      getPrDiff: async () => "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1,4 +1,4 @@\n-  \"version\": \"1.2.3\",\n-  \"lodash\": \"1.2.3\",\n+  \"version\": \"4.5.6\",\n+  \"lodash\": \"4.5.6\",\n",
+      listPrFiles: async () => ({ ok: true, data: [{ filename: "package-lock.json", status: "modified", additions: 2, deletions: 2, changes: 4 }] }),
+    };
+    const req = request(server.url, f.runDir);
+    req.inputs = { ...req.inputs, "claim-falsification": "true" };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
+    // #1505: unresolved rows are coverage, never a block — the verdict is
+    // not forced and no blocking obligation rides.
+    assert.equal(result.outputs.verdict, "approve");
+    const rows = result.unresolvedReviewObligations;
+    assert.ok(rows !== undefined, "the engine result carries the blocking rows");
+    assert.deepEqual(rows, [], "an unresolved row is coverage, never a block");
+  } finally {
+    await server.close();
+    f.cleanup();
+  }
+});
+
+test("#1521: the model-unavailable notice names no obligation row, because no obligation blocked it", async () => {
+  // The same dependency-update fixture, but the model never answers. The
+  // notice's own `request_changes` is the whole block: no enforcement
+  // overlay runs on that path, so no obligation row blocked the review.
+  // Publishing the fallback `must_check` rows as "what blocked it" would
+  // tell a controller the review failed checks it never performed.
+  const deadServer = await startMockServer((_req, _body, res) => {
+    res.statusCode = 500;
+    res.end('{"error":"down"}');
+  });
+  const f = fixture();
+  try {
+    const adapter: PlatformReadAdapter = {
+      ...mockPlatform(),
+      getPr: async () => ({
+        number: 7, title: "chore(deps): bump lodash from 1.2.3 to 4.5.6",
+        body: "Only one file changed. No CRDs changed and the CRD schema is unchanged.",
+        state: "open", draft: false, head: { sha: "a".repeat(40), ref: "renovate/lodash-4.x" }, base: { ref: "main" },
+        user: { login: "someone" }, changed_files: 1, additions: 2, deletions: 2,
+      }),
+      getPrDiff: async () => "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@ -1,4 +1,4 @@\n-  \"version\": \"1.2.3\",\n-  \"lodash\": \"1.2.3\",\n+  \"version\": \"4.5.6\",\n+  \"lodash\": \"4.5.6\",\n",
+      listPrFiles: async () => ({ ok: true, data: [{ filename: "package-lock.json", status: "modified", additions: 2, deletions: 2, changes: 4 }] }),
+    };
+    const req = request(deadServer.url, f.runDir);
+    req.inputs = { ...req.inputs, "on-model-failure": "notice", "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0" };
+    const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
+    assert.equal(result.outputs.verdict, "request_changes", "the notice is the block");
+    assert.deepEqual(result.unresolvedReviewObligations, [], "no obligation row blocked the review");
+  } finally {
+    await deadServer.close();
+    f.cleanup();
+  }
+});
+
 test("#1448: the derived-obligations pre-pass runs on the primary route and its section reaches the final corpus", async () => {
   const obligationsPayload = JSON.stringify({
     obligations: [{
