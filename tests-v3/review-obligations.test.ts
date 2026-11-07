@@ -669,13 +669,15 @@ test("harness and engine agree on obligation identity: candidates rows flow thro
 
 test("#1537: reviewObligationsFromArtifact round-trips exactly what reviewObligationsToArtifact wrote", () => {
   const rows: ReviewObligation[] = [
-    { id: "mc-1", source: "must_check", text: "Verify the auth path", status: "unresolved", cause: "tool-capability" },
+    { id: "mc-1", source: "must_check", text: "Verify the auth path", status: "unmet", cause: null },
+    { id: "mc-2", source: "must_check", text: "Unfinished availability gap", status: "unresolved", cause: "tool-capability" },
     { id: "tb-1", source: "trusted_base_guidance", text: "Confirm the plan", status: "satisfied", cause: null },
     { id: "dv-1", source: "derived", text: "Cross-path", status: "unmet", cause: "derivation-incomplete", anchors: ["src/a.ts:1"] },
   ];
   assert.deepEqual(reviewObligationsFromArtifact(JSON.parse(JSON.stringify(reviewObligationsToArtifact(rows)))), rows);
-  // The blocking filter over read-back rows names exactly the forcing,
-  // non-satisfied rows — derived coverage never blocks (#1447/#1521).
+  // The blocking filter over read-back rows names exactly the forcing `unmet`
+  // rows — #1505: an `unresolved` row is coverage, never a block; derived
+  // coverage never blocks (#1447/#1521).
   assert.deepEqual(blockingReviewObligations(rows as ReviewObligation[]).map((row) => row.id), ["mc-1"]);
 });
 

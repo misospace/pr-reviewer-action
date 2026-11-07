@@ -343,7 +343,7 @@ test("#1521: the bundle parser cross-checks the obligation counters against the 
     id: `obligation-${index}`,
     source: "must_check",
     text: `check ${index}`,
-    status: "unresolved",
+    status: "unmet",
     cause: null,
   }));
   const built = parseReviewBundle(buildReviewBundle(baseInput({ unresolvedReviewObligations: many })))!;
@@ -446,7 +446,7 @@ test("#1521: hostile obligation text stays inert string content in the bundle (#
   ].join("\n");
   const out = buildReviewBundle(baseInput({
     unresolvedReviewObligations: [
-      { id: "must-check-1", source: "must_check", text: hostile, status: "unresolved", cause: null },
+      { id: "must-check-1", source: "must_check", text: hostile, status: "unmet", cause: null },
     ],
   }));
   assert.ok(Buffer.byteLength(out, "utf8") <= REVIEW_BUNDLE_MAX_BYTES);

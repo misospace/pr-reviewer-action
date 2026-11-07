@@ -1219,16 +1219,18 @@ test("#1537: publishInputFromEnv names the blocking obligation rows from the run
     writeFileSync(join(dir, "review-obligations.json"), JSON.stringify({
       version: 1,
       obligations: [
-        { id: "mc-1", source: "must_check", text: "Verify the auth path", status: "unresolved", cause: "tool-capability" },
+        { id: "mc-1", source: "must_check", text: "Verify the auth path", status: "unmet", cause: null },
+        { id: "tb-2", source: "must_check", text: "Unfinished availability gap", status: "unresolved", cause: "tool-capability" },
         { id: "tb-1", source: "trusted_base_guidance", text: "Confirm the migration plan", status: "satisfied", cause: null },
         { id: "dv-1", source: "derived", text: "Cross-path relationship", status: "unresolved", cause: null, anchors: ["src/a.ts:1"] },
       ],
     }));
     const input = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");
-    // Only the forcing, non-satisfied rows block: the satisfied row and the
-    // derived coverage row (#1447/#1521) never reach the published handoff.
+    // #1505: only the forcing `unmet` row blocks. The `unresolved` row is an
+    // availability failure (coverage, never a defect); the satisfied row and
+    // the derived coverage row (#1447/#1521) never reach the handoff either.
     assert.deepEqual(input.unresolvedReviewObligations, [
-      { id: "mc-1", source: "must_check", text: "Verify the auth path", status: "unresolved", cause: "tool-capability" },
+      { id: "mc-1", source: "must_check", text: "Verify the auth path", status: "unmet", cause: null },
     ]);
   });
 });
