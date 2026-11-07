@@ -40,7 +40,7 @@
  */
 import { redactText } from "../context/redact.js";
 import { fenceDelimiterFor } from "../context/fence.js";
-import { boundedIdList, MAX_ID_LIST_CHARS, MAX_ID_LIST_ENTRIES } from "../context/id-lists.js";
+import { boundedIdList, boundedIdListWithTotal, sourceIdCount, MAX_ID_LIST_CHARS, MAX_ID_LIST_ENTRIES } from "../context/id-lists.js";
 import { pyCodepointSlice } from "../platform/py.js";
 import { findingIdentityFromRecord } from "../outcomes/identity.js";
 import { safePath } from "../findings/safe-path.js";
@@ -167,6 +167,15 @@ export interface ReviewHandoff {
   unresolved_required_checks_total: number | null;
   /** #1538: the same truncation flag for the required-check ids. */
   unresolved_required_checks_truncated: boolean | null;
+  /** #1541: the number of DISTINCT merge-gating requirement ids the
+   * deterministic enforcement pass produced, BEFORE the shared 20-entry id
+   * cap shortened the list. A count larger than the listed length means the
+   * shared cap dropped ids. `null` when the document discloses no count (a
+   * handoff published before #1541): an unknown count is never read as zero
+   * and never read as "the list is the whole set". */
+  unresolved_requirement_ids_source_total: number | null;
+  /** #1541: the same honest count for the required-check ids. */
+  unresolved_required_checks_source_total: number | null;
 }
 
 export interface ReviewHandoffInput {
@@ -182,6 +191,13 @@ export interface ReviewHandoffInput {
   findings: unknown;
   unresolvedRequirementIds?: readonly string[] | undefined;
   unresolvedRequiredChecks?: readonly string[] | undefined;
+  /** #1541: the number of DISTINCT requirement ids the enforcement pass
+   * produced before the shared id cap shortened the list. The producers
+   * carry it here; without it the document discloses nothing about that
+   * bound, and an absent count is unknown — never zero. */
+  unresolvedRequirementIdsSourceTotal?: number | undefined;
+  /** #1541: the same honest count for the required-check ids. */
+  unresolvedRequiredChecksSourceTotal?: number | undefined;
   /** The replacements THIS run published as review comments, keyed by the
    * finding's stable identity digest. A suggestion rides an item only when
    * the action itself published that exact replacement, so the handoff can
@@ -298,13 +314,22 @@ function serializeHandoff(value: unknown): string {
  * all (`*_truncated`) — a consumer can never read a shortened list as the
  * whole set. The counters ride the base, so they are reserved in the byte
  * budget exactly like the item counters are.
+ *
+ * #1541: the shared 20-entry id cap is a SECOND bound, and it happens
+ * upstream — the producers hand over an already-bounded list, so the byte
+ * budget's count can never disclose it. Each list therefore also publishes
+ * `*_source_total`: the number of distinct ids the enforcement pass produced
+ * BEFORE the shared cap shortened the list. A count larger than the listed
+ * length means the shared cap dropped ids; an absent count is unknown.
  */
 export function buildReviewHandoff(input: ReviewHandoffInput): string {
   const candidates = findingsArray(input.findings).filter(
     (value): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value),
   );
-  const requirementIds = boundedIdList(input.unresolvedRequirementIds);
-  const checkIds = boundedIdList(input.unresolvedRequiredChecks);
+  const incomingRequirements = boundedIdListWithTotal(input.unresolvedRequirementIds);
+  const incomingChecks = boundedIdListWithTotal(input.unresolvedRequiredChecks);
+  const requirementIds = incomingRequirements.ids;
+  const checkIds = incomingChecks.ids;
   // #1538: the honest count of the ids each list could carry BEFORE the byte
   // budget shortens it. The lists arrive already bounded by their producers
   // (`unresolvedTraceRequirementIds`, `unresolvedRequiredCheckIds`), so the
@@ -312,6 +337,12 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
   // budget is the only thing that shortens it here.
   const requirementTotal = requirementIds.length;
   const checkTotal = checkIds.length;
+  // #1541: the count the enforcement pass produced BEFORE the shared cap
+  // shortened the list. It arrives from the producers; without it the
+  // document would disclose nothing about that bound, and a consumer would
+  // read the bounded list as the whole set.
+  const requirementSourceTotal = sourceIdCount(input.unresolvedRequirementIdsSourceTotal, incomingRequirements);
+  const checkSourceTotal = sourceIdCount(input.unresolvedRequiredChecksSourceTotal, incomingChecks);
   const serialize = (items: ReviewHandoffItem[], reqIds: string[], chkIds: string[]): string => serializeHandoff({
     schema: REVIEW_HANDOFF_SCHEMA,
     review_id: bounded(input.reviewId ?? "", REVIEW_HANDOFF_MAX_TOKEN_CHARS),
@@ -325,9 +356,11 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
     unresolved_requirement_ids: reqIds,
     unresolved_requirement_ids_total: requirementTotal,
     unresolved_requirement_ids_truncated: reqIds.length < requirementTotal,
+    ...(requirementSourceTotal !== null ? { unresolved_requirement_ids_source_total: requirementSourceTotal } : {}),
     unresolved_required_checks: chkIds,
     unresolved_required_checks_total: checkTotal,
     unresolved_required_checks_truncated: chkIds.length < checkTotal,
+    ...(checkSourceTotal !== null ? { unresolved_required_checks_source_total: checkSourceTotal } : {}),
   });
 
   // The document without any item is the base the disclosure rides on. The
@@ -430,6 +463,11 @@ function idCountersAgree(ids: string[], total: number | null, truncated: boolean
  * before #1538 carries none of them and stays parseable — but an absent
  * counter is UNKNOWN (`null`), never read as "the list is the whole set":
  * the byte budget could have shortened that list without saying so.
+ *
+ * #1541: the shared-cap counters are OPTIONAL and cross-checked the same
+ * way. An absent counter is UNKNOWN (`null`) — never read as zero, and
+ * never read as "the list is the whole set": the shared 20-entry id cap
+ * could have shortened that list without saying so.
  */
 export function parseReviewHandoff(text: string): ReviewHandoff | null {
   let value: unknown;
@@ -471,6 +509,18 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
     ? null
     : record.unresolved_required_checks_truncated;
   if (!(checkTruncated === null || typeof checkTruncated === "boolean")) return null;
+  // #1541: the shared-bound disclosure counters — absent means unknown,
+  // never "the list is the whole set".
+  const requirementSourceTotal = record.unresolved_requirement_ids_source_total === undefined
+    ? null
+    : record.unresolved_requirement_ids_source_total;
+  if (!(requirementSourceTotal === null
+    || (typeof requirementSourceTotal === "number" && Number.isInteger(requirementSourceTotal) && requirementSourceTotal >= 0))) return null;
+  const checkSourceTotal = record.unresolved_required_checks_source_total === undefined
+    ? null
+    : record.unresolved_required_checks_source_total;
+  if (!(checkSourceTotal === null
+    || (typeof checkSourceTotal === "number" && Number.isInteger(checkSourceTotal) && checkSourceTotal >= 0))) return null;
   const items: ReviewHandoffItem[] = [];
   for (const raw of record.items) {
     const item = parseHandoffItem(raw);
@@ -485,6 +535,15 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
   // #1538: the same cross-check for the two id lists.
   if (!idCountersAgree(record.unresolved_requirement_ids, requirementTotal, requirementTruncated)) return null;
   if (!idCountersAgree(record.unresolved_required_checks, checkTotal, checkTruncated)) return null;
+  // #1541: the shared-bound counters are cross-checked the same way. A
+  // count below the list it describes (or below the count the byte budget
+  // measured) contradicts itself: the shared cap only drops ids, so the
+  // count can never be smaller than the list. An UNKNOWN counter (`null` —
+  // a handoff published before #1541) is never a contradiction.
+  if (requirementSourceTotal !== null && requirementSourceTotal < record.unresolved_requirement_ids.length) return null;
+  if (requirementSourceTotal !== null && requirementTotal !== null && requirementSourceTotal < requirementTotal) return null;
+  if (checkSourceTotal !== null && checkSourceTotal < record.unresolved_required_checks.length) return null;
+  if (checkSourceTotal !== null && checkTotal !== null && checkSourceTotal < checkTotal) return null;
   return {
     schema: REVIEW_HANDOFF_SCHEMA,
     review_id: record.review_id,
@@ -498,9 +557,11 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
     unresolved_requirement_ids: [...record.unresolved_requirement_ids],
     unresolved_requirement_ids_total: requirementTotal,
     unresolved_requirement_ids_truncated: requirementTruncated,
+    unresolved_requirement_ids_source_total: requirementSourceTotal,
     unresolved_required_checks: [...record.unresolved_required_checks],
     unresolved_required_checks_total: checkTotal,
     unresolved_required_checks_truncated: checkTruncated,
+    unresolved_required_checks_source_total: checkSourceTotal,
   };
 }
 

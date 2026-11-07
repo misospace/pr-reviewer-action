@@ -76,7 +76,9 @@ here for readability — real output has no newlines):
   "findings_total": 1,
   "findings_truncated": false,
   "unresolved_requirement_ids": [],
-  "unresolved_required_checks": []
+  "unresolved_requirement_ids_source_total": 0,
+  "unresolved_required_checks": [],
+  "unresolved_required_checks_source_total": 0
 }
 ```
 
@@ -109,6 +111,19 @@ These ids are enforcement output, not model output. They let a consumer see
 which obligation stayed open instead of only seeing that coverage was
 incomplete. Each list holds at most 20 ids, and each id is at most 64
 characters.
+
+The 20-id cap is a second bound, and it applies before the bundle is
+written. When the cap drops an id, the bundle says so:
+
+- `unresolved_requirement_ids_source_total` counts the distinct requirement
+  ids the enforcement pass produced before the cap shortened the list.
+- `unresolved_required_checks_source_total` counts the required-check ids the
+  same way.
+
+A count larger than the listed length means the shared cap dropped ids.
+Treat the list as incomplete. A count equal to the listed length means the
+cap dropped nothing. An absent count is unknown. Never read an absent count
+as zero, because the cap could have shortened the list without saying so.
 
 ### Freshness and supersession
 
@@ -161,6 +176,8 @@ characters.
 - The two merge-gating id lists are reserved in that budget at their exact
   serialized byte length, so an id made of multi-byte codepoints can never
   push the document over the cap.
+- The shared-cap counters are reserved in the same budget, so the disclosure
+  never pushes the document over the cap either.
 - Every text field passes secret redaction and a length cap before it is
   serialized. The document carries no model transcripts, no raw tool
   output, no rendered Markdown, and no evidence blobs.
@@ -242,6 +259,10 @@ A consumer MUST:
   `*_truncated` flag means that the document discloses no truncation, so the
   list may be short. A count larger than the listed length means the list is
   short, whatever the flag says. A consumer MUST NOT read `null` as `false`.
+- Treat an unknown shared-cap count as an incomplete list. A `null`
+  `*_source_total` means that the document discloses no count, so the shared
+  20-entry id cap could have shortened that list. A consumer MUST NOT read
+  `null` as zero, and MUST NOT read it as "the list is the whole set".
 
 ### Document shape
 
@@ -274,9 +295,11 @@ here for readability, real output has no newlines):
   "unresolved_requirement_ids": ["REQ-7"],
   "unresolved_requirement_ids_total": 1,
   "unresolved_requirement_ids_truncated": false,
+  "unresolved_requirement_ids_source_total": 1,
   "unresolved_required_checks": ["tests cover the new path"],
   "unresolved_required_checks_total": 1,
-  "unresolved_required_checks_truncated": false
+  "unresolved_required_checks_truncated": false,
+  "unresolved_required_checks_source_total": 1
 }
 ```
 
@@ -327,10 +350,21 @@ here for readability, real output has no newlines):
   `unresolved_requirement_ids_truncated` and
   `unresolved_required_checks_truncated` say whether the byte budget dropped
   an id from that list. Never read a shortened list as the whole set.
+- `unresolved_requirement_ids_source_total` and
+  `unresolved_required_checks_source_total` count the distinct ids the
+  enforcement pass produced before the shared 20-entry id cap shortened the
+  list. That cap applies upstream, so the byte-budget counts above can never
+  disclose it. A source count larger than `*_total` means the shared cap
+  dropped ids. A `*_total` larger than the listed length means the byte
+  budget dropped ids.
 - A handoff published before #1538 carries no id counters. The parser then
   reports the count and the flag as unknown (`null`). An unknown flag is
   never read as `false`, because such a document may still hide a dropped
   id.
+- A handoff published before #1541 carries no shared-cap count. The parser
+  then reports it as unknown (`null`). An unknown count is never read as
+  zero, and never read as "the list is the whole set", because the shared cap
+  could have shortened that list without saying so.
 
 ### Bounds and redaction
 
@@ -344,6 +378,8 @@ here for readability, real output has no newlines):
 - The two id counters ride the base (#1538). The byte budget that shortens
   the lists measures the counters too, so a shortened document still fits the
   cap, and the shortened list is disclosed by its own count and flag.
+- The shared-cap counters ride the base too (#1541). The byte budget measures
+  them as well, so the disclosure never pushes the document over the cap.
 - At most 25 findings are listed (`REVIEW_HANDOFF_MAX_ITEMS`).
 - A suggestion is at most 2000 codepoints
   (`REVIEW_HANDOFF_MAX_SUGGESTION_CHARS`). A longer replacement is omitted

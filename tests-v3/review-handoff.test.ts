@@ -34,7 +34,11 @@
  * 9. #1538: the two merge-gating id lists carry the byte budget's own
  *    disclosure — a count and a truncation flag — so a shortened list is
  *    never read as the whole set. The parser refuses a disclosure that
- *    contradicts itself, and reads an absent counter as unknown. */
+ *    contradicts itself, and reads an absent counter as unknown.
+ * 10. #1541: the SHARED 20-entry id cap is a second bound, and it happens
+ *    upstream. The producers carry the count the pass produced, and the
+ *    document publishes it, so a consumer can tell that the shared cap
+ *    shortened the list. An absent count is unknown, never zero. */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -130,6 +134,22 @@ test("#1518: the handoff is deterministic, fixed-key, and round-trips the strict
     "items", "items_total", "items_truncated",
     "unresolved_requirement_ids", "unresolved_requirement_ids_total", "unresolved_requirement_ids_truncated",
     "unresolved_required_checks", "unresolved_required_checks_total", "unresolved_required_checks_truncated",
+  ]);
+  // #1541: the shared-cap counters ride next to the list they describe, and
+  // only when the producer carried them. The key order is pinned with the
+  // counters present too, because that is the production shape.
+  const withCounters = JSON.parse(buildReviewHandoff(baseInput({
+    unresolvedRequirementIds: ["REQ-1"],
+    unresolvedRequirementIdsSourceTotal: 1,
+    unresolvedRequiredChecksSourceTotal: 0,
+  }))) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(withCounters), [
+    "schema", "review_id", "head_sha", "verdict", "review_result", "required_checks",
+    "items", "items_total", "items_truncated",
+    "unresolved_requirement_ids", "unresolved_requirement_ids_total", "unresolved_requirement_ids_truncated",
+    "unresolved_requirement_ids_source_total",
+    "unresolved_required_checks", "unresolved_required_checks_total", "unresolved_required_checks_truncated",
+    "unresolved_required_checks_source_total",
   ]);
   const item = (doc.items as Array<Record<string, unknown>>)[0]!;
   assert.deepEqual(Object.keys(item), [
@@ -428,6 +448,145 @@ test("#1538: a handoff published before #1538 stays parseable, with unknown id c
   assert.equal(parsed!.unresolved_required_checks_truncated, null);
 });
 
+test("#1541: the shared id cap's drop is disclosed by the count the enforcement pass produced", () => {
+  // The shared cap keeps twenty ids. A run with thirty unmet requirement
+  // rows publishes twenty of them, and the document must say that thirty
+  // existed — a shortened list is never read as the whole set.
+  const ids = Array.from({ length: 30 }, (_, index) => `REQ-${String(index).padStart(2, "0")}`);
+  const doc = parseReviewHandoff(buildReviewHandoff(baseInput({
+    unresolvedRequirementIds: ids,
+    unresolvedRequiredChecks: ["check-a"],
+    unresolvedRequirementIdsSourceTotal: 30,
+    unresolvedRequiredChecksSourceTotal: 1,
+  })));
+  assert.ok(doc !== null, "the document parses under the strict consumer rules");
+  assert.equal(doc!.unresolved_requirement_ids.length, REVIEW_HANDOFF_MAX_IDS, "the shared cap kept twenty ids");
+  // The count the enforcement pass produced, not the bounded length.
+  assert.equal(doc!.unresolved_requirement_ids_source_total, 30, "the shared cap's drop is disclosed");
+  // The byte budget's own disclosure is unchanged and independent: it dropped
+  // nothing here, so the byte-budget count equals the listed length.
+  assert.equal(doc!.unresolved_requirement_ids_total, REVIEW_HANDOFF_MAX_IDS);
+  assert.equal(doc!.unresolved_requirement_ids_truncated, false);
+  // The check list was never shortened, and says so.
+  assert.deepEqual(doc!.unresolved_required_checks, ["check-a"]);
+  assert.equal(doc!.unresolved_required_checks_source_total, 1);
+});
+
+test("#1541: an unshortened id list carries the count the enforcement pass produced", () => {
+  const doc = parseReviewHandoff(buildReviewHandoff(baseInput({
+    unresolvedRequirementIds: ["REQ-1", "REQ-2"],
+    unresolvedRequiredChecks: ["check-a"],
+    unresolvedRequirementIdsSourceTotal: 2,
+    unresolvedRequiredChecksSourceTotal: 1,
+  })));
+  assert.ok(doc !== null);
+  assert.deepEqual(doc!.unresolved_requirement_ids, ["REQ-1", "REQ-2"]);
+  assert.equal(doc!.unresolved_requirement_ids_source_total, 2, "the count equals the whole set");
+  assert.equal(doc!.unresolved_required_checks_source_total, 1);
+});
+
+test("#1541: an absent source count is unknown, never a count of zero", () => {
+  // A handoff published before #1541 carries no shared-cap count. The
+  // parser reports it as unknown — never as zero, and never as "the list is
+  // the whole set": the shared cap could have shortened it without saying so.
+  const legacy = {
+    schema: REVIEW_HANDOFF_SCHEMA,
+    review_id: "0123456789abcdef",
+    head_sha: HEAD,
+    verdict: "request_changes",
+    review_result: "findings",
+    required_checks: "complete",
+    items: [],
+    items_total: 0,
+    items_truncated: false,
+    unresolved_requirement_ids: ["REQ-1"],
+    unresolved_required_checks: [],
+  };
+  const parsed = parseReviewHandoff(JSON.stringify(legacy));
+  assert.ok(parsed !== null, "a handoff published before #1541 stays parseable");
+  assert.equal(parsed!.unresolved_requirement_ids_source_total, null, "an absent count is unknown, never a count");
+  assert.equal(parsed!.unresolved_required_checks_source_total, null);
+
+  // The builder publishes the counter only when the producer carried one —
+  // a missing count is never published as zero.
+  const built = parseReviewHandoff(buildReviewHandoff(baseInput({
+    unresolvedRequirementIds: ["REQ-1"],
+  })))!;
+  assert.equal(built.unresolved_requirement_ids_source_total, null, "no count was carried, so none is published");
+});
+
+test("#1541: the parser refuses a shared-cap count that contradicts itself", () => {
+  const disclosed = JSON.parse(buildReviewHandoff(baseInput({
+    unresolvedRequirementIds: ["REQ-1", "REQ-2"],
+    unresolvedRequiredChecks: ["check-a"],
+    unresolvedRequirementIdsSourceTotal: 2,
+    unresolvedRequiredChecksSourceTotal: 1,
+  }))) as Record<string, unknown>;
+  assert.ok(parseReviewHandoff(JSON.stringify(disclosed)) !== null, "an agreeing count parses");
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({ ...disclosed, unresolved_requirement_ids_source_total: 1 })),
+    null,
+    "a count below the listed length contradicts itself",
+  );
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({ ...disclosed, unresolved_requirement_ids_source_total: 2.5 })),
+    null,
+    "a non-integer count is refused",
+  );
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({ ...disclosed, unresolved_requirement_ids_source_total: -1 })),
+    null,
+    "a negative count is refused",
+  );
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({ ...disclosed, unresolved_required_checks_source_total: 0 })),
+    null,
+    "a count below its own list contradicts itself",
+  );
+});
+
+test("#1541: the enforcement producers carry the count the shared cap dropped", () => {
+  // The producer is the only place that sees the whole set: the shared cap
+  // shortens the list there, so the count must travel with it.
+  const rows = Array.from({ length: 30 }, (_, index) => ({
+    requirement_id: `REQ-${String(index).padStart(2, "0")}`,
+    disposition: "unmet" as const,
+    proof: "test_required",
+    enforcement: [],
+    test: [],
+    reason: "",
+    notes: [],
+  }));
+  const produced = unresolvedTraceRequirementIds({
+    version: 1,
+    incomplete: true,
+    errors: [],
+    rows,
+  } as never);
+  assert.equal(produced.ids.length, REVIEW_HANDOFF_MAX_IDS, "the shared cap kept twenty ids");
+  assert.equal(produced.total, 30, "the count the pass produced is thirty, not the bounded length");
+  // A duplicated row is one id, not two.
+  const duplicated = unresolvedTraceRequirementIds({
+    version: 1,
+    incomplete: true,
+    errors: [],
+    rows: [...rows, rows[0]!],
+  } as never);
+  assert.equal(duplicated.total, 30, "a repeated requirement id is one distinct id");
+});
+
+test("#1541: the publisher discloses its own cap's drop when the producer carried no count", () => {
+  // A caller that hands over more ids than the shared cap allows, and no
+  // count of its own: the publisher's own cap shortened the list, and the
+  // document must say so instead of publishing a list that reads as the
+  // whole set.
+  const ids = Array.from({ length: 30 }, (_, index) => `REQ-${String(index).padStart(2, "0")}`);
+  const doc = parseReviewHandoff(buildReviewHandoff(baseInput({ unresolvedRequirementIds: ids })));
+  assert.ok(doc !== null);
+  assert.equal(doc!.unresolved_requirement_ids.length, REVIEW_HANDOFF_MAX_IDS, "the cap kept twenty ids");
+  assert.equal(doc!.unresolved_requirement_ids_source_total, 30, "the publisher's own drop is disclosed");
+});
+
 test("#1518: a suggestion rides the handoff only when THIS run published that replacement", () => {
   const finding = {
     severity: "major", category: "bug", file: "src/a.ts", line: 2,
@@ -595,10 +754,10 @@ test("#1518: the enforcement helpers name the obligations the pass could not dis
     mode: "warn" as const,
     result: { status: "incomplete", mode: "warn", missing: ["check-a", "check-b", "check-a"], addressed: ["check-c"] },
   };
-  assert.deepEqual(unresolvedRequiredCheckIds(completeness), ["check-a", "check-b"]);
+  assert.deepEqual(unresolvedRequiredCheckIds(completeness), { ids: ["check-a", "check-b"], total: 2 });
   // A result with no usable `missing` list yields no ids instead of throwing.
-  assert.deepEqual(unresolvedRequiredCheckIds({ status: "none", mode: "warn", result: {} }), []);
-  assert.deepEqual(unresolvedRequiredCheckIds({ status: "none", mode: "warn", result: { missing: "nope" } }), []);
+  assert.deepEqual(unresolvedRequiredCheckIds({ status: "none", mode: "warn", result: {} }), { ids: [], total: 0 });
+  assert.deepEqual(unresolvedRequiredCheckIds({ status: "none", mode: "warn", result: { missing: "nope" } }), { ids: [], total: 0 });
 
   // The requirement ids are the trace rows that are `unmet` or
   // `unverifiable` — exactly the rows that set the trace's `incomplete` flag.
@@ -614,7 +773,7 @@ test("#1518: the enforcement helpers name the obligations the pass could not dis
       { requirement_id: "REQ-2", disposition: "unmet", proof: "test_required", enforcement: [], test: [], reason: "", notes: [] },
     ],
   };
-  assert.deepEqual(unresolvedTraceRequirementIds(trace), ["REQ-2", "REQ-3"]);
+  assert.deepEqual(unresolvedTraceRequirementIds(trace), { ids: ["REQ-2", "REQ-3"], total: 2 });
 });
 
 /** The action's own posting identity on the mocked forge, and the managed
@@ -919,6 +1078,11 @@ test("#1518: a consumer reads the published handoff with an ordinary pull-reques
     assert.equal(handoff!.verdict, "request_changes");
     assert.equal(handoff!.items_total, 1);
     assert.equal(handoff!.items.length, 1);
+    // #1541: the count the enforcement pass produced rides the published
+    // handoff. This run left no obligation open, so both counts are zero —
+    // the KEYS are present, which is what proves the wiring.
+    assert.equal(handoff!.unresolved_requirement_ids_source_total, 0);
+    assert.equal(handoff!.unresolved_required_checks_source_total, 0);
     assert.equal(handoff!.items[0]!.path, "README.md");
     assert.equal(handoff!.items[0]!.line, 2);
     assert.match(String(handoff!.items[0]!.id), /^[0-9a-f]{64}$/);
