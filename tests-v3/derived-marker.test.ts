@@ -133,14 +133,25 @@ test("#1449: the published marker omits an absent or unusable derived state", as
     const api = new StickyApi();
     await publishReview(publishInput(entry.state === undefined ? {} : { derivedObligationState: entry.state }), api, { diffText: "" });
     const body = api.sticky[0]!.body;
-    assert.ok(!body.includes("derived_obligation_state"), `state ${entry.label} leaked into the marker`);
+    // The MARKER omits the state — that is what this test is about.
+    assert.ok(!markerLine(body).includes("derived_obligation_state"), `state ${entry.label} leaked into the marker`);
+    // #1521: the machine-readable `review-handoff/v1` document carries the
+    // same member with a FIXED key set, so the key is always there — but
+    // its value is null (unknown) whenever the state is absent or
+    // unusable, so no state VALUE leaks into the published body.
+    assert.equal(handoffPayload(body).derived_obligation_state, null);
   }
 });
 
 test("#1449: a run without the feature publishes byte-identical output", async () => {
   const without = new StickyApi();
   await publishReview(publishInput(), without, { diffText: "" });
-  assert.ok(!without.sticky[0]!.body.includes("derived_obligation_state"));
+  // The MARKER carries no derived state at all.
+  assert.ok(!markerLine(without.sticky[0]!.body).includes("derived_obligation_state"));
+  // #1521: the `review-handoff/v1` document's key set is fixed, so its
+  // derived-state member is always there — as null (unknown) when the
+  // feature is off.
+  assert.equal(handoffPayload(without.sticky[0]!.body).derived_obligation_state, null);
   // The pre-#1449 bytes: the same keys, in the same order, with nothing
   // appended (the build stamp is the only optional key).
   assert.match(
@@ -618,13 +629,17 @@ test("#1449 action: the published comment's marker carries the derived state", a
   }
 });
 
-test("#1449 action: a run without the feature publishes no derived state at all", async () => {
+test("#1449 action: a run without the feature publishes no derived state value", async () => {
   const result = await runActionCase(false);
   try {
     assert.equal(result.exitCode, 0);
     assert.equal(result.commentPosts.length, 1, "the sticky comment did not publish");
     const body = (JSON.parse(result.commentPosts[0]!) as { body?: string }).body ?? "";
-    assert.ok(!body.includes("derived_obligation_state"));
+    // #1521: the MARKER carries no derived state when the feature is off,
+    // and the handoff document's member is null (unknown). No derived state
+    // VALUE is published anywhere; the member itself is always present.
+    assert.ok(!markerLine(body).includes("derived_obligation_state"));
+    assert.equal(handoffPayload(body).derived_obligation_state, null);
     const coverage = JSON.parse(readFileSync(join(result.runDir, "review-coverage.json"), "utf8")) as Record<string, unknown>;
     assert.equal("derived_obligation_state" in coverage, false);
     const standalone = publishInputFromEnv({ PR_REVIEWER_RUN_DIR: result.runDir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github");

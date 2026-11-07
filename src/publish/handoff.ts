@@ -22,6 +22,8 @@
  *   and a codepoint cap BEFORE serialization);
  * - the items are the FINAL post-enforcement findings, never raw model
  *   output;
+ * - #1521: the blocking review-obligation rows ride the document too, so a
+ *   controller sees WHAT blocked the review and not only an opaque id;
  * - a byte bound checked on the exact serialized string, with omissions
  *   disclosed (`items_total` / `items_truncated`) rather than hidden;
  * - #1538: the two merge-gating id lists carry the same disclosure — the
@@ -45,6 +47,7 @@ import { pyCodepointSlice } from "../platform/py.js";
 import { findingIdentityFromRecord } from "../outcomes/identity.js";
 import { safePath } from "../findings/safe-path.js";
 import { RESERVED_MARKER_PATTERNS, REVIEW_HANDOFF_ANCHOR } from "../metadata/markers.js";
+import type { ReviewObligation } from "../enforcement/review-obligations.js";
 
 /** The container anchor. It marks the START of the action-owned block and is
  * reserved against model-authored text on every published surface, so the
@@ -86,6 +89,14 @@ export const REVIEW_HANDOFF_MAX_TOKEN_CHARS = 200;
  * publish layer's aliases of it. */
 export const REVIEW_HANDOFF_MAX_IDS = MAX_ID_LIST_ENTRIES;
 export const REVIEW_HANDOFF_MAX_ID_CHARS = MAX_ID_LIST_CHARS;
+
+/** #1521: the blocking obligation rows are bounded independently of the
+ * items too: at most this many rows ride the document, each row's text at
+ * most this many codepoints. The row projection is SHARED with the local
+ * `review-bundle/v1` document (see `boundedObligationRows`), so the two
+ * documents can never disagree about what a blocking row says. */
+export const REVIEW_HANDOFF_MAX_OBLIGATIONS = 10;
+export const REVIEW_HANDOFF_MAX_OBLIGATION_TEXT_CHARS = 300;
 
 /** The closed severity vocabulary. Anything else is reported as `info`
  * rather than smuggled into the closed set. */
@@ -142,6 +153,153 @@ export interface ReviewHandoffItem {
   agent_prompt?: string;
 }
 
+/**
+ * #1521: one published blocking obligation row.
+ *
+ * The row names WHAT blocked the review — the id, the source that made it
+ * blocking, the status, the cause and the obligation's own text — so a
+ * controller never has to guess what an opaque id refers to. The row is
+ * untrusted text: every string in it is redacted, stripped of the reserved
+ * marker grammar and capped before serialization.
+ *
+ * `source` and `status` are plain strings here because the PARSER accepts
+ * any string for them (the wire shape is what the parser guarantees); the
+ * BUILDER only ever publishes the closed vocabularies below.
+ */
+export interface ReviewObligationRow {
+  id: string;
+  source: string;
+  status: string;
+  cause: string | null;
+  text: string;
+}
+
+/** #1521: the sources a BLOCKING row may carry. A `derived` row is a
+ * coverage statement, never a block (#1449), and anything outside this
+ * vocabulary cannot be proven non-derived — so such a row is dropped, fail
+ * closed. */
+const PUBLISHED_OBLIGATION_SOURCES = ["must_check", "trusted_base_guidance"] as const;
+
+/** #1521: the statuses a published row may carry. `satisfied` never rides
+ * (it blocked nothing); anything else that is not `unmet` is published as
+ * `unresolved`, the conservative reading. */
+const PUBLISHED_OBLIGATION_STATUSES = ["unmet", "unresolved"] as const;
+
+/** #1521: the closed cause vocabulary (the enforcement layer's own). The
+ * cause EXPLAINS a block, it never decides one, so an unknown cause is
+ * published as null rather than invented. */
+const PUBLISHED_OBLIGATION_CAUSES = [
+  "tool-capability",
+  "budget-exhausted",
+  "provider-failure",
+  "missing-source-evidence",
+  "derivation-incomplete",
+] as const;
+
+/** #1521: the run's derived-obligation state (#1449's closed vocabulary).
+ * `null` means the state is UNKNOWN — the feature was off, or the run could
+ * not prove it. An unknown state is never read as `complete`, so the
+ * disclosure stays conservative. Exported so the local bundle validates the
+ * SAME vocabulary. */
+export const DERIVED_OBLIGATION_STATES = ["complete", "unresolved", "unavailable"] as const;
+export type PublishedDerivedObligationState = (typeof DERIVED_OBLIGATION_STATES)[number];
+
+function isPublishedObligationSource(value: unknown): boolean {
+  return typeof value === "string" && (PUBLISHED_OBLIGATION_SOURCES as readonly string[]).includes(value);
+}
+
+/** #1521: the parser's own vocabulary checks. The builder already emits only
+ * these values, so a document that carries anything else was not produced by
+ * this action — and a consumer must never read a `derived` coverage row or a
+ * discharged row as "an obligation that blocked the review". The parser
+ * refuses such a document instead of accepting it. */
+function isPublishedObligationStatus(value: unknown): boolean {
+  return typeof value === "string" && (PUBLISHED_OBLIGATION_STATUSES as readonly string[]).includes(value);
+}
+
+function isPublishedObligationCause(value: unknown): boolean {
+  return value === null || (typeof value === "string" && (PUBLISHED_OBLIGATION_CAUSES as readonly string[]).includes(value));
+}
+
+function publishedObligationStatus(value: unknown): string {
+  return typeof value === "string" && (PUBLISHED_OBLIGATION_STATUSES as readonly string[]).includes(value)
+    ? value
+    : "unresolved";
+}
+
+function publishedObligationCause(value: unknown): string | null {
+  return typeof value === "string" && (PUBLISHED_OBLIGATION_CAUSES as readonly string[]).includes(value)
+    ? value
+    : null;
+}
+
+/** #1521: the derived-obligation state as published — the closed vocabulary
+ * or null (unknown). Anything outside the vocabulary is unknown, never
+ * `complete`. Exported so the local bundle publishes the SAME state. */
+export function publishedDerivedObligationState(value: unknown): PublishedDerivedObligationState | null {
+  return typeof value === "string" && (DERIVED_OBLIGATION_STATES as readonly string[]).includes(value)
+    ? value as PublishedDerivedObligationState
+    : null;
+}
+
+/**
+ * #1521: the shared projection of the blocking obligation rows.
+ *
+ * ONE implementation, shared with the local `review-bundle/v1` document
+ * (`src/publish/bundle.ts` imports it from here), so the published handoff
+ * and the local bundle can never disagree about what a blocking row says or
+ * how many rows there are.
+ *
+ * The projection is deliberately strict:
+ * - only the FORCING sources ride (`must_check`, `trusted_base_guidance`) —
+ *   a `derived` row is coverage, never a block (#1449), and a row whose
+ *   source cannot be proven non-derived is dropped too (fail closed);
+ * - a `satisfied` row never rides (it blocked nothing);
+ * - the id is redacted, marker-stripped and capped like an id list entry,
+ *   and a row whose id bounds to nothing is dropped (an unaddressable row
+ *   cannot be acted on);
+ * - duplicate ids are dropped (first wins);
+ * - the text is redacted, marker-stripped and capped.
+ *
+ * `total` is the honest count of the blocking rows the run had BEFORE the
+ * listing bound, so a truncated list is never passed off as the whole set.
+ */
+export interface BoundedObligationRows {
+  /** The rows that ride the document (at most `REVIEW_HANDOFF_MAX_OBLIGATIONS`). */
+  rows: ReviewObligationRow[];
+  /** The count of the qualifying blocking rows, before the listing bound. */
+  total: number;
+}
+
+export function boundedObligationRows(obligations: readonly ReviewObligation[] | undefined): BoundedObligationRows {
+  const rows: ReviewObligationRow[] = [];
+  const seen = new Set<string>();
+  let total = 0;
+  for (const obligation of obligations ?? []) {
+    if (obligation === null || typeof obligation !== "object") continue;
+    if (!isPublishedObligationSource(obligation.source)) continue;
+    // #1505: only a FORCING row rides as a blocking obligation — a
+    // review-owned `unmet` row. An `unresolved` row is an availability
+    // failure (coverage, never a defect) and `satisfied` blocked nothing;
+    // a `derived` row is coverage (#1449). None of those ever ride here.
+    if (obligation.status !== "unmet") continue;
+    if (typeof obligation.id !== "string") continue;
+    const id = bounded(obligation.id.trim(), MAX_ID_LIST_CHARS);
+    if (id === "" || seen.has(id)) continue;
+    seen.add(id);
+    total += 1;
+    if (rows.length >= REVIEW_HANDOFF_MAX_OBLIGATIONS) continue;
+    rows.push({
+      id,
+      source: obligation.source,
+      status: publishedObligationStatus(obligation.status),
+      cause: publishedObligationCause(obligation.cause),
+      text: bounded(obligation.text, REVIEW_HANDOFF_MAX_OBLIGATION_TEXT_CHARS),
+    });
+  }
+  return { rows, total };
+}
+
 export interface ReviewHandoff {
   schema: typeof REVIEW_HANDOFF_SCHEMA;
   review_id: string;
@@ -167,7 +325,18 @@ export interface ReviewHandoff {
   unresolved_required_checks_total: number | null;
   /** #1538: the same truncation flag for the required-check ids. */
   unresolved_required_checks_truncated: boolean | null;
-}
+/** #1521: the review-obligation rows that BLOCKED the review — the
+   * deterministic enforcement pass's own rows, so a controller sees WHAT
+   * blocked it and not only an opaque id. */
+  unresolved_review_obligations: ReviewObligationRow[];
+  /** #1521: the honest count of the blocking rows the run had, BEFORE the
+   * listing bound — a truncated list is never passed off as the whole set. */
+  unresolved_review_obligations_total: number;
+  /** #1521: whether the listing was shortened. */
+  unresolved_review_obligations_truncated: boolean;
+  /** #1521: the run's derived-obligation state (#1449), null when unknown.
+   * ALWAYS present, so the document's key set stays fixed. */
+  derived_obligation_state: PublishedDerivedObligationState | null;}
 
 export interface ReviewHandoffInput {
   /** The run's own review id; it pairs with `headSha` to name THIS review
@@ -182,6 +351,14 @@ export interface ReviewHandoffInput {
   findings: unknown;
   unresolvedRequirementIds?: readonly string[] | undefined;
   unresolvedRequiredChecks?: readonly string[] | undefined;
+  /** #1521: the review-obligation rows that blocked the review. Only the
+   * forcing rows ride (see `blockingReviewObligations`): a review-owned
+   * `unmet` row (#1505). An `unresolved` row is coverage, never a block,
+   * and a `derived` row is likewise coverage. */
+  unresolvedReviewObligations?: readonly ReviewObligation[] | undefined;
+  /** #1521: the run's derived-obligation state ("complete" | "unresolved" |
+   * "unavailable"). Anything else is published as null (unknown). */
+  derivedObligationState?: string | undefined;
   /** The replacements THIS run published as review comments, keyed by the
    * finding's stable identity digest. A suggestion rides an item only when
    * the action itself published that exact replacement, so the handoff can
@@ -298,7 +475,11 @@ function serializeHandoff(value: unknown): string {
  * all (`*_truncated`) — a consumer can never read a shortened list as the
  * whole set. The counters ride the base, so they are reserved in the byte
  * budget exactly like the item counters are.
- */
+* #1521: the blocking obligation rows are part of the document BASE, exactly
+ * like the two id lists — they name WHAT blocked the review, so they are the
+ * last thing the byte budget gives way (and only after both id lists are
+ * empty). Their own omission is disclosed by
+ * `unresolved_review_obligations_total` / `unresolved_review_obligations_truncated`. */
 export function buildReviewHandoff(input: ReviewHandoffInput): string {
   const candidates = findingsArray(input.findings).filter(
     (value): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value),
@@ -312,7 +493,17 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
   // budget is the only thing that shortens it here.
   const requirementTotal = requirementIds.length;
   const checkTotal = checkIds.length;
-  const serialize = (items: ReviewHandoffItem[], reqIds: string[], chkIds: string[]): string => serializeHandoff({
+  // #1521: the shared row projection (the local bundle uses the same one).
+  const obligations = boundedObligationRows(input.unresolvedReviewObligations);
+  const derivedState = publishedDerivedObligationState(input.derivedObligationState);
+  const serialize = (
+    items: ReviewHandoffItem[],
+    reqIds: string[],
+    chkIds: string[],
+    obligationRows: ReviewObligationRow[],
+    obligationTotal: number,
+    obligationTruncated: boolean,
+  ): string => serializeHandoff({
     schema: REVIEW_HANDOFF_SCHEMA,
     review_id: bounded(input.reviewId ?? "", REVIEW_HANDOFF_MAX_TOKEN_CHARS),
     head_sha: bounded(input.headSha, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
@@ -328,6 +519,10 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
     unresolved_required_checks: chkIds,
     unresolved_required_checks_total: checkTotal,
     unresolved_required_checks_truncated: chkIds.length < checkTotal,
+    unresolved_review_obligations: obligationRows,
+    unresolved_review_obligations_total: obligationTotal,
+    unresolved_review_obligations_truncated: obligationTruncated,
+    derived_obligation_state: derivedState,
   });
 
   // The document without any item is the base the disclosure rides on. The
@@ -345,25 +540,34 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
   // document still fits the cap.
   let baseRequirementIds = requirementIds;
   let baseCheckIds = checkIds;
-  while (Buffer.byteLength(serialize([], baseRequirementIds, baseCheckIds), "utf8") > REVIEW_HANDOFF_MAX_BYTES
-    && (baseRequirementIds.length > 0 || baseCheckIds.length > 0)) {
+  // #1521: the obligation rows shrink only AFTER both id lists are empty —
+  // they are the disclosure that says WHAT blocked the review, so they are
+  // the last thing to go, and their omission is disclosed.
+  let baseObligationRows = obligations.rows;
+  const baseObligationTotal = obligations.total;
+  let baseObligationTruncated = obligations.rows.length < obligations.total;
+  while (Buffer.byteLength(serialize([], baseRequirementIds, baseCheckIds, baseObligationRows, baseObligationTotal, baseObligationTruncated), "utf8") > REVIEW_HANDOFF_MAX_BYTES
+    && (baseRequirementIds.length > 0 || baseCheckIds.length > 0 || baseObligationRows.length > 0)) {
     if (baseRequirementIds.length >= baseCheckIds.length && baseRequirementIds.length > 0) {
       baseRequirementIds = baseRequirementIds.slice(0, -1);
-    } else {
+    } else if (baseCheckIds.length > 0) {
       baseCheckIds = baseCheckIds.slice(0, -1);
+    } else {
+      baseObligationRows = baseObligationRows.slice(0, -1);
+      baseObligationTruncated = true;
     }
   }
 
   const included: ReviewHandoffItem[] = [];
-  if (Buffer.byteLength(serialize(included, baseRequirementIds, baseCheckIds), "utf8") <= REVIEW_HANDOFF_MAX_BYTES) {
+  if (Buffer.byteLength(serialize(included, baseRequirementIds, baseCheckIds, baseObligationRows, baseObligationTotal, baseObligationTruncated), "utf8") <= REVIEW_HANDOFF_MAX_BYTES) {
     for (const candidate of candidates.slice(0, REVIEW_HANDOFF_MAX_ITEMS)) {
       const item = handoffItem(candidate, input.publishedPrescriptions);
-      const next = serialize([...included, item], baseRequirementIds, baseCheckIds);
+      const next = serialize([...included, item], baseRequirementIds, baseCheckIds, baseObligationRows, baseObligationTotal, baseObligationTruncated);
       if (Buffer.byteLength(next, "utf8") > REVIEW_HANDOFF_MAX_BYTES) break;
       included.push(item);
     }
   }
-  return serialize(included, baseRequirementIds, baseCheckIds);
+  return serialize(included, baseRequirementIds, baseCheckIds, baseObligationRows, baseObligationTotal, baseObligationTruncated);
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -413,6 +617,37 @@ function idCountersAgree(ids: string[], total: number | null, truncated: boolean
   if (truncated === true && total !== null && total === ids.length) return false;
   return true;
 }
+
+/**
+ * #1521: one published blocking obligation row, checked fail-closed.
+ *
+ * The row's shape is the published contract: a string `id`, `source`,
+ * `status` and `text`, and a `cause` that is a string or null. A row that
+ * does not have that shape refuses the whole document — a consumer must
+ * never read a half-formed row as a blocking obligation.
+ *
+ * The three vocabularies are checked too, not only the types. A `derived`
+ * row is a COVERAGE statement and a `satisfied` row blocked nothing, so a
+ * document that carries either one as a blocking obligation tells the
+ * consumer the review was blocked by something it was not. The builder
+ * never emits such a row, so a document that does carry one was not
+ * produced by this action, and it is refused rather than read.
+ */
+export function parseObligationRow(value: unknown): ReviewObligationRow | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string") return null;
+  if (!isPublishedObligationSource(record.source)) return null;
+  if (!isPublishedObligationStatus(record.status)) return null;
+  if (typeof record.text !== "string") return null;
+  if (!isPublishedObligationCause(record.cause)) return null;
+  return {
+    id: record.id,
+    source: record.source as string,
+    status: record.status as string,
+    cause: record.cause as string | null,
+    text: record.text,
+  };}
 
 /**
  * Fail-closed parse of a handoff document: the exact schema string and the
@@ -471,7 +706,33 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
     ? null
     : record.unresolved_required_checks_truncated;
   if (!(checkTruncated === null || typeof checkTruncated === "boolean")) return null;
-  const items: ReviewHandoffItem[] = [];
+// #1521: the four #1521 members are OPTIONAL on parse — a handoff
+  // published before #1521 carries none of them, and it must stay
+  // parseable. An absent list parses as empty, an absent state as null.
+  const obligationRows: ReviewObligationRow[] = [];
+  if (record.unresolved_review_obligations !== undefined) {
+    if (!Array.isArray(record.unresolved_review_obligations)) return null;
+    for (const raw of record.unresolved_review_obligations) {
+      const row = parseObligationRow(raw);
+      if (row === null) return null;
+      obligationRows.push(row);
+    }
+  }
+  const obligationTotal = record.unresolved_review_obligations_total === undefined
+    ? obligationRows.length
+    : record.unresolved_review_obligations_total;
+  if (typeof obligationTotal !== "number" || !Number.isInteger(obligationTotal)) return null;
+  const obligationTruncated = record.unresolved_review_obligations_truncated === undefined
+    ? false
+    : record.unresolved_review_obligations_truncated;
+  if (typeof obligationTruncated !== "boolean") return null;
+  const derivedState = record.derived_obligation_state === undefined
+    ? null
+    : record.derived_obligation_state;
+  if (!(derivedState === null
+    || (typeof derivedState === "string" && (DERIVED_OBLIGATION_STATES as readonly string[]).includes(derivedState)))) {
+    return null;
+  }  const items: ReviewHandoffItem[] = [];
   for (const raw of record.items) {
     const item = parseHandoffItem(raw);
     if (item === null) return null;
@@ -485,7 +746,11 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
   // #1538: the same cross-check for the two id lists.
   if (!idCountersAgree(record.unresolved_requirement_ids, requirementTotal, requirementTruncated)) return null;
   if (!idCountersAgree(record.unresolved_required_checks, checkTotal, checkTruncated)) return null;
-  return {
+// #1521: the same cross-check for the obligation rows — a document that
+  // claims fewer blocking rows than it lists, or that claims no truncation
+  // while its total disagrees with the list it carries, contradicts itself.
+  if (obligationTotal < obligationRows.length) return null;
+  if (obligationTruncated === false && obligationTotal !== obligationRows.length) return null;  return {
     schema: REVIEW_HANDOFF_SCHEMA,
     review_id: record.review_id,
     head_sha: record.head_sha,
@@ -501,7 +766,10 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
     unresolved_required_checks: [...record.unresolved_required_checks],
     unresolved_required_checks_total: checkTotal,
     unresolved_required_checks_truncated: checkTruncated,
-  };
+unresolved_review_obligations: obligationRows,
+    unresolved_review_obligations_total: obligationTotal,
+    unresolved_review_obligations_truncated: obligationTruncated,
+    derived_obligation_state: derivedState as PublishedDerivedObligationState | null,  };
 }
 
 /**
