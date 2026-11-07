@@ -30,7 +30,7 @@
 import { redactText } from "../context/redact.js";
 import { pyCodepointSlice } from "../platform/py.js";
 import { findingIdentityFromRecord } from "../outcomes/identity.js";
-import { boundedIdList } from "../context/id-lists.js";
+import { boundedIdListWithTotal, sourceIdCount } from "../context/id-lists.js";
 
 /** The schema identifier. A consumer must refuse a document whose `schema`
  * is not byte-identical to this string (the ledger pattern, #1027). */
@@ -155,6 +155,13 @@ export interface ReviewBundleInput {
   /** #1518: the required-check ids the deterministic enforcement pass could
    * not resolve. Serialized only for the review-producing states. */
   unresolvedRequiredChecks?: readonly string[];
+  /** #1541: the number of DISTINCT requirement ids the enforcement pass
+   * produced BEFORE the shared 20-entry id cap shortened the list. The
+   * producers carry it here; without it the bundle discloses nothing about
+   * that bound, and an absent count is unknown — never zero. */
+  unresolvedRequirementIdsSourceTotal?: number;
+  /** #1541: the same honest count for the required-check ids. */
+  unresolvedRequiredChecksSourceTotal?: number;
 }
 
 interface BundleFindingCandidate {
@@ -269,11 +276,27 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
   // never a synthetic ASCII worst case. The id cap counts CODEPOINTS, so a
   // four-byte codepoint id is four bytes long: a synthetic worst case
   // under-counts it, and the document could then exceed the 64 KiB cap.
-  const requirementIds = reviewsProduced ? boundedIdList(input.unresolvedRequirementIds) : [];
-  const checkIds = reviewsProduced ? boundedIdList(input.unresolvedRequiredChecks) : [];
+  const incomingRequirements = boundedIdListWithTotal(input.unresolvedRequirementIds);
+  const incomingChecks = boundedIdListWithTotal(input.unresolvedRequiredChecks);
+  const requirementIds = reviewsProduced ? incomingRequirements.ids : [];
+  const checkIds = reviewsProduced ? incomingChecks.ids : [];
+  // #1541: the honest count the enforcement pass produced BEFORE the shared
+  // 20-entry id cap shortened the lists. The lists arrive already bounded by
+  // their producers, so the bundle cannot see that bound from the list
+  // alone; the producers carry the count and the bundle publishes it. An
+  // absent count is UNKNOWN, never a count of zero.
+  const requirementSourceTotal = reviewsProduced
+    ? sourceIdCount(input.unresolvedRequirementIdsSourceTotal, incomingRequirements)
+    : null;
+  const checkSourceTotal = reviewsProduced
+    ? sourceIdCount(input.unresolvedRequiredChecksSourceTotal, incomingChecks)
+    : null;
   const idSegmentBytes = reviewsProduced
     ? Buffer.byteLength(
-      `,"unresolved_requirement_ids":${JSON.stringify(requirementIds)},"unresolved_required_checks":${JSON.stringify(checkIds)}`,
+      `,"unresolved_requirement_ids":${JSON.stringify(requirementIds)}`
+      + (requirementSourceTotal !== null ? `,"unresolved_requirement_ids_source_total":${requirementSourceTotal}` : "")
+      + `,"unresolved_required_checks":${JSON.stringify(checkIds)}`
+      + (checkSourceTotal !== null ? `,"unresolved_required_checks_source_total":${checkSourceTotal}` : ""),
       "utf8",
     )
     : 0;
@@ -295,7 +318,12 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
     // #1518: the merge-gating ids of the deterministic enforcement pass,
     // last in the envelope so the pinned key order above stays stable.
     envelope.unresolved_requirement_ids = requirementIds;
+    // #1541: the count the enforcement pass produced before the shared id
+    // cap shortened that list. Absent when the producer carried none — an
+    // absent count is unknown, never a count of zero.
+    if (requirementSourceTotal !== null) envelope.unresolved_requirement_ids_source_total = requirementSourceTotal;
     envelope.unresolved_required_checks = checkIds;
+    if (checkSourceTotal !== null) envelope.unresolved_required_checks_source_total = checkSourceTotal;
   }
   return JSON.stringify(envelope);
 }
@@ -324,6 +352,15 @@ export interface ReviewBundle {
   /** #1518: the required-check ids the deterministic enforcement pass could
    * not resolve. Present only on a review-producing state. */
   unresolved_required_checks?: string[];
+  /** #1541: the number of DISTINCT merge-gating requirement ids the
+   * deterministic enforcement pass produced, BEFORE the shared 20-entry id
+   * cap shortened the list. A count larger than the listed length means the
+   * shared cap dropped ids. `null` when the document discloses no count: an
+   * unknown count is never read as zero and never read as "the list is the
+   * whole set". */
+  unresolved_requirement_ids_source_total?: number | null;
+  /** #1541: the same honest count for the required-check ids. */
+  unresolved_required_checks_source_total?: number | null;
 }
 
 /** Fail-closed parse of a bundle document: exact schema string, closed
@@ -374,6 +411,34 @@ export function parseReviewBundle(text: string): ReviewBundle | null {
     if (!reviewProducing) return null;
     if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) return null;
   }
+  // #1541: the shared-cap counters follow the same presence rule and are
+  // cross-checked the same way. An absent counter is UNKNOWN (`null`), never
+  // a count of zero: the shared cap could have shortened the list without
+  // saying so. A counter without the list it describes is refused, and a
+  // count below the listed length contradicts itself (the shared cap only
+  // DROPS ids, so the count can never be smaller than the list).
+  for (const [counterKey, listKey] of [
+    ["unresolved_requirement_ids_source_total", "unresolved_requirement_ids"],
+    ["unresolved_required_checks_source_total", "unresolved_required_checks"],
+  ] as const) {
+    const value = record[counterKey];
+    // An explicit `null` is an absent counter, exactly like a missing key:
+    // the handoff parser reads it as unknown, and so does this one.
+    if (value === undefined || value === null) continue;
+    if (!reviewProducing) return null;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return null;
+    const list = record[listKey];
+    if (!Array.isArray(list)) return null;
+    if (value < list.length) return null;
+  }
+  const requirementSourceTotal = record.unresolved_requirement_ids_source_total === undefined
+    || record.unresolved_requirement_ids_source_total === null
+    ? null
+    : record.unresolved_requirement_ids_source_total as number;
+  const checkSourceTotal = record.unresolved_required_checks_source_total === undefined
+    || record.unresolved_required_checks_source_total === null
+    ? null
+    : record.unresolved_required_checks_source_total as number;
   if (record.skip_reason !== undefined && (typeof record.skip_reason !== "string" || record.state !== "skipped")) return null;
   if (record.failure_reason !== undefined && (typeof record.failure_reason !== "string" || record.state !== "failed")) return null;
   const bundle = {
@@ -405,5 +470,8 @@ export function parseReviewBundle(text: string): ReviewBundle | null {
   if (Array.isArray(record.unresolved_required_checks)) {
     bundle.unresolved_required_checks = [...record.unresolved_required_checks] as string[];
   }
+  // #1541: the shared-cap counts are unknown when the document carries none.
+  bundle.unresolved_requirement_ids_source_total = requirementSourceTotal;
+  bundle.unresolved_required_checks_source_total = checkSourceTotal;
   return bundle;
 }

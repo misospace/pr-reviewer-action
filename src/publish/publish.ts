@@ -97,6 +97,13 @@ export interface PublishInput {
   /** #1518: the required-check ids the deterministic enforcement pass could
    * not resolve. They ride the published handoff. */
   unresolvedRequiredChecks?: readonly string[];
+  /** #1541: the number of DISTINCT requirement ids the enforcement pass
+   * produced BEFORE the shared id cap shortened the list. The published
+   * handoff carries it, so a consumer can tell that the cap dropped ids
+   * instead of reading a shortened list as the whole set. */
+  unresolvedRequirementIdsSourceTotal?: number;
+  /** #1541: the same honest count for the required-check ids. */
+  unresolvedRequiredChecksSourceTotal?: number;
   cleanupPreviousNativeReviews: string;
   /** #1161: DEPRECATED and inert. The input stays accepted for backward
    * compatibility, but it gates nothing and changes no published event —
@@ -1811,10 +1818,12 @@ export async function publishReview(
     reviewResult,
     requiredChecks: input.requiredChecks,
     findings: input.findings,
-    unresolvedRequirementIds: input.unresolvedRequirementIds ?? [],
-    unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
-    publishedPrescriptions,
-  }));
+unresolvedRequirementIds: input.unresolvedRequirementIds ?? [],
+unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
+unresolvedRequirementIdsSourceTotal: input.unresolvedRequirementIdsSourceTotal,
+unresolvedRequiredChecksSourceTotal: input.unresolvedRequiredChecksSourceTotal,
+publishedPrescriptions,
+}));
   // #1518: a suggestion may ride the handoff ONLY after the inline review
   // submission that would publish it SUCCEEDS. The submission happens after
   // (or with) the body's own publication, so every path that publishes a
@@ -1832,10 +1841,12 @@ export async function publishReview(
       reviewResult,
       requiredChecks: input.requiredChecks,
       findings: input.findings,
-      unresolvedRequirementIds: input.unresolvedRequirementIds ?? [],
-      unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
-      publishedPrescriptions: new Map(),
-    }));
+unresolvedRequirementIds: input.unresolvedRequirementIds ?? [],
+unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
+unresolvedRequirementIdsSourceTotal: input.unresolvedRequirementIdsSourceTotal,
+unresolvedRequiredChecksSourceTotal: input.unresolvedRequiredChecksSourceTotal,
+publishedPrescriptions: new Map(),
+}));
   const bodySansPublishedSuggestions = (body: string): string =>
     handoffBlock === handoffBlockSansSuggestions
       ? body

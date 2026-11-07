@@ -906,8 +906,15 @@ export function reviewDerivedPublishFields(review: RunReviewResult): Partial<Pub
     // published handoff so a controller can see WHICH obligation stayed
     // open. Absent when the run never reviewed (the admission skip path),
     // so such a run keeps the pre-#1518 publish-input shape.
-    ...(review.unresolvedRequirementIds !== undefined ? { unresolvedRequirementIds: review.unresolvedRequirementIds } : {}),
-    ...(review.unresolvedRequiredChecks !== undefined ? { unresolvedRequiredChecks: review.unresolvedRequiredChecks } : {}),
+...(review.unresolvedRequirementIds !== undefined ? { unresolvedRequirementIds: review.unresolvedRequirementIds } : {}),
+...(review.unresolvedRequiredChecks !== undefined ? { unresolvedRequiredChecks: review.unresolvedRequiredChecks } : {}),
+// #1541: the count the enforcement pass produced BEFORE the shared id cap
+// shortened those lists. It rides the published handoff so a consumer can
+// tell that the cap dropped ids. Absent when the run never reviewed (the
+// admission skip path), so such a run keeps the pre-#1541 publish-input
+// shape.
+...(review.unresolvedRequirementIdsSourceTotal !== undefined ? { unresolvedRequirementIdsSourceTotal: review.unresolvedRequirementIdsSourceTotal } : {}),
+...(review.unresolvedRequiredChecksSourceTotal !== undefined ? { unresolvedRequiredChecksSourceTotal: review.unresolvedRequiredChecksSourceTotal } : {}),
     // #1003: the human-review triage answer reaches the published body only
     // when triage ran ("" when off), so a disabled run's review is
     // byte-identical to pre-#1003. Triage grants no capability.

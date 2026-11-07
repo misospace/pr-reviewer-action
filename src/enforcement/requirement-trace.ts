@@ -76,7 +76,7 @@ import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
-import { boundedIdList } from "../context/id-lists.js";
+import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
 
@@ -2749,16 +2749,21 @@ const COLLAPSE_THRESHOLD = 5;
  *
  * The list is deduplicated, keeps the trace's order, and is bounded by the
  * shared id cap, so a large ledger cannot flood the published handoff.
+ *
+ * #1541: the returned count is the number of distinct ids the trace produced
+ * BEFORE the shared id cap shortened the list, so a publisher can disclose
+ * that the cap dropped ids instead of passing a shortened list off as the
+ * whole set.
  */
-export function unresolvedTraceRequirementIds(trace: RequirementTraceArtifact): string[] {
-  if (trace === null || typeof trace !== "object" || !Array.isArray(trace.rows)) return [];
+export function unresolvedTraceRequirementIds(trace: RequirementTraceArtifact): BoundedIdList {
+  if (trace === null || typeof trace !== "object" || !Array.isArray(trace.rows)) return { ids: [], total: 0 };
   const ids: string[] = [];
   for (const row of trace.rows) {
     if (row.disposition !== "unmet" && row.disposition !== "unverifiable") continue;
     if (typeof row.requirement_id !== "string" || row.requirement_id === "") continue;
     ids.push(row.requirement_id);
   }
-  return boundedIdList(ids);
+  return boundedIdListWithTotal(ids);
 }
 
 /**
