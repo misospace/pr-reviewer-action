@@ -233,7 +233,15 @@ A consumer MUST:
   an empty `review_id`, and it cross-checks the item counters. A document
   that lists more items than it counts, or that claims no truncation while
   its total disagrees with the list it carries, contradicts itself and is
+  refused. The two id lists carry the same cross-check (#1538): a count
+  below the listed length, a count that disagrees with the list while the
+  document claims no truncation, and a truncation claim whose count matches
+  the list exactly are all contradictions, and a contradictory document is
   refused.
+- Treat an unknown id-list disclosure as an incomplete list. A `null`
+  `*_truncated` flag means that the document discloses no truncation, so the
+  list may be short. A count larger than the listed length means the list is
+  short, whatever the flag says. A consumer MUST NOT read `null` as `false`.
 
 ### Document shape
 
@@ -264,7 +272,11 @@ here for readability, real output has no newlines):
   "items_total": 1,
   "items_truncated": false,
   "unresolved_requirement_ids": ["REQ-7"],
-  "unresolved_required_checks": ["tests cover the new path"]
+  "unresolved_requirement_ids_total": 1,
+  "unresolved_requirement_ids_truncated": false,
+  "unresolved_required_checks": ["tests cover the new path"],
+  "unresolved_required_checks_total": 1,
+  "unresolved_required_checks_truncated": false
 }
 ```
 
@@ -310,6 +322,15 @@ here for readability, real output has no newlines):
 - `unresolved_requirement_ids` and `unresolved_required_checks` carry the
   same ids as the bundle, on the same presence rule. They name the
   obligations the deterministic enforcement pass could not discharge.
+- `unresolved_requirement_ids_total` and `unresolved_required_checks_total`
+  count the ids each list carried before the byte budget shortened it.
+  `unresolved_requirement_ids_truncated` and
+  `unresolved_required_checks_truncated` say whether the byte budget dropped
+  an id from that list. Never read a shortened list as the whole set.
+- A handoff published before #1538 carries no id counters. The parser then
+  reports the count and the flag as unknown (`null`). An unknown flag is
+  never read as `false`, because such a document may still hide a dropped
+  id.
 
 ### Bounds and redaction
 
@@ -320,6 +341,9 @@ here for readability, real output has no newlines):
   bound — so the base is shrunk first: the last ids of the longer id list
   are dropped one at a time (requirements first on a tie) until the document
   fits. The empty-list base is far below the cap, so the bound always holds.
+- The two id counters ride the base (#1538). The byte budget that shortens
+  the lists measures the counters too, so a shortened document still fits the
+  cap, and the shortened list is disclosed by its own count and flag.
 - At most 25 findings are listed (`REVIEW_HANDOFF_MAX_ITEMS`).
 - A suggestion is at most 2000 codepoints
   (`REVIEW_HANDOFF_MAX_SUGGESTION_CHARS`). A longer replacement is omitted
