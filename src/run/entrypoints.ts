@@ -404,8 +404,11 @@ function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undef
  * Per-member sources and their fail-closed rules:
  * - `review-obligations.json` — the folded rows, parsed strictly by
  *   `reviewObligationsFromArtifact`; a structurally unrecognizable artifact
- *   publishes nothing. `blockingReviewObligations` keeps only the forcing rows,
- *   non-satisfied rows — exactly what the engine's #1521 in-memory pass names.
+ *   publishes nothing. `blockingReviewObligations` keeps only the FORCING
+ *   rows — a review-owned row with status `unmet`, a confirmed negative. An
+ *   `unresolved` row is non-satisfied but never forcing (it is coverage, not
+ *   a defect), so it is left out on purpose. Exactly what the engine's #1521
+ *   in-memory pass names.
  * - `requirement-trace.json` — the trace artifact, always created at the
  *   review tail and left zero-byte when the trace did not apply
  *   (`src/engine/review.ts`); the strict object reader refuses a file it
