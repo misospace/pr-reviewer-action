@@ -11,6 +11,7 @@ import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { canonicalChangedFile, normalizeLinkedIssues } from "../context/types.js";
+import { type BoundedIdList } from "../context/id-lists.js";
 import { redactDiffText, redactPrTextDeep, redactPrTextLines, redactText } from "../context/redact.js";
 import { pythonJsonStringify } from "../precheck/metadata.js";
 import { buildHarnessObligations } from "../requirements/obligations.js";
@@ -166,6 +167,14 @@ export class RunReviewError extends Error {
   }
 }
 
+/** #1541: the merge-gating id set of an enforcement pass that never ran — no
+ * ids, and no count either (the count is a count of ids, and there are
+ * none). The publishers turn this into an empty list and a zero count. A
+ * fresh object per call: the two lists never share an array instance. */
+function emptyMergeGatingIds(): BoundedIdList {
+  return { ids: [], total: 0 };
+}
+
 export interface RunReviewResult {
   outputs: ReviewStepOutputs;
   /** The resolved artifact directory this run wrote to (#838 follow-up): the
@@ -232,6 +241,10 @@ export interface RunReviewResult {
    * discharge (unmet or unverifiable). These are the merge-gating ids of
    * the enforcement pass, not model claims. */
   unresolvedRequirementIds?: string[];
+  /** #1541: the number of DISTINCT requirement ids the enforcement pass
+   * produced BEFORE the shared id cap shortened the list. The publishers
+   * carry it so a consumer can tell that the cap dropped ids. */
+  unresolvedRequirementIdsSourceTotal?: number;
   /** #1518: the required-check ids the deterministic enforcement pass could
    * not resolve. These are the merge-gating ids of the enforcement pass, not
    * model claims. */
@@ -245,6 +258,8 @@ export interface RunReviewResult {
    * bundle name these rows so a controller sees WHAT blocked the review, not
    * only an opaque id. */
   unresolvedReviewObligations?: ReviewObligation[];
+  /** #1541: the same honest count for the required-check ids. */
+  unresolvedRequiredChecksSourceTotal?: number;
   /** #1455: the verifier's own telemetry — the unscored cause, the measured
    * latency and the provider's token counts. The publish step carries it
    * into the metadata marker; it is advisory and changes nothing else. */
@@ -2477,8 +2492,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // stayed open (a required check the reviewer did not resolve, a
   // requirement the trace could not discharge) rather than only that the
   // coverage was incomplete.
-  const unresolvedRequiredChecks = completenessResult === null ? [] : unresolvedRequiredCheckIds(completenessResult);
-  const unresolvedRequirementIds = requirementTraceResult === null ? [] : unresolvedTraceRequirementIds(requirementTraceResult.trace);
+  // #1541: the count is the number of distinct ids the enforcement pass
+  // produced. A pass that never ran produced no ids, so the count is zero
+  // and the list is empty — the same shape the documents already carried
+  // for that case.
+  const unresolvedRequiredChecks = completenessResult === null ? emptyMergeGatingIds() : unresolvedRequiredCheckIds(completenessResult);
+  const unresolvedRequirementIds = requirementTraceResult === null ? emptyMergeGatingIds() : unresolvedTraceRequirementIds(requirementTraceResult.trace);
   // #1521: the obligation rows that BLOCKED this review, computed AFTER both
   // enforcement branches for the same reason the two id lists above are:
   // the strict path and the non-strict path carry the SAME rows, and the
@@ -3189,8 +3208,10 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     // handoff can name the obligations that stayed open. Both lists are
     // always present here (empty when the enforcement pass found nothing);
     // a run that never reviewed carries neither (the admission skip path).
-    unresolvedRequirementIds,
-    unresolvedRequiredChecks,
+    unresolvedRequirementIds: unresolvedRequirementIds.ids,
+    unresolvedRequirementIdsSourceTotal: unresolvedRequirementIds.total,
+    unresolvedRequiredChecks: unresolvedRequiredChecks.ids,
+    unresolvedRequiredChecksSourceTotal: unresolvedRequiredChecks.total,
     // #1521: the obligation ROWS that blocked this review, on the same
     // presence rule as the two id lists above — always present on the
     // review path (empty when nothing blocked), never on the admission skip

@@ -85,6 +85,25 @@ test("#1425: serialization is deterministic and round-trips the strict parser", 
     "unresolved_review_obligations", "unresolved_review_obligations_total",
     "unresolved_review_obligations_truncated", "derived_obligation_state",
   ]);
+  // #1541: the shared-cap counters ride next to the list they describe, and
+  // only when the producer carried them. The key order is pinned with the
+  // counters present too, because that is the production shape.
+  const withCounters = JSON.parse(buildReviewBundle(baseInput({
+    unresolvedRequirementIds: ["REQ-1"],
+    unresolvedRequirementIdsSourceTotal: 1,
+    unresolvedRequiredChecksSourceTotal: 0,
+  }))) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(withCounters), [
+    "schema", "review_id", "generated_at", "action_version", "repository",
+    "pr_number", "head_sha", "base_sha", "state", "identity", "disposition",
+    "findings", "findings_total", "findings_truncated",
+    "unresolved_requirement_ids", "unresolved_requirement_ids_source_total",
+    "unresolved_required_checks", "unresolved_required_checks_source_total",
+    // #1521: the blocking obligation rows, their counters and the derived
+    // state — on the same presence rule as the id lists above.
+    "unresolved_review_obligations", "unresolved_review_obligations_total",
+    "unresolved_review_obligations_truncated", "derived_obligation_state",
+  ]);
   const parsed = parseReviewBundle(a);
   assert.ok(parsed !== null);
   assert.equal(parsed!.state, "complete");
@@ -558,6 +577,96 @@ test("#1521: hostile obligation text stays inert string content in the bundle (#
   assert.equal(parsed.unresolved_review_obligations!.length, 1, "the row itself survives as string content");
   assert.equal(parsed.unresolved_review_obligations_total, 1, "the honest total rides");
   assert.equal(parsed.unresolved_review_obligations_truncated, false, "nothing was omitted");
+});
+
+test("#1541: the bundle discloses the count the shared id cap dropped", () => {
+  // The shared cap keeps twenty ids. A run with thirty unmet requirement
+  // rows publishes twenty of them, and the bundle must say that thirty
+  // existed — a shortened list is never read as the whole set.
+  const ids = Array.from({ length: 30 }, (_, index) => `REQ-${String(index).padStart(2, "0")}`);
+  const doc = parseReviewBundle(buildReviewBundle(baseInput({
+    unresolvedRequirementIds: ids,
+    unresolvedRequiredChecks: ["check-a"],
+    unresolvedRequirementIdsSourceTotal: 30,
+    unresolvedRequiredChecksSourceTotal: 1,
+  })));
+  assert.ok(doc !== null, "the bundle parses under the strict consumer rules");
+  assert.equal(doc!.unresolved_requirement_ids?.length, MAX_ID_LIST_ENTRIES, "the shared cap kept twenty ids");
+  assert.equal(doc!.unresolved_requirement_ids_source_total, 30, "the shared cap's drop is disclosed");
+  assert.deepEqual(doc!.unresolved_required_checks, ["check-a"]);
+  assert.equal(doc!.unresolved_required_checks_source_total, 1);
+
+  // An unshortened list carries the count the pass produced.
+  const whole = parseReviewBundle(buildReviewBundle(baseInput({
+    unresolvedRequirementIds: ["REQ-1", "REQ-2"],
+    unresolvedRequirementIdsSourceTotal: 2,
+  })))!;
+  assert.deepEqual(whole.unresolved_requirement_ids, ["REQ-1", "REQ-2"]);
+  assert.equal(whole.unresolved_requirement_ids_source_total, 2, "the count equals the whole set");
+
+  // An absent count is UNKNOWN, never a count of zero.
+  const unknown = parseReviewBundle(buildReviewBundle(baseInput({
+    unresolvedRequirementIds: ["REQ-1"],
+  })))!;
+  assert.equal(unknown.unresolved_requirement_ids_source_total, null, "an absent count is unknown, never a count");
+  assert.equal(unknown.unresolved_required_checks_source_total, null);
+
+  // The publisher discloses its own cap's drop when the producer carried no
+  // count of its own.
+  const ownDrop = parseReviewBundle(buildReviewBundle(baseInput({
+    unresolvedRequirementIds: Array.from({ length: 30 }, (_, index) => `REQ-${String(index).padStart(2, "0")}`),
+  })))!;
+  assert.equal(ownDrop.unresolved_requirement_ids?.length, MAX_ID_LIST_ENTRIES, "the cap kept twenty ids");
+  assert.equal(ownDrop.unresolved_requirement_ids_source_total, 30, "the publisher's own drop is disclosed");
+
+  // The parser refuses a count that contradicts the list it describes.
+  const disclosed = JSON.parse(buildReviewBundle(baseInput({
+    unresolvedRequirementIds: ["REQ-1", "REQ-2"],
+    unresolvedRequiredChecks: ["check-a"],
+    unresolvedRequirementIdsSourceTotal: 2,
+    unresolvedRequiredChecksSourceTotal: 1,
+  }))) as Record<string, unknown>;
+  assert.ok(parseReviewBundle(JSON.stringify(disclosed)) !== null, "an agreeing count parses");
+  assert.equal(
+    parseReviewBundle(JSON.stringify({ ...disclosed, unresolved_requirement_ids_source_total: 1 })),
+    null,
+    "a count below the listed length contradicts itself",
+  );
+  assert.equal(
+    parseReviewBundle(JSON.stringify({ ...disclosed, unresolved_requirement_ids_source_total: 2.5 })),
+    null,
+    "a non-integer count is refused",
+  );
+  assert.equal(
+    parseReviewBundle(JSON.stringify({ ...disclosed, unresolved_required_checks_source_total: 0 })),
+    null,
+    "a count below its own list contradicts itself",
+  );
+
+  // A run without a review proves nothing about unresolved obligations, so
+  // it may not carry the counters either.
+  const skipped = JSON.parse(buildReviewBundle(baseInput({
+    state: "skipped",
+    skipReason: "already-reviewed",
+    unresolvedRequirementIdsSourceTotal: 3,
+  }))) as Record<string, unknown>;
+  assert.ok(!Object.hasOwn(skipped, "unresolved_requirement_ids_source_total"));
+  assert.equal(
+    parseReviewBundle(JSON.stringify({
+      schema: REVIEW_BUNDLE_SCHEMA,
+      state: "skipped",
+      review_id: "r1",
+      generated_at: "2026-11-02T12:00:00.000Z",
+      repository: "o/r",
+      pr_number: 7,
+      head_sha: "a".repeat(40),
+      base_sha: "b".repeat(40),
+      identity: { diff_fingerprint: "", analysis_engine: "" },
+      unresolved_requirement_ids_source_total: 3,
+    })),
+    null,
+    "a counter on a state that proves no review is refused",
+  );
 });
 
 test("#1425: partial and superseded states pass through with the publication record", () => {
@@ -1040,6 +1149,11 @@ test("#1425: a published review run emits a complete bundle with anchors and red
     // present, which is what proves the wiring.
     assert.deepEqual(bundle!.unresolved_requirement_ids, []);
     assert.deepEqual(bundle!.unresolved_required_checks, []);
+    // #1541: the count the enforcement pass produced rides the bundle too.
+    // This run resolved every obligation, so both counts are zero — the KEYS
+    // are present, which is what proves the wiring.
+    assert.equal(bundle!.unresolved_requirement_ids_source_total, 0);
+    assert.equal(bundle!.unresolved_required_checks_source_total, 0);
     const finding = (bundle!.findings as Array<Record<string, unknown>>)[0]!;
     assert.equal(finding.severity, "minor");
     assert.equal(finding.file, "README.md");

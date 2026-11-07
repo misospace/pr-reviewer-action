@@ -505,6 +505,11 @@ async function runActionPipeline(
     // too, on the same presence rule as the findings set.
     ...(review.unresolvedRequirementIds !== undefined ? { unresolvedRequirementIds: review.unresolvedRequirementIds } : {}),
     ...(review.unresolvedRequiredChecks !== undefined ? { unresolvedRequiredChecks: review.unresolvedRequiredChecks } : {}),
+    // #1541: the count the enforcement pass produced before the shared id
+    // cap shortened those lists. It rides the local bundle too, so a
+    // consumer can tell that the cap dropped ids.
+    ...(review.unresolvedRequirementIdsSourceTotal !== undefined ? { unresolvedRequirementIdsSourceTotal: review.unresolvedRequirementIdsSourceTotal } : {}),
+    ...(review.unresolvedRequiredChecksSourceTotal !== undefined ? { unresolvedRequiredChecksSourceTotal: review.unresolvedRequiredChecksSourceTotal } : {}),
     // #1521: the obligation ROWS that blocked the review, plus the run's
     // derived-obligation state — the local bundle names what blocked the
     // review exactly like the published handoff does.
