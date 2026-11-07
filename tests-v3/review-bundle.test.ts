@@ -272,6 +272,86 @@ test("#1521: the bundle parser refuses the members on a state that proves no rev
   assert.ok(parseReviewBundle(make("complete", { derived_obligation_state: "complete" })) !== null);
 });
 
+test("#1521: the bundle parser cross-checks the obligation counters against the rows they carry", () => {
+  // The counters are not only TYPE-checked: a document that lists more
+  // blocking rows than it counts, or that claims no truncation while its
+  // total disagrees with the list it carries, contradicts itself and is
+  // refused. The published handoff refuses the same contradictions, so the
+  // two documents read one contract.
+  const make = (extra: Record<string, unknown>): string => JSON.stringify({
+    schema: REVIEW_BUNDLE_SCHEMA,
+    state: "complete",
+    review_id: "r1",
+    generated_at: "2026-11-02T12:00:00.000Z",
+    repository: "o/r",
+    pr_number: 7,
+    head_sha: "a".repeat(40),
+    base_sha: "b".repeat(40),
+    identity: { diff_fingerprint: "", analysis_engine: "" },
+    ...extra,
+  });
+  const row = { id: "must-check-1", source: "must_check", status: "unresolved", cause: null, text: "verify the changelog" };
+  const rows = [row, { ...row, id: "must-check-2" }];
+  // A total below the listed row count contradicts the list it carries.
+  assert.equal(
+    parseReviewBundle(make({ unresolved_review_obligations: rows, unresolved_review_obligations_total: 1, unresolved_review_obligations_truncated: true })),
+    null,
+    "a total below the listed row count is refused",
+  );
+  assert.equal(
+    parseReviewBundle(make({ unresolved_review_obligations: rows, unresolved_review_obligations_total: 0 })),
+    null,
+    "a total below the listed row count is refused even without a truncation flag",
+  );
+  // A total that claims no truncation while it disagrees with the list is
+  // the exact-count contradiction.
+  assert.equal(
+    parseReviewBundle(make({ unresolved_review_obligations: rows, unresolved_review_obligations_total: 5, unresolved_review_obligations_truncated: false })),
+    null,
+    "an exact-count contradiction is refused",
+  );
+  // The honest shapes still parse: a disclosed prefix, an exact count, and
+  // a list with no counters of its own.
+  assert.ok(
+    parseReviewBundle(make({ unresolved_review_obligations: rows, unresolved_review_obligations_total: 5, unresolved_review_obligations_truncated: true })) !== null,
+    "a disclosed prefix parses",
+  );
+  assert.ok(
+    parseReviewBundle(make({ unresolved_review_obligations: rows, unresolved_review_obligations_total: 2, unresolved_review_obligations_truncated: false })) !== null,
+    "an exact count parses",
+  );
+  assert.ok(
+    parseReviewBundle(make({ unresolved_review_obligations: rows })) !== null,
+    "a list with no counters of its own parses",
+  );
+  // A bundle written before #1521 carries none of the four members, and it
+  // stays parseable: an absent list parses as empty, an absent state as
+  // null.
+  const legacy = parseReviewBundle(make({
+    findings: [],
+    findings_total: 0,
+    findings_truncated: false,
+    unresolved_requirement_ids: [],
+    unresolved_required_checks: [],
+  }));
+  assert.ok(legacy !== null, "a pre-#1521 bundle stays parseable");
+  assert.ok(!Object.hasOwn(legacy!, "unresolved_review_obligations"));
+  assert.ok(!Object.hasOwn(legacy!, "unresolved_review_obligations_total"));
+  assert.ok(!Object.hasOwn(legacy!, "unresolved_review_obligations_truncated"));
+  // The builder's own document round-trips, truncated listing included.
+  const many: ReviewObligation[] = Array.from({ length: 12 }, (_, index) => ({
+    id: `obligation-${index}`,
+    source: "must_check",
+    text: `check ${index}`,
+    status: "unresolved",
+    cause: null,
+  }));
+  const built = parseReviewBundle(buildReviewBundle(baseInput({ unresolvedReviewObligations: many })))!;
+  assert.equal(built.unresolved_review_obligations!.length, REVIEW_HANDOFF_MAX_OBLIGATIONS, "the listing is bounded");
+  assert.equal(built.unresolved_review_obligations_total, 12, "the honest total rides");
+  assert.equal(built.unresolved_review_obligations_truncated, true, "the shortened listing is disclosed");
+});
+
 test("#1521: the local bundle and the published handoff project the SAME rows", () => {
   // Both documents use the shared projection (`boundedObligationRows`), so a
   // consumer never reads two different stories about what blocked the same

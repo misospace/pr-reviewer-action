@@ -474,15 +474,28 @@ export function parseReviewBundle(text: string): ReviewBundle | null {
       obligationRows.push(row);
     }
   }
-  if (record.unresolved_review_obligations_total !== undefined) {
-    if (!reviewProducing) return null;
-    if (typeof record.unresolved_review_obligations_total !== "number"
-      || !Number.isInteger(record.unresolved_review_obligations_total)) return null;
-  }
-  if (record.unresolved_review_obligations_truncated !== undefined) {
-    if (!reviewProducing) return null;
-    if (typeof record.unresolved_review_obligations_truncated !== "boolean") return null;
-  }
+  // The counters are OPTIONAL on parse (a bundle written before #1521
+  // carries none of them, and it stays parseable), but a counter that IS
+  // present is cross-checked against the list it carries. An absent counter
+  // defaults to the list's own length (the total) or to `false` (the
+  // truncation flag) — the same defaults the published handoff's parser
+  // uses, so the two documents read one contract.
+  if (record.unresolved_review_obligations_total !== undefined && !reviewProducing) return null;
+  const obligationTotal = record.unresolved_review_obligations_total === undefined
+    ? obligationRows.length
+    : record.unresolved_review_obligations_total;
+  if (typeof obligationTotal !== "number" || !Number.isInteger(obligationTotal)) return null;
+  if (record.unresolved_review_obligations_truncated !== undefined && !reviewProducing) return null;
+  const obligationTruncated = record.unresolved_review_obligations_truncated === undefined
+    ? false
+    : record.unresolved_review_obligations_truncated;
+  if (typeof obligationTruncated !== "boolean") return null;
+  // The counters must agree with the list: a document that lists more
+  // blocking rows than it counts, or that claims no truncation while its
+  // total disagrees with the list it carries, contradicts itself and is
+  // refused. The published handoff refuses the same contradictions.
+  if (obligationTotal < obligationRows.length) return null;
+  if (obligationTruncated === false && obligationTotal !== obligationRows.length) return null;
   if (record.derived_obligation_state !== undefined) {
     if (!reviewProducing) return null;
     const state = record.derived_obligation_state;

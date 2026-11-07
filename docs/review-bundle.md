@@ -187,6 +187,14 @@ The parser treats the four members as optional. A bundle written before
 a `derived` row is a coverage statement and a `satisfied` row blocked
 nothing.
 
+The obligation counters are cross-checked against the rows they carry, and
+not only type-checked. A document that lists more blocking rows than it
+counts is contradictory. So is a document that claims no truncation while
+its total disagrees with the list. The parser refuses both. An absent
+counter defaults to the list's own length (the total) or to `false` (the
+truncation flag), so a bundle that carries the rows without the counters
+still parses. The published handoff's parser refuses the same contradictions.
+
 ### Freshness and supersession
 
 - `head_sha` is the exact commit this run reviewed — never a newer head.
