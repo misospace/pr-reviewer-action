@@ -693,6 +693,11 @@ test("#1537: reviewObligationsFromArtifact refuses anything this runtime did not
     { ...base, source: "model_claim" },
     { ...base, status: "blocked" },
     { ...base, cause: "because-i-said-so" },
+    // The writer always records `cause` (string or `null`), so an omitted
+    // `cause` is not a row this runtime wrote — refused, never normalized.
+    { ...base, cause: undefined },
+    // A property the writer never emits refuses the row (and the artifact).
+    { ...base, rationale: "half-trusted" },
     { ...base, id: "" },
     { ...base, anchors: [1] },
     null,

@@ -298,7 +298,7 @@ function writeCoverageArtifact(dir: string, overrides: Partial<{
   route: string;
   partial_coverage: unknown;
   required_checks: string | undefined;
-  required_check_fold_status: string | undefined;
+  required_check_fold_status: unknown;
   incomplete_reason: string;
 }> = {}): void {
   const artifact = {
@@ -1346,10 +1346,19 @@ test("#1537: required-check ids are recomputed only when the fold itself was inc
     writeCoverageArtifact(dir, { required_checks: "incomplete", required_check_fold_status: "incomplete" });
     rmSync(join(dir, "classification.json"));
     assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
-    // An unrecognizable recorded fold status is never half-trusted: with the
-    // published dimension also unrecognizable (a pre-#1543 artifact would
-    // fail its own heuristic too), nothing recomputes.
     writeFileSync(join(dir, "classification.json"), JSON.stringify({ must_check: ["Check the auth path"] }));
+    // An unrecognizable recorded fold status is never half-trusted and never
+    // read as the pre-#1543 absence: the field is PRESENT, so the artifact
+    // declares a fold status this runtime cannot interpret and the recompute
+    // fails closed — even when the published dimension alone (a valid
+    // `incomplete` with a non-trace reason) would have triggered the
+    // inference fallback the absent field earns.
+    writeCoverageArtifact(dir, { required_checks: "incomplete", required_check_fold_status: "yes-very-incomplete", incomplete_reason: "execution" });
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
+    writeCoverageArtifact(dir, { required_checks: "incomplete", required_check_fold_status: true, incomplete_reason: "execution" });
+    assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
+    // The same holds with the published dimension itself unrecognizable (a
+    // pre-#1543 artifact would fail its own heuristic too): nothing recomputes.
     writeCoverageArtifact(dir, { required_checks: "yes-very-incomplete", required_check_fold_status: "yes-very-incomplete" });
     assert.equal(publishInputFromEnv({ PR_REVIEWER_RUN_DIR: dir, PUBLISH_MODE: "comment" } as NodeJS.ProcessEnv, "github").unresolvedRequiredChecks, undefined);
     // A run dir predating #1543 carries no fold-status field: the recorded-
