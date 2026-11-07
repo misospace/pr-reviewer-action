@@ -536,14 +536,14 @@ export function isForcingObligation(obligation: ReviewObligation): boolean {
 }
 
 /**
- * The hard-force gate (#1381): an unresolved obligation row — deterministic
- * `must_check` or extracted `trusted_base_guidance` — is a review-owned
- * required check the reviewer was expected and equipped to perform, so it
- * forces request_changes and names every unresolved row with its status and
- * cause. There is deliberately no per-source exemption between those two
- * sources: two classes of review-owned required rows with different approval
- * semantics would let an unresolved review-owned check certify a native
- * APPROVE through the second class (#1381 review). #750's
+ * The hard-force gate (#1381/#1505) is status-based for review-owned
+ * `must_check` and `trusted_base_guidance` rows. An `unmet` row is a
+ * confirmed negative and forces request_changes. An `unresolved` row is
+ * incomplete coverage, not a defect: it is disclosed with its status/cause,
+ * marks the review partial, and withholds native APPROVE at the publish
+ * boundary (COMMENT, never a manufactured blocking request). There is
+ * deliberately no per-source exemption between those two sources: the same
+ * status has the same approval semantics for either source. #750's
  * REQUIRED_CHECK_VALIDATION_MODE keeps owning the completeness markdown; it
  * no longer owns whether approval may publish.
  *
