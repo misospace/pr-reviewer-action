@@ -7,11 +7,13 @@ import {
 
 /**
  * The run-wide inference governor (#1515): ONE admission point every model
- * request path of a review run flows through when the operator enables the
- * run-wide cap (`AI_MAX_CONCURRENT_MODEL_REQUESTS`). It bounds how many
- * provider requests one run may have in flight at once and schedules the
- * queued ones by priority, so the review's authoritative work is not the
- * thing that queues behind an advisory burst.
+ * request path of a review run flows through before any wire attempt. It
+ * bounds how many provider requests one run may have in flight at once and
+ * schedules the queued ones by priority, so the review's authoritative work
+ * is not the thing that queues behind an advisory burst. The cap comes from
+ * the ambient env knob `AI_MAX_CONCURRENT_MODEL_REQUESTS` and is ON by
+ * default at the conservative `DEFAULT_MAX_CONCURRENT_REQUESTS`; an explicit
+ * `0` opts out (the disabled compatibility posture).
  *
  * What it is NOT, deliberately (#1515 non-goals):
  * - not a quota/token-plan answer: hard account exhaustion (a provider 429
@@ -52,13 +54,11 @@ export const GOVERNOR_PRIORITY_RECOVERY = 3;
 export const GOVERNOR_PRIORITY_ADVISORY = 4;
 export type GovernorPriority = 1 | 2 | 3 | 4;
 
-/** The library default when a governor is constructed without an explicit
- * cap: deliberately conservative — two concurrent provider requests per run —
- * so an unconfigured-but-constructed governor still bounds a burst. The
- * ACTION's default posture is separate and stricter about compatibility:
- * `inferenceGovernorFromEnv` keeps the governor DISABLED when the operator
- * sets no cap, so existing single-call paths are byte/behavior compatible
- * (see docs/architecture/model-gateway.md). */
+/** The conservative default cap — two concurrent provider requests per run —
+ * used BOTH when a governor is constructed without an explicit cap and when
+ * the operator sets no cap at all (#1515 review fix: the unconfigured default
+ * must bound the burst it exists to control, so unset/empty enables the
+ * governor at this cap; an explicit `0` is the operator's opt-out). */
 export const DEFAULT_MAX_CONCURRENT_REQUESTS = 2;
 
 /** Upper bound on a configured cap: an operator typo must not disable the
@@ -90,7 +90,11 @@ export class GovernorCancelledError extends Error {
 export interface GovernedRequest {
   priority: GovernorPriority;
   endpointKey: string;
-  /** Abort while queued (also checked at dispatch-selection time). */
+  /** Abort while queued: a signal already aborted at submission is refused
+   * before dispatch (both the immediate and the queued path — the enabled
+   * governor never hands an aborted request to the transport), and a signal
+   * that aborts DURING the wait removes the request from the queue. Once
+   * dispatched, the caller's signal keeps riding the transport itself. */
   signal?: AbortSignal;
   /** Maximum wall-clock wait in the queue, in milliseconds; expiry cancels
    * the request before dispatch. */
@@ -152,6 +156,21 @@ class RunInferenceGovernor implements InferenceGovernor {
 
   admit<R>(request: GovernedRequest, task: () => Promise<R>): Promise<R> {
     if (!this.enabled) return task();
+    // A signal already aborted at submission is refused in BOTH paths: the
+    // enqueue path checks below, and the immediate path must not run the task
+    // either — an aborted request never dispatches, so it never reaches the
+    // transport and records as cancelled-before-dispatch like any other
+    // request that left admission without a wire attempt.
+    if (request.signal?.aborted) {
+      this.records.push({
+        priority: request.priority,
+        endpointKey: request.endpointKey,
+        queueWaitMs: 0,
+        activeCount: this.active,
+        cancelledBeforeDispatch: true,
+      });
+      return Promise.reject(new GovernorCancelledError("cancelled"));
+    }
     if (this.active < this.maxConcurrent) return this.dispatch(request, task, 0);
     return this.enqueue(request, task);
   }
@@ -282,20 +301,23 @@ class RunInferenceGovernor implements InferenceGovernor {
   }
 }
 
-/** Build a governor. Without a cap (or with a non-positive one) the governor
- * is DISABLED: `admit` runs the task directly, records no telemetry, and adds
- * no scheduling — the byte/behavior-compatible default posture. With a cap
- * of 1..`MAX_CONFIGURABLE_CONCURRENCY` the governor bounds the run's
- * in-flight provider requests to it. */
+/** Build a governor. Without a cap the governor uses the conservative
+ * `DEFAULT_MAX_CONCURRENT_REQUESTS`; with a cap of
+ * 1..`MAX_CONFIGURABLE_CONCURRENCY` it bounds the run's in-flight provider
+ * requests to it. `0` (or any other value that is not a positive integer)
+ * builds a DISABLED governor: `admit` runs the task directly, records no
+ * telemetry, and adds no scheduling — the operator's explicit opt-out. */
 export function createInferenceGovernor(config?: { maxConcurrent?: number }): InferenceGovernor {
   const raw = config?.maxConcurrent;
   const cap = raw === undefined ? DEFAULT_MAX_CONCURRENT_REQUESTS : raw;
   return new RunInferenceGovernor(cap);
 }
 
-/** The disabled module singleton every seam defaults to: one boolean branch
- * per request, no queue, no records — until the run configures a real
- * governor over it. */
+/** The disabled module singleton every seam defaults to before a run
+ * configures its policy: one boolean branch per request, no queue, no
+ * records. A review run replaces this at pipeline start with the governor
+ * its env selects (unset env = the conservative default cap); only surfaces
+ * that never configure a run keep this one. */
 let sharedGovernor: InferenceGovernor | null = null;
 const disabledGovernor = createInferenceGovernor({ maxConcurrent: 0 });
 
@@ -324,10 +346,15 @@ export function drainSharedRunInferenceGovernor(): GovernorTelemetrySummary | nu
 }
 
 /** The env knob (#1515): a run-wide cap on concurrent model requests.
- * Unset/empty (or 0) keeps the governor DISABLED — the documented default
- * compatibility posture; a positive integer enables the run-wide cap;
+ * Unset/empty enables the CONSERVATIVE DEFAULT cap
+ * (`DEFAULT_MAX_CONCURRENT_REQUESTS`) — the issue's "bounded configurable
+ * concurrency with a conservative default": the unconfigured burst is exactly
+ * the one the knob exists to bound, so the default posture is bounded. An
+ * explicit `0` is the operator's opt-out (the disabled compatibility
+ * posture); a positive integer `1..MAX_CONFIGURABLE_CONCURRENCY` is the cap;
  * anything else is invalid and reported as such so the engine can warn by
- * name instead of silently dropping the operator's intent. */
+ * name and fall back to the conservative default — a typo never silently
+ * unbounds the run (and never aborts a review). */
 export const RUN_INFERENCE_CAP_ENV = "AI_MAX_CONCURRENT_MODEL_REQUESTS";
 
 export type RunInferenceCapConfig =
@@ -336,21 +363,25 @@ export type RunInferenceCapConfig =
   | { kind: "invalid"; raw: string };
 
 export function parseRunInferenceCap(raw: string | undefined): RunInferenceCapConfig {
-  if (raw === undefined) return { kind: "disabled" };
+  if (raw === undefined) return { kind: "enabled", cap: DEFAULT_MAX_CONCURRENT_REQUESTS };
   const trimmed = raw.trim();
-  if (trimmed === "") return { kind: "disabled" };
+  if (trimmed === "") return { kind: "enabled", cap: DEFAULT_MAX_CONCURRENT_REQUESTS };
   const value = Number(trimmed);
   if (!Number.isInteger(value)) return { kind: "invalid", raw: trimmed };
-  if (value <= 0) return { kind: "disabled" };
-  if (value > MAX_CONFIGURABLE_CONCURRENCY) return { kind: "invalid", raw: trimmed };
+  if (value === 0) return { kind: "disabled" };
+  if (value < 0 || value > MAX_CONFIGURABLE_CONCURRENCY) return { kind: "invalid", raw: trimmed };
   return { kind: "enabled", cap: value };
 }
 
-/** The governor a run configures from its env, or null to keep the default
- * disabled posture. An invalid value returns null too (the engine warns). */
+/** The governor a run configures from its env. Unset/empty enables the
+ * conservative default cap; an explicit `0` returns null (the disabled
+ * posture); an invalid value returns the conservative default cap too — the
+ * caller warns by name, and the run stays bounded either way. */
 export function inferenceGovernorFromEnv(env: Record<string, string | undefined>): InferenceGovernor | null {
   const parsed = parseRunInferenceCap(env[RUN_INFERENCE_CAP_ENV]);
-  return parsed.kind === "enabled" ? createInferenceGovernor({ maxConcurrent: parsed.cap }) : null;
+  if (parsed.kind === "disabled") return null;
+  const cap = parsed.kind === "enabled" ? parsed.cap : DEFAULT_MAX_CONCURRENT_REQUESTS;
+  return createInferenceGovernor({ maxConcurrent: cap });
 }
 
 /** The one bounded observability line for a drained summary (the record

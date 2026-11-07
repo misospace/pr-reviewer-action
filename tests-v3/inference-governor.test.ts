@@ -1,20 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  DEFAULT_MAX_CONCURRENT_REQUESTS,
   GOVERNOR_PRIORITY_ADVISORY,
   GOVERNOR_PRIORITY_AUTHORITATIVE,
   GOVERNOR_PRIORITY_REQUIRED_PREPASS,
   GOVERNOR_PRIORITY_RECOVERY,
   GovernorCancelledError,
+  RUN_INFERENCE_CAP_ENV,
+  configureSharedRunInferenceGovernor,
   createInferenceGovernor,
   inferenceEndpointKey,
+  inferenceGovernorFromEnv,
   parseRunInferenceCap,
   sharedRunInferenceGovernor,
   type GovernedRequest,
   type InferenceGovernor,
 } from "../src/model/governor.js";
 import { summarizeGovernorTelemetry, renderGovernorTelemetryLine } from "../src/model/telemetry.js";
-import { callModelTier, type TierProfile } from "../src/model/call.js";
+import { callModelTier, governedScorerTransport, type TierProfile } from "../src/model/call.js";
+import { runConfidenceScorer } from "../src/confidence/scorer.js";
+import type { ConfidenceProfile } from "../src/routing/tiers.js";
 import { specialistRequestFn } from "../src/gates/specialist-transport.js";
 import { SPECIALIST_GATE_ENV_KEYS } from "../src/gates/env.js";
 import { TransportFailure } from "../src/transport/http.js";
@@ -176,6 +182,22 @@ test("#1515: a lower-priority class runs when no higher-priority work contends (
   assert.deepEqual(ran, ["advisory"], "an advisory waiter runs once the authoritative work is not contending");
 });
 
+test("#1515 review fix: a request whose signal is already aborted never dispatches, on the immediate path too", async () => {
+  const governor = createInferenceGovernor({ maxConcurrent: 2 });
+  const controller = new AbortController();
+  controller.abort();
+  let ran = false;
+  const refused = governor.admit(
+    { priority: GOVERNOR_PRIORITY_AUTHORITATIVE, endpointKey: "e", signal: controller.signal },
+    async () => { ran = true; return 1; },
+  );
+  await assert.rejects(refused, GovernorCancelledError);
+  assert.equal(ran, false, "the immediate-dispatch path must not run an already-aborted request");
+  const summary = governor.summarizeTelemetry();
+  assert.equal(summary.dispatched, 0);
+  assert.equal(summary.cancelledBeforeDispatch, 1, "the refusal records as cancelled-before-dispatch");
+});
+
 test("#1515: queued cancellation never reaches the task", async () => {
   const governor = createInferenceGovernor({ maxConcurrent: 1 });
   let dispatched = 0;
@@ -237,7 +259,7 @@ test("#1515: telemetry records queue wait, priority, active count", async () => 
   assert.equal(governor.drainTelemetry().length, 0, "drain clears the records");
 });
 
-test("#1515: the disabled governor admits directly, records nothing, is the shared default", async () => {
+test("#1515: the disabled governor (an explicit 0 cap) admits directly, records nothing; the module singleton stays disabled until a run configures one", async () => {
   const governor = createInferenceGovernor({ maxConcurrent: 0 });
   assert.equal(governor.enabled, false);
   let ran = false;
@@ -245,22 +267,31 @@ test("#1515: the disabled governor admits directly, records nothing, is the shar
   assert.equal(result, 7);
   assert.equal(ran, true);
   assert.equal(governor.drainTelemetry().length, 0);
-  // The shared instance every seam defaults to is the disabled one until a
-  // run configures a cap — the default-compatibility posture.
+  // Before a run configures its policy, the shared instance is the disabled
+  // one; a review run replaces it at pipeline start from its env (unset env
+  // = the conservative default cap — pinned by the env-posture test below).
   assert.equal(sharedRunInferenceGovernor().enabled, false);
 });
 
-test("#1515: parseRunInferenceCap — unset/empty/0 disabled, positive integer enabled, junk invalid", () => {
-  assert.deepEqual(parseRunInferenceCap(undefined), { kind: "disabled" });
-  assert.deepEqual(parseRunInferenceCap(""), { kind: "disabled" });
-  assert.deepEqual(parseRunInferenceCap("  "), { kind: "disabled" });
-  assert.deepEqual(parseRunInferenceCap("0"), { kind: "disabled" });
+test("#1515 review fix: unset/empty env enables the conservative default cap; an explicit 0 opts out; invalid falls back bounded", () => {
+  const defaultCap = DEFAULT_MAX_CONCURRENT_REQUESTS;
+  // The unconfigured burst is exactly the one the knob exists to bound, so
+  // unset/empty is the conservative default cap, not disabled.
+  assert.deepEqual(parseRunInferenceCap(undefined), { kind: "enabled", cap: defaultCap });
+  assert.deepEqual(parseRunInferenceCap(""), { kind: "enabled", cap: defaultCap });
+  assert.deepEqual(parseRunInferenceCap("  "), { kind: "enabled", cap: defaultCap });
+  assert.deepEqual(parseRunInferenceCap("0"), { kind: "disabled" }, "an explicit 0 is the operator's opt-out");
   assert.deepEqual(parseRunInferenceCap("3"), { kind: "enabled", cap: 3 });
   assert.deepEqual(parseRunInferenceCap(" 2 "), { kind: "enabled", cap: 2 });
   assert.equal(parseRunInferenceCap("abc").kind, "invalid");
   assert.equal(parseRunInferenceCap("2.5").kind, "invalid");
-  assert.equal(parseRunInferenceCap("-1").kind, "disabled");
+  assert.equal(parseRunInferenceCap("-1").kind, "invalid", "a negative number is neither the 0 opt-out nor a cap");
   assert.equal(parseRunInferenceCap("99999").kind, "invalid", "an out-of-range cap is refused, never silently huge");
+  const fromDefault = inferenceGovernorFromEnv({});
+  assert.ok(fromDefault?.enabled === true && fromDefault.maxConcurrent === defaultCap, "unset env configures the conservative default cap");
+  assert.equal(inferenceGovernorFromEnv({ [RUN_INFERENCE_CAP_ENV]: "0" }), null, "an explicit 0 keeps the disabled posture");
+  const fromInvalid = inferenceGovernorFromEnv({ [RUN_INFERENCE_CAP_ENV]: "typo" });
+  assert.ok(fromInvalid?.enabled === true && fromInvalid.maxConcurrent === defaultCap, "a typo falls back to the conservative default cap, never to unbounded");
 });
 
 test("#1515: the scheduling identity never carries a credential", () => {
@@ -516,6 +547,75 @@ test("#1515: the unconfigured specialist lane queues at the advisory class (behi
   assert.deepEqual(order, ["recovery", "specialist"], "the unconfigured specialist lane queues at advisory (4), behind recovery (3)");
   await specialist;
   await recovery;
+});
+
+// ── confidence-scorer integration (#1515 review fix) ────────────────────────
+
+function scorerProfile(): ConfidenceProfile {
+  return {
+    enabled: true,
+    baseUrl: "https://scorer.example.com",
+    model: "scorer-model",
+    apiFormat: "openai",
+    tokensParam: "max_tokens",
+    apiKey: "scorer-key",
+    requestTimeoutSec: 10,
+    reasoningEffort: "",
+    inheritedTransport: true,
+    credentialSource: "own",
+    maxTokens: 4096,
+    promptTokens: 98304,
+    modelContextTokens: 0,
+    anthropicEffortSupported: false,
+    structuredOutputSupported: false,
+    refusalCause: "",
+  };
+}
+
+test("#1515 review fix: a queued confidence-scorer admission carries the run signal and never dispatches after cancellation", async () => {
+  const governor = createInferenceGovernor({ maxConcurrent: 1 });
+  // The engine wires the scorer's transport through the SHARED governor it
+  // installs at pipeline start — install this one the same way (and clear it
+  // in the finally, like the engine does), so the regression exercises the
+  // production wiring, not a private instance.
+  configureSharedRunInferenceGovernor(governor);
+  try {
+    const first = deferred();
+    const holder = governor.admit({ priority: GOVERNOR_PRIORITY_ADVISORY, endpointKey: "e" }, async () => { await first.promise; });
+    await sleep(2);
+    const controller = new AbortController();
+    let transportReached = 0;
+    const scorer = runConfidenceScorer({
+      profile: scorerProfile(),
+      primaryApiKey: "primary-key-ABC",
+      prompt: { system: "s", user: "u" },
+      connectTimeoutSec: 5,
+      // The engine's wiring: the run's cancellation scope rides the ADMISSION
+      // request (the scorer's own signal only reaches the transport after it).
+      transport: governedScorerTransport(controller.signal, async () => {
+        transportReached++;
+        return okVerdict();
+      }),
+      findings: [],
+      coverage: {},
+      signal: controller.signal,
+    });
+    await sleep(2);
+    controller.abort(); // the run cancels while the scorer's admission is still queued
+    const outcome = await scorer;
+    assert.equal(outcome.result.status, "unscored");
+    assert.equal(outcome.result.cause, "transport_error", "a queued-cancel degrades through the typed transport-failure path, not internal_error");
+    assert.equal(outcome.latencyMs, null, "a request that never left the queue reports no provider latency");
+    assert.equal(outcome.wireEffort, "", "and no wire effort");
+    assert.equal(transportReached, 0, "the scorer's transport must never have been invoked after the cancellation");
+    first.release();
+    await holder;
+    const summary = governor.summarizeTelemetry();
+    assert.equal(summary.cancelledBeforeDispatch, 1, "the queued scorer admission was removed before dispatch");
+    assert.equal(summary.dispatched, 1, "only the holder dispatched");
+  } finally {
+    configureSharedRunInferenceGovernor(null);
+  }
 });
 
 // ── telemetry fold ──────────────────────────────────────────────────────────

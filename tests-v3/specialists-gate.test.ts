@@ -67,7 +67,12 @@ test("disabled deep review is call-free and write-free", async () => {
   const calls: { system: string; timeoutSec: number }[] = [];
   const result = await run({ DEEP_REVIEW: "false" }, { requestFn: mockTransport(calls) });
   assert.equal(result.code, 0);
-  assert.deepEqual(result.out, ["deep_review disabled; no specialist passes run"]);
+  assert.deepEqual(result.out, [
+    // #1515: the child configures the run-wide governor from its env before
+    // anything else — unset env enables the conservative default cap.
+    "inference governor: run-wide cap 2 concurrent model request(s)",
+    "deep_review disabled; no specialist passes run",
+  ]);
   assert.equal(calls.length, 0);
   assert.equal(existsSync(join(result.root, "specialists.json")), false);
   rmSync(result.root, { recursive: true, force: true });
@@ -540,7 +545,8 @@ test("auto mode: classification drives selection; skipped roles keep v2's exact 
     setup: (root) => writeFileSync(join(root, "classification.json"), JSON.stringify({ pr_kind: "dependency_upgrade", risk_flags: [], changed_files_summary: ["package.json"] })),
   });
   assert.equal(result.code, 0);
-  assert.equal(result.out[0], "deep review mode auto: selected roles [tests]");
+  assert.equal(result.out[0], "inference governor: run-wide cap 2 concurrent model request(s)");
+  assert.equal(result.out[1], "deep review mode auto: selected roles [tests]");
   const text = result.read("specialists.json");
   assert.match(text, /"role": "correctness",\n {6}"status": "skipped",\n {6}"error_kind": null,\n {6}"elapsed_sec": 0\.0,\n {6}"lead_count": 0,\n {6}"errors_count": 0,\n {6}"reason": "[^"]+",\n {6}"request_bytes": null\n/);
   assert.equal(existsSync(join(result.root, "specialist-correctness.json")), false);

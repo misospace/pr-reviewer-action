@@ -19,7 +19,7 @@ import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standa
 import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, renderSkillCatalog, repositorySkillsAllowed } from "../context/repository-skills.js";
 import { loopContextLimits, type HarnessDeps } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
-import { runChatRequest, runChatRequestOnce } from "../transport/transport.js";
+import { runChatRequest } from "../transport/transport.js";
 import {
   describeTransportFailure,
   endpointUrlCredentialOrEmpty,
@@ -62,9 +62,9 @@ import { renderClaimsSection } from "../claims/render.js";
 import { runDerivedObligationsPass } from "../derived/pass.js";
 import { renderDerivedSectionForStatus, renderDerivedUnavailable } from "../derived/render.js";
 import { buildModelRequest } from "../model/request.js";
-import { callModelTier, type TierProfile } from "../model/call.js";
+import { callModelTier, governedScorerTransport, type TierProfile } from "../model/call.js";
 import {
-  GOVERNOR_PRIORITY_ADVISORY,
+  DEFAULT_MAX_CONCURRENT_REQUESTS,
   GOVERNOR_PRIORITY_AUTHORITATIVE,
   GOVERNOR_PRIORITY_RECOVERY,
   GOVERNOR_PRIORITY_REQUIRED_PREPASS,
@@ -72,11 +72,9 @@ import {
   RUN_INFERENCE_CAP_ENV,
   configureSharedRunInferenceGovernor,
   drainSharedRunInferenceGovernor,
-  inferenceEndpointKey,
   inferenceGovernorFromEnv,
   parseRunInferenceCap,
   renderRunInferenceTelemetryLine,
-  sharedRunInferenceGovernor,
 } from "../model/governor.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
 import { maskDiagnostic, maskKnownSecrets, redactTextDeep } from "../context/redact.js";
@@ -697,18 +695,21 @@ export async function runReviewEngine(request: ReviewRequest, dependencies: Revi
   // ONE run-wide admission point for the model request paths (tier calls,
   // native-loop turns, specialist/pre-pass/trace-repair transports, the
   // confidence scorer). The cap comes from the ambient
-  // `AI_MAX_CONCURRENT_MODEL_REQUESTS` env-only knob; UNSET keeps the
-  // governor disabled, which is the documented default-compatibility
-  // posture — `admit` then runs each request directly, so existing
-  // single-call paths are behavior-identical (an invalid value is announced
-  // by name, never silently dropped). Installed here and cleared in the
+  // `AI_MAX_CONCURRENT_MODEL_REQUESTS` env-only knob; UNSET/EMPTY enables the
+  // conservative DEFAULT cap (#1515 review fix: "bounded configurable
+  // concurrency with a conservative default" — the unconfigured burst is the
+  // one the knob exists to bound), an explicit `0` is the operator's opt-out
+  // (the disabled compatibility posture, in which `admit` runs each request
+  // directly and existing single-call paths are behavior-identical), and an
+  // invalid value warns by name and falls back to the conservative default —
+  // a typo never silently unbounds the run. Installed here and cleared in the
   // finally, so one run can never inherit another run's policy.
   const capConfig = parseRunInferenceCap(request.ambient[RUN_INFERENCE_CAP_ENV]);
   const governor = inferenceGovernorFromEnv(request.ambient);
   if (capConfig.kind === "enabled" && dependencies.quiet !== true) {
     dependencies.log(`inference governor: run-wide cap ${capConfig.cap} concurrent model request(s)`);
   } else if (capConfig.kind === "invalid") {
-    dependencies.error(`WARNING: ${RUN_INFERENCE_CAP_ENV}=${JSON.stringify(capConfig.raw)} is not a positive integer up to ${MAX_CONFIGURABLE_CONCURRENCY}; run-wide inference cap disabled`);
+    dependencies.error(`WARNING: ${RUN_INFERENCE_CAP_ENV}=${JSON.stringify(capConfig.raw)} is not a positive integer up to ${MAX_CONFIGURABLE_CONCURRENCY}; using the default run-wide cap of ${DEFAULT_MAX_CONCURRENT_REQUESTS}`);
   }
   configureSharedRunInferenceGovernor(governor);
   try {
@@ -2769,20 +2770,13 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         prompt: confidencePrompt,
         connectTimeoutSec: Number(env.AI_CONNECT_TIMEOUT_SEC ?? "30") || 30,
         // #1515: the scorer is advisory work (class 4) — it admits through
-        // the run-wide governor like every other model request path. A
-        // queued-cancel surfaces as the scorer's thrown-transport path, which
-        // already degrades to unscored.
-        transport: (chatInput) => sharedRunInferenceGovernor().admit(
-          {
-            priority: GOVERNOR_PRIORITY_ADVISORY,
-            endpointKey: inferenceEndpointKey({
-              baseUrl: chatInput.baseUrl,
-              apiFormat: chatInput.apiFormat,
-              model: chatInput.payload.body.model,
-            }),
-          },
-          () => runChatRequestOnce(chatInput),
-        ),
+        // the run-wide governor like every other model request path, WITH the
+        // run's cancellation scope on the admission request itself (review
+        // fix: the scorer's own signal only reaches the transport after
+        // admission, so a queued scorer could otherwise dispatch after
+        // cancellation). A queued-cancel surfaces as the scorer's typed
+        // transport-failure path, which already degrades to unscored.
+        transport: governedScorerTransport(cancellation.scope.signal),
         // #1481: no tokensParam here — the token-limit field is resolved INTO
         // the profile (routing/tiers.ts), so the scorer never receives the
         // primary lane's/global AI_TOKENS_PARAM convention on a dedicated

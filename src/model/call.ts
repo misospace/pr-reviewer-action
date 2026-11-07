@@ -14,11 +14,12 @@ import {
   shouldRaiseCompletionBudget,
   type ResponseDiagnostics,
 } from "./response-diagnostics.js";
-import { runChatRequest, type ChatRequestInput, type ChatRequestOutcome, type StructuredOutputSurface } from "../transport/transport.js";
+import { runChatRequest, runChatRequestOnce, type ChatRequestInput, type ChatRequestOutcome, type StructuredOutputSurface } from "../transport/transport.js";
 import { describeTransportFailure, endpointUrlCredentialOrEmpty, TransportFailure } from "../transport/http.js";
 import { callKnownSecrets } from "../transport/headers.js";
 import { classifyTerminalProviderFailure, type TerminalProviderFailure } from "../transport/terminal.js";
 import {
+  GOVERNOR_PRIORITY_ADVISORY,
   GOVERNOR_PRIORITY_AUTHORITATIVE,
   GovernorCancelledError,
   inferenceEndpointKey,
@@ -209,6 +210,45 @@ async function admittedCall(
     }
     throw error;
   }
+}
+
+/**
+ * #1515 (review fix): the confidence scorer's governed transport. The scorer
+ * is advisory work (class 4) and admits through the run-wide governor before
+ * any wire attempt, carrying the run's cancellation scope ON THE ADMISSION
+ * REQUEST — the scorer's own input signal only reaches the transport after
+ * admission, so without it a queued scorer could dispatch after cancellation,
+ * violating the governor's cancellation-aware-while-queued property for an
+ * explicitly governed model path. A queued cancel surfaces here as the same
+ * typed `cancelled` transport failure `admittedCall` produces, which the
+ * scorer degrades to unscored on (never `internal_error`, and no provider
+ * latency is reported for a request that never left the queue).
+ */
+export function governedScorerTransport(
+  signal: AbortSignal | undefined,
+  call: (input: ChatRequestInput) => Promise<ChatRequestOutcome> = runChatRequestOnce,
+): (input: ChatRequestInput) => Promise<ChatRequestOutcome> {
+  return async (chatInput) => {
+    try {
+      return await sharedRunInferenceGovernor().admit(
+        {
+          priority: GOVERNOR_PRIORITY_ADVISORY,
+          endpointKey: inferenceEndpointKey({
+            baseUrl: chatInput.baseUrl,
+            apiFormat: chatInput.apiFormat,
+            model: chatInput.payload.body.model,
+          }),
+          ...(signal !== undefined ? { signal } : {}),
+        },
+        () => call(chatInput),
+      );
+    } catch (error) {
+      if (error instanceof GovernorCancelledError) {
+        return { status: "failure", failure: new TransportFailure("cancelled", "model request cancelled while queued for an inference slot") };
+      }
+      throw error;
+    }
+  };
 }
 
 export type ModelCallOutcome =

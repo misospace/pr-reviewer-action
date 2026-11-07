@@ -237,27 +237,36 @@ generate?" — from the concurrency side. `src/gateway/` (above) is an
 unwired library; the governor below is wired into the action pipeline.
 
 `src/model/governor.ts` is ONE run-scoped admission point the model request
-paths flow through before any wire attempt, enabled by the ambient env knob
+paths flow through before any wire attempt, sized by the ambient env knob
 `AI_MAX_CONCURRENT_MODEL_REQUESTS` (env-only, not a contract input — the
 same class of operator knob as `DEEP_REVIEW_EXECUTION`).
 
-### The knob and the default-compatibility posture
+### The knob and the default posture
 
-- **Unset / empty / `0`** → the governor is DISABLED. `admit` runs the
-  request directly: no queue, no scheduling, no telemetry records, one
-  boolean branch per request. This is the default posture, and it is why the
-  feature ships behavior-compatible: every existing single-call path — a
-  lone tier call, a one-shot scorer, a single specialist — is byte- and
-  behavior-identical with the feature in the tree.
+The #1515 contract is "bounded configurable concurrency with a conservative
+default" — so the unconfigured run is bounded too; the compatibility posture
+is an explicit opt-out, not the default:
+
+- **Unset / empty** → the governor is ENABLED at the conservative default cap
+  `DEFAULT_MAX_CONCURRENT_REQUESTS` (2). The unconfigured burst is exactly
+  the one the knob exists to bound, so it must not stay unbounded; 2 keeps a
+  lone tier call, a one-shot scorer, or a single specialist behavior
+  identical (one request dispatches immediately, nothing queues) while a
+  multi-stage burst is capped.
+- **An explicit `0`** → the operator's opt-out: the governor is DISABLED.
+  `admit` runs the request directly: no queue, no scheduling, no telemetry
+  records, one boolean branch per request — the disabled compatibility
+  posture, preserved for operators who need the old behavior exactly.
 - **A positive integer `1..256`** → the run-wide cap: at most that many
   provider requests from this run are in flight at once; the rest queue.
   The cap bounds the CONCURRENT BURST one run can produce; it does not add
   retries, does not raise any budget, and does not change what the verdict
   authority is.
 - **Anything else** → invalid; the run warns with the exact value by name
-  and stays disabled. A typo never silently becomes "unbounded" (the
-  reason invalid values are refused rather than clamped to a huge cap) and
-  never aborts a review.
+  and falls back to the conservative default cap. A typo therefore never
+  silently unbounds the run (it also never aborts a review): the value is
+  refused rather than clamped to a huge cap, and the fallback is the same
+  bounded default an unset env gets.
 
 ### Priority classes (highest first, per #1515)
 
@@ -272,13 +281,17 @@ Scheduling: strict priority — a freed slot goes to the highest-priority
 waiter; within one class, FIFO by arrival. No starvation per the #1515
 definition: lower-priority queued work runs as soon as no higher-priority
 work is contending, and bounded concurrency means in-flight requests
-finish, so slots keep being offered. Cancellation/deadline: a queued
-request carries the run's cancellation scope (and optionally a deadline);
-an abort or expiry while queued removes it from the queue and rejects it —
-it NEVER dispatches, so it spends no provider attempt, no wire bytes, and
-no retry budget (the tier's attempt counters only advance on returned
-outcomes, and a queued request returns none; a 429's retry accounting
-therefore begins only after actual dispatch).
+finish, so slots keep being offered. Cancellation/deadline: a request
+carries the run's cancellation scope (and optionally a deadline); a signal
+already aborted at submission is refused in BOTH paths (immediate dispatch
+and queue — an aborted request never reaches the transport and records as
+cancelled-before-dispatch), and an abort or expiry while queued removes the
+request from the queue and rejects it — it NEVER dispatches, so it spends
+no provider attempt, no wire bytes, and no retry budget (the tier's attempt
+counters only advance on returned outcomes, and a queued request returns
+none; a 429's retry accounting therefore begins only after actual
+dispatch). Once dispatched, the caller's signal keeps riding the transport
+itself.
 
 ### Route ownership and scheduling identity
 
@@ -308,11 +321,15 @@ Governed paths: `callModelTier`/`produceVerdict` (`src/model/call.ts`),
 the native-loop transport adapter (`src/run/stages.ts`), every
 `specialistRequestFn` lane (`src/gates/specialist-transport.ts` — priority
 defaulting to advisory 4 there; the trace repair passes 1, the two
-required pre-passes pass 2), and the confidence scorer's transport. The
-specialist gate subprocess configures the same knob from its own
-(allowlisted) env, because the specialist roles run in a child process.
-NOT governed: the controller/follow-up daemon entry points (separate runs
-with their own model traffic, wired when that surface lands).
+required pre-passes pass 2), and the confidence scorer's transport
+(`governedScorerTransport` in `src/model/call.ts`, which carries the run's
+cancellation scope on the ADMISSION request — the scorer's own signal only
+reaches the transport after admission, so a queued scorer leaves the queue
+on cancellation and never dispatches after it). The specialist gate
+subprocess configures the same knob from its own (allowlisted) env, because
+the specialist roles run in a child process. NOT governed: the
+controller/follow-up daemon entry points (separate runs with their own
+model traffic, wired when that surface lands).
 
 ### Non-goals (per #1515)
 

@@ -19,6 +19,7 @@ import {
 import { DEFAULT_SPECIALIST_MAX_TOKENS, MAX_INPUT_BYTES, SPECIALIST_ROLES_ORDER, type SpecialistArtifact } from "../specialists/types.js";
 import { guardedWrite, resolveArtifactPath, resolveRoot } from "./guarded-write.js";
 import {
+  DEFAULT_MAX_CONCURRENT_REQUESTS,
   MAX_CONFIGURABLE_CONCURRENCY,
   RUN_INFERENCE_CAP_ENV,
   configureSharedRunInferenceGovernor,
@@ -320,15 +321,15 @@ export async function runSpecialistsGate(deps: SpecialistsGateDeps): Promise<num
 
   // #1515: the specialist phase is a gate SUBPROCESS with its own process —
   // the engine's run-scoped governor never ran here — so the run-wide cap is
-  // configured from this child's (allowlisted) env too. Unset keeps the
-  // default disabled posture; the concurrent specialist roles are exactly
-  // the advisory burst the cap exists to bound.
+  // configured from this child's (allowlisted) env too. Unset/empty enables
+  // the conservative default cap (the concurrent specialist roles are exactly
+  // the advisory burst the cap exists to bound); an explicit `0` opts out.
   const capConfig = parseRunInferenceCap(envStr(env, RUN_INFERENCE_CAP_ENV));
   configureSharedRunInferenceGovernor(inferenceGovernorFromEnv(env));
   if (capConfig.kind === "enabled") {
     stdout(`inference governor: run-wide cap ${capConfig.cap} concurrent model request(s)`);
   } else if (capConfig.kind === "invalid") {
-    stderr(`WARNING: ${RUN_INFERENCE_CAP_ENV}=${pyReprStr(capConfig.raw)} is not a positive integer up to ${MAX_CONFIGURABLE_CONCURRENCY}; run-wide inference cap disabled`);
+    stderr(`WARNING: ${RUN_INFERENCE_CAP_ENV}=${pyReprStr(capConfig.raw)} is not a positive integer up to ${MAX_CONFIGURABLE_CONCURRENCY}; using the default run-wide cap of ${DEFAULT_MAX_CONCURRENT_REQUESTS}`);
   }
 
   const deepMode = envStr(env, "DEEP_REVIEW", "false").trim().toLowerCase();
