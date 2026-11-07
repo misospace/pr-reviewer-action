@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -628,6 +628,78 @@ test("#1529 phase: a config inside GITHUB_WORKSPACE derives ZERO negative-eviden
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1529 phase: without GITHUB_WORKSPACE the config source is untrusted — zero rules, positive evidence intact", async () => {
+  // Fail-closed classification: when the reviewed workspace cannot be
+  // established, "outside the workspace" cannot be proven, so the source
+  // is untrusted. A config in a temp dir must not become trusted merely
+  // because the boundary defaulted to the run dir.
+  const dir = phaseDir();
+  const operatorDir = phaseDir();
+  const configPath = join(operatorDir, "providers.json");
+  writeFileSync(configPath, JSON.stringify([FORMATTER_SPEC]));
+  try {
+    const outcome = await runEvidenceProvidersPhase({
+      env: { PATH: process.env.PATH ?? "", HOME: dir, EVIDENCE_PROVIDERS_FILE: configPath, PR_HEAD_SHA: HEAD },
+      cwd: dir,
+      isForkPr: "false",
+      enableForForks: "false",
+      log: () => undefined,
+      runProvider: async () => entry("prettier"),
+    });
+    assert.equal(outcome, "ran");
+    const summary = JSON.parse(readFileSync(join(dir, "evidence-providers.json"), "utf8")) as EvidenceSummary;
+    assert.equal(summary.providers.length, 1, "positive evidence still runs");
+    const sidecar = JSON.parse(readFileSync(join(dir, EVIDENCE_NEGATIVE_EVIDENCE_FILE), "utf8")) as { rules: unknown[] };
+    assert.deepEqual(sidecar.rules, [], "unprovable source derives zero rules");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(operatorDir, { recursive: true, force: true });
+  }
+});
+
+test("#1529 phase: symlinked spellings cannot launder a workspace config into trusted authority", async () => {
+  // Both directions in one phase: (a) GITHUB_WORKSPACE given through a
+  // symlink alias while the config uses the real path — still inside the
+  // reviewed tree; (b) an operator-side symlink pointing INTO the
+  // workspace — its canonical target is PR-writable content.
+  const dir = phaseDir();
+  const workspace = phaseDir();
+  const alias = phaseDir();
+  mkdirSync(join(workspace, ".github"), { recursive: true });
+  const configPath = join(workspace, ".github", "providers.json");
+  writeFileSync(configPath, JSON.stringify([FORMATTER_SPEC]));
+  const aliasLink = join(alias, "ws");
+  symlinkSync(workspace, aliasLink, "dir");
+  const operatorDir = phaseDir();
+  const configLink = join(operatorDir, "providers.json");
+  symlinkSync(configPath, configLink);
+  try {
+    for (const [label, env] of [
+      ["workspace alias", { GITHUB_WORKSPACE: aliasLink, EVIDENCE_PROVIDERS_FILE: configPath }],
+      ["config symlink into workspace", { GITHUB_WORKSPACE: workspace, EVIDENCE_PROVIDERS_FILE: configLink }],
+    ] as const) {
+      const outcome = await runEvidenceProvidersPhase({
+        env: { PATH: process.env.PATH ?? "", HOME: dir, PR_HEAD_SHA: HEAD, ...env },
+        cwd: dir,
+        isForkPr: "false",
+        enableForForks: "false",
+        log: () => undefined,
+        runProvider: async () => entry("prettier"),
+      });
+      assert.equal(outcome, "ran", label);
+      const summary = JSON.parse(readFileSync(join(dir, "evidence-providers.json"), "utf8")) as EvidenceSummary;
+      assert.equal(summary.providers.length, 1, `${label}: positive evidence still runs`);
+      const sidecar = JSON.parse(readFileSync(join(dir, EVIDENCE_NEGATIVE_EVIDENCE_FILE), "utf8")) as { rules: unknown[] };
+      assert.deepEqual(sidecar.rules, [], `${label}: zero negative-evidence rules`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(alias, { recursive: true, force: true });
+    rmSync(operatorDir, { recursive: true, force: true });
   }
 });
 

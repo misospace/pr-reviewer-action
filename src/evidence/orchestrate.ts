@@ -226,27 +226,20 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
   // resolves inside the reviewed workspace is PR-writable content: it
   // derives ZERO negative-evidence rules (ordinary positive evidence keeps
   // its existing behavior). Only a config from a trusted operator/base
-  // source — a path outside the reviewed workspace — may carry
-  // negative-evidence authority. The check is lexical against the
-  // workspace's realpath, so a workspace-internal symlink pointing outside
-  // cannot launder a PR file into trusted authority.
+  // source — a path provably outside the reviewed workspace — may carry
+  // negative-evidence authority. The containment comparison runs on the
+  // canonical (realpath) form of BOTH paths, so neither a symlinked
+  // workspace root nor a symlinked config path can launder a PR file into
+  // trusted authority in either direction. Fail-closed: when the reviewed
+  // workspace cannot be established (GITHUB_WORKSPACE unset or
+  // unresolvable) or the config cannot be canonicalized, the source is
+  // untrusted — never trusted by default.
   let providersTrustedForNegativeEvidence = false;
   if (configPathRaw) {
     ({ providers, error: configError } = loadConfig(configPathRaw, cwd));
-    const insideLexical = configPathInsideWorkspace(configPathRaw, cwd, workspaceRoot);
-    // The containment comparison also runs on the config's realpath: a
-    // symlinked workspace root (tmpdir shapes) must not misdetect.
-    let insideReal = false;
-    try {
-      const configReal = safeRealpath(resolvePath(cwd, configPathRaw));
-      insideReal = configReal === workspaceRoot || configReal.startsWith(`${workspaceRoot}/`);
-    } catch {
-      // Unresolvable/missing config: no providers ran, so the side is moot.
-      insideReal = insideLexical;
-    }
-    providersTrustedForNegativeEvidence = !insideLexical && !insideReal;
+    providersTrustedForNegativeEvidence = isConfigOutsideWorkspace(configPathRaw, cwd, env);
     if (!providersTrustedForNegativeEvidence) {
-      options.log?.("negative evidence: providers config resolves inside the reviewed workspace; no negative-evidence rules derive from it (#1529 review)");
+      options.log?.("negative evidence: providers config is not provably outside the reviewed workspace; no negative-evidence rules derive from it (#1529 review)");
     }
   }
 
@@ -369,13 +362,34 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
   return { summary, markdown: redactText(mdLines.join("\n")), negativeEvidenceRules, headSha };
 }
 
-/** #1529 review: true when the config path — resolved with the SAME
- * semantics loadConfig uses (`resolvePath(cwd, raw)`) — lands inside the
- * reviewed workspace (`workspaceRoot`, the realpath of GITHUB_WORKSPACE).
- * Inside = PR-writable content = untrusted for negative evidence. */
-function configPathInsideWorkspace(configPathRaw: string, cwd: string, workspaceRoot: string): boolean {
-  const configResolved = resolvePath(cwd, configPathRaw);
-  return configResolved === workspaceRoot || configResolved.startsWith(`${workspaceRoot}/`);
+/** #1529 review: true only when the provider config is PROVABLY outside the
+ * reviewed workspace. Both paths are canonicalized with realpath and
+ * compared in canonical form, so a symlinked workspace root, a symlinked
+ * config path (in either direction), or alias spellings of the same tree
+ * cannot flip the classification. Returns false — untrusted for negative
+ * evidence — whenever the workspace cannot be established
+ * (GITHUB_WORKSPACE unset/empty/unresolvable) or the config cannot be
+ * canonicalized (missing/unresolvable): the trust boundary is fail-closed,
+ * never "outside by default". */
+function isConfigOutsideWorkspace(configPathRaw: string, cwd: string, env: NodeJS.ProcessEnv): boolean {
+  const workspaceRaw = pyStrip(env.GITHUB_WORKSPACE ?? "");
+  if (workspaceRaw === "") return false;
+  const workspaceRoot = canonicalPath(resolvePath(cwd, workspaceRaw));
+  if (workspaceRoot === null) return false;
+  const configReal = canonicalPath(resolvePath(cwd, configPathRaw));
+  if (configReal === null) return false;
+  return configReal !== workspaceRoot && !configReal.startsWith(`${workspaceRoot}/`);
+}
+
+/** realpath or null when the path cannot be canonicalized (missing, a
+ * broken symlink, a symlink loop). Unlike a fallback-to-raw helper, null
+ * lets the caller fail closed instead of comparing unresolved spellings. */
+function canonicalPath(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
 }
 
 function safeRealpath(path: string): string {

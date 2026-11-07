@@ -1223,6 +1223,12 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     errorLog(`Evidence provider execution failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     ws.write("evidence-providers.md", "Evidence providers failed to run in this review.\n");
     ws.write("evidence-providers.json", '{"configured": false, "has_blocker": false, "providers": [], "error": "execution failed"}\n');
+    // #1529 review: the phase's own failure path clears the negative-
+    // evidence sidecar, but an exception escaping runEvidencePhase itself
+    // (e.g. a sidecar write failure) lands HERE. Clear it too, so a prior
+    // same-head derivation in a shared run directory can never survive a
+    // failed evidence phase into this run's deterministic pass.
+    ws.write(EVIDENCE_NEGATIVE_EVIDENCE_FILE, "");
     return null;
   });
 
