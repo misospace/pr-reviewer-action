@@ -30,7 +30,11 @@
  *    `listIssueComments`) — no run directory, no step output. The consumer
  *    selects the managed body by the FORGE-REPORTED AUTHOR plus the managed
  *    marker, never by a content prefix, so a look-alike PR-authored comment
- *    is refused. */
+ *    is refused;
+ * 9. #1538: the two merge-gating id lists carry the byte budget's own
+ *    disclosure — a count and a truncation flag — so a shortened list is
+ *    never read as the whole set. The parser refuses a disclosure that
+ *    contradicts itself, and reads an absent counter as unknown. */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -123,7 +127,9 @@ test("#1518: the handoff is deterministic, fixed-key, and round-trips the strict
   const doc = JSON.parse(a) as Record<string, unknown>;
   assert.deepEqual(Object.keys(doc), [
     "schema", "review_id", "head_sha", "verdict", "review_result", "required_checks",
-    "items", "items_total", "items_truncated", "unresolved_requirement_ids", "unresolved_required_checks",
+    "items", "items_total", "items_truncated",
+    "unresolved_requirement_ids", "unresolved_requirement_ids_total", "unresolved_requirement_ids_truncated",
+    "unresolved_required_checks", "unresolved_required_checks_total", "unresolved_required_checks_truncated",
   ]);
   const item = (doc.items as Array<Record<string, unknown>>)[0]!;
   assert.deepEqual(Object.keys(item), [
@@ -138,6 +144,11 @@ test("#1518: the handoff is deterministic, fixed-key, and round-trips the strict
   assert.equal(parsed!.items[0]!.suggestion, "const second = 2;");
   assert.equal(parsed!.items_total, 1);
   assert.equal(parsed!.items_truncated, false);
+  // #1538: an unshortened id list carries its count and says it is whole.
+  assert.equal(parsed!.unresolved_requirement_ids_total, 0);
+  assert.equal(parsed!.unresolved_requirement_ids_truncated, false);
+  assert.equal(parsed!.unresolved_required_checks_total, 0);
+  assert.equal(parsed!.unresolved_required_checks_truncated, false);
 });
 
 test("#1518: hostile finding text stays inert string content (#252 boundary)", () => {
@@ -272,7 +283,9 @@ test("#1518: a hostile path never rides the handoff (traversal, absolute, NUL); 
 test("#1518: an oversized id-list base is shrunk until the exact serialized document fits the cap", () => {
   // Four-byte codepoints at the per-id cap: twenty ids per list alone
   // exceed the 8 KiB bound before any finding rides the document — the base
-  // itself must shrink, never be returned oversized.
+  // itself must shrink, never be returned oversized. These ids are
+  // IDENTICAL, so the shared id bound collapses them first; the byte
+  // budget's own shrink of DISTINCT ids is covered by the #1538 test below.
   const ids = Array.from(
     { length: REVIEW_HANDOFF_MAX_IDS },
     () => "\u{1D400}".repeat(REVIEW_HANDOFF_MAX_ID_CHARS),
@@ -287,6 +300,132 @@ test("#1518: an oversized id-list base is shrunk until the exact serialized docu
   assert.ok(doc !== null, "the shrunk document still parses under the strict consumer rules");
   assert.ok(doc!.unresolved_requirement_ids.length < ids.length, "requirement ids were shrunk, never smuggled past the cap");
   assert.ok(doc!.unresolved_required_checks.length < ids.length, "check ids were shrunk, never smuggled past the cap");
+});
+
+test("#1538: the byte budget's id-list drop is disclosed by a count and a truncation flag", () => {
+  // DISTINCT four-byte-codepoint ids at the per-id cap: twenty per list
+  // exceed the 8 KiB bound, so the byte budget really does drop ids from
+  // the base. The document must say so — a shortened list is never read as
+  // the whole set.
+  const ids = Array.from(
+    { length: REVIEW_HANDOFF_MAX_IDS },
+    (_, index) => `${"\u{1D400}".repeat(REVIEW_HANDOFF_MAX_ID_CHARS - 4)}-${String(index).padStart(3, "0")}`,
+  );
+  const json = buildReviewHandoff(baseInput({
+    findings: [],
+    unresolvedRequirementIds: ids,
+    unresolvedRequiredChecks: ids,
+  }));
+  assert.ok(Buffer.byteLength(json, "utf8") <= REVIEW_HANDOFF_MAX_BYTES, "the counters ride the base, so the cap still holds");
+  const doc = parseReviewHandoff(json);
+  assert.ok(doc !== null, "the shortened document still parses under the strict consumer rules");
+  // The count is the honest count the list was shortened FROM.
+  assert.equal(doc!.unresolved_requirement_ids_total, REVIEW_HANDOFF_MAX_IDS);
+  assert.equal(doc!.unresolved_required_checks_total, REVIEW_HANDOFF_MAX_IDS);
+  // The flag says the list is not the whole set.
+  assert.equal(doc!.unresolved_requirement_ids_truncated, true);
+  assert.equal(doc!.unresolved_required_checks_truncated, true);
+  assert.ok(doc!.unresolved_requirement_ids.length < REVIEW_HANDOFF_MAX_IDS, "the requirement list really was shortened");
+  assert.ok(doc!.unresolved_required_checks.length < REVIEW_HANDOFF_MAX_IDS, "the check list really was shortened");
+});
+
+test("#1538: an unshortened id list carries its count and says it is whole", () => {
+  const doc = parseReviewHandoff(buildReviewHandoff(baseInput({
+    unresolvedRequirementIds: ["REQ-1", "REQ-2"],
+    unresolvedRequiredChecks: ["check-a"],
+  })));
+  assert.ok(doc !== null);
+  assert.equal(doc!.unresolved_requirement_ids_total, 2);
+  assert.equal(doc!.unresolved_requirement_ids_truncated, false);
+  assert.equal(doc!.unresolved_required_checks_total, 1);
+  assert.equal(doc!.unresolved_required_checks_truncated, false);
+});
+
+test("#1538: the two id lists are counted independently of each other", () => {
+  // The requirement list is long enough for the byte budget to shorten it,
+  // the check list is not. Each list reports its OWN count and flag, so the
+  // whole check list is never read as shortened and the shortened
+  // requirement list is never read as whole. A swap between the two lists
+  // would pass every other test here.
+  const longIds = (count: number, tag: string): string[] => Array.from(
+    { length: count },
+    (_, index) => `${"\u{1D400}".repeat(REVIEW_HANDOFF_MAX_ID_CHARS - 5)}-${tag}${String(index).padStart(2, "0")}`,
+  );
+  const doc = parseReviewHandoff(buildReviewHandoff(baseInput({
+    findings: [],
+    unresolvedRequirementIds: longIds(REVIEW_HANDOFF_MAX_IDS, "r"),
+    unresolvedRequiredChecks: longIds(15, "c"),
+  })));
+  assert.ok(doc !== null);
+  assert.equal(doc!.unresolved_requirement_ids_total, REVIEW_HANDOFF_MAX_IDS);
+  assert.equal(doc!.unresolved_requirement_ids_truncated, true, "the requirement list is the shortened one");
+  assert.ok(doc!.unresolved_requirement_ids.length < REVIEW_HANDOFF_MAX_IDS);
+  assert.equal(doc!.unresolved_required_checks_total, 15, "the check list keeps its own count");
+  assert.equal(doc!.unresolved_required_checks_truncated, false, "the whole check list is not shortened");
+  assert.equal(doc!.unresolved_required_checks.length, 15);
+});
+
+test("#1538: the parser refuses an id-list disclosure that contradicts itself", () => {
+  const disclosed = {
+    ...(JSON.parse(buildReviewHandoff(baseInput({ unresolvedRequirementIds: ["REQ-1", "REQ-2"] }))) as Record<string, unknown>),
+    unresolved_requirement_ids_total: 2,
+    unresolved_requirement_ids_truncated: false,
+    unresolved_required_checks_total: 0,
+    unresolved_required_checks_truncated: false,
+  };
+  assert.ok(parseReviewHandoff(JSON.stringify(disclosed)) !== null, "an agreeing disclosure parses");
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({ ...disclosed, unresolved_requirement_ids_total: 1 })),
+    null,
+    "a count below the listed length contradicts itself",
+  );
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({ ...disclosed, unresolved_requirement_ids_total: 5 })),
+    null,
+    "a count that disagrees with the list while the document claims no truncation contradicts itself",
+  );
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({ ...disclosed, unresolved_requirement_ids_truncated: true })),
+    null,
+    "a truncation claim whose count matches the listed length contradicts itself",
+  );
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({ ...disclosed, unresolved_requirement_ids_total: 2.5 })),
+    null,
+    "a non-integer count is refused",
+  );
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({ ...disclosed, unresolved_requirement_ids_truncated: "yes" })),
+    null,
+    "a non-boolean flag is refused",
+  );
+  assert.equal(
+    parseReviewHandoff(JSON.stringify({ ...disclosed, unresolved_required_checks_total: -1 })),
+    null,
+    "a negative count is refused",
+  );
+});
+
+test("#1538: a handoff published before #1538 stays parseable, with unknown id counters", () => {
+  const legacy = {
+    schema: REVIEW_HANDOFF_SCHEMA,
+    review_id: "0123456789abcdef",
+    head_sha: HEAD,
+    verdict: "request_changes",
+    review_result: "findings",
+    required_checks: "complete",
+    items: [],
+    items_total: 0,
+    items_truncated: false,
+    unresolved_requirement_ids: ["REQ-1"],
+    unresolved_required_checks: [],
+  };
+  const parsed = parseReviewHandoff(JSON.stringify(legacy));
+  assert.ok(parsed !== null, "a handoff published before #1538 stays parseable");
+  assert.equal(parsed!.unresolved_requirement_ids_total, null, "an absent count is unknown, never a count");
+  assert.equal(parsed!.unresolved_requirement_ids_truncated, null, "an absent flag is unknown, never false");
+  assert.equal(parsed!.unresolved_required_checks_total, null);
+  assert.equal(parsed!.unresolved_required_checks_truncated, null);
 });
 
 test("#1518: a suggestion rides the handoff only when THIS run published that replacement", () => {

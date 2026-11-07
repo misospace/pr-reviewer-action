@@ -23,7 +23,11 @@
  * - the items are the FINAL post-enforcement findings, never raw model
  *   output;
  * - a byte bound checked on the exact serialized string, with omissions
- *   disclosed (`items_total` / `items_truncated`) rather than hidden.
+ *   disclosed (`items_total` / `items_truncated`) rather than hidden;
+ * - #1538: the two merge-gating id lists carry the same disclosure — the
+ *   byte budget shortens them first, so each list carries its honest count
+ *   and a truncation flag and a shortened list is never read as the whole
+ *   set.
  *
  * Trust rules (why a consumer may believe the FIRST block it finds):
  * - the action renders the container into the marker preamble, which precedes
@@ -149,7 +153,20 @@ export interface ReviewHandoff {
   items_total: number;
   items_truncated: boolean;
   unresolved_requirement_ids: string[];
+  /** #1538: the number of merge-gating requirement ids this document could
+   * carry BEFORE the byte budget shortened the list. `null` when the
+   * document discloses no count (a handoff published before #1538): an
+   * unknown count is never read as "the list is the whole set". */
+  unresolved_requirement_ids_total: number | null;
+  /** #1538: whether the byte budget dropped a requirement id. `false` means
+   * the list is the whole set; `null` means the document discloses nothing
+   * (a handoff published before #1538) and is never read as `false`. */
+  unresolved_requirement_ids_truncated: boolean | null;
   unresolved_required_checks: string[];
+  /** #1538: the same honest count for the required-check ids. */
+  unresolved_required_checks_total: number | null;
+  /** #1538: the same truncation flag for the required-check ids. */
+  unresolved_required_checks_truncated: boolean | null;
 }
 
 export interface ReviewHandoffInput {
@@ -274,6 +291,13 @@ function serializeHandoff(value: unknown): string {
  * one at a time only while the whole document still fits. An omission is
  * disclosed through `items_total` / `items_truncated`, so a truncated set is
  * never passed off as the whole set.
+ *
+ * #1538: the two merge-gating id lists carry the SAME disclosure. They are
+ * the first thing the byte budget gives way, so each one publishes the
+ * count it was shortened FROM (`*_total`) and whether it was shortened at
+ * all (`*_truncated`) — a consumer can never read a shortened list as the
+ * whole set. The counters ride the base, so they are reserved in the byte
+ * budget exactly like the item counters are.
  */
 export function buildReviewHandoff(input: ReviewHandoffInput): string {
   const candidates = findingsArray(input.findings).filter(
@@ -281,7 +305,14 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
   );
   const requirementIds = boundedIdList(input.unresolvedRequirementIds);
   const checkIds = boundedIdList(input.unresolvedRequiredChecks);
-  const serialize = (items: ReviewHandoffItem[], requirementIds: string[], checkIds: string[]): string => serializeHandoff({
+  // #1538: the honest count of the ids each list could carry BEFORE the byte
+  // budget shortens it. The lists arrive already bounded by their producers
+  // (`unresolvedTraceRequirementIds`, `unresolvedRequiredCheckIds`), so the
+  // received length IS the whole set this document knows about; the byte
+  // budget is the only thing that shortens it here.
+  const requirementTotal = requirementIds.length;
+  const checkTotal = checkIds.length;
+  const serialize = (items: ReviewHandoffItem[], reqIds: string[], chkIds: string[]): string => serializeHandoff({
     schema: REVIEW_HANDOFF_SCHEMA,
     review_id: bounded(input.reviewId ?? "", REVIEW_HANDOFF_MAX_TOKEN_CHARS),
     head_sha: bounded(input.headSha, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
@@ -291,8 +322,12 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
     items,
     items_total: candidates.length,
     items_truncated: items.length < candidates.length,
-    unresolved_requirement_ids: requirementIds,
-    unresolved_required_checks: checkIds,
+    unresolved_requirement_ids: reqIds,
+    unresolved_requirement_ids_total: requirementTotal,
+    unresolved_requirement_ids_truncated: reqIds.length < requirementTotal,
+    unresolved_required_checks: chkIds,
+    unresolved_required_checks_total: checkTotal,
+    unresolved_required_checks_truncated: chkIds.length < checkTotal,
   });
 
   // The document without any item is the base the disclosure rides on. The
@@ -302,6 +337,12 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
   // (requirements first on a tie) until the zero-item document fits. The
   // empty-list base is far below the cap, so the loop always terminates —
   // and the cap holds on the exact serialized string in every input.
+  //
+  // #1538: the shrink is DISCLOSED, never silent. Each list publishes the
+  // count it was shortened from (`*_total`) and whether it was shortened
+  // (`*_truncated`), and both counters ride the base — so they are measured
+  // in the very byte budget that shortens the lists, and the shortened
+  // document still fits the cap.
   let baseRequirementIds = requirementIds;
   let baseCheckIds = checkIds;
   while (Buffer.byteLength(serialize([], baseRequirementIds, baseCheckIds), "utf8") > REVIEW_HANDOFF_MAX_BYTES
@@ -356,6 +397,24 @@ function parseHandoffItem(value: unknown): ReviewHandoffItem | null {
 }
 
 /**
+ * #1538: the id-list disclosure counters must agree with the list they
+ * describe.
+ *
+ * A count below the listed length, a count that disagrees with the list
+ * while the document claims no truncation, and a truncation claim whose count
+ * matches the list exactly are all contradictions, and a contradictory
+ * document is refused. An UNKNOWN counter (`null` — a handoff published
+ * before #1538) is never a contradiction: the document simply discloses
+ * nothing, and nothing is read from it.
+ */
+function idCountersAgree(ids: string[], total: number | null, truncated: boolean | null): boolean {
+  if (total !== null && total < ids.length) return false;
+  if (truncated === false && total !== null && total !== ids.length) return false;
+  if (truncated === true && total !== null && total === ids.length) return false;
+  return true;
+}
+
+/**
  * Fail-closed parse of a handoff document: the exact schema string and the
  * exact member types, or null. A consumer must treat anything this refuses
  * as absent.
@@ -365,6 +424,12 @@ function parseHandoffItem(value: unknown): ReviewHandoffItem | null {
  * disagrees with the list it carries, is contradictory and refused. An
  * empty `review_id` is refused too — a handoff that cannot name its review
  * names nothing (the bundle's parser refuses the same).
+ *
+ * #1538: the two id lists carry the same disclosure, and the same
+ * cross-check. Their counters are OPTIONAL on parse — a handoff published
+ * before #1538 carries none of them and stays parseable — but an absent
+ * counter is UNKNOWN (`null`), never read as "the list is the whole set":
+ * the byte budget could have shortened that list without saying so.
  */
 export function parseReviewHandoff(text: string): ReviewHandoff | null {
   let value: unknown;
@@ -386,6 +451,26 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
   if (typeof record.items_truncated !== "boolean") return null;
   if (!isStringArray(record.unresolved_requirement_ids)) return null;
   if (!isStringArray(record.unresolved_required_checks)) return null;
+  // #1538: the id-list disclosure counters — absent means unknown, never
+  // "not truncated".
+  const requirementTotal = record.unresolved_requirement_ids_total === undefined
+    ? null
+    : record.unresolved_requirement_ids_total;
+  if (!(requirementTotal === null
+    || (typeof requirementTotal === "number" && Number.isInteger(requirementTotal) && requirementTotal >= 0))) return null;
+  const requirementTruncated = record.unresolved_requirement_ids_truncated === undefined
+    ? null
+    : record.unresolved_requirement_ids_truncated;
+  if (!(requirementTruncated === null || typeof requirementTruncated === "boolean")) return null;
+  const checkTotal = record.unresolved_required_checks_total === undefined
+    ? null
+    : record.unresolved_required_checks_total;
+  if (!(checkTotal === null
+    || (typeof checkTotal === "number" && Number.isInteger(checkTotal) && checkTotal >= 0))) return null;
+  const checkTruncated = record.unresolved_required_checks_truncated === undefined
+    ? null
+    : record.unresolved_required_checks_truncated;
+  if (!(checkTruncated === null || typeof checkTruncated === "boolean")) return null;
   const items: ReviewHandoffItem[] = [];
   for (const raw of record.items) {
     const item = parseHandoffItem(raw);
@@ -397,6 +482,9 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
   // with the list, contradicts itself.
   if (record.items_total < items.length) return null;
   if (record.items_truncated === false && record.items_total !== items.length) return null;
+  // #1538: the same cross-check for the two id lists.
+  if (!idCountersAgree(record.unresolved_requirement_ids, requirementTotal, requirementTruncated)) return null;
+  if (!idCountersAgree(record.unresolved_required_checks, checkTotal, checkTruncated)) return null;
   return {
     schema: REVIEW_HANDOFF_SCHEMA,
     review_id: record.review_id,
@@ -408,7 +496,11 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
     items_total: record.items_total,
     items_truncated: record.items_truncated,
     unresolved_requirement_ids: [...record.unresolved_requirement_ids],
+    unresolved_requirement_ids_total: requirementTotal,
+    unresolved_requirement_ids_truncated: requirementTruncated,
     unresolved_required_checks: [...record.unresolved_required_checks],
+    unresolved_required_checks_total: checkTotal,
+    unresolved_required_checks_truncated: checkTruncated,
   };
 }
 
