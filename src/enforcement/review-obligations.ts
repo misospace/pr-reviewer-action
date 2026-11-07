@@ -712,3 +712,58 @@ export function reviewObligationsToArtifact(obligations: readonly ReviewObligati
     )),
   };
 }
+
+/** The closed vocabularies `reviewObligationsFromArtifact` validates rows
+ * against — the exact value sets the `ReviewObligation` type declares. */
+const OBLIGATION_SOURCES: ReadonlySet<string> = new Set(["must_check", "trusted_base_guidance", "derived"]);
+const OBLIGATION_STATUSES: ReadonlySet<string> = new Set(["satisfied", "unmet", "unresolved"]);
+const OBLIGATION_CAUSES: ReadonlySet<string> = new Set([
+  "tool-capability", "budget-exhausted", "provider-failure", "missing-source-evidence", "derivation-incomplete",
+]);
+
+/**
+ * #1537: read `reviewObligationsToArtifact`'s output back into rows. The
+ * standalone `publish` CLI is a separate process from `run` and cannot hold
+ * the folded rows in memory, so it reads them from the run directory's own
+ * `review-obligations.json` (see `mergeGatingFieldsFromRunDir` in
+ * `src/run/entrypoints.ts`) — the fold lives only in that artifact.
+ *
+ * Strict round-trip, not a normalization: anything this runtime did not
+ * write is `null` (unreadable → the caller keeps the state absent, never a
+ * guess). A row whose source, status or cause is outside the closed
+ * vocabulary refuses the WHOLE artifact — the same rule #1521's handoff
+ * parser applies to a published document, so a half-trusted row can never
+ * reach the published handoff through this seam.
+ *
+ * `anchors` round-trips when present (the #1449 derived rows). The publish
+ * layer projects rows through `blockingReviewObligations` before rendering,
+ * and that filter drops every `derived` row, so anchors never reach a
+ * published document either way.
+ */
+export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[] | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as { version?: unknown; obligations?: unknown };
+  if (record.version !== 1 || !Array.isArray(record.obligations)) return null;
+  const rows: ReviewObligation[] = [];
+  for (const raw of record.obligations) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const row = raw as Record<string, unknown>;
+    if (typeof row.id !== "string" || row.id === "") return null;
+    if (typeof row.source !== "string" || !OBLIGATION_SOURCES.has(row.source)) return null;
+    if (typeof row.text !== "string") return null;
+    if (typeof row.status !== "string" || !OBLIGATION_STATUSES.has(row.status)) return null;
+    if (row.cause !== null && row.cause !== undefined
+      && !(typeof row.cause === "string" && OBLIGATION_CAUSES.has(row.cause))) return null;
+    if (row.anchors !== undefined
+      && !(Array.isArray(row.anchors) && row.anchors.every((anchor) => typeof anchor === "string"))) return null;
+    rows.push({
+      id: row.id,
+      source: row.source as ReviewObligationSource,
+      text: row.text,
+      status: row.status as ReviewObligation["status"],
+      cause: (typeof row.cause === "string" ? row.cause : null) as ReviewObligation["cause"],
+      ...(row.anchors !== undefined ? { anchors: row.anchors as string[] } : {}),
+    });
+  }
+  return rows;
+}
