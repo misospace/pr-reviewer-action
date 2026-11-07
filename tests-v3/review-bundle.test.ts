@@ -33,6 +33,18 @@ import { buildReviewHandoff, parseReviewHandoff, REVIEW_HANDOFF_ANCHOR, REVIEW_H
 import type { ReviewObligation } from "../src/enforcement/review-obligations.js";
 import { startMockServer, type CapturedRequest } from "./helpers.js";
 
+function baseHandoffInput(overrides: Partial<Parameters<typeof buildReviewHandoff>[0]> = {}): Parameters<typeof buildReviewHandoff>[0] {
+  return {
+    reviewId: "0123456789abcdef",
+    headSha: "a".repeat(40),
+    verdict: "request_changes",
+    reviewResult: "findings",
+    requiredChecks: "complete",
+    findings: [],
+    ...overrides,
+  };
+}
+
 function baseInput(overrides: Partial<ReviewBundleInput> = {}): ReviewBundleInput {
   return {
     state: "complete",
@@ -347,9 +359,72 @@ test("#1521: the bundle parser cross-checks the obligation counters against the 
     cause: null,
   }));
   const built = parseReviewBundle(buildReviewBundle(baseInput({ unresolvedReviewObligations: many })))!;
-  assert.equal(built.unresolved_review_obligations!.length, REVIEW_HANDOFF_MAX_OBLIGATIONS, "the listing is bounded");
+  // #1521 (review): twelve distinct blocking rows is exactly the case the
+  // 10-row handoff bound used to make unnameable. What a remote controller
+  // can actually obtain is the bundle, and it names EVERY row: no blocking
+  // row's id, source or text is reachable only through the workflow-local
+  // `review-obligations.json`.
+  assert.equal(built.unresolved_review_obligations!.length, 12, "the bundle lists every blocking row, not just the first ten");
+  assert.deepEqual(
+    built.unresolved_review_obligations!.map((row) => row.id),
+    many.map((row) => row.id),
+    "every blocking row's id, source and text ride the controller-facing document",
+  );
   assert.equal(built.unresolved_review_obligations_total, 12, "the honest total rides");
-  assert.equal(built.unresolved_review_obligations_truncated, true, "the shortened listing is disclosed");
+  assert.equal(built.unresolved_review_obligations_truncated, false, "the bundle omitted nothing, and says so");
+});
+
+test("#1521 (review): a remote controller can name EVERY blocking row past the handoff's bound", () => {
+  // The published handoff keeps its listing bound and its byte bound, but
+  // its truncation flag now points at a machine surface that carries the
+  // rest: the handoff lists a PREFIX of the same set the bundle names in
+  // full, with the same total. Twelve > ten exercises the boundary.
+  const many: ReviewObligation[] = Array.from({ length: 12 }, (_, index) => ({
+    id: `obligation-${index}`,
+    source: "must_check",
+    text: `verify blocked item ${index}`,
+    status: "unmet",
+    cause: null,
+  }));
+  const handoff = parseReviewHandoff(buildReviewHandoff(baseHandoffInput({ unresolvedReviewObligations: many })))!;
+  const bundle = parseReviewBundle(buildReviewBundle(baseInput({ unresolvedReviewObligations: many })))!;
+  assert.equal(handoff.unresolved_review_obligations.length, REVIEW_HANDOFF_MAX_OBLIGATIONS, "the handoff stays bounded");
+  assert.equal(handoff.unresolved_review_obligations_truncated, true, "the handoff says rows were dropped");
+  const handoffIds = new Set(handoff.unresolved_review_obligations.map((row) => row.id));
+  for (const row of bundle.unresolved_review_obligations!) {
+    if (!handoffIds.has(row.id)) {
+      assert.ok(row.id !== "" && row.text !== "" && row.source === "must_check", `the row the handoff dropped (${row.id}) is still fully named in the bundle`);
+    }
+  }
+  assert.equal(bundle.unresolved_review_obligations!.length, 12, "the bundle names all twelve");
+  assert.equal(handoff.unresolved_review_obligations_total, 12, "the handoff's total proves the set is larger than its list");
+});
+
+test("#1521 (review): the bundle's row listing stays inside the 64 KiB bound", () => {
+  // The byte budget, not the count, is the bundle's only row bound now. A
+  // run with far more (and far wider) blocking rows than 64 KiB can carry
+  // must still produce a parseable, in-bound document that discloses the
+  // shortening honestly.
+  const astral = "\u{1F600}";
+  const huge: ReviewObligation[] = Array.from({ length: 200 }, (_, index) => ({
+    id: `obligation-${index}-${astral.repeat(40)}`,
+    source: "must_check",
+    text: astral.repeat(300),
+    status: "unmet",
+    cause: null,
+  }));
+  const out = buildReviewBundle(baseInput({ unresolvedReviewObligations: huge }));
+  assert.ok(Buffer.byteLength(out, "utf8") <= REVIEW_BUNDLE_MAX_BYTES, "the cap holds on the exact serialized string");
+  const doc = parseReviewBundle(out)!;
+  assert.ok(doc !== null, "the shrunk document still parses");
+  assert.ok(doc.unresolved_review_obligations!.length < 200, "the byte budget shed rows");
+  assert.ok(doc.unresolved_review_obligations!.length > 10, "the bundle still carries well past the handoff's ten");
+  assert.equal(doc.unresolved_review_obligations_total, 200, "the honest total rides");
+  assert.equal(doc.unresolved_review_obligations_truncated, true, "the shortening is disclosed");
+  // The document's own counters agree with what it lists (#1521 parser
+  // contract refuses a contradiction), so the listing is honest at the
+  // boundary too.
+  assert.ok(doc.unresolved_review_obligations_total >= doc.unresolved_review_obligations!.length);
 });
 
 test("#1521: the local bundle and the published handoff project the SAME rows", () => {
@@ -379,17 +454,25 @@ test("#1521: the local bundle and the published handoff project the SAME rows", 
     unresolvedReviewObligations: rows,
     derivedObligationState: "unresolved",
   }))!;
-  assert.deepEqual(bundle.unresolved_review_obligations, handoff.unresolved_review_obligations, "both documents list the same rows");
   assert.equal(bundle.unresolved_review_obligations_total, handoff.unresolved_review_obligations_total, "both documents report the same total");
-  assert.equal(bundle.unresolved_review_obligations_truncated, handoff.unresolved_review_obligations_truncated, "both documents disclose the same omission");
   assert.equal(bundle.derived_obligation_state, handoff.derived_obligation_state, "both documents carry the same derived state");
-  assert.equal(bundle.unresolved_review_obligations!.length, REVIEW_HANDOFF_MAX_OBLIGATIONS, "the shared bound caps the listing");
-  assert.ok(bundle.unresolved_review_obligations_total! > bundle.unresolved_review_obligations!.length, "the truncated listing is disclosed");
-  // The handoff's 8 KiB budget can shorten the list further than the shared
-  // 10-row bound. The bundle's 64 KiB budget never sheds a row, so the
-  // handoff may carry a DISCLOSED PREFIX of the bundle's rows. Both
-  // documents keep the same honest total. The rows and the ids below are
-  // four-byte codepoints on purpose: a row's text is at most 300
+  // #1521 (review): the bundle is the controller's COMPLETE machine-readable
+  // set — it does not apply the handoff's 10-row listing bound. The handoff
+  // keeps its bound (its 8 KiB budget is the tighter one) and discloses the
+  // shortening, so the handoff's rows are always a PREFIX of the bundle's,
+  // never a different or longer set.
+  assert.equal(bundle.unresolved_review_obligations!.length, 15, "the bundle lists every blocking row, past the handoff's 10-row bound");
+  assert.equal(bundle.unresolved_review_obligations_truncated, false, "the bundle omitted nothing");
+  assert.equal(handoff.unresolved_review_obligations.length, REVIEW_HANDOFF_MAX_OBLIGATIONS, "the published handoff keeps its listing bound");
+  assert.equal(handoff.unresolved_review_obligations_truncated, true, "the handoff discloses the shortening");
+  assert.deepEqual(
+    handoff.unresolved_review_obligations.map((row) => row.id),
+    bundle.unresolved_review_obligations!.slice(0, handoff.unresolved_review_obligations.length).map((row) => row.id),
+    "the handoff lists a prefix of the bundle's rows",
+  );
+  // The handoff's 8 KiB budget can shorten the list further than the 10-row
+  // bound. Both documents keep the same honest total. The rows and the ids
+  // below are four-byte codepoints on purpose: a row's text is at most 300
   // codepoints, so the widest possible row is four times that in bytes.
   const astral = "\u{1F600}";
   const wideRows: ReviewObligation[] = Array.from({ length: REVIEW_HANDOFF_MAX_OBLIGATIONS }, (_, index) => ({

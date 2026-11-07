@@ -91,10 +91,13 @@ export const REVIEW_HANDOFF_MAX_IDS = MAX_ID_LIST_ENTRIES;
 export const REVIEW_HANDOFF_MAX_ID_CHARS = MAX_ID_LIST_CHARS;
 
 /** #1521: the blocking obligation rows are bounded independently of the
- * items too: at most this many rows ride the document, each row's text at
- * most this many codepoints. The row projection is SHARED with the local
- * `review-bundle/v1` document (see `boundedObligationRows`), so the two
- * documents can never disagree about what a blocking row says. */
+ * items too: at most this many rows ride the PUBLISHED handoff (its 8 KiB
+ * budget is the tighter one), each row's text at most this many codepoints.
+ * The row projection is SHARED with the local `review-bundle/v1` document
+ * (see `boundedObligationRows`), so the two documents can never disagree
+ * about what a blocking row says; the bundle applies its OWN, larger bound
+ * (its byte budget, not this count), so the handoff's list is always a
+ * disclosed prefix of the bundle's — see `src/publish/bundle.ts`. */
 export const REVIEW_HANDOFF_MAX_OBLIGATIONS = 10;
 export const REVIEW_HANDOFF_MAX_OBLIGATION_TEXT_CHARS = 300;
 
@@ -248,7 +251,12 @@ export function publishedDerivedObligationState(value: unknown): PublishedDerive
  * ONE implementation, shared with the local `review-bundle/v1` document
  * (`src/publish/bundle.ts` imports it from here), so the published handoff
  * and the local bundle can never disagree about what a blocking row says or
- * how many rows there are.
+ * how many rows there are. The listing bound is a PARAMETER: the published
+ * handoff keeps its 10-row default, while the bundle passes no bound and
+ * admits rows against its own byte budget, so the controller's machine
+ * surface can name every blocking row the document can carry (#1521
+ * review). Both documents list PREFIXES of the same projection, so the
+ * handoff's rows are always a prefix of the bundle's.
  *
  * The projection is deliberately strict:
  * - only the FORCING sources ride (`must_check`, `trusted_base_guidance`) —
@@ -265,7 +273,7 @@ export function publishedDerivedObligationState(value: unknown): PublishedDerive
  * listing bound, so a truncated list is never passed off as the whole set.
  */
 export interface BoundedObligationRows {
-  /** The rows that ride the document (at most `REVIEW_HANDOFF_MAX_OBLIGATIONS`). */
+  /** The rows that ride the document (at most `maxRows`). */
   rows: ReviewObligationRow[];
   /** The count of the qualifying blocking rows, before the listing bound. */
   total: number;

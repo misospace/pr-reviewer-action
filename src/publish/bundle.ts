@@ -294,20 +294,31 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
       "utf8",
     )
     : 0;
-  // #1521: the blocking obligation rows and the derived-obligation state
-  // ride the envelope's tail, on the same presence rule as the id lists.
-  // The row projection is the SHARED one (`boundedObligationRows` in
-  // `src/publish/handoff.ts`), so both documents project the SAME rows and
-  // the SAME total. The bundle's 64 KiB budget never sheds them; the
-  // published handoff's 8 KiB budget can shorten its list further, and it
-  // discloses that with its total and its truncated flag.
-  const obligations = reviewsProduced ? boundedObligationRows(input.unresolvedReviewObligations) : { rows: [], total: 0 };
+  // #1521 (review): the blocking obligation rows and the derived-obligation
+  // state ride the envelope's tail, on the same presence rule as the id
+  // lists. The row projection is the SHARED one (`boundedObligationRows` in
+  // `src/publish/handoff.ts`), so both documents project the SAME rows in
+  // the SAME order with the SAME honest total — the handoff's list is always
+  // a prefix of the bundle's. But the bundle is the CONTROLLER's complete
+  // machine-readable set: it does NOT apply the handoff's 10-row listing
+  // bound. Its own bound is the 64 KiB byte budget: rows are admitted one at
+  // a time (charged exactly, like the findings), ahead of the findings
+  // because they name WHAT blocked the review. A byte-shed row is disclosed
+  // by the same total/truncated pair, so a shortened list is never passed
+  // off as the whole set.
+  const projectedObligations = reviewsProduced
+    ? boundedObligationRows(input.unresolvedReviewObligations, Number.POSITIVE_INFINITY)
+    : { rows: [], total: 0 };
   const derivedState = reviewsProduced ? publishedDerivedObligationState(input.derivedObligationState) : null;
+  // Reserve the segment with the EMPTY row list (the truncation flag reserved
+  // as `false`, one byte longer than `true`, so the reservation never
+  // under-counts), then charge one row plus one comma per admitted row — the
+  // exact serialized string can only land at or below the reservation.
   const obligationSegmentBytes = reviewsProduced
     ? Buffer.byteLength(
-      `,"unresolved_review_obligations":${JSON.stringify(obligations.rows)}`
-      + `,"unresolved_review_obligations_total":${obligations.total}`
-      + `,"unresolved_review_obligations_truncated":${obligations.rows.length < obligations.total}`
+      `,"unresolved_review_obligations":[]`
+      + `,"unresolved_review_obligations_total":${projectedObligations.total}`
+      + `,"unresolved_review_obligations_truncated":false`
       + `,"derived_obligation_state":${JSON.stringify(derivedState)}`,
       "utf8",
     )
@@ -316,6 +327,13 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
     + (reviewsProduced ? Buffer.byteLength(disclosure, "utf8") + 1 : 0)
     + idSegmentBytes
     + obligationSegmentBytes;
+  const includedObligations: ReviewObligationRow[] = [];
+  for (const row of projectedObligations.rows) {
+    const rowBytes = Buffer.byteLength(JSON.stringify(row), "utf8") + 1;
+    if (bytes + rowBytes > REVIEW_BUNDLE_MAX_BYTES) break;
+    bytes += rowBytes;
+    includedObligations.push(row);
+  }
   const included: ReviewBundleFinding[] = [];
   for (const candidate of candidates.slice(0, REVIEW_BUNDLE_MAX_FINDINGS)) {
     const finding = bundleFinding(candidate.record);
@@ -333,11 +351,12 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
     envelope.unresolved_requirement_ids = requirementIds;
     envelope.unresolved_required_checks = checkIds;
     // #1521: the blocking obligation rows and the derived-obligation state,
-    // after the id lists — the local document names WHAT blocked the review
-    // exactly like the published handoff does.
-    envelope.unresolved_review_obligations = obligations.rows;
-    envelope.unresolved_review_obligations_total = obligations.total;
-    envelope.unresolved_review_obligations_truncated = obligations.rows.length < obligations.total;
+    // after the id lists — the controller's document names EVERY blocking
+    // row the byte budget can carry, and the published handoff's list stays
+    // a disclosed prefix of it.
+    envelope.unresolved_review_obligations = includedObligations;
+    envelope.unresolved_review_obligations_total = projectedObligations.total;
+    envelope.unresolved_review_obligations_truncated = includedObligations.length < projectedObligations.total;
     envelope.derived_obligation_state = derivedState;
   }
   return JSON.stringify(envelope);

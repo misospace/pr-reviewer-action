@@ -138,8 +138,8 @@ The bundle names each blocking row in `unresolved_review_obligations`.
 {
   "id": "must-check-1",
   "source": "must_check",
-  "status": "unresolved",
-  "cause": "budget-exhausted",
+  "status": "unmet",
+  "cause": null,
   "text": "verify the changelog entry"
 }
 ```
@@ -148,8 +148,10 @@ The bundle names each blocking row in `unresolved_review_obligations`.
 - `source` names the rule that made the row blocking. It is `must_check` for
   the operator's checklist. It is `trusted_base_guidance` for an ask the
   trusted base stated. Those two are the only values a row carries.
-- `status` is `unmet` or `unresolved`. An `unmet` row was checked, and the
-  requirement did not hold. An `unresolved` row was never closed.
+- `status` is `unmet` in every published row (#1505). An `unmet` row was
+  checked, and the requirement did not hold — a confirmed negative, and the
+  only state that blocks. An `unresolved` row was never checked; it is
+  incomplete coverage, not a block, so it never rides here.
 - `cause` explains the block. It is `tool-capability`, `budget-exhausted`,
   `provider-failure`, `missing-source-evidence` or `derivation-incomplete`,
   or null when the run knows no cause. The cause never decides a block.
@@ -174,8 +176,17 @@ The derived coverage rides as a state in `derived_obligation_state`:
 that the document could list. A row whose id is empty after the bounds, and a
 row whose id repeats an earlier row, are dropped and are not counted.
 `unresolved_review_obligations_truncated` says whether the list is shorter
-than that count. At most 10 rows are listed. Never read a shortened list as
-the whole set.
+than that count. Never read a shortened list as the whole set.
+
+The bundle carries the COMPLETE blocking set: its only row bound is the
+document's own 64 KiB byte budget, and rows are admitted one at a time ahead
+of the findings, because they name what blocked the review (#1521 review: a
+controller must be able to name every blocking row, not only the first ten).
+The published handoff keeps a tighter listing bound — at most 10 rows, its
+8 KiB budget — and discloses its shortening, so the handoff's list is always
+a disclosed PREFIX of the bundle's rows, never a different or longer set.
+When the handoff reports `unresolved_review_obligations_truncated: true`,
+the bundle is the machine surface that names the rest.
 
 All four members ride the same presence rule as `findings`. A skipped or
 failed bundle carries none of them. A run that never reviewed blocked
@@ -256,9 +267,10 @@ still parses. The published handoff's parser refuses the same contradictions.
 - The two merge-gating id lists are reserved in that budget at their exact
   serialized byte length, so an id made of multi-byte codepoints can never
   push the document over the cap.
-- The blocking obligation rows are reserved in that budget at their exact
-  serialized byte length, so a row with a long text can never push the
-  document over the cap.
+- The blocking obligation rows are admitted one at a time against that
+  budget, each charged at its exact serialized byte length, ahead of the
+  findings; a row the budget cannot carry is disclosed, not hidden, so a
+  long row can never push the document over the cap.
 - Every text field passes secret redaction and a length cap before it is
   serialized. The document carries no model transcripts, no raw tool
   output, no rendered Markdown, and no evidence blobs.
@@ -507,9 +519,12 @@ derived state.
   the cap — twenty four-byte-codepoint ids per list is more than the bound —
   so the base is shrunk first: the last ids of the longer id list are dropped
   one at a time (requirements first on a tie) until the document fits. The
-  empty-list base is far below the cap, so the bound always holds.- At most 25 findings are listed (`REVIEW_HANDOFF_MAX_ITEMS`).
-- At most 10 obligation rows are listed
-  (`REVIEW_HANDOFF_MAX_OBLIGATIONS`). A row's text is at most 300
+  empty-list base is far below the cap, so the bound always holds.
+- At most 25 findings are listed (`REVIEW_HANDOFF_MAX_ITEMS`).
+- At most 10 obligation rows are listed on the PUBLISHED handoff
+  (`REVIEW_HANDOFF_MAX_OBLIGATIONS`) — the complete set lives in the local
+  bundle, and the handoff's list is its disclosed prefix (#1521 review).
+  A row's text is at most 300
   codepoints (`REVIEW_HANDOFF_MAX_OBLIGATION_TEXT_CHARS`). A row's id is at
   most 64 codepoints.
 - A suggestion is at most 2000 codepoints
