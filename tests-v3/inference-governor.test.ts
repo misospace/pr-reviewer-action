@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   DEFAULT_MAX_CONCURRENT_REQUESTS,
   GOVERNOR_PRIORITY_ADVISORY,
@@ -22,6 +25,7 @@ import { callModelTier, governedScorerTransport, type TierProfile } from "../src
 import { runConfidenceScorer } from "../src/confidence/scorer.js";
 import type { ConfidenceProfile } from "../src/routing/tiers.js";
 import { specialistRequestFn } from "../src/gates/specialist-transport.js";
+import { runSpecialistsGate } from "../src/gates/specialists-gate.js";
 import { SPECIALIST_GATE_ENV_KEYS } from "../src/gates/env.js";
 import { TransportFailure } from "../src/transport/http.js";
 import type { ChatRequestInput, ChatRequestOutcome } from "../src/transport/transport.js";
@@ -419,6 +423,7 @@ function specialistConfig(overrides: {
   governor?: InferenceGovernor;
   priority?: 1 | 2 | 3 | 4;
   signal?: AbortSignal;
+  admissionDeadlineAtMs?: number;
 } = {}) {
   return {
     baseUrl: "http://mock-endpoint",
@@ -428,6 +433,7 @@ function specialistConfig(overrides: {
     ...(overrides.governor !== undefined ? { governor: overrides.governor } : {}),
     ...(overrides.priority !== undefined ? { priority: overrides.priority } : {}),
     ...(overrides.signal !== undefined ? { signal: overrides.signal } : {}),
+    ...(overrides.admissionDeadlineAtMs !== undefined ? { admissionDeadlineAtMs: overrides.admissionDeadlineAtMs } : {}),
   };
 }
 
@@ -616,6 +622,127 @@ test("#1515 review fix: a queued confidence-scorer admission carries the run sig
   } finally {
     configureSharedRunInferenceGovernor(null);
   }
+});
+
+// ── in-process specialist gate (#1515 review fix, 5809968233) ────────────────
+
+/** The minimal corpus the specialist gate accepts (same shape the gate tests use). */
+const GATE_CORPUS = "# Corpus\n\n+def load(path):\n+    return open(path).read()\n";
+
+function gateWorkspace(): string {
+  const root = mkdtempSync(join(tmpdir(), "inference-governor-gate-"));
+  writeFileSync(join(root, "specialist-corpus.md"), GATE_CORPUS);
+  return root;
+}
+
+function gateEnv(root: string, phaseTimeoutSec: string): Record<string, string> {
+  return {
+    AI_MODEL: "m",
+    AI_BASE_URL: "http://model.invalid/v1",
+    AI_STREAM: "false",
+    GITHUB_WORKSPACE: root,
+    DEEP_REVIEW: "true",
+    AI_REQUEST_TIMEOUT_SEC: "5",
+    DEEP_REVIEW_TIMEOUT_SEC: phaseTimeoutSec,
+  };
+}
+
+test("#1515 review fix: an in-process specialist gate reuses the run's governor — its roles stay queued behind in-flight pre-pass work and expire at the phase deadline without dispatching", async () => {
+  const governor = createInferenceGovernor({ maxConcurrent: 1 });
+  configureSharedRunInferenceGovernor(governor);
+  const root = gateWorkspace();
+  try {
+    const first = deferred();
+    // The one slot is held by authoritative-class work still in flight when
+    // the gate starts — exactly the pre-pass/specialist overlap the review
+    // flagged. The gate's roles must queue behind it on the SAME cap.
+    const holder = governor.admit({ priority: GOVERNOR_PRIORITY_AUTHORITATIVE, endpointKey: "e" }, async () => { await first.promise; });
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runSpecialistsGate({
+      env: gateEnv(root, "2"),
+      argv: ["--corpus", "specialist-corpus.md"],
+      cwd: root,
+      governor, // the in-process engine wiring
+      stdout: (line) => out.push(line),
+      stderr: (line) => err.push(line),
+    });
+    first.release();
+    await holder;
+    rmSync(root, { recursive: true, force: true });
+    assert.equal(code, 0, `gate exited cleanly (stderr: ${JSON.stringify(err)})`);
+    assert.equal(sharedRunInferenceGovernor(), governor, "the gate did not replace the run's governor");
+    assert.ok(out.every((line) => !line.startsWith("inference governor:")), "an in-process gate does not re-announce the cap");
+    // Under the replaced-governor bug a fresh env-configured governor would
+    // have dispatched all three roles straight into model.invalid; with the
+    // fix they queue behind the holder and expire at the phase deadline.
+    const summary = governor.summarizeTelemetry();
+    assert.equal(summary.dispatched, 1, "only the pre-pass holder dispatched");
+    assert.equal(summary.cancelledBeforeDispatch, 3, "every role's admission expired at the phase deadline on the SAME governor");
+  } finally {
+    configureSharedRunInferenceGovernor(null);
+  }
+});
+
+test("#1515 review fix: a queued specialist role leaves the queue when the run's signal aborts", async () => {
+  const governor = createInferenceGovernor({ maxConcurrent: 1 });
+  configureSharedRunInferenceGovernor(governor);
+  const root = gateWorkspace();
+  try {
+    const first = deferred();
+    const holder = governor.admit({ priority: GOVERNOR_PRIORITY_AUTHORITATIVE, endpointKey: "e" }, async () => { await first.promise; });
+    const controller = new AbortController();
+    const out: string[] = [];
+    const pending = runSpecialistsGate({
+      env: gateEnv(root, "30"),
+      argv: ["--corpus", "specialist-corpus.md"],
+      cwd: root,
+      governor,
+      signal: controller.signal,
+      stdout: (line) => out.push(line),
+      stderr: () => {},
+    });
+    await sleep(100); // the roles' admissions are submitted and queued
+    controller.abort(); // the run is cancelled while the roles wait for slots
+    const code = await pending;
+    first.release();
+    await holder;
+    rmSync(root, { recursive: true, force: true });
+    assert.equal(code, 0);
+    const summary = governor.summarizeTelemetry();
+    assert.equal(summary.dispatched, 1, "only the holder dispatched");
+    // 3 roles × 2 attempts (the runner's 1 initial + 1 retry on a transport
+    // failure): every attempt's admission was refused on the pre-aborted
+    // signal or removed from the queue by the abort — none dispatched after
+    // cancellation.
+    assert.equal(summary.cancelledBeforeDispatch, 6);
+  } finally {
+    configureSharedRunInferenceGovernor(null);
+  }
+});
+
+test("#1515 review fix: a specialist admission bounded by a phase deadline expires without dispatching (wire_attempted false)", async () => {
+  const governor = createInferenceGovernor({ maxConcurrent: 1 });
+  const first = deferred();
+  const holder = governor.admit({ priority: GOVERNOR_PRIORITY_AUTHORITATIVE, endpointKey: "e" }, async () => { await first.promise; });
+  let transportReached = 0;
+  const requestFn = specialistRequestFn(specialistConfig({
+    governor,
+    admissionDeadlineAtMs: Date.now() + 30,
+    runChat: async () => {
+      transportReached++;
+      return okSpecialistOutcome();
+    },
+  }));
+  const queued = requestFn(specialistPayload(), "openai", 5);
+  const outcome = await queued;
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.wire_attempted, false, "the phase-expired waiter never dispatched");
+  assert.equal(transportReached, 0, "the transport stub must never have been invoked");
+  first.release();
+  await holder;
+  const summary = governor.summarizeTelemetry();
+  assert.equal(summary.cancelledBeforeDispatch, 1, "the expiry records as cancelled-before-dispatch");
 });
 
 // ── telemetry fold ──────────────────────────────────────────────────────────

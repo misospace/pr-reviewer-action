@@ -325,10 +325,15 @@ required pre-passes pass 2), and the confidence scorer's transport
 (`governedScorerTransport` in `src/model/call.ts`, which carries the run's
 cancellation scope on the ADMISSION request — the scorer's own signal only
 reaches the transport after admission, so a queued scorer leaves the queue
-on cancellation and never dispatches after it). The specialist gate
-subprocess configures the same knob from its own (allowlisted) env, because
-the specialist roles run in a child process. NOT governed: the
-controller/follow-up daemon entry points (separate runs with their own
+on cancellation and never dispatches after it). The specialist gate is one
+admission surface with two postures: run IN-PROCESS (the engine's #634
+workload branch), it REUSES the run's already-configured governor and binds
+the run's cancellation scope into every role's admission; run as a genuine
+standalone subprocess, it configures an isolated governor from its own
+(allowlisted) env. Either way, every role's queue wait is bounded by the
+remaining phase deadline, so a role the runner reaps or a run cancelled
+mid-wait never dispatches after its phase or run has ended. NOT governed:
+the controller/follow-up daemon entry points (separate runs with their own
 model traffic, wired when that surface lands).
 
 ### Non-goals (per #1515)

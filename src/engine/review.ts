@@ -75,6 +75,7 @@ import {
   inferenceGovernorFromEnv,
   parseRunInferenceCap,
   renderRunInferenceTelemetryLine,
+  sharedRunInferenceGovernor,
 } from "../model/governor.js";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
 import { maskDiagnostic, maskKnownSecrets, redactTextDeep } from "../context/redact.js";
@@ -1665,6 +1666,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         // in the run dir this workspace reads, not GITHUB_WORKSPACE.
         argv: ["--corpus", "specialist-corpus.md", "--workspace-root", runDir, ...equivalentPathsArgv],
         cwd: runDir,
+        // #1515 (review fix): this gate runs IN THIS PROCESS — it must reuse
+        // the run's already-configured governor (a second governor from env
+        // would split the run-wide cap while the claim/derived pre-passes are
+        // still in flight) and bind the run's cancellation scope into every
+        // role's admission, so a queued role never dispatches after
+        // cancellation or past the phase deadline.
+        governor: sharedRunInferenceGovernor(),
+        signal: cancellation.scope.signal,
         stdout: (line) => log(line),
         stderr: (line) => errorLog(line),
         ...(dependencies.sleep !== undefined ? { sleep: dependencies.sleep } : {}),

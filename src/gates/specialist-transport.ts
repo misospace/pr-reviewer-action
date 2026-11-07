@@ -61,6 +61,12 @@ export interface SpecialistTransportConfig {
    * `wire_attempted: false` and never reaches the transport (#726 pattern:
    * the run's cancellation scope rides every model request of the run). */
   signal?: AbortSignal;
+  /** #1515 (review fix): the phase deadline as an absolute wall-clock
+   * instant (ms since epoch). Each admission converts it to the remaining
+   * `deadlineMs` queue-wait bound, so a role whose phase deadline expires
+   * while it sits queued leaves the queue instead of dispatching after the
+   * phase it belongs to has ended. */
+  admissionDeadlineAtMs?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -302,6 +308,10 @@ const wire = {
           priority,
           endpointKey: inferenceEndpointKey({ baseUrl: config.baseUrl, apiFormat: format, model: laneModel }),
           ...(config.signal !== undefined ? { signal: config.signal } : {}),
+          // #1515 (review fix): the phase deadline bounds the queue WAIT —
+          // computed per admission, so a request that waited most of the
+          // phase out expires with the phase, not phase-length-plus-wait.
+          ...(config.admissionDeadlineAtMs !== undefined ? { deadlineMs: Math.max(0, config.admissionDeadlineAtMs - Date.now()) } : {}),
         },
         () => runChat({
           baseUrl: config.baseUrl,
