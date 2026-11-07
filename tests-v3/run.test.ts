@@ -4148,6 +4148,11 @@ test("#954: completed investigation with an unverifiable requirement exposes tra
     assert.equal(result.outputs.reviewResult, "partial");
     assert.match(result.marker, /"incomplete_reason":"requirement_trace"/);
     assert.equal(coverage.incomplete_reason, "requirement_trace");
+    // #1543: the published dimension reads `incomplete` from the trace flip
+    // alone — the #750 fold itself never validated (README-only diff, empty
+    // must_check list), and the record says so, so the standalone publish
+    // read-back can never name `must_check` items this fold never gated.
+    assert.equal(coverage.required_check_fold_status, "none");
   } finally {
     await server.close();
     cleanup();

@@ -416,23 +416,18 @@ function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undef
  *   recomputed from the run's OWN inputs — the classifier's `must_check` list
  *   (`classification.json`) and the artifact's `required_check_dispositions`
  *   (`ai-output.json`) — but only when the run's coverage record says the
- *   required-check dimension is `incomplete`. The recomputation can then
- *   never contradict what the review published, and a run whose fold was
- *   clean or never validated publishes nothing instead of guessing. A flip
- *   whose only reason is the requirement trace (`incomplete_reason:
- *   "requirement_trace"`) means the completeness fold itself was clean — the
- *   execution reasons include its incompleteness — so there are no open fold
-   * ids either, and nothing is recomputed.
-   *
-   * Known residual (follow-up #1543): an operator's
-   * `validate-required-checks: false` is recorded in NO artifact, so a run
-   * with the fold opted out, a #874 trace flip, AND an execution gap (a
-   * recorded reason of `execution`/`both`) still recomputes and can name
-   * `must_check` items the fold never gated. The absence of `must_check`
-   * obligation rows is not a sound substitute signal:
-   * `candidateRowsToObligations` falls back to the must_check list only when
-   * the harness injected no candidate rows at all, so guidance-only
-   * injections produce none even with the fold fully on.
+ *   FOLD ITSELF was incomplete: the #1543 `required_check_fold_status` field
+ *   is the fold's own status before any #874 trace flip, so a run whose fold
+ *   was clean or never validated (`validate-required-checks: false` records
+ *   `none` there while the trace pass still flips the published
+ *   `required_checks` dimension) publishes nothing instead of naming
+ *   `must_check` items the fold never gated. A run dir written before the
+ *   field existed falls back to the recorded-dimension inference —
+ *   `required_checks: "incomplete"` for a reason that is not solely
+ *   `requirement_trace` (a trace-only flip means the fold itself was clean,
+ *   since the execution reasons include its incompleteness) — the same rule
+ *   the recomputation shipped with, kept only for artifacts that cannot
+ *   carry recorded truth.
  *
  * The model-unavailable notice path runs NONE of these folds (#1521): its
  * `request_changes` is the notice's own, and the engine still persisted its
@@ -469,7 +464,17 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
   const incompleteReason = coverageRecord !== null && isIncompleteReason(coverageRecord.incomplete_reason)
     ? coverageRecord.incomplete_reason
     : undefined;
-  if (requiredChecks === "incomplete" && incompleteReason !== "requirement_trace") {
+  // #1543: the fold's OWN recorded status decides whenever it exists (its
+  // value set is exactly the required-check status vocabulary). A recorded
+  // status of `none`/`complete` means the fold named nothing in memory, so
+  // nothing is recomputed even when the #874 trace flip made the published
+  // dimension read `incomplete`. Only a run dir predating the field falls
+  // back to the recorded-dimension inference above.
+  const foldStatus = coverageRecord === null ? undefined : validateRequiredChecks(coverageRecord.required_check_fold_status);
+  const foldWasIncomplete = foldStatus !== undefined
+    ? foldStatus === "incomplete"
+    : requiredChecks === "incomplete" && incompleteReason !== "requirement_trace";
+  if (foldWasIncomplete) {
     const classification = readJsonObject(join(runDir, "classification.json"));
     const output = readJsonObject(join(runDir, "ai-output.json"));
     if (classification !== null && output !== null) {
