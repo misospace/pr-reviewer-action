@@ -422,7 +422,17 @@ function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undef
  *   whose only reason is the requirement trace (`incomplete_reason:
  *   "requirement_trace"`) means the completeness fold itself was clean — the
  *   execution reasons include its incompleteness — so there are no open fold
- *   ids either, and nothing is recomputed.
+   * ids either, and nothing is recomputed.
+   *
+   * Known residual (follow-up #1543): an operator's
+   * `validate-required-checks: false` is recorded in NO artifact, so a run
+   * with the fold opted out, a #874 trace flip, AND an execution gap (a
+   * recorded reason of `execution`/`both`) still recomputes and can name
+   * `must_check` items the fold never gated. The absence of `must_check`
+   * obligation rows is not a sound substitute signal:
+   * `candidateRowsToObligations` falls back to the must_check list only when
+   * the harness injected no candidate rows at all, so guidance-only
+   * injections produce none even with the fold fully on.
  *
  * The model-unavailable notice path runs NONE of these folds (#1521): its
  * `request_changes` is the notice's own, and the engine still persisted its
