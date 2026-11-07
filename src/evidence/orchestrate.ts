@@ -87,8 +87,11 @@ export interface EvidenceRunOptions {
   /** Source of the EVIDENCE_* / SARIF_* settings, and the ambient env the
    * provider allowlist draws from. */
   env: NodeJS.ProcessEnv;
-  /** The review working directory: relative config paths resolve here,
-   * providers run here, and artifacts are written here (v2: process cwd). */
+  /** The phase run directory: artifacts are written here (v2: process cwd).
+   * Relative config paths resolve against the reviewed workspace (#1531),
+   * and provider commands run in that same workspace (#1532):
+   * `env.GITHUB_WORKSPACE` resolved against this directory, falling back to
+   * it when the env binding is absent. */
   cwd: string;
   /** Monotonic clock in ms (tests freeze it). */
   clock?: () => number;
@@ -131,8 +134,10 @@ function pyPathStr(raw: string): string {
   return leading + body || (leading === "" ? "." : leading);
 }
 
-function loadConfig(configPathRaw: string, cwd: string): { providers: unknown[]; error: string } {
-  const configPath = resolvePath(cwd, configPathRaw);
+/** `configPathRaw` resolves against `baseDir` (the reviewed workspace root,
+ * #1531); an absolute raw path is kept verbatim (operator-owned semantics). */
+function loadConfig(configPathRaw: string, baseDir: string): { providers: unknown[]; error: string } {
+  const configPath = resolvePath(baseDir, configPathRaw);
   let exists = false;
   try {
     exists = existsSync(configPath) && statSync(configPath) !== undefined;
@@ -202,6 +207,13 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
     const parsed = pyIntFromText(env.SARIF_MAX_FINDINGS);
     if (parsed !== null && parsed >= 1) sarifMaxFindings = typeof parsed === "bigint" ? Number.MAX_SAFE_INTEGER : parsed;
   }
+  // #1531/#1532: the reviewed workspace, not the phase run directory, is the
+  // root for repo-relative evidence config/SARIF reads and for provider
+  // execution. The documented `evidence-providers-file` value (for example
+  // `.github/pr-review-providers.json`) loads from the checkout, and a
+  // repo-relative provider command runs there too. Absolute operator config
+  // paths remain verbatim. An empty `GITHUB_WORKSPACE` binding keeps the v2
+  // process-cwd semantics for library callers.
   const workspaceRoot = safeRealpath(resolvePath(cwd, env.GITHUB_WORKSPACE || cwd));
 
   const summary: EvidenceSummary = {
@@ -236,8 +248,8 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
   // untrusted — never trusted by default.
   let providersTrustedForNegativeEvidence = false;
   if (configPathRaw) {
-    ({ providers, error: configError } = loadConfig(configPathRaw, cwd));
-    providersTrustedForNegativeEvidence = isConfigOutsideWorkspace(configPathRaw, cwd, env);
+    ({ providers, error: configError } = loadConfig(configPathRaw, workspaceRoot));
+    providersTrustedForNegativeEvidence = isConfigOutsideWorkspace(configPathRaw, workspaceRoot, env);
     if (!providersTrustedForNegativeEvidence) {
       options.log?.("negative evidence: providers config is not provably outside the reviewed workspace; no negative-evidence rules derive from it (#1529 review)");
     }
@@ -267,7 +279,7 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
       timeoutSec: defaultTimeout,
       maxOutputBytes: defaultMaxOutput,
       ambientEnv: env,
-      cwd,
+      cwd: workspaceRoot,
       ...(options.clock ? { clock: options.clock } : {}),
       ...(options.log ? { log: options.log } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
@@ -371,12 +383,12 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
  * (GITHUB_WORKSPACE unset/empty/unresolvable) or the config cannot be
  * canonicalized (missing/unresolvable): the trust boundary is fail-closed,
  * never "outside by default". */
-function isConfigOutsideWorkspace(configPathRaw: string, cwd: string, env: NodeJS.ProcessEnv): boolean {
+function isConfigOutsideWorkspace(configPathRaw: string, configBase: string, env: NodeJS.ProcessEnv): boolean {
   const workspaceRaw = pyStrip(env.GITHUB_WORKSPACE ?? "");
   if (workspaceRaw === "") return false;
-  const workspaceRoot = canonicalPath(resolvePath(cwd, workspaceRaw));
+  const workspaceRoot = canonicalPath(resolvePath(configBase, workspaceRaw));
   if (workspaceRoot === null) return false;
-  const configReal = canonicalPath(resolvePath(cwd, configPathRaw));
+  const configReal = canonicalPath(resolvePath(configBase, configPathRaw));
   if (configReal === null) return false;
   return configReal !== workspaceRoot && !configReal.startsWith(`${workspaceRoot}/`);
 }

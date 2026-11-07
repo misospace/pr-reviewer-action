@@ -212,6 +212,12 @@ output is folded into the review as evidence.
     evidence-blocker-enforcement: "true"
 ```
 
+A relative `evidence-providers-file` path resolves against the reviewed
+workspace (the checked-out repository, `GITHUB_WORKSPACE`), so a value like
+`.github/pr-review-providers.json` loads from the checkout (#1531). An
+absolute path reads verbatim, for operator-managed files outside the
+checkout.
+
 Example provider config:
 
 ```json
@@ -236,7 +242,13 @@ checkout. SARIF findings are evidence only — they don't trigger blocker
 enforcement on their own.
 
 Providers run with full access to the **checked-out PR working tree**
-(files, environment, installed tools) — not the base ref. Prefer an argv
+(files, environment, installed tools) — not the base ref. Each provider
+command runs with its working directory set to that workspace
+(`GITHUB_WORKSPACE`), so a repo-relative argv command such as
+`["python3", "scripts/check_version_compat.py"]` finds its files in the
+checkout; the `evidence-providers.md` / `evidence-providers.json` artifacts
+are still written to the phase run directory, not the workspace (#1532).
+Prefer an argv
 array for `command` (e.g. `["python3", "scripts/check.py"]`): it runs via
 direct `subprocess.run` with no shell. A string `command` runs through `bash
 -lc`, which is a shell-injection risk if any part of the command or

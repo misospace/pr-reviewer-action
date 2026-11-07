@@ -205,6 +205,7 @@ a forge-specific CLI.
 ## Out of scope (per #1348)
 
 Controller/admin HTTP API and metrics (#737), OCI images and Helm
-packaging (#738), the end-to-end qualification harness (#739),
+packaging (#738), the end-to-end qualification harness (see
+[Self-hosted qualification](../self-hosted-qualification.md)),
 onboarding/doctor UX (#1028), the dashboard (#742). Those consume this
 runtime.

@@ -94,7 +94,7 @@ import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligat
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, mergeTraceClaims, missingTraceRequirementIds, requirementTraceScope, unresolvedTraceRequirementIds, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { createTraceGapProbe, traceGapContinuationSummary } from "../requirements/trace-gap-probe.js";
-import { runRequirementTraceRepairPass, traceRepairOutcomeSummary } from "../requirements/trace-repair.js";
+import { harnessEvidenceDigest, resolveStandaloneTraceRepairInvocation, runRequirementTraceRepairPass, traceRepairOutcomeSummary, traceRepairRouteForArtifact } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
 import { buildRunMetadataMarker } from "../metadata/markers.js";
 import { ACTION_VERSION } from "../version.js";
@@ -1812,6 +1812,9 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // ── Escalation (#721: reviewer-requested only) ───────────────────────
   let escalationReasons = "";
   let enforcementHarness = "tool-harness.json";
+  // #1504: true when the smart review succeeded and its artifact is the
+  // authoritative one — the trace repair must then ride the smart lane.
+  let escalatedToSmart = false;
   if (
     (env.REVIEW_ROUTING_MODE ?? "off").toLowerCase() === "auto"
     && (env.REVIEW_ROUTE ?? "legacy") === "primary"
@@ -1842,6 +1845,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       }
       enforcementHarness = "tool-harness.smart.json";
       env.REVIEW_ROUTE = "escalated";
+      escalatedToSmart = true;
       env.ROUTE_REASON = `escalated: ${escalationReasons}`;
       analysisEngine = annotateAnalysisEngine(analysisEngineBase(profiles.smart.model, profiles.smart.baseUrl, profiles.smart.apiFormat), "escalated", { escalationReasons });
       log("Smart model succeeded; publishing the escalated review");
@@ -1857,15 +1861,26 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // A verdict can carry no trace claim at all for an in-scope requirement
   // (the #947 shape: `requirement_coverage: null` even though the prose
   // review cites real locations). Before publishing, re-ask ONCE, for exactly
-  // the missing ids, on the same route as the primary review — mirroring the
-  // claim-falsification pre-pass. Gated on the default prompt (`isDefault`):
-  // the repair IS the trace fragment's retry, so with an operator replace-mode
-  // prompt there is no fragment to retry and the documented fail-closed
-  // behavior stands. Fail-soft: any failure leaves the artifact unchanged, and
-  // the missing rows then render as "the reviewer reported no trace" rather
-  // than implying enforcement does not exist. A claim that IS present with
-  // unusable locations is never repaired, so this cannot become a way to pass
-  // an untraceable change.
+  // the missing ids. #1504: the pass is a context-rich bounded FALLBACK to
+  // the native loop's own trace-only repair, and it rides the route that
+  // produced the authoritative accepted review artifact — primary review →
+  // primary repair, fallback review → fallback repair, escalated smart
+  // review → smart repair — never a lane already known terminal for the run
+  // (a lane that produced the artifact is by definition not terminal, and a
+  // lane that went terminal never produced the artifact this would repair).
+  // Gated on the default prompt (`isDefault`): the repair IS the trace
+  // fragment's retry, so with an operator replace-mode prompt there is no
+  // fragment to retry and the documented fail-closed behavior stands.
+  // Fail-soft: any failure leaves the artifact unchanged, and the missing
+  // rows then render as "the reviewer reported no trace" rather than
+  // implying enforcement does not exist. A claim that IS present with
+  // unusable locations is never repaired, so this cannot become a way to
+  // pass an untraceable change.
+  // #1504: when the native loop's own trace-only repair already merged
+  // parseable claims into THIS artifact, the standalone pass is SUPPRESSED —
+  // no second independent repair model fires merely because rows remain
+  // unresolved; the leftover rows fail closed per #1492. The invocation
+  // reason is recorded on the telemetry either way.
   // #1044: bounded, sanitized summary of what the pass did, attached to the
   // persisted artifact (`requirement_trace_repair`) and handed to the trace
   // enforcement so the published section can distinguish "the reviewer never
@@ -1875,11 +1890,36 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     const repairTarget = (artifact ?? {}) as Record<string, unknown>;
     const missingTraceIds = missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds);
     const repairRequirements = missingTraceIds.length > 0 ? ledgerRequirementsById(ledgerValue, missingTraceIds) : [];
+    // #1504 route ownership: the repair lane is the tier that produced the
+    // accepted artifact, resolved to the same transport/credentials that tier
+    // reviewed with.
+    const repairRoute = traceRepairRouteForArtifact({ escalated: escalatedToSmart, fromFallback: primary.fromFallback });
+    const repairLane = tierProfileFrom(profiles, repairRoute, env);
+    // #1504: suppression/invocation decision — a native-loop trace-only
+    // repair counts only when the accepted artifact IS the loop's verdict
+    // (the conversation its claims were merged into); a continuation record
+    // without merged claims is the serialization-failure shape this pass
+    // exists to recover.
+    const repairInvocation = resolveStandaloneTraceRepairInvocation({
+      nativeLoopVerdictArtifact: !escalatedToSmart && primary.nativeLoopVerdict,
+      continuation: traceGapContinuation,
+    });
+    const summaryBase = {
+      missingIds: missingTraceIds,
+      route: repairRoute,
+      secrets: [repairLane.apiKey],
+      ...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}),
+    };
     if (missingTraceIds.length === 0) {
-      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey], ...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}) });
-    } else if (!promptState.isDefault || analysisEngine === MODEL_UNAVAILABLE_ENGINE || !profiles.primary.baseUrl || !profiles.primary.model || repairRequirements.length === 0) {
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", ...summaryBase });
+    } else if (!repairInvocation.invoke) {
+      // #1504: the native loop's trace-only repair already merged parseable
+      // claims into this artifact — the standalone pass stands down.
+      log(`requirement trace: ${missingTraceIds.length} row(s) still unresolved, but the native-loop trace-only repair already merged claims; suppressing the standalone repair pass (${repairInvocation.reason})`);
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "suppressed_native_loop", invocationReason: repairInvocation.reason, ...summaryBase });
+    } else if (!promptState.isDefault || analysisEngine === MODEL_UNAVAILABLE_ENGINE || !repairLane.baseUrl || !repairLane.model || repairRequirements.length === 0) {
       // The pass exists but its own gates kept it from running at all.
-      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: missingTraceIds, secrets: [profiles.primary.apiKey], ...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}) });
+      traceRepairOutcome = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", invocationReason: repairInvocation.reason, ...summaryBase });
     } else {
       const rawTemp = (env.AI_TEMPERATURE ?? "").trim();
       const temperature = rawTemp === "" || Number.isNaN(Number(rawTemp)) ? null : Number(rawTemp);
@@ -1887,13 +1927,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         Number(env.REQUIREMENT_TRACE_REPAIR_TIMEOUT_SEC ?? "180") || 180,
         Number(env.AI_REQUEST_TIMEOUT_SEC ?? "180") || 180,
       );
-      log(`requirement trace: ${repairRequirements.length} in-scope requirement(s) carried no claim; attempting one bounded repair pass`);
-      // #1047: the repair pass rides the primary route and asks for its own
-      // (non-verdict) JSON contract in the prompt only — an Anthropic-format
-      // repair call never carries a native structured-output parameter, so a
-      // configured response_format must not read as enforced here either.
-      if (profiles.primary.apiFormat === "anthropic" && profiles.primary.responseFormat !== "off") {
-        log(`WARNING: primary lane (trace repair pass): ai-response-format resolved to ${profiles.primary.responseFormat}, which is not sent on the Anthropic wire for the repair contract — the repair JSON is prompt-only`);
+      log(`requirement trace: ${repairRequirements.length} in-scope requirement(s) carried no claim; attempting one bounded repair pass on the ${repairRoute} lane (${repairInvocation.reason})`);
+      // #1047: the repair pass asks for its own (non-verdict) JSON contract
+      // in the prompt only — an Anthropic-format repair call never carries a
+      // native structured-output parameter, so a configured response_format
+      // must not read as enforced here either. #1504: the warning names the
+      // lane that actually owns the repair.
+      if (repairLane.apiFormat === "anthropic" && repairLane.responseFormat !== "off") {
+        log(`WARNING: ${repairRoute} lane (trace repair pass): ai-response-format resolved to ${repairLane.responseFormat}, which is not sent on the Anthropic wire for the repair contract — the repair JSON is prompt-only`);
       }
       // Fail-soft at the boundary too, mirroring the claim-falsification
       // pre-pass: a throw here must never abort the review.
@@ -1914,25 +1955,42 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
           title: String(pr.title ?? ""),
           files: safeJson(ws.read("pr-files.json")),
           diff: ws.readText("pr.diff.truncated") ?? ws.readText("pr.diff") ?? "",
+          // #1504: the fallback's navigation context — the PR body (bounded/
+          // fenced, untrusted), the review's current coverage rows, and a
+          // bounded digest of the evidence the native loop already gathered.
+          // PR-body claims are navigation hints only; the deterministic
+          // validator still decides whether a citation proves the requirement.
+          prBody: String(pr.body ?? ""),
+          coverageRows: Array.isArray(repairTarget.requirement_coverage) ? repairTarget.requirement_coverage : undefined,
+          // #1504 (review): the digest comes from the authoritative loop's
+          // harness — `tool-harness.smart.json` when the escalated smart
+          // review authored the accepted artifact, never the stale
+          // primary-loop evidence beside it. Tools-off runs have neither
+          // file, so the digest is empty either way.
+          evidenceDigest: harnessEvidenceDigest(safeJson(ws.read(enforcementHarness))),
           config: {
-            apiFormat: profiles.primary.apiFormat,
-            model: profiles.primary.model,
-            baseUrl: profiles.primary.baseUrl,
-            apiKey: profiles.primary.apiKey,
+            apiFormat: repairLane.apiFormat,
+            model: repairLane.model,
+            baseUrl: repairLane.baseUrl,
+            apiKey: repairLane.apiKey,
             maxTokens: Number(env.REQUIREMENT_TRACE_REPAIR_MAX_TOKENS ?? "4096") || 4096,
             temperature,
-            responseFormat: profiles.primary.responseFormat,
+            responseFormat: repairLane.responseFormat,
             tokensParam: env.AI_TOKENS_PARAM ?? "max_tokens",
-            stream: (env.AI_STREAM ?? "true").toLowerCase() === "true",
+            // #1504 (review): the transport profile belongs to the owning lane
+            // too — a fallback with `ai-fallback-stream` diverging from the
+            // base `ai-stream` must repair on ITS streaming setting, the one
+            // its authoritative review rode, not the globally selected one.
+            stream: repairLane.stream,
             timeoutSec: repairTimeoutSec,
             inputMaxBytes: Number(env.REQUIREMENT_TRACE_REPAIR_INPUT_MAX_BYTES ?? "48000") || 48000,
-            // #998: the repair pass runs on the primary route.
-            reasoningEffort: profiles.primary.reasoningEffort,
-            anthropicEffortSupported: profiles.primary.anthropicEffortSupported,
+            // #998: the repair lane's own effort — never another lane's.
+            reasoningEffort: repairLane.reasoningEffort,
+            anthropicEffortSupported: repairLane.anthropicEffortSupported,
           },
           requestFn: specialistRequestFn({
-            baseUrl: profiles.primary.baseUrl,
-            apiKey: profiles.primary.apiKey,
+            baseUrl: repairLane.baseUrl,
+            apiKey: repairLane.apiKey,
             anthropicVersion: env.ANTHROPIC_VERSION ?? "2023-06-01",
             // #1037: correlation headers ride specialist/pre-pass calls too;
             // unset config omits the key.
@@ -1943,7 +2001,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         repairThrow = cause;
         // Credential-shaped transport/provider text must not reach local
         // diagnostics either (AGENTS.md security boundaries).
-        log(`WARNING: requirement trace repair pass failed; continuing without repair: ${maskKnownSecrets(cause instanceof Error ? cause.message : String(cause), [profiles.primary.apiKey])}`);
+        log(`WARNING: requirement trace repair pass failed; continuing without repair: ${maskKnownSecrets(cause instanceof Error ? cause.message : String(cause), [repairLane.apiKey])}`);
       }
       if (repaired !== null) {
         // Per-run record, mirroring claim-falsification.json: the merged
@@ -1953,10 +2011,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
         ws.write("requirement-trace-repair.json", Buffer.from(`${pyJsonDumps({
           status: repaired.status,
           error_kind: repaired.errorKind,
-          error: redactText(maskKnownSecrets(repaired.error ?? "", [profiles.primary.apiKey])) || null,
+          error: redactText(maskKnownSecrets(repaired.error ?? "", [repairLane.apiKey])) || null,
           missing_ids: missingTraceIds,
           claims: repaired.claims.length,
           diff_clipped: repaired.diffClipped,
+          route: repairRoute,
+          invocation_reason: repairInvocation.reason,
+          first_failure_class: repaired.firstFailureClass,
+          serialization_retry: repaired.retried,
           // #1145: the loop's own in-conversation continuation (if the probe
           // fired or was skipped in this run) — the no-tools pass above and
           // the loop's continuation are distinct attempts and both are
@@ -1967,7 +2029,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
           repairTarget.requirement_coverage = mergeTraceClaims(repairTarget.requirement_coverage, repaired.claims);
           log(`requirement trace: repair pass returned ${repaired.claims.length} claim(s)`);
         } else {
-          log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${redactText(maskKnownSecrets(repaired.error, [profiles.primary.apiKey]))}` : ""})`);
+          log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${redactText(maskKnownSecrets(repaired.error, [repairLane.apiKey]))}` : ""})`);
         }
       }
       // #1044 review follow-up: derive the summary's `missing_ids` from the
@@ -1976,15 +2038,17 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       // some not) labels only the genuinely unfilled rows. For "no_claims"/
       // thrown nothing merged, so this equals the pre-run set; a full merge
       // leaves it empty.
-traceRepairOutcome = traceRepairOutcomeSummary({
-attempted: true,
-outcome: null,
-missingIds: missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds),
-result: repaired,
-thrownError: repaired === null ? repairThrow : undefined,
-secrets: [profiles.primary.apiKey],
-...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}),
-});
+      traceRepairOutcome = traceRepairOutcomeSummary({
+        attempted: true,
+        outcome: null,
+        missingIds: missingTraceRequirementIds(repairTarget.requirement_coverage, traceScopeIds),
+        result: repaired,
+        thrownError: repaired === null ? repairThrow : undefined,
+        route: repairRoute,
+        invocationReason: repairInvocation.reason,
+        secrets: [repairLane.apiKey],
+        ...(traceGapContinuation !== null ? { continuation: traceGapContinuation } : {}),
+      });
     }
     if (traceRepairOutcome !== null) {
       artifact.requirement_trace_repair = traceRepairOutcome;
@@ -3777,6 +3841,10 @@ async function producePrimaryReview(input: ReviewCallInput & {
   analysisEngine: string;
   fromPrimary: boolean;
   fromFallback: boolean;
+  /** #1504: the artifact is the native loop's own in-conversation verdict —
+   * the conversation the loop's trace-only repair merges into. Only this
+   * artifact can suppress the standalone repair pass on the loop's behalf. */
+  nativeLoopVerdict: boolean;
 }> {
   const { env, ws, profiles, log, errorLog, budgets } = input;
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
@@ -3825,6 +3893,7 @@ async function producePrimaryReview(input: ReviewCallInput & {
           ),
           fromPrimary: true,
           fromFallback: false,
+          nativeLoopVerdict: true,
         };
       } catch (cause) {
         errorLog(`native_loop verdict did not parse (${cause instanceof Error ? cause.message : "unknown"}); falling back to the standard review call`);
@@ -3851,6 +3920,7 @@ async function producePrimaryReview(input: ReviewCallInput & {
       }),
       fromPrimary: true,
       fromFallback: false,
+      nativeLoopVerdict: false,
     };
   }
 
@@ -3897,6 +3967,7 @@ async function producePrimaryReview(input: ReviewCallInput & {
       ),
       fromPrimary: false,
       fromFallback: true,
+      nativeLoopVerdict: false,
     };
   }
   const outcome = handleModelFailure("Fallback model failed", env.ON_MODEL_FAILURE ?? "fail");
@@ -3917,11 +3988,11 @@ async function producePrimaryReview(input: ReviewCallInput & {
 function noticeResult(
   ws: RunWorkspace,
   outcome: { aiOutputJson: string; analysisEngine: string },
-): { artifact: Record<string, unknown>; analysisEngine: string; fromPrimary: false; fromFallback: false } {
+): { artifact: Record<string, unknown>; analysisEngine: string; fromPrimary: false; fromFallback: false; nativeLoopVerdict: false } {
   const parsed = parseVerdictResponse({ choices: [{ message: { content: outcome.aiOutputJson } }] });
   const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
-  return { artifact, analysisEngine: outcome.analysisEngine, fromPrimary: false, fromFallback: false };
+  return { artifact, analysisEngine: outcome.analysisEngine, fromPrimary: false, fromFallback: false, nativeLoopVerdict: false };
 }
 
 interface SmartReviewInput extends ReviewCallInput {
