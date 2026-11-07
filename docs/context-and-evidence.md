@@ -212,6 +212,12 @@ output is folded into the review as evidence.
     evidence-blocker-enforcement: "true"
 ```
 
+A relative `evidence-providers-file` path resolves against the reviewed
+workspace (the checked-out repository, `GITHUB_WORKSPACE`), so a value like
+`.github/pr-review-providers.json` loads from the checkout (#1531). An
+absolute path reads verbatim, for operator-managed files outside the
+checkout.
+
 Example provider config:
 
 ```json
