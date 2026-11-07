@@ -388,25 +388,48 @@ test("#1449: with the feature off there are no derived rows, no coverage row, an
 
 // ── (g) the non-derived section stays byte-identical ───────────────────
 
-test("#1449: the non-derived gate section is byte-identical to #1381", () => {
+test("#1449/#1505: the unmet non-derived gate section keeps #1381's shape; unresolved rows render coverage, never a block", () => {
+  // A confirmed negative (unmet) keeps the forcing shape: the reason and the
+  // fenced section, with the status name carrying the confirmed negative.
   const required: ReviewObligation[] = [
-    { id: "obligation-1", source: "must_check", text: "check one", status: "unresolved", cause: "tool-capability" },
+    { id: "obligation-1", source: "must_check", text: "check one", status: "unmet", cause: null },
   ];
   const artifact = base({ verdict: "approve", review_markdown: "" });
   const enforced = applyReviewObligationEnforcement(artifact, required);
   assert.equal(enforced.applied, true);
-  assert.equal(enforced.reason, "Required review evidence unresolved: obligation-1");
+  assert.equal(enforced.reason, "Required review evidence unmet: obligation-1");
   assert.equal(artifact.review_markdown, [
     "",
     "",
+    "## Unmet Required Review Evidence",
+    "```text",
+    "- obligation-1 (must_check, unmet): check one",
+    "```",
+    "",
+    "_required review evidence unresolved: obligation-1 (review-owned required check not discharged; review partial, trusted approval withheld; #1381)._",
+  ].join("\n"));
+  assert.ok(!artifact.review_markdown.includes("Derived Architectural Obligations"));
+  // An unresolved row is coverage: the same fenced rows with its cause, the
+  // #1449 coverage prose, and nothing forced.
+  const ungathered: ReviewObligation[] = [
+    { id: "obligation-1", source: "must_check", text: "check one", status: "unresolved", cause: "tool-capability" },
+  ];
+  const coverageArtifact = base({ verdict: "approve", review_markdown: "" });
+  const coverage = applyReviewObligationEnforcement(coverageArtifact, ungathered);
+  assert.equal(coverage.applied, false);
+  assert.equal(coverage.reason, "");
+  assert.equal(coverageArtifact.verdict, "approve");
+  assert.equal(coverageArtifact.review_markdown, [
+    "",
+    "",
     "## Unresolved Required Review Evidence",
+    "Required-evidence coverage is incomplete: the review could not gather the required evidence above, so no defect is claimed here (an unresolved required check is a coverage marker, not a finding). The review is partial and trusted approval is withheld until the evidence is gathered.",
     "```text",
     "- obligation-1 (must_check, unresolved, cause: tool-capability): check one",
     "```",
     "",
-    "_required review evidence unresolved: obligation-1 (review-owned required check not discharged; #1381)._",
+    "_required review evidence unresolved: obligation-1 (review-owned required check not discharged; review partial, trusted approval withheld; #1381)._",
   ].join("\n"));
-  assert.ok(!artifact.review_markdown.includes("Derived Architectural Obligations"));
 });
 
 // ── the resolver is defensive ──────────────────────────────────────────

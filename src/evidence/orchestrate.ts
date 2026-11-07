@@ -37,6 +37,12 @@ import {
   type RunEvidenceProviderOptions,
 } from "./providers.js";
 import {
+  deriveNegativeEvidenceRules,
+  negativeEvidenceHeadSha,
+  writeNegativeEvidenceArtifact,
+  type NegativeEvidenceRule,
+} from "./negative-evidence.js";
+import {
   PyUncaughtError,
   decodeUtf8Strict,
   isPyDict,
@@ -187,8 +193,10 @@ async function mapPool<T, R>(items: readonly T[], width: number, worker: (item: 
   });
 }
 
-/** `main()` minus the file writes: the summary and the markdown. */
-export async function runEvidenceProviders(options: EvidenceRunOptions): Promise<{ summary: EvidenceSummary; markdown: string }> {
+/** `main()` minus the file writes: the summary, the markdown, and the
+ * #1517 negative-evidence rules derived from this run's clean provider
+ * results. */
+export async function runEvidenceProviders(options: EvidenceRunOptions): Promise<{ summary: EvidenceSummary; markdown: string; negativeEvidenceRules: NegativeEvidenceRule[]; headSha: string | null }> {
   const { env, cwd } = options;
   const configPathRaw = pyStrip(env.EVIDENCE_PROVIDERS_FILE ?? "");
   const sarifPaths = splitSarifPaths(env.SARIF_FILES ?? "");
@@ -219,12 +227,33 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
   if (!configPathRaw && sarifPaths.length === 0) {
     // The normal state for consumers with no evidence providers: an empty
     // markdown, not a "not configured" diagnostic (#399/#409).
-    return { summary, markdown: "" };
+    return { summary, markdown: "", negativeEvidenceRules: [], headSha: null };
   }
 
   let providers: unknown[] = [];
   let configError = "";
-  if (configPathRaw) ({ providers, error: configError } = loadConfig(configPathRaw, workspaceRoot));
+  // #1529 review (trust boundary): the phase cwd is the run dir, NOT the
+  // reviewed tree — the PR-controlled boundary is `GITHUB_WORKSPACE` (the
+  // reviewed checkout, `workspaceRoot` above). A provider config that
+  // resolves inside the reviewed workspace is PR-writable content: it
+  // derives ZERO negative-evidence rules (ordinary positive evidence keeps
+  // its existing behavior). Only a config from a trusted operator/base
+  // source — a path provably outside the reviewed workspace — may carry
+  // negative-evidence authority. The containment comparison runs on the
+  // canonical (realpath) form of BOTH paths, so neither a symlinked
+  // workspace root nor a symlinked config path can launder a PR file into
+  // trusted authority in either direction. Fail-closed: when the reviewed
+  // workspace cannot be established (GITHUB_WORKSPACE unset or
+  // unresolvable) or the config cannot be canonicalized, the source is
+  // untrusted — never trusted by default.
+  let providersTrustedForNegativeEvidence = false;
+  if (configPathRaw) {
+    ({ providers, error: configError } = loadConfig(configPathRaw, workspaceRoot));
+    providersTrustedForNegativeEvidence = isConfigOutsideWorkspace(configPathRaw, workspaceRoot, env);
+    if (!providersTrustedForNegativeEvidence) {
+      options.log?.("negative evidence: providers config is not provably outside the reviewed workspace; no negative-evidence rules derive from it (#1529 review)");
+    }
+  }
 
   if (configError) summary.error = configError;
   summary.configured = true;
@@ -262,6 +291,20 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
   } else {
     entries = await mapPool(indexed, Math.min(parallelism, indexed.length), run);
   }
+
+  // #1517: the negative-evidence rules this run derived — clean provider
+  // runs whose operator spec declared a covered domain, provenance-stamped
+  // with the exact head the phase ran against (PR_HEAD_SHA, resolved by the
+  // engine; a run without a usable head stamps null and the application
+  // boundary then refuses the rule). Derivation is deterministic over the
+  // provider specs and entries; nothing a provider printed contributes.
+  const headSha = negativeEvidenceHeadSha(env.PR_HEAD_SHA);
+  const negativeEvidenceRules = deriveNegativeEvidenceRules(
+    providers.slice(0, MAX_CONFIGURED_PROVIDERS),
+    entries,
+    headSha,
+    providersTrustedForNegativeEvidence,
+  );
 
   for (const entry of entries) {
     if (entry.provider_severity === "blocker") summary.has_blocker = true;
@@ -328,7 +371,37 @@ export async function runEvidenceProviders(options: EvidenceRunOptions): Promise
     }
   }
 
-  return { summary, markdown: redactText(mdLines.join("\n")) };
+  return { summary, markdown: redactText(mdLines.join("\n")), negativeEvidenceRules, headSha };
+}
+
+/** #1529 review: true only when the provider config is PROVABLY outside the
+ * reviewed workspace. Both paths are canonicalized with realpath and
+ * compared in canonical form, so a symlinked workspace root, a symlinked
+ * config path (in either direction), or alias spellings of the same tree
+ * cannot flip the classification. Returns false — untrusted for negative
+ * evidence — whenever the workspace cannot be established
+ * (GITHUB_WORKSPACE unset/empty/unresolvable) or the config cannot be
+ * canonicalized (missing/unresolvable): the trust boundary is fail-closed,
+ * never "outside by default". */
+function isConfigOutsideWorkspace(configPathRaw: string, configBase: string, env: NodeJS.ProcessEnv): boolean {
+  const workspaceRaw = pyStrip(env.GITHUB_WORKSPACE ?? "");
+  if (workspaceRaw === "") return false;
+  const workspaceRoot = canonicalPath(resolvePath(configBase, workspaceRaw));
+  if (workspaceRoot === null) return false;
+  const configReal = canonicalPath(resolvePath(configBase, configPathRaw));
+  if (configReal === null) return false;
+  return configReal !== workspaceRoot && !configReal.startsWith(`${workspaceRoot}/`);
+}
+
+/** realpath or null when the path cannot be canonicalized (missing, a
+ * broken symlink, a symlink loop). Unlike a fallback-to-raw helper, null
+ * lets the caller fail closed instead of comparing unresolved spellings. */
+function canonicalPath(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
 }
 
 function safeRealpath(path: string): string {
@@ -373,7 +446,10 @@ export interface EvidencePhaseOptions extends EvidenceRunOptions {
 export type EvidencePhaseOutcome = "skipped" | "ran" | "failed";
 
 /** The whole evidence phase as the v2 shell runs it: fork gate → run →
- * write, with the fallback artifacts on any failure. Never throws. */
+ * write, with the fallback artifacts on any failure. Never throws. The
+ * #1517 negative-evidence sidecar is written on EVERY outcome — zero rules
+ * on the skip/failure paths — so the artifact on disk is always this run's
+ * own and a shared run directory can never serve a previous run's rules. */
 export async function runEvidenceProvidersPhase(options: EvidencePhaseOptions): Promise<EvidencePhaseOutcome> {
   const log = options.log ?? ((line: string): void => {
     process.stderr.write(`${line}\n`);
@@ -381,16 +457,19 @@ export async function runEvidenceProvidersPhase(options: EvidencePhaseOptions): 
   if (evidenceForkGateApplies(options.isForkPr, options.enableForForks)) {
     writeFileSync(resolvePath(options.cwd, EVIDENCE_MARKDOWN_FILE), FORK_SKIP_MARKDOWN, "utf8");
     writeFileSync(resolvePath(options.cwd, EVIDENCE_JSON_FILE), FORK_SKIP_JSON, "utf8");
+    writeNegativeEvidenceArtifact(options.cwd, null, []);
     return "skipped";
   }
   try {
-    const { summary, markdown } = await runEvidenceProviders(options);
+    const { summary, markdown, negativeEvidenceRules, headSha } = await runEvidenceProviders(options);
     writeEvidenceArtifacts(options.cwd, summary, markdown);
+    writeNegativeEvidenceArtifact(options.cwd, headSha, negativeEvidenceRules);
     return "ran";
   } catch (error) {
     log(`ERROR: Evidence provider execution failed: ${error instanceof Error ? error.message : String(error)}`);
     writeFileSync(resolvePath(options.cwd, EVIDENCE_MARKDOWN_FILE), FAILURE_FALLBACK_MARKDOWN, "utf8");
     writeFileSync(resolvePath(options.cwd, EVIDENCE_JSON_FILE), FAILURE_FALLBACK_JSON, "utf8");
+    writeNegativeEvidenceArtifact(options.cwd, null, []);
     return "failed";
   }
 }

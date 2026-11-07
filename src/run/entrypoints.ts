@@ -364,6 +364,26 @@ function derivedObligationStateFromRunDir(env: NodeJS.ProcessEnv): string | unde
   return featureEnabled ? "unavailable" : undefined;
 }
 
+/** #1505: the run's required-evidence state, read from the run dir's own
+ * `review-coverage.json` artifact (never cwd, never ambient env) — the same
+ * seam and the same fail-closed discipline as the derived state above: the
+ * engine writes `required-evidence-state.json` ONLY when the review-owned
+ * required-evidence contract was active, so a present sentinel with an
+ * unreadable state reads `unavailable` (approval withheld), and an absent
+ * sentinel means the contract was off (state stays absent, published bytes
+ * unchanged). */
+function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undefined {
+  const runDir = nonEmpty(env.PR_REVIEWER_RUN_DIR);
+  if (runDir === undefined) return undefined;
+  const record = readJsonObject(join(runDir, "review-coverage.json"));
+  const state = record === null ? undefined : record.required_evidence_state;
+  if (state === "complete" || state === "unresolved") {
+    return state;
+  }
+  const featureEnabled = existsSync(join(runDir, "required-evidence-state.json"));
+  return featureEnabled ? "unavailable" : undefined;
+}
+
 /** #1005: read the persisted reviewer-routing plan from the run dir (never
  * cwd). A missing, unparseable, or structurally unrecognizable plan yields
  * `undefined` (no routing) so an uncertain plan can never mutate the forge. */
@@ -536,6 +556,7 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
   const reviewRouting = reviewRoutingFromRunDir(env);
   const confidenceTelemetry = confidenceTelemetryFromRunDir(env);
   const derivedObligationState = derivedObligationStateFromRunDir(env);
+  const requiredEvidenceState = requiredEvidenceStateFromRunDir(env);
   return {
     mode: publishMode(env.PUBLISH_MODE),
     reviewMarkdown: env.REVIEW_MARKDOWN ?? "",
@@ -641,6 +662,11 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
     // `unavailable` (fail closed) so a coverage gap can never certify an
     // approval. Absent when the feature was off.
     ...(derivedObligationState !== undefined ? { derivedObligationState } : {}),
+    // #1505: the run's required-evidence state, the same gate-as-disclosure
+    // seam as the derived state above (unreadable over an active-contract
+    // sentinel fails closed to `unavailable`). Absent when the contract was
+    // off.
+    ...(requiredEvidenceState !== undefined ? { requiredEvidenceState } : {}),
     // #1005: the deterministic reviewer-routing plan the review step persisted
     // (read from the run dir, never cwd). Absent when routing did not run.
     ...(reviewRouting ? { reviewRouting } : {}),
@@ -861,6 +887,10 @@ export function reviewDerivedPublishFields(review: RunReviewResult): Partial<Pub
     // #1449: a GATE as well as disclosure — the publish boundary refuses a
     // native approval while the state is not `complete`. Absent when off.
     ...(review.derivedObligationState !== undefined ? { derivedObligationState: review.derivedObligationState } : {}),
+    // #1505: a GATE as well as disclosure — the publish boundary refuses a
+    // native approval while required review evidence stayed unresolved.
+    // Absent when the contract was inactive.
+    ...(review.requiredEvidenceState !== undefined ? { requiredEvidenceState: review.requiredEvidenceState } : {}),
     // #1455: advisory verifier telemetry (never touches the verdict).
     ...(review.confidenceTelemetry !== undefined ? { confidenceTelemetry: review.confidenceTelemetry } : {}),
     // #847: the #810/#702 tool-budget provenance.

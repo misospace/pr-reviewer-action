@@ -100,8 +100,8 @@ artifact (`tests-v3/required-checks.test.ts`, byte-identical with
 
 `not_applicable` is a completed disposition. An absent named test does not
 force `request_changes` when the underlying risk is demonstrably absent;
-requesting changes is reserved for an actually violated or unresolved
-applicable requirement. An `unmet` disposition is a completed-but-failed
+requesting changes is reserved for an actually violated applicable
+requirement (`unmet`), exactly like a real blocking finding. An `unmet` disposition is a completed-but-failed
 one: it is recorded verbatim (`reason: ok`), but it is never clean coverage
 — the check was performed and the requirement confirmed NOT satisfied — so
 it keeps coverage `incomplete` exactly like an `unresolved` check.
@@ -128,11 +128,18 @@ no keyword mention can substitute for a missing or malformed disposition.
 
 Once represented as review-obligation rows (`src/enforcement/review-obligations.ts`),
 deterministic `must_check` items share one approval semantics with extracted
-trusted-base approval prerequisites: **any unresolved row — or an `unmet`
-row, which was resolved negatively but is still not clean coverage — forces
-`request_changes` through the enforcement overlays — a native APPROVE never
-certifies an unresolved (or failed) review-owned required check** (#1381
-review). Disposition identity follows each source's contract: `must_check`
+trusted-base approval prerequisites. Forcing is **status-based** (#1505):
+an **`unmet`** row — the check was performed and the requirement confirmed
+NOT satisfied — is a confirmed negative and is a real blocking result
+exactly like a blocker/major finding: it forces `request_changes` through
+the enforcement overlays, and a native APPROVE never certifies it. An
+**`unresolved`** row — the evidence was never gathered — is an availability
+failure, never a defect: it marks the review partial/incomplete, withholds
+the trusted native APPROVE at the publish boundary (the native event
+becomes a `COMMENT`, never a blocking `REQUEST_CHANGES`), and does not
+manufacture a blocking request out of an incomplete review. Real blocking
+findings still force `request_changes` as before — only the unresolved
+coverage distinction changed. Disposition identity follows each source's contract: `must_check`
 rows fold ONLY on the exact check text (identity parity with #750's
 completeness fold, which recognizes only the deterministic check text — an
 `obligation-<n>` echo never discharges one), while `trusted_base_guidance`

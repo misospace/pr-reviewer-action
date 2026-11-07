@@ -164,8 +164,13 @@ function noBlockingFindings(findings: ArtifactFinding[]): boolean {
   return !findings.some(isBlockingFinding);
 }
 
-function canRelaxForCiOnly(artifact: ReviewArtifact, forced: boolean, unresolvedReviewObligations: readonly string[] = []): boolean {
-  return unresolvedReviewObligations.length === 0
+function canRelaxForCiOnly(artifact: ReviewArtifact, forced: boolean, unmetReviewObligations: readonly string[] = []): boolean {
+  // #1505: only UNMET rows (confirmed negatives) gate relaxation. An
+  // UNRESOLVED row is a coverage state — the publish boundary withholds the
+  // approval instead — so it must not keep a verification-only
+  // request_changes blocked (a review that could not gather evidence is not
+  // a defect claim).
+  return unmetReviewObligations.length === 0
     && !forced
     && !hasUnresolvedRequiredCheck(artifact)
     && artifact.required_checks !== "incomplete"
@@ -200,10 +205,10 @@ function hasUnresolvedRequiredCheck(artifact: ReviewArtifact): boolean {
  */
 export function relaxVerificationOnlyVerdict(
   artifact: ReviewArtifact,
-  options: { forced: boolean; unresolvedReviewObligations?: readonly string[] },
+  options: { forced: boolean; unmetReviewObligations?: readonly string[] },
 ): boolean {
   if (artifact.verdict !== "request_changes") return false;
-  if (!canRelaxForCiOnly(artifact, options.forced, options.unresolvedReviewObligations)) return false;
+  if (!canRelaxForCiOnly(artifact, options.forced, options.unmetReviewObligations)) return false;
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   if (!findings.every((finding) => isAlwaysNonBlockingCategory(finding.category))) return false;
@@ -221,10 +226,10 @@ export function relaxVerificationOnlyVerdict(
  */
 export function relaxCiOnlyVerdict(
   artifact: ReviewArtifact,
-  options: { forced: boolean; unresolvedReviewObligations?: readonly string[] },
+  options: { forced: boolean; unmetReviewObligations?: readonly string[] },
 ): boolean {
   if (artifact.verdict !== "request_changes") return false;
-  if (!canRelaxForCiOnly(artifact, options.forced, options.unresolvedReviewObligations)) return false;
+  if (!canRelaxForCiOnly(artifact, options.forced, options.unmetReviewObligations)) return false;
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   const allRelaxable = findings.every((finding) =>
@@ -294,10 +299,10 @@ function isUnverifiedBlockerDemotion(finding: ArtifactFinding): boolean {
  */
 export function relaxUnverifiedBlockerVerdict(
   artifact: ReviewArtifact,
-  options: { forced: boolean; unresolvedReviewObligations?: readonly string[] },
+  options: { forced: boolean; unmetReviewObligations?: readonly string[] },
 ): boolean {
   if (artifact.verdict !== "request_changes") return false;
-  if (!canRelaxForCiOnly(artifact, options.forced, options.unresolvedReviewObligations)) return false;
+  if (!canRelaxForCiOnly(artifact, options.forced, options.unmetReviewObligations)) return false;
   const findings = artifact.findings;
   if (!Array.isArray(findings) || findings.length === 0) return false;
   // Unknown evidence must never certify a clean review: refuse the relaxer
@@ -550,19 +555,24 @@ export function applyStrictVerdictPolicy(
   options: {
     modelVerdict: string;
     forced: boolean;
-    unresolvedReviewObligations?: readonly string[];
+    /** #1505: the ids of UNMET (forcing) obligation rows — confirmed
+     * negatives that force `request_changes`. UNRESOLVED rows are
+     * deliberately absent: they are a coverage state (the evidence was
+     * never gathered), they never manufacture a blocking request here, and
+     * they withhold the trusted approval at the publish boundary instead. */
+    unmetReviewObligations?: readonly string[];
   },
 ): StrictVerdictOutcome {
   const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
   const modelVerdict = options.modelVerdict;
   const counts = severityCounts(findings);
   const unverifiedGrounding = findings.some(isUnverifiedBlockingGrounding);
-  const unresolvedObligations = options.unresolvedReviewObligations ?? [];
+  const unmetObligations = options.unmetReviewObligations ?? [];
   const detail = (): string => strictRequestChangesDetail({
     counts,
     unverifiedGrounding,
     forced: options.forced,
-    obligations: unresolvedObligations,
+    obligations: unmetObligations,
   });
 
   let verdict: VerdictValue;
@@ -612,15 +622,17 @@ export function applyStrictVerdictPolicy(
         modelVerdict,
       );
     }
-  } else if (unresolvedObligations.length > 0) {
-    // #1381: the ANTI-RELAX half of the review-obligation contract. A review-
-    // owned obligation is unresolved: this mapping never publishes approve,
-    // whichever verdict the model recommended, and the attribution note names
-    // the obligations so the published review shows the deterministic reason.
-    // In the engine composition an unresolved row already rides
+  } else if (unmetObligations.length > 0) {
+    // #1505 (was #1381's anti-relax half): only a confirmed negative — an
+    // UNMET row, the check performed and the requirement not holding —
+    // forces `request_changes` in this mapping, with the attribution note
+    // naming the rows. An UNRESOLVED row is a coverage state: the evidence
+    // was never gathered, the review is partial, and the trusted approval is
+    // withheld at the publish boundary — it never manufactures a blocking
+    // request here (#1447: preserve the found-defect vs review-incomplete
+    // distinction). In the engine composition an unmet row already rides
     // `failClosedEnforcementFired`, so the forced branch above owns it; this
-    // branch is the standalone guarantee for direct callers of the mapping
-    // (and holds the model's own request_changes with `overridden: false`).
+    // branch is the standalone guarantee for direct callers of the mapping.
     //
     // #1449: the `derived` source is deliberately NOT in this branch. An
     // undischarged derived obligation is missing coverage, not a defect

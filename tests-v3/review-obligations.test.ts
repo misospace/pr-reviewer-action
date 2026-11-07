@@ -19,6 +19,7 @@ import { evaluateRequiredCheckCoverage } from "../src/enforcement/required-check
 import { applyStrictVerdictPolicy, relaxVerificationOnlyVerdict } from "../src/enforcement/verdict-policy.js";
 import { buildPlanningContext, computeRequiredEvidenceReservation, requiredEvidenceSection } from "../src/tools/harness.js";
 import { REQUIRED_EVIDENCE_TURN_NOTE } from "../src/tools/loop.js";
+import { markerReviewResult, reviewCoverageIncomplete } from "../src/publish/publish.js";
 
 const standard = "# Repository Standards and Conventions\nBefore approval, verify the Kubernetes version against the published Talos support matrix.";
 const base = (overrides: Record<string, unknown> = {}): ReviewArtifact => ({ verdict: "approve", review_markdown: "review", findings: [], ...overrides } as ReviewArtifact);
@@ -171,7 +172,7 @@ test("#1388: an unmet obligation is forcing — a model approve cannot survive, 
   const outcome = applyStrictVerdictPolicy(base({ verdict: "approve" }), {
     modelVerdict: "approve",
     forced: false,
-    unresolvedReviewObligations: unresolvedReviewObligations(obligations),
+    unmetReviewObligations: unresolvedReviewObligations(obligations),
   });
   assert.equal(outcome.verdict, "request_changes");
   assert.equal(outcome.source, "enforcement");
@@ -217,27 +218,42 @@ test("unresolved cause precedence is deterministic and a planning failure is not
   assert.equal(deriveUnresolvedCause({ stopReason: "max-rounds", harnessError: null, planningError: null, degraded: true }), "tool-capability");
 });
 
-test("unresolved trusted-base obligations force changes with a listed section; satisfied ones never do", () => {
+test("#1505: unresolved required-evidence rows are coverage (no block, approval withheld); unmet rows force changes — either source", () => {
   const rows = [{ id: "obligation-1", source: "trusted_base_guidance", text: "Before approval, verify the Kubernetes version against the published Talos support matrix." }];
   const unresolved: ReviewObligation[] = candidateRowsToObligations(rows, []);
   const artifact = base();
   const enforced = applyReviewObligationEnforcement(artifact, unresolved);
-  assert.equal(enforced.applied, true);
-  assert.match(enforced.reason, /obligation-1/);
-  assert.equal(artifact.verdict, "request_changes");
+  // An unresolved row is an availability failure, not a defect: the gate
+  // discloses coverage and never manufactures a blocking request.
+  assert.equal(enforced.applied, false);
+  assert.equal(enforced.reason, "");
+  assert.equal(artifact.verdict, "approve");
   assert.match(artifact.review_markdown, /## Unresolved Required Review Evidence/);
+  assert.match(artifact.review_markdown, /no defect is claimed here/);
+  assert.match(artifact.review_markdown, /trusted approval is withheld/);
   assert.match(artifact.review_markdown, /cause: unknown/);
+  // A confirmed negative (unmet — the check was performed and the
+  // requirement did NOT hold) keeps #1381's force.
+  const unmet = foldObligationDispositions(candidateRowsToObligations(rows, []), [{ check: "obligation-1", status: "unmet", rationale: "matrix read; the pinned version is not supported" }]);
+  const unmetArtifact = base();
+  const unmetGate = applyReviewObligationEnforcement(unmetArtifact, unmet);
+  assert.equal(unmetGate.applied, true);
+  assert.match(unmetGate.reason, /obligation-1/);
+  assert.equal(unmetArtifact.verdict, "request_changes");
+  assert.match(unmetArtifact.review_markdown, /## Unmet Required Review Evidence/);
   const satisfied = foldObligationDispositions(candidateRowsToObligations(rows, []), [{ check: "obligation-1", status: "satisfied", rationale: "compatibility matrix read" }]);
   const clean = base();
   assert.equal(applyReviewObligationEnforcement(clean, satisfied).applied, false);
   assert.equal(clean.verdict, "approve");
   assert.deepEqual(unresolvedReviewObligations(unresolved), ["obligation-1"]);
-  // #1381 (review): must_check rows carry the SAME approval semantics — an
-  // unresolved review-owned row of either source never certifies APPROVE.
-  const mustCheckOnly = base();
-  const mustCheckGate = applyReviewObligationEnforcement(mustCheckOnly, candidateRowsToObligations([], ["check one"]));
+  // #1381 (review): must_check rows carry the SAME status semantics — an
+  // unmet review-owned row of either source forces; an unresolved one is
+  // coverage.
+  const mustCheckUnmet = foldObligationDispositions(candidateRowsToObligations([], ["check one"]), [{ check: "check one", status: "unmet", rationale: "checked; the traversal is present" }]);
+  const mustCheckArtifact = base();
+  const mustCheckGate = applyReviewObligationEnforcement(mustCheckArtifact, mustCheckUnmet);
   assert.equal(mustCheckGate.applied, true);
-  assert.equal(mustCheckOnly.verdict, "request_changes");
+  assert.equal(mustCheckArtifact.verdict, "request_changes");
 });
 
 test("adversarial boundary: hostile obligation text cannot forge headings or close the fence (#252)", () => {
@@ -253,10 +269,11 @@ test("adversarial boundary: hostile obligation text cannot forge headings or clo
   assert.ok(section.indexOf("## Final Recommendation") > section.indexOf(`${delimiter}text\n`), "hostile heading only appears inside the fence");
   assert.equal(section.trimEnd().endsWith(delimiter), true, "fence closes on its own line after the rows");
 
-  // Renderer (b): the enforcement markdown section.
+  // Renderer (b): the enforcement markdown section (coverage disclosure —
+  // the rows are unresolved, so nothing is forced).
   const artifact = base();
   const enforced = applyReviewObligationEnforcement(artifact, obligations);
-  assert.equal(enforced.applied, true);
+  assert.equal(enforced.applied, false);
   const markdown = artifact.review_markdown as string;
   const firstHeading = markdown.indexOf("## Unresolved Required Review Evidence");
   const fenceStart = markdown.indexOf(`${delimiter}text\n`);
@@ -268,7 +285,7 @@ test("adversarial boundary: hostile obligation text cannot forge headings or clo
   assert.ok(markdown.includes(`${delimiter}\n\n_required review evidence unresolved: obligation-1`), "closer sits on its own line before the attribution note");
 });
 
-test("enforcement pipeline: unresolved guidance obligations force request_changes inside applyAllEnforcement with the banner", () => {
+test("#1505 enforcement pipeline: unresolved required evidence is coverage (no gate, no banner); unmet evidence forces with the banner", () => {
   const obligations = candidateRowsToObligations([{ id: "obligation-1", source: "trusted_base_guidance", text: "Before approval, verify the Kubernetes version against the published Talos support matrix." }], []);
   const inputs: EnforcementInputs = {
     evidenceBlockerEnabled: false,
@@ -281,17 +298,33 @@ test("enforcement pipeline: unresolved guidance obligations force request_change
     verdictPolicy: "strict",
     reviewObligations: obligations,
   };
-  assert.equal(failClosedEnforcementFired(inputs), true);
+  // Unresolved: failClosed stays false so the strict mapping can never
+  // claim a forced verdict, no banner is written, and the verdict the
+  // model produced survives to the publish boundary (which withholds the
+  // approval instead).
+  assert.equal(failClosedEnforcementFired(inputs), false);
   const artifact = base({ verdict: "approve", review_markdown: "Recommendation: Approve\nlooks fine" });
-  assert.equal(applyAllEnforcement(artifact, inputs), 1);
-  assert.equal(artifact.verdict, "request_changes");
-  assert.match(artifact.review_markdown, /## Final Recommendation/);
-  assert.match(artifact.review_markdown, /Required review evidence unresolved: obligation-1/);
+  assert.equal(applyAllEnforcement(artifact, inputs), 0);
+  assert.equal(artifact.verdict, "approve");
+  assert.ok(!(artifact.review_markdown as string).includes("## Final Recommendation"));
   assert.match(artifact.review_markdown, /## Unresolved Required Review Evidence/);
-  assert.equal(artifact.verdict_source, "enforcement");
+  assert.equal(artifact.verdict_source, undefined);
+  // A confirmed negative (unmet) fires the same gate #1381 always used —
+  // with the banner.
+  const unmetRows = foldObligationDispositions(obligations, [{ check: "obligation-1", status: "unmet", rationale: "matrix read; the pinned version is not supported" }]);
+  const unmetInputs: EnforcementInputs = { ...inputs, reviewObligations: unmetRows };
+  assert.equal(failClosedEnforcementFired(unmetInputs), true);
+  const unmetArtifact = base({ verdict: "approve", review_markdown: "Recommendation: Approve\nlooks fine" });
+  assert.equal(applyAllEnforcement(unmetArtifact, unmetInputs), 1);
+  assert.equal(unmetArtifact.verdict, "request_changes");
+  assert.match(unmetArtifact.review_markdown, /## Final Recommendation/);
+  assert.match(unmetArtifact.review_markdown, /Required review evidence unmet: obligation-1/);
+  assert.match(unmetArtifact.review_markdown, /## Unmet Required Review Evidence/);
+  assert.equal(unmetArtifact.verdict_source, "enforcement");
   // #1381 (review): must_check rows fire the same gate — one class of
   // review-owned required evidence, one approval semantics.
-  const mustCheckInputs: EnforcementInputs = { ...inputs, reviewObligations: candidateRowsToObligations([], ["check one"]) };
+  const mustCheckUnmet = foldObligationDispositions(candidateRowsToObligations([], ["check one"]), [{ check: "check one", status: "unmet", rationale: "checked; the traversal is present" }]);
+  const mustCheckInputs: EnforcementInputs = { ...inputs, reviewObligations: mustCheckUnmet };
   assert.equal(failClosedEnforcementFired(mustCheckInputs), true);
   const mustCheckArtifact = base({ verdict: "approve", review_markdown: "Recommendation: Approve\nlooks fine" });
   assert.equal(applyAllEnforcement(mustCheckArtifact, mustCheckInputs), 1);
@@ -322,7 +355,7 @@ test("regression fixture (home-ops#11668 shape): budget-exhausted guidance oblig
   };
   applyAllEnforcement(artifact, inputs);
   const forced = failClosedEnforcementFired(inputs);
-  const outcome = applyStrictVerdictPolicy(artifact, { modelVerdict: "request_changes", forced, unresolvedReviewObligations: unresolvedReviewObligations(obligations) });
+  const outcome = applyStrictVerdictPolicy(artifact, { modelVerdict: "request_changes", forced, unmetReviewObligations: unresolvedReviewObligations(obligations) });
   assert.equal(outcome.verdict, "request_changes");
   assert.equal(outcome.reviewResult, "issues");
   assert.match(artifact.review_markdown, /required review evidence unresolved: obligation-2/);
@@ -351,7 +384,7 @@ test("positive path: a discharged obligation lets the strict mapping approve ver
   };
   assert.equal(failClosedEnforcementFired(inputs), false);
   assert.equal(applyAllEnforcement(artifact, inputs), 0);
-  const outcome = applyStrictVerdictPolicy(artifact, { modelVerdict: "request_changes", forced: false, unresolvedReviewObligations: [] });
+  const outcome = applyStrictVerdictPolicy(artifact, { modelVerdict: "request_changes", forced: false, unmetReviewObligations: [] });
   assert.equal(outcome.verdict, "approve");
 });
 
@@ -372,28 +405,33 @@ test("#977 non-regression: external verification asks stay non-blocking when no 
     reviewObligations: null,
   };
   assert.equal(applyAllEnforcement(artifact, inputs), 0);
-  const outcome = applyStrictVerdictPolicy(artifact, { modelVerdict: "request_changes", forced: false, unresolvedReviewObligations: [] });
+  const outcome = applyStrictVerdictPolicy(artifact, { modelVerdict: "request_changes", forced: false, unmetReviewObligations: [] });
   assert.equal(outcome.verdict, "approve");
-  assert.equal(relaxVerificationOnlyVerdict(artifact, { forced: false, unresolvedReviewObligations: [] }), false);
+  assert.equal(relaxVerificationOnlyVerdict(artifact, { forced: false, unmetReviewObligations: [] }), false);
 });
 
-test("strict mapping preserves verification-only behavior absent obligations and blocks unresolved ones", () => {
+test("#1505 strict mapping: absent obligations approve verification-only findings; unmet rows hold the model's request_changes; unresolved rows never manufacture a block", () => {
   const findings = [{ severity: "major", category: "verification", file: null, line: null, message: "confirm external" }];
   const regression = base({ verdict: "request_changes", findings });
   applyStrictVerdictPolicy(regression, { modelVerdict: "request_changes", forced: false });
   assert.equal(regression.verdict, "approve");
   const obligation = base({ verdict: "request_changes", findings });
-  applyStrictVerdictPolicy(obligation, { modelVerdict: "request_changes", forced: false, unresolvedReviewObligations: ["obligation-2", "obligation-3"] });
+  applyStrictVerdictPolicy(obligation, { modelVerdict: "request_changes", forced: false, unmetReviewObligations: ["obligation-2", "obligation-3"] });
   assert.equal(obligation.verdict, "request_changes");
   assert.match(obligation.review_markdown, /obligation-2, obligation-3/);
+  // An unresolved row is coverage: the mapping keeps the mapped verdict and
+  // the publish boundary withholds the approval instead.
+  const coverage = base({ verdict: "request_changes", findings });
+  applyStrictVerdictPolicy(coverage, { modelVerdict: "request_changes", forced: false });
+  assert.equal(coverage.verdict, "approve");
   const forced = base({ verdict: "approve" });
-  applyStrictVerdictPolicy(forced, { modelVerdict: "approve", forced: true, unresolvedReviewObligations: ["obligation-1"] });
+  applyStrictVerdictPolicy(forced, { modelVerdict: "approve", forced: true, unmetReviewObligations: ["obligation-1"] });
   assert.equal(forced.verdict, "request_changes");
 });
 
-test("relaxers refuse unresolved review obligations", () => {
+test("#1505: relaxers refuse unmet review obligations; unresolved ones are coverage, never a relaxation block", () => {
   const artifact = base({ verdict: "request_changes", findings: [{ severity: "major", category: "verification", file: null, line: null, message: "confirm" }] });
-  assert.equal(relaxVerificationOnlyVerdict(artifact, { forced: false, unresolvedReviewObligations: ["obligation-1"] }), false);
+  assert.equal(relaxVerificationOnlyVerdict(artifact, { forced: false, unmetReviewObligations: ["obligation-1"] }), false);
 });
 
 test("planning section and reservation expose obligations to the tool driver", () => {
@@ -406,12 +444,18 @@ test("planning section and reservation expose obligations to the tool driver", (
   assert.match(REQUIRED_EVIDENCE_TURN_NOTE, /refused/);
 });
 
-test("the strict mapping alone never approves unresolved obligations, whichever verdict the model recommended", () => {
+test("#1505: the strict mapping forces on UNMET obligations and never manufactures a block for unresolved ones", () => {
   const approve = base({ verdict: "approve" });
-  const outcome = applyStrictVerdictPolicy(approve, { modelVerdict: "approve", forced: false, unresolvedReviewObligations: ["obligation-1"] });
+  const outcome = applyStrictVerdictPolicy(approve, { modelVerdict: "approve", forced: false, unmetReviewObligations: ["obligation-1"] });
   assert.equal(outcome.verdict, "request_changes");
   assert.equal(outcome.source, "enforcement");
   assert.match(approve.review_markdown, /obligation-1/);
+  // Unresolved rows are coverage: the mapping keeps the model's verdict and
+  // the publish boundary withholds the approval instead.
+  const unresolved = base({ verdict: "approve" });
+  const untouched = applyStrictVerdictPolicy(unresolved, { modelVerdict: "approve", forced: false });
+  assert.equal(untouched.verdict, "approve");
+  assert.equal(untouched.source, "model");
 });
 
 // The ACTUAL home-ops#11668 trusted-base shape (#1381 review): the approval
@@ -465,7 +509,12 @@ test("regression fixture (real home-ops#11668 wording): budget-exhausted review 
   assert.deepEqual(parsed.obligations.map((row) => row.source), ["trusted_base_guidance"]);
   // Engine side: the loop exhausted its budget without reading the
   // machineconfigs or the matrix (home-ops run 41192550614), the model
-  // reports the gap but publishes… APPROVE. It must not survive.
+  // reports the gap but publishes… APPROVE. #1505: the availability failure
+  // is a COVERAGE state, not a defect — the gate no longer manufactures a
+  // blocking request, the verdict stays the model's own approve, and the
+  // run publishes PARTIAL with the native approval withheld (a COMMENT —
+  // never APPROVE: the #1381 invariant now carried by the publish
+  // boundary, aligned with #1505's failed-evidence twin).
   const obligations = foldObligationDispositions(candidateRowsToObligations(parsed.obligations, []), null)
     .map((obligation) => ({ ...obligation, cause: "budget-exhausted" as const }));
   const review = base({ verdict: "approve", review_markdown: "Recommendation: Approve\nkubelet bump looks routine" });
@@ -480,11 +529,25 @@ test("regression fixture (real home-ops#11668 wording): budget-exhausted review 
     verdictPolicy: "strict",
     reviewObligations: obligations,
   };
-  applyAllEnforcement(review, inputs);
-  const outcome = applyStrictVerdictPolicy(review, { modelVerdict: "approve", forced: failClosedEnforcementFired(inputs), unresolvedReviewObligations: unresolvedReviewObligations(obligations) });
-  assert.equal(outcome.verdict, "request_changes");
+  assert.equal(applyAllEnforcement(review, inputs), 0);
+  assert.equal(failClosedEnforcementFired(inputs), false);
+  const outcome = applyStrictVerdictPolicy(review, { modelVerdict: "approve", forced: false });
+  assert.equal(outcome.verdict, "approve");
   assert.match(review.review_markdown, /## Unresolved Required Review Evidence/);
   assert.match(review.review_markdown, /obligation-1 \(trusted_base_guidance, unresolved, cause: budget-exhausted\)/);
+  assert.match(review.review_markdown, /no defect is claimed here/);
+  // The marker reads partial — the review never calls itself clean while
+  // required evidence stayed ungathered (#752) — and a partial review is an
+  // abstention: the native event is a COMMENT, never APPROVE.
+  const reviewResult = markerReviewResult({
+    verdictPolicy: "strict",
+    verdict: outcome.verdict,
+    findings: [],
+    requiredChecks: "complete",
+    requiredEvidenceState: "unresolved",
+  });
+  assert.equal(reviewResult, "partial");
+  assert.equal(reviewCoverageIncomplete(reviewResult), true);
 });
 
 test("admission vocabulary targets gatherable rows and never gates generic checklist prose", () => {

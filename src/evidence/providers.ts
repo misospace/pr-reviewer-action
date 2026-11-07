@@ -30,7 +30,15 @@ import { pyStrip } from "../platform/py.js";
  * like v2. Provenance constraint: provider specs come from operator-managed
  * workflow configuration (the `evidence_providers_file` input), never from
  * PR-controlled content — a future caller must not wire PR/issue-derived
- * specs into this executor without adding its own allowlist layer. The
+ * specs into this executor without adding its own allowlist layer. On the
+ * standard Action path that input resolves INSIDE the reviewed-head
+ * checkout, so the file's content is PR-writable there: the orchestration
+ * treats such a source as untrusted for NEGATIVE evidence (a PR must never
+ * mint its own clean-run authority) while ordinary positive evidence keeps
+ * its existing behavior (#1529 review). The
+ * executed child owns a process group, so a provider that outlives its
+ * deadline cannot leave transport children behind — the whole tree is
+ * terminated (the v2 `subprocess.run(timeout=)` path only killed the direct
  * executed child owns a process group, so a provider that outlives its
  * deadline cannot leave transport children behind — the whole tree is
  * terminated (the v2 `subprocess.run(timeout=)` path only killed the direct
@@ -130,6 +138,223 @@ export interface ProviderSpec {
   timeout_sec?: unknown;
   max_output_bytes?: unknown;
   [key: string]: unknown;
+}
+
+// ── #1517: the negative-evidence declaration ─────────────────────────────
+// A provider spec MAY carry a `negative_evidence` object declaring what a
+// CLEAN run of that provider is authoritative negative evidence for. The
+// declaration lives ONLY in the operator-managed providers config (the same
+// trust source as the command itself — see the module docblock: provider
+// specs come from operator-managed workflow configuration, never from
+// PR-controlled content), and nothing a provider PRINTS can create or widen
+// one: external/untrusted status text cannot self-declare negative-evidence
+// authority. Parsing is fail-closed — any shape that is not exactly the
+// declared schema yields null, and a null spec produces no rule.
+
+export type NegativeEvidenceDomain = "formatter" | "lint" | "schema";
+
+export const NEGATIVE_EVIDENCE_DOMAINS: ReadonlySet<string> = new Set(["formatter", "lint", "schema"]);
+
+/**
+ * The finding categories a negative-evidence rule may contradict: the model
+ * category allowlist (src/model/verdict.ts FINDING_CATEGORIES) MINUS
+ * `security` — a clean deterministic tool run is never evidence that
+ * security properties hold, so a security-capable rule is refused at parse
+ * time. `requirements` is not a model category (it is synthesized by the
+ * deterministic enforcement layer, see
+ * src/enforcement/blocker-verification.ts DETERMINISTIC_FINDING_CATEGORIES)
+ * and is refused for the same reason.
+ */
+export const NEGATIVE_EVIDENCE_CATEGORIES: ReadonlySet<string> = new Set([
+  "bug", "performance", "style", "docs", "tests", "question", "other", "verification",
+]);
+
+/** Severity ceilings a rule may declare; `blocker` is deliberately absent —
+ * blocker findings are never contradicted by negative evidence. */
+export const NEGATIVE_EVIDENCE_MAX_SEVERITIES: ReadonlySet<string> = new Set(["major", "minor", "info"]);
+
+/**
+ * #1517 (2026-11-06 corpus-calibration hardening): a tool identity or rule id
+ * must NAME the tool distinctively. A token that appears in ordinary review
+ * prose word-boundedly matches most finding texts and silently voids the
+ * lint/schema identity gate — the calibration measured a generic identity of
+ * "the" satisfying 71/74 real corpus findings. Refuse English function words
+ * and ultra-generic review nouns outright, plus any token shorter than three
+ * characters, at parse time AND when a persisted rule is revalidated.
+ * Fail-closed: a refused declaration is no declaration. An operator whose
+ * tool needs a colliding token declares a distinctive form instead (e.g.
+ * "go vet", not "go").
+ */
+export const MIN_NEGATIVE_EVIDENCE_TOKEN_CHARS = 3;
+
+const NEGATIVE_EVIDENCE_GENERIC_TOKENS: ReadonlySet<string> = new Set([
+  // English function words (articles, conjunctions, prepositions, pronouns,
+  // auxiliaries, common adverbs of degree/time).
+  "a", "an", "the", "and", "or", "but", "nor", "so", "yet", "if", "then", "than", "that", "this",
+  "these", "those", "there", "here", "when", "where", "why", "how", "all", "any", "some", "none",
+  "each", "every", "both", "few", "many", "much", "more", "most", "such", "only", "own", "same",
+  "too", "very", "just", "also", "even", "ever", "never", "not", "no", "yes", "of", "to", "in",
+  "on", "at", "by", "for", "with", "from", "into", "onto", "over", "under", "about", "after",
+  "before", "between", "through", "during", "without", "within", "is", "are", "was", "were",
+  "be", "been", "being", "am", "do", "does", "did", "done", "doing", "has", "have", "had",
+  "having", "will", "would", "shall", "should", "can", "could", "may", "might", "must", "it",
+  "its", "itself", "they", "them", "their", "theirs", "we", "us", "our", "ours", "you", "your",
+  "yours", "he", "she", "him", "his", "her", "hers", "me", "my", "mine", "who", "whom", "whose",
+  "which", "what", "because", "while", "until", "since", "although", "though", "whether",
+  "either", "neither", "always", "often", "again", "almost", "enough", "instead", "rather",
+  "out", "off", "old", "new", "now", "get", "got", "put", "set", "use", "used", "using", "one",
+  "two", "six", "ten", "way", "end", "per", "via", "vs", "versus", "etc",
+  // Ultra-generic code-review nouns — ordinary finding prose contains them.
+  "code", "lint", "linter", "formatter", "style", "check", "checks", "test", "tests", "tool",
+  "tools", "rule", "rules", "file", "files", "line", "lines", "error", "errors", "warning",
+  "warnings", "issue", "issues", "name", "config", "script", "build", "ci", "run", "runs",
+  "step", "steps",
+]);
+
+/** True when the token is too short or too generic to distinctively name a
+ * tool (see the calibration note above). */
+export function isGenericNegativeEvidenceToken(token: string): boolean {
+  const text = token.trim().toLowerCase();
+  return text.length < MIN_NEGATIVE_EVIDENCE_TOKEN_CHARS || NEGATIVE_EVIDENCE_GENERIC_TOKENS.has(text);
+}
+
+export const MAX_NEGATIVE_EVIDENCE_PATHS = 64;
+export const MAX_NEGATIVE_EVIDENCE_PATH_CHARS = 256;
+export const MAX_NEGATIVE_EVIDENCE_RULES = 64;
+
+export interface NegativeEvidenceSpec {
+  domain: NegativeEvidenceDomain;
+  /** Repo-relative POSIX path patterns the clean run covers. A pattern with
+   * no `/`-metacharacter semantics covers the exact path and everything
+   * beneath it; `*`/`**` globs are honored (see
+   * src/enforcement/negative-evidence.ts). */
+  paths: string[];
+  /** Finding categories the rule may contradict (subset of
+   * NEGATIVE_EVIDENCE_CATEGORIES). */
+  categories: string[];
+  /** The most severe finding severity the rule may contradict. Omitted
+   * declarations default to the safe `minor` ceiling: a clean tool run
+   * contradicts a MAJOR model finding only when the operator explicitly
+   * says so (the 2026-11-06 corpus calibration — every adjudicated human
+   * finding was major/blocker, so a default of `major` admitted the whole
+   * corpus to the wrong-demotion surface). */
+  max_severity: "major" | "minor" | "info";
+  /** The tool identity a lint/schema claim must name; null means "the
+   * provider's own id". */
+  identity: string | null;
+  /** Exact rule ids (lint rule family / schema rule) a claim may cite. */
+  rules: string[];
+}
+
+/** A repo-relative POSIX path pattern: no absolute, drive, backslash, NUL,
+ * or traversal segments; bounded count and length. One trailing `/` is the
+ * directory form the matcher treats as the covered subtree. Exported for
+ * the persistence gate, which re-validates every rule path with the same
+ * rule the spec parser enforced at derivation. */
+export function validRulePath(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const path = raw.trim();
+  if (path === "" || path.length > MAX_NEGATIVE_EVIDENCE_PATH_CHARS) return null;
+  if (path.includes("\0") || path.includes("\\") || path.startsWith("/")) return null;
+  // Windows drive-absolute shapes (`C:/src`, `c:/src`, `C:`) are not
+  // repo-relative POSIX paths — refuse the drive-letter-colon prefix
+  // outright (anchored: a colon inside a deeper segment is an ordinary,
+  // if unusual, filename).
+  if (/^[A-Za-z]:/.test(path)) return null;
+  const trimmed = path.endsWith("/") && path.length > 1 ? path.slice(0, -1) : path;
+  if (trimmed === "") return null;
+  for (const segment of trimmed.split("/")) {
+    if (segment === "" || segment === "." || segment === "..") return null;
+  }
+  return path;
+}
+
+function stringListField(value: unknown, allowed: ReadonlySet<string> | null, max: number, maxChars: number): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") return null;
+    const text = item.trim();
+    if (text === "" || text.length > maxChars) return null;
+    if (allowed !== null && !allowed.has(text)) return null;
+    if (seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+    if (out.length > max) return null;
+  }
+  return out;
+}
+
+/**
+ * Parse the `negative_evidence` key of a provider spec. Returns null when
+ * the key is absent or anything about the value is not exactly the declared
+ * schema — fail-closed: an unparsable declaration is no declaration, and the
+ * provider keeps its plain advisory-finding behavior. An omitted
+ * `max_severity` defaults to the safe `minor` ceiling (NOT `major`), and
+ * generic identity/rule-id tokens (see
+ * `isGenericNegativeEvidenceToken`) are refused outright.
+ */
+export function parseNegativeEvidenceSpec(raw: unknown): NegativeEvidenceSpec | null {
+  if (raw === null || raw === undefined) return null;
+  if (!isPyDict(raw)) return null;
+
+  const domainValue = dictGet(raw, "domain");
+  if (typeof domainValue !== "string" || !NEGATIVE_EVIDENCE_DOMAINS.has(domainValue)) return null;
+
+  const paths = stringListField(dictGet(raw, "paths"), null, MAX_NEGATIVE_EVIDENCE_PATHS, MAX_NEGATIVE_EVIDENCE_PATH_CHARS);
+  if (paths === null || paths.length === 0) return null;
+  const validPaths: string[] = [];
+  for (const path of paths) {
+    const valid = validRulePath(path);
+    if (valid === null) return null;
+    validPaths.push(valid);
+  }
+
+  const categories = stringListField(dictGet(raw, "categories"), NEGATIVE_EVIDENCE_CATEGORIES, NEGATIVE_EVIDENCE_CATEGORIES.size, 32);
+  if (categories === null || categories.length === 0) return null;
+  // #1529 review (structural formatter boundary): a formatter-clean run is
+  // authoritative negative evidence for STYLE-class claims only. A semantic
+  // bug is category `bug`, never `style`, so a formatter declaration that
+  // claims any other category is refused outright — the structural
+  // boundary that keeps formatter cues from ever reaching semantic
+  // findings, independent of the message's wording.
+  if (domainValue === "formatter" && categories.some((category) => category !== "style")) return null;
+
+  let maxSeverity: NegativeEvidenceSpec["max_severity"] = "minor";
+  const rawMaxSeverity = dictGet(raw, "max_severity");
+  if (rawMaxSeverity !== undefined && rawMaxSeverity !== null) {
+    if (typeof rawMaxSeverity !== "string" || !NEGATIVE_EVIDENCE_MAX_SEVERITIES.has(rawMaxSeverity)) return null;
+    maxSeverity = rawMaxSeverity as NegativeEvidenceSpec["max_severity"];
+  }
+
+  let identity: string | null = null;
+  const rawIdentity = dictGet(raw, "identity");
+  if (rawIdentity !== undefined && rawIdentity !== null) {
+    if (typeof rawIdentity !== "string") return null;
+    const identityText = rawIdentity.trim();
+    if (identityText === "" || identityText.length > 128) return null;
+    if (isGenericNegativeEvidenceToken(identityText)) return null;
+    identity = identityText;
+  }
+
+  const rawRules = dictGet(raw, "rules");
+  const ruleIds = rawRules === undefined || rawRules === null
+    ? []
+    : stringListField(rawRules, null, MAX_NEGATIVE_EVIDENCE_RULES, 128);
+  if (ruleIds === null) return null;
+  // A rule id carries the same distinctiveness duty as the identity: a
+  // generic token substring-matches ordinary prose and voids the gate.
+  for (const ruleId of ruleIds) {
+    if (isGenericNegativeEvidenceToken(ruleId)) return null;
+  }
+
+  const allowed = new Set(["domain", "paths", "categories", "max_severity", "identity", "rules"]);
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) return null;
+  }
+
+  return { domain: domainValue as NegativeEvidenceDomain, paths: validPaths, categories, max_severity: maxSeverity, identity, rules: ruleIds };
 }
 
 export interface RunEvidenceProviderOptions {

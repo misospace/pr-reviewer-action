@@ -64,6 +64,21 @@ export interface ArtifactFinding {
    * minor with it; minor/info findings carry it without a severity change.
    * Never set on a grounded finding. */
   grounding_status?: "refuted" | "unverified" | "unsupported";
+  /** #1517: set by the deterministic negative-evidence pass when a trusted,
+   * configured evidence provider ran CLEAN at the exact reviewed head and
+   * its operator-declared rule positively contradicts this finding's claim
+   * class (domain + covered path + declared category/severity ceiling all
+   * matched). `decision` is "demoted" (severity dropped one level, original
+   * in `capped_from`) or "unchanged" (already non-blocking); `reason`
+   * records the deciding provider/domain/pattern for eval calibration.
+   * Never set on security or blocker findings, on deterministic
+   * (requirements) findings, or from stale/partial/missing runs. */
+  negative_evidence?: {
+    provider: string;
+    domain: string;
+    decision: "demoted" | "unchanged";
+    reason: string;
+  };
 }
 
 export interface ArtifactThreadDisposition {

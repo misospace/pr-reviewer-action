@@ -237,12 +237,19 @@ export function failClosedEnforcementFired(inputs: Pick<
       return true;
     }
   }
-  // #1381: an unresolved review-owned obligation — from EITHER forcing source
-  // (`must_check`, `trusted_base_guidance`) — is a required check the reviewer
-  // was expected and equipped to perform but did not complete, a fail-closed
-  // forcing condition like the layers above. No per-source exemption between
-  // those two: an unresolved review-owned row must never be able to certify a
-  // native APPROVE through a weaker second class.
+  // #1381/#1505: an `unmet` (confirmed-negative) review-owned obligation —
+  // from EITHER forcing source (`must_check`, `trusted_base_guidance`) — is
+  // a required check the reviewer performed and confirmed NOT satisfied,
+  // a real blocking result like a blocker/major finding: a fail-closed
+  // forcing condition like the layers above. No per-source exemption
+  // between those two: an unmet review-owned row must never be able to
+  // certify a native APPROVE through a weaker second class.
+  //
+  // An `unresolved` review-owned row is NOT forcing: the evidence was never
+  // gathered, so it is incomplete coverage, never a defect claim (#1447).
+  // It withholds the trusted approve at the publish boundary and marks the
+  // review partial (a publish COMMENT), and must not manufacture a
+  // blocking request out of an incomplete review.
   //
   // #1449: the `derived` source is NOT a forcing row. An undischarged
   // derived obligation is missing COVERAGE (the review never established a

@@ -195,10 +195,12 @@ test("#1380: dependency-update classification drives the claim pass dependency m
     const req = request(server.url, f.runDir);
     req.inputs = { ...req.inputs, "claim-falsification": "true" };
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
-    // #1381: the dependency classification's must_check obligation rows are
-    // undisposed by the scripted verdict, so the obligation gate forces
-    // request_changes. This test pins claim-pass dependency mode, not the verdict.
-    assert.equal(result.outputs.verdict, "request_changes");
+    // #1381's must_check obligation rows are undisposed by the scripted
+    // verdict; #1505: an undisposed row is COVERAGE, not a defect — the
+    // verdict stays the model's own and the publish boundary withholds the
+    // approval instead. This test pins claim-pass dependency mode, not the
+    // verdict.
+    assert.equal(result.outputs.verdict, "approve");
     const classification = JSON.parse(readFileSync(join(f.runDir, "classification.json"), "utf8")) as { pr_kind?: string };
     assert.equal(classification.pr_kind, "dependency_upgrade");
     const claimRequests = server.requests.filter((r) => r.body.includes("You extract the claims a pull request makes"));
@@ -497,7 +499,9 @@ test("#1388: resolveReviewObligations stamps a cause on unresolved rows only —
     };
     const logLines: string[] = [];
     const result = await runReviewEngine(request(server.url, f.runDir), { ...engineDeps(f.root, f.runDir, { adapter }), quiet: false, log: (line) => logLines.push(line) });
-    // Both the unmet row and the undisposed row are forcing: no model approve.
+    // The unmet row forces request_changes (a confirmed negative); the
+    // undisposed rows are unresolved COVERAGE (#1505) — they withhold the
+    // trusted approve but do not force the block themselves.
     assert.equal(result.outputs.verdict, "request_changes");
     const persisted = JSON.parse(readFileSync(join(f.runDir, "review-obligations.json"), "utf8")) as {
       obligations: Array<{ id: string; source: string; text: string; status: string; cause: string | null }>;

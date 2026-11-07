@@ -2355,20 +2355,22 @@ test("#873: required-check coverage incomplete + a model approve never publishes
   const result = await runWithVerdictOn(platform, { verdict: "approve", findings: [] });
 
   // PR #854's shape — model approve, no required_check_dispositions at all
-  // (conservatively unresolved, #750 key-absence semantics). #1381 reconciles
-  // the contract: the checklist items ARE review-owned obligation rows, and
-  // an unresolved review-owned row never certifies a native APPROVE — the
-  // obligation gate forces request_changes while warn-mode completeness keeps
-  // recording the incomplete coverage.
-  assert.equal(result.outputs.verdict, "request_changes");
+  // (conservatively unresolved, #750 key-absence semantics). #1381's
+  // invariant survives #1505's status-based semantics: the unresolved
+  // review-owned rows never certify a native APPROVE — but they are a
+  // coverage state, not a defect, so the verdict stays the model's own
+  // approve while warn-mode completeness keeps recording the incomplete
+  // coverage and the run's required-evidence state reads unresolved.
+  assert.equal(result.outputs.verdict, "approve");
   assert.equal(result.outputs.requiredChecks, "incomplete");
-  assert.match(result.marker, /"review_result":"issues"/);
+  assert.match(result.marker, /"review_result":"partial"/);
   assert.match(result.marker, /"required_checks":"incomplete"/);
 
-  // The invariant (#1145 strengthened by #1381): piping that exact shape
-  // through publish (review_verdict mode, allow_approve on) publishes a
-  // changes-requested event naming the unresolved obligation rows; the run
-  // never reads as clean.
+  // The invariant (#1145 strengthened by #1381, withheld by #1505's
+  // status-based contract): piping that exact shape through publish
+  // (review_verdict mode, allow_approve on) withholds the native approval —
+  // the event is a COMMENT naming the required-evidence state, the run
+  // never reads as clean, and no blocking request is manufactured.
   const api = new MinimalPublishApi("a".repeat(40));
   const publishResult = await publishReview({
     mode: "review_verdict",
@@ -2381,6 +2383,9 @@ test("#873: required-check coverage incomplete + a model approve never publishes
     prNumber: "7",
     commentMarker: "<!-- ai-pr-review -->",
     requiredChecks: result.outputs.requiredChecks,
+    // #1505: the composite wiring passes the run's own required-evidence
+    // state (entrypoints reads it from the run dir the same way).
+    ...(result.requiredEvidenceState !== undefined ? { requiredEvidenceState: result.requiredEvidenceState } : {}),
     reviewRoute: result.outputs.reviewRoute,
     escalationReason: result.outputs.escalationReason,
     cacheHitRatio: result.outputs.cacheHitRatio,
@@ -2401,11 +2406,18 @@ test("#873: required-check coverage incomplete + a model approve never publishes
 
   assert.equal(publishResult.status, "published");
   assert.equal(api.submitted.length, 1);
-  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+  // #1505: unresolved required evidence is a coverage state, not a defect —
+  // the verdict stays the model's own approve, the review reads partial,
+  // and the native event is a COMMENT (never APPROVE — the #1381 invariant
+  // at the publish boundary; never a manufactured REQUEST_CHANGES either).
+  assert.equal(result.outputs.verdict, "approve");
+  assert.equal(api.submitted[0]!.event, "COMMENT");
   assert.match(api.submitted[0]!.body, /Unresolved Required Review Evidence/);
   assert.match(api.submitted[0]!.body, /Unaddressed required checks/);
-  assert.match(api.submitted[0]!.body, /"review_result":"issues"/);
+  assert.match(api.submitted[0]!.body, /Approval withheld by required-evidence state/);
+  assert.match(api.submitted[0]!.body, /"review_result":"partial"/);
   assert.match(api.submitted[0]!.body, /"required_checks":"incomplete"/);
+  assert.ok(!api.submitted.some((review) => review.event === "REQUEST_CHANGES"));
 });
 
 /** The native loop only reads tracked files: make the run dir a checkout. */
@@ -2556,10 +2568,11 @@ test("#930: primary review grants corpus-diff credit through the primary artifac
     assert.equal(harness.stop_reason, "tool-call-budget-exhausted");
     assert.equal(harness.partial_coverage, undefined, "complete coverage: the corpus credit resolves the only changed file");
 assert.deepEqual(harness.corpus_diff_covered_files, ["src/auth.ts"]);
-// #1381: the auth classification's must_check obligation rows are undisposed
-// by the scripted verdict, so the obligation gate forces request_changes.
-// This test pins coverage credit, which stays gap-free either way.
-assert.equal(result.outputs.verdict, "request_changes");
+// #1381's must_check obligation rows are undisposed by the scripted verdict;
+// #1505: an undisposed row is COVERAGE, not a defect — the verdict stays the
+// model's own and the publish boundary withholds the approval instead. This
+// test pins coverage credit, which stays gap-free either way.
+assert.equal(result.outputs.verdict, "approve");
     // #847: a budget stop with no unread files stays out of `coverage` (no
     // gap) but is now visible in the marker through `tool_stop_reason` — the
     // case that made budget-exhaustion rates unmeasurable from telemetry.
@@ -3248,9 +3261,10 @@ test("a PR whose body keyword-links a fetched issue classifies without crashing"
       quiet: true,
     });
     // #1381: this test pins linked-issue collection/classification, not the
-    // verdict — the scripted verdict dispositions nothing, so the obligation
-    // gate forces request_changes over the mandated must_check rows.
-    assert.equal(result.outputs.verdict, "request_changes");
+    // verdict — the scripted verdict dispositions nothing, so the mandated
+    // must_check rows stay unresolved; #1505: that is COVERAGE, not a
+    // defect, and the verdict stays the model's own.
+    assert.equal(result.outputs.verdict, "approve");
     const classification = JSON.parse(readFileSync(join(runDir, "classification.json"), "utf8")) as { risk_flags: string[]; linked_issue_labels: string[] };
     assert.deepEqual(classification.linked_issue_labels, ["enhancement", "priority/p1"]);
     assert.deepEqual(classification.risk_flags, ["linked_priority_p1"]);

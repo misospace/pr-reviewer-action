@@ -404,6 +404,80 @@ test("#1449: the approval guardrails withhold an approval for an unresolved deri
   });
 });
 
+test("#1505: a native approval cannot bypass the required-evidence state", async () => {
+  // The publish boundary: an `unresolved` or `unavailable` required-evidence
+  // state withholds the native APPROVE. The run stays ADVISORY — the native
+  // event is a COMMENT, never a blocking REQUEST_CHANGES, because an
+  // incomplete review must not invent an issue (failed evidence gathering
+  // is availability, not a defect).
+  for (const state of ["unresolved", "unavailable"]) {
+    const api = new MockPublishApi();
+    const result = await publishReview(
+      input({ mode: "review_verdict", verdict: "approve", requiredEvidenceState: state }),
+      api,
+      { diffText: "" },
+    );
+    assert.equal(result.status, "published", state);
+    assert.equal(api.submitted.length, 1, state);
+    assert.equal(api.submitted[0]!.event, "COMMENT", state);
+    assert.ok(
+      result.messages.some((message) => message.includes("Withholding native approval") && message.includes(state)),
+      result.messages.join("; "),
+    );
+    // The published body names the reason.
+    assert.match(api.submitted[0]!.body, /Approval withheld by required-evidence state/);
+    // Never a blocking request.
+    assert.ok(!api.submitted.some((review) => review.event === "REQUEST_CHANGES"), state);
+  }
+  // A complete required-evidence state approves exactly like a run without
+  // the contract.
+  const complete = new MockPublishApi();
+  await publishReview(
+    input({ mode: "review_verdict", verdict: "approve", requiredEvidenceState: "complete" }),
+    complete,
+    { diffText: "" },
+  );
+  assert.equal(complete.submitted[0]!.event, "APPROVE");
+});
+
+test("#1505: the approval guardrails withhold an approval for an unresolved required-evidence state", () => {
+  const check = (overrides: Partial<Parameters<typeof evaluateApprovalGuardrails>[0]>) => evaluateApprovalGuardrails({
+    verdict: "approve", approveForks: false, isForkPr: false, ...overrides,
+  });
+  assert.equal(check({ requiredEvidenceState: "unresolved" }).canApprove, false);
+  assert.equal(check({ requiredEvidenceState: "unavailable" }).canApprove, false);
+  assert.equal(check({ requiredEvidenceState: "complete" }).canApprove, true);
+  // A verdict that is not an approve never allows an approval.
+  assert.equal(check({ verdict: "request_changes", requiredEvidenceState: "unresolved" }).canApprove, false);
+  // The state absent: the result is byte-identical to the pre-#1505 shape.
+  const absent = check({});
+  assert.equal(absent.canApprove, true);
+  assert.equal("requiredEvidenceBlocked" in absent, false);
+});
+
+test("#1505: a real blocking finding still publishes REQUEST_CHANGES with unresolved required evidence", async () => {
+  // The COMMENT withholding applies to an APPROVE verdict only: concrete
+  // blocker/major findings own REQUEST_CHANGES regardless of the
+  // required-evidence state.
+  const api = new MockPublishApi();
+  const result = await publishReview(
+    input({ mode: "review_verdict", verdict: "request_changes", requiredEvidenceState: "unresolved", findings: FINDINGS }),
+    api,
+    { diffText: "" },
+  );
+  assert.equal(result.status, "published");
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+  assert.ok(!api.submitted.some((review) => review.event === "COMMENT"));
+});
+
+test("#1505: the marker reads partial while required evidence stays unresolved", () => {
+  const strictApprove = { verdictPolicy: "strict", verdict: "approve", findings: [], requiredChecks: "complete" } as const;
+  assert.equal(markerReviewResult({ ...strictApprove, requiredEvidenceState: "unresolved" }), "partial");
+  assert.equal(markerReviewResult({ ...strictApprove, requiredEvidenceState: "unavailable" }), "partial");
+  assert.equal(markerReviewResult({ ...strictApprove, requiredEvidenceState: "complete" }), "clean");
+  assert.equal(markerReviewResult({ ...strictApprove }), "clean", "contract inactive: bytes unchanged");
+});
+
 test("#1161: a fork PR without approve-forks never approves and states the scope policy", async () => {
   const api = new MockPublishApi();
   const result = await publishReview(input({ mode: "review_verdict", isForkPr: true, approveForks: false }), api, { diffText: "" });
