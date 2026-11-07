@@ -406,9 +406,11 @@ function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undef
  *   `reviewObligationsFromArtifact`; a structurally unrecognizable artifact
  *   publishes nothing. `blockingReviewObligations` keeps only the forcing rows,
  *   non-satisfied rows — exactly what the engine's #1521 in-memory pass names.
- * - `requirement-trace.json` — the trace artifact, written ONLY when the
- *   trace applied; its absence is the review path's own empty list (an
- *   unapplied trace has no rows). Rows are shape-checked here rather than
+ * - `requirement-trace.json` — the trace artifact, always created at the
+ *   review tail and left zero-byte when the trace did not apply
+ *   (`src/engine/review.ts`); the strict object reader refuses a file it
+ *   cannot parse, so an unapplied trace stays absent — the review path's
+ *   own empty list. Rows are shape-checked here rather than
  *   trusted: `unresolvedTraceRequirementIds` reads a property of every row
  *   directly, and a run-dir artifact is a file any earlier tool could have
  *   written — a non-object row must yield no ids, never an exception.
