@@ -238,8 +238,7 @@ A consumer MUST:
   below the listed length, a count that disagrees with the list while the
   document claims no truncation, and a truncation claim whose count matches
   the list exactly are all contradictions, and a contradictory document is
-  refused. One rule checks all three lists (#1547) — the same rule
-  `review-bundle/v1` applies to its findings counters (#1542).
+  refused. All three lists are checked by the one rule (#1547).
 - Treat an unknown id-list disclosure as an incomplete list. A `null`
   `*_truncated` flag means that the document discloses no truncation, so the
   list may be short. A count larger than the listed length means the list is
