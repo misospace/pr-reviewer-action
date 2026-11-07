@@ -3268,6 +3268,14 @@ test("a PR whose body keyword-links a fetched issue classifies without crashing"
     const classification = JSON.parse(readFileSync(join(runDir, "classification.json"), "utf8")) as { risk_flags: string[]; linked_issue_labels: string[] };
     assert.deepEqual(classification.linked_issue_labels, ["enhancement", "priority/p1"]);
     assert.deepEqual(classification.risk_flags, ["linked_priority_p1"]);
+    // #1543 writer side: this run mandates must_check items and the scripted
+    // verdict emits no `required_check_dispositions`, so the #750 fold itself
+    // ends `incomplete` (conservative key absence) — and its OWN status is
+    // recorded in the coverage artifact, which is what the standalone
+    // publish read-back (#1537) gates its required-check id recomputation on.
+    assert.equal(result.outputs.requiredChecks, "incomplete");
+    const foldCoverage = JSON.parse(readFileSync(join(runDir, "review-coverage.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(foldCoverage.required_check_fold_status, "incomplete");
   } finally {
     await server.close();
     cleanup();
@@ -4148,6 +4156,11 @@ test("#954: completed investigation with an unverifiable requirement exposes tra
     assert.equal(result.outputs.reviewResult, "partial");
     assert.match(result.marker, /"incomplete_reason":"requirement_trace"/);
     assert.equal(coverage.incomplete_reason, "requirement_trace");
+    // #1543: the published dimension reads `incomplete` from the trace flip
+    // alone — the #750 fold itself never validated (README-only diff, empty
+    // must_check list), and the record says so, so the standalone publish
+    // read-back can never name `must_check` items this fold never gated.
+    assert.equal(coverage.required_check_fold_status, "none");
   } finally {
     await server.close();
     cleanup();
