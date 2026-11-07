@@ -4,6 +4,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { runNativeLoop, runToolHarness, type HarnessDeps, type HarnessResult, type RunNativeLoopInput, type TraceGapLoopState } from "../src/tools/harness.js";
+import { createTraceGapProbe } from "../src/requirements/trace-gap-probe.js";
+import {
+  applyRequirementTraceEnforcement,
+  validateRequirementTrace,
+} from "../src/enforcement/requirement-trace.js";
+import {
+  markerReviewResult,
+  resolveIncompleteReason,
+  reviewCoverageIncomplete,
+} from "../src/publish/publish.js";
+import { parseVerdictResponse } from "../src/model/verdict.js";
+import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "harness-trace-"));
@@ -741,46 +753,147 @@ test("#1447: trace repair gets one bounded round even after exploration hits max
   assert.deepEqual(coverage.unread_files, ["other.ts"]);
 });
 
-test("#1552: a repair round that issues no tool call still earns the trace-only turn (#1539 shape)", async () => {
+// ── #1552 acceptance fixtures: the same ledger/workspace/claim shapes the
+// #1503 acceptance revalidation uses (tools-harness-trace-only-repair.test.ts)
+// — real predicate lines the deterministic validator accepts, so "trusted
+// APPROVE eligible" is proven against the publication validator itself.
+
+const SOURCE_SHA_REQUIREMENT = "Context resolution MUST compare the source SHA against the resolved pull.";
+const ID_REFUSAL_REQUIREMENT = "The repair parser MUST reject requirement ids outside the probe set.";
+const ACCEPTANCE_LEDGER = {
+  requirements: [
+    { id: "req-source-sha", text: SOURCE_SHA_REQUIREMENT, kind: "acceptance" },
+    { id: "req-id-refusal", text: ID_REFUSAL_REQUIREMENT, kind: "acceptance" },
+  ],
+};
+const ACCEPTANCE_IDS = ["req-source-sha", "req-id-refusal"];
+
+function seedAcceptanceWorkspace(root: string) {
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.mkdirSync(path.join(root, "tests"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src", "context-resolution-checked.ts"), [
+    "export function resolveContext(ctx, record) {",
+    "  if (record.head !== ctx.sourceSha) {",
+    "    throw new Error('source sha mismatch');",
+    "  }",
+    "  return { ok: true };",
+    "}",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(root, "src", "trace-id-refusal.ts"), [
+    "export function refuseUnknownRequirementIds(ids, probeSet) {",
+    "  for (const id of ids) {",
+    "    if (!probeSet.has(id)) throw new Error('requirement id outside the probe set');",
+    "  }",
+    "}",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(root, "tests", "real.test.ts"), "test1\ntest2\ntest3\n");
+  fs.writeFileSync(
+    path.join(root, "tests", "trace-id-refusal.test.ts"),
+    "assert.throws(() => refuseUnknownRequirementIds(['req-outside'], probeSet));\n",
+  );
+}
+
+const ACCEPTANCE_CLAIMS = [
+  {
+    requirement_id: "req-source-sha",
+    disposition: "met",
+    enforcement: [{ file: "src/context-resolution-checked.ts", line: 2 }],
+    test: [{ file: "tests/real.test.ts", line: 1 }],
+    reason: "compares record.head to ctx.sourceSha and throws on mismatch",
+  },
+  {
+    requirement_id: "req-id-refusal",
+    disposition: "met",
+    enforcement: [{ file: "src/trace-id-refusal.ts", line: 3 }],
+    test: [{ file: "tests/trace-id-refusal.test.ts", line: 1 }],
+    reason: "refuses requirement ids outside the probe set",
+  },
+];
+
+test("#1552: the exact #1539 shape — exhausted 40-call investigation, zero-tool repair round, two unverifiable claims closed, trusted APPROVE eligible", async () => {
   const { root, deps } = workspace();
   seedWorkspace(root);
-  // Default budgets: the loop stops early (model-stopped, one round of its
-  // round budget spent), so the repair round starts — but the model answers
-  // the repair instruction with plain text and NO tool call. The round
-  // inspected no NEW evidence, yet the evidence the EARLIER loop rounds
-  // gathered is already in the conversation: the trace-only turn is still
-  // justified (#1539), so the gap is filled instead of stranded.
-  const scripted = baseScripted([
-    openAiText("I cannot verify requirement R1 from memory alone."),
-    tracePayload(["R1"]),
-  ]);
+  seedAcceptanceWorkspace(root);
+  // The #1539 production shape, end to end: ordinary investigation exhausts
+  // its 40-call exploration ceiling (the 41st request is refused), the
+  // accepted verdict carries TWO present-but-`unverifiable` requirement rows,
+  // the dedicated 4-call repair reserve remains untouched, the repair round
+  // answers with ZERO tool calls — and the evidence the earlier rounds
+  // already gathered still justifies the trace-only turn, which closes both
+  // rows with validator-accepted enforcement+test locations.
+  for (let i = 0; i < 40; i++) {
+    fs.writeFileSync(path.join(root, `evidence-${String(i).padStart(2, "0")}.md`), "evidence\n");
+  }
+  const paths = Array.from({ length: 40 }, (_, i) => `evidence-${String(i).padStart(2, "0")}.md`);
+  const scripted: unknown[] = [];
+  for (let round = 0; round < 4; round++) {
+    scripted.push({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: paths.slice(round * 10, round * 10 + 10).map((p, j) => ({
+            id: `c${round * 10 + j}`,
+            type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ path: p }) },
+          })),
+        },
+      }],
+    });
+  }
+  // The accepted verdict's own output starts with the two unverifiable rows.
+  scripted.push(openAiText(JSON.stringify({
+    verdict: "approve",
+    review_markdown: "## Review\noriginal",
+    findings: [],
+    requirement_coverage: ACCEPTANCE_IDS.map((id) => ({
+      requirement_id: id,
+      disposition: "unverifiable",
+      enforcement: [],
+      test: [],
+      reason: "not re-validated before the exploration ceiling exhausted",
+    })),
+  })));
+  // Repair round: the model answers the repair instruction with plain text
+  // and NO tool call (the #1539 `no-tool-calls` shape).
+  scripted.push(openAiText("I cannot verify the remaining requirements from memory alone."));
+  // Trace-only turn: closes BOTH rows with real predicate citations.
+  scripted.push(openAiText(
+    "```json\n" + JSON.stringify({ requirement_coverage: ACCEPTANCE_CLAIMS }) + "\n```",
+  ));
   let calls = 0;
   const result = freshResult();
   const handled = await runNativeLoop(
     loopInput(deps({ transport: async () => scripted[calls++] }), {
       result,
-      traceGapProbe: async () => ({
-        instruction: "Verify requirement R1 now.",
-        unresolvedIds: ["R1"],
-      }),
+      maxRequests: 40,
+      // The REAL probe: the continuation is computed by the same deterministic
+      // validator the production run wires in — the two unverifiable rows are
+      // its verdict, not a stubbed fixture.
+      traceGapProbe: createTraceGapProbe({ ledger: ACCEPTANCE_LEDGER, traceScopeIds: ACCEPTANCE_IDS, workspace: root }),
     }),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 5); // loop(2) + verdict(1) + repair(1 text-only) + trace-only(1)
+  assert.equal(calls, 7); // 4 exploration rounds(40 calls) + verdict(1) + repair(1 text-only) + trace-only(1)
+  assert.equal(result.stop_reason, "tool-call-budget-exhausted");
+  assert.equal(result.budget_exhausted, true);
+  assert.equal((result.tool_calls as unknown[]).length, 40);
   assert.deepEqual(result.trace_repair_continuation, {
     attempted: true,
     outcome: "continued_trace_only",
-    unresolved_ids: ["R1"],
+    unresolved_ids: ACCEPTANCE_IDS,
     stop_reason: "no-tool-calls",
     rounds: 1,
     tool_calls: 0,
-    claims_merged: 1,
+    claims_merged: 2,
     trace_claims_merged: true,
-    // #1552: the round issued nothing, so the full allowance (base remainder
-    // 23 + the 4-call trace-closure extra) remains.
-    repair_requests_remaining: 27,
+    // #1552: the exploration ceiling left 0 base requests + the 4-call
+    // trace-closure extra, and the round issued nothing — the full
+    // dedicated reserve remains.
+    repair_requests_remaining: 4,
   });
-  // The standing verdict keeps its original body; the trace claim merged in.
+  // The standing verdict keeps its original body; both trace claims merged in.
   assert.equal(result.native_loop_verdict_produced, true);
   assert.equal(result.native_loop_verdict_status, "accepted");
   const persisted = JSON.parse(
@@ -790,9 +903,31 @@ test("#1552: a repair round that issues no tool call still earns the trace-only 
   const body = JSON.parse(String((choice.message as Record<string, unknown>).content));
   assert.equal(body.review_markdown, "## Review\noriginal");
   const coverage = body.requirement_coverage as Array<Record<string, unknown>>;
-  assert.equal(coverage.length, 1);
-  assert.equal(coverage[0]!.requirement_id, "R1");
-  assert.equal(coverage[0]!.disposition, "met");
+  assert.equal(coverage.length, 2);
+  for (const row of coverage) {
+    assert.equal(row.disposition, "met");
+  }
+  // Trusted APPROVE eligibility, proven against the SAME deterministic
+  // validator the publication boundary runs: the merged artifact revalidates
+  // complete, the enforcement pass leaves no trace-incomplete escalation, and
+  // the #1492 inputs certify a native APPROVE.
+  const parsed = parseVerdictResponse(persisted);
+  const trace = validateRequirementTrace(parsed.requirementCoverage, ACCEPTANCE_LEDGER, root);
+  assert.equal(trace.incomplete, false);
+  for (const id of ACCEPTANCE_IDS) {
+    const row = trace.rows.find((candidate) => candidate.requirement_id === id);
+    assert.equal(row?.disposition, "met");
+    assert.deepEqual(row?.notes, []);
+  }
+  const artifact = { verdict: "approve", review_markdown: "## Review\noriginal", findings: [], requirement_coverage: parsed.requirementCoverage } as ReviewArtifact;
+  const enforcement = applyRequirementTraceEnforcement(artifact, { enabled: true, ledger: ACCEPTANCE_LEDGER, workspace: root });
+  assert.equal(enforcement.applied, true);
+  assert.equal(artifact.requirement_trace_incomplete, undefined);
+  const requiredChecks = String(artifact.required_checks ?? "none");
+  assert.equal(requiredChecks, "none");
+  const reviewResult = markerReviewResult({ verdictPolicy: "strict", verdict: "approve", findings: [], requiredChecks });
+  assert.equal(reviewCoverageIncomplete(reviewResult), false);
+  assert.equal(resolveIncompleteReason({ requiredChecks }), "none");
 });
 
 test("#1145 wiring: runToolHarness forwards deps.traceGapProbe to the native loop", async () => {
