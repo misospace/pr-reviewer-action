@@ -544,6 +544,31 @@ export function isForcingObligation(obligation: ReviewObligation): boolean {
  * boundary (COMMENT, never a manufactured blocking request). There is
  * deliberately no per-source exemption between those two sources: the same
  * status has the same approval semantics for either source. #750's
+ *
+ * #1521: the obligation rows that BLOCKED this review — the rows a
+ * controller must be able to name, not only count.
+ *
+ * #1505: a row blocks iff it is FORCING (see `isForcingObligation`): a
+ * review-owned (`must_check`, `trusted_base_guidance`) row whose check was
+ * performed and did NOT hold (`unmet`). An `unresolved` row is an availability
+ * failure (coverage, never a defect): it withholds the trusted approval and
+ * marks the review partial, but it never manufactures a blocking request, so
+ * it never rides as a blocking obligation. A `derived` row is likewise
+ * coverage (#1447/#1449), never a block. The deterministic layer owns this
+ * decision: the rows are the enforcement pass's own output, and no model may
+ * add, drop or re-label one.
+ */
+export function blockingReviewObligations(obligations: readonly ReviewObligation[]): ReviewObligation[] {
+  return obligations.filter((obligation) => isForcingObligation(obligation));
+}
+
+/**
+ * The hard-force gate (#1381/#1505): an `unmet` row — deterministic
+ * `must_check` or extracted `trusted_base_guidance` confirmed negative —
+ * forces request_changes and names every such row with its status and cause.
+ * An `unresolved` row is coverage: disclosed with the #1449 coverage prose,
+ * `applied` stays false, and `required_evidence_state` withholds approval.
+ * There is deliberately no per-source exemption between those two sources.
  * REQUIRED_CHECK_VALIDATION_MODE keeps owning the completeness markdown; it
  * no longer owns whether approval may publish.
  *

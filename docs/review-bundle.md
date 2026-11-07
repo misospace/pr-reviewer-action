@@ -82,7 +82,19 @@ here for readability — real output has no newlines):
   "findings_total": 1,
   "findings_truncated": false,
   "unresolved_requirement_ids": [],
-  "unresolved_required_checks": []
+  "unresolved_required_checks": [],
+  "unresolved_review_obligations": [
+    {
+      "id": "must-check-1",
+      "source": "must_check",
+      "status": "unmet",
+      "cause": "missing-source-evidence",
+      "text": "verify the changelog entry"
+    }
+  ],
+  "unresolved_review_obligations_total": 1,
+  "unresolved_review_obligations_truncated": false,
+  "derived_obligation_state": "complete"
 }
 ```
 
@@ -115,6 +127,83 @@ These ids are enforcement output, not model output. They let a consumer see
 which obligation stayed open instead of only seeing that coverage was
 incomplete. Each list holds at most 20 ids, and each id is at most 64
 characters.
+
+### Blocking review obligations and derived coverage
+
+A review obligation is a check the reviewer was expected to perform. A
+blocking review obligation is one that stayed open and stopped the review.
+The bundle names each blocking row in `unresolved_review_obligations`.
+
+```json
+{
+  "id": "must-check-1",
+  "source": "must_check",
+  "status": "unmet",
+  "cause": null,
+  "text": "verify the changelog entry"
+}
+```
+
+- `id` names the obligation. It is at most 64 codepoints.
+- `source` names the rule that made the row blocking. It is `must_check` for
+  the operator's checklist. It is `trusted_base_guidance` for an ask the
+  trusted base stated. Those two are the only values a row carries.
+- `status` is always `unmet` (#1505): the row was checked, and the
+  requirement did not hold — a confirmed negative. An `unresolved` row is an
+  availability failure: coverage, never a defect, so it never rides here.
+- `cause` explains the block. It is `tool-capability`, `budget-exhausted`,
+  `provider-failure`, `missing-source-evidence` or `derivation-incomplete`,
+  or null when the run knows no cause. The cause never decides a block.
+- `text` is the obligation's own wording. It is at most 300 codepoints.
+
+A derived obligation is a different thing. The reviewer never stated it, so
+the run derived it from the change itself. A derived obligation is discharged
+when evidence proves it. An undischarged derived obligation is a coverage
+statement. It withholds the trusted approval, and it never forces a request
+for changes. A derived row therefore never rides in
+`unresolved_review_obligations`.
+
+The derived coverage rides as a state in `derived_obligation_state`:
+
+- `complete` means every derived obligation was discharged.
+- `unresolved` means at least one derived obligation stayed open.
+- `unavailable` means the run could not prove the coverage.
+- null means the run has no derived state. The feature was off, or the run
+  could not read it. An unknown state is never read as `complete`.
+
+`unresolved_review_obligations_total` counts every blocking row the run had
+that the document could list. A row whose id is empty after the bounds, and a
+row whose id repeats an earlier row, are dropped and are not counted.
+`unresolved_review_obligations_truncated` says whether the list is shorter
+than that count. Never read a shortened list as the whole set.
+
+The bundle carries the COMPLETE blocking set: its only row bound is the
+document's own 64 KiB byte budget, and rows are admitted one at a time ahead
+of the findings, because they name what blocked the review (#1521 review: a
+controller must be able to name every blocking row, not only the first ten).
+The published handoff keeps a tighter listing bound — at most 10 rows, its
+8 KiB budget — and discloses its shortening, so the handoff's list is always
+a disclosed PREFIX of the bundle's rows, never a different or longer set.
+When the handoff reports `unresolved_review_obligations_truncated: true`,
+the bundle is the machine surface that names the rest.
+
+All four members ride the same presence rule as `findings`. A skipped or
+failed bundle carries none of them. A run that never reviewed blocked
+nothing.
+
+The parser treats the four members as optional. A bundle written before
+#1521 carries none of them, and it stays parseable. A row whose `source`,
+`status` or `cause` is outside the published vocabulary is refused: a
+`derived` row is a coverage statement, a `satisfied` row blocked nothing,
+and an `unresolved` row is an availability failure, never a defect (#1505).
+
+The obligation counters are cross-checked against the rows they carry, and
+not only type-checked. A document that lists more blocking rows than it
+counts is contradictory. So is a document that claims no truncation while
+its total disagrees with the list. The parser refuses both. An absent
+counter defaults to the list's own length (the total) or to `false` (the
+truncation flag), so a bundle that carries the rows without the counters
+still parses. The published handoff's parser refuses the same contradictions.
 
 ### Freshness and supersession
 
@@ -177,13 +266,18 @@ characters.
 - The two merge-gating id lists are reserved in that budget at their exact
   serialized byte length, so an id made of multi-byte codepoints can never
   push the document over the cap.
+- The blocking obligation rows are admitted one at a time against that
+  budget, each charged at its exact serialized byte length, ahead of the
+  findings; a row the budget cannot carry is disclosed, not hidden, so a
+  long row can never push the document over the cap.
 - Every text field passes secret redaction and a length cap before it is
   serialized. The document carries no model transcripts, no raw tool
   output, no rendered Markdown, and no evidence blobs.
-- The document is a single-line JSON string, so hostile finding text —
-  quotes, braces, fake headings, delimiter names — stays inert string
-  content and cannot forge structure. Tests feed those tokens back at the
-  builder (`tests-v3/review-bundle.test.ts`).
+- The document is a single-line JSON string, so hostile finding text and
+  hostile obligation text stay inert string content and cannot forge
+  structure. Quotes, braces, fake headings, and delimiter names are all
+  string content. Tests feed those tokens back at the builder
+  (`tests-v3/review-bundle.test.ts`).
 
 ## What does NOT change
 
@@ -259,7 +353,16 @@ A consumer MUST:
   `*_truncated` flag means that the document discloses no truncation, so the
   list may be short. A count larger than the listed length means the list is
   short, whatever the flag says. A consumer MUST NOT read `null` as `false`.
-
+- Treat the four obligation members as optional. A document published before
+  #1521 carries none of them, so it stays parseable. An absent list parses
+  as empty, and an absent state parses as null. A member that is present is
+  shape-checked, and the obligation counters are cross-checked the same way
+  as the item counters.
+- Refuse a row whose `source`, `status` or `cause` is outside the published
+  vocabulary. A `derived` row is a coverage statement, a `satisfied` row
+  blocked nothing, and an `unresolved` row is an availability failure —
+  coverage, never a defect (#1505). A document that carries any of them as a
+  blocking obligation did not come from this action, so it is refused.
 ### Document shape
 
 The document is one line of JSON with a fixed key order. Example (wrapped
@@ -293,8 +396,19 @@ here for readability, real output has no newlines):
   "unresolved_requirement_ids_truncated": false,
   "unresolved_required_checks": ["tests cover the new path"],
   "unresolved_required_checks_total": 1,
-  "unresolved_required_checks_truncated": false
-}
+  "unresolved_required_checks_truncated": false,
+  "unresolved_review_obligations": [
+    {
+      "id": "must-check-1",
+      "source": "must_check",
+      "status": "unmet",
+      "cause": "missing-source-evidence",
+      "text": "verify the changelog entry"
+    }
+  ],
+  "unresolved_review_obligations_total": 1,
+  "unresolved_review_obligations_truncated": false,
+  "derived_obligation_state": "complete"}
 ```
 
 - `items` holds the FINAL post-enforcement findings. That is the artifact's
@@ -351,6 +465,39 @@ here for readability, real output has no newlines):
   never read as `false`, because such a document may still hide a dropped
   id.
 
+### Blocking review obligations and derived coverage
+
+The handoff projects the same blocking rows as the bundle. A consumer that
+reads a published body sees what blocked the review, not only an opaque id.
+Per #1505, a row blocks only when it is `unmet` (the check was performed and
+the requirement did NOT hold — a confirmed negative). An `unresolved` row is
+an availability failure (coverage, never a defect): it withholds the trusted
+approval and marks the review partial, but it never rides here as a blocking
+obligation. The `derived` rows are likewise coverage, never blocks.
+The handoff's byte budget can shorten its list, so the handoff may carry a
+prefix of the bundle's rows. Its total and its truncated flag say so.
+
+- `unresolved_review_obligations` holds the blocking rows. Each row carries
+  `id`, `source`, `status`, `cause` and `text`. The row shape and the
+  closed vocabularies are the ones the bundle section above lists.
+- `unresolved_review_obligations_total` counts every blocking row the run
+  had that the document could list. `unresolved_review_obligations_truncated`
+  says whether the list is shorter than that count. At most 10 rows are
+  listed.
+- `derived_obligation_state` carries the run's derived coverage as a state.
+  It is `complete`, `unresolved` or `unavailable`, and null when the state
+  is unknown. The states are the ones the bundle section above lists.
+
+A derived obligation is a coverage statement, never a blocking obligation.
+It withholds the trusted approval, and it never forces a request for
+changes. A derived row therefore never rides in
+`unresolved_review_obligations`. It rides only as the derived state.
+
+The four members are always present in a published handoff, so the key set
+of the document stays fixed. The presence of `derived_obligation_state` does
+not mean that the derived feature ran. A null value means the run has no
+derived state.
+
 ### Bounds and redaction
 
 - The whole document is at most 8 KiB (`REVIEW_HANDOFF_MAX_BYTES`), checked
@@ -363,7 +510,23 @@ here for readability, real output has no newlines):
 - The two id counters ride the base (#1538). The byte budget that shortens
   the lists measures the counters too, so a shortened document still fits the
   cap, and the shortened list is disclosed by its own count and flag.
+- The two id lists give way before the obligation rows. The rows name what
+  blocked the review, so they are the last thing the byte budget takes (and
+  only after both id lists are empty). A shed row sets
+  `unresolved_review_obligations_truncated` to true, and the honest count
+  stays in `unresolved_review_obligations_total`. The zero-item base
+  (metadata plus the two id lists plus the obligation rows) can itself exceed
+  the cap — twenty four-byte-codepoint ids per list is more than the bound —
+  so the base is shrunk first: the last ids of the longer id list are dropped
+  one at a time (requirements first on a tie) until the document fits. The
+  empty-list base is far below the cap, so the bound always holds.
 - At most 25 findings are listed (`REVIEW_HANDOFF_MAX_ITEMS`).
+- At most 10 obligation rows are listed on the PUBLISHED handoff
+  (`REVIEW_HANDOFF_MAX_OBLIGATIONS`) — the complete set lives in the local
+  bundle, and the handoff's list is its disclosed prefix (#1521 review).
+  A row's text is at most 300
+  codepoints (`REVIEW_HANDOFF_MAX_OBLIGATION_TEXT_CHARS`). A row's id is at
+  most 64 codepoints.
 - A suggestion is at most 2000 codepoints
   (`REVIEW_HANDOFF_MAX_SUGGESTION_CHARS`). A longer replacement is omitted
   rather than cut off.
@@ -372,8 +535,9 @@ here for readability, real output has no newlines):
 - Every text field passes secret redaction and a length cap before it is
   serialized. The HTML characters are written as JSON escapes, so the
   published body never carries a raw tag out of the payload.
-- The document is a single-line JSON string, so hostile finding text stays
-  inert string content and cannot forge structure.
+- The document is a single-line JSON string, so hostile finding text and
+  hostile obligation text stay inert string content and cannot forge
+  structure.
 
 ### A read-only surface
 

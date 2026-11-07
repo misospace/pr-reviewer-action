@@ -31,6 +31,15 @@ import { redactText } from "../context/redact.js";
 import { pyCodepointSlice } from "../platform/py.js";
 import { findingIdentityFromRecord } from "../outcomes/identity.js";
 import { boundedIdList } from "../context/id-lists.js";
+import {
+  boundedObligationRows,
+  DERIVED_OBLIGATION_STATES,
+  parseObligationRow,
+  publishedDerivedObligationState,
+  type PublishedDerivedObligationState,
+  type ReviewObligationRow,
+} from "./handoff.js";
+import type { ReviewObligation } from "../enforcement/review-obligations.js";
 
 /** The schema identifier. A consumer must refuse a document whose `schema`
  * is not byte-identical to this string (the ledger pattern, #1027). */
@@ -155,6 +164,14 @@ export interface ReviewBundleInput {
   /** #1518: the required-check ids the deterministic enforcement pass could
    * not resolve. Serialized only for the review-producing states. */
   unresolvedRequiredChecks?: readonly string[];
+  /** #1521: the review-obligation rows that BLOCKED the review. The same
+   * shared projection (and the same caps) as the published handoff, so the
+   * two documents never disagree about the rows. Serialized only for the
+   * review-producing states. */
+  unresolvedReviewObligations?: readonly ReviewObligation[];
+  /** #1521: the run's derived-obligation state ("complete" | "unresolved" |
+   * "unavailable"); anything else is published as null (unknown). */
+  derivedObligationState?: string;
 }
 
 interface BundleFindingCandidate {
@@ -277,9 +294,46 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
       "utf8",
     )
     : 0;
+  // #1521 (review): the blocking obligation rows and the derived-obligation
+  // state ride the envelope's tail, on the same presence rule as the id
+  // lists. The row projection is the SHARED one (`boundedObligationRows` in
+  // `src/publish/handoff.ts`), so both documents project the SAME rows in
+  // the SAME order with the SAME honest total — the handoff's list is always
+  // a prefix of the bundle's. But the bundle is the CONTROLLER's complete
+  // machine-readable set: it does NOT apply the handoff's 10-row listing
+  // bound. Its own bound is the 64 KiB byte budget: rows are admitted one at
+  // a time (charged exactly, like the findings), ahead of the findings
+  // because they name WHAT blocked the review. A byte-shed row is disclosed
+  // by the same total/truncated pair, so a shortened list is never passed
+  // off as the whole set.
+  const projectedObligations = reviewsProduced
+    ? boundedObligationRows(input.unresolvedReviewObligations, Number.POSITIVE_INFINITY)
+    : { rows: [], total: 0 };
+  const derivedState = reviewsProduced ? publishedDerivedObligationState(input.derivedObligationState) : null;
+  // Reserve the segment with the EMPTY row list (the truncation flag reserved
+  // as `false`, one byte longer than `true`, so the reservation never
+  // under-counts), then charge one row plus one comma per admitted row — the
+  // exact serialized string can only land at or below the reservation.
+  const obligationSegmentBytes = reviewsProduced
+    ? Buffer.byteLength(
+      `,"unresolved_review_obligations":[]`
+      + `,"unresolved_review_obligations_total":${projectedObligations.total}`
+      + `,"unresolved_review_obligations_truncated":false`
+      + `,"derived_obligation_state":${JSON.stringify(derivedState)}`,
+      "utf8",
+    )
+    : 0;
   let bytes = Buffer.byteLength(JSON.stringify(envelope), "utf8")
     + (reviewsProduced ? Buffer.byteLength(disclosure, "utf8") + 1 : 0)
-    + idSegmentBytes;
+    + idSegmentBytes
+    + obligationSegmentBytes;
+  const includedObligations: ReviewObligationRow[] = [];
+  for (const row of projectedObligations.rows) {
+    const rowBytes = Buffer.byteLength(JSON.stringify(row), "utf8") + 1;
+    if (bytes + rowBytes > REVIEW_BUNDLE_MAX_BYTES) break;
+    bytes += rowBytes;
+    includedObligations.push(row);
+  }
   const included: ReviewBundleFinding[] = [];
   for (const candidate of candidates.slice(0, REVIEW_BUNDLE_MAX_FINDINGS)) {
     const finding = bundleFinding(candidate.record);
@@ -296,6 +350,14 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
     // last in the envelope so the pinned key order above stays stable.
     envelope.unresolved_requirement_ids = requirementIds;
     envelope.unresolved_required_checks = checkIds;
+    // #1521: the blocking obligation rows and the derived-obligation state,
+    // after the id lists — the controller's document names EVERY blocking
+    // row the byte budget can carry, and the published handoff's list stays
+    // a disclosed prefix of it.
+    envelope.unresolved_review_obligations = includedObligations;
+    envelope.unresolved_review_obligations_total = projectedObligations.total;
+    envelope.unresolved_review_obligations_truncated = includedObligations.length < projectedObligations.total;
+    envelope.derived_obligation_state = derivedState;
   }
   return JSON.stringify(envelope);
 }
@@ -324,6 +386,19 @@ export interface ReviewBundle {
   /** #1518: the required-check ids the deterministic enforcement pass could
    * not resolve. Present only on a review-producing state. */
   unresolved_required_checks?: string[];
+  /** #1521: the review-obligation rows that blocked the review. Present
+   * only on a review-producing state, with the same shape and caps as the
+   * published handoff's rows. */
+  unresolved_review_obligations?: ReviewObligationRow[];
+  /** #1521: the count of the blocking rows, before the listing bound.
+   * Present only on a review-producing state. */
+  unresolved_review_obligations_total?: number;
+  /** #1521: whether the row listing was shortened. Present only on a
+   * review-producing state. */
+  unresolved_review_obligations_truncated?: boolean;
+  /** #1521: the run's derived-obligation state, null when unknown. Present
+   * only on a review-producing state. */
+  derived_obligation_state?: PublishedDerivedObligationState | null;
 }
 
 /** Fail-closed parse of a bundle document: exact schema string, closed
@@ -403,6 +478,49 @@ export function parseReviewBundle(text: string): ReviewBundle | null {
     if (!reviewProducing) return null;
     if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) return null;
   }
+  // #1521: the blocking obligation rows, their counters and the
+  // derived-obligation state follow the SAME presence rule as the id lists
+  // (a state that proves no review may not claim what blocked a review it
+  // never produced). When present they are shape-checked fail-closed, and
+  // the counters are cross-checked against the list they carry.
+  const obligationRows: ReviewObligationRow[] = [];
+  if (record.unresolved_review_obligations !== undefined) {
+    if (!reviewProducing) return null;
+    if (!Array.isArray(record.unresolved_review_obligations)) return null;
+    for (const raw of record.unresolved_review_obligations) {
+      const row = parseObligationRow(raw);
+      if (row === null) return null;
+      obligationRows.push(row);
+    }
+  }
+  // The counters are OPTIONAL on parse (a bundle written before #1521
+  // carries none of them, and it stays parseable), but a counter that IS
+  // present is cross-checked against the list it carries. An absent counter
+  // defaults to the list's own length (the total) or to `false` (the
+  // truncation flag) — the same defaults the published handoff's parser
+  // uses, so the two documents read one contract.
+  if (record.unresolved_review_obligations_total !== undefined && !reviewProducing) return null;
+  const obligationTotal = record.unresolved_review_obligations_total === undefined
+    ? obligationRows.length
+    : record.unresolved_review_obligations_total;
+  if (typeof obligationTotal !== "number" || !Number.isInteger(obligationTotal)) return null;
+  if (record.unresolved_review_obligations_truncated !== undefined && !reviewProducing) return null;
+  const obligationTruncated = record.unresolved_review_obligations_truncated === undefined
+    ? false
+    : record.unresolved_review_obligations_truncated;
+  if (typeof obligationTruncated !== "boolean") return null;
+  // The counters must agree with the list: a document that lists more
+  // blocking rows than it counts, or that claims no truncation while its
+  // total disagrees with the list it carries, contradicts itself and is
+  // refused. The published handoff refuses the same contradictions.
+  if (obligationTotal < obligationRows.length) return null;
+  if (obligationTruncated === false && obligationTotal !== obligationRows.length) return null;
+  if (record.derived_obligation_state !== undefined) {
+    if (!reviewProducing) return null;
+    const state = record.derived_obligation_state;
+    if (!(state === null
+      || (typeof state === "string" && (DERIVED_OBLIGATION_STATES as readonly string[]).includes(state)))) return null;
+  }
   if (record.skip_reason !== undefined && (typeof record.skip_reason !== "string" || record.state !== "skipped")) return null;
   if (record.failure_reason !== undefined && (typeof record.failure_reason !== "string" || record.state !== "failed")) return null;
   const bundle = {
@@ -433,6 +551,20 @@ export function parseReviewBundle(text: string): ReviewBundle | null {
   }
   if (Array.isArray(record.unresolved_required_checks)) {
     bundle.unresolved_required_checks = [...record.unresolved_required_checks] as string[];
+  }
+  // #1521: the blocking rows, their counters and the derived-obligation
+  // state, present only on a review-producing state.
+  if (obligationRows.length > 0 || record.unresolved_review_obligations !== undefined) {
+    bundle.unresolved_review_obligations = obligationRows;
+  }
+  if (typeof record.unresolved_review_obligations_total === "number") {
+    bundle.unresolved_review_obligations_total = record.unresolved_review_obligations_total;
+  }
+  if (typeof record.unresolved_review_obligations_truncated === "boolean") {
+    bundle.unresolved_review_obligations_truncated = record.unresolved_review_obligations_truncated;
+  }
+  if (record.derived_obligation_state !== undefined) {
+    bundle.derived_obligation_state = record.derived_obligation_state as PublishedDerivedObligationState | null;
   }
   return bundle;
 }

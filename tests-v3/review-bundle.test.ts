@@ -29,7 +29,21 @@ import {
 import { findingIdentity } from "../src/outcomes/identity.js";
 import { MAX_ID_LIST_CHARS, MAX_ID_LIST_ENTRIES } from "../src/context/id-lists.js";
 import { actionMain, reviewBundleState } from "../src/run/action.js";
+import { buildReviewHandoff, parseReviewHandoff, REVIEW_HANDOFF_ANCHOR, REVIEW_HANDOFF_MAX_OBLIGATIONS } from "../src/publish/handoff.js";
+import type { ReviewObligation } from "../src/enforcement/review-obligations.js";
 import { startMockServer, type CapturedRequest } from "./helpers.js";
+
+function baseHandoffInput(overrides: Partial<Parameters<typeof buildReviewHandoff>[0]> = {}): Parameters<typeof buildReviewHandoff>[0] {
+  return {
+    reviewId: "0123456789abcdef",
+    headSha: "a".repeat(40),
+    verdict: "request_changes",
+    reviewResult: "findings",
+    requiredChecks: "complete",
+    findings: [],
+    ...overrides,
+  };
+}
 
 function baseInput(overrides: Partial<ReviewBundleInput> = {}): ReviewBundleInput {
   return {
@@ -66,6 +80,10 @@ test("#1425: serialization is deterministic and round-trips the strict parser", 
     "pr_number", "head_sha", "base_sha", "state", "identity", "disposition",
     "findings", "findings_total", "findings_truncated",
     "unresolved_requirement_ids", "unresolved_required_checks",
+    // #1521: the blocking obligation rows, their counters and the derived
+    // state — on the same presence rule as the id lists above.
+    "unresolved_review_obligations", "unresolved_review_obligations_total",
+    "unresolved_review_obligations_truncated", "derived_obligation_state",
   ]);
   const parsed = parseReviewBundle(a);
   assert.ok(parsed !== null);
@@ -147,6 +165,399 @@ test("#1518: the merge-gating id lists ride a review-producing bundle and never 
   assert.equal(parseReviewBundle(make("failed", { unresolved_required_checks: ["check-a"] })), null);
   assert.equal(parseReviewBundle(make("complete", { unresolved_requirement_ids: [1] })), null);
   assert.ok(parseReviewBundle(make("complete", { unresolved_requirement_ids: ["REQ-1"] })) !== null);
+});
+
+// ── #1521: the blocking obligation rows ride the local bundle too ──
+
+/** The blocking rows a run hands to the publish layer. A `derived` row and a
+ * `satisfied` row are in the list on purpose: neither may ride as a block. */
+function blockingObligationRows(): ReviewObligation[] {
+  return [
+    { id: "must-check-1", source: "must_check", text: "verify the changelog entry", status: "unmet", cause: null },
+    { id: "guidance-1", source: "trusted_base_guidance", text: "check the release notes", status: "unmet", cause: null },
+    { id: "derived-1", source: "derived", text: "the mint site must place the identity", status: "unresolved", cause: "derivation-incomplete" },
+    { id: "must-check-2", source: "must_check", text: "already discharged", status: "satisfied", cause: null },
+  ];
+}
+
+test("#1521: the blocking rows, the counters and the derived state ride a review-producing bundle", () => {
+  // A consumer of the local bundle must see WHAT blocked the review, not
+  // only an opaque id, and it must see the derived coverage as a state.
+  for (const state of ["complete", "partial", "superseded"] as const) {
+    const doc = parseReviewBundle(buildReviewBundle(baseInput({
+      state,
+      unresolvedReviewObligations: blockingObligationRows(),
+      derivedObligationState: "unresolved",
+    })))!;
+    assert.deepEqual(doc.unresolved_review_obligations, [
+      {
+        id: "must-check-1",
+        source: "must_check",
+        status: "unmet",
+        cause: null,
+        text: "verify the changelog entry",
+      },
+      {
+        id: "guidance-1",
+        source: "trusted_base_guidance",
+        status: "unmet",
+        cause: null,
+        text: "check the release notes",
+      },
+    ], `the ${state} bundle lists the two blocking rows and nothing else`);
+    assert.equal(doc.unresolved_review_obligations_total, 2, "the total counts the qualifying rows");
+    assert.equal(doc.unresolved_review_obligations_truncated, false, "nothing was omitted");
+    assert.equal(doc.derived_obligation_state, "unresolved", "the derived state rides as a state");
+  }
+  // The derived state rides its own closed vocabulary, and an unknown state
+  // publishes as null.
+  for (const state of ["complete", "unresolved", "unavailable"]) {
+    const doc = parseReviewBundle(buildReviewBundle(baseInput({ derivedObligationState: state })))!;
+    assert.equal(doc.derived_obligation_state, state, `the ${state} state rides the bundle`);
+  }
+  const unknown = parseReviewBundle(buildReviewBundle(baseInput({ derivedObligationState: "bogus" })))!;
+  assert.equal(unknown.derived_obligation_state, null, "an unusable state publishes as null");
+  const absent = parseReviewBundle(buildReviewBundle(baseInput()))!;
+  assert.equal(absent.derived_obligation_state, null, "an absent state publishes as null");
+});
+
+test("#1521: the #1521 members are absent on the skipped and failed states", () => {
+  // A run that never reviewed blocked nothing, so it must not claim what
+  // blocked a review it never produced.
+  const skipped = JSON.parse(buildReviewBundle(baseInput({
+    state: "skipped",
+    skipReason: "already-reviewed",
+    unresolvedReviewObligations: blockingObligationRows(),
+    derivedObligationState: "unresolved",
+  }))) as Record<string, unknown>;
+  assert.ok(!Object.hasOwn(skipped, "unresolved_review_obligations"), "a skipped run claims no blocking row");
+  assert.ok(!Object.hasOwn(skipped, "unresolved_review_obligations_total"));
+  assert.ok(!Object.hasOwn(skipped, "unresolved_review_obligations_truncated"));
+  assert.ok(!Object.hasOwn(skipped, "derived_obligation_state"));
+
+  const failedInput = baseInput({
+    state: "failed",
+    failureReason: "model transport exploded",
+    unresolvedReviewObligations: blockingObligationRows(),
+    derivedObligationState: "unresolved",
+  });
+  delete failedInput.disposition;
+  const failed = JSON.parse(buildReviewBundle(failedInput)) as Record<string, unknown>;
+  assert.ok(!Object.hasOwn(failed, "unresolved_review_obligations"), "a failed run claims no blocking row");
+  assert.ok(!Object.hasOwn(failed, "unresolved_review_obligations_total"));
+  assert.ok(!Object.hasOwn(failed, "unresolved_review_obligations_truncated"));
+  assert.ok(!Object.hasOwn(failed, "derived_obligation_state"));
+});
+
+test("#1521: the bundle parser refuses the members on a state that proves no review, and refuses a malformed member", () => {
+  const make = (state: string, extra: Record<string, unknown>): string => JSON.stringify({
+    schema: REVIEW_BUNDLE_SCHEMA,
+    state,
+    review_id: "r1",
+    generated_at: "2026-11-02T12:00:00.000Z",
+    repository: "o/r",
+    pr_number: 7,
+    head_sha: "a".repeat(40),
+    base_sha: "b".repeat(40),
+    identity: { diff_fingerprint: "", analysis_engine: "" },
+    ...extra,
+  });
+  const row = { id: "must-check-1", source: "must_check", status: "unmet", cause: null, text: "verify the changelog" };
+  // A state that proves no review may not claim what blocked a review it
+  // never produced.
+  assert.equal(parseReviewBundle(make("skipped", { unresolved_review_obligations: [row] })), null);
+  assert.equal(parseReviewBundle(make("failed", { unresolved_review_obligations: [row] })), null);
+  assert.equal(parseReviewBundle(make("skipped", { unresolved_review_obligations_total: 1 })), null);
+  assert.equal(parseReviewBundle(make("skipped", { unresolved_review_obligations_truncated: true })), null);
+  assert.equal(parseReviewBundle(make("failed", { derived_obligation_state: "unresolved" })), null);
+  assert.equal(parseReviewBundle(make("skipped", { derived_obligation_state: null })), null);
+  // A malformed member refuses the whole document.
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: ["not-a-row"] })), null);
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ source: "must_check", status: "unmet", cause: null, text: "t" }] })), null);
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ id: "a", source: "must_check", status: "unmet", cause: 7, text: "t" }] })), null);
+  // #1505: a blocking row is a confirmed negative. An `unresolved` row is
+  // availability (coverage, never a defect) and a `satisfied` row blocked
+  // nothing, so a document listing either as a blocking obligation is
+  // refused, not read.
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ id: "a", source: "must_check", status: "unresolved", cause: null, text: "t" }] })), null, "an unresolved row is coverage, never a block");
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ id: "a", source: "must_check", status: "satisfied", cause: null, text: "t" }] })), null, "a discharged row blocked nothing");
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations: [{ id: "a", source: "derived", status: "unmet", cause: null, text: "t" }] })), null, "a derived row is coverage, never a block");
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations_total: 1.5 })), null);
+  assert.equal(parseReviewBundle(make("complete", { unresolved_review_obligations_truncated: "yes" })), null);
+  assert.equal(parseReviewBundle(make("complete", { derived_obligation_state: "bogus" })), null);
+  assert.equal(parseReviewBundle(make("complete", { derived_obligation_state: 7 })), null);
+  // The honest shapes still parse.
+  assert.ok(parseReviewBundle(make("complete", { unresolved_review_obligations: [row], unresolved_review_obligations_total: 1, unresolved_review_obligations_truncated: false })) !== null);
+  assert.ok(parseReviewBundle(make("complete", { derived_obligation_state: "complete" })) !== null);
+});
+
+test("#1521: the bundle parser cross-checks the obligation counters against the rows they carry", () => {
+  // The counters are not only TYPE-checked: a document that lists more
+  // blocking rows than it counts, or that claims no truncation while its
+  // total disagrees with the list it carries, contradicts itself and is
+  // refused. The published handoff refuses the same contradictions, so the
+  // two documents read one contract.
+  const make = (extra: Record<string, unknown>): string => JSON.stringify({
+    schema: REVIEW_BUNDLE_SCHEMA,
+    state: "complete",
+    review_id: "r1",
+    generated_at: "2026-11-02T12:00:00.000Z",
+    repository: "o/r",
+    pr_number: 7,
+    head_sha: "a".repeat(40),
+    base_sha: "b".repeat(40),
+    identity: { diff_fingerprint: "", analysis_engine: "" },
+    ...extra,
+  });
+  const row = { id: "must-check-1", source: "must_check", status: "unmet", cause: null, text: "verify the changelog" };
+  const rows = [row, { ...row, id: "must-check-2" }];
+  // A total below the listed row count contradicts the list it carries.
+  assert.equal(
+    parseReviewBundle(make({ unresolved_review_obligations: rows, unresolved_review_obligations_total: 1, unresolved_review_obligations_truncated: true })),
+    null,
+    "a total below the listed row count is refused",
+  );
+  assert.equal(
+    parseReviewBundle(make({ unresolved_review_obligations: rows, unresolved_review_obligations_total: 0 })),
+    null,
+    "a total below the listed row count is refused even without a truncation flag",
+  );
+  // A total that claims no truncation while it disagrees with the list is
+  // the exact-count contradiction.
+  assert.equal(
+    parseReviewBundle(make({ unresolved_review_obligations: rows, unresolved_review_obligations_total: 5, unresolved_review_obligations_truncated: false })),
+    null,
+    "an exact-count contradiction is refused",
+  );
+  // The honest shapes still parse: a disclosed prefix, an exact count, and
+  // a list with no counters of its own.
+  assert.ok(
+    parseReviewBundle(make({ unresolved_review_obligations: rows, unresolved_review_obligations_total: 5, unresolved_review_obligations_truncated: true })) !== null,
+    "a disclosed prefix parses",
+  );
+  assert.ok(
+    parseReviewBundle(make({ unresolved_review_obligations: rows, unresolved_review_obligations_total: 2, unresolved_review_obligations_truncated: false })) !== null,
+    "an exact count parses",
+  );
+  assert.ok(
+    parseReviewBundle(make({ unresolved_review_obligations: rows })) !== null,
+    "a list with no counters of its own parses",
+  );
+  // A bundle written before #1521 carries none of the four members, and it
+  // stays parseable: an absent list parses as empty, an absent state as
+  // null.
+  const legacy = parseReviewBundle(make({
+    findings: [],
+    findings_total: 0,
+    findings_truncated: false,
+    unresolved_requirement_ids: [],
+    unresolved_required_checks: [],
+  }));
+  assert.ok(legacy !== null, "a pre-#1521 bundle stays parseable");
+  assert.ok(!Object.hasOwn(legacy!, "unresolved_review_obligations"));
+  assert.ok(!Object.hasOwn(legacy!, "unresolved_review_obligations_total"));
+  assert.ok(!Object.hasOwn(legacy!, "unresolved_review_obligations_truncated"));
+  // The builder's own document round-trips, truncated listing included.
+  const many: ReviewObligation[] = Array.from({ length: 12 }, (_, index) => ({
+    id: `obligation-${index}`,
+    source: "must_check",
+    text: `check ${index}`,
+    status: "unmet",
+    cause: null,
+  }));
+  const built = parseReviewBundle(buildReviewBundle(baseInput({ unresolvedReviewObligations: many })))!;
+  // #1521 (review): twelve distinct blocking rows is exactly the case the
+  // 10-row handoff bound used to make unnameable. What a remote controller
+  // can actually obtain is the bundle, and it names EVERY row: no blocking
+  // row's id, source or text is reachable only through the workflow-local
+  // `review-obligations.json`.
+  assert.equal(built.unresolved_review_obligations!.length, 12, "the bundle lists every blocking row, not just the first ten");
+  assert.deepEqual(
+    built.unresolved_review_obligations!.map((row) => row.id),
+    many.map((row) => row.id),
+    "every blocking row's id, source and text ride the controller-facing document",
+  );
+  assert.equal(built.unresolved_review_obligations_total, 12, "the honest total rides");
+  assert.equal(built.unresolved_review_obligations_truncated, false, "the bundle omitted nothing, and says so");
+});
+
+test("#1521 (review): a remote controller can name EVERY blocking row past the handoff's bound", () => {
+  // The published handoff keeps its listing bound and its byte bound, but
+  // its truncation flag now points at a machine surface that carries the
+  // rest: the handoff lists a PREFIX of the same set the bundle names in
+  // full, with the same total. Twelve > ten exercises the boundary.
+  const many: ReviewObligation[] = Array.from({ length: 12 }, (_, index) => ({
+    id: `obligation-${index}`,
+    source: "must_check",
+    text: `verify blocked item ${index}`,
+    status: "unmet",
+    cause: null,
+  }));
+  const handoff = parseReviewHandoff(buildReviewHandoff(baseHandoffInput({ unresolvedReviewObligations: many })))!;
+  const bundle = parseReviewBundle(buildReviewBundle(baseInput({ unresolvedReviewObligations: many })))!;
+  assert.equal(handoff.unresolved_review_obligations.length, REVIEW_HANDOFF_MAX_OBLIGATIONS, "the handoff stays bounded");
+  assert.equal(handoff.unresolved_review_obligations_truncated, true, "the handoff says rows were dropped");
+  const handoffIds = new Set(handoff.unresolved_review_obligations.map((row) => row.id));
+  for (const row of bundle.unresolved_review_obligations!) {
+    if (!handoffIds.has(row.id)) {
+      assert.ok(row.id !== "" && row.text !== "" && row.source === "must_check", `the row the handoff dropped (${row.id}) is still fully named in the bundle`);
+    }
+  }
+  assert.equal(bundle.unresolved_review_obligations!.length, 12, "the bundle names all twelve");
+  assert.equal(handoff.unresolved_review_obligations_total, 12, "the handoff's total proves the set is larger than its list");
+});
+
+test("#1521 (review): the bundle's row listing stays inside the 64 KiB bound", () => {
+  // The byte budget, not the count, is the bundle's only row bound now. A
+  // run with far more (and far wider) blocking rows than 64 KiB can carry
+  // must still produce a parseable, in-bound document that discloses the
+  // shortening honestly.
+  const astral = "\u{1F600}";
+  const huge: ReviewObligation[] = Array.from({ length: 200 }, (_, index) => ({
+    id: `obligation-${index}-${astral.repeat(40)}`,
+    source: "must_check",
+    text: astral.repeat(300),
+    status: "unmet",
+    cause: null,
+  }));
+  const out = buildReviewBundle(baseInput({ unresolvedReviewObligations: huge }));
+  assert.ok(Buffer.byteLength(out, "utf8") <= REVIEW_BUNDLE_MAX_BYTES, "the cap holds on the exact serialized string");
+  const doc = parseReviewBundle(out)!;
+  assert.ok(doc !== null, "the shrunk document still parses");
+  assert.ok(doc.unresolved_review_obligations!.length < 200, "the byte budget shed rows");
+  assert.ok(doc.unresolved_review_obligations!.length > 10, "the bundle still carries well past the handoff's ten");
+  assert.equal(doc.unresolved_review_obligations_total, 200, "the honest total rides");
+  assert.equal(doc.unresolved_review_obligations_truncated, true, "the shortening is disclosed");
+  // The document's own counters agree with what it lists (#1521 parser
+  // contract refuses a contradiction), so the listing is honest at the
+  // boundary too.
+  assert.ok(doc.unresolved_review_obligations_total >= doc.unresolved_review_obligations!.length);
+});
+
+test("#1521: the local bundle and the published handoff project the SAME rows", () => {
+  // Both documents use the shared projection (`boundedObligationRows`), so a
+  // consumer never reads two different stories about what blocked the same
+  // review. The bound is the same too: both list at most ten rows. The
+  // handoff's 8 KiB budget can shorten its list further, and it discloses
+  // that.
+  const rows: ReviewObligation[] = Array.from({ length: 15 }, (_, index) => ({
+    id: `obligation-${index}`,
+    source: "must_check",
+    text: `verify the checklist item ${index}`,
+    status: "unmet",
+    cause: null,
+  }));
+  const bundle = parseReviewBundle(buildReviewBundle(baseInput({
+    unresolvedReviewObligations: rows,
+    derivedObligationState: "unresolved",
+  })))!;
+  const handoff = parseReviewHandoff(buildReviewHandoff({
+    reviewId: "0123456789abcdef",
+    headSha: "a".repeat(40),
+    verdict: "request_changes",
+    reviewResult: "findings",
+    requiredChecks: "complete",
+    findings: [],
+    unresolvedReviewObligations: rows,
+    derivedObligationState: "unresolved",
+  }))!;
+  assert.equal(bundle.unresolved_review_obligations_total, handoff.unresolved_review_obligations_total, "both documents report the same total");
+  assert.equal(bundle.derived_obligation_state, handoff.derived_obligation_state, "both documents carry the same derived state");
+  // #1521 (review): the bundle is the controller's COMPLETE machine-readable
+  // set — it does not apply the handoff's 10-row listing bound. The handoff
+  // keeps its bound (its 8 KiB budget is the tighter one) and discloses the
+  // shortening, so the handoff's rows are always a PREFIX of the bundle's,
+  // never a different or longer set.
+  assert.equal(bundle.unresolved_review_obligations!.length, 15, "the bundle lists every blocking row, past the handoff's 10-row bound");
+  assert.equal(bundle.unresolved_review_obligations_truncated, false, "the bundle omitted nothing");
+  assert.equal(handoff.unresolved_review_obligations.length, REVIEW_HANDOFF_MAX_OBLIGATIONS, "the published handoff keeps its listing bound");
+  assert.equal(handoff.unresolved_review_obligations_truncated, true, "the handoff discloses the shortening");
+  assert.deepEqual(
+    handoff.unresolved_review_obligations.map((row) => row.id),
+    bundle.unresolved_review_obligations!.slice(0, handoff.unresolved_review_obligations.length).map((row) => row.id),
+    "the handoff lists a prefix of the bundle's rows",
+  );
+  // The handoff's 8 KiB budget can shorten the list further than the 10-row
+  // bound. Both documents keep the same honest total. The rows and the ids
+  // below are four-byte codepoints on purpose: a row's text is at most 300
+  // codepoints, so the widest possible row is four times that in bytes.
+  const astral = "\u{1F600}";
+  const wideRows: ReviewObligation[] = Array.from({ length: REVIEW_HANDOFF_MAX_OBLIGATIONS }, (_, index) => ({
+    id: `obligation-${index}-${astral.repeat(40)}`,
+    source: "must_check",
+    text: `${astral.repeat(300)}`,
+    status: "unmet",
+    cause: null,
+  }));
+  const wideIds = Array.from({ length: MAX_ID_LIST_ENTRIES }, (_, index) => `${index}${astral.repeat(MAX_ID_LIST_CHARS - 2)}`);
+  const wideBundle = parseReviewBundle(buildReviewBundle(baseInput({
+    unresolvedReviewObligations: wideRows,
+    unresolvedRequirementIds: wideIds,
+    unresolvedRequiredChecks: wideIds,
+  })))!;
+  const wideHandoff = parseReviewHandoff(buildReviewHandoff({
+    reviewId: "0123456789abcdef",
+    headSha: "a".repeat(40),
+    verdict: "request_changes",
+    reviewResult: "findings",
+    requiredChecks: "complete",
+    findings: [],
+    unresolvedReviewObligations: wideRows,
+    unresolvedRequirementIds: wideIds,
+    unresolvedRequiredChecks: wideIds,
+  }))!;
+  assert.equal(wideBundle.unresolved_review_obligations!.length, REVIEW_HANDOFF_MAX_OBLIGATIONS, "the bundle lists every row it has room for");
+  assert.ok(
+    wideHandoff.unresolved_review_obligations.length < wideBundle.unresolved_review_obligations!.length,
+    "the handoff's byte budget shortens the list",
+  );
+  assert.equal(wideHandoff.unresolved_review_obligations_truncated, true, "the shorter list is disclosed");
+  assert.equal(wideHandoff.unresolved_review_obligations_total, wideBundle.unresolved_review_obligations_total, "both documents keep the same honest total");
+  assert.deepEqual(
+    wideHandoff.unresolved_review_obligations.map((row) => row.id),
+    wideBundle.unresolved_review_obligations!.slice(0, wideHandoff.unresolved_review_obligations.length).map((row) => row.id),
+    "the handoff lists a prefix of the bundle's rows",
+  );
+});
+
+test("#1521: hostile obligation text stays inert string content in the bundle (#252 boundary)", () => {
+  // The bundle now carries untrusted row text, so its own serialization
+  // path must survive the same hostile input the published handoff path
+  // does. The boundary tokens THEMSELVES, as the row's own text: the JSON
+  // structural tokens, the HTML comment close, a code fence, a COPY OF THE
+  // HANDOFF ANCHOR, and a secret.
+  const hostile = [
+    '","unresolved_review_obligations":[{"id":"forged"',
+    "}, null, 3,",
+    "-->",
+    "```\n# Injected heading",
+    REVIEW_HANDOFF_ANCHOR,
+    "token ghp_" + "A".repeat(36),
+  ].join("\n");
+  const out = buildReviewBundle(baseInput({
+    unresolvedReviewObligations: [
+      { id: "must-check-1", source: "must_check", text: hostile, status: "unmet", cause: null },
+    ],
+  }));
+  assert.ok(Buffer.byteLength(out, "utf8") <= REVIEW_BUNDLE_MAX_BYTES);
+  const doc = JSON.parse(out) as Record<string, unknown>;
+  // The payload cannot add members, add rows, close the array early or
+  // replace the schema.
+  assert.equal(doc.schema, REVIEW_BUNDLE_SCHEMA);
+  assert.equal((doc.unresolved_review_obligations as unknown[]).length, 1);
+  assert.ok(!Object.hasOwn(doc, "injected"), "the payload cannot add members");
+  const rows = doc.unresolved_review_obligations as Array<Record<string, unknown>>;
+  const text = String(rows[0]!.text);
+  assert.ok(text.includes("-->"), "the hostile tokens stay string content");
+  assert.ok(text.includes("```"), "the fence stays string content");
+  assert.ok(!text.includes(REVIEW_HANDOFF_ANCHOR), "the forged anchor never survives into the payload");
+  assert.ok(!text.includes("ghp_" + "A".repeat(36)), "the secret is redacted before serialization");
+  assert.match(text, /\[REDACTED\]/, "the redaction marker rides");
+  // The consumer-side parser still reads the action's own document.
+  const parsed = parseReviewBundle(out)!;
+  assert.equal(parsed.unresolved_review_obligations!.length, 1, "the row itself survives as string content");
+  assert.equal(parsed.unresolved_review_obligations_total, 1, "the honest total rides");
+  assert.equal(parsed.unresolved_review_obligations_truncated, false, "nothing was omitted");
 });
 
 test("#1425: partial and superseded states pass through with the publication record", () => {
