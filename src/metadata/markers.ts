@@ -54,6 +54,24 @@ export const REVIEW_HANDOFF_ANCHOR = "<!-- ai-pr-reviewer-handoff:v1 -->";
  * (an inline finding body) applies. */
 const REVIEW_HANDOFF_ANCHOR_PATTERN = /<!--\s*ai-pr-reviewer-handoff\s*:\s*[^>]*-->/gi;
 
+/**
+ * #1521: the published review-obligations document's container anchor
+ * (`review-obligations/v1`, `src/publish/obligations.ts`). It names the
+ * COMPLETE set of review obligations that blocked a review — the document
+ * that carries every qualifying row, where the handoff's compact list can
+ * only carry a disclosed prefix.
+ *
+ * Like the handoff anchor, it is action-owned state: the action renders the
+ * container into the marker preamble, which precedes every model-authored
+ * surface, so the FIRST occurrence of this anchor in a published body is
+ * always the action's own. No model-authored surface may carry it.
+ */
+export const REVIEW_OBLIGATIONS_ANCHOR = "<!-- ai-pr-reviewer-obligations:v1 -->";
+
+/** The reserved grammar of the obligations anchor: any spelling, in any case,
+ * with any spacing — a sibling of the handoff anchor's pattern. */
+const REVIEW_OBLIGATIONS_ANCHOR_PATTERN = /<!--\s*ai-pr-reviewer-obligations\s*:\s*[^>]*-->/gi;
+
 export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
   /<!--\s*ai-pr-review-fingerprint\s*:\s*[^>]*-->/gi,
   /<!--\s*ai-pr-review-sha\s*:\s*[^>]*-->/gi,
@@ -66,21 +84,30 @@ export const RESERVED_MARKER_PATTERNS: readonly RegExp[] = [
   // #1518: the published handoff's anchor is action-owned state (see
   // `REVIEW_HANDOFF_ANCHOR` above).
   REVIEW_HANDOFF_ANCHOR_PATTERN,
+  // #1521: the published review-obligations document's anchor is action-owned
+  // state too (see `REVIEW_OBLIGATIONS_ANCHOR` above).
+  REVIEW_OBLIGATIONS_ANCHOR_PATTERN,
 ];
 
 /**
- * #1518: remove every handoff-anchor occurrence from model-authored text.
+ * #1518/#1521: remove every PUBLISHED-CONTAINER anchor from model-authored
+ * text.
  *
- * The anchor names the action's own container, so model text that carries it
- * could offer a consumer a look-alike handoff. This strip runs on the
- * surfaces that never pass through `stripReservedMarkers` — an inline
- * finding body and the outside-diff section — so no published surface can
- * carry a second anchor. The text itself stays a string; nothing is dropped
- * beyond the anchor.
+ * The anchors name the action's own containers (the `review-handoff/v1` and
+ * `review-obligations/v1` documents), so model text that carries one could
+ * offer a consumer a look-alike container. This strip runs on the surfaces
+ * that never pass through `stripReservedMarkers` — an inline finding body
+ * and the outside-diff section — so no published surface can carry a second
+ * anchor. The text itself stays a string; nothing is dropped beyond the
+ * anchors.
  */
-export function stripReviewHandoffAnchor(text: string): string {
-  REVIEW_HANDOFF_ANCHOR_PATTERN.lastIndex = 0;
-  return text.replace(REVIEW_HANDOFF_ANCHOR_PATTERN, "");
+export function stripPublishedContainerAnchors(text: string): string {
+  let stripped = text;
+  for (const pattern of [REVIEW_HANDOFF_ANCHOR_PATTERN, REVIEW_OBLIGATIONS_ANCHOR_PATTERN]) {
+    pattern.lastIndex = 0;
+    stripped = stripped.replace(pattern, "");
+  }
+  return stripped;
 }
 
 /**

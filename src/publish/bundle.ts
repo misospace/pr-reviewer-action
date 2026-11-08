@@ -33,6 +33,7 @@ import { findingIdentityFromRecord } from "../outcomes/identity.js";
 import { boundedIdListWithTotal, sourceIdCount } from "../context/id-lists.js";
 import {
   boundedObligationRows,
+  countersAgreeWithList,
   DERIVED_OBLIGATION_STATES,
   parseObligationRow,
   publishedDerivedObligationState,
@@ -72,6 +73,13 @@ export const REVIEW_BUNDLE_MAX_BYTES = 65_536;
 
 /** Findings admitted before the `findings_truncated` disclosure fires. */
 export const REVIEW_BUNDLE_MAX_FINDINGS = 100;
+
+/** The blocking obligation rows may claim at most this many bytes of the
+ * bundle's budget. The rows are merge-gating disclosure, but they must never
+ * starve the findings list: the findings are the review's own content, and
+ * they have no other machine surface. Half the budget leaves the other half
+ * for the findings in every case. */
+export const REVIEW_BUNDLE_MAX_OBLIGATION_BYTES = 32_768;
 
 /** Per-field codepoint caps applied AFTER redaction. */
 export const REVIEW_BUNDLE_MAX_MESSAGE_CHARS = 1_000;
@@ -351,10 +359,16 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
     + idSegmentBytes
     + obligationSegmentBytes;
   const includedObligations: ReviewObligationRow[] = [];
+  let obligationBytes = 0;
   for (const row of projectedObligations.rows) {
     const rowBytes = Buffer.byteLength(JSON.stringify(row), "utf8") + 1;
     if (bytes + rowBytes > REVIEW_BUNDLE_MAX_BYTES) break;
+    // #1521: the rows may claim only their own share of the budget, so a
+    // large row set never starves the findings list. The findings are the
+    // review's own content, and no other machine surface carries them.
+    if (obligationBytes + rowBytes > REVIEW_BUNDLE_MAX_OBLIGATION_BYTES) break;
     bytes += rowBytes;
+    obligationBytes += rowBytes;
     includedObligations.push(row);
   }
   const included: ReviewBundleFinding[] = [];
@@ -495,10 +509,9 @@ export function parseReviewBundle(text: string): ReviewBundle | null {
     // that claims a truncation while its total matches the list exactly,
     // contradicts itself and is refused. The published handoff refuses the
     // same contradictions for its id lists (#1538) and the first two for
-    // its item counters.
-    if (total < findings.length) return null;
-    if (truncated === false && total !== findings.length) return null;
-    if (truncated === true && total === findings.length) return null;
+    // its item counters. #1521: the ONE shared rule
+    // (`countersAgreeWithList`) reads all of them.
+    if (!countersAgreeWithList(findings.length, total, truncated)) return null;
   } else if (record.findings_total !== undefined || record.findings_truncated !== undefined) {
     // #1542: a counter with no list to check against is a claim the
     // document cannot back. A skipped or failed run proves no review, and
@@ -546,12 +559,14 @@ export function parseReviewBundle(text: string): ReviewBundle | null {
     ? false
     : record.unresolved_review_obligations_truncated;
   if (typeof obligationTruncated !== "boolean") return null;
-  // The counters must agree with the list: a document that lists more
-  // blocking rows than it counts, or that claims no truncation while its
-  // total disagrees with the list it carries, contradicts itself and is
-  // refused. The published handoff refuses the same contradictions.
-  if (obligationTotal < obligationRows.length) return null;
-  if (obligationTruncated === false && obligationTotal !== obligationRows.length) return null;
+// The counters must agree with the list: a document that lists more
+// blocking rows than it counts, that claims no truncation while its
+// total disagrees with the list it carries, or that claims a truncation
+// while its total matches the list exactly, contradicts itself and is
+// refused. #1521: the SAME shared rule the published handoff and the
+// published `review-obligations/v1` document read — one implementation of
+// "the counters must agree with the list they describe".
+if (!countersAgreeWithList(obligationRows.length, obligationTotal, obligationTruncated)) return null;
   if (record.derived_obligation_state !== undefined) {
     if (!reviewProducing) return null;
     const state = record.derived_obligation_state;

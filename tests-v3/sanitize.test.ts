@@ -38,7 +38,7 @@ test("inline code spans remain verbatim while fenced code is sanitized", () => {
 });
 
 test("reserved markers are removed case-insensitively", () => {
-  assert.equal(RESERVED_MARKER_PATTERNS.length, 5);
+  assert.equal(RESERVED_MARKER_PATTERNS.length, 6);
   assert.equal(stripReservedMarkers("x<!-- ai-pr-review-sha:deadbeef -->y<!-- AI-PR-REVIEW-FINGERPRINT: x -->z"), "xyz");
   // #762: the rejection carry marker is reserved too — model markdown can
   // never smuggle a suppression claim into a published body.
@@ -54,6 +54,13 @@ test("reserved markers are removed case-insensitively", () => {
   assert.equal(stripReservedMarkers("a<!-- AI-PR-REVIEWER-HANDOFF:v1 -->b"), "ab");
   assert.equal(stripReservedMarkers("a<!--ai-pr-reviewer-handoff:v1-->b"), "ab");
   assert.equal(stripReservedMarkers("a<!-- ai-pr-reviewer-handoff : v1 -->b"), "ab");
+  // #1521: the published review-obligations document's anchor is reserved
+  // too — the same rule, so the FIRST obligations block in a published body
+  // is always the action's own container.
+  assert.equal(stripReservedMarkers("a<!-- ai-pr-reviewer-obligations:v1 -->b"), "ab");
+  assert.equal(stripReservedMarkers("a<!-- AI-PR-REVIEWER-OBLIGATIONS:v1 -->b"), "ab");
+  assert.equal(stripReservedMarkers("a<!--ai-pr-reviewer-obligations:v1-->b"), "ab");
+  assert.equal(stripReservedMarkers("a<!-- ai-pr-reviewer-obligations : v1 -->b"), "ab");
   // The action's own metadata marker is a different grammar and stays.
   assert.equal(
     stripReservedMarkers('<!-- ai-pr-reviewer:{"head_sha":"abc"} -->'),

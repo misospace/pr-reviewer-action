@@ -127,8 +127,14 @@ function stripReservedMarkerGrammar(text: string): string {
 /** Every text field goes through this: the reserved marker grammar first (so
  * no action-owned marker can be forged into the container), then redaction
  * (a secret must not survive into a machine artifact), then the caller's
- * cap. */
-function bounded(value: unknown, max: number): string {
+ * cap.
+ *
+ * Exported so the other published machine documents — the
+ * `review-obligations/v1` document — bound their text exactly the same way:
+ * one implementation of the reserved-marker strip, the redaction and the
+ * cap, so two published documents can never treat the same untrusted text
+ * differently. */
+export function boundedPublishedText(value: unknown, max: number): string {
   const text = typeof value === "string" ? value : value === undefined || value === null ? "" : String(value);
   return pyCodepointSlice(redactText(stripReservedMarkerGrammar(text)), max);
 }
@@ -246,14 +252,20 @@ export function publishedDerivedObligationState(value: unknown): PublishedDerive
  * #1521: the shared projection of the blocking obligation rows.
  *
  * ONE implementation, shared with the local `review-bundle/v1` document
- * (`src/publish/bundle.ts` imports it from here), so the published handoff
- * and the local bundle can never disagree about what a blocking row says or
- * how many rows there are. The listing bound is a PARAMETER: the published
+ * (`src/publish/bundle.ts` imports it from here) and with the published
+ * `review-obligations/v1` document (`src/publish/obligations.ts`), so the
+ * three documents can never disagree about what a blocking row says or how
+ * many rows there are. The listing bound is a PARAMETER: the published
  * handoff keeps its 10-row default, while the bundle passes no bound and
  * admits rows against its own byte budget, so the controller's machine
  * surface can name every blocking row the document can carry (#1521
  * review). Both documents list PREFIXES of the same projection, so the
  * handoff's rows are always a prefix of the bundle's.
+ *
+ * The per-row TEXT cap is a parameter too, so the published obligations
+ * document can SQUEEZE every row's text to fit its byte budget without
+ * dropping a row (#1521 review): it passes a smaller cap, the handoff and
+ * the bundle keep the shared default.
  *
  * The projection is deliberately strict:
  * - only the FORCING sources ride (`must_check`, `trusted_base_guidance`) —
@@ -276,9 +288,22 @@ export interface BoundedObligationRows {
   total: number;
 }
 
+/**
+ * #1521: project the run's blocking obligation rows.
+ *
+ * `maxRows` bounds the LISTING (the handoff's own 10-row default; the
+ * published obligations document passes its own publication bound), and
+ * `maxTextChars` bounds each row's TEXT (the shared 300-codepoint default;
+ * the published obligations document passes a smaller cap to squeeze the
+ * text into its byte budget rather than shed a row).
+ *
+ * `total` counts every qualifying blocking row, before the listing bound, so
+ * a shortened list is never passed off as the whole set.
+ */
 export function boundedObligationRows(
   obligations: readonly ReviewObligation[] | undefined,
   maxRows: number = REVIEW_HANDOFF_MAX_OBLIGATIONS,
+  maxTextChars: number = REVIEW_HANDOFF_MAX_OBLIGATION_TEXT_CHARS,
 ): BoundedObligationRows {
   const rows: ReviewObligationRow[] = [];
   const seen = new Set<string>();
@@ -292,7 +317,7 @@ export function boundedObligationRows(
     // a `derived` row is coverage (#1449). None of those ever ride here.
     if (obligation.status !== "unmet") continue;
     if (typeof obligation.id !== "string") continue;
-    const id = bounded(obligation.id.trim(), MAX_ID_LIST_CHARS);
+    const id = boundedPublishedText(obligation.id.trim(), MAX_ID_LIST_CHARS);
     if (id === "" || seen.has(id)) continue;
     seen.add(id);
     total += 1;
@@ -303,7 +328,7 @@ export function boundedObligationRows(
       // The filter above proved it: a riding row is exactly `unmet`.
       status: obligation.status,
       cause: publishedObligationCause(obligation.cause),
-      text: bounded(obligation.text, REVIEW_HANDOFF_MAX_OBLIGATION_TEXT_CHARS),
+      text: boundedPublishedText(obligation.text, maxTextChars),
     });
   }
   return { rows, total };
@@ -443,7 +468,7 @@ function handoffItem(
   // absolute, traversing, or NUL-bearing path proves no anchor and is
   // dropped (`null`), never serialized.
   const path = safePath(record.file)
-    ? bounded(record.file, REVIEW_HANDOFF_MAX_PATH_CHARS)
+    ? boundedPublishedText(record.file, REVIEW_HANDOFF_MAX_PATH_CHARS)
     : null;
   const line = typeof record.line === "number" && Number.isFinite(record.line) ? Math.trunc(record.line) : null;
   const endLine = typeof record.end_line === "number" && Number.isFinite(record.end_line)
@@ -452,16 +477,16 @@ function handoffItem(
   const id = findingIdentityFromRecord(record);
   const suggestion = publishedSuggestion(id, published);
   const agentPrompt = typeof record.agent_prompt === "string" && record.agent_prompt !== ""
-    ? bounded(record.agent_prompt, REVIEW_HANDOFF_MAX_AGENT_PROMPT_CHARS)
+    ? boundedPublishedText(record.agent_prompt, REVIEW_HANDOFF_MAX_AGENT_PROMPT_CHARS)
     : null;
   return {
     id,
     severity,
-    category: bounded(record.category ?? "", REVIEW_HANDOFF_MAX_CATEGORY_CHARS),
+    category: boundedPublishedText(record.category ?? "", REVIEW_HANDOFF_MAX_CATEGORY_CHARS),
     path,
     line,
     ...(endLine !== null ? { end_line: endLine } : {}),
-    message: bounded(record.message ?? "", REVIEW_HANDOFF_MAX_MESSAGE_CHARS),
+    message: boundedPublishedText(record.message ?? "", REVIEW_HANDOFF_MAX_MESSAGE_CHARS),
     ...(suggestion !== null ? { suggestion } : {}),
     ...(agentPrompt !== null ? { agent_prompt: agentPrompt } : {}),
   };
@@ -547,11 +572,11 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
     obligationTruncated: boolean,
   ): string => serializeHandoff({
     schema: REVIEW_HANDOFF_SCHEMA,
-    review_id: bounded(input.reviewId ?? "", REVIEW_HANDOFF_MAX_TOKEN_CHARS),
-    head_sha: bounded(input.headSha, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
-    verdict: bounded(input.verdict, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
-    review_result: bounded(input.reviewResult, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
-    required_checks: bounded(input.requiredChecks, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
+    review_id: boundedPublishedText(input.reviewId ?? "", REVIEW_HANDOFF_MAX_TOKEN_CHARS),
+    head_sha: boundedPublishedText(input.headSha, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
+    verdict: boundedPublishedText(input.verdict, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
+    review_result: boundedPublishedText(input.reviewResult, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
+    required_checks: boundedPublishedText(input.requiredChecks, REVIEW_HANDOFF_MAX_TOKEN_CHARS),
     items,
     items_total: candidates.length,
     items_truncated: items.length < candidates.length,
@@ -655,7 +680,7 @@ function parseHandoffItem(value: unknown): ReviewHandoffItem | null {
  * before #1538) is never a contradiction: the document simply discloses
  * nothing, and nothing is read from it.
  */
-function countersAgreeWithList(listLength: number, total: number | null, truncated: boolean | null): boolean {
+export function countersAgreeWithList(listLength: number, total: number | null, truncated: boolean | null): boolean {
   if (total !== null && total < listLength) return false;
   if (truncated === false && total !== null && total !== listLength) return false;
   if (truncated === true && total !== null && total === listLength) return false;
