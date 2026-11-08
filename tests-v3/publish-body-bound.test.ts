@@ -4,6 +4,7 @@ import {
   buildPublishedBody,
   fitReviewProseToBytes,
   MAX_PUBLISHED_BODY_BYTES,
+  PublishedBodyCeilingError,
   publishReview,
   renderFindingsSummary,
 } from "../src/publish/publish.js";
@@ -188,6 +189,55 @@ test("#1554: prose smaller than the note reserve is omitted entirely (full-omiss
   assert.ok(!body.includes(prose));
   const lastLine = body.split("\n")[body.split("\n").length - 2]!;
   assert.equal(lastLine, OMITTED_NOTE);
+});
+
+test("#1557: action-owned content alone over the ceiling with no prose fails closed instead of publishing", () => {
+  // The corner where nothing is trimmable: empty prose and action-owned
+  // bytes (the never-trimmed tail block here) alone past the ceiling. The
+  // forge would refuse the body; the builder must refuse to build it.
+  const hugeTail = `\n${"y".repeat(MAX_PUBLISHED_BODY_BYTES + 1)}\n`;
+  assert.throws(
+    () => buildPublishedBody({
+      markers: MARKER,
+      handoffBlock: HANDOFF,
+      analysisEngine: "m (openai)",
+      sanitizedMarkdown: "",
+      tailBlock: hugeTail,
+      actionVersion: "test",
+    }),
+    PublishedBodyCeilingError,
+  );
+  // Not tail-specific: any action-owned block can be the overflow source.
+  assert.throws(
+    () => buildPublishedBody({
+      markers: MARKER,
+      handoffBlock: HANDOFF,
+      analysisEngine: "m (openai)",
+      sanitizedMarkdown: "",
+      coverageNotice: "c".repeat(MAX_PUBLISHED_BODY_BYTES + 1),
+      actionVersion: "test",
+    }),
+    PublishedBodyCeilingError,
+  );
+});
+
+test("#1557: action-owned content over the ceiling even with the prose omitted whole fails closed", () => {
+  // A nonempty prose keeps the trim lever alive, but when the fixed bytes
+  // alone (prefix + tail + note) already exceed the ceiling, even the
+  // full-omission variant is over the ceiling — nothing left to trim, so
+  // the guard throws instead of publishing a body the forge refuses.
+  const hugeTail = `\n${"y".repeat(MAX_PUBLISHED_BODY_BYTES + 1)}\n`;
+  assert.throws(
+    () => buildPublishedBody({
+      markers: MARKER,
+      handoffBlock: HANDOFF,
+      analysisEngine: "m (openai)",
+      sanitizedMarkdown: "some prose",
+      tailBlock: hugeTail,
+      actionVersion: "test",
+    }),
+    PublishedBodyCeilingError,
+  );
 });
 
 test("#1554: fitReviewProseToBytes cuts at codepoint boundaries and reports dropped codepoints", () => {
