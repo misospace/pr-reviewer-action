@@ -537,7 +537,7 @@ function unclosedFenceStart(text: string): number {
           closable: false,
         };
       }
-    } else if (open !== null && open.closable) {
+    } else if (open.closable) {
       const current: NonNullable<typeof open> = open;
       const blank = line.trim() === "";
       let intact: boolean;
