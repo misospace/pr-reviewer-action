@@ -1570,7 +1570,7 @@ test("#1566: a term inside a camelCase identifier on one line and the predicate 
   }
 });
 
-test("#1566: term and predicate may sit at most two lines apart, still inside the citation window", () => {
+test("#1566: a nearby predicate only counts when the term line binds an identifier it references", () => {
   const workspace = makeWorkspace();
   try {
     const ledger = ledgerWith([{ id: "req-1", text: SOURCE_SHA_REQUIREMENT, kind: "acceptance" }]);
@@ -1582,25 +1582,106 @@ test("#1566: term and predicate may sit at most two lines apart, still inside th
       reason: "compares",
     }];
 
-    // Gap 2: term line, one padding line, predicate — inside the bound.
-    writeFile(workspace, "src/gap2.ts", [
+    // The blocker's false positive: a copy line carrying the term plus an
+    // UNRELATED comparison two lines away proves nothing. The term line
+    // binds no local identifier, so no split-line link is establishable and
+    // the historical same-line rule stands — fail closed.
+    writeFile(workspace, "src/gap2-unlinked.ts", [
       "sourceSha: ctx.sourceSha,",
       "// padding",
       "if (a !== b) { throw new Error('x'); }",
     ]);
-    assert.equal(validateRequirementTrace(claimAt("src/gap2.ts", 2), ledger, workspace).rows[0]?.disposition, "met");
+    const unlinked = validateRequirementTrace(claimAt("src/gap2-unlinked.ts", 1), ledger, workspace);
+    assert.equal(unlinked.rows[0]?.disposition, "unverifiable");
+    assert.ok(unlinked.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
 
-    // Gap 3: the term-predicate span exceeds the bound — still downgraded
-    // even though both halves sit inside the ±3 citation window.
-    writeFile(workspace, "src/gap3.ts", [
-      "sourceSha: ctx.sourceSha,",
-      "// padding",
+    // A requirement term in a nearby COMMENT binds nothing either: the term
+    // match reads the raw line, but a comment cannot bind an identifier, so
+    // the unrelated predicate stays unverified.
+    writeFile(workspace, "src/gap2-comment.ts", [
+      "// the sourceSha copy lands here before anything else",
       "// padding",
       "if (a !== b) { throw new Error('x'); }",
     ]);
-    const far = validateRequirementTrace(claimAt("src/gap3.ts", 1), ledger, workspace);
-    assert.equal(far.rows[0]?.disposition, "unverifiable");
-    assert.ok(far.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+    const commentTerm = validateRequirementTrace(claimAt("src/gap2-comment.ts", 1), ledger, workspace);
+    assert.equal(commentTerm.rows[0]?.disposition, "unverifiable");
+    assert.ok(commentTerm.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+
+    // Legitimate split-line enforcement: the term line BINDS `openAt` (its
+    // term rides the camelCase identifier in the initializer) and the
+    // predicate two lines away REFERENCES that bound identifier. The throw
+    // message carries no requirement word, so only the binding link can
+    // pass this.
+    const fenceLedger = ledgerWith([{ id: "req-fence", text: "the publish-body fence scan must cut hostile prose at an unclosed fence delimiter before publishing", kind: "acceptance" }]);
+    writeFile(workspace, "src/gap2-linked.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "// padding",
+      "if (openAt >= 0) { throw new Error('x'); }",
+    ]);
+    const linked = validateRequirementTrace([{
+      requirement_id: "req-fence",
+      disposition: "met",
+      enforcement: [{ file: "src/gap2-linked.ts", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the fence cut throws when openAt is non-negative",
+    }], fenceLedger, workspace);
+    assert.equal(linked.rows[0]?.disposition, "met");
+    assert.deepEqual(linked.rows[0]?.notes, []);
+
+    // Beyond the two-line limit: even WITH the binding link, a predicate
+    // three lines from the term line stays unverified.
+    writeFile(workspace, "src/gap3-linked.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "// padding",
+      "// padding",
+      "if (openAt >= 0) { throw new Error('x'); }",
+    ]);
+    const tooFar = validateRequirementTrace([{
+      requirement_id: "req-fence",
+      disposition: "met",
+      enforcement: [{ file: "src/gap3-linked.ts", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the fence cut throws when openAt is non-negative",
+    }], fenceLedger, workspace);
+    assert.equal(tooFar.rows[0]?.disposition, "unverifiable");
+    assert.ok(tooFar.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1566: the split-line link survives destructuring bindings and rejects a same-name-but-unbound predicate", () => {
+  const workspace = makeWorkspace();
+  try {
+    const fenceLedger = ledgerWith([{ id: "req-fence", text: "the publish-body fence scan must cut hostile prose at an unclosed fence delimiter before publishing", kind: "acceptance" }]);
+    const fenceClaimAt = (file: string, line: number) => [{
+      requirement_id: "req-fence",
+      disposition: "met",
+      enforcement: [{ file, line }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the fence cut throws when openAt is non-negative",
+    }];
+
+    // Destructuring: the bound names are the binding targets (rename and
+    // default included), and the predicate references one of them.
+    writeFile(workspace, "src/destructure.ts", [
+      "const { fenceStart: openAt, fallback = -1 } = scanProse(markdown);",
+      "if (openAt >= 0) { throw new Error('unclosed fence'); }",
+    ]);
+    const destructured = validateRequirementTrace(fenceClaimAt("src/destructure.ts", 2), fenceLedger, workspace);
+    assert.equal(destructured.rows[0]?.disposition, "met");
+
+    // The binding link requires the REFERENCE: the term line binds
+    // `openAt`, but the nearby predicate neither carries the term on its
+    // own line nor references any bound identifier — co-occurrence alone
+    // stays insufficient.
+    writeFile(workspace, "src/unbound.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "// padding",
+      "if (a !== b) { throw new Error('x'); }",
+    ]);
+    const unbound = validateRequirementTrace(fenceClaimAt("src/unbound.ts", 1), fenceLedger, workspace);
+    assert.equal(unbound.rows[0]?.disposition, "unverifiable");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

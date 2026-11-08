@@ -914,7 +914,15 @@ function citedLinePredicateFound(locations: readonly TraceLocation[], cache: Fil
  *
  * - the term line and the predicate line may differ by at most
  *   `TERM_PREDICATE_MAX_LINE_GAP` lines (both still inside the citation
- *   window);
+ *   window) — but ONLY when the two halves are DETERMINISTICALLY LINKED:
+ *   the term line must bind a local identifier (a `const`/`let`/`var`
+ *   declaration, single-level destructuring included) that the predicate
+ *   line itself references, e.g. `const openAt = unclosedFenceStart(text);`
+ *   followed by `if (openAt >= 0)`. A term-bearing line that binds nothing
+ *   (an object-property copy, a comment, a bare expression) can never link
+ *   a nearby predicate, so the historical same-line rule stands for it —
+ *   fail closed. This is what keeps an unrelated comparison two lines from
+ *   a copy line from certifying `met` (#1566 blocker);
  * - a term also matches as a camelCase/snake_case identifier segment
  *   (`unclosedFenceStart` carries "fence"), via `termMatchRegExp`.
  *
@@ -969,6 +977,35 @@ function termMatchRegExp(terms: readonly string[]): RegExp {
   return new RegExp(`\\b(?:${alternatives.join("|")})\\b`, "i");
 }
 
+/** #1566 blocker: the local identifiers one source line BINDS — plain
+ * `const`/`let`/`var` declarations and single-level destructuring lists
+ * (`const { a, b: c } =`, `const [x, y = 1] =`; the binding name survives
+ * both a rename (`a: c` → `c`) and a default (`y = 1` → `y`). Everything
+ * else binds nothing: an object-property entry (`sourceSha: ctx.sourceSha`),
+ * a comment, a bare expression. The split-line predicate rule links a
+ * predicate to a DECLARATION whose name the predicate uses; an
+ * unestablishable link fails closed to the historical same-line rule. */
+const MAX_BOUND_IDENTIFIERS = 8;
+const BOUND_IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
+
+function boundIdentifiers(line: string): string[] {
+  const out: string[] = [];
+  for (const match of line.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
+    if (!out.includes(match[1]!)) out.push(match[1]!);
+    if (out.length >= MAX_BOUND_IDENTIFIERS) return out;
+  }
+  for (const match of line.matchAll(/\b(?:const|let|var)\s*(?:\{([^}]*)\}|\[([^\]]*)\])\s*=(?!=)/g)) {
+    const list = match[1] ?? match[2] ?? "";
+    for (const part of list.split(",")) {
+      if (out.length >= MAX_BOUND_IDENTIFIERS) return out;
+      const target = part.includes(":") ? part.slice(part.indexOf(":") + 1) : part;
+      const name = target.split("=")[0]!.trim();
+      if (BOUND_IDENTIFIER_RE.test(name) && !out.includes(name)) out.push(name);
+    }
+  }
+  return out;
+}
+
 export function enforcementPredicateFound(
   locations: readonly TraceLocation[],
   terms: readonly string[],
@@ -987,9 +1024,31 @@ export function enforcementPredicateFound(
       if (termRe.test(rawLine) || termRe.test(splitIdentifierSegments(rawLine))) termLineIndexes.push(index);
     }
     if (termLineIndexes.length === 0) continue;
+    // Bindings are per term line, computed once: the split-line link below
+    // is the only consumer.
+    const boundByTermLine = new Map<number, string[]>();
+    for (const termIndex of termLineIndexes) {
+      const bound = boundIdentifiers(window[termIndex]!);
+      if (bound.length > 0) boundByTermLine.set(termIndex, bound);
+    }
     for (const [index, signal] of windowSignals.entries()) {
       if (signal !== true) continue;
-      if (termLineIndexes.some((termIndex) => Math.abs(termIndex - index) <= TERM_PREDICATE_MAX_LINE_GAP)) return true;
+      // Historical rule: the term and the predicate on the SAME line.
+      if (termLineIndexes.includes(index)) return true;
+      // #1566 blocker: a NEARBY predicate only counts when the term line
+      // binds a local identifier this predicate line references — a
+      // deterministic link between the requirement-bearing expression and
+      // the comparison. Co-occurrence alone proves nothing: an unrelated
+      // comparison two lines from a term-bearing copy line stays
+      // `unverifiable` (fail closed).
+      const predicateLine = window[index]!;
+      const linked = termLineIndexes.some((termIndex) => {
+        if (Math.abs(termIndex - index) > TERM_PREDICATE_MAX_LINE_GAP) return false;
+        const bound = boundByTermLine.get(termIndex);
+        if (bound === undefined) return false;
+        return bound.some((name) => new RegExp(`\\b${escapeRegExp(name)}\\b`).test(predicateLine));
+      });
+      if (linked) return true;
     }
   }
   return false;
