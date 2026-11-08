@@ -366,25 +366,24 @@ export async function computeReReviewEvidencePlan(
         degradedReason = "blob-digest-mismatch";
         break;
       }
-      const priorSymlink = priorEntry.startsWith("symlink:");
-      const headSymlink = headEntry.startsWith("symlink:");
-      const priorBlob = !priorEntry.startsWith("non-blob:") && !priorSymlink;
-      const headBlob = !headEntry.startsWith("non-blob:") && !headSymlink;
-      if (priorBlob !== headBlob) {
-        // A path whose blob-ness (including symlink-ness) differs between
-        // the heads is a typechange the delta failed to report (`T` would
-        // have forced it fresh) — the delta is contradicted, reuse is
-        // refused entirely, never narrowed.
+      const kindOf = (entry: string): "regular" | "symlink" | "non-blob" =>
+        entry.startsWith("non-blob:") ? "non-blob" : entry.startsWith("symlink:") ? "symlink" : "regular";
+      const priorKind = kindOf(priorEntry);
+      const headKind = kindOf(headEntry);
+      if (priorKind !== headKind) {
+        // A path whose entry kind differs between the heads is a typechange
+        // the delta failed to report (`T` would have forced it fresh) — the
+        // delta is contradicted, reuse is refused entirely, never narrowed.
         degradedReason = "blob-digest-mismatch";
         break;
       }
-      if (!priorBlob) continue; // non-blob at both heads (e.g. a submodule), or a symlink at both heads whose dereferenced target may still have changed: nothing to vouch for, drop quietly
       if (priorEntry !== headEntry) {
-        // A differing blob contradicts the delta this plan was built from;
-        // reuse is refused entirely, never narrowed.
+        // A differing oid, mode, or pointer contradicts the delta this plan
+        // was built from; reuse is refused entirely, never narrowed.
         degradedReason = "blob-digest-mismatch";
         break;
       }
+      if (priorKind !== "regular") continue; // symlink or non-blob (e.g. a submodule) at both heads: the symlink's dereferenced target may still have changed, so there is nothing to vouch for — drop quietly
       seeded.push(path);
       verifiedBlobs += 1;
     }

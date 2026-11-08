@@ -365,13 +365,43 @@ test("#1516: a symlink-to-regular typechange the delta failed to report refuses 
     git(`commit -q -m "prior"`);
     const shaPrior = execSync("git rev-parse HEAD", { cwd: root }).toString().trim();
     rmSync(join(root, "link"));
-    writeFileSync(join(root, "link"), "now a regular file\n");
+    // The replacement regular file's bytes are exactly the target pathname —
+    // the same bytes the symlink's blob stored — so its blob OID is identical
+    // to the symlink's at the prior head. Pre-fix this seeded as
+    // "byte-identical"; the kind check must refuse it instead.
+    writeFileSync(join(root, "link"), "target.txt");
     git("add -A");
     git(`commit -q -m "typechange"`);
     const shaHead = execSync("git rev-parse HEAD", { cwd: root }).toString().trim();
     // The overridden delta claims nothing changed, hiding the typechange:
     // a path that is a symlink at one head and a regular blob at the other
     // is a contradiction — reuse is refused, never narrowed.
+    const delta = await computeReReviewDelta(root, shaPrior, shaHead);
+    const plan = await computeReReviewEvidencePlan(
+      root, delta, { context: makeRelated() }, { overrideDiffStatus: "" },
+    );
+    assert.equal(plan.degradedReason, "blob-digest-mismatch");
+    assert.deepEqual([...plan.seeded], []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#1516: a mode-only change the delta failed to report refuses reuse entirely", async () => {
+  const root = mkdtempSync(join(tmpdir(), "v3-rereview-evidence-mode-"));
+  const git = (args: string): void => { execSync(`${GIT} ${args}`, { cwd: root, stdio: "ignore" }); };
+  try {
+    git("init -q -b main");
+    writeFileSync(join(root, "script.sh"), "echo hi\n");
+    writeFileSync(join(root, "keep.txt"), "same\n");
+    git("add -A");
+    git(`commit -q -m "prior"`);
+    const shaPrior = execSync("git rev-parse HEAD", { cwd: root }).toString().trim();
+    execSync("chmod +x script.sh", { cwd: root, stdio: "ignore" });
+    git("add -A");
+    git(`commit -q -m "make script executable"`);
+    const shaHead = execSync("git rev-parse HEAD", { cwd: root }).toString().trim();
+    // The overridden delta claims nothing changed, hiding the 100644→100755
+    // mode flip: the contents are byte-identical but the tree entries
+    // differ, so the digest pass must refuse, not silently seed.
     const delta = await computeReReviewDelta(root, shaPrior, shaHead);
     const plan = await computeReReviewEvidencePlan(
       root, delta, { context: makeRelated() }, { overrideDiffStatus: "" },
