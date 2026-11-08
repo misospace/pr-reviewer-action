@@ -266,8 +266,11 @@ pass therefore:
   distributed must cite one enforcement location **and one matching test** in each named
   seam.
 
-Repair eligibility is unchanged (missing ids only); a repaired claim is validated by the
-same distributed rule.
+Repair eligibility (#1552) covers missing ids AND rows the validator left
+`unverifiable` (present-but-unverified); a repaired claim is validated by the
+same distributed rule, and the replacement-aware merge (`mergeTraceRepairClaims`)
+confines any in-place replacement to that validated target set — a stored
+`unmet` row is never replaced, and ids outside the set are never touched.
 
 ## Fail-soft vs fail-closed
 

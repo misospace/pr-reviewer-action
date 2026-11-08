@@ -32,9 +32,11 @@ import type { ReviewArtifact } from "../src/enforcement/artifact.js";
 // re-requests the WHOLE verdict. Instead a single trace-only repair turn
 // asks the SAME conversation for a `requirement_coverage` payload covering
 // exactly the probe's unresolved ids, and those claims are merged into the
-// standing accepted-verdict artifact with `mergeTraceClaims` semantics (an
-// id that already carries a claim is never touched). Every failure path
-// leaves the standing verdict and its artifact byte-for-byte intact.
+// standing accepted-verdict artifact with the #1552
+// `mergeTraceRepairClaims` semantics (an id with no row is appended; a row
+// still marked `unverifiable` is replaced in place; a settled row is never
+// touched). Every failure path leaves the standing verdict and its artifact
+// byte-for-byte intact.
 
 function workspace(): { root: string; deps: (overrides?: Partial<HarnessDeps>) => HarnessDeps } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "trace-only-repair-"));
@@ -186,6 +188,10 @@ test("#1503: the happy path — one bounded repair round, then a trace-only turn
     tool_calls: 1,
     claims_merged: 1,
     trace_claims_merged: true,
+    // #1552: the remaining DEDICATED repair allowance after the round
+    // (base remainder 23 + the 4-call trace-closure extra, minus the 1
+    // call the round issued).
+    repair_requests_remaining: 26,
   });
   // The standing verdict stays ACCEPTED and is never re-emitted.
   assert.equal(result.native_loop_verdict_produced, true);
@@ -243,6 +249,9 @@ test("#1503: trace repair still runs after the exploration call ceiling is exhau
     tool_calls: 1,
     claims_merged: 2,
     trace_claims_merged: true,
+    // #1552: the 1-request exploration ceiling left 0 + the 4-call extra,
+    // minus the 1 call the round issued.
+    repair_requests_remaining: 3,
   });
   // Both raw ids were filled in the standing artifact.
   const coverage = standingVerdictBody(root).requirement_coverage as Array<Record<string, unknown>>;
@@ -295,6 +304,9 @@ test("#1503: trace repair gets its bounded rounds even after exploration hits ma
     tool_calls: 1,
     claims_merged: 1,
     trace_claims_merged: true,
+    // #1552: base remainder 22 (two executed exploration calls) + 4, minus
+    // the 1 call the round issued.
+    repair_requests_remaining: 25,
   });
   // The deterministic coverage is recomputed over the combined call log: the
   // repair closed the notes.md gap, other.ts stays honestly partial.
@@ -343,11 +355,12 @@ test("#1503: an exhausted wall-clock budget leaves the run as a 3-field skipped_
   assert.equal(result.native_loop_verdict_status, "accepted");
 });
 
-test("#1503: a repair round that issues no tool call is skipped_no_evidence and never attempts the trace turn", async () => {
+test("#1552: a repair round that stops on no-tool-calls still earns the trace-only turn (#1539 shape)", async () => {
   const { root, deps } = workspace();
   seedWorkspace(root);
   const scripted = baseScripted([
     openAiText("I cannot verify requirement R1 from memory alone."),
+    tracePayload(["R1"]),
   ]);
   let calls = 0;
   const result = freshResult();
@@ -358,22 +371,81 @@ test("#1503: a repair round that issues no tool call is skipped_no_evidence and 
     }),
   );
   assert.equal(handled, true);
-  assert.equal(calls, 4); // loop(2) + verdict(1) + repair(1 text-only) ; NO trace turn
+  assert.equal(calls, 5); // loop(2) + verdict(1) + repair(1 text-only) + trace turn(1)
   assert.deepEqual(result.trace_repair_continuation, {
     attempted: true,
-    outcome: "skipped_no_evidence",
+    outcome: "continued_trace_only",
     unresolved_ids: ["R1"],
     stop_reason: "no-tool-calls",
     rounds: 1,
     tool_calls: 0,
-    claims_merged: 0,
-    trace_claims_merged: false,
+    claims_merged: 1,
+    trace_claims_merged: true,
+    // #1552: the round issued nothing, so the full allowance (base remainder
+    // 23 + the 4-call trace-closure extra) remains.
+    repair_requests_remaining: 27,
   });
-  // The standing verdict and its artifact are byte-intact (no coverage added).
+  // The zero-call repair round's stop is preserved, but the evidence the
+  // EARLIER loop rounds gathered justifies the trace-only turn: the gap the
+  // #1539 run left behind is now filled in the standing artifact.
   const body = standingVerdictBody(root);
   assert.equal(body.review_markdown, "## Review\noriginal");
-  assert.equal(body.requirement_coverage, undefined);
+  const coverage = body.requirement_coverage as Array<Record<string, unknown>>;
+  assert.equal(coverage.length, 1);
+  assert.equal(coverage[0]!.requirement_id, "R1");
+  assert.equal(coverage[0]!.disposition, "met");
 });
+
+test("#1552: the trace-only turn replaces a present-but-unverifiable row in place", async () => {
+  const { root, deps } = workspace();
+  seedWorkspace(root);
+  // The verdict ALREADY carries an unverifiable row for R1 (the #1539 shape:
+  // the reviewer traced it but its claim could not be verified). The repair
+  // round gathers the missing evidence; the trace-only turn re-derives the
+  // claim — and the merge REPLACES the unverifiable row instead of dropping
+  // the fresh claim.
+  const seededVerdict = JSON.stringify({
+    verdict: "approve",
+    review_markdown: "## Review\noriginal",
+    findings: [],
+    requirement_coverage: [
+      { requirement_id: "R1", disposition: "unverifiable", reason: "claim could not be verified from the gathered evidence" },
+    ],
+  });
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    openAiText(seededVerdict), // verdict turn (accepted)
+    openAiCall("c2", "read_file", '{"path":"notes.md"}'),
+    openAiText("repair round done"),
+    tracePayload(["R1"]),
+  ];
+  let calls = 0;
+  const result = freshResult();
+  const handled = await runNativeLoop(
+    loopInput(deps({ transport: async () => scripted[calls++], env: { SYSTEM_PROMPT: "You are the reviewer." } }), {
+      result,
+      traceGapProbe: async () => ({ instruction: "Verify requirement R1 now.", unresolvedIds: ["R1"] }),
+    }),
+  );
+  assert.equal(handled, true);
+  assert.equal(result.trace_repair_continuation?.outcome, "continued");
+  assert.equal(result.trace_repair_continuation?.claims_merged, 1, "the replacement counts as merged");
+  const body = standingVerdictBody(root);
+  const coverage = body.requirement_coverage as Array<Record<string, unknown>>;
+  assert.equal(coverage.length, 1, "replaced in place — no duplicate row");
+  assert.equal(coverage[0]!.disposition, "met");
+  assert.equal(coverage[0]!.requirement_id, "R1");
+});
+
+// The wire-UNSAFE tail (a standalone-user message last, no open
+// tool_result batch) is not reachable through runNativeLoop today — a
+// zero-tool-call main loop degrades before the verdict turn, and every
+// tool-call round leaves an open tool_result batch that text-only rounds do
+// not close (no assistant event is recorded for them). The gate's
+// `wire_unsafe` branch is structural defense for future conversation shapes
+// and is pinned by the `appendingUserWouldBeAdjacent` unit tests in
+// conversation.test.ts.
 
 test("#1503: a repair round that dies on a request error is skipped_refresh_failed, not continued", async () => {
   const { root, deps } = workspace();
@@ -405,6 +477,9 @@ test("#1503: a repair round that dies on a request error is skipped_refresh_fail
     tool_calls: 0,
     claims_merged: 0,
     trace_claims_merged: false,
+    // #1552: the round died on its first request — nothing issued, so the
+    // full allowance (23 + 4) remains.
+    repair_requests_remaining: 27,
   });
   // The standing verdict is untouched.
   assert.equal(result.native_loop_verdict_status, "accepted");
@@ -438,6 +513,8 @@ test("#1503: a malformed trace-only response keeps the standing verdict and merg
     tool_calls: 1,
     claims_merged: 0,
     trace_claims_merged: false,
+    // #1552: base remainder 23 + 4, minus the 1 call the round issued.
+    repair_requests_remaining: 26,
   });
   // The evidence folded in (the repair round ran) but nothing was merged.
   assert.equal((result.tool_calls as unknown[]).length, 2);
@@ -662,23 +739,43 @@ test("mergeTraceClaimsIntoVerdictEnvelope: splices claims into an OpenAI verdict
   assert.ok(String(out!.content).includes("R1"));
 });
 
-test("mergeTraceClaimsIntoVerdictEnvelope: never overwrites an id that already carries a claim", () => {
+test("mergeTraceClaimsIntoVerdictEnvelope: never overwrites a settled id; #1552 replaces a targeted unverifiable one", () => {
   const existing = JSON.stringify({
     verdict: "approve",
     review_markdown: "## Review",
     findings: [],
     requirement_coverage: [
       { requirement_id: "R1", disposition: "met", enforcement: [{ file: "a.ts", line: 5 }], test: [{ file: "t.ts", line: 1 }], reason: "original" },
+      { requirement_id: "R3", disposition: "unverifiable", reason: "could not verify" },
     ],
   });
-  const out = mergeTraceClaimsIntoVerdictEnvelope(openAiEnvelope(existing), [claim("R1", { reason: "forged" }), claim("R2")]);
+  // allowedIds is the validator-derived target set: R2 was missing and R3 is
+  // validator-unverifiable; R1 is settled and NOT in the set.
+  const out = mergeTraceClaimsIntoVerdictEnvelope(
+    openAiEnvelope(existing),
+    [claim("R1", { reason: "forged" }), claim("R2"), claim("R3", { reason: "now verified" })],
+    [],
+    new Set(["R2", "R3"]),
+  );
   assert.ok(out !== null);
-  assert.equal(out!.merged, 1); // only R2 is new
+  assert.equal(out!.merged, 2); // R2 appended + R3 replaced (a pure replacement would read as 0 by length)
   const message = (out!.envelope.choices as Array<Record<string, unknown>>)[0]!.message as Record<string, unknown>;
   const body = JSON.parse(String(message.content));
   const byId = Object.fromEntries((body.requirement_coverage as Array<Record<string, unknown>>).map((c) => [c.requirement_id, c]));
-  assert.equal(byId["R1"]!.reason, "original"); // untouched
-  assert.equal(byId["R2"]!.reason, "cited");
+  assert.equal(byId["R1"]!.reason, "original"); // settled met row untouched
+  assert.equal(byId["R2"]!.reason, "cited"); // appended
+  assert.equal(byId["R3"]!.reason, "now verified"); // unverifiable row replaced in place
+  assert.equal(byId["R3"]!.disposition, "met");
+  // Without an allowed set the merge is append-only: R3 stays as it was.
+  const appendOnly = mergeTraceClaimsIntoVerdictEnvelope(
+    openAiEnvelope(existing),
+    [claim("R2"), claim("R3", { reason: "now verified" })],
+  );
+  assert.ok(appendOnly !== null);
+  assert.equal(appendOnly!.merged, 1);
+  const appendOnlyBody = JSON.parse(String(((appendOnly!.envelope.choices as Array<Record<string, unknown>>)[0]!.message as Record<string, unknown>).content));
+  const appendOnlyById = Object.fromEntries((appendOnlyBody.requirement_coverage as Array<Record<string, unknown>>).map((c: Record<string, unknown>) => [c.requirement_id, c]));
+  assert.equal(appendOnlyById["R3"]!.reason, "could not verify");
 });
 
 test("mergeTraceClaimsIntoVerdictEnvelope: a non-JSON verdict body is left byte-for-byte untouched", () => {

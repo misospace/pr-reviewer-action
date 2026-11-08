@@ -4536,6 +4536,112 @@ test("#959: a verdict with no trace claim at all gets one bounded repair pass an
   }
 });
 
+test("#1552: the standalone repair pass targets present-but-unverifiable rows, not just missing ids", async () => {
+  const repairRequests: string[] = [];
+  const server = await startMockServer((_req, body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    const text = String(body);
+    if (text.includes("Requirements to trace:")) {
+      repairRequests.push(text);
+      const reqId = /req-[0-9a-f]{12}/.exec(text)?.[0] ?? "";
+      res.end(verdictBody({
+        requirement_coverage: [{
+          requirement_id: reqId,
+          disposition: "met",
+          enforcement: [{ file: "src/context-resolution.ts", line: 2 }],
+          test: [{ file: "tests/context-resolution.test.ts", line: 1 }],
+          reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
+        }],
+      }));
+      return;
+    }
+    // Primary review verdict: the row EXISTS but its claim is unverifiable
+    // (bare disposition, no reason) — the #1539 shape the old missing-only
+    // targeting left stranded with `no_missing_ids`.
+    res.end(verdictBody({
+      ...baseVerdict(),
+      requirement_coverage: [{
+        requirement_id: /req-[0-9a-f]{12}/.exec(String(body))?.[0] ?? "",
+        disposition: "unverifiable",
+      }],
+    }));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    mkdirSync(join(runDir, "src"), { recursive: true });
+    mkdirSync(join(runDir, "tests"), { recursive: true });
+    writeFileSync(
+      join(runDir, "src", "context-resolution.ts"),
+      [
+        "export function resolveContext(ctx, record) {",
+        "  if (record.sourceSha !== ctx.sourceSha) {",
+        "    throw new Error('source sha mismatch');",
+        "  }",
+        "  return record;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(join(runDir, "tests", "context-resolution.test.ts"), "test('placeholder', () => {});\n");
+    const result = await runReview({
+      env: { GITHUB_OUTPUT: join(runDir, "gh-output.txt") },
+      inputs: {
+        "github-token": "tok",
+        repo: "o/r",
+        "pr-number": "7",
+        "ai-base-url": server.url,
+        "ai-model": "m",
+        "ai-stream": "false",
+        "ai-api-key": "k",
+        "ci-status-check": "false",
+        "requirement-trace": "true",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: requirementTracePlatform(),
+      persistArtifacts: true,
+      quiet: true,
+    });
+    assert.equal(repairRequests.length, 1, "the unverifiable row earns the bounded repair pass");
+    const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
+      rows: Array<{ disposition: string; notes: string[] }>;
+      incomplete: boolean;
+    };
+    assert.equal(trace.rows.length, 1);
+    assert.equal(trace.rows[0]!.disposition, "met", "the fresh claim replaced the unverifiable row");
+    assert.deepEqual(trace.rows[0]!.notes, []);
+    assert.equal(trace.incomplete, false);
+    assert.notEqual(result.outputs.requiredChecks, "incomplete");
+    const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
+      status: string; claims: number; rows_merged: number; missing_ids: string[]; targeted_ids: string[]; targeted_row_states: Record<string, string>;
+    };
+    assert.equal(repairRecord.status, "ok");
+    assert.equal(repairRecord.claims, 1);
+    assert.equal(repairRecord.rows_merged, 1, "the replacement is counted, not just the parsed claim");
+    assert.equal(repairRecord.missing_ids.length, 0, "the row was never missing — it was present-but-unverifiable");
+    assert.equal(repairRecord.targeted_ids.length, 1);
+    assert.deepEqual(repairRecord.targeted_row_states, {
+      [repairRecord.targeted_ids[0]!]: "insufficient_claim",
+    });
+    // #1044: the persisted summary carries the repair states too.
+    const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
+      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[]; targeted_row_states?: Record<string, string>; rows_merged?: number };
+    };
+    assert.equal(persisted.requirement_trace_repair?.attempted, true);
+    assert.equal(persisted.requirement_trace_repair?.outcome, "merged");
+    assert.equal(persisted.requirement_trace_repair?.claims, 1);
+    assert.equal(persisted.requirement_trace_repair?.rows_merged, 1);
+    assert.deepEqual(persisted.requirement_trace_repair?.missing_ids, []);
+    assert.deepEqual(
+      persisted.requirement_trace_repair?.targeted_row_states,
+      { [repairRecord.targeted_ids[0]!]: "insufficient_claim" },
+    );
+  } finally {
+    await server.close();
+    cleanup();
+  }
+});
+
 test("#959: when the repair pass also yields nothing, the section says so instead of implying no enforcement exists", async () => {
   let repairAttempts = 0;
   const server = await startMockServer((_req, body, res) => {

@@ -43,7 +43,7 @@ import { reframeForCorpus, renderRepoMapMarkdown, repoMapFromArtifact, trustFram
 import { parseVerdictResponse } from "../model/verdict.js";
 import { VerdictParseFailure } from "../model/types.js";
 import { extractResponseText } from "../specialists/wire.js";
-import { mergeTraceClaims } from "../enforcement/requirement-trace.js";
+import { mergeTraceRepairClaims } from "../enforcement/requirement-trace.js";
 import { buildTraceOnlyRepairMessage, parseTraceRepairResponse } from "../requirements/trace-repair.js";
 import { raisedCompletionBudget } from "../model/call.js";
 import { AI_MAX_TOKENS_DEFAULT } from "../config/contract.js";
@@ -71,10 +71,10 @@ import { resolveDerivedObligations, type DerivedObligationRow } from "../enforce
 import { readTracePlan, tracePlanSection, traceAdmissionTokens, parseTracePlanRow, TRACE_PLAN_ARTIFACT, TRACE_PLAN_CANDIDATES_ARTIFACT, TRACE_PLAN_VERSION, TRACE_EVIDENCE_TOOLS, type TracePlanRow } from "../requirements/trace-plan.js";
 import { authorIntentSection } from "../context/author-intent.js";
 import {
-  DEPENDENCY_EVIDENCE_OBLIGATIONS,
-  DEPENDENCY_EVIDENCE_RESERVE,
-  STOP_BUDGET,
-  STOP_REQUEST_ERROR,
+DEPENDENCY_EVIDENCE_OBLIGATIONS,
+DEPENDENCY_EVIDENCE_RESERVE,
+STOP_BUDGET,
+STOP_REQUEST_ERROR,
   STOP_WALL_CLOCK,
   STOP_WALL_CLOCK_RESERVE,
   adaptiveLoopBudgets,
@@ -806,13 +806,26 @@ function joinedCompletionText(content: unknown, topLevel: boolean): string | nul
  * merged requirement coverage. Strict JSON first; a markdown-fenced body is
  * tolerated exactly as the verdict parser tolerates it. Anything else —
  * non-object payloads, exotic decodes — returns null so the caller leaves
- * the standing artifact byte-for-byte untouched. Only ids that carried NO
- * claim are appended (`mergeTraceClaims` semantics: an existing claim, even
- * one with unusable locations, is never overwritten); every other field of
- * the verdict object is carried through the JSON round-trip unchanged. */
+ * the standing artifact byte-for-byte untouched. #1552: the merge is the
+ * replacement-aware `mergeTraceRepairClaims` — ids with NO row are appended,
+ * and an existing row inside `allowedIds` whose stored disposition is
+ * `unverifiable`, `met` or `not_applicable` is replaced in place (inside the
+ * validator-derived target set those stored states are exactly the invalid
+ * coverage the repair targets; a stored `unmet` row and rows outside the set
+ * are never overwritten). The merged count is
+ * `appended + replaced`: a pure replacement leaves the coverage length
+ * unchanged, so the historical length-delta count would report 0 and refuse
+ * the very merge #1539 needed. Every other field of the verdict object is
+ * carried through the JSON round-trip unchanged. `allowedIds` (#1552) is the
+ * validator-derived target set the claims were requested for: replacement is
+ * confined to it (an existing row whose stored disposition is `unverifiable`,
+ * `met` or `not_applicable` inside the set is replaced in place — inside the
+ * set a `met`/`not_applicable` row is one the validator downgraded); omitted,
+ * the merge stays append-only. */
 function mergedVerdictContent(
   text: string,
   claims: readonly unknown[],
+  allowedIds?: ReadonlySet<string>,
 ): { text: string; merged: number } | null {
   const decode = (body: string): unknown => {
     try {
@@ -831,10 +844,10 @@ function mergedVerdictContent(
   }
   if (!isEnvelopeRecord(parsed)) return null;
   const coverage = parsed.requirement_coverage;
-  const mergedList = mergeTraceClaims(coverage, claims);
-  const merged = mergedList.length - (Array.isArray(coverage) ? coverage.length : 0);
+  const merge = mergeTraceRepairClaims(coverage, claims, allowedIds);
+  const merged = merge.appended + merge.replaced;
   if (merged <= 0) return { text, merged: 0 };
-  return { text: JSON.stringify({ ...parsed, requirement_coverage: mergedList }), merged };
+  return { text: JSON.stringify({ ...parsed, requirement_coverage: merge.coverage }), merged };
 }
 
 /** #1503: merge trace-only repair claims into the persisted accepted-verdict
@@ -851,11 +864,18 @@ function mergedVerdictContent(
  * credential-indistinguishable prose the acceptance gate deliberately kept).
  * The returned `content` is the (new or carried) joined completion text, so
  * the caller can run the reuse-side content gate over the merged envelope
- * before rewriting the artifact. */
+ * before rewriting the artifact. #1552: the merge is replacement-aware —
+ * ids with no row are appended and, inside `allowedIds` (the validator-derived
+ * target set the claims were requested for), a row the validator left
+ * `unverifiable` is replaced in place even when its stored disposition says
+ * `met` (a downgrade); outside the set, and with no `allowedIds` at all, the
+ * merge is append-only. `merged` counts appended + replaced ids, so a pure
+ * replacement reports > 0. */
 export function mergeTraceClaimsIntoVerdictEnvelope(
   envelope: unknown,
   claims: readonly unknown[],
   secrets: readonly (string | null | undefined)[] = [],
+  allowedIds?: ReadonlySet<string>,
 ): { envelope: Record<string, unknown>; merged: number; content: string } | null {
   if (!isEnvelopeRecord(envelope)) return null;
   const safeClaims = claims.map((claim) => maskKnownSecretsDeep(claim, secrets));
@@ -866,7 +886,7 @@ export function mergeTraceClaimsIntoVerdictEnvelope(
     if (!("content" in message)) return null;
     const text = joinedCompletionText(message.content, false);
     if (text === null) return null;
-    const replaced = mergedVerdictContent(text, safeClaims);
+    const replaced = mergedVerdictContent(text, safeClaims, allowedIds);
     if (replaced === null) return null;
     if (replaced.merged === 0) return { envelope, merged: 0, content: replaced.text };
     // A plain string re-enters `extractContent`'s string branch — parse-
@@ -881,7 +901,7 @@ export function mergeTraceClaimsIntoVerdictEnvelope(
   const content = envelope.content;
   const text = joinedCompletionText(content, true);
   if (text === null) return null;
-  const replaced = mergedVerdictContent(text, safeClaims);
+  const replaced = mergedVerdictContent(text, safeClaims, allowedIds);
   if (replaced === null) return null;
   if (replaced.merged === 0) return { envelope, merged: 0, content: replaced.text };
   const nextContent = typeof content === "string"
@@ -2173,7 +2193,13 @@ export type HarnessResult = Record<string, unknown> & {
    * snake_case: persisted verbatim in the harness artifact. */
   trace_repair_continuation?: {
     attempted: boolean;
-    outcome: "continued" | "skipped_no_budget" | "skipped_probe_error" | "skipped_refresh_failed" | "skipped_no_evidence";
+    /** #1552: `continued_trace_only` marks a repair round that executed no
+     * tool call but whose trace-only serialization turn still ran against the
+     * conversation's already-gathered evidence (the #1539 shape);
+     * `skipped_wire_unsafe` marks a round whose trace instruction would have
+     * rendered as an adjacent user turn. The historical `skipped_no_evidence`
+     * value can appear only in artifacts written before #1552. */
+    outcome: "continued" | "continued_trace_only" | "skipped_no_budget" | "skipped_probe_error" | "skipped_refresh_failed" | "skipped_no_evidence" | "skipped_wire_unsafe";
     unresolved_ids: string[];
     stop_reason?: string;
     rounds?: number;
@@ -2186,6 +2212,15 @@ export type HarnessResult = Record<string, unknown> & {
     /** #1503: `claims_merged > 0` — the artifact was rewritten with the
      * merged trace rows. */
     trace_claims_merged?: boolean;
+    /** #1552: the DEDICATED repair allowance (base remainder + bounded
+     * trace-closure extra) that remained after the round — present on every
+     * record that describes a completed repair round. */
+    repair_requests_remaining?: number;
+    /** #1552: why the trace-only turn was NOT attempted when targets
+     * existed — `wire_unsafe` (the conversation tail would make the
+     * instruction an adjacent user turn). Absent whenever the turn was
+     * attempted or no targets existed. */
+    trace_skipped_reason?: "wire_unsafe" | "no_new_evidence";
   };
 };
 
@@ -3704,12 +3739,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // rows missing even though the evidence had been found). This turn asks
     // the SAME conversation for a trace-only payload covering exactly the
     // unresolved ids, normalizes it with the existing #959 repair parser,
-    // and merges it into the ACCEPTED verdict artifact with the existing
-    // `mergeTraceClaims` semantics: ids that already carry a claim (valid or
-    // not) are never touched, and findings, severities, recommendation/
-    // verdict, escalation state, required-check dispositions and every other
-    // artifact field are unchanged. EVERY failure path — exhausted budget,
-    // transport error, malformed or empty payload, unparsable artifact, zero
+    // and merges it into the ACCEPTED verdict artifact with the #1552
+    // `mergeTraceRepairClaims` semantics: ids with no row are appended, and
+    // a row still marked `unverifiable` is replaced in place — a valid row
+    // is never overwritten. Findings, severities, recommendation/verdict,
+    // escalation state, required-check dispositions and every other artifact
+    // field are unchanged. EVERY failure path — exhausted budget, transport
+    // error, malformed or empty payload, unparsable artifact, zero
     // mergeable ids — leaves the standing verdict and its artifact intact.
     // Returns the number of requirement ids actually filled. Never throws.
     const runTraceOnlyRepairTurn = async (targetIds: readonly string[]): Promise<number> => {
@@ -3719,11 +3755,15 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
           log("  native_loop: trace-only repair skipped (wall-clock budget exhausted) — keeping the original verdict");
           return 0;
         }
-        // The instruction rides the SAME conversation. On the Anthropic
-        // format it merges into the repair round's trailing tool_result
-        // message (both follow tool_result blocks, so no adjacent user
-        // turns are created) — the identical wire-safety the #1145 refresh
-        // relied on.
+        // The instruction rides the SAME conversation. Wire safety here is
+        // STRUCTURAL (#1552): the caller gates on
+        // `Conversation.appendingUserWouldBeAdjacent` BEFORE this append —
+        // on the #1539 shape the repair round stopped on `no-tool-calls`,
+        // so the tail is still the OPEN tool_result batch carrying the
+        // verdict + repair instruction as trailing text blocks, and this
+        // user event merges into that same message (no adjacent user turns).
+        // A closed batch whose last rendered message is a standalone user
+        // turn is suppressed by the caller instead.
         conversation.addUser(buildTraceOnlyRepairMessage({ ids: targetIds }));
         const tempRaw = (env.AI_TEMPERATURE ?? "").trim();
         const temperature = tempRaw ? Number(tempRaw) : null;
@@ -3772,7 +3812,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         } catch {
           return 0;
         }
-        const merge = mergeTraceClaimsIntoVerdictEnvelope(envelope, parsed.claims, harnessSecrets);
+        const merge = mergeTraceClaimsIntoVerdictEnvelope(envelope, parsed.claims, harnessSecrets, new Set(targetIds));
         if (merge === null || merge.merged === 0) return 0;
         // #1503 (review): the reuse parse re-applies the fail-closed content
         // gate over the WHOLE completion with the lane's full known-secret
@@ -4043,38 +4083,67 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
                 Number(repairMeta.requests_remaining ?? 0) - repair.toolCallsIssued,
               );
             }
-            // #1503: the trace-only turn is justified only by new executed
-            // evidence — and it is wire-safe only then: with no fresh
-            // tool_result event the trace instruction's user turn would sit
-            // directly after the (already merged) verdict+repair user
-            // message, which the Anthropic format rejects.
-            const claimsMerged =
-              repair.executed.length > 0 && repairTargetIds.length > 0
-                ? await runTraceOnlyRepairTurn(repairTargetIds)
-                : 0;
-            // A repair round that itself stopped on a request error did NOT
-            // complete: record it distinctly instead of calling an errored
-            // round "continued" (the stop_reason keeps the precise cause).
+            // #1552: classify the repair round FIRST. A round that stopped
+            // on a request error did NOT complete: record it distinctly
+            // instead of calling an errored round "continued" (the
+            // stop_reason keeps the precise cause). A round that issued NO
+            // tool call inspected no NEW evidence — but the evidence the
+            // earlier rounds gathered is ALREADY in the conversation, so the
+            // trace-only turn below is still justified by it regardless of
+            // the round's stop reason (the #1539 shape is
+            // `no-tool-calls`; a round whose only call was refused is the
+            // sibling shape).
             const repairErrored = repair.stopReason === "request-error" || String(repair.error ?? "") !== "";
-            // A repair round that issued NO tool call inspected no evidence,
-            // so it cannot justify the trace-only turn (none is attempted)
-            // and must not read as a completed evidence repair: recording it
-            // as "continued" would claim the trace gap was chased when the
-            // model answered the repair instruction with plain text alone.
-            const repairProducedNoEvidence = !repairErrored && repair.executed.length === 0;
+            // #1552: the trace-only turn is gated on STRUCTURAL Anthropic
+            // wire safety — `appendingUserWouldBeAdjacent` mirrors the
+            // renderer's batching without mutating state, so the check
+            // reflects exactly what appending the trace instruction would
+            // do to the wire. The #1539 tail (an OPEN tool_result batch
+            // carrying the verdict + repair instruction as trailing text
+            // blocks) merges the instruction and is wire-safe even when the
+            // repair round itself executed nothing; a standalone-user tail
+            // (or the no-targets case) still suppresses it, and the
+            // standalone repair fallback may then recover the gap. A round
+            // that executed at least one call always left a tool_result
+            // event behind, so the structural check never suppresses a turn
+            // the pre-#1552 executed-call gate allowed.
+            const traceWireSafe = !conversation.appendingUserWouldBeAdjacent();
+            const traceAttemptable =
+              repairTargetIds.length > 0 && !repairErrored && traceWireSafe;
+            const claimsMerged = traceAttemptable ? await runTraceOnlyRepairTurn(repairTargetIds) : 0;
+            const continuationOutcome = repairErrored
+              ? "skipped_refresh_failed"
+              : traceAttemptable
+                ? repair.executed.length === 0
+                  ? "continued_trace_only"
+                  : "continued"
+                : repairTargetIds.length > 0
+                  ? "skipped_wire_unsafe"
+                  : "continued";
+            // #1552: when targets existed but the turn was NOT attempted,
+            // record why. With the structural gate the only suppression
+            // cause is a wire-unsafe (standalone-user) tail — a round that
+            // executed nothing no longer suppresses the turn, because the
+            // justification is the conversation's ALREADY-gathered evidence.
+            const traceSkippedReason =
+              repairTargetIds.length > 0 && !repairErrored && !traceAttemptable
+                ? "wire_unsafe"
+                : undefined;
             input.result.trace_repair_continuation = {
               attempted: true,
-              outcome: repairErrored
-                ? "skipped_refresh_failed"
-                : repairProducedNoEvidence
-                  ? "skipped_no_evidence"
-                  : "continued",
+              outcome: continuationOutcome,
               unresolved_ids: unresolvedIds,
               stop_reason: repair.stopReason,
               rounds: repair.rounds,
               tool_calls: repair.executed.length,
               claims_merged: claimsMerged,
               trace_claims_merged: claimsMerged > 0,
+              // #1552: the remaining DEDICATED repair allowance after the
+              // round (base remainder + bounded trace-closure extra, minus
+              // what the round issued) — keeps the allowance honest in
+              // telemetry even when the round executed nothing.
+              repair_requests_remaining: Math.max(0, repairRequestBudget - repair.toolCallsIssued),
+              ...(traceSkippedReason !== undefined ? { trace_skipped_reason: traceSkippedReason } : {}),
             };
             log(
               `  native_loop: trace-gap repair ran ${repair.executed.length} additional tool call(s) ` +

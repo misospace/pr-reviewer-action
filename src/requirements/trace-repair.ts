@@ -286,7 +286,9 @@ export function buildTraceRepairUserMessage(input: {
     head.push(
       fenced(
         "Requirement-coverage rows the review already carries (untrusted data, possibly incomplete or "
-          + "wrong; the ids to fill are exactly the ones above with no row here):",
+          + "wrong; some requested ids may already carry a row the validator could not verify — re-derive "
+          + "its claim from the evidence; the merge replaces only those unresolved rows and never "
+          + "overwrites a settled row):",
         fitUtf8(JSON.stringify(input.coverageRows) ?? "[]", MAX_TRACE_REPAIR_COVERAGE_BYTES)[0],
       ),
       "",
@@ -402,9 +404,9 @@ export function buildTraceGapContinuationMessage(input: {
  * probe found, so completion cannot depend on the model volunteering them.
  *
  * The response is normalized by the existing `normalizeTraceRepairPayload`
- * and merged by `mergeTraceClaims` — this is the same requirement-coverage
- * shape the #959 pass uses, not a second trace format. Untrusted-data
- * handling matches `buildTraceGapContinuationMessage`: ids are
+ * and merged by `mergeTraceRepairClaims` (#1552) — this is the same
+ * requirement-coverage shape the #959 pass uses, not a second trace format.
+ * Untrusted-data handling matches `buildTraceGapContinuationMessage`: ids are
  * control-escaped and fenced with a delimiter longer than any backtick run,
  * so a hostile requirement id can neither close the fence nor promote itself
  * into instructions. */
@@ -550,7 +552,9 @@ export function parseTraceRepairResponse(
 }
 
 export interface TraceRepairPassInput {
-  /** The in-scope requirements that carried no claim, with their texts. */
+  /** The in-scope unresolved requirements this pass targets — ids with no
+   * claim and ids whose validator row is still `unverifiable` (#1552) — with
+   * their texts. */
   requirements: readonly TraceRepairRequirement[];
   title: string;
   files: unknown;
@@ -730,6 +734,20 @@ export function traceRepairOutcomeSummary(input: {
    * persisted `requirement_trace_repair` summary shows the in-conversation
    * attempt, distinct from this no-tools pass. Absent when no probe ran. */
   continuation?: TraceGapContinuationSummary;
+  /** #1552: the repair-state classification of the rows this pass targeted
+   * (`missing` | `insufficient_claim` | `evidence_unverified`), keyed by raw
+   * ledger id. Sanitized here: ids like `missing_ids`, values validated
+   * against the three-state enum, capped at MAX_TRACE_REPAIR_SUMMARY_IDS
+   * entries; persisted as `targeted_row_states` — named "targeted" because
+   * they carry the PRE-repair state of the rows the pass was asked about,
+   * not the post-merge state (which `missing_ids` and the trace section
+   * report). Omitted when empty. */
+  rowStates?: Record<string, string>;
+  /** #1552: rows the merge appended or replaced (`appended + replaced`). A
+   * parsed-claim count alone can overstate the merge, so the persisted
+   * summary carries what actually landed. Omitted when the pass returned no
+   * claims or the caller could not run the merge. */
+  rowsMerged?: number;
 }): RequirementTraceRepairOutcome {
   const secrets = input.secrets ?? [];
   const sanitizeId = (id: string): string => id.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_TRACE_REPAIR_SUMMARY_ID_CHARS);
@@ -747,6 +765,29 @@ export function traceRepairOutcomeSummary(input: {
     if (clean !== "" && !missing_ids.includes(clean)) missing_ids.push(clean);
     if (missing_ids.length >= MAX_TRACE_REPAIR_SUMMARY_IDS) break;
   }
+  // #1552: the targeted rows' repair states — enum-validated, sanitized ids,
+  // capped; first occurrence wins per id, hostile values are dropped.
+  const TRACE_REPAIR_ROW_STATES = new Set(["missing", "insufficient_claim", "evidence_unverified"]);
+  const targeted_row_states: Record<string, string> = {};
+  if (input.rowStates !== null && typeof input.rowStates === "object" && !Array.isArray(input.rowStates)) {
+    for (const [rawId, rawState] of Object.entries(input.rowStates)) {
+      if (Object.keys(targeted_row_states).length >= MAX_TRACE_REPAIR_SUMMARY_IDS) break;
+      const clean = sanitizeId(rawId);
+      if (clean === "" || clean in targeted_row_states) continue;
+      const state = typeof rawState === "string" ? rawState.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, 32) : "";
+      if (!TRACE_REPAIR_ROW_STATES.has(state)) continue;
+      targeted_row_states[clean] = state;
+    }
+  }
+  const rowStates =
+    Object.keys(targeted_row_states).length > 0 ? { targeted_row_states } : {};
+  // #1552: rows the merge appended or replaced — finite-truncated, omitted when
+  // absent or zero (an attempted pass that changed nothing is visible via
+  // `missing_ids`/the trace section instead).
+  const rowsMerged =
+    typeof input.rowsMerged === "number" && Number.isFinite(input.rowsMerged) && input.rowsMerged > 0
+      ? { rows_merged: Math.max(0, Math.trunc(input.rowsMerged)) }
+      : {};
   // #1504: route/invocation_reason are caller-controlled enums; validate the
   // shape so a future caller bug cannot smuggle free text into the artifact.
   const route = input.route === "primary" || input.route === "fallback" || input.route === "smart"
@@ -765,6 +806,7 @@ export function traceRepairOutcomeSummary(input: {
       ...route,
       ...invocationReason,
       ...continuation,
+      ...rowStates,
     };
   }
   if (input.result === null || input.result === undefined) {
@@ -781,6 +823,7 @@ export function traceRepairOutcomeSummary(input: {
       ...route,
       ...invocationReason,
       ...continuation,
+      ...rowStates,
     };
   }
   return {
@@ -797,5 +840,7 @@ export function traceRepairOutcomeSummary(input: {
     ...route,
     ...invocationReason,
     ...continuation,
+    ...rowStates,
+    ...rowsMerged,
   };
 }

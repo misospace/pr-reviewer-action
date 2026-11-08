@@ -83,6 +83,92 @@ function deterministicRowReason(rowNotes: readonly string[], wasMissing: boolean
   return ordered.slice(0, 3).join("; ") || "unverifiable";
 }
 
+/** #1552: the three repair-relevant states a trace row can be in. `missing`
+ * = the coverage payload carries no row at all; `insufficient_claim` = a
+ * present `unverifiable` row whose notes name a real coverage gap (bad
+ * locations, invalid disposition, …) a re-derived claim can fix;
+ * `evidence_unverified` = a present `unverifiable` row whose only notes are
+ * environmental (provenance / CI state / pending documentation) — the claim
+ * itself may be fine, the row just could not be confirmed from the run's
+ * evidence. */
+export type TraceRepairRowState = "missing" | "insufficient_claim" | "evidence_unverified";
+
+export interface TraceRepairRowClassification {
+  id: string;
+  state: TraceRepairRowState;
+  reason: string;
+}
+
+/** #1552: classify the in-scope trace rows a trace-repair pass could target.
+ * Rules, in scope-id order:
+ * - an id with NO row in `coverage` (the `missingTraceRequirementIds`
+ *   semantics: any entry carrying the id counts as present) → `missing`;
+ * - else the validator row for the id is a repair candidate ONLY when its
+ *   disposition is exactly `unverifiable` — `met`/`not_applicable` are
+ *   settled, a model-claimed `unmet` is never synthesized (the #1095 rule)
+ *   and `pending` is a non-code advisory — and rows whose notes include any
+ *   `CONFIRMED_UNMET_REFUTATION_NOTES` label are excluded exactly like the
+ *   probe excludes them;
+ * - for an `unverifiable` row: when EVERY note is environmental — starts
+ *   with `provenance:`, `external-state-ci`, `external-state-pending`, or
+ *   `documentation-pending` — the row is `evidence_unverified`; anything
+ *   else is `insufficient_claim`.
+ * `reason` is the row's non-environmental deterministic note labels joined
+ * with "; " (same filter/order as `deterministicRowReason`, capped at 3,
+ * fallback "unverifiable"); missing rows get the `not-traced-by-reviewer`
+ * -first ordering. The FULL list is returned in scope order (no cap) — the
+ * caller bounds what it targets at `MAX_TRACE_REPAIR_CLAIMS`. Never throws
+ * on a hostile `coverage` payload or a degenerate `trace`. */
+export function classifyTraceRepairRows(input: {
+  coverage: unknown;
+  trace: ReturnType<typeof validateRequirementTrace>;
+  scopeIds: readonly string[];
+}): TraceRepairRowClassification[] {
+  const present = new Set<string>();
+  if (Array.isArray(input.coverage)) {
+    for (const claim of input.coverage) {
+      if (!claim || typeof claim !== "object" || Array.isArray(claim)) continue;
+      const rid = (claim as { requirement_id?: unknown }).requirement_id;
+      if (typeof rid === "string") present.add(rid);
+    }
+  }
+  const rowsById = new Map<string, ReturnType<typeof validateRequirementTrace>["rows"][number]>();
+  for (const row of input.trace && Array.isArray(input.trace.rows) ? input.trace.rows : []) {
+    if (typeof row.requirement_id === "string") rowsById.set(row.requirement_id, row);
+  }
+  const out: TraceRepairRowClassification[] = [];
+  for (const id of new Set(input.scopeIds)) {
+    if (typeof id !== "string" || id === "") continue;
+    const row = rowsById.get(id);
+    // Missing = the coverage payload carries no row for the id AT ALL, or
+    // the validator produced no row for it (a synthetic/defensive state —
+    // the real validator rows every in-scope id; treat the uncertain row as
+    // missing so the repair targets it rather than silently dropping it).
+    if (!present.has(id) || row === undefined) {
+      out.push({
+        id,
+        state: "missing",
+        reason: "not-traced-by-reviewer",
+      });
+      continue;
+    }
+    if (row.disposition !== "unverifiable") continue;
+    if (CONFIRMED_UNMET_REFUTATION_NOTES.some((note) => Array.isArray(row.notes) && row.notes.includes(note))) continue;
+    const notes: string[] = Array.isArray(row.notes) ? row.notes.filter((note): note is string => typeof note === "string") : [];
+    const environmental = (note: string): boolean =>
+      note.startsWith("provenance:")
+      || note.startsWith("external-state-ci")
+      || note.startsWith("external-state-pending")
+      || note.startsWith("documentation-pending");
+    out.push({
+      id,
+      state: notes.length > 0 && notes.every(environmental) ? "evidence_unverified" : "insufficient_claim",
+      reason: deterministicRowReason(notes, false),
+    });
+  }
+  return out;
+}
+
 /** Core probe computation. Exported for tests; the production entry point is
  * `createTraceGapProbe`, which wraps it in the harness's fail-soft boundary
  * (a throwing probe leaves the run exactly as pre-#1145). */
@@ -195,5 +281,26 @@ export function traceGapContinuationSummary(harness: Record<string, unknown> | n
   const claimsMerged = typeof rec.claims_merged === "number" && Number.isFinite(rec.claims_merged)
     ? Math.max(0, Math.trunc(rec.claims_merged))
     : 0;
-  return { outcome, unresolved_ids: ids, trace_claims_merged: rec.trace_claims_merged === true, claims_merged: claimsMerged };
+  // #1552: forward the bounded repair-round fields when the record carries
+  // them — strings control/backtick-stripped and capped like `outcome`,
+  // numbers finite-truncated and non-negative. Absent inputs stay absent so
+  // historical records keep their exact shape.
+  const cleanBounded = (value: unknown): string | undefined =>
+    typeof value === "string" ? value.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, 64) : undefined;
+  const cleanCount = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : undefined;
+  const stopReason = cleanBounded(rec.stop_reason);
+  const toolCalls = cleanCount(rec.tool_calls);
+  const repairRequestsRemaining = cleanCount(rec.repair_requests_remaining);
+  const traceSkippedReason = cleanBounded(rec.trace_skipped_reason);
+  return {
+    outcome,
+    unresolved_ids: ids,
+    trace_claims_merged: rec.trace_claims_merged === true,
+    claims_merged: claimsMerged,
+    ...(stopReason !== undefined && stopReason !== "" ? { stop_reason: stopReason } : {}),
+    ...(toolCalls !== undefined ? { tool_calls: toolCalls } : {}),
+    ...(repairRequestsRemaining !== undefined ? { repair_requests_remaining: repairRequestsRemaining } : {}),
+    ...(traceSkippedReason !== undefined && traceSkippedReason !== "" ? { trace_skipped_reason: traceSkippedReason } : {}),
+  };
 }
