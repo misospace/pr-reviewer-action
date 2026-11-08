@@ -197,7 +197,7 @@ Set `rereview-command` to an empty string to disable comment-triggered re-review
 
 ### The unchanged-diff skip
 
-`skip-if-diff-unchanged` (default `true`) skips the LLM review entirely when the current PR patch plus config fingerprint matches the last managed review, and carries the prior verdict forward (`verdict-source: carry_forward`) — zero model calls spent on a PR nobody touched. Any new push, force-push, rebase, or config change busts the fingerprint and triggers a fresh full review; there is no incremental/delta mode, every review is a full review of the current PR.
+`skip-if-diff-unchanged` (default `true`) skips the LLM review entirely when the current PR patch plus config fingerprint matches the last managed review, and carries the prior verdict forward (`verdict-source: carry_forward`) — zero model calls spent on a PR nobody touched. Any new push, force-push, rebase, or config change busts the fingerprint and triggers a fresh full review; there is no incremental/delta mode, every review is a full review of the current PR. That claim governs **verdict authority** and stands unchanged: a re-review that does run never adopts the prior review's verdict. The #1516 evidence-reuse seam is advisory context, not a delta mode — files whose blob digests are provably identical to the prior reviewed head may be seeded as prior evidence candidates in the corpus, fresh reads are forced for changed/renamed/deleted/impact-affected paths, unresolved prior findings are always reconsidered at the current head, and merge gating always revalidates the current head exactly as in any review (see [rereview-evidence-reuse.md](architecture/rereview-evidence-reuse.md)).
 
 ## Dependency-upgrade coverage accounting (#1337)
 

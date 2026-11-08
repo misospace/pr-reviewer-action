@@ -268,8 +268,10 @@ export function buildReReviewScopeMd(
 
 /** An adaptive-fenced block for untrusted one-per-line entries: the
  * delimiter is longer than any backtick run in the payload, and the closer
- * always begins on its own line (#1261). */
-function fencedList(entries: readonly string[]): string[] {
+ * always begins on its own line (#1261). Exported for the #1516 re-review
+ * evidence renderer, which renders untrusted paths under the same
+ * discipline. */
+export function fencedList(entries: readonly string[]): string[] {
   const payload = `${entries.join("\n")}\n`;
   const fence = fenceDelimiterFor(payload);
   const closer = `${endsWithNewline(payload) ? "" : "\n"}${fence}`;

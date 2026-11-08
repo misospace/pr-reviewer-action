@@ -86,6 +86,10 @@ export interface CorpusWorkspace {
    * reviewed head). Optional so existing fixtures need no update: an absent
    * field behaves like `null`. */
   reReviewScopeMd?: Uint8Array | null;
+  /** #1516: the re-review evidence-reuse section (empty unless the run
+   * seeded prior evidence candidates). Optional so existing fixtures need no
+   * update: an absent field behaves like `null`. */
+  reReviewEvidenceMd?: Uint8Array | null;
   linkedSourcesMd: Uint8Array | null;
   repoImpactTruncatedMd: Uint8Array | null;
   repoHistoryTruncatedMd: Uint8Array | null;
@@ -443,6 +447,14 @@ export function buildReviewCorpus(
   // a prior reviewed head — no section boundary for anything else.
   if (nonEmpty(ws.reReviewScopeMd)) {
     pushSection(undefined, bytes(ws.reReviewScopeMd!));
+  }
+  // #1516: the re-review evidence-reuse section rides immediately after the
+  // scope framing, ahead of the file list and diff, minimizing the chance a
+  // body-budget truncation drops the reuse rules (the section is additionally
+  // byte-bounded by its own shrink-render loop). Empty unless the run seeded
+  // reuse — no section boundary for anything else.
+  if (nonEmpty(ws.reReviewEvidenceMd)) {
+    pushSection(undefined, bytes(ws.reReviewEvidenceMd!));
   }
   pushSection("# PR Files", filesContent, "json");
   pushSection(

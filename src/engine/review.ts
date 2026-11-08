@@ -40,7 +40,8 @@ import { RunWorkspace } from "../run/workspace.js";
 import { trustFramingOverhead } from "../context/repo-map.js";
 import { generateRepoMap, renderRepoMapJson, renderRepoMapMarkdown } from "../context/repo-map.js";
 import { buildDependencyCoverageContext } from "../context/dependency-coverage.js";
-import { buildReReviewScopeMd, computeReReviewDelta } from "../context/rereview-scope.js";
+import { buildReReviewScopeMd, computeReReviewDelta, type ReReviewScopeDelta } from "../context/rereview-scope.js";
+import { buildReReviewEvidenceMd, computeReReviewEvidencePlan, renderReReviewEvidenceJson } from "../context/rereview-evidence.js";
 import { renderDependencyCoverageBlock } from "../model/dependency-coverage.js";
 import {
   buildLinkedIssueContext,
@@ -1155,9 +1156,15 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // holds the force-pushed-away prior head still gets the identities-only
   // section, never a guessed delta.
   ws.write("re-review-scope.md", new Uint8Array(0));
+  // #1516: the evidence-reuse artifacts follow the same unconditional-empty
+  // pattern — a reused run directory never carries a previous run's section.
+  ws.write("re-review-evidence.md", new Uint8Array(0));
+  ws.write("re-review-evidence.json", new Uint8Array(0));
   const priorReviewedHead = typeof pre.prior_head_sha === "string" ? pre.prior_head_sha : "";
-  if (SHA_SHAPE.test(priorReviewedHead) && priorReviewedHead.toLowerCase() !== headSha.toLowerCase()) {
-    const delta = await computeReReviewDelta(workspace, priorReviewedHead, headSha);
+  const priorHeadUsable = SHA_SHAPE.test(priorReviewedHead) && priorReviewedHead.toLowerCase() !== headSha.toLowerCase();
+  let delta: ReReviewScopeDelta | null = null;
+  if (priorHeadUsable) {
+    delta = await computeReReviewDelta(workspace, priorReviewedHead, headSha);
     const section = buildReReviewScopeMd(delta, { priorHeadSha: priorReviewedHead, headSha, baseSha: pre.base_sha });
     if (section !== "") {
       ws.write("re-review-scope.md", section);
@@ -1203,6 +1210,32 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // reads only the diff, the file list and the checkout.
   const relatedInputs = await buildRelatedCodeSection(ws, env, workspace, rawDiffText);
   checkpoint();
+
+  // ── Re-review evidence reuse (#1516) ─────────────────────────────────
+  // Advisory only: seed prior evidence candidates for paths proven
+  // byte-identical to the prior reviewed head, force fresh reads for
+  // everything changed/renamed/deleted/impact-affected. The verdict, merge
+  // gating, and every deterministic gate are untouched — the JSON artifact
+  // is written whenever a re-review plan was computed (including degraded
+  // plans, so the reason reuse was refused is recorded), while the corpus
+  // section is written only when there is something to say.
+  if (priorHeadUsable && delta !== null) {
+    const evidencePlan = await computeReReviewEvidencePlan(
+      workspace,
+      delta,
+      relatedInputs === null
+        ? null
+        : { context: relatedInputs.related, anchorsTruncated: relatedInputs.anchors.truncated === true },
+    );
+    const evidenceSection = buildReReviewEvidenceMd(evidencePlan, { priorHeadSha: priorReviewedHead, headSha });
+    if (evidenceSection !== "") {
+      ws.write("re-review-evidence.md", evidenceSection);
+      log(`Re-review evidence reuse: ${evidencePlan.seeded.length} seeded, ${evidencePlan.impactInvalidated.length} invalidated, ${evidencePlan.changed.length}+${evidencePlan.renamed.length}+${evidencePlan.deleted.length} forced fresh`);
+    }
+    const evidenceJson = renderReReviewEvidenceJson(evidencePlan, { priorHeadSha: priorReviewedHead, headSha, baseSha: pre.base_sha });
+    if (evidenceJson !== "") ws.write("re-review-evidence.json", evidenceJson);
+  }
+
   const obligationsOn = (env.HARNESS_OBLIGATIONS ?? "false").toLowerCase() === "true";
   const harnessObligations = relatedInputs === null || !obligationsOn ? [] : buildHarnessObligations(relatedInputs);
 
