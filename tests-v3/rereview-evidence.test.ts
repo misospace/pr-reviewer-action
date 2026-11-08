@@ -392,6 +392,31 @@ test("#1516: a rebase-only push proves whole-tree identity without a digest pass
   } finally { repo.cleanup(); }
 });
 
+test("#1516: a truncated delta never proves whole-tree identity without digest verification", async () => {
+  const repo = evidenceRepo();
+  try {
+    // A capped capture can discard its only partial path and still report
+    // zero files: `treeUnchanged: true` then carries no proof at all. The
+    // plan must refuse the shortcut and re-derive the real paths itself.
+    const cappedDelta: ReReviewScopeDelta = {
+      priorHeadSha: repo.shaB,
+      headSha: repo.shaC,
+      enumerated: true,
+      treeUnchanged: true,
+      commits: [],
+      commitsTruncated: false,
+      files: [],
+      filesTruncated: true,
+    };
+    const plan = await computeReReviewEvidencePlan(repo.root, cappedDelta, { context: makeRelated() });
+    assert.equal(plan.degradedReason, null);
+    assert.equal(plan.treeUnchanged, false, "the whole-tree shortcut is never taken on a truncated delta");
+    assert.ok(plan.changed.includes("README.md"), "the real change is still forced fresh");
+    assert.ok(plan.seeded.includes("base.txt"), "unchanged paths still seed through digest verification");
+    assert.ok(plan.verifiedBlobs > 0, "the digest pass actually ran");
+  } finally { repo.cleanup(); }
+});
+
 // ---------------------------------------------------------------------------
 // buildReReviewEvidenceMd
 // ---------------------------------------------------------------------------

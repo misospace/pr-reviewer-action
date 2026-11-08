@@ -239,8 +239,12 @@ export async function computeReReviewEvidencePlan(
 
   // Whole-tree identity: the delta probe already proved the prior→current
   // diff empty, and that empty diff IS the proof — no digest pass is needed
-  // and there is nothing to list.
-  if (delta.treeUnchanged) {
+  // and there is nothing to list. A capped delta capture can discard its
+  // only partial path and still report zero files, so a truncated delta
+  // never takes this shortcut: the name-status re-derivation below either
+  // classifies the real paths or refuses reuse — it never claims whole-tree
+  // identity without proof.
+  if (delta.treeUnchanged && !delta.filesTruncated) {
     return {
       ...basePlan,
       enumerated: true,
