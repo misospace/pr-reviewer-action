@@ -59,10 +59,34 @@
  * forever. A forge failure returns `false`: the
  * scheduler retries later, and the retry path reads the payload from the
  * durable record — the worker's artifact file is consulted exactly once.
+ *
+ * ENVELOPE REFUSALS (#1560): a `publishing` record holding its durable
+ * result is exempt from the queue's deadline/expiry settlement and
+ * publication retries carry no terminal attempt limit, so a retry-later
+ * `false` on a refusal that no retry can fix strands the record forever.
+ * The envelope read therefore splits its failures: a CONTENT verdict on a
+ * fully read envelope (not JSON, contract-invalid, a foreign correlation
+ * identity, a non-completed status, or a head that disagrees with the
+ * queue record) is provably permanent — the worker wrote the envelope
+ * once before it settled, and the queue reached `publishing` only because
+ * the executor already read that same envelope successfully, so a retry
+  * re-reads identical bytes — and settles TERMINALLY. An I/O-class
+  * failure (absent, unreadable, not provably
+ * contained) genuinely mixes transient causes (a mount that will return,
+ * a momentary filesystem error) with permanent ones (the run directory
+ * was garbage-collected), so it stays retry-later but BOUNDED: after
+ * `MAX_ENVELOPE_READ_ATTEMPTS` consecutive failed reads of the same run's
+ * envelope it settles terminally too. Both terminal classes follow the
+ * stale/expired settlement contract above: the queue record settles and
+ * the run's durable account closes as failed. The bound counts
+ * consecutive failures inside one controller process: a restart resets
+ * it, so a stable controller converges on the terminal answer while a
+ * crash-loop (a different outage) may re-run the bound once per restart.
  */
 
 import type { ReviewJob } from "../jobs/types.js";
 import { gateJobPublication } from "../ingress/dispatch.js";
+import { isTerminalState } from "../queue/index.js";
 import type { JobPublisher } from "../queue/scheduler.js";
 import type { JobRecord } from "../queue/types.js";
 import { containsSecretShapedContent } from "../context/redact.js";
@@ -147,6 +171,112 @@ type ArtifactOutcome =
   | { readonly kind: "unavailable"; readonly reason: string }
   | { readonly kind: "refused"; readonly reason: string };
 
+/** Outcome of reading the EXECUTION envelope (#1560). `transient` is the
+ * I/O class — absent, unreadable, not provably contained — which mixes
+ * transient and permanent causes, so it is retried (bounded) rather than
+ * judged. `refused` is a CONTENT verdict on a fully read envelope:
+ * provably permanent, terminal. */
+type EnvelopeOutcome =
+  | { readonly kind: "ok"; readonly result: ExecutionResult }
+  | { readonly kind: "transient"; readonly reason: string }
+  | { readonly kind: "refused"; readonly reason: string };
+
+/** Consecutive I/O-class envelope-read failures tolerated for one run
+ * before the publication settles terminally (#1560). Generous enough to
+ * ride out a remount or a transient filesystem error at any sane publish
+ * backoff, bounded enough that a garbage-collected run directory stops
+ * spinning identical failing reads. */
+export const MAX_ENVELOPE_READ_ATTEMPTS = 10;
+
+/** Hard bound on the number of runs whose consecutive-failure streaks the
+ * publisher tracks at once: a publishing record retired between ticks
+ * (superseded, cancelled) leaves its streak entry behind, so the map is
+ * capped. An entry is NEVER dropped to make room — dropping an ACTIVE
+ * streak resets it toward the bound, and once more runs fail concurrently
+ * than the cap holds, every streak could be reset before reaching it and
+ * the records would spin forever instead of converging. When the map is
+ * full, entries whose run is provably retired are reclaimed first (see
+ * `pruneRetiredEnvelopeReadFailures`); if nothing can be reclaimed the
+ * new failure stays retry-later UNTRACKED. That spin is bounded by
+ * construction: tracked streaks are never reset by eviction, so every
+ * tracked run reaches `MAX_ENVELOPE_READ_ATTEMPTS` and frees its slot,
+ * and the untracked run is admitted (and converges) as soon as one is. */
+export const MAX_TRACKED_ENVELOPE_READ_FAILURES = 128;
+
+/** Admission outcome of counting one transient envelope-read failure:
+ * either the run's consecutive-failure streak after this read, or a
+ * full-map saturation with nothing provably retired to reclaim. */
+type EnvelopeReadFailureAdmission =
+  | { readonly state: "tracked"; readonly streak: number }
+  | { readonly state: "saturated" };
+
+/** Count one transient envelope-read failure for `runId`: an existing
+ * streak is incremented; a new run is admitted at 1 when the map has
+ * capacity. A full map first reclaims provably-retired entries; still
+ * full, the failure is reported `saturated` (retry-later, untracked).
+ * Entries for successful or terminal reads are removed by the caller. */
+async function noteEnvelopeReadFailure(
+  store: ControlPlaneStore,
+  failures: Map<string, number>,
+  runId: string,
+): Promise<EnvelopeReadFailureAdmission> {
+  const current = failures.get(runId);
+  if (current !== undefined) {
+    const streak = current + 1;
+    failures.set(runId, streak);
+    return { state: "tracked", streak };
+  }
+  if (failures.size >= MAX_TRACKED_ENVELOPE_READ_FAILURES) {
+    await pruneRetiredEnvelopeReadFailures(store, failures);
+  }
+  if (failures.size >= MAX_TRACKED_ENVELOPE_READ_FAILURES) {
+    return { state: "saturated" };
+  }
+  failures.set(runId, 1);
+  return { state: "tracked", streak: 1 };
+}
+
+/** Drop streak entries whose run record is TERMINAL — the only
+ * PROOF of retirement: the run has no durable account left for the
+ * publisher to settle, and the daemon's reconcile pass mirrors every
+ * retired queue record's run to a terminal state, so retirement residue
+ * becomes reclaimable at the latest by the next full-map sweep.
+ *
+ * An entry whose run is non-terminal is NEVER dropped: that is the
+ * active-streak guarantee the bound converges on. An ABSENT run record
+ * is kept too — absence is not proof of retirement (the daemon creates
+ * the run record before the worker launches, so on a healthy control
+ * plane retired residue is terminal, never absent; an absent record
+ * means the durable state itself diverged, e.g. a restore that lost the
+ * run rows while the queue still retries publication), and the sweep
+ * fires on every admission while saturated — far more often than any
+ * one record retries — so dropping absent entries would reset every
+ * active streak in rotation and never heal, the exact spin this sweep
+ * exists to prevent. A diverged control plane therefore degrades to
+ * "no capacity reclaims until the tracked cohort converges" (tracked
+ * streaks advance and settle on their own), never to a reset rotator.
+ * An unreadable run record is kept for the same reason — uncertain
+ * state is never treated as proof of retirement. */
+async function pruneRetiredEnvelopeReadFailures(
+  store: ControlPlaneStore,
+  failures: Map<string, number>,
+): Promise<void> {
+  const runIds = [...failures.keys()];
+  const retired = await Promise.all(
+    runIds.map(async (trackedRunId) => {
+      try {
+        const run = await store.getRun(trackedRunId);
+        return run !== null && isTerminalState(run.state);
+      } catch {
+        return false;
+      }
+    }),
+  );
+  for (let index = 0; index < runIds.length; index += 1) {
+    if (retired[index]) failures.delete(runIds[index]!);
+  }
+}
+
 /** Read the EXECUTION envelope the worker wrote (`<runDir>/result.json`)
  * and validate it against the executor's own result contract (#733).
  *
@@ -154,48 +284,59 @@ type ArtifactOutcome =
  * (`resultArtifactPath`) the publication consumes. It is validated with
  * the executor's OWN validator — an unknown field, a foreign correlation
  * identity, or an artifact path outside the run directory is refused
- * here, never normalized. */
+ * here, never normalized.
+ *
+ * The failure taxonomy is #1560's: I/O outcomes are `transient` (retry
+ * later, bounded by the caller's attempt counter) because their presence
+ * can change between reads; a CONTENT verdict on a fully read envelope is
+ * `refused` (terminal) because it cannot. The permanence argument is the
+ * queue's own ordering: the record reached `publishing` with a durable
+ * result only because the executor read and validated THIS envelope
+ * (`status: "completed"`) before settling, so the file was complete at
+ * settle time and nothing in the daemon ever rewrites it — a content
+ * failure now proves the bytes were changed after completion or the file
+ * was swapped, and every retry re-reads the same broken content. */
 async function readExecutionEnvelope(
   runsRoot: string,
   jobId: string,
   attempt: number,
-): Promise<
-  | { readonly kind: "ok"; readonly result: ExecutionResult }
-  | { readonly kind: "unavailable"; readonly reason: string }
-> {
+): Promise<EnvelopeOutcome> {
   const runDir = executionRunDir(runsRoot, jobId, attempt);
   const envelopePath = executionResultPath(runsRoot, jobId, attempt);
   const proof = await proveContained(runDir, envelopePath);
   if (!proof.contained) {
-    return { kind: "unavailable", reason: "execution result envelope is not provably contained" };
+    // A failed proof is presence-uncertain (it also covers a directory
+    // that does not resolve), so it joins the bounded transient class
+    // rather than the permanent one.
+    return { kind: "transient", reason: "execution result envelope is not provably contained" };
   }
   const read = await readBoundedFileNoFollow(envelopePath, MAX_EXECUTION_RESULT_FILE_BYTES);
   if (read.kind === "missing") {
-    return { kind: "unavailable", reason: "worker execution result envelope is missing" };
+    return { kind: "transient", reason: "worker execution result envelope is missing" };
   }
   if (read.kind === "too-large") {
-    return { kind: "unavailable", reason: "worker execution result envelope is too large" };
+    return { kind: "transient", reason: "worker execution result envelope is too large" };
   }
   if (read.kind === "invalid") {
-    return { kind: "unavailable", reason: "worker execution result envelope is unreadable" };
+    return { kind: "transient", reason: "worker execution result envelope is unreadable" };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(read.text);
   } catch {
-    return { kind: "unavailable", reason: "worker execution result envelope is not JSON" };
+    return { kind: "refused", reason: "worker execution result envelope is not JSON" };
   }
   let result: ExecutionResult;
   try {
     result = validateExecutionResult(parsed, { runDir });
   } catch {
-    return { kind: "unavailable", reason: "worker execution result envelope is invalid" };
+    return { kind: "refused", reason: "worker execution result envelope is invalid" };
   }
   if (result.runId !== executionRunId(jobId, attempt) || result.jobId !== jobId) {
-    return { kind: "unavailable", reason: "worker execution result envelope belongs to another run" };
+    return { kind: "refused", reason: "worker execution result envelope belongs to another run" };
   }
   if (result.status !== "completed") {
-    return { kind: "unavailable", reason: "worker execution result envelope is not a completed result" };
+    return { kind: "refused", reason: "worker execution result envelope is not a completed result" };
   }
   return { kind: "ok", result };
 }
@@ -302,18 +443,66 @@ async function readReviewArtifact(
  * envelope (which names the review artifact) and the review artifact
  * itself. The envelope's head must agree with the queue record's
  * durable head: two different heads mean the artifact on disk is not
- * the result the queue is publishing. */
+ * the result the queue is publishing — and BOTH sides are durable and
+ * immutable once the record holds its result, so the disagreement can
+ * never resolve on a retry: it is terminal (#1560).
+ *
+ * `envelopeReadFailures` counts consecutive I/O-class envelope-read
+ * failures per run (keyed by the run id, the exact envelope being read);
+ * a successful envelope read clears the streak, and a streak reaching
+ * `MAX_ENVELOPE_READ_ATTEMPTS` converts the transient failure into a
+ * terminal refusal so a garbage-collected run directory stops spinning
+ * identical failing reads against the expiry-exempt record. A full
+ * tracking map never resets an active streak (see
+ * `MAX_TRACKED_ENVELOPE_READ_FAILURES`): a failure that cannot be
+ * admitted stays retry-later untracked. */
 async function readPublicationArtifact(
+  store: ControlPlaneStore,
   runsRoot: string,
   jobId: string,
   attempt: number,
   resultHeadSha: string,
   nowMs: number,
+  envelopeReadFailures: Map<string, number>,
 ): Promise<ArtifactOutcome> {
+  const runId = executionRunId(jobId, attempt);
   const envelope = await readExecutionEnvelope(runsRoot, jobId, attempt);
-  if (envelope.kind === "unavailable") return envelope;
+  if (envelope.kind === "refused") {
+    // A permanent content verdict retires any transient streak residue
+    // for this run: the publication settles now, and the entry would
+    // otherwise linger until a full-map sweep proves the run retired.
+    envelopeReadFailures.delete(runId);
+    return { kind: "refused", reason: envelope.reason };
+  }
+  if (envelope.kind === "transient") {
+    const admission = await noteEnvelopeReadFailure(store, envelopeReadFailures, runId);
+    if (admission.state === "saturated") {
+      // Every slot holds an active, unresettable streak: this failure is
+      // honestly retry-later, and the wait is bounded because each
+      // tracked streak reaches its own terminal bound and frees its slot.
+      return {
+        kind: "unavailable",
+        reason: boundedDetail(
+          `worker execution result envelope is unreadable and envelope-failure tracking is at its ${String(MAX_TRACKED_ENVELOPE_READ_FAILURES)}-run capacity (last: ${envelope.reason})`,
+          256,
+        ),
+      };
+    }
+    if (admission.streak >= MAX_ENVELOPE_READ_ATTEMPTS) {
+      envelopeReadFailures.delete(runId);
+      return {
+        kind: "refused",
+        reason: boundedDetail(
+          `worker execution result envelope remained unreadable after ${String(MAX_ENVELOPE_READ_ATTEMPTS)} publication attempts (last: ${envelope.reason})`,
+          256,
+        ),
+      };
+    }
+    return { kind: "unavailable", reason: envelope.reason };
+  }
+  envelopeReadFailures.delete(runId);
   if (envelope.result.resultHeadSha !== resultHeadSha) {
-    return { kind: "unavailable", reason: "execution result envelope head disagrees with the queue record" };
+    return { kind: "refused", reason: "execution result envelope head disagrees with the queue record" };
   }
   return readReviewArtifact(
     runsRoot,
@@ -410,6 +599,13 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
   ) {
     throw new TypeError("DurablePublisherDeps: store, forge.publish, currentHeadSha and now are required");
   }
+  /** Consecutive I/O-class envelope-read failures per run id (#1560).
+   * In-process state with a hard cardinality bound
+   * (`MAX_TRACKED_ENVELOPE_READ_FAILURES`): entries are cleared on any
+   * successful envelope read and on the terminal settlement, and a
+   * full-map sweep drops only provably-retired runs — an active streak
+   * is never reset, so every tracked run converges on the bound. */
+  const envelopeReadFailures = new Map<string, number>();
   return {
     async publish(record: JobRecord): Promise<boolean> {
       if (record === null || typeof record !== "object") return false;
@@ -512,11 +708,13 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
         usage = [];
       } else {
         const artifact = await readPublicationArtifact(
+          deps.store,
           deps.runsRoot,
           jobId,
           record.attempt,
           record.resultHeadSha,
           nowMs,
+          envelopeReadFailures,
         );
         if (artifact.kind === "refused") {
           // #1558: a deterministic size refusal is terminal — the
@@ -544,7 +742,12 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
           // REQUIRED, so a record cannot be written without its payload):
           // the retry path simply tries the artifact read again once the
           // worker's run directory is intact. Nothing is persisted and
-          // nothing is published on an unprovable artifact.
+          // nothing is published on an unprovable artifact. Envelope
+          // reads in this class are already bounded
+          // (`MAX_ENVELOPE_READ_ATTEMPTS`, converted to `refused` above);
+          // review-artifact unavailability keeps its unbounded
+          // retry-later contract (#1560 scopes the bound to the
+          // envelope).
           return false;
         }
         payload = artifact.payload;
