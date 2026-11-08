@@ -196,11 +196,13 @@ The bundle carries the COMPLETE blocking set: its only row bound is the
 document's own 64 KiB byte budget, and rows are admitted one at a time ahead
 of the findings, because they name what blocked the review (#1521 review: a
 controller must be able to name every blocking row, not only the first ten).
-The published handoff keeps a tighter listing bound — at most 10 rows, its
-8 KiB budget — and discloses its shortening, so the handoff's list is always
-a disclosed PREFIX of the bundle's rows, never a different or longer set.
-When the handoff reports `unresolved_review_obligations_truncated: true`,
-the bundle is the machine surface that names the rest.
+The rows may claim at most half of that budget
+(`REVIEW_BUNDLE_MAX_OBLIGATION_BYTES`), so a large row set never squeezes
+the findings out of the document. The published handoff keeps a tighter
+listing bound — at most 10 rows, its 8 KiB budget — and discloses its
+shortening, so the handoff's list is always a disclosed PREFIX of the
+bundle's rows, never a different or longer set. The published obligations
+document is the surface that names the rest, for a consumer outside the run.
 
 All four members ride the same presence rule as `findings`. A skipped or
 failed bundle carries none of them. A run that never reviewed blocked
@@ -308,7 +310,9 @@ The bundle is the local surface. It rides the `review-bundle` step output
 and a run-directory file, so only a workflow inside the same run can read it.
 The handoff is the published surface. It rides the action-owned managed body,
 so any consumer with ordinary pull-request comment or review reads can read
-it. No artifact download and no forge-specific API are needed.
+it. No artifact download and no forge-specific API are needed. The published
+obligations document is a second published surface. It carries the complete
+set of blocking rows, which the handoff's compact list can only prefix.
 
 - Producer: `src/publish/handoff.ts` (`buildReviewHandoff` builds the
   document, `renderReviewHandoffBlock` renders the container), wired in
@@ -510,8 +514,12 @@ the requirement did NOT hold — a confirmed negative). An `unresolved` row is
 an availability failure (coverage, never a defect): it withholds the trusted
 approval and marks the review partial, but it never rides here as a blocking
 obligation. The `derived` rows are likewise coverage, never blocks.
-The handoff's byte budget can shorten its list, so the handoff may carry a
-prefix of the bundle's rows. Its total and its truncated flag say so.
+The handoff is an 8 KiB document that also carries the items and the two
+merge-gating id lists. Its own list of obligation rows is therefore at most
+10 rows, and that list is a disclosed prefix of the complete set. The
+complete set rides the published obligations document, which the next section
+describes. Both documents report the same honest total, so a consumer can
+always tell that the handoff's list is short.
 
 - `unresolved_review_obligations` holds the blocking rows. Each row carries
   `id`, `source`, `status`, `cause` and `text`. The row shape and the
@@ -519,7 +527,8 @@ prefix of the bundle's rows. Its total and its truncated flag say so.
 - `unresolved_review_obligations_total` counts every blocking row the run
   had that the document could list. `unresolved_review_obligations_truncated`
   says whether the list is shorter than that count. At most 10 rows are
-  listed.
+  listed. That is the handoff's own bound, not a bound on the rows
+  themselves.
 - `derived_obligation_state` carries the run's derived coverage as a state.
   It is `complete`, `unresolved` or `unavailable`, and null when the state
   is unknown. The states are the ones the bundle section above lists.
@@ -594,5 +603,144 @@ derived state.
 ### A read-only surface
 
 The handoff is an added read surface. It never feeds the verdict, a gate or
+the published verdict text. It carries no model transcript, no raw tool
+output and no evidence blob.
+
+## Published obligations (`review-obligations/v1`)
+
+The handoff is compact by design. It shares its 8 KiB budget with the items
+and the two merge-gating id lists, so it can carry only a prefix of the
+blocking rows. The local bundle rides a step output, so only a workflow in
+the same run can read it. A controller that stands outside the run needs a
+third surface, and this is it: a second published document that carries the
+COMPLETE set of blocking rows.
+
+- Producer: `src/publish/obligations.ts` (`buildReviewObligations` builds the
+  document, `renderReviewObligationsBlock` renders the container), wired in
+  `src/publish/publish.ts`.
+- Consumer-side parser: `parseReviewObligationsBlock` reads the first
+  anchored block, `parseReviewObligations` parses the document and fails
+  closed.
+- Issue: #1521.
+
+### Container format
+
+The action renders the container into the managed body, right after the
+handoff container. Both sit in the action-owned marker preamble, before every
+model-authored surface. The format is the same as the handoff's: the anchor
+line, then the fence, then the payload on one line, then the closing fence.
+
+````text
+<!-- ai-pr-reviewer-obligations:v1 -->
+```json
+{"schema":"review-obligations/v1", ...}
+```
+````
+
+### Document shape
+
+The document is one line of JSON with a fixed key order:
+
+```json
+{
+  "schema": "review-obligations/v1",
+  "review_id": "9f3c2a1b7d04e5c6",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "unresolved_review_obligations": [
+    {
+      "id": "must-check-1",
+      "source": "must_check",
+      "status": "unmet",
+      "cause": "missing-source-evidence",
+      "text": "verify the changelog entry"
+    }
+  ],
+  "unresolved_review_obligations_total": 1,
+  "unresolved_review_obligations_truncated": false,
+  "unresolved_review_obligations_text_chars": 300
+}
+```
+
+- The rows are the same rows the bundle and the handoff carry. One projection
+  serves all three documents, so they never disagree about what a blocking
+  row says.
+- The row shape and the closed vocabularies are the ones the bundle section
+  above lists.
+- `unresolved_review_obligations_total` counts every blocking row the run
+  had. `unresolved_review_obligations_truncated` says whether the list is
+  shorter than that count — it can only be true when the row-count
+  publication bound binds.
+- `unresolved_review_obligations_text_chars` is the EFFECTIVE per-row text
+  cap in codepoints (`0..300`): every row's text is at most that long. It is
+  the full 300 whenever the byte budget is not binding, and smaller when the
+  budget made the action shorten the row texts.
+- The list this document carries is the COMPLETE set of qualifying blocking
+  rows. It is never a prefix of it: the byte budget is met by shortening the
+  row texts, never by dropping a row.
+- The action publishes no document at all when the run has no blocking row.
+  There is nothing to name, so the published body stays the same as the body
+  of a run that never had a blocking obligation.
+
+### Trust rules
+
+A consumer MUST:
+
+- Select the action-owned managed body by the forge-reported author, exactly
+  as the handoff section above requires.
+- Take the first anchored block that carries the obligations anchor. The
+  anchor is reserved against model markdown, so model prose can never emit
+  it. A later copy can never pass for the action's block.
+- Compare `head_sha` with the pull request's current head before acting.
+- Refuse a document whose `schema` is not exactly `review-obligations/v1`,
+  and treat anything `parseReviewObligations` refuses as absent. The parser
+  refuses an empty `review_id`, a row outside the published vocabulary, a
+  disclosure that contradicts itself, and a document that lies about its own
+  text bound. The counters read the same rule as the handoff's counters and
+  the bundle's counters.
+- Read the complete set from this document, not from the handoff's list. The
+  handoff's list is a disclosed prefix.
+
+### Bounds and redaction
+
+- The whole document is at most 24 KiB (`REVIEW_OBLIGATIONS_MAX_BYTES`),
+  checked on the exact serialized string. The budget is met by SHORTENING
+  every row's text uniformly — the action picks the largest per-row text cap
+  that still fits and discloses it in
+  `unresolved_review_obligations_text_chars`. A row is never dropped to make
+  room for another row, so the list is never a prefix.
+- The row count has a publication bound of 64
+  (`REVIEW_OBLIGATIONS_MAX_ROWS`), which never binds for a real run: the
+  run's blocking rows come from two deterministic sources — the classifier's
+  `must_check` checklist (at most 37 distinct static items: `KIND_CHECKS`,
+  `FLAG_CHECKS` and the shared `*_EVIDENCE_CHECKS` tables in
+  `src/classification/classify.ts`) and the trusted base's guidance asks (at
+  most 5, `MAX_APPROVAL_PREREQUISITES` in
+  `src/enforcement/review-obligations.ts`) — so a run holds at most 42
+  qualifying rows. When the bound does bind, the total and the truncation
+  flag say so.
+- The container is RESERVED ahead of the model-authored review prose. It
+  renders at its own byte budget (`REVIEW_OBLIGATIONS_MAX_BYTES`, 24 KiB)
+  and never competes with the prose for room: when the published body would
+  grow past the forge's comment ceiling (`MAX_PUBLISHED_BODY_BYTES`), the
+  aggregate publish-boundary guard trims ONLY the model-authored review
+  prose (#1554, disclosed in the body's final line) — never the container
+  and never its rows. A verbose review can therefore no longer starve the
+  complete obligations document out of the published body. The document
+  still shortens row texts inside its own budget when its own bound binds,
+  and discloses the effective cap. When the document's own budget cannot
+  hold the complete list at all — not even with empty row texts — no
+  container is published: a partial list would tell a controller less than
+  no list.
+- The handoff's 8 KiB document and this 24 KiB document ride the same
+  published body, so both stay well inside a forge comment body's limit.
+- Every text field passes secret redaction and a length cap before it is
+  serialized, exactly as the handoff does. The row text is at most 300
+  codepoints and the row id is at most 64 codepoints.
+- The document is a single-line JSON string, so hostile obligation text stays
+  inert string content and cannot forge structure.
+
+### A read-only surface
+
+This document is an added read surface. It never feeds the verdict, a gate or
 the published verdict text. It carries no model transcript, no raw tool
 output and no evidence blob.
