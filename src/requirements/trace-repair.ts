@@ -92,8 +92,12 @@ export const TRACE_CLAIM_OUTPUT_CONTRACT =
   + "production code. `met` requires BOTH a valid enforcement location and a valid test location, and the "
   + "enforcement must be a real predicate — a comparison, guard, throw/assert, or match call — not just an "
   + "assignment or object-literal property that copies the value (naming the field is not enforcing it). "
-  + "The predicate's line must also carry a word from the requirement's own wording (or the `symbol`) — "
-  + "unless the cited file is a declared owner of the requirement in the repository's "
+  + "The predicate's line must carry a word from the requirement's own wording (or the `symbol`) — or the "
+  + "cited line declares a local identifier (`const`/`let`/`var`) whose name the predicate's condition "
+  + "references within two lines, e.g. cite `const openAt = unclosedFenceStart(text);` and let "
+  + "`if (openAt >= 0)` carry the predicate (identifier segments count: `fence` matches "
+  + "`unclosedFenceStart`). "
+  + "Unless the cited file is a declared owner of the requirement in the repository's "
   + "`.github/pr-reviewer-owners.yml`, in which case the predicate must sit on the cited line itself and "
   + "the requirement's wording is not needed. "
   + "`not_applicable`, `unmet`, and `unverifiable` all require a `reason`. A `met` claim for a requirement listed as distributed must cite one enforcement location and one matching test in each named seam; a real predicate in a cited seam is enough there — no word from the requirement's wording is needed. Return strict "
@@ -507,7 +511,9 @@ export function buildTraceRepairValidationFeedback(input: {
     "",
     "Fix the citations so the validator can accept them: `enforcement` must point at a line that carries a real "
       + "predicate (a comparison, guard, throw/assert, or match call) and — unless the cited file is a declared owner "
-      + "of the requirement — also carries a word from the requirement's own wording (or the `symbol`); `test` must "
+      + "of the requirement — also carries a word from the requirement's own wording (or the `symbol`); alternatively, "
+      + "cite the `const`/`let`/`var` declaration line that binds an identifier the nearby predicate's condition "
+      + "references within two lines (identifier segments count: `fence` matches `unclosedFenceStart`). `test` must "
       + "point at an actual test or fixture file in the pull request head. The full original request follows "
       + "unchanged below.",
     "",

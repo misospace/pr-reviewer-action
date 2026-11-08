@@ -445,11 +445,18 @@ test("#1343: the citation rule is disclosed where the reviewer is asked for clai
   assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /declared owner/);
   assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /pr-reviewer-owners\.yml/);
   assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /the predicate must sit on the cited line itself/);
+  // #1566 (review): the split-line linked shape the validator accepts must
+  // be disclosed on both surfaces too — a compliant model cannot repair the
+  // #1562 citation geometry with a prompt that only knows the same-line rule.
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /predicate's condition\s*\n?\s*references within two lines/);
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /unclosedFenceStart/);
   const fragment = readFileSync("scripts/prompt_fragments/requirement_trace.txt", "utf8");
   assert.match(fragment, /carrying a word from the requirement's own wording/);
   assert.match(fragment, /declared owner/);
   assert.match(fragment, /pr-reviewer-owners\.yml/);
   assert.match(fragment, /the cited line itself must carry the predicate/);
+  assert.match(fragment, /bound identifier the predicate's condition references within two lines/);
+  assert.match(fragment, /unclosedFenceStart/);
 });
 
 /**
