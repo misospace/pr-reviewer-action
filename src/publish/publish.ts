@@ -104,6 +104,13 @@ export interface PublishInput {
    * not only an opaque id. Only the forcing sources ride — a `derived` row
    * is coverage, never a block. */
   unresolvedReviewObligations?: readonly ReviewObligation[];
+  /** #1541: the number of DISTINCT requirement ids the enforcement pass
+   * produced BEFORE the shared id cap shortened the list. The published
+   * handoff carries it, so a consumer can tell that the cap dropped ids
+   * instead of reading a shortened list as the whole set. */
+  unresolvedRequirementIdsSourceTotal?: number;
+  /** #1541: the same honest count for the required-check ids. */
+  unresolvedRequiredChecksSourceTotal?: number;
   cleanupPreviousNativeReviews: string;
   /** #1161: DEPRECATED and inert. The input stays accepted for backward
    * compatibility, but it gates nothing and changes no published event —
@@ -1820,6 +1827,11 @@ export async function publishReview(
     findings: input.findings,
     unresolvedRequirementIds: input.unresolvedRequirementIds ?? [],
     unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
+    // #1541: the count the enforcement pass produced before the shared id cap
+    // shortened those lists. It rides the published handoff so a consumer
+    // can tell that the cap dropped ids.
+    unresolvedRequirementIdsSourceTotal: input.unresolvedRequirementIdsSourceTotal,
+    unresolvedRequiredChecksSourceTotal: input.unresolvedRequiredChecksSourceTotal,
     // #1521: the blocking obligation rows and the derived-obligation state
     // ride the published handoff, so a controller sees what blocked the
     // review and how complete the derived coverage was.
@@ -1846,6 +1858,9 @@ export async function publishReview(
       findings: input.findings,
       unresolvedRequirementIds: input.unresolvedRequirementIds ?? [],
       unresolvedRequiredChecks: input.unresolvedRequiredChecks ?? [],
+      // #1541: the same counts as the suggestion-carrying variant above.
+      unresolvedRequirementIdsSourceTotal: input.unresolvedRequirementIdsSourceTotal,
+      unresolvedRequiredChecksSourceTotal: input.unresolvedRequiredChecksSourceTotal,
       // #1521: the same rows and state as the suggestion-carrying variant
       // above — the two documents must never disagree about what blocked
       // the review.

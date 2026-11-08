@@ -25,7 +25,7 @@ import {
   evaluateRequiredCheckCoverage,
   type RequiredCheckCoverage,
 } from "./required-checks.js";
-import { boundedIdList } from "../context/id-lists.js";
+import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 import type { NormalizedRequiredCheckDisposition } from "../model/types.js";
 
 export type RequiredCheckValidationMode = "warn" | "fail" | "metadata_only";
@@ -163,9 +163,14 @@ export function applyRequiredCheckValidation(
  *
  * Defensive about the artifact shape: a missing or non-array `missing` list
  * yields no ids instead of throwing, and the shared id cap bounds the list.
+ *
+ * #1541: the returned count is the number of distinct ids the pass produced
+ * BEFORE the shared id cap shortened the list, so a publisher can disclose
+ * that the cap dropped ids instead of passing a shortened list off as the
+ * whole set.
  */
-export function unresolvedRequiredCheckIds(result: RequiredCheckValidationResult): string[] {
+export function unresolvedRequiredCheckIds(result: RequiredCheckValidationResult): BoundedIdList {
   const missing = result?.result?.missing;
-  if (!Array.isArray(missing)) return [];
-  return boundedIdList(missing.filter((entry): entry is string => typeof entry === "string"));
+  if (!Array.isArray(missing)) return { ids: [], total: 0 };
+  return boundedIdListWithTotal(missing.filter((entry): entry is string => typeof entry === "string"));
 }
