@@ -57,7 +57,11 @@ export async function readWorkerResultFile(
     MAX_EXECUTION_RESULT_FILE_BYTES,
   );
   if (read.kind === "missing") return { kind: "missing" };
-  if (read.kind === "invalid") return { kind: "invalid" };
+  // A too-large result envelope is a corrupted execution wrapper (the
+  // contract caps it far below the read bound); the result contract has
+  // no richer refusal, so it is the same `invalid` the reader returned
+  // before this seam distinguished sizes.
+  if (read.kind !== "ok") return { kind: "invalid" };
   let raw: unknown;
   try {
     raw = JSON.parse(read.text);

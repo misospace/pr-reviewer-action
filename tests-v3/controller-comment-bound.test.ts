@@ -255,6 +255,23 @@ test("#1558: an artifact whose payload overflows the comment envelope is refused
   assert.match(run.failureReason, /does not fit the comment ceiling/);
 });
 
+test("#1558: an artifact FILE past the payload byte cap is refused terminally too — the dominant oversized shape", async (t) => {
+  const h = setup();
+  t.after(() => rmSync(h.runsRoot, { recursive: true, force: true }));
+  // The bounded read proves the size on its own descriptor and used to
+  // flatten that into a retry-later `invalid` — the stranding the fix
+  // targets: the identical oversized file re-read forever.
+  const review = { blob: "a".repeat(FORGE_COMMENT_MAX_BYTES + 16) };
+  writeArtifacts(h.runsRoot, "job-1", review);
+  await plantRun(h.store, "job-1");
+  assert.equal(await h.publish(makePublishingRecord("job-1")), true);
+  assert.equal(await h.store.getPublication("job-1"), null);
+  const run = await h.store.getRun(executionRunId("job-1", 1));
+  assert.ok(run !== null);
+  assert.equal(run.state, "failed");
+  assert.match(run.failureReason, /too large to publish/);
+});
+
 test("#1558: a refused size verdict is stable across replays — no durable mutation, forge never reached", async (t) => {
   const h = setup();
   t.after(() => rmSync(h.runsRoot, { recursive: true, force: true }));

@@ -163,6 +163,9 @@ async function readExecutionEnvelope(
   if (read.kind === "missing") {
     return { kind: "unavailable", reason: "worker execution result envelope is missing" };
   }
+  if (read.kind === "too-large") {
+    return { kind: "unavailable", reason: "worker execution result envelope is too large" };
+  }
   if (read.kind === "invalid") {
     return { kind: "unavailable", reason: "worker execution result envelope is unreadable" };
   }
@@ -217,6 +220,14 @@ async function readReviewArtifact(
   if (read.kind === "missing") {
     return { kind: "unavailable", reason: "worker review artifact is missing" };
   }
+  if (read.kind === "too-large") {
+    // The dominant oversized shape: the artifact FILE exceeds the payload
+    // byte cap. The read proves it on the same descriptor, and the
+    // worker completed before the record reached `publishing`, so this
+    // is final — a retry-later `false` here would strand the record in
+    // `publishing` forever (the class of bug #1558's review caught).
+    return { kind: "refused", reason: "worker review artifact is too large to publish" };
+  }
   if (read.kind === "invalid") {
     return { kind: "unavailable", reason: "worker review artifact is unreadable" };
   }
@@ -230,6 +241,11 @@ async function readReviewArtifact(
     return { kind: "unavailable", reason: "worker review artifact is not a JSON object" };
   }
   const canonical = JSON.stringify(parsed);
+  // Defense-in-depth: unreachable after the byte-capped read above (the
+  // canonical encoding never exceeds the parsed text's character count,
+  // which never exceeds the file's byte count, which the read capped at
+  // this bound), but it pins the payload contract directly at the payload
+  // rather than only at the read. Terminal for the same reason.
   if (canonical.length > PUBLICATION_PAYLOAD_MAX_CHARS) {
     return { kind: "refused", reason: "worker review artifact is too large to publish" };
   }
@@ -410,8 +426,11 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
           // record (`true`) and close the run's account as failed with
           // the bounded reason. No durable publication record is
           // created: resultPayload is REQUIRED non-empty and this
-          // payload can never be persisted or replayed — the run
-          // record's terminal failure is the durable explanation.
+          // payload can never be persisted or replayed. The run record
+          // is the durable explanation on the daemon path (it always
+          // exists — created before the worker launches); a missing or
+          // already-terminal run makes the mirror a no-op, and the
+          // queue's own terminal record remains.
           await mirrorRunTransition(
             deps.store,
             executionRunId(jobId, record.attempt),
