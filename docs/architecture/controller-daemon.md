@@ -110,6 +110,14 @@ a forge-specific CLI.
   JSON. The `result.json` file beside it is the execution wrapper, and
   the publisher never publishes it. A payload that is not canonical JSON,
   or that carries a secret shape, is refused.
+- **The durable-result comment never exceeds the forge comment ceiling
+  (#1558).** The forge-capability renderer wraps the payload in the sticky
+  marker and a fence, and the forge REFUSES (never trims) a body over its
+  65,536-byte ceiling — so a payload at its own ceiling would lose the
+  whole publication. The publisher measures the exact assembled body and
+  refuses a payload that does not fit the room the marker and fences
+  leave, before it persists a record or reaches the forge; the renderer
+  itself is the fail-closed backstop and renders nothing over the bound.
 - **Run bookkeeping mirrors the attempt, not the generation.** The
   control-plane `RunRecord` is created before the worker launches and
   moves through the queue's own state machine (`starting` when the

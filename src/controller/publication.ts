@@ -62,6 +62,7 @@ import {
   type UsageRole,
 } from "../state/index.js";
 import { proveContained, readBoundedFileNoFollow } from "../executor/paths.js";
+import { durableResultPayloadFitsCeiling } from "./forge-capability.js";
 import {
   MAX_EXECUTION_RESULT_FILE_BYTES,
   validateExecutionResult,
@@ -219,6 +220,16 @@ async function readReviewArtifact(
   const canonical = JSON.stringify(parsed);
   if (canonical.length > PUBLICATION_PAYLOAD_MAX_CHARS) {
     return { kind: "unavailable", reason: "worker review artifact is too large to publish" };
+  }
+  // #1558: the payload's own ceiling is EXACTLY the forge comment ceiling,
+  // so a payload at its bound overflows the comment the publisher renders
+  // around it (marker + fences), and the forge refuses the oversized
+  // comment — the whole publication lost. Refuse such an artifact here,
+  // before a durable record is created for a payload that can never be
+  // written: the refusal is a bounded local reason, and no oversized body
+  // is ever persisted, rendered, or sent.
+  if (!durableResultPayloadFitsCeiling(canonical)) {
+    return { kind: "unavailable", reason: "worker review artifact does not fit the comment ceiling it would publish inside" };
   }
   if (containsSecretShapedContent(canonical)) {
     return { kind: "unavailable", reason: "worker review artifact carries secret-shaped content" };
