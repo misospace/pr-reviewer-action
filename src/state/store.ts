@@ -69,6 +69,21 @@ export class StateConflictError extends Error {
   }
 }
 
+/** Thrown when a PERSISTED record fails the CURRENT record validator
+ * (#1561): a record written under an older validator's rules can fail a
+ * rule added since — the stored bytes are final, so every replayed read
+ * and every attempt recorded against the record fails identically, and
+ * no mutation that routes through the validator can ever succeed on it.
+ * Throwing this instead of a generic error lets the caller that owns the
+ * record's settlement (the durable publisher) distinguish that
+ * deterministic refusal from a transient store failure. */
+export class StateRecordValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StateRecordValidationError";
+  }
+}
+
 // ── mutations ───────────────────────────────────────────────────────────
 
 /** Optional run patches carried by a `transition-run` mutation. Fields

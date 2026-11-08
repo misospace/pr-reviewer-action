@@ -22,7 +22,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { InMemoryControlPlaneStore } from "../src/state/index.js";
+import {
+  InMemoryControlPlaneStore,
+  StateRecordValidationError,
+  newRunRecord,
+  validatePublication,
+  type PublicationRecord,
+} from "../src/state/index.js";
 import { newJobRecord, withState } from "../src/queue/index.js";
 import type { JobRecord } from "../src/queue/types.js";
 import type { ReviewJob } from "../src/jobs/types.js";
@@ -30,6 +36,7 @@ import {
   createDurablePublisher,
   type ForgeWriteCapability,
 } from "../src/controller/publication.js";
+import { durableResultPayloadFitsCeiling } from "../src/controller/forge-capability.js";
 import {
   executionResultPath,
   executionRunDir,
@@ -188,8 +195,9 @@ interface Harness {
 function setup(options: {
   currentHead?: string | null;
   heads?: Array<string | null>;
+  store?: InMemoryControlPlaneStore;
 } = {}): Harness {
-  const store = new InMemoryControlPlaneStore();
+  const store = options.store ?? new InMemoryControlPlaneStore();
   const forge = new FakeForge();
   const heads = [...(options.heads ?? [options.currentHead ?? HEAD])];
   const runsRoot = mkdtempSync(join(tmpdir(), "prv-pub-"));
@@ -509,4 +517,156 @@ test("publish ignores records that are not publishing with a durable result", as
   assert.equal(await h.publish(runningNoResult), false);
   assert.equal(h.forge.calls.length, 0);
   assert.equal(await h.store.getPublication("job-1"), null);
+});
+
+// ── #1561: a persisted record that fails the CURRENT validator ──────────
+//
+// A pre-fix record written under an older validator's rules can fail a
+// rule added since (canonical-encoding or secret-shape checks). Every
+// mutation routed through the validator refuses it — the attempt-recording
+// mutation throws "next record failed validation", which used to propagate
+// out of `publish` into the scheduler's retry-later catch and strand the
+// expiry-exempt record in `publishing` forever. The stale record cannot be
+// planted through the store's own writer (put-publication validates), so
+// these tests override the READ seam the publisher uses — exactly where
+// the PostgreSQL backend's row mapper revalidates persisted rows.
+
+/** The run account the terminal settlement must close as failed. */
+async function plantRun(store: InMemoryControlPlaneStore, jobId: string): Promise<void> {
+  await store.apply([
+    {
+      kind: "create-run",
+      record: newRunRecord(
+        {
+          runId: executionRunId(jobId, 1),
+          jobId,
+          kind: "review",
+          executorIdentity: "test-executor",
+          headSha: HEAD,
+          configFingerprint: "0123456789abcdef",
+          attempt: 1,
+        },
+        4_000,
+      ),
+    },
+  ]);
+}
+
+/** Serves a record the CURRENT validator refuses — the state a deployed
+ * pre-fix row is in after a validator-rule change. */
+class StalePublicationStore extends InMemoryControlPlaneStore {
+  constructor(private readonly stale: PublicationRecord) {
+    super();
+  }
+  override async getPublication(_jobId: string): Promise<PublicationRecord | null> {
+    void _jobId;
+    return this.stale;
+  }
+}
+
+/** The PostgreSQL backend's read-time shape: the row mapper refuses the
+ * stored bytes with the typed error instead of returning them. */
+class ReadRefusingStore extends InMemoryControlPlaneStore {
+  override async getPublication(_jobId: string): Promise<PublicationRecord | null> {
+    void _jobId;
+    throw new StateRecordValidationError("postgres backend: malformed publication row");
+  }
+}
+
+/** A store failure that is NOT a validator refusal: transient, retry-later. */
+class FlakyStore extends InMemoryControlPlaneStore {
+  override async getPublication(_jobId: string): Promise<PublicationRecord | null> {
+    void _jobId;
+    throw new Error("connection reset");
+  }
+}
+
+function staleRecord(payload: string): PublicationRecord {
+  return {
+    jobId: "job-1",
+    publicationState: "pending",
+    destination: "github:owner/repo#7",
+    publicationId: "",
+    attempt: 0,
+    lastError: "",
+    resultHeadSha: HEAD,
+    resultPayload: payload,
+    history: [],
+    createdAtMs: 4000,
+    updatedAtMs: 4000,
+  };
+}
+
+test("#1561: a pre-fix record whose payload fails the current validator settles terminally on replay", async (t) => {
+  // Duplicate keys: canonical under no current rule, small enough to fit
+  // the comment ceiling — the #1558 replay check must NOT be what settles
+  // this record, and the attempt-recording mutation must never be reached
+  // (it would throw "next record failed validation" into the retry loop).
+  const payload = '{"verdict":"issues","verdict":"passed"}';
+  const stale = staleRecord(payload);
+  assert.equal(validatePublication(stale), null, "the record fails the CURRENT validator");
+  assert.equal(durableResultPayloadFitsCeiling(payload), true, "not the #1558 size shape");
+  const store = new StalePublicationStore(stale);
+  const h = setup({ store });
+  t.after(() => cleanup(h));
+  await plantRun(store, "job-1");
+  // TERMINAL: `true` settles the queue record; `false` (or a throw) would
+  // retry the identical refused replay forever.
+  assert.equal(await h.publish(makePublishingRecord("job-1")), true);
+  assert.equal(h.forge.calls.length, 0, "the refused payload is never replayed");
+  const run = await store.getRun(executionRunId("job-1", 1));
+  assert.ok(run !== null);
+  assert.equal(run.state, "failed");
+  assert.match(run.failureReason, /current record validator/);
+  // The stale record stays untouched: no mutation routed through the
+  // validator can persist anything against this payload.
+  assert.equal(await store.getPublication("job-1"), stale);
+  // A restarted controller re-fires publish on the same record: the
+  // settlement is stable, never mutating toward a write.
+  assert.equal(await h.publish(makePublishingRecord("job-1")), true);
+  assert.equal(h.forge.calls.length, 0);
+});
+
+test("#1561: a pre-fix record carrying secret-shaped persisted content settles terminally too", async (t) => {
+  // The payload's canonical encoding is fine; the CONTENT is what the
+  // current boundary refuses — a credential shape that must never be
+  // replayed to the forge.
+  const payload = JSON.stringify({ note: `ghp_${"a1b2c3d4e5".repeat(4)}` });
+  const stale = staleRecord(payload);
+  assert.equal(validatePublication(stale), null);
+  assert.equal(durableResultPayloadFitsCeiling(payload), true);
+  const store = new StalePublicationStore(stale);
+  const h = setup({ store });
+  t.after(() => cleanup(h));
+  await plantRun(store, "job-1");
+  assert.equal(await h.publish(makePublishingRecord("job-1")), true);
+  assert.equal(h.forge.calls.length, 0);
+  const run = await store.getRun(executionRunId("job-1", 1));
+  assert.ok(run !== null);
+  assert.equal(run.state, "failed");
+});
+
+test("#1561: a read-time validator refusal settles terminally without surfacing the record", async (t) => {
+  const store = new ReadRefusingStore();
+  const h = setup({ store });
+  t.after(() => cleanup(h));
+  await plantRun(store, "job-1");
+  assert.equal(await h.publish(makePublishingRecord("job-1")), true);
+  assert.equal(h.forge.calls.length, 0);
+  const run = await store.getRun(executionRunId("job-1", 1));
+  assert.ok(run !== null);
+  assert.equal(run.state, "failed");
+  assert.match(run.failureReason, /current record validator/);
+});
+
+test("#1561: a transient store failure on the read stays retry-later, never terminal", async (t) => {
+  const store = new FlakyStore();
+  const h = setup({ store });
+  t.after(() => cleanup(h));
+  await plantRun(store, "job-1");
+  await assert.rejects(h.publish(makePublishingRecord("job-1")), /connection reset/);
+  assert.equal(h.forge.calls.length, 0);
+  const run = await store.getRun(executionRunId("job-1", 1));
+  assert.ok(run !== null);
+  assert.equal(run.state, "queued", "a transient failure records no terminal mirror");
 });

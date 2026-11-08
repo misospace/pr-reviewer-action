@@ -123,6 +123,20 @@ a forge-specific CLI.
   cap, so the publisher settles the queue record and closes the run's
   durable account as failed with the bounded reason instead of retrying
   an unchanged artifact forever.
+- **A persisted record the CURRENT validator refuses settles terminally
+  (#1561).** A pre-fix `PublicationRecord` can carry a `resultPayload`
+  that passed its write-time validation but fails a rule added since (the
+  canonical-encoding or secret-shape checks). The boundary refuses such a
+  payload on every replay, so no mutation routed through the validator can
+  ever succeed on the record — the attempt-recording mutation throws, and
+  before the typed `StateRecordValidationError` the publisher let that
+  throw propagate into the scheduler's retry-later catch, stranding the
+  expiry-exempt record in `publishing` forever. The publisher now
+  revalidates the replayed record under the current validator (and
+  recognizes the typed read-time refusal from the PostgreSQL backend's row
+  mapper) and settles terminally: the queue record completes, the run's
+  account closes as failed with the bounded reason, and no attempt is
+  recorded — the refused record stays as the durable evidence.
 - **Run bookkeeping mirrors the attempt, not the generation.** The
   control-plane `RunRecord` is created before the worker launches and
   moves through the queue's own state machine (`starting` when the

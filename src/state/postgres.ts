@@ -44,6 +44,7 @@ import type { QueueSnapshotStore } from "./queue-snapshot.js";
 import { pendingMigrations, type ControlPlaneMigration } from "./migrations.js";
 import {
   StateConflictError,
+  StateRecordValidationError,
   type ControlPlaneStore,
   type StateExport,
   type StateMutation,
@@ -252,7 +253,12 @@ function mapPublication(row: QueryResultRow): PublicationRecord {
     updatedAtMs: num(row["updated_at_ms"]),
   });
   if (record === null) {
-    throw new Error("postgres backend: malformed publication row");
+    // #1561: a persisted row written under an older validator's rules can
+    // fail a rule the CURRENT validator enforces (canonical-encoding or
+    // secret-shape checks). The stored bytes are final, so every replayed
+    // read fails identically — throw the typed error the durable
+    // publisher settles terminally, never a generic read failure.
+    throw new StateRecordValidationError("postgres backend: malformed publication row");
   }
   return record;
 }

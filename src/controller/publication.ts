@@ -43,6 +43,14 @@
  * a deterministic size refusal (#1558) all return `true` (the queue record
  * settles; a stale result must never be retried forever against a moved
  * head — the durable publication record explains why nothing was written).
+ * So does a persisted publication record that fails the CURRENT record
+ * validator (#1561): a pre-fix record whose `resultPayload` passes its
+ * write-time validation but fails a rule added since is refused by the
+ * boundary on every replay — no attempt can be recorded against it (the
+ * mutation revalidates the whole record and throws), the payload must not
+ * be replayed, and the record is exempt from the queue's deadline/expiry
+ * settlement — so the publisher settles it terminally here, and the run's
+ * account carries the durable explanation.
  * A `publishing` record holding its durable result is exempt from the
  * queue's deadline/expiry settlement and publication retries carry no
  * terminal attempt limit, so the size refusals — which no retry can fix,
@@ -60,6 +68,8 @@ import type { JobRecord } from "../queue/types.js";
 import { containsSecretShapedContent } from "../context/redact.js";
 import {
   PUBLICATION_PAYLOAD_MAX_CHARS,
+  StateRecordValidationError,
+  validatePublication,
   type ControlPlaneStore,
   type PublicationRecord,
   type StateMutation,
@@ -407,7 +417,30 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
       if (record.state !== "publishing" || record.resultHeadSha === "") return false;
       const nowMs = deps.now();
       const jobId = record.job.jobId;
-      const existing = await deps.store.getPublication(jobId);
+      let existing: PublicationRecord | null;
+      try {
+        existing = await deps.store.getPublication(jobId);
+      } catch (err) {
+        // #1561: a backend that revalidates a persisted record at READ
+        // time (the PostgreSQL backend's row mapper) throws the typed
+        // error when the stored bytes fail the CURRENT validator — a
+        // deterministic refusal (the bytes are final), so the replay can
+        // never succeed and the record is exempt from the queue's
+        // expiry settlement. Settle it terminally here, exactly like the
+        // replay-branch refusal below; any other store failure is a
+        // transient retry-later and keeps propagating.
+        if (err instanceof StateRecordValidationError) {
+          const detail = "persisted publication record fails the current record validator";
+          await mirrorRunTransition(
+            deps.store,
+            executionRunId(jobId, record.attempt),
+            "failed",
+            { nowMs: deps.now(), patch: { failureReason: detail } },
+          );
+          return true;
+        }
+        throw err;
+      }
       if (existing !== null && existing.publicationState === "published") {
         // Already on the forge: a replayed publish call is a no-op, never
         // a second write.
@@ -416,6 +449,35 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
       let payload: string;
       let usage: readonly UsageRecord[];
       if (existing !== null && existing.resultPayload !== "") {
+        // #1561: a pre-fix record may fail the CURRENT record validator —
+        // its resultPayload passed the write-time validation of an older
+        // binary but fails a rule added since (the canonical-encoding or
+        // secret-shape checks). The boundary refuses the payload on every
+        // replay, so NO mutation that routes through the validator can
+        // ever succeed on this record: `record-publication-attempt` throws
+        // "next record failed validation" (the exact throw this branch
+        // used to let propagate into an unbounded retry-later — a
+        // `publishing`-with-result record is exempt from expiry settlement
+        // and publication retries have no attempt cap), and the record
+        // cannot be rewritten either, because every persisted form
+        // carrying this payload is refused. The size verdict on the
+        // durable bytes is deterministic, so the refusal is terminal:
+        // the queue record settles and the run's account closes as failed
+        // with the bounded reason — the same terminal-refusal contract as
+        // the stale/expired outcomes below. No attempt is recorded: the
+        // mutation itself would throw, and the stale record stays as the
+        // durable evidence the boundary refused it.
+        if (validatePublication(existing) === null) {
+          const detail =
+            "persisted publication record fails the current record validator";
+          await mirrorRunTransition(
+            deps.store,
+            executionRunId(jobId, record.attempt),
+            "failed",
+            { nowMs: deps.now(), patch: { failureReason: detail } },
+          );
+          return true;
+        }
         // A pre-fix record may hold a payload that can never render inside
         // the comment ceiling (#1558): the renderer would throw, the catch
         // below would record another attempt, and the retry would repeat
