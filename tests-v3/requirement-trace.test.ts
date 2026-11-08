@@ -1657,6 +1657,39 @@ test("#1566: a nearby predicate only counts when the term line binds an identifi
   }
 });
 
+test("#1566: a destructuring sibling binding never links — the term anchors only its own entry", () => {
+  const workspace = makeWorkspace();
+  try {
+    const fenceLedger = ledgerWith([{ id: "req-fence", text: "the publish-body fence scan must cut hostile prose at an unclosed fence delimiter before publishing", kind: "acceptance" }]);
+    const fenceClaimAt = (file: string, line: number) => [{
+      requirement_id: "req-fence",
+      disposition: "met",
+      enforcement: [{ file, line }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the fence cut throws when openAt is non-negative",
+    }];
+
+    // The review's repro: only `fenceStart`/`openAt` carries the term; the
+    // sibling `fallback` binding must not link an unrelated predicate.
+    writeFile(workspace, "src/des-sibling-unlinked.ts", [
+      "const { fenceStart: openAt, fallback = -1 } = scanProse(markdown);",
+      "if (fallback) { throw new Error('x'); }",
+    ]);
+    const siblingUnlinked = validateRequirementTrace(fenceClaimAt("src/des-sibling-unlinked.ts", 1), fenceLedger, workspace);
+    assert.equal(siblingUnlinked.rows[0]?.disposition, "unverifiable");
+
+    // Positive control: the term-bearing entry's own binding links.
+    writeFile(workspace, "src/des-sibling-linked.ts", [
+      "const { fenceStart: openAt, fallback = -1 } = scanProse(markdown);",
+      "if (openAt >= 0) { throw new Error('x'); }",
+    ]);
+    const siblingLinked = validateRequirementTrace(fenceClaimAt("src/des-sibling-linked.ts", 1), fenceLedger, workspace);
+    assert.equal(siblingLinked.rows[0]?.disposition, "met");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("#1566: the link goes through the term-bearing declaration only — never a sibling binding", () => {
   const workspace = makeWorkspace();
   try {

@@ -1030,14 +1030,16 @@ function governingPredicateText(blankedLine: string): string {
  * name, never through an unrelated sibling's. A declarator is term-bearing
  * when the term matches its LHS (including a destructuring key that is
  * renamed away: `fenceStart: openAt` still carries "fence") or its
- * initializer, on the raw or the segment-split view. Binding names: plain
- * `const`/`let`/`var` declarations and single-level destructuring (`const {
- * a, b: c } =`, `const [x, y = 1] =`; rename and default included, so the
- * binding name survives). Everything else binds nothing: an object-property
- * entry (`sourceSha: ctx.sourceSha`), a bare expression. The split-line
- * predicate rule links a predicate to such a declaration whose bound name
- * the predicate's governing expression uses; an unestablishable link fails
- * closed to the historical same-line rule. */
+ * initializer, on the raw or the segment-split view. In a destructuring
+ * list a term riding a SPECIFIC entry (its key or its bound name) anchors
+ * only that entry's binding — a sibling binding never links. Binding
+ * names: plain `const`/`let`/`var` declarations and single-level
+ * destructuring (`const { a, b: c } =`, `const [x, y = 1] =`; rename and
+ * default included, so the binding name survives). Everything else binds
+ * nothing: an object-property entry (`sourceSha: ctx.sourceSha`), a bare
+ * expression. The split-line predicate rule links a predicate to such a
+ * declaration whose bound name the predicate's governing expression uses;
+ * an unestablishable link fails closed to the historical same-line rule. */
 const MAX_BOUND_IDENTIFIERS = 8;
 const BOUND_IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
 
@@ -1064,18 +1066,19 @@ function topLevelEqualsIndex(text: string): number {
   return -1;
 }
 
-function boundNamesFromLhs(lhs: string): string[] {
+function boundNamesFromLhs(lhs: string): Array<{ key: string | null; name: string }> {
   const trimmed = lhs.trim();
-  if (BOUND_IDENTIFIER_RE.test(trimmed)) return [trimmed];
+  if (BOUND_IDENTIFIER_RE.test(trimmed)) return [{ key: null, name: trimmed }];
   const list = /^\{([\s\S]*)\}$/.exec(trimmed) ?? /^\[([\s\S]*)\]$/.exec(trimmed);
   if (list === null) return [];
-  const names: string[] = [];
+  const entries: Array<{ key: string | null; name: string }> = [];
   for (const part of list[1]!.split(",")) {
-    const target = part.includes(":") ? part.slice(part.indexOf(":") + 1) : part;
-    const name = target.split("=")[0]!.trim().replace(/^\.\.\./, "");
-    if (BOUND_IDENTIFIER_RE.test(name) && !names.includes(name)) names.push(name);
+    const name = (part.includes(":") ? part.slice(part.indexOf(":") + 1) : part).split("=")[0]!.trim().replace(/^\.\.\./, "");
+    if (!BOUND_IDENTIFIER_RE.test(name)) continue;
+    const key = part.includes(":") ? part.slice(0, part.indexOf(":")).trim() : null;
+    if (!entries.some((entry) => entry.name === name)) entries.push({ key, name });
   }
-  return names;
+  return entries;
 }
 
 function boundTermBearingIdentifiers(blankedLine: string, termRe: RegExp): string[] {
@@ -1110,12 +1113,26 @@ function boundTermBearingIdentifiers(blankedLine: string, termRe: RegExp): strin
       const init = declarator.slice(eq + 1);
       const names = boundNamesFromLhs(lhs);
       if (names.length === 0) continue;
-      const termBearing = termRe.test(lhs) || termRe.test(splitIdentifierSegments(lhs))
-        || termRe.test(init) || termRe.test(splitIdentifierSegments(init));
-      if (!termBearing) continue;
-      for (const name of names) {
-        if (!out.includes(name)) out.push(name);
+      // A term that rides a SPECIFIC entry (its destructuring key or its
+      // bound name) anchors only that entry's binding. A term that rides
+      // only the SHARED initializer anchors a binding only when the
+      // declarator is unambiguous — with several sibling bindings the
+      // initializer cannot say which one carries the requirement, so the
+      // declarator links nothing (fail closed, #1566 review).
+      const initTermBearing = termRe.test(init) || termRe.test(splitIdentifierSegments(init));
+      const termBearingEntries = names.filter((entry) =>
+        entry.key !== null
+          ? termRe.test(entry.key) || termRe.test(splitIdentifierSegments(entry.key))
+            || termRe.test(entry.name) || termRe.test(splitIdentifierSegments(entry.name))
+          : termRe.test(entry.name) || termRe.test(splitIdentifierSegments(entry.name)));
+      const linkable = termBearingEntries.length > 0
+        ? termBearingEntries
+        : initTermBearing && names.length === 1
+          ? names
+          : [];
+      for (const entry of linkable) {
         if (out.length >= MAX_BOUND_IDENTIFIERS) break;
+        if (!out.includes(entry.name)) out.push(entry.name);
       }
     }
   }
