@@ -22,10 +22,11 @@ import {
   InMemoryControlPlaneStore,
   PostgresControlPlaneStore,
   PostgresQueueSnapshotStore,
-  runControlPlaneMigrations,
-  seedControlPlaneStore,
-  StateConflictError,
-  type ControlPlaneStore,
+runControlPlaneMigrations,
+seedControlPlaneStore,
+StateConflictError,
+StateRecordValidationError,
+type ControlPlaneStore,
   type PublicationRecord,
   type RunRecord,
   type UsageRecord,
@@ -635,6 +636,34 @@ pgTest("pg: queue recovery reconcile runs over the loaded snapshot", async () =>
     assert.deepEqual(recovered.requeued, ["job-1"]);
     await store.save(recovered.snapshot);
     assert.equal((await store.load()).records[0]!.state, "queued");
+  } finally {
+    await pool.end();
+  }
+});
+
+pgTest("pg: a persisted publication row failing the CURRENT validator is a typed read refusal (#1561)", async () => {
+  const pool = new Pool({ connectionString: DSN });
+  try {
+    await runControlPlaneMigrations(pool);
+    await truncateAll(pool);
+    const store = new PostgresControlPlaneStore(pool);
+    await store.apply([
+      { kind: "put-publication", record: makePublication("job-1") },
+    ]);
+    // Plant the pre-fix shape: the row's payload passed the WRITE-time
+    // validation of an older binary but is not the canonical encoding the
+    // CURRENT validator requires. The row mapper must refuse the stored
+    // bytes with the typed error the durable publisher settles
+    // terminally — every replayed read fails identically (the bytes are
+    // final), never a generic read failure a retry could "fix".
+    await pool.query(
+      "UPDATE cp_publications SET result_payload = $1 WHERE job_id = $2",
+      ['{"verdict":"issues","verdict":"passed"}', "job-1"],
+    );
+    await assert.rejects(
+      () => store.getPublication("job-1"),
+      StateRecordValidationError,
+    );
   } finally {
     await pool.end();
   }

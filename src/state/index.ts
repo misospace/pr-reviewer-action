@@ -48,6 +48,7 @@ export {
   parseStateExport,
   seedControlPlaneStore,
   StateConflictError,
+  StateRecordValidationError,
 } from "./store.js";
 
 export { hasCostBasis, usageWithoutCost } from "./usage.js";
