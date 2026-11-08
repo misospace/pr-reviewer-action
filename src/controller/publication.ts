@@ -39,10 +39,16 @@
  * (`validatePublication` refuses, never normalizes, a payload that is not
  * a fixed point of the producer's verdict-content sanitizer).
  *
- * Terminal semantics: `published` and a refused-as-stale/expired result
- * both return `true` (the queue record settles; a stale result must never
- * be retried forever against a moved head — the durable publication record
- * explains why nothing was written). A forge failure returns `false`: the
+ * Terminal semantics: `published`, a refused-as-stale/expired result, and
+ * a deterministic size refusal (#1558) all return `true` (the queue record
+ * settles; a stale result must never be retried forever against a moved
+ * head — the durable publication record explains why nothing was written).
+ * A `publishing` record holding its durable result is exempt from the
+ * queue's deadline/expiry settlement and publication retries carry no
+ * terminal attempt limit, so the size refusals — which no retry can fix,
+ * the artifact's bytes are final once the worker completed — are settled
+ * HERE; returning `false` for one would strand the record in `publishing`
+ * forever. A forge failure returns `false`: the
  * scheduler retries later, and the retry path reads the payload from the
  * durable record — the worker's artifact file is consulted exactly once.
  */
@@ -62,6 +68,7 @@ import {
   type UsageRole,
 } from "../state/index.js";
 import { proveContained, readBoundedFileNoFollow } from "../executor/paths.js";
+import { durableResultPayloadFitsCeiling } from "./forge-capability.js";
 import {
   MAX_EXECUTION_RESULT_FILE_BYTES,
   validateExecutionResult,
@@ -119,10 +126,16 @@ function boundedDetail(value: string, cap: number): string {
   return `${singleLine.slice(0, Math.max(0, cap - 1))}…`;
 }
 
-/** Outcome of reading the worker's review artifact for publication. */
+/** Outcome of reading the worker's review artifact for publication.
+ * `unavailable` is retry-later (the bytes may not be readable yet; the
+ * queue settles the record only through expiry/supersession); `refused`
+ * is terminal for content that can NEVER be published (a deterministic
+ * size overflow — the worker's bytes are final once it completed, so no
+ * retry changes the answer); `ok` carries the durable payload. */
 type ArtifactOutcome =
   | { readonly kind: "ok"; readonly payload: string; readonly usage: readonly UsageRecord[] }
-  | { readonly kind: "unavailable"; readonly reason: string };
+  | { readonly kind: "unavailable"; readonly reason: string }
+  | { readonly kind: "refused"; readonly reason: string };
 
 /** Read the EXECUTION envelope the worker wrote (`<runDir>/result.json`)
  * and validate it against the executor's own result contract (#733).
@@ -149,6 +162,9 @@ async function readExecutionEnvelope(
   const read = await readBoundedFileNoFollow(envelopePath, MAX_EXECUTION_RESULT_FILE_BYTES);
   if (read.kind === "missing") {
     return { kind: "unavailable", reason: "worker execution result envelope is missing" };
+  }
+  if (read.kind === "too-large") {
+    return { kind: "unavailable", reason: "worker execution result envelope is too large" };
   }
   if (read.kind === "invalid") {
     return { kind: "unavailable", reason: "worker execution result envelope is unreadable" };
@@ -204,6 +220,17 @@ async function readReviewArtifact(
   if (read.kind === "missing") {
     return { kind: "unavailable", reason: "worker review artifact is missing" };
   }
+  if (read.kind === "too-large") {
+    // The dominant oversized shape: the artifact FILE exceeds the payload
+    // byte cap. The read proves it on the same descriptor, and the
+    // worker completed before the record reached `publishing`, so this
+    // is final — a retry-later `false` here would strand the record in
+    // `publishing` forever (the class of bug #1558's review caught).
+    return {
+      kind: "refused",
+      reason: "worker review artifact is too large to publish (file exceeds the publication byte cap)",
+    };
+  }
   if (read.kind === "invalid") {
     return { kind: "unavailable", reason: "worker review artifact is unreadable" };
   }
@@ -217,8 +244,39 @@ async function readReviewArtifact(
     return { kind: "unavailable", reason: "worker review artifact is not a JSON object" };
   }
   const canonical = JSON.stringify(parsed);
+  // The payload contract, pinned directly at the payload (not only at
+  // the read). Effectively unreachable after the byte-capped read —
+  // EXCEPT through canonical re-encoding growth: JSON can serialize
+  // longer than its source for number forms (`1e21` → `1e+21`, `.5` →
+  // `0.5`), so a file at the byte cap can canonicalize past the char
+  // cap. Terminal for the same reason: the bytes are final.
   if (canonical.length > PUBLICATION_PAYLOAD_MAX_CHARS) {
-    return { kind: "unavailable", reason: "worker review artifact is too large to publish" };
+    return {
+      kind: "refused",
+      reason: "worker review artifact is too large to publish (canonical form exceeds the payload cap)",
+    };
+  }
+  // #1558: the payload's own ceiling is EXACTLY the forge comment ceiling,
+  // so a payload at its bound overflows the comment the publisher renders
+  // around it (marker + fences), and the forge refuses the oversized
+  // comment — the whole publication lost. Refuse such an artifact here,
+  // before a durable record is created for a payload that can never be
+  // written: the refusal is a bounded local reason, and no oversized body
+  // is ever persisted, rendered, or sent. It is TERMINAL (`refused`, not
+  // retry-later): the worker completed, so its bytes are final and no
+  // retry can shrink them, while a `publishing`-with-result record is
+  // exempt from the queue's expiry settlement and publication retries have
+  // no terminal attempt limit — a `false` here would strand the record in
+  // `publishing` forever. The publisher settles it: the queue record
+  // completes and the run account closes as failed with this reason; no
+  // durable publication record is created, because the payload cannot be
+  // persisted by contract and there is nothing to replay. A payload
+  // already persisted by a pre-fix record is out of reach here; the
+  // publisher's replay branch settles that record terminally with the
+  // same fit check (`durableResultPayloadFitsCeiling`), and the render
+  // guard in `forge-capability.ts` stays the fail-closed backstop.
+  if (!durableResultPayloadFitsCeiling(canonical)) {
+    return { kind: "refused", reason: "worker review artifact does not fit the comment ceiling it would publish inside" };
   }
   if (containsSecretShapedContent(canonical)) {
     return { kind: "unavailable", reason: "worker review artifact carries secret-shaped content" };
@@ -358,6 +416,36 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
       let payload: string;
       let usage: readonly UsageRecord[];
       if (existing !== null && existing.resultPayload !== "") {
+        // A pre-fix record may hold a payload that can never render inside
+        // the comment ceiling (#1558): the renderer would throw, the catch
+        // below would record another attempt, and the retry would repeat
+        // forever — a `publishing`-with-result record is exempt from
+        // expiry settlement and publication retries have no attempt cap.
+        // The size verdict on the durable bytes is deterministic (the
+        // persisted payload is final), so the refusal is terminal here
+        // too: the durable record closes as failed with the bounded
+        // reason and the run's account closes with it — the same
+        // terminal-refusal contract as the stale/expired outcomes below.
+        if (!durableResultPayloadFitsCeiling(existing.resultPayload)) {
+          const detail =
+            "persisted result payload does not fit the comment ceiling it would publish inside";
+          await deps.store.apply([
+            {
+              kind: "record-publication-attempt",
+              jobId,
+              atMs: deps.now(),
+              outcome: "failed",
+              detail,
+            },
+          ]);
+          await mirrorRunTransition(
+            deps.store,
+            executionRunId(jobId, record.attempt),
+            "failed",
+            { nowMs: deps.now(), patch: { failureReason: detail } },
+          );
+          return true;
+        }
         payload = existing.resultPayload;
         usage = [];
       } else {
@@ -368,6 +456,27 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
           record.resultHeadSha,
           nowMs,
         );
+        if (artifact.kind === "refused") {
+          // #1558: a deterministic size refusal is terminal — the
+          // artifact's bytes are final, and a `publishing`-with-result
+          // record is exempt from expiry settlement, so `false` here
+          // would retry the identical read forever. Settle the queue
+          // record (`true`) and close the run's account as failed with
+          // the bounded reason. No durable publication record is
+          // created: resultPayload is REQUIRED non-empty and this
+          // payload can never be persisted or replayed. The run record
+          // is the durable explanation on the daemon path (it always
+          // exists — created before the worker launches); a missing or
+          // already-terminal run makes the mirror a no-op, and the
+          // queue's own terminal record remains.
+          await mirrorRunTransition(
+            deps.store,
+            executionRunId(jobId, record.attempt),
+            "failed",
+            { nowMs: deps.now(), patch: { failureReason: artifact.reason } },
+          );
+          return true;
+        }
         if (artifact.kind === "unavailable") {
           // No durable publication record exists yet (resultPayload is
           // REQUIRED, so a record cannot be written without its payload):

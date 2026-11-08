@@ -50,6 +50,8 @@ export {
 export {
   composeForgeCapability,
   renderDurableResultBody,
+  durableResultPayloadFitsCeiling,
+  FORGE_COMMENT_MAX_BYTES,
   CONTROLLER_STICKY_MARKER,
   type ComposedForge,
   type ForgeCompositionInput,

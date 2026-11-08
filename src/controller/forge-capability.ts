@@ -71,11 +71,22 @@ function webOriginFromApiBase(apiBaseUrl: string): string {
   return base;
 }
 
-/** A fenced, marker-carrying comment body for the durable result payload.
- * The fence is chosen LONGER than any backtick run inside the payload, so
- * hostile review content can never close its own fence and forge markdown
- * structure around it (the fence-safe rendering rule). */
-export function renderDurableResultBody(marker: string, resultPayload: string): string {
+/** The forge comment-body ceiling (#1558): 65,536 bytes — the same bound
+ * the GitHub App ingress client enforces before its write
+ * (`MAX_COMMENT_BYTES` in `src/ingress/github-app-client.ts`), and the
+ * bound the review body is guarded against in #1554. It is applied as a
+ * BYTE bound, counting UTF-8 bytes, the stricter measure: a body over
+ * the ceiling is not trimmed by the forge, it is REFUSED, and a refused
+ * publication loses the whole result. */
+export const FORGE_COMMENT_MAX_BYTES = 65_536;
+
+/** Assemble `marker + fence + payload + fence` with the fence chosen
+ * LONGER than any backtick run inside the payload, so hostile review
+ * content can never close its own fence and forge markdown structure
+ * around it (the fence-safe rendering rule). UNBOUNDED: use
+ * `renderDurableResultBody` (which enforces the ceiling) or
+ * `durableResultPayloadFitsCeiling` (which predicts it). */
+function assembleDurableResultBody(marker: string, resultPayload: string): string {
   let longest = 0;
   let run = 0;
   for (const char of resultPayload) {
@@ -88,6 +99,42 @@ export function renderDurableResultBody(marker: string, resultPayload: string): 
   }
   const fence = "`".repeat(Math.max(3, longest + 1));
   return `${marker}\n\n${fence}json\n${resultPayload}\n${fence}`;
+}
+
+/** A fenced, marker-carrying comment body for the durable result payload.
+ *
+ * #1558: the assembled body is bounded against `FORGE_COMMENT_MAX_BYTES`.
+ * The payload's own ceiling (`PUBLICATION_PAYLOAD_MAX_CHARS`, and the
+ * review bundle's `REVIEW_BUNDLE_MAX_BYTES`) is exactly the comment
+ * ceiling, so the marker and the fences used to push the assembled body
+ * PAST it — the forge refused the oversized comment and the whole
+ * publication was lost (the same failure #1554 fixed for the review
+ * body). The payload is a machine document and #1554's policy forbids
+ * trimming one, so the guard here is fail-closed: a payload that does
+ * not fit the room the marker and the fences leave renders NOTHING and
+ * says by how much it overflowed. The durable publisher refuses such a
+ * payload BEFORE it persists a record or reaches the forge, so the
+ * refusal is a bounded local diagnostic, never a forge rejection. */
+export function renderDurableResultBody(marker: string, resultPayload: string): string {
+  const body = assembleDurableResultBody(marker, resultPayload);
+  const bytes = Buffer.byteLength(body, "utf8");
+  if (bytes > FORGE_COMMENT_MAX_BYTES) {
+    throw new Error(
+      `the durable result comment exceeds the forge comment ceiling by ${bytes - FORGE_COMMENT_MAX_BYTES} byte(s)`,
+    );
+  }
+  return body;
+}
+
+/** #1558: whether a result payload survives the durable-result rendering
+ * inside the comment ceiling. The test IS the render with the controller's
+ * own sticky marker, byte-measured — the fence grows with the payload's
+ * longest backtick run, so no static reserve can prove the fit; the
+ * exact assembled body is the only honest measure. */
+export function durableResultPayloadFitsCeiling(resultPayload: string): boolean {
+  return Buffer
+    .byteLength(assembleDurableResultBody(CONTROLLER_STICKY_MARKER, resultPayload), "utf8")
+    <= FORGE_COMMENT_MAX_BYTES;
 }
 
 /** Validate a repository full name for raw path composition (fail closed). */

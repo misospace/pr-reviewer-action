@@ -246,11 +246,16 @@ export async function writeFileNoFollow(path: string, data: string): Promise<voi
 }
 
 /** The outcome of a bounded no-follow read. `missing` is the honest
- * "there is no result file" answer; `invalid` covers every refusal
- * (symlinked, not a regular file, too large, unreadable). */
+ * "there is no result file" answer; `too-large` is the honest "the file
+ * is a regular file whose size provably exceeds the cap on the very
+ * descriptor we would read" answer — deterministic, final once the
+ * writer completed, and NOT an unreadable-failure the caller should
+ * retry; `invalid` covers every other refusal (symlinked, not a regular
+ * file, grew past the cap mid-read, unreadable). */
 export type BoundedReadOutcome =
   | { readonly kind: "ok"; readonly text: string }
   | { readonly kind: "missing" }
+  | { readonly kind: "too-large" }
   | { readonly kind: "invalid" };
 
 /** Read a bounded regular file with NO-FOLLOW semantics.
@@ -261,8 +266,10 @@ export type BoundedReadOutcome =
  * bytes from that same descriptor — so the bound cannot be bypassed by
  * swapping the file between a stat and a read.
  *
- * `ENOENT` -> `{kind:"missing"}`; anything else (symlink, not a regular
- * file, too large, unreadable) -> `{kind:"invalid"}`. Never throws. */
+ * `ENOENT` -> `{kind:"missing"}`; a regular file whose `fstat` size
+ * exceeds the cap -> `{kind:"too-large"}`; anything else (symlink, not a
+ * regular file, grew past the cap mid-read, unreadable) ->
+ * `{kind:"invalid"}`. Never throws. */
 export async function readBoundedFileNoFollow(
   path: string,
   maxBytes: number,
@@ -283,8 +290,11 @@ export async function readBoundedFileNoFollow(
   }
   try {
     const info = await handle.stat();
-    if (!info.isFile() || info.size > maxBytes) {
+    if (!info.isFile()) {
       return { kind: "invalid" };
+    }
+    if (info.size > maxBytes) {
+      return { kind: "too-large" };
     }
     const buffer = Buffer.alloc(maxBytes + 1);
     const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0);
