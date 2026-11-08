@@ -186,6 +186,40 @@ test("#1516: a related file's test and manifest bindings are impact-invalidated 
     assert.ok(plan.seeded.includes("base.txt"), "unrelated candidates still seed");
   } finally { repo.cleanup(); }
 });
+test("#1516: whitespace in a repository path is preserved for invalidation matching", async () => {
+  const root = mkdtempSync(join(tmpdir(), "v3-rereview-ws-path-repo-"));
+  const git = (args: string): void => {
+    execSync(`${GIT} ${args}`, { cwd: root, stdio: "ignore" });
+  };
+  const write = (name: string, content: string): void => {
+    writeFileSync(join(root, name), content);
+  };
+  git("init -q -b main");
+  write("README.md", "hello\n");
+  write(" spaced.txt ", "kept\n");
+  git("add -A");
+  git(`commit -q -m "prior reviewed head"`);
+  const shaPrior = execSync("git rev-parse HEAD", { cwd: root }).toString().trim();
+  write("README.md", "hello\nchanged\n");
+  git("commit -qam " + JSON.stringify("current head"));
+  const shaHead = execSync("git rev-parse HEAD", { cwd: root }).toString().trim();
+  try {
+    const delta = await computeReReviewDelta(root, shaPrior, shaHead);
+    const plan = await computeReReviewEvidencePlan(
+      root,
+      delta,
+      { context: makeRelated({
+        files: [{ path: "README.md", symbols: [], tests: [" spaced.txt "], manifests: [] }],
+      }), anchorsTruncated: false },
+    );
+    assert.equal(plan.degradedReason, null);
+    assert.ok(plan.impactInvalidated.includes(" spaced.txt "),
+      "the whitespace-named binding matches its tree spelling exactly");
+    assert.ok(!plan.seeded.includes(" spaced.txt "),
+      "an impacted whitespace-named file is never seeded");
+    assert.equal(plan.seeded.length + plan.impactInvalidated.length, plan.verifiedBlobs);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("#1516: a truncated change-anchor artifact degrades the impact rule", async () => {
   const repo = evidenceRepo();

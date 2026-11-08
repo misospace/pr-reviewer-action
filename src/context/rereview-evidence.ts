@@ -192,9 +192,12 @@ function parseNameStatus(stdout: string, truncated: boolean): { paths: DeltaPath
 }
 
 /** Strip the `./` prefix git pathspecs and grep output sometimes carry, so a
- * related-code path matches its tree spelling. */
+ * related-code path matches its tree spelling. Leading and trailing
+ * whitespace is never stripped: those bytes are legitimate in Git
+ * filenames, and trimming them would break the exact invalidation match
+ * (or match the wrong path) and let an impacted file seed stale evidence. */
 function normalizePath(path: string): string {
-  return path.trim().replace(/^\.\//, "");
+  return path.replace(/^\.\//, "");
 }
 
 /** Compute the evidence-reuse plan for one re-review. Never throws and never
