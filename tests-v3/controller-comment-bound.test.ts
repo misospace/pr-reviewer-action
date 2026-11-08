@@ -38,6 +38,7 @@ import {
   executionRunDir,
   executionRunId,
 } from "../src/controller/execution.js";
+import { MAX_EXECUTION_RESULT_FILE_BYTES } from "../src/executor/index.js";
 import { InMemoryControlPlaneStore, newRunRecord } from "../src/state/index.js";
 import { newJobRecord, withState } from "../src/queue/index.js";
 import type { JobRecord } from "../src/queue/types.js";
@@ -269,7 +270,30 @@ test("#1558: an artifact FILE past the payload byte cap is refused terminally to
   const run = await h.store.getRun(executionRunId("job-1", 1));
   assert.ok(run !== null);
   assert.equal(run.state, "failed");
-  assert.match(run.failureReason, /too large to publish/);
+  assert.match(run.failureReason, /file exceeds the publication byte cap/);
+});
+
+test("#1558: an oversized artifact FILE settles terminally; an oversized ENVELOPE stays retry-later", async (t) => {
+  const h = setup();
+  t.after(() => rmSync(h.runsRoot, { recursive: true, force: true }));
+  // The envelope is the execution wrapper, not the review: a corrupted
+  // one is not a size verdict on the payload, so it must NOT settle the
+  // record terminally — only the artifact read distinguishes sizes.
+  const runDir = executionRunDir(h.runsRoot, "job-1", 1);
+  mkdirSync(runDir, { recursive: true });
+  const reviewPath = join(runDir, "review.json");
+  writeFileSync(reviewPath, JSON.stringify(REVIEW_ARTIFACT), "utf8");
+  writeFileSync(
+    executionResultPath(h.runsRoot, "job-1", 1),
+    `${JSON.stringify(executionEnvelope("job-1", reviewPath)) }${"x".repeat(MAX_EXECUTION_RESULT_FILE_BYTES)}`,
+    "utf8",
+  );
+  await plantRun(h.store, "job-1");
+  assert.equal(await h.publish(makePublishingRecord("job-1")), false);
+  assert.equal(await h.store.getPublication("job-1"), null);
+  const run = await h.store.getRun(executionRunId("job-1", 1));
+  assert.ok(run !== null);
+  assert.equal(run.state, "queued"); // untouched: no terminal mirror on retry-later
 });
 
 test("#1558: a refused size verdict is stable across replays — no durable mutation, forge never reached", async (t) => {

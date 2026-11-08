@@ -226,7 +226,10 @@ async function readReviewArtifact(
     // worker completed before the record reached `publishing`, so this
     // is final — a retry-later `false` here would strand the record in
     // `publishing` forever (the class of bug #1558's review caught).
-    return { kind: "refused", reason: "worker review artifact is too large to publish" };
+    return {
+      kind: "refused",
+      reason: "worker review artifact is too large to publish (file exceeds the publication byte cap)",
+    };
   }
   if (read.kind === "invalid") {
     return { kind: "unavailable", reason: "worker review artifact is unreadable" };
@@ -241,13 +244,17 @@ async function readReviewArtifact(
     return { kind: "unavailable", reason: "worker review artifact is not a JSON object" };
   }
   const canonical = JSON.stringify(parsed);
-  // Defense-in-depth: unreachable after the byte-capped read above (the
-  // canonical encoding never exceeds the parsed text's character count,
-  // which never exceeds the file's byte count, which the read capped at
-  // this bound), but it pins the payload contract directly at the payload
-  // rather than only at the read. Terminal for the same reason.
+  // The payload contract, pinned directly at the payload (not only at
+  // the read). Effectively unreachable after the byte-capped read —
+  // EXCEPT through canonical re-encoding growth: JSON can serialize
+  // longer than its source for number forms (`1e21` → `1e+21`, `.5` →
+  // `0.5`), so a file at the byte cap can canonicalize past the char
+  // cap. Terminal for the same reason: the bytes are final.
   if (canonical.length > PUBLICATION_PAYLOAD_MAX_CHARS) {
-    return { kind: "refused", reason: "worker review artifact is too large to publish" };
+    return {
+      kind: "refused",
+      reason: "worker review artifact is too large to publish (canonical form exceeds the payload cap)",
+    };
   }
   // #1558: the payload's own ceiling is EXACTLY the forge comment ceiling,
   // so a payload at its bound overflows the comment the publisher renders
