@@ -205,10 +205,14 @@ function writeArtifacts(runsRoot: string, jobId: string, review: unknown): void 
 test("#1558: an artifact whose payload overflows the comment envelope is refused before any durable record or forge write", async (t) => {
   const h = setup();
   t.after(() => rmSync(h.runsRoot, { recursive: true, force: true }));
-  // A canonical payload at exactly the store's own ceiling: the marker
-  // and fences can only push the comment past 65,536 bytes.
-  const target = FORGE_COMMENT_MAX_BYTES - Buffer.byteLength('{"blob":""}', "utf8");
-  writeArtifacts(h.runsRoot, "job-1", { blob: "a".repeat(target) });
+  // A canonical payload at exactly the comment ceiling: the marker and
+  // the fences can only push the rendered comment past 65,536 bytes.
+  const envelopeShell = Buffer.byteLength('{"blob":""}', "utf8");
+  const review = { blob: "a".repeat(FORGE_COMMENT_MAX_BYTES - envelopeShell) };
+  const canonical = JSON.stringify(review);
+  assert.equal(Buffer.byteLength(canonical, "utf8"), FORGE_COMMENT_MAX_BYTES);
+  assert.equal(durableResultPayloadFitsCeiling(canonical), false);
+  writeArtifacts(h.runsRoot, "job-1", review);
   assert.equal(await h.publish(makePublishingRecord("job-1")), false);
   assert.equal(await h.store.getPublication("job-1"), null);
 });
@@ -216,11 +220,18 @@ test("#1558: an artifact whose payload overflows the comment envelope is refused
 test("#1558: a payload that fits the comment envelope right down to the byte publishes", async (t) => {
   const h = setup();
   t.after(() => rmSync(h.runsRoot, { recursive: true, force: true }));
-  // One byte less than the previous test's overflow: exactly the room the
-  // marker and fences leave, and it publishes.
-  const target = FORGE_COMMENT_MAX_BYTES - Buffer.byteLength('{"blob":""}', "utf8") - 32;
-  const review = { blob: "a".repeat(target) };
-  assert.equal(durableResultPayloadFitsCeiling(JSON.stringify(review)), true);
+  // The exact room the marker and fences leave: the rendered comment is
+  // exactly 65,536 bytes, and it publishes.
+  const envelopeShell = Buffer.byteLength('{"blob":""}', "utf8");
+  const review = {
+    blob: "a".repeat(FORGE_COMMENT_MAX_BYTES - envelopeShell - scaffoldBytes("x")),
+  };
+  const canonical = JSON.stringify(review);
+  assert.equal(durableResultPayloadFitsCeiling(canonical), true);
+  assert.equal(
+    Buffer.byteLength(renderDurableResultBody(CONTROLLER_STICKY_MARKER, canonical), "utf8"),
+    FORGE_COMMENT_MAX_BYTES,
+  );
   writeArtifacts(h.runsRoot, "job-1", review);
   h.forge.publish = async (input) => {
     h.forge.payloads.push(input.resultPayload);

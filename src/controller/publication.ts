@@ -227,7 +227,11 @@ async function readReviewArtifact(
   // comment — the whole publication lost. Refuse such an artifact here,
   // before a durable record is created for a payload that can never be
   // written: the refusal is a bounded local reason, and no oversized body
-  // is ever persisted, rendered, or sent.
+  // is ever persisted, rendered, or sent. A deterministic size refusal
+  // stays a retry-later `false` like the ceiling check above — the queue
+  // settles it when the result goes stale/expired. A payload already
+  // persisted by a pre-fix record is out of reach here; the render guard
+  // in `forge-capability.ts` is that replay path's fail-closed backstop.
   if (!durableResultPayloadFitsCeiling(canonical)) {
     return { kind: "unavailable", reason: "worker review artifact does not fit the comment ceiling it would publish inside" };
   }

@@ -73,12 +73,11 @@ function webOriginFromApiBase(apiBaseUrl: string): string {
 
 /** The forge comment-body ceiling (#1558): 65,536 bytes — the same bound
  * the GitHub App ingress client enforces before its write
- * (`MAX_COMMENT_BYTES` in `src/ingress/github-app-client.ts`) and the
- * #1554 published-review-body guard (`MAX_PUBLISHED_BODY_BYTES` in
- * `src/publish/publish.ts`). It is applied as a BYTE bound, counting
- * UTF-8 bytes, the stricter measure: a body over the ceiling is not
- * trimmed by the forge, it is REFUSED, and a refused publication loses
- * the whole result. */
+ * (`MAX_COMMENT_BYTES` in `src/ingress/github-app-client.ts`), and the
+ * bound the review body is guarded against in #1554. It is applied as a
+ * BYTE bound, counting UTF-8 bytes, the stricter measure: a body over
+ * the ceiling is not trimmed by the forge, it is REFUSED, and a refused
+ * publication loses the whole result. */
 export const FORGE_COMMENT_MAX_BYTES = 65_536;
 
 /** Assemble `marker + fence + payload + fence` with the fence chosen
