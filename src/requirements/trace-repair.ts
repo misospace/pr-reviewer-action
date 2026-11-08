@@ -796,7 +796,14 @@ export async function runRequirementTraceRepairPass(input: TraceRepairPassInput)
       .map((id) => requirementsById.get(id))
       .filter((entry): entry is TraceRepairRequirement => entry !== undefined);
     if (retryRequirements.length > 0) {
-      const feedbackUser = `${buildTraceRepairValidationFeedback({ rejections })}\n${user}`;
+      // The combined retry request is re-fitted to the SAME configured input
+      // bound the original request used: the feedback block rides on top of
+      // a message that was already fitted to inputMaxBytes, so without this
+      // clamp the retry could exceed the configured repair-input bound. The
+      // clamp is newline-aware and cuts at the tail (inside the diff block,
+      // untrusted data by contract — a prompt surface, not a published one);
+      // `diffClipped` keeps reporting the ORIGINAL diff fit.
+      const [feedbackUser] = fitUtf8(`${buildTraceRepairValidationFeedback({ rejections })}\n${user}`, input.config.inputMaxBytes);
       const feedback = await request(buildPayload(feedbackUser));
       if (feedback.kind === "response") {
         const reparsed = parseTraceRepairResponse(feedback.text, allowedIds);

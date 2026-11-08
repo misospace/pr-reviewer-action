@@ -3000,6 +3000,27 @@ test("#1502: a well-formed response that omits every requested id still gets the
   assert.equal(noFeedback.validationRetried, false);
 });
 
+test("#1502: the validation-feedback retry stays inside the configured input bound", async () => {
+  const requirements = [{ id: "req-1", text: "must validate X" }];
+  const payloads: unknown[] = [];
+  await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "x".repeat(5000),
+    config: { ...RETRY_PASS_CONFIG, inputMaxBytes: 3000 },
+    requestFn: (payload) => {
+      payloads.push(payload);
+      return retryWire('{"requirement_coverage":[]}');
+    },
+    validateClaims: () => ({ "req-1": ["not-traced-by-reviewer"] }),
+  });
+  // The feedback prefix rides ON TOP of an already-fitted request, so the
+  // combined retry message must be re-fitted to the same bound — not the
+  // original bound plus the feedback bytes.
+  assert.ok(Buffer.byteLength(retryUserContent(payloads[0]!), "utf8") <= 3000);
+  const retryUser = retryUserContent(payloads[1]!);
+  assert.ok(Buffer.byteLength(retryUser, "utf8") <= 3000, `retry user was ${Buffer.byteLength(retryUser, "utf8")} bytes`);
+  assert.match(retryUser, /not-traced-by-reviewer/);
+});
+
 test("#1502: the validator-feedback block carries sanitized ids and labels, and the sanitizer bounds persistence", () => {
   const feedback = buildTraceRepairValidationFeedback({
     rejections: {
