@@ -12,6 +12,9 @@
  * final), and publishing-with-result records are exempt from expiry
  * settlement with no terminal retry cap, so the publisher settles the
  * queue record and closes the run as failed instead of returning `false`.
+ * A pre-fix record already holding an oversized persisted payload is
+ * settled terminally on replay too: the durable record closes failed
+ * instead of retrying the renderer's fail-closed throw forever.
  *
  * #252 discipline: the boundary is fed the boundary itself — a payload at
  * exactly the ceiling, one byte over, and a run of backticks that grows
@@ -39,7 +42,11 @@ import {
   executionRunId,
 } from "../src/controller/execution.js";
 import { MAX_EXECUTION_RESULT_FILE_BYTES } from "../src/executor/index.js";
-import { InMemoryControlPlaneStore, newRunRecord } from "../src/state/index.js";
+import {
+  InMemoryControlPlaneStore,
+  PUBLICATION_PAYLOAD_MAX_CHARS,
+  newRunRecord,
+} from "../src/state/index.js";
 import { newJobRecord, withState } from "../src/queue/index.js";
 import type { JobRecord } from "../src/queue/types.js";
 import type { ReviewJob } from "../src/jobs/types.js";
@@ -309,6 +316,53 @@ test("#1558: a refused size verdict is stable across replays — no durable muta
   assert.equal(await h.publish(makePublishingRecord("job-1")), true);
   assert.equal(await h.publish(makePublishingRecord("job-1")), true);
   assert.equal(await h.store.getPublication("job-1"), null);
+});
+
+test("#1558: a pre-fix record holding an oversized persisted payload settles terminally on replay", async (t) => {
+  const h = setup();
+  t.after(() => rmSync(h.runsRoot, { recursive: true, force: true }));
+  await plantRun(h.store, "job-1");
+  // A pre-fix record: the payload is valid durable state under the
+  // record contract (canonical JSON at the payload cap) but can never
+  // render inside the comment ceiling. The replay branch must settle it
+  // terminally — the renderer's fail-closed throw into the retry-later
+  // catch would otherwise retry the identical write forever.
+  const envelopeShell = Buffer.byteLength('{"blob":""}', "utf8");
+  const payload = JSON.stringify({ blob: "a".repeat(FORGE_COMMENT_MAX_BYTES - envelopeShell) });
+  assert.equal(Buffer.byteLength(payload, "utf8"), PUBLICATION_PAYLOAD_MAX_CHARS);
+  assert.equal(durableResultPayloadFitsCeiling(payload), false);
+  await h.store.apply([
+    {
+      kind: "put-publication",
+      record: {
+        jobId: "job-1",
+        publicationState: "pending",
+        destination: "github:owner/repo#7",
+        publicationId: "",
+        attempt: 0,
+        lastError: "",
+        resultHeadSha: HEAD,
+        resultPayload: payload,
+        history: [],
+        createdAtMs: 4000,
+        updatedAtMs: 4000,
+      },
+    },
+  ]);
+  assert.equal(await h.publish(makePublishingRecord("job-1")), true);
+  // The durable record closes as failed with the bounded reason — the
+  // replayed payload was never written to the forge.
+  const persisted = await h.store.getPublication("job-1");
+  assert.ok(persisted !== null);
+  assert.equal(persisted.publicationState, "failed");
+  assert.match(persisted.lastError, /does not fit the comment ceiling/);
+  const run = await h.store.getRun(executionRunId("job-1", 1));
+  assert.ok(run !== null);
+  assert.equal(run.state, "failed");
+  assert.match(run.failureReason, /does not fit the comment ceiling/);
+  // A restarted controller re-fires publish on the same record: the
+  // terminal settlement is stable, never mutating toward a write.
+  assert.equal(await h.publish(makePublishingRecord("job-1")), true);
 });
 
 test("#1558: a payload that fits the comment envelope right down to the byte publishes", async (t) => {

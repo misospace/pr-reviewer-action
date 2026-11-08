@@ -271,9 +271,10 @@ async function readReviewArtifact(
   // completes and the run account closes as failed with this reason; no
   // durable publication record is created, because the payload cannot be
   // persisted by contract and there is nothing to replay. A payload
-  // already persisted by a pre-fix record is out of reach here; the render
-  // guard in `forge-capability.ts` is that replay path's fail-closed
-  // backstop.
+  // already persisted by a pre-fix record is out of reach here; the
+  // publisher's replay branch settles that record terminally with the
+  // same fit check (`durableResultPayloadFitsCeiling`), and the render
+  // guard in `forge-capability.ts` stays the fail-closed backstop.
   if (!durableResultPayloadFitsCeiling(canonical)) {
     return { kind: "refused", reason: "worker review artifact does not fit the comment ceiling it would publish inside" };
   }
@@ -415,6 +416,36 @@ export function createDurablePublisher(deps: DurablePublisherDeps): JobPublisher
       let payload: string;
       let usage: readonly UsageRecord[];
       if (existing !== null && existing.resultPayload !== "") {
+        // A pre-fix record may hold a payload that can never render inside
+        // the comment ceiling (#1558): the renderer would throw, the catch
+        // below would record another attempt, and the retry would repeat
+        // forever — a `publishing`-with-result record is exempt from
+        // expiry settlement and publication retries have no attempt cap.
+        // The size verdict on the durable bytes is deterministic (the
+        // persisted payload is final), so the refusal is terminal here
+        // too: the durable record closes as failed with the bounded
+        // reason and the run's account closes with it — the same
+        // terminal-refusal contract as the stale/expired outcomes below.
+        if (!durableResultPayloadFitsCeiling(existing.resultPayload)) {
+          const detail =
+            "persisted result payload does not fit the comment ceiling it would publish inside";
+          await deps.store.apply([
+            {
+              kind: "record-publication-attempt",
+              jobId,
+              atMs: deps.now(),
+              outcome: "failed",
+              detail,
+            },
+          ]);
+          await mirrorRunTransition(
+            deps.store,
+            executionRunId(jobId, record.attempt),
+            "failed",
+            { nowMs: deps.now(), patch: { failureReason: detail } },
+          );
+          return true;
+        }
         payload = existing.resultPayload;
         usage = [];
       } else {
