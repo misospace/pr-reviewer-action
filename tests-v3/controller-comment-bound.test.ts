@@ -7,7 +7,11 @@
  * refuses the whole publication. The renderer is the fail-closed backstop
  * (it renders nothing over the bound), the fit helper is the payload's
  * admission test, and the durable publisher refuses a payload that cannot
- * fit BEFORE persisting a record or writing to the forge.
+ * fit BEFORE persisting a record or writing to the forge — TERMINALLY:
+ * a size refusal cannot be fixed by a retry (the worker's bytes are
+ * final), and publishing-with-result records are exempt from expiry
+ * settlement with no terminal retry cap, so the publisher settles the
+ * queue record and closes the run as failed instead of returning `false`.
  *
  * #252 discipline: the boundary is fed the boundary itself — a payload at
  * exactly the ceiling, one byte over, and a run of backticks that grows
@@ -34,7 +38,7 @@ import {
   executionRunDir,
   executionRunId,
 } from "../src/controller/execution.js";
-import { InMemoryControlPlaneStore } from "../src/state/index.js";
+import { InMemoryControlPlaneStore, newRunRecord } from "../src/state/index.js";
 import { newJobRecord, withState } from "../src/queue/index.js";
 import type { JobRecord } from "../src/queue/types.js";
 import type { ReviewJob } from "../src/jobs/types.js";
@@ -202,6 +206,29 @@ function writeArtifacts(runsRoot: string, jobId: string, review: unknown): void 
   writeFileSync(executionResultPath(runsRoot, jobId, 1), JSON.stringify(executionEnvelope(jobId, reviewPath)), "utf8");
 }
 
+/** The run account the publisher's refusal must close as failed. The
+ * daemon creates it before the worker launches; tests plant it so the
+ * mirror has something to settle (a missing run is a no-op mirror). */
+async function plantRun(store: InMemoryControlPlaneStore, jobId: string): Promise<void> {
+  await store.apply([
+    {
+      kind: "create-run",
+      record: newRunRecord(
+        {
+          runId: executionRunId(jobId, 1),
+          jobId,
+          kind: "review",
+          executorIdentity: "test-executor",
+          headSha: HEAD,
+          configFingerprint: "0123456789abcdef",
+          attempt: 1,
+        },
+        4_000,
+      ),
+    },
+  ]);
+}
+
 test("#1558: an artifact whose payload overflows the comment envelope is refused before any durable record or forge write", async (t) => {
   const h = setup();
   t.after(() => rmSync(h.runsRoot, { recursive: true, force: true }));
@@ -213,7 +240,33 @@ test("#1558: an artifact whose payload overflows the comment envelope is refused
   assert.equal(Buffer.byteLength(canonical, "utf8"), FORGE_COMMENT_MAX_BYTES);
   assert.equal(durableResultPayloadFitsCeiling(canonical), false);
   writeArtifacts(h.runsRoot, "job-1", review);
-  assert.equal(await h.publish(makePublishingRecord("job-1")), false);
+  await plantRun(h.store, "job-1");
+  // TERMINAL settlement: `true` (the queue record settles). Returning
+  // `false` would retry forever — publishing-with-result is exempt from
+  // expiry settlement and publication retries have no attempt cap.
+  assert.equal(await h.publish(makePublishingRecord("job-1")), true);
+  // No durable publication record: the payload cannot be persisted by
+  // contract, and there is nothing to replay.
+  assert.equal(await h.store.getPublication("job-1"), null);
+  // The run's durable account closes as failed with the bounded reason.
+  const run = await h.store.getRun(executionRunId("job-1", 1));
+  assert.ok(run !== null);
+  assert.equal(run.state, "failed");
+  assert.match(run.failureReason, /does not fit the comment ceiling/);
+});
+
+test("#1558: a refused size verdict is stable across replays — no durable mutation, forge never reached", async (t) => {
+  const h = setup();
+  t.after(() => rmSync(h.runsRoot, { recursive: true, force: true }));
+  const envelopeShell = Buffer.byteLength('{"blob":""}', "utf8");
+  const review = { blob: "a".repeat(FORGE_COMMENT_MAX_BYTES - envelopeShell) };
+  writeArtifacts(h.runsRoot, "job-1", review);
+  await plantRun(h.store, "job-1");
+  // A restarted controller re-fires publish on the same record: the
+  // refusal settles again identically (already-terminal run is a no-op
+  // mirror), never mutating durable state toward a write.
+  assert.equal(await h.publish(makePublishingRecord("job-1")), true);
+  assert.equal(await h.publish(makePublishingRecord("job-1")), true);
   assert.equal(await h.store.getPublication("job-1"), null);
 });
 
@@ -239,6 +292,23 @@ test("#1558: a payload that fits the comment envelope right down to the byte pub
   };
   assert.equal(await h.publish(makePublishingRecord("job-1")), true);
   assert.equal(h.forge.payloads.length, 1);
+  const persisted = await h.store.getPublication("job-1");
+  assert.ok(persisted !== null);
+  assert.equal(persisted.publicationState, "published");
+});
+
+test("#1558: a normal-sized review artifact is untouched by the ceiling admission — it publishes", async (t) => {
+  const h = setup();
+  t.after(() => rmSync(h.runsRoot, { recursive: true, force: true }));
+  // The ceiling check must be a boundary, not a size tax: an ordinary
+  // review artifact passes it and publishes exactly as before.
+  writeArtifacts(h.runsRoot, "job-1", REVIEW_ARTIFACT);
+  h.forge.publish = async (input) => {
+    h.forge.payloads.push(input.resultPayload);
+    return { publicationId: "github-comment:100" };
+  };
+  assert.equal(await h.publish(makePublishingRecord("job-1")), true);
+  assert.deepEqual(h.forge.payloads, [JSON.stringify(REVIEW_ARTIFACT)]);
   const persisted = await h.store.getPublication("job-1");
   assert.ok(persisted !== null);
   assert.equal(persisted.publicationState, "published");

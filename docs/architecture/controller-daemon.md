@@ -118,6 +118,11 @@ a forge-specific CLI.
   refuses a payload that does not fit the room the marker and fences
   leave, before it persists a record or reaches the forge; the renderer
   itself is the fail-closed backstop and renders nothing over the bound.
+  The refusal is TERMINAL — a `publishing`-with-result queue record is
+  exempt from expiry settlement and publication retries have no attempt
+  cap, so the publisher settles the queue record and closes the run's
+  durable account as failed with the bounded reason instead of retrying
+  an unchanged artifact forever.
 - **Run bookkeeping mirrors the attempt, not the generation.** The
   control-plane `RunRecord` is created before the worker launches and
   moves through the queue's own state machine (`starting` when the
