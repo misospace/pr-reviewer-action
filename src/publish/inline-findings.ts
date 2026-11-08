@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { redactText } from "../context/redact.js";
 import { safePath } from "../findings/safe-path.js";
-import { reserveSuggestionOpeners, stripReviewHandoffAnchor } from "../metadata/markers.js";
+import { reserveSuggestionOpeners, stripPublishedContainerAnchors } from "../metadata/markers.js";
 import { findingIdentityFromRecord, renderFindingIdentityMarker, stripFindingIdentityMarkers } from "../outcomes/identity.js";
 import { sanitizeMarkdown } from "./sanitize.js";
 
@@ -472,12 +472,13 @@ export function buildComments(
 // this is a no-op there; it still covers `message` and `agent_prompt`.)
 // #1027: same hygiene strips model-authored finding-identity
 // marker — this action's state and never model's to mint.
-// #1518: same hygiene strips the published handoff's anchor. This body is
-// model-authored text on a published surface, and the anchor names the
+// #1518/#1521: same hygiene strips the published containers' anchors (the
+// `review-handoff/v1` and the `review-obligations/v1` documents). This body
+// is model-authored text on a published surface, and an anchor names the
 // action's own container: a look-alike anchor here would offer a consumer a
-// handoff that this run never published. The item survives; only the
-// anchor goes.
-body = stripReviewHandoffAnchor(stripRejectionCarryover(stripFindingIdentityMarkers(body)));
+// document that this run never published. The item survives; only the
+// anchors go.
+body = stripPublishedContainerAnchors(stripRejectionCarryover(stripFindingIdentityMarkers(body)));
     // #762: a suppressed prescription's rejection survives this run as a
     // digest-only carry marker on the replacement comment — the reaction on
     // the original comment is lost when cleanup retires it, so without the

@@ -22,9 +22,10 @@ import {
 import { redactText } from "../context/redact.js";
 import { escapeCodeSpan } from "../context/fence.js";
 import { buildReviewHandoff, renderReviewHandoffBlock } from "./handoff.js";
+import { buildReviewObligations, renderReviewObligationsBlock, REVIEW_OBLIGATIONS_MAX_BYTES, type ReviewObligationsInput } from "./obligations.js";
 import { stripRevealedCapNoteTails } from "../confidence/result.js";
 import type { ConfidenceTelemetry } from "../confidence/telemetry.js";
-import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, parseMetadata, stripReviewHandoffAnchor, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
+import { buildRunMetadataMarker, emitReviewMarkers, isManagedBody, parseMetadata, stripPublishedContainerAnchors, type MarkerPreamble, type RunMarkerContext } from "../metadata/markers.js";
 import { FINDING_OUTCOMES_SCHEMA, isProvenHeadSha, MAX_LEDGER_EVENTS, normalizeOutcomeEvent, serializeOutcomeLedger, type OutcomeEvent, type OutcomeLedger } from "../outcomes/schema.js";
 import { parseFindingIdentityMarker } from "../outcomes/identity.js";
 import { deriveOutcomeEvents, type PriorFindingObservation } from "../outcomes/reconcile.js";
@@ -375,14 +376,19 @@ export function resolveIncompleteReason(input: {
     : "none";
 }
 
+
 /** #1554: the forge's comment-body ceiling — 65,536 characters on GitHub and
  * Forgejo — applied as a BYTE bound. This guard counts UTF-8 bytes, the
  * stricter measure for a body carrying multi-byte text: a body within the
  * character ceiling can still exceed it in bytes, and a publication that
  * fails past the ceiling publishes nothing at all. The machine documents are
- * individually bounded (`REVIEW_HANDOFF_MAX_BYTES`, `FINDINGS_SUMMARY_MAX_BYTES`),
- * but the model-authored review prose was not — so the aggregate guard at the
- * publish boundary trims only that prose and discloses the trim in the body. */
+ * individually bounded (`REVIEW_HANDOFF_MAX_BYTES`,
+ * `REVIEW_OBLIGATIONS_MAX_BYTES`, `FINDINGS_SUMMARY_MAX_BYTES`) and are
+ * RESERVED ahead of the review prose (#1521) — the model-authored review
+ * prose was the one unbounded surface, so the aggregate guard at the
+ * publish boundary trims only that prose and discloses the trim in the
+ * body. A verbose review can therefore never starve the complete
+ * action-owned obligations document out of the published body. */
 export const MAX_PUBLISHED_BODY_BYTES = 65_536;
 
 /** #1557: thrown by `buildPublishedBody` when the aggregate ceiling cannot be
@@ -627,6 +633,39 @@ const PROSE_TRUNCATED_NOTE_PREFIX = "_Review prose truncated to fit the forge's 
 const PROSE_TRUNCATED_NOTE_SUFFIX = " character(s) dropped. The verdict, coverage notices, and machine documents above are complete._";
 const PROSE_OMITTED_NOTE = "_The review prose did not fit the forge's comment ceiling and was omitted. The verdict, coverage notices, and machine documents above are complete._";
 
+/**
+ * #1521: render the review-obligations container at its own byte budget,
+ * RESERVED ahead of the model-authored review prose.
+ *
+ * The container's own bytes (the anchor, the fence and the payload's own
+ * backtick runs) are measured on the rendered block, not estimated, because
+ * the fence delimiter grows with the payload's own backtick runs. When the
+ * rendered block exceeds the document's own budget, the document's byte
+ * budget is lowered by the overflow and the document is built again.
+ *
+ * The room squeezes the rows' TEXT, never the row LIST: the document carries
+ * the COMPLETE set of blocking rows and discloses the effective text cap it
+ * had to use, so a controller can still name every row that blocked the
+ * review.
+ *
+ * An empty result means no container at all: the run had no qualifying row.
+ * The container is never dropped and never squeezed to make room for review
+ * prose — the aggregate publish-boundary guard (#1554) trims only the prose.
+ */
+function renderObligationsReserved(input: ReviewObligationsInput | undefined): string {
+  if (input === undefined) return "";
+  let budget = REVIEW_OBLIGATIONS_MAX_BYTES;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const json = buildReviewObligations({ ...input, maxBytes: budget });
+    if (json === "") return "";
+    const block = renderReviewObligationsBlock(json);
+    const blockBytes = Buffer.byteLength(block, "utf8");
+    if (blockBytes <= REVIEW_OBLIGATIONS_MAX_BYTES) return block;
+    budget = Math.max(0, budget - (blockBytes - REVIEW_OBLIGATIONS_MAX_BYTES));
+  }
+  return "";
+}
+
 /** Build the published body: marker preamble + engine line + the optional
  * action-owned #810 coverage notice + the strict state block (#811, when
  * present) + the optional #1003 human-review triage section + sanitized
@@ -639,6 +678,12 @@ const PROSE_OMITTED_NOTE = "_The review prose did not fit the forge's comment ce
  * preamble is action-owned and precedes every model-authored surface, so a
  * consumer that reads the FIRST anchored block always reads this action's
  * container and never a model-authored copy of it.
+ * #1521: the optional review-obligations container rides IMMEDIATELY AFTER
+ * the handoff container — both machine documents sit in the action-owned
+ * marker preamble, before every model-authored surface, and the handoff
+ * block stays first. The container is RESERVED ahead of the review prose:
+ * it renders at its own byte budget and the aggregate ceiling below trims
+ * only the prose, never the container.
  *
  * #1554: `tailBlock` is appended VERBATIM after the review prose — raw
  * concatenation semantics (`returned body + tailBlock`), never trimmed or
@@ -650,19 +695,24 @@ const PROSE_OMITTED_NOTE = "_The review prose did not fit the forge's comment ce
  * model-authored review prose — to the bytes left after every action-owned
  * block and the tail block, cutting UTF-8-safe and never ending inside an
  * open fence (`fitReviewProseToBytes`), and discloses the trim in a final
- * action-owned note. The machine documents and every action-owned block are
- * never trimmed: their inputs are individually bounded, so the prose is the
- * one surface whose trim can always absorb the overflow. #1557: the one
- * corner where nothing is trimmable — the action-owned blocks alone already
- * exceed the ceiling and there is no prose to trim — fails CLOSED: the
- * builder throws instead of publishing a body the forge will refuse. Their
- * own bounds make the corner unreachable in practice, which is exactly why a
- * violation of those bounds must be loud rather than a silent publication. */
+ * action-owned note. The machine documents (the marker preamble, the handoff
+ * container, the review-obligations container) and every action-owned block
+ * are never trimmed: their inputs are individually bounded, so the prose is
+ * the one surface whose trim can always absorb the overflow. #1557: if
+ * action-owned blocks alone already exceed the ceiling and no prose remains
+ * to trim, the builder fails CLOSED instead of publishing an oversized body.
+ * This corner is ordinarily unreachable under the action-owned block caps,
+ * and violating those bounds must be explicit rather than silently published. */
 export function buildPublishedBody(options: {
   markers: string;
   /** #1518: the rendered `review-handoff/v1` container (anchor + fenced
    * JSON). Inserted right after the marker preamble. */
   handoffBlock?: string;
+  /** #1521: the input of the `review-obligations/v1` container (anchor +
+   * fenced JSON). The container is rendered here at its own byte budget,
+   * RESERVED immediately after the handoff container and ahead of the
+   * review prose; the aggregate ceiling trims only the prose. */
+  obligations?: ReviewObligationsInput | undefined;
   header?: string;
   note?: string;
   analysisEngine: string;
@@ -687,9 +737,18 @@ export function buildPublishedBody(options: {
   /** #915: defaults to the build-time stamp; explicit "" forces unstamped. */
   actionVersion?: string;
 }): string {
-  const lines = [options.markers];
+  // The body is assembled as one prefix of action-owned and model-authored
+  // blocks, then the review prose, then the raw tail block. #1521: the
+  // review-obligations container rides IMMEDIATELY after the handoff
+  // container, rendered at its own byte budget — RESERVED ahead of the
+  // prose, never squeezed by it (#1554 integration).
+  const lines: string[] = [options.markers];
   if (options.handoffBlock) {
     lines.push(options.handoffBlock, "");
+  }
+  const obligationsBlock = renderObligationsReserved(options.obligations);
+  if (obligationsBlock) {
+    lines.push(obligationsBlock, "");
   }
   if (options.header) {
     lines.push(options.header, "");
@@ -725,13 +784,18 @@ export function buildPublishedBody(options: {
   const untrimmed = `${prefix}\n${prose}\n${tailBlock}`;
   const untrimmedBytes = Buffer.byteLength(untrimmed, "utf8");
   if (untrimmedBytes <= MAX_PUBLISHED_BODY_BYTES) return untrimmed;
-  // #1554: overflow — trim ONLY the model-authored prose. The byte cost of
-  // everything else is fixed: the prefix (marker preamble, handoff container,
+  // #1554 (integrated with #1521): overflow — trim ONLY the model-authored
+  // prose. The byte cost of everything else is fixed: the prefix (marker
+  // preamble, handoff container, the RESERVED review-obligations container,
   // header, note, engine line, coverage notice, state/triage/routing/
   // confidence blocks), the two newlines that wrap the prose, the tail
   // block, and the disclosure note itself (reserved at its worst-case size,
   // so the note can never push the body back past the ceiling it just
-  // enforced). The +1 covers the final newline after the note.
+  // enforced). The +1 covers the final newline after the note. The
+  // obligations container is never trimmed and never squeezed by the prose:
+  // it rendered at its own budget above, and the prose is the one surface
+  // that absorbs the overflow — a verbose review can no longer starve the
+  // complete action-owned obligations document out of the body.
   const tailSeparator = tailBlock !== "" && !tailBlock.endsWith("\n") ? "\n" : "";
   const noteReserve = Buffer.byteLength(PROSE_TRUNCATED_NOTE_PREFIX, "utf8")
     + Buffer.byteLength(PROSE_TRUNCATED_NOTE_SUFFIX, "utf8")
@@ -1561,18 +1625,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * renders as one bullet in a shared section rather than a standalone
  * comment.
  *
- * #1518: the message is model-authored text on a published surface, and this
- * section is appended AFTER the review markdown was sanitized, so it never
- * passes through the reserved-marker strip. The published handoff's anchor
- * is stripped here for the same reason the inline finding body strips it:
- * no model-authored surface may carry the anchor that names the action's own
+ * #1518/#1521: the message is model-authored text on a published surface, and
+ * this section is appended AFTER the review markdown was sanitized, so it
+ * never passes through the reserved-marker strip. The published containers'
+ * anchors (the handoff's and the review-obligations document's) are stripped
+ * here for the same reason the inline finding body strips them: no
+ * model-authored surface may carry an anchor that names the action's own
  * container. */
 function renderOutsideDiffLine(finding: Record<string, unknown>, linkMode: UpstreamLinkMode): string {
   const severity = typeof finding.severity === "string" ? finding.severity : "info";
   const label = Object.hasOwn(SEVERITY_LABELS, severity) ? SEVERITY_LABELS[severity]! : severity;
   const category = finding.category;
   const suffix = category && category !== "other" ? ` (${String(category)})` : "";
-  const message = stripReviewHandoffAnchor(String(finding.message || "").replace(/\s+/g, " ").trim());
+  const message = stripPublishedContainerAnchors(String(finding.message || "").replace(/\s+/g, " ").trim());
   const prefix = finding.pre_existing === true ? "(pre-existing, outside this diff)" : "(outside this diff)";
   const line = `- **${label}${suffix}:** ${prefix} ${message}`;
   return sanitizeMarkdown(redactText(line), linkMode);
@@ -2180,6 +2245,20 @@ export async function publishReview(
     derivedObligationState: input.derivedObligationState,
     publishedPrescriptions,
   }));
+  // #1521: the published review-obligations document — the COMPLETE set of
+  // review obligations that blocked this review, from the SAME rows the
+  // handoff projects. The handoff's own list is a compact, disclosed prefix
+  // of them; this document names every one, so a controller never has to
+  // guess what an opaque id refers to. The container is rendered and sized
+  // by `buildPublishedBody`, against the room the rest of the body leaves.
+  // It is published only when the run has at least one qualifying blocking
+  // row: no row means nothing to name, so no document is published and the
+  // body stays byte-identical.
+  const obligationsInput: ReviewObligationsInput = {
+    reviewId: input.reviewId ?? "",
+    headSha: input.headSha,
+    unresolvedReviewObligations: input.unresolvedReviewObligations ?? [],
+  };
   // #1518: a suggestion may ride the handoff ONLY after the inline review
   // submission that would publish it SUCCEEDS. The submission happens after
   // (or with) the body's own publication, so every path that publishes a
@@ -2252,6 +2331,7 @@ export async function publishReview(
       const body = buildPublishedBody({
         markers,
         handoffBlock,
+        obligations: obligationsInput,
         header: prefix,
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
@@ -2277,6 +2357,7 @@ export async function publishReview(
       const body = buildPublishedBody({
         markers,
         handoffBlock,
+        obligations: obligationsInput,
         header: "# AI Automated Review",
         analysisEngine: input.analysisEngine,
         sanitizedMarkdown: sanitized,
@@ -2343,13 +2424,18 @@ export async function publishReview(
             // tail block — the raw-concatenation tail semantics make this
             // byte-identical to the old
             // `bodySansPublishedSuggestions(body) + summary` formula whenever
-            // the body fits, and it bounds the recovery publication under the
-            // same aggregate ceiling. The suggestion-free variant is the ONLY
-            // thing that differs from the primary build: the withheld-notice
-            // tail does not exist in this mode and the prose is identical.
+            // the body fits AND the handoff block occurs once in the body
+            // (the normal case; the old string surgery also rewrote a
+            // handoff block echoed verbatim in the prose, which the rebuild
+            // does not — strictly safer, never looser), and it bounds the
+            // recovery publication under the same aggregate ceiling. The
+            // suggestion-free variant is the ONLY thing that differs from
+            // the primary build: the withheld-notice tail does not exist in
+            // this mode and the prose is identical.
             const recoveryBody = buildPublishedBody({
               markers,
               handoffBlock: handoffBlockSansSuggestions,
+              obligations: obligationsInput,
               header: "# AI Automated Review",
               analysisEngine: input.analysisEngine,
               sanitizedMarkdown: sanitized,
@@ -2552,6 +2638,7 @@ export async function publishReview(
       const body = buildPublishedBody({
         markers,
         handoffBlock,
+        obligations: obligationsInput,
         header: "# AI Automated Review",
         note: "_Full PR review._",
         analysisEngine: input.analysisEngine,
@@ -2607,12 +2694,17 @@ export async function publishReview(
         // withheld notice as the tail block — the raw-concatenation tail
         // semantics make this byte-identical to the old
         // `bodySansPublishedSuggestions(body) + summary` formula whenever the
-        // body fits, and it bounds the fallback publication under the same
-        // aggregate ceiling. (The notice rides the fallback because it rode
-        // the primary body the old formula derived the fallback from.)
+        // body fits AND the handoff block occurs once in the body (the
+        // normal case; the old string surgery also rewrote a handoff block
+        // echoed verbatim in the prose, which the rebuild does not —
+        // strictly safer, never looser), and it bounds the fallback
+        // publication under the same aggregate ceiling. (The notice rides
+        // the fallback because it rode the primary body the old formula
+        // derived the fallback from.)
         const fallbackBody = buildPublishedBody({
           markers,
           handoffBlock: handoffBlockSansSuggestions,
+          obligations: obligationsInput,
           header: "# AI Automated Review",
           note: "_Full PR review._",
           analysisEngine: input.analysisEngine,
