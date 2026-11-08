@@ -1023,30 +1023,100 @@ function governingPredicateText(blankedLine: string): string {
 
 /** #1566 blocker: the local identifiers one source line BINDS — read on the
  * #1347 BLANKED code view, so a declaration written inside a comment or a
- * string cannot bind. Plain `const`/`let`/`var` declarations and
- * single-level destructuring lists (`const { a, b: c } =`,
- * `const [x, y = 1] =`; the binding name survives both a rename (`a: c` →
- * `c`) and a default (`y = 1` → `y`)). Everything else binds nothing: an
- * object-property entry (`sourceSha: ctx.sourceSha`), a bare expression.
- * The split-line predicate rule links a predicate to a DECLARATION whose
- * name the predicate's governing expression uses; an unestablishable link
- * fails closed to the historical same-line rule. */
+ * string cannot bind — and restricted to the DECLARATIONS THAT CARRY THE
+ * REQUIREMENT'S TERM: a line may bind several identifiers
+ * (`const sourceSha = ctx.sourceSha; const marker = true;`), and a nearby
+ * predicate may only link through the term-bearing declaration's bound
+ * name, never through an unrelated sibling's. A declarator is term-bearing
+ * when the term matches its LHS (including a destructuring key that is
+ * renamed away: `fenceStart: openAt` still carries "fence") or its
+ * initializer, on the raw or the segment-split view. Binding names: plain
+ * `const`/`let`/`var` declarations and single-level destructuring (`const {
+ * a, b: c } =`, `const [x, y = 1] =`; rename and default included, so the
+ * binding name survives). Everything else binds nothing: an object-property
+ * entry (`sourceSha: ctx.sourceSha`), a bare expression. The split-line
+ * predicate rule links a predicate to such a declaration whose bound name
+ * the predicate's governing expression uses; an unestablishable link fails
+ * closed to the historical same-line rule. */
 const MAX_BOUND_IDENTIFIERS = 8;
 const BOUND_IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
 
-function boundIdentifiers(blankedLine: string): string[] {
-  const out: string[] = [];
-  for (const match of blankedLine.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
-    if (!out.includes(match[1]!)) out.push(match[1]!);
-    if (out.length >= MAX_BOUND_IDENTIFIERS) return out;
+function topLevelIndex(text: string, ch: string): number {
+  let depth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const current = text[index];
+    if (current === "(" || current === "[" || current === "{") depth += 1;
+    else if (current === ")" || current === "]" || current === "}") depth -= 1;
+    else if (current === ch && depth === 0) return index;
   }
-  for (const match of blankedLine.matchAll(/\b(?:const|let|var)\s*(?:\{([^}]*)\}|\[([^\]]*)\])\s*=(?!=)/g)) {
-    const list = match[1] ?? match[2] ?? "";
-    for (const part of list.split(",")) {
-      if (out.length >= MAX_BOUND_IDENTIFIERS) return out;
-      const target = part.includes(":") ? part.slice(part.indexOf(":") + 1) : part;
-      const name = target.split("=")[0]!.trim();
-      if (BOUND_IDENTIFIER_RE.test(name) && !out.includes(name)) out.push(name);
+  return -1;
+}
+
+function topLevelEqualsIndex(text: string): number {
+  let depth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const current = text[index];
+    if (current === "(" || current === "[" || current === "{") depth += 1;
+    else if (current === ")" || current === "]" || current === "}") depth -= 1;
+    else if (current === "=" && depth === 0 && text[index + 1] !== "=" && text[index - 1] !== "="
+      && text[index - 1] !== "<" && text[index - 1] !== ">" && text[index + 1] !== ">") return index;
+  }
+  return -1;
+}
+
+function boundNamesFromLhs(lhs: string): string[] {
+  const trimmed = lhs.trim();
+  if (BOUND_IDENTIFIER_RE.test(trimmed)) return [trimmed];
+  const list = /^\{([\s\S]*)\}$/.exec(trimmed) ?? /^\[([\s\S]*)\]$/.exec(trimmed);
+  if (list === null) return [];
+  const names: string[] = [];
+  for (const part of list[1]!.split(",")) {
+    const target = part.includes(":") ? part.slice(part.indexOf(":") + 1) : part;
+    const name = target.split("=")[0]!.trim().replace(/^\.\.\./, "");
+    if (BOUND_IDENTIFIER_RE.test(name) && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+function boundTermBearingIdentifiers(blankedLine: string, termRe: RegExp): string[] {
+  const out: string[] = [];
+  for (const keyword of blankedLine.matchAll(/\b(?:const|let|var)\b/g)) {
+    if (out.length >= MAX_BOUND_IDENTIFIERS) return out;
+    const statementStart = keyword.index + keyword[0].length;
+    const semi = topLevelIndex(blankedLine.slice(statementStart), ";");
+    const statement = blankedLine.slice(statementStart, semi === -1 ? blankedLine.length : statementStart + semi);
+    // Split the declarator list at top-level commas: destructuring braces
+    // and call parens hold their commas above depth 0, so `const { a, b: c }
+    // = f(x, y)` stays one declarator while `const a = x, b = y` splits.
+    const declarators: string[] = [];
+    let depth = 0;
+    let current = "";
+    for (const ch of statement) {
+      if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+      else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
+      if (ch === "," && depth === 0) {
+        declarators.push(current);
+        current = "";
+        continue;
+      }
+      current += ch;
+    }
+    declarators.push(current);
+    for (const declarator of declarators) {
+      if (out.length >= MAX_BOUND_IDENTIFIERS) break;
+      const eq = topLevelEqualsIndex(declarator);
+      if (eq === -1) continue;
+      const lhs = declarator.slice(0, eq);
+      const init = declarator.slice(eq + 1);
+      const names = boundNamesFromLhs(lhs);
+      if (names.length === 0) continue;
+      const termBearing = termRe.test(lhs) || termRe.test(splitIdentifierSegments(lhs))
+        || termRe.test(init) || termRe.test(splitIdentifierSegments(init));
+      if (!termBearing) continue;
+      for (const name of names) {
+        if (!out.includes(name)) out.push(name);
+        if (out.length >= MAX_BOUND_IDENTIFIERS) break;
+      }
     }
   }
   return out;
@@ -1074,11 +1144,12 @@ export function enforcementPredicateFound(
     }
     if (termLineIndexes.length === 0) continue;
     // Bindings are per term line, read from the BLANKED view (a declaration
-    // in a comment or a string cannot bind) and computed once: the
-    // split-line link below is the only consumer.
+    // in a comment or a string cannot bind) and restricted to the
+    // term-bearing declarations, computed once: the split-line link below is
+    // the only consumer.
     const boundByTermLine = new Map<number, string[]>();
     for (const termIndex of termLineIndexes) {
-      const bound = boundIdentifiers(blankedWindow[termIndex] ?? "");
+      const bound = boundTermBearingIdentifiers(blankedWindow[termIndex] ?? "", termRe);
       if (bound.length > 0) boundByTermLine.set(termIndex, bound);
     }
     for (const [index, signal] of windowSignals.entries()) {

@@ -1657,6 +1657,60 @@ test("#1566: a nearby predicate only counts when the term line binds an identifi
   }
 });
 
+test("#1566: the link goes through the term-bearing declaration only — never a sibling binding", () => {
+  const workspace = makeWorkspace();
+  try {
+    const shaLedger = ledgerWith([{ id: "req-1", text: SOURCE_SHA_REQUIREMENT, kind: "acceptance" }]);
+    const shaClaimAt = (file: string, line: number) => [{
+      requirement_id: "req-1",
+      disposition: "met",
+      enforcement: [{ file, line }],
+      test: [VALID_TEST_LOCATION],
+      reason: "compares the resolved source sha",
+    }];
+
+    // The review's repro: the line binds BOTH the requirement-bearing
+    // declaration and an unrelated flag. The unrelated predicate must not
+    // certify through the sibling — only the term-bearing declaration's
+    // bound name may link.
+    writeFile(workspace, "src/sibling.ts", [
+      "const sourceSha = ctx.sourceSha; const marker = true;",
+      "if (marker) { throw new Error('x'); }",
+    ]);
+    const sibling = validateRequirementTrace(shaClaimAt("src/sibling.ts", 1), shaLedger, workspace);
+    assert.equal(sibling.rows[0]?.disposition, "unverifiable");
+    assert.ok(sibling.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+
+    // Positive control: the same line, the predicate referencing the
+    // term-bearing binding itself.
+    writeFile(workspace, "src/sibling-linked.ts", [
+      "const sourceSha = ctx.sourceSha; const marker = true;",
+      "if (sourceSha !== ctx.expected) { throw new Error('x'); }",
+    ]);
+    const siblingLinked = validateRequirementTrace(shaClaimAt("src/sibling-linked.ts", 1), shaLedger, workspace);
+    assert.equal(siblingLinked.rows[0]?.disposition, "met");
+
+    // Comma declarators split: the term rides the SECOND declarator, so an
+    // unrelated predicate over the first stays unverified while a predicate
+    // over the term-bearing one links.
+    writeFile(workspace, "src/comma-unlinked.ts", [
+      "const marker = true, sourceSha = ctx.sourceSha;",
+      "if (marker) { throw new Error('x'); }",
+    ]);
+    const commaUnlinked = validateRequirementTrace(shaClaimAt("src/comma-unlinked.ts", 1), shaLedger, workspace);
+    assert.equal(commaUnlinked.rows[0]?.disposition, "unverifiable");
+
+    writeFile(workspace, "src/comma-linked.ts", [
+      "const marker = true, sourceSha = ctx.sourceSha;",
+      "if (sourceSha === ctx.expected) { publish(); }",
+    ]);
+    const commaLinked = validateRequirementTrace(shaClaimAt("src/comma-linked.ts", 1), shaLedger, workspace);
+    assert.equal(commaLinked.rows[0]?.disposition, "met");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("#1566: the linkage reads code, not comments or strings — and the reference must govern", () => {
   const workspace = makeWorkspace();
   try {
