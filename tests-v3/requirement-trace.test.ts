@@ -1530,6 +1530,111 @@ test("predicate window: a term + predicate signal far outside the ±3 window doe
   }
 });
 
+test("#1566: a term inside a camelCase identifier on one line and the predicate on the next satisfies 'met'", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The #1562 production shape (row req-a241097fa88c at publish.ts:616):
+    // the honest citation is a two-line pair — the const line carries the
+    // requirement's word ONLY inside a camelCase identifier and is not
+    // predicate-shaped, and the real comparison is the next line. Same-line
+    // co-occurrence rejected every honest citation of this pair forever.
+    writeFile(workspace, "src/fit.ts", [
+      "export function fitProse(markdown: string): string {",
+      "  const openAt = unclosedFenceStart(markdown);",
+      "  if (openAt >= 0) return markdown.slice(0, openAt);",
+      "  return markdown;",
+      "}",
+      "function unclosedFenceStart(text: string): number {",
+      "  for (let i = 0; i < text.length; i += 1) {",
+      "    if (text.charAt(i) === '~') return i;",
+      "  }",
+      "  return -1;",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-fence", text: "the publish-body fence scan must cut hostile prose at an unclosed fence delimiter before publishing", kind: "acceptance" }]);
+    for (const citedLine of [2, 3]) {
+      const claims = [{
+        requirement_id: "req-fence",
+        disposition: "met",
+        enforcement: [{ file: "src/fit.ts", line: citedLine }],
+        test: [VALID_TEST_LOCATION],
+        reason: "the fence scan cut runs when openAt is non-negative",
+      }];
+      const result = validateRequirementTrace(claims, ledger, workspace);
+      assert.equal(result.rows[0]?.disposition, "met", `citing line ${citedLine}`);
+      assert.deepEqual(result.rows[0]?.notes, [], `citing line ${citedLine}`);
+      assert.equal(result.incomplete, false);
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1566: term and predicate may sit at most two lines apart, still inside the citation window", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-1", text: SOURCE_SHA_REQUIREMENT, kind: "acceptance" }]);
+    const claimAt = (file: string, line: number) => [{
+      requirement_id: "req-1",
+      disposition: "met",
+      enforcement: [{ file, line }],
+      test: [VALID_TEST_LOCATION],
+      reason: "compares",
+    }];
+
+    // Gap 2: term line, one padding line, predicate — inside the bound.
+    writeFile(workspace, "src/gap2.ts", [
+      "sourceSha: ctx.sourceSha,",
+      "// padding",
+      "if (a !== b) { throw new Error('x'); }",
+    ]);
+    assert.equal(validateRequirementTrace(claimAt("src/gap2.ts", 2), ledger, workspace).rows[0]?.disposition, "met");
+
+    // Gap 3: the term-predicate span exceeds the bound — still downgraded
+    // even though both halves sit inside the ±3 citation window.
+    writeFile(workspace, "src/gap3.ts", [
+      "sourceSha: ctx.sourceSha,",
+      "// padding",
+      "// padding",
+      "if (a !== b) { throw new Error('x'); }",
+    ]);
+    const far = validateRequirementTrace(claimAt("src/gap3.ts", 1), ledger, workspace);
+    assert.equal(far.rows[0]?.disposition, "unverifiable");
+    assert.ok(far.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1566 adversarial: segmented term matching must not turn an identifier-bearing copy line into enforcement", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The #252 probe: the cited line carries the requirement's word as a
+    // camelCase/snake_case identifier segment (which the segmented view now
+    // matches) but only COPIES the value — and no predicate line sits within
+    // the proximity bound of it. Segment matching alone must never pass this.
+    writeFile(workspace, "src/copyseg.ts", [
+      "export function render(c) {",
+      "  const maxCommentBytes = c.max_comment_bytes;",
+      "  return { body: c.body };",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-comment", text: "the renderer must bound the comment bytes it writes under the forge ceiling", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-comment",
+      disposition: "met",
+      enforcement: [{ file: "src/copyseg.ts", line: 2 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "maxCommentBytes names the comment bytes bound",
+    }];
+    const result = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(result.rows[0]?.disposition, "unverifiable");
+    assert.ok(result.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("predicate check is skipped (documented limitation) when the requirement text yields no usable terms", () => {
   const workspace = makeWorkspace();
   try {

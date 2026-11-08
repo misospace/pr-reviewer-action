@@ -898,10 +898,32 @@ function citedLinePredicateFound(locations: readonly TraceLocation[], cache: Fil
 
 /**
  * True when at least one of the given (already location-valid) enforcement
- * locations has a term from `terms` and a predicate signal on the SAME
- * line, within `PREDICATE_WINDOW_RADIUS` lines of the cited one — the
- * line-level co-occurrence is what rules out a term merely being named
- * somewhere nearby while the actual comparison lives in unrelated code.
+ * locations has a term from `terms` and a predicate signal near each other,
+ * within `PREDICATE_WINDOW_RADIUS` lines of the cited one.
+ *
+ * Historical rule (pre-#1566): the term and the predicate signal had to sit
+ * on the SAME line. Production falsified that as a calibration bug rather
+ * than an anti-copy feature: real enforcement routinely splits the two
+ * halves across adjacent lines (`const openAt = unclosedFenceStart(text);`
+ * carries the requirement's "fence" only inside a camelCase identifier and
+ * is not predicate-shaped; the real comparison `if (openAt >= 0)` is the
+ * next line and carries no requirement word — the #1562 review row
+ * `req-a241097fa88c` at `src/publish/publish.ts:616` failed on exactly this
+ * geometry, and no honest citation of the pair could ever pass). Two bounded
+ * relaxations, each anchored by the citation:
+ *
+ * - the term line and the predicate line may differ by at most
+ *   `TERM_PREDICATE_MAX_LINE_GAP` lines (both still inside the citation
+ *   window);
+ * - a term also matches as a camelCase/snake_case identifier segment
+ *   (`unclosedFenceStart` carries "fence"), via `termMatchRegExp`.
+ *
+ * The line-level co-occurrence within the citation window is still what
+ * rules out a term merely being named somewhere unrelated: a copy-only
+ * cited line with no predicate in its window still fails (#854), and a
+ * comparison far from any requirement word still fails. The relaxation is
+ * strictly wider than same-line but far narrower than file-level search,
+ * which would pass #854's own file.
  *
  * When `terms` is empty (the requirement text yielded no usable candidate —
  * e.g. it is all stopwords/short words), the predicate check is skipped and
@@ -910,28 +932,64 @@ function citedLinePredicateFound(locations: readonly TraceLocation[], cache: Fil
  * itself found nothing to check.
  *
  * Note the asymmetry the two halves read: the shape test sees the scrubbed
- * code view (#1347) while the term test still matches the raw line, so a
- * genuine predicate followed by `// ceiling` on the same line counts. Pre-#1347
- * behavior on the term half, kept deliberately: a requirement word a reviewer
- * quotes in a comment beside the real comparison is evidence of the citation,
- * not the copy, this gate exists to refuse.
+ * code view (#1347) while the term test matches the raw line AND its
+ * segmented view, so a genuine predicate followed by `// ceiling` on the
+ * same line counts. Pre-#1347 behavior on the term half, kept deliberately:
+ * a requirement word a reviewer quotes in a comment beside the real
+ * comparison is evidence of the citation, not the copy, this gate exists to
+ * refuse.
  */
+export const TERM_PREDICATE_MAX_LINE_GAP = 2;
+
+/** Split camelCase / snake_case identifier boundaries into spaces so a
+ * requirement term that surfaces only inside an identifier
+ * (`unclosedFenceStart`, `MAX_COMMENT_BYTES`) is visible to the `\b`-bounded
+ * term match. Runs on one source line and, with `termMatchRegExp`, on the
+ * term list itself. */
+function splitIdentifierSegments(text: string): string {
+  return text
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Za-z0-9])_([A-Za-z0-9])/g, "$1 $2");
+}
+
+/** The term-match alternation for `enforcementPredicateFound`: every term in
+ * its raw form (the historical bare-word match on the raw line) plus its
+ * segmented form (`sourceSha` → "source Sha") for the segmented line view,
+ * so compound identifiers match their spaced segments too. Deduplicated;
+ * bounded by the extractor's own term cap. */
+function termMatchRegExp(terms: readonly string[]): RegExp {
+  const alternatives: string[] = [];
+  for (const term of terms) {
+    if (typeof term !== "string" || term === "") continue;
+    const raw = escapeRegExp(term);
+    if (!alternatives.includes(raw)) alternatives.push(raw);
+    const segmented = escapeRegExp(splitIdentifierSegments(term)).replace(/ /g, "\\s+");
+    if (!alternatives.includes(segmented)) alternatives.push(segmented);
+  }
+  return new RegExp(`\\b(?:${alternatives.join("|")})\\b`, "i");
+}
+
 export function enforcementPredicateFound(
   locations: readonly TraceLocation[],
   terms: readonly string[],
   cache: FileTextCache,
 ): boolean {
   if (terms.length === 0) return true;
-  const termRe = new RegExp(`\\b(?:${terms.map(escapeRegExp).join("|")})\\b`, "i");
+  const termRe = termMatchRegExp(terms);
   for (const loc of locations) {
     const lines = cache.lines(loc.file);
     const signals = cache.predicateSignals(loc.file);
     if (lines === null || signals === null || loc.line > lines.length) continue;
     const window = windowLines(lines, loc.line, PREDICATE_WINDOW_RADIUS);
     const windowSignals = windowLines(signals, loc.line, PREDICATE_WINDOW_RADIUS);
-    for (const [index, line] of window.entries()) {
-      if (windowSignals[index] !== true) continue;
-      if (termRe.test(line)) return true;
+    const termLineIndexes: number[] = [];
+    for (const [index, rawLine] of window.entries()) {
+      if (termRe.test(rawLine) || termRe.test(splitIdentifierSegments(rawLine))) termLineIndexes.push(index);
+    }
+    if (termLineIndexes.length === 0) continue;
+    for (const [index, signal] of windowSignals.entries()) {
+      if (signal !== true) continue;
+      if (termLineIndexes.some((termIndex) => Math.abs(termIndex - index) <= TERM_PREDICATE_MAX_LINE_GAP)) return true;
     }
   }
   return false;
@@ -963,7 +1021,13 @@ function declaredOwnerGlobsFor(text: string, ownership: readonly RequirementOwne
  * anti-copy core once the lexical half is gone). A citation that is neither a
  * declared owner nor carries the requirement's vocabulary still fails, so
  * the boundary does not become fail-open; the lexical check is unchanged for
- * every other shape (including the documented empty-terms skip). */
+ * every other shape (including the documented empty-terms skip).
+ *
+ * #1566: owner-matched citations never fall through to the proximity-
+ * relaxed lexical path below — the owner rule's predicate-on-the-cited-line
+ * is the whole anti-copy core there, and a neighbouring comparison within
+ * the relaxed term/predicate gap must not rescue a copy-only cited line in
+ * a declared owner file. Only non-owner citations take the lexical path. */
 function enforcementPredicateSatisfied(
   validLocations: readonly TraceLocation[],
   terms: readonly string[],
@@ -973,6 +1037,8 @@ function enforcementPredicateSatisfied(
   if (ownerGlobs.length > 0) {
     const ownerCitations = validLocations.filter((loc) => citationMatchesPatterns(loc, ownerGlobs));
     if (ownerCitations.length > 0 && citedLinePredicateFound(ownerCitations, cache)) return true;
+    const nonOwnerCitations = validLocations.filter((loc) => !citationMatchesPatterns(loc, ownerGlobs));
+    return enforcementPredicateFound(nonOwnerCitations, terms, cache);
   }
   return enforcementPredicateFound(validLocations, terms, cache);
 }
