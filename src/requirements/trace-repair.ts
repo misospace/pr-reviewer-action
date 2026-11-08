@@ -747,22 +747,28 @@ export async function runRequirementTraceRepairPass(input: TraceRepairPassInput)
     retried: boolean,
   ): TraceRepairPassResult => ({ claims: [], status, errorKind, error, diffClipped, firstFailureClass, retried, validationRetried: false, validationRejections: null });
 
-  // #1502 follow-up: the one bounded validator-feedback retry. Runs ONLY on a
+  // #1502 follow-up: the one bounded validator-feedback retry. Runs on a
   // first-attempt parse success whose claims the caller's deterministic
-  // validator rejected; shares the one-retry budget with the serialization
-  // retry (a pass that already used the serialization retry never also
-  // validation-retries). Any failure inside the stage (throwing validator,
-  // transport failure, unparsable retry response) keeps the first attempt's
-  // claims — the stage can only ever ADD a better claim set, never lose a
-  // mergeable one, and a claim that still fails validation fails closed at
-  // the publication path exactly as before (#1492).
+  // validator rejected — including a WELL-FORMED response that omitted every
+  // requested id entirely (the #1488 shape this pass exists to recover: the
+  // caller's validator reports those ids `not-traced-by-reviewer` and the
+  // retry re-asks with the full original request). Shares the one-retry
+  // budget with the serialization retry (a pass that already used the
+  // serialization retry never also validation-retries). Any failure inside
+  // the stage (throwing validator, transport failure, unparsable retry
+  // response) keeps the first attempt's claims — the stage can only ever ADD
+  // a better claim set, never lose a mergeable one, and a claim that still
+  // fails validation fails closed at the publication path exactly as before
+  // (#1492).
   const finishOk = async (
     claims: Record<string, unknown>[],
     serializationRetried: boolean,
     firstFailureClass: string | null,
+    emptyStatus: "ok" | "empty",
   ): Promise<TraceRepairPassResult> => {
-    const base = { status: "ok" as const, errorKind: null, error: null, diffClipped, firstFailureClass, retried: serializationRetried };
-    if (input.validateClaims === undefined || serializationRetried || claims.length === 0) {
+    const status: TraceRepairPassResult["status"] = claims.length > 0 ? "ok" : emptyStatus;
+    const base = { status, errorKind: null, error: null, diffClipped, firstFailureClass, retried: serializationRetried };
+    if (input.validateClaims === undefined || serializationRetried) {
       return { claims, ...base, validationRetried: false, validationRejections: null };
     }
     let rejections: Record<string, readonly string[]> = {};
@@ -796,7 +802,8 @@ export async function runRequirementTraceRepairPass(input: TraceRepairPassInput)
           if (index >= 0) merged[index] = claim;
           else merged.push(claim);
         }
-        return { claims: merged, ...base, validationRetried: true, validationRejections: sanitizedRejections };
+        const mergedStatus: TraceRepairPassResult["status"] = merged.length > 0 ? "ok" : status;
+        return { claims: merged, status: mergedStatus, errorKind: null, error: null, diffClipped, firstFailureClass, retried: serializationRetried, validationRetried: true, validationRejections: sanitizedRejections };
       }
     }
     return { claims, ...base, validationRetried: true, validationRejections: sanitizedRejections };
@@ -811,13 +818,23 @@ export async function runRequirementTraceRepairPass(input: TraceRepairPassInput)
   } else {
     const parsed = parseTraceRepairResponse(first.text, allowedIds);
     if (parsed.claims.length > 0) {
-      return await finishOk(parsed.claims, false, null);
+      return await finishOk(parsed.claims, false, null, "ok");
+    }
+    if (parsed.errors.length === 0 && input.validateClaims !== undefined) {
+      // #1566 (review): a well-formed payload that affirmatively carries no
+      // claim for the requested ids is not a serialization failure, but with
+      // validator feedback wired it is still a REJECTED response — the
+      // targeted ids were omitted entirely, so the bounded feedback retry
+      // gives the model one informed shot at them. Without a callback the
+      // historical final "empty" stands.
+      return await finishOk([], false, null, "empty");
     }
     if (parsed.errors.length > 0) firstFailureClass = "malformed";
   }
   if (firstFailureClass === null) {
     // A well-formed payload that affirmatively carries no usable claim for
-    // the requested ids: not a serialization failure — fail closed as today.
+    // the requested ids, with no validator feedback wired: not a
+    // serialization failure — fail closed as today.
     return { claims: [], status: "empty", errorKind: null, error: null, diffClipped, firstFailureClass: null, retried: false, validationRetried: false, validationRejections: null };
   }
 

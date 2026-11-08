@@ -2699,6 +2699,60 @@ test("#1502: the validation stage is fail-soft and shares the one-retry budget w
   assert.equal(serialized.claims.length, 1);
 });
 
+test("#1502: a well-formed response that omits every requested id still gets the validator-feedback retry", async () => {
+  const requirements = [{ id: "req-1", text: "must validate X" }];
+  const reject = (): Record<string, readonly string[]> => ({ "req-1": ["not-traced-by-reviewer"] });
+  const emptyCoverage = '{"requirement_coverage":[]}';
+
+  // The #1488 shape with feedback wired: a well-formed payload with no
+  // claims is a REJECTED response — the retry re-asks with the full original
+  // request, and its claim is appended.
+  const goodClaim = { ...RETRY_WIRE_CLAIM, enforcement: [{ file: "src/b.ts", line: 2 }] };
+  const payloads: unknown[] = [];
+  let call = 0;
+  const recovered = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "DIFFTEXT", config: RETRY_PASS_CONFIG,
+    requestFn: (payload) => {
+      payloads.push(payload);
+      call += 1;
+      return retryWire(call === 1 ? emptyCoverage : retryCover(goodClaim));
+    },
+    validateClaims: reject,
+  });
+  assert.equal(recovered.status, "ok");
+  assert.equal(recovered.claims.length, 1);
+  assert.equal(recovered.validationRetried, true);
+  assert.deepEqual(recovered.validationRejections, { "req-1": "not-traced-by-reviewer" });
+  // The retry is single-turn: the rejection labels AND the full original
+  // request (diff included) ride it.
+  const retryUser = retryUserContent(payloads[1]);
+  assert.match(retryUser, /not-traced-by-reviewer/);
+  assert.match(retryUser, /DIFFTEXT/);
+
+  // The retry also produces nothing: the historical final "empty" stands,
+  // with the retry attempt recorded.
+  let calls2 = 0;
+  const stillEmpty = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => { calls2 += 1; return retryWire(emptyCoverage); },
+    validateClaims: reject,
+  });
+  assert.equal(calls2, 2);
+  assert.equal(stillEmpty.status, "empty");
+  assert.equal(stillEmpty.validationRetried, true);
+  assert.equal(stillEmpty.claims.length, 0);
+
+  // Without a validateClaims callback the historical no-retry "empty" stands.
+  let calls3 = 0;
+  const noFeedback = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => { calls3 += 1; return retryWire(emptyCoverage); },
+  });
+  assert.equal(calls3, 1);
+  assert.equal(noFeedback.status, "empty");
+  assert.equal(noFeedback.validationRetried, false);
+});
+
 test("#1502: the validator-feedback block carries sanitized ids and labels, and the sanitizer bounds persistence", () => {
   const feedback = buildTraceRepairValidationFeedback({
     rejections: {

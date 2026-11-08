@@ -4676,7 +4676,10 @@ test("#959: when the repair pass also yields nothing, the section says so instea
       quiet: true,
     });
 
-    assert.equal(repairAttempts, 1, "still only one bounded repair pass");
+    // #1502 follow-up: TWO model calls — the well-formed no-claims response
+    // is a REJECTED response with validator feedback wired, so the bounded
+    // retry re-asks once (and this scripted model omits it again).
+    assert.equal(repairAttempts, 2, "first attempt plus the validator-feedback retry");
     const trace = JSON.parse(readFileSync(join(runDir, "requirement-trace.json"), "utf8")) as {
       rows: Array<{ disposition: string; notes: string[] }>;
       incomplete: boolean;
@@ -4689,10 +4692,11 @@ test("#959: when the repair pass also yields nothing, the section says so instea
     assert.equal(result.outputs.requiredChecks, "incomplete");
 
     const repairRecord = JSON.parse(readFileSync(join(runDir, "requirement-trace-repair.json"), "utf8")) as {
-      status: string; claims: number;
+      status: string; claims: number; validation_retried?: boolean;
     };
     assert.equal(repairRecord.status, "empty");
     assert.equal(repairRecord.claims, 0);
+    assert.equal(repairRecord.validation_retried, true);
 
     // #1044: the row is now marked as repair-attempted, the rendered section
     // says the retry also failed, and the persisted artifact carries the
@@ -4700,12 +4704,13 @@ test("#959: when the repair pass also yields nothing, the section says so instea
     assert.ok(trace.rows[0]!.notes.includes("trace-repair-ran-no-claims"));
     assert.match(result.outputs.reviewMarkdown, /the reviewer reported no trace for this requirement, and a bounded repair pass also returned no usable claim/);
     const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
-      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[] };
+      requirement_trace_repair?: { attempted: boolean; outcome: string; claims: number; missing_ids: string[]; validation_retried?: boolean };
     };
     assert.equal(persisted.requirement_trace_repair?.attempted, true);
     assert.equal(persisted.requirement_trace_repair?.outcome, "no_claims");
     assert.equal(persisted.requirement_trace_repair?.claims, 0);
     assert.equal(persisted.requirement_trace_repair?.missing_ids.length, 1);
+    assert.equal(persisted.requirement_trace_repair?.validation_retried, true);
   } finally {
     await server.close();
     cleanup();
@@ -5397,8 +5402,10 @@ test("#1502: a native-loop repair that merged claims but left a row unresolved r
       return;
     }
     // Tool-less turns: the in-conversation verdict, then the trace-only
-    // repair turn, then the standalone fallback pass (which returns a
-    // well-formed payload with no claims — the fail-closed twin shape).
+    // repair turn, then the standalone fallback pass — which returns a
+    // well-formed payload with no claims (the fail-closed twin shape), gets
+    // the one validator-feedback retry for the omitted id, and returns no
+    // claims again.
     const scriptedPlain = [
       openAiText(JSON.stringify(baseVerdict())),
       openAiText("```json\n" + JSON.stringify({
@@ -5410,6 +5417,7 @@ test("#1502: a native-loop repair that merged claims but left a row unresolved r
           reason: "compares record.sourceSha against ctx.sourceSha and throws on mismatch",
         }],
       }) + "\n```"),
+      openAiText(JSON.stringify({ requirement_coverage: [] })),
       openAiText(JSON.stringify({ requirement_coverage: [] })),
     ];
     const response = scriptedPlain[plainTurn];
@@ -5469,11 +5477,12 @@ test("#1502: a native-loop repair that merged claims but left a row unresolved r
     assert.equal(harness.trace_repair_continuation?.claims_merged, 1);
     assert.equal(harness.trace_repair_continuation?.trace_claims_merged, true);
     // Recovery: the standalone fallback fired for the row the loop's merged
-    // claim left unresolved — and produced nothing, so the summary reports
-    // the no-claims outcome under the new invocation reason.
-    assert.equal(repairMarkerRequests, 1, "the bounded fallback recovers when the loop's merge left a target unresolved");
+    // claim left unresolved — and produced nothing across its first attempt
+    // AND the validator-feedback retry for the omitted id, so the summary
+    // reports the no-claims outcome under the new invocation reason.
+    assert.equal(repairMarkerRequests, 2, "first attempt plus the validator-feedback retry for the omitted id");
     const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
-      requirement_trace_repair?: { attempted: boolean; outcome: string; route?: string; invocation_reason?: string; claims: number; missing_ids: string[] };
+      requirement_trace_repair?: { attempted: boolean; outcome: string; route?: string; invocation_reason?: string; claims: number; missing_ids: string[]; validation_retried?: boolean };
     };
     assert.equal(persisted.requirement_trace_repair?.attempted, true);
     assert.equal(persisted.requirement_trace_repair?.outcome, "no_claims");
@@ -5481,6 +5490,7 @@ test("#1502: a native-loop repair that merged claims but left a row unresolved r
     assert.equal(persisted.requirement_trace_repair?.invocation_reason, "native_loop_repair_left_unresolved");
     assert.deepEqual(persisted.requirement_trace_repair?.missing_ids, [idSecond]);
     assert.equal(persisted.requirement_trace_repair?.claims, 0);
+    assert.equal(persisted.requirement_trace_repair?.validation_retried, true);
 
     // The leftover row still fails closed: the trace is incomplete and #1492
     // withholds the APPROVE.
