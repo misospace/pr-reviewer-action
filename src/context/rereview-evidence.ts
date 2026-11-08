@@ -17,7 +17,6 @@
  * identical is refused. */
 
 import { runProcess } from "../runtime/subprocess.js";
-import { endsWithNewline, fenceDelimiterFor } from "./fence.js";
 import { fencedList, type ReReviewScopeDelta } from "./rereview-scope.js";
 import type { RelatedContext } from "./related-context.js";
 import { pyJsonDump } from "./py-json.js";
