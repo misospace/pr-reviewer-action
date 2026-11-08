@@ -385,6 +385,15 @@ export function resolveIncompleteReason(input: {
  * publish boundary trims only that prose and discloses the trim in the body. */
 export const MAX_PUBLISHED_BODY_BYTES = 65_536;
 
+/** #1557: thrown by `buildPublishedBody` when the aggregate ceiling cannot be
+ * honored because nothing is trimmable — the action-owned blocks and tail
+ * alone already exceed `MAX_PUBLISHED_BODY_BYTES` and there is no review
+ * prose left to cut. A publication past the ceiling publishes nothing at
+ * all, so the guard fails closed: the run's publish step reports a failure
+ * (`publishReview` catches this) instead of emitting a body the forge
+ * refuses. */
+export class PublishedBodyCeilingError extends Error {}
+
 /** #1554: one fence delimiter line — a line whose trimmed start is a run of
  * 3+ backticks or 3+ tildes. The `info` field is what follows the run
  * (whitespace-trimmed): an opener may carry an info string; a closer must
@@ -643,10 +652,12 @@ const PROSE_OMITTED_NOTE = "_The review prose did not fit the forge's comment ce
  * open fence (`fitReviewProseToBytes`), and discloses the trim in a final
  * action-owned note. The machine documents and every action-owned block are
  * never trimmed: their inputs are individually bounded, so the prose is the
- * one surface whose trim can always absorb the overflow. The guard is
- * best-effort only in the corner where the action-owned blocks alone already
- * exceed the ceiling — there is nothing legal left to trim — which their own
- * bounds make unreachable in practice. */
+ * one surface whose trim can always absorb the overflow. #1557: the one
+ * corner where nothing is trimmable — the action-owned blocks alone already
+ * exceed the ceiling and there is no prose to trim — fails CLOSED: the
+ * builder throws instead of publishing a body the forge will refuse. Their
+ * own bounds make the corner unreachable in practice, which is exactly why a
+ * violation of those bounds must be loud rather than a silent publication. */
 export function buildPublishedBody(options: {
   markers: string;
   /** #1518: the rendered `review-handoff/v1` container (anchor + fenced
@@ -712,7 +723,8 @@ export function buildPublishedBody(options: {
   const prose = options.sanitizedMarkdown;
   const tailBlock = options.tailBlock ?? "";
   const untrimmed = `${prefix}\n${prose}\n${tailBlock}`;
-  if (Buffer.byteLength(untrimmed, "utf8") <= MAX_PUBLISHED_BODY_BYTES) return untrimmed;
+  const untrimmedBytes = Buffer.byteLength(untrimmed, "utf8");
+  if (untrimmedBytes <= MAX_PUBLISHED_BODY_BYTES) return untrimmed;
   // #1554: overflow — trim ONLY the model-authored prose. The byte cost of
   // everything else is fixed: the prefix (marker preamble, handoff container,
   // header, note, engine line, coverage notice, state/triage/routing/
@@ -732,15 +744,44 @@ export function buildPublishedBody(options: {
       - (Buffer.byteLength(prefix, "utf8") + 2 + Buffer.byteLength(tailBlock, "utf8")
         + Buffer.byteLength(tailSeparator, "utf8") + noteReserve));
   const fitted = fitReviewProseToBytes(prose, budget);
-  // Nothing trimmable (no prose at all): the overflow lives in bytes this
-  // guard must never touch, so the body publishes unchanged — the corner the
-  // action-owned blocks' own bounds make unreachable.
-  if (fitted.dropped === 0) return untrimmed;
+  // #1557: nothing trimmable (no prose at all): the overflow lives entirely
+  // in bytes this guard must never touch, so there is no legal body left.
+  // Fail closed — the forge would refuse this body anyway, and a silent
+  // pass-through would let a future bound regression publish nothing while
+  // reporting success. (In the overflow branch, `dropped === 0` is exactly
+  // the empty-prose corner: any prose that still fit the post-reserve budget
+  // would have kept `untrimmed` at or under the ceiling.)
+  if (fitted.dropped === 0) {
+    throw new PublishedBodyCeilingError(
+      `published body exceeds the forge comment ceiling (${MAX_PUBLISHED_BODY_BYTES} UTF-8 bytes)`
+        + ` with no trimmable review prose: action-owned content alone is ${untrimmedBytes} bytes; refusing to publish`,
+    );
+  }
   if (fitted.text === "") {
     // No prose fits at all: the full-omission variant, prose line dropped.
-    return `${prefix}\n${tailBlock}${tailSeparator}${PROSE_OMITTED_NOTE}\n`;
+    const omitted = `${prefix}\n${tailBlock}${tailSeparator}${PROSE_OMITTED_NOTE}\n`;
+    // #1557: the omitted variant is itself bounded by the same fixed bytes —
+    // when the action-owned content plus the note alone exceed the ceiling,
+    // there is nothing left to trim and the guard fails closed.
+    if (Buffer.byteLength(omitted, "utf8") > MAX_PUBLISHED_BODY_BYTES) {
+      throw new PublishedBodyCeilingError(
+        `published body exceeds the forge comment ceiling (${MAX_PUBLISHED_BODY_BYTES} UTF-8 bytes)`
+          + ` even with the review prose omitted whole: action-owned content is too large; refusing to publish`,
+      );
+    }
+    return omitted;
   }
-  return `${prefix}\n${fitted.text}\n${tailBlock}${tailSeparator}${PROSE_TRUNCATED_NOTE_PREFIX}${fitted.dropped}${PROSE_TRUNCATED_NOTE_SUFFIX}\n`;
+  const truncated = `${prefix}\n${fitted.text}\n${tailBlock}${tailSeparator}${PROSE_TRUNCATED_NOTE_PREFIX}${fitted.dropped}${PROSE_TRUNCATED_NOTE_SUFFIX}\n`;
+  // #1557: belt-and-braces on the note-reserve invariant above — the note
+  // reserve is sized worst-case, so this body fits whenever the budget math
+  // holds; a violation means a sizing regression and must be loud.
+  if (Buffer.byteLength(truncated, "utf8") > MAX_PUBLISHED_BODY_BYTES) {
+    throw new PublishedBodyCeilingError(
+      `published body exceeds the forge comment ceiling (${MAX_PUBLISHED_BODY_BYTES} UTF-8 bytes)`
+        + ` after trimming the review prose: the disclosure note reserve no longer bounds the note; refusing to publish`,
+    );
+  }
+  return truncated;
 }
 
 /** #1003: the three literal triage decisions live with the other publish-layer
