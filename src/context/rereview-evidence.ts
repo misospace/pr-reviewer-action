@@ -329,8 +329,17 @@ export async function computeReReviewEvidencePlan(
       if (tab <= 0) return false;
       const meta = record.slice(0, tab).split(" ");
       if (meta.length !== 3) return false;
-      const [, type, oid] = meta as [string, string, string];
-      into.set(record.slice(tab + 1), type === "blob" ? oid : `non-blob:${type}`);
+      const [mode, type, oid] = meta as [string, string, string];
+      // A symlink entry is also a `blob`, but its blob stores the target
+      // *pathname*, not target file contents — it can never vouch for
+      // byte-identical dereferenced content, so it is recorded as its own
+      // kind and never seeded (see the seed loop below). The mode travels
+      // with the oid so a mode-only change (e.g. the executable bit) that
+      // the delta failed to report is a contradiction, not a match.
+      into.set(
+        record.slice(tab + 1),
+        type !== "blob" ? `non-blob:${type}` : mode === "120000" ? `symlink:${oid}` : `${mode} ${oid}`,
+      );
     }
     return true;
   };
@@ -357,16 +366,19 @@ export async function computeReReviewEvidencePlan(
         degradedReason = "blob-digest-mismatch";
         break;
       }
-      const priorBlob = !priorEntry.startsWith("non-blob:");
-      const headBlob = !headEntry.startsWith("non-blob:");
+      const priorSymlink = priorEntry.startsWith("symlink:");
+      const headSymlink = headEntry.startsWith("symlink:");
+      const priorBlob = !priorEntry.startsWith("non-blob:") && !priorSymlink;
+      const headBlob = !headEntry.startsWith("non-blob:") && !headSymlink;
       if (priorBlob !== headBlob) {
-        // A path that is a blob at exactly one head is a typechange the
-        // delta failed to report (`T` would have forced it fresh) — the
-        // delta is contradicted, reuse is refused entirely, never narrowed.
+        // A path whose blob-ness (including symlink-ness) differs between
+        // the heads is a typechange the delta failed to report (`T` would
+        // have forced it fresh) — the delta is contradicted, reuse is
+        // refused entirely, never narrowed.
         degradedReason = "blob-digest-mismatch";
         break;
       }
-      if (!priorBlob) continue; // non-blob at both heads (e.g. a submodule): nothing to vouch for, drop quietly
+      if (!priorBlob) continue; // non-blob at both heads (e.g. a submodule), or a symlink at both heads whose dereferenced target may still have changed: nothing to vouch for, drop quietly
       if (priorEntry !== headEntry) {
         // A differing blob contradicts the delta this plan was built from;
         // reuse is refused entirely, never narrowed.

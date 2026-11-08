@@ -6,7 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -319,6 +319,62 @@ test("#1516: a head-only file the delta failed to report refuses reuse entirely"
     const delta = await computeReReviewDelta(root, shaPrior, shaHead);
     const plan = await computeReReviewEvidencePlan(
       root, delta, { context: makeRelated() }, { overrideDiffStatus: "M\0kept.txt\0" },
+    );
+    assert.equal(plan.degradedReason, "blob-digest-mismatch");
+    assert.deepEqual([...plan.seeded], []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#1516: a symlink whose dereferenced target changed is never seeded", async () => {
+  const root = mkdtempSync(join(tmpdir(), "v3-rereview-evidence-symlink-"));
+  const git = (args: string): void => { execSync(`${GIT} ${args}`, { cwd: root, stdio: "ignore" }); };
+  try {
+    git("init -q -b main");
+    writeFileSync(join(root, "target.txt"), "old\n");
+    writeFileSync(join(root, "keep.txt"), "stays\n");
+    symlinkSync("target.txt", join(root, "link"));
+    git("add -A");
+    git(`commit -q -m "prior"`);
+    const shaPrior = execSync("git rev-parse HEAD", { cwd: root }).toString().trim();
+    // Only the symlink's target changes: `git diff --name-status` reports
+    // just `M target.txt` and the link's own blob (which stores the target
+    // pathname) is byte-identical at both heads — the link must still not
+    // seed, because its dereferenced contents changed.
+    writeFileSync(join(root, "target.txt"), "new\n");
+    git("add -A");
+    git(`commit -q -m "touch the target only"`);
+    const shaHead = execSync("git rev-parse HEAD", { cwd: root }).toString().trim();
+    const delta = await computeReReviewDelta(root, shaPrior, shaHead);
+    assert.deepEqual([...delta.files], ["target.txt"]);
+    const plan = await computeReReviewEvidencePlan(root, delta, { context: makeRelated() });
+    assert.equal(plan.degradedReason, null);
+    assert.ok(plan.seeded.includes("keep.txt"), "the genuinely unchanged regular file still seeds");
+    assert.ok(!plan.seeded.includes("link"), "the symlink never seeds — its dereferenced contents changed");
+    assert.ok(!plan.seeded.includes("target.txt"), "the changed target stays forced fresh");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("#1516: a symlink-to-regular typechange the delta failed to report refuses reuse entirely", async () => {
+  const root = mkdtempSync(join(tmpdir(), "v3-rereview-evidence-typechange-"));
+  const git = (args: string): void => { execSync(`${GIT} ${args}`, { cwd: root, stdio: "ignore" }); };
+  try {
+    git("init -q -b main");
+    writeFileSync(join(root, "target.txt"), "same\n");
+    symlinkSync("target.txt", join(root, "link"));
+    git("add -A");
+    git(`commit -q -m "prior"`);
+    const shaPrior = execSync("git rev-parse HEAD", { cwd: root }).toString().trim();
+    rmSync(join(root, "link"));
+    writeFileSync(join(root, "link"), "now a regular file\n");
+    git("add -A");
+    git(`commit -q -m "typechange"`);
+    const shaHead = execSync("git rev-parse HEAD", { cwd: root }).toString().trim();
+    // The overridden delta claims nothing changed, hiding the typechange:
+    // a path that is a symlink at one head and a regular blob at the other
+    // is a contradiction — reuse is refused, never narrowed.
+    const delta = await computeReReviewDelta(root, shaPrior, shaHead);
+    const plan = await computeReReviewEvidencePlan(
+      root, delta, { context: makeRelated() }, { overrideDiffStatus: "" },
     );
     assert.equal(plan.degradedReason, "blob-digest-mismatch");
     assert.deepEqual([...plan.seeded], []);
