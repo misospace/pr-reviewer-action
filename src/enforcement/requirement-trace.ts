@@ -157,6 +157,7 @@ function capReason(value: unknown): string {
 class FileTextCache {
   private readonly linesByFile = new Map<string, string[] | null>();
   private readonly signalsByFile = new Map<string, boolean[] | null>();
+  private readonly viewsByFile = new Map<string, FileCodeViews | null>();
   constructor(private readonly workspace: string) {}
 
   private load(file: string): string[] | null {
@@ -204,6 +205,20 @@ class FileTextCache {
     const signals = lines === null ? null : filePredicateSignal(lines);
     this.signalsByFile.set(file, signals);
     return signals;
+  }
+
+  /** The file's per-line code views (#1347), or `null` when it is not a
+   * readable regular file in the checkout. Computed once per file with the
+   * SAME production blanking `predicateSignals` uses, so the signal view and
+   * the text view can never disagree about what is code. The #1566 linkage
+   * check reads the blanked view so a bound identifier (or a declaration)
+   * that exists only inside a comment or a string can never count. */
+  codeViews(file: string): FileCodeViews | null {
+    if (this.viewsByFile.has(file)) return this.viewsByFile.get(file) ?? null;
+    const lines = this.load(file);
+    const views = lines === null ? null : computeCodeViews(lines, true);
+    this.viewsByFile.set(file, views);
+    return views;
   }
 }
 
@@ -916,13 +931,18 @@ function citedLinePredicateFound(locations: readonly TraceLocation[], cache: Fil
  *   `TERM_PREDICATE_MAX_LINE_GAP` lines (both still inside the citation
  *   window) — but ONLY when the two halves are DETERMINISTICALLY LINKED:
  *   the term line must bind a local identifier (a `const`/`let`/`var`
- *   declaration, single-level destructuring included) that the predicate
- *   line itself references, e.g. `const openAt = unclosedFenceStart(text);`
- *   followed by `if (openAt >= 0)`. A term-bearing line that binds nothing
- *   (an object-property copy, a comment, a bare expression) can never link
- *   a nearby predicate, so the historical same-line rule stands for it —
- *   fail closed. This is what keeps an unrelated comparison two lines from
- *   a copy line from certifying `met` (#1566 blocker);
+ *   declaration, single-level destructuring included, read on the #1347
+ *   BLANKED code view so a declaration in a comment or a string cannot
+ *   bind) whose name appears in the predicate line's GOVERNING EXPRESSION
+ *   — the parenthesized condition of a conditional/loop/switch keyword,
+ *   else the whole blanked line — e.g. `const openAt =
+ *   unclosedFenceStart(text);` followed by `if (openAt >= 0)`. A mention in
+ *   a string, a comment, or a conditional body is not participation; a term
+ *   line that binds nothing (an object-property copy, a comment, a bare
+ *   expression) can never link a nearby predicate, so the historical
+ *   same-line rule stands for it — fail closed. This is what keeps an
+ *   unrelated comparison two lines from a copy line from certifying `met`
+ *   (#1566 blocker);
  * - a term also matches as a camelCase/snake_case identifier segment
  *   (`unclosedFenceStart` carries "fence"), via `termMatchRegExp`.
  *
@@ -977,24 +997,50 @@ function termMatchRegExp(terms: readonly string[]): RegExp {
   return new RegExp(`\\b(?:${alternatives.join("|")})\\b`, "i");
 }
 
-/** #1566 blocker: the local identifiers one source line BINDS — plain
- * `const`/`let`/`var` declarations and single-level destructuring lists
- * (`const { a, b: c } =`, `const [x, y = 1] =`; the binding name survives
- * both a rename (`a: c` → `c`) and a default (`y = 1` → `y`). Everything
- * else binds nothing: an object-property entry (`sourceSha: ctx.sourceSha`),
- * a comment, a bare expression. The split-line predicate rule links a
- * predicate to a DECLARATION whose name the predicate uses; an
- * unestablishable link fails closed to the historical same-line rule. */
+/** #1566 blocker: the part of a BLANKED predicate line the linkage check
+ * reads. A conditional/loop/switch keyword yields its parenthesized
+ * condition (first `if(`/`while(`/`for(`/`switch(` with a balanced close);
+ * throw/assert/match/comparison/ternary shapes have no separate body, so
+ * the whole blanked line stands. Reading the condition alone is what keeps
+ * an identifier that only appears in the conditional BODY — or in a string
+ * or comment, which the blanked view has already removed — from certifying
+ * a link it does not participate in. */
+function governingPredicateText(blankedLine: string): string {
+  const keyword = /\b(?:if|while|for|switch)\s*\(/.exec(blankedLine);
+  if (keyword === null) return blankedLine;
+  const open = keyword.index + keyword[0].length - 1;
+  let depth = 0;
+  for (let index = open; index < blankedLine.length; index += 1) {
+    const ch = blankedLine[index];
+    if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return blankedLine.slice(open + 1, index);
+    }
+  }
+  return blankedLine.slice(open + 1);
+}
+
+/** #1566 blocker: the local identifiers one source line BINDS — read on the
+ * #1347 BLANKED code view, so a declaration written inside a comment or a
+ * string cannot bind. Plain `const`/`let`/`var` declarations and
+ * single-level destructuring lists (`const { a, b: c } =`,
+ * `const [x, y = 1] =`; the binding name survives both a rename (`a: c` →
+ * `c`) and a default (`y = 1` → `y`)). Everything else binds nothing: an
+ * object-property entry (`sourceSha: ctx.sourceSha`), a bare expression.
+ * The split-line predicate rule links a predicate to a DECLARATION whose
+ * name the predicate's governing expression uses; an unestablishable link
+ * fails closed to the historical same-line rule. */
 const MAX_BOUND_IDENTIFIERS = 8;
 const BOUND_IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
 
-function boundIdentifiers(line: string): string[] {
+function boundIdentifiers(blankedLine: string): string[] {
   const out: string[] = [];
-  for (const match of line.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
+  for (const match of blankedLine.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
     if (!out.includes(match[1]!)) out.push(match[1]!);
     if (out.length >= MAX_BOUND_IDENTIFIERS) return out;
   }
-  for (const match of line.matchAll(/\b(?:const|let|var)\s*(?:\{([^}]*)\}|\[([^\]]*)\])\s*=(?!=)/g)) {
+  for (const match of blankedLine.matchAll(/\b(?:const|let|var)\s*(?:\{([^}]*)\}|\[([^\]]*)\])\s*=(?!=)/g)) {
     const list = match[1] ?? match[2] ?? "";
     for (const part of list.split(",")) {
       if (out.length >= MAX_BOUND_IDENTIFIERS) return out;
@@ -1017,18 +1063,22 @@ export function enforcementPredicateFound(
     const lines = cache.lines(loc.file);
     const signals = cache.predicateSignals(loc.file);
     if (lines === null || signals === null || loc.line > lines.length) continue;
+    const views = cache.codeViews(loc.file);
+    if (views === null) continue;
     const window = windowLines(lines, loc.line, PREDICATE_WINDOW_RADIUS);
     const windowSignals = windowLines(signals, loc.line, PREDICATE_WINDOW_RADIUS);
+    const blankedWindow = windowLines(views.blanked, loc.line, PREDICATE_WINDOW_RADIUS);
     const termLineIndexes: number[] = [];
     for (const [index, rawLine] of window.entries()) {
       if (termRe.test(rawLine) || termRe.test(splitIdentifierSegments(rawLine))) termLineIndexes.push(index);
     }
     if (termLineIndexes.length === 0) continue;
-    // Bindings are per term line, computed once: the split-line link below
-    // is the only consumer.
+    // Bindings are per term line, read from the BLANKED view (a declaration
+    // in a comment or a string cannot bind) and computed once: the
+    // split-line link below is the only consumer.
     const boundByTermLine = new Map<number, string[]>();
     for (const termIndex of termLineIndexes) {
-      const bound = boundIdentifiers(window[termIndex]!);
+      const bound = boundIdentifiers(blankedWindow[termIndex] ?? "");
       if (bound.length > 0) boundByTermLine.set(termIndex, bound);
     }
     for (const [index, signal] of windowSignals.entries()) {
@@ -1036,17 +1086,17 @@ export function enforcementPredicateFound(
       // Historical rule: the term and the predicate on the SAME line.
       if (termLineIndexes.includes(index)) return true;
       // #1566 blocker: a NEARBY predicate only counts when the term line
-      // binds a local identifier this predicate line references — a
-      // deterministic link between the requirement-bearing expression and
-      // the comparison. Co-occurrence alone proves nothing: an unrelated
-      // comparison two lines from a term-bearing copy line stays
-      // `unverifiable` (fail closed).
-      const predicateLine = window[index]!;
+      // binds a local identifier that the predicate's GOVERNING EXPRESSION
+      // references — read on the blanked view, so a mention in a string, a
+      // comment, or a conditional body cannot certify a link. Co-occurrence
+      // alone proves nothing: an unrelated comparison two lines from a
+      // term-bearing copy line stays `unverifiable` (fail closed).
+      const governing = governingPredicateText(blankedWindow[index] ?? "");
       const linked = termLineIndexes.some((termIndex) => {
         if (Math.abs(termIndex - index) > TERM_PREDICATE_MAX_LINE_GAP) return false;
         const bound = boundByTermLine.get(termIndex);
         if (bound === undefined) return false;
-        return bound.some((name) => new RegExp(`\\b${escapeRegExp(name)}\\b`).test(predicateLine));
+        return bound.some((name) => new RegExp(`\\b${escapeRegExp(name)}\\b`).test(governing));
       });
       if (linked) return true;
     }

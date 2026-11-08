@@ -1650,6 +1650,78 @@ test("#1566: a nearby predicate only counts when the term line binds an identifi
   }
 });
 
+test("#1566: the linkage reads code, not comments or strings — and the reference must govern", () => {
+  const workspace = makeWorkspace();
+  try {
+    const fenceLedger = ledgerWith([{ id: "req-fence", text: "the publish-body fence scan must cut hostile prose at an unclosed fence delimiter before publishing", kind: "acceptance" }]);
+    const fenceClaimAt = (file: string, line: number) => [{
+      requirement_id: "req-fence",
+      disposition: "met",
+      enforcement: [{ file, line }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the fence cut throws when openAt is non-negative",
+    }];
+
+    // STRING-only reference: the identifier appears on the predicate line
+    // only inside a string literal. The blanked view removes it, and the
+    // governing condition (`a !== b`) never references the bound name.
+    writeFile(workspace, "src/string-ref.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      'if (a !== b) { throw new Error("openAt"); }',
+    ]);
+    const stringRef = validateRequirementTrace(fenceClaimAt("src/string-ref.ts", 1), fenceLedger, workspace);
+    assert.equal(stringRef.rows[0]?.disposition, "unverifiable");
+    assert.ok(stringRef.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+
+    // COMMENT-only reference on the predicate line: same removal.
+    writeFile(workspace, "src/comment-ref.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "if (a !== b) { throw new Error('x'); } // links openAt",
+    ]);
+    const commentRef = validateRequirementTrace(fenceClaimAt("src/comment-ref.ts", 1), fenceLedger, workspace);
+    assert.equal(commentRef.rows[0]?.disposition, "unverifiable");
+
+    // CONDITIONAL-BODY-ONLY reference: the identifier is real code on the
+    // predicate line but sits in the conditional BODY, not the governing
+    // condition — the link must not certify.
+    writeFile(workspace, "src/body-ref.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "if (a !== b) { limit = openAt; }",
+    ]);
+    const bodyRef = validateRequirementTrace(fenceClaimAt("src/body-ref.ts", 1), fenceLedger, workspace);
+    assert.equal(bodyRef.rows[0]?.disposition, "unverifiable");
+
+    // FAKE DECLARATION in a comment: the raw line matches the term (the
+    // term half reads the raw line by design), but a comment binds nothing
+    // on the blanked view, so no linkage is establishable.
+    writeFile(workspace, "src/fake-decl.ts", [
+      "// const openAt = unclosedFenceStart(markdown);",
+      "if (a !== b) { throw new Error('x'); }",
+    ]);
+    const fakeDecl = validateRequirementTrace(fenceClaimAt("src/fake-decl.ts", 1), fenceLedger, workspace);
+    assert.equal(fakeDecl.rows[0]?.disposition, "unverifiable");
+
+    // POSITIVE controls: the reference in the GOVERNING CONDITION passes —
+    // `if` and `while` conditions alike — while the same identifier in the
+    // body of an unrelated conditional never does.
+    writeFile(workspace, "src/cond-ref.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "if (openAt >= 0) { throw new Error('x'); }",
+    ]);
+    const condRef = validateRequirementTrace(fenceClaimAt("src/cond-ref.ts", 1), fenceLedger, workspace);
+    assert.equal(condRef.rows[0]?.disposition, "met");
+
+    writeFile(workspace, "src/while-ref.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "while (openAt >= 0) { openAt = cutProse(markdown); }",
+    ]);
+    const whileRef = validateRequirementTrace(fenceClaimAt("src/while-ref.ts", 1), fenceLedger, workspace);
+    assert.equal(whileRef.rows[0]?.disposition, "met");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("#1566: the split-line link survives destructuring bindings and rejects a same-name-but-unbound predicate", () => {
   const workspace = makeWorkspace();
   try {
