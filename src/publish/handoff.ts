@@ -42,7 +42,7 @@
  */
 import { redactText } from "../context/redact.js";
 import { fenceDelimiterFor } from "../context/fence.js";
-import { boundedIdList, MAX_ID_LIST_CHARS, MAX_ID_LIST_ENTRIES } from "../context/id-lists.js";
+import { boundedIdList, boundedIdListWithTotal, sourceIdCount, MAX_ID_LIST_CHARS, MAX_ID_LIST_ENTRIES } from "../context/id-lists.js";
 import { pyCodepointSlice } from "../platform/py.js";
 import { findingIdentityFromRecord } from "../outcomes/identity.js";
 import { safePath } from "../findings/safe-path.js";
@@ -334,6 +334,15 @@ export interface ReviewHandoff {
   unresolved_required_checks_total: number | null;
   /** #1538: the same truncation flag for the required-check ids. */
   unresolved_required_checks_truncated: boolean | null;
+  /** #1541: the number of DISTINCT merge-gating requirement ids the
+   * deterministic enforcement pass produced, BEFORE the shared 20-entry id
+   * cap shortened the list. A count larger than the listed length means the
+   * shared cap dropped ids. `null` when the document discloses no count (a
+   * handoff published before #1541): an unknown count is never read as zero
+   * and never read as "the list is the whole set". */
+  unresolved_requirement_ids_source_total: number | null;
+  /** #1541: the same honest count for the required-check ids. */
+  unresolved_required_checks_source_total: number | null;
 /** #1521: the review-obligation rows that BLOCKED the review — the
    * deterministic enforcement pass's own rows, so a controller sees WHAT
    * blocked it and not only an opaque id. */
@@ -345,7 +354,8 @@ export interface ReviewHandoff {
   unresolved_review_obligations_truncated: boolean;
   /** #1521: the run's derived-obligation state (#1449), null when unknown.
    * ALWAYS present, so the document's key set stays fixed. */
-  derived_obligation_state: PublishedDerivedObligationState | null;}
+  derived_obligation_state: PublishedDerivedObligationState | null;
+}
 
 export interface ReviewHandoffInput {
   /** The run's own review id; it pairs with `headSha` to name THIS review
@@ -368,6 +378,13 @@ export interface ReviewHandoffInput {
   /** #1521: the run's derived-obligation state ("complete" | "unresolved" |
    * "unavailable"). Anything else is published as null (unknown). */
   derivedObligationState?: string | undefined;
+  /** #1541: the number of DISTINCT requirement ids the enforcement pass
+   * produced before the shared id cap shortened the list. The producers
+   * carry it here; without it the document discloses nothing about that
+   * bound, and an absent count is unknown — never zero. */
+  unresolvedRequirementIdsSourceTotal?: number | undefined;
+  /** #1541: the same honest count for the required-check ids. */
+  unresolvedRequiredChecksSourceTotal?: number | undefined;
   /** The replacements THIS run published as review comments, keyed by the
    * finding's stable identity digest. A suggestion rides an item only when
    * the action itself published that exact replacement, so the handoff can
@@ -488,13 +505,23 @@ function serializeHandoff(value: unknown): string {
  * like the two id lists — they name WHAT blocked the review, so they are the
  * last thing the byte budget gives way (and only after both id lists are
  * empty). Their own omission is disclosed by
- * `unresolved_review_obligations_total` / `unresolved_review_obligations_truncated`. */
+ * `unresolved_review_obligations_total` / `unresolved_review_obligations_truncated`.
+ *
+ * #1541: the shared 20-entry id cap is a SECOND bound, and it happens
+ * upstream — the producers hand over an already-bounded list, so the byte
+ * budget's count can never disclose it. Each list therefore also publishes
+ * `*_source_total`: the number of distinct ids the enforcement pass produced
+ * BEFORE the shared cap shortened the list. A count larger than the listed
+ * length means the shared cap dropped ids; an absent count is unknown.
+ */
 export function buildReviewHandoff(input: ReviewHandoffInput): string {
   const candidates = findingsArray(input.findings).filter(
     (value): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value),
   );
-  const requirementIds = boundedIdList(input.unresolvedRequirementIds);
-  const checkIds = boundedIdList(input.unresolvedRequiredChecks);
+  const incomingRequirements = boundedIdListWithTotal(input.unresolvedRequirementIds);
+  const incomingChecks = boundedIdListWithTotal(input.unresolvedRequiredChecks);
+  const requirementIds = incomingRequirements.ids;
+  const checkIds = incomingChecks.ids;
   // #1538: the honest count of the ids each list could carry BEFORE the byte
   // budget shortens it. The lists arrive already bounded by their producers
   // (`unresolvedTraceRequirementIds`, `unresolvedRequiredCheckIds`), so the
@@ -502,6 +529,12 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
   // budget is the only thing that shortens it here.
   const requirementTotal = requirementIds.length;
   const checkTotal = checkIds.length;
+  // #1541: the count the enforcement pass produced BEFORE the shared cap
+  // shortened the list. It arrives from the producers; without it the
+  // document would disclose nothing about that bound, and a consumer would
+  // read the bounded list as the whole set.
+  const requirementSourceTotal = sourceIdCount(input.unresolvedRequirementIdsSourceTotal, incomingRequirements);
+  const checkSourceTotal = sourceIdCount(input.unresolvedRequiredChecksSourceTotal, incomingChecks);
   // #1521: the shared row projection (the local bundle uses the same one).
   const obligations = boundedObligationRows(input.unresolvedReviewObligations);
   const derivedState = publishedDerivedObligationState(input.derivedObligationState);
@@ -525,9 +558,11 @@ export function buildReviewHandoff(input: ReviewHandoffInput): string {
     unresolved_requirement_ids: reqIds,
     unresolved_requirement_ids_total: requirementTotal,
     unresolved_requirement_ids_truncated: reqIds.length < requirementTotal,
+    ...(requirementSourceTotal !== null ? { unresolved_requirement_ids_source_total: requirementSourceTotal } : {}),
     unresolved_required_checks: chkIds,
     unresolved_required_checks_total: checkTotal,
     unresolved_required_checks_truncated: chkIds.length < checkTotal,
+    ...(checkSourceTotal !== null ? { unresolved_required_checks_source_total: checkSourceTotal } : {}),
     unresolved_review_obligations: obligationRows,
     unresolved_review_obligations_total: obligationTotal,
     unresolved_review_obligations_truncated: obligationTruncated,
@@ -676,6 +711,11 @@ export function parseObligationRow(value: unknown): ReviewObligationRow | null {
  * before #1538 carries none of them and stays parseable — but an absent
  * counter is UNKNOWN (`null`), never read as "the list is the whole set":
  * the byte budget could have shortened that list without saying so.
+ *
+ * #1541: the shared-cap counters are OPTIONAL and cross-checked the same
+ * way. An absent counter is UNKNOWN (`null`) — never read as zero, and
+ * never read as "the list is the whole set": the shared 20-entry id cap
+ * could have shortened that list without saying so.
  */
 export function parseReviewHandoff(text: string): ReviewHandoff | null {
   let value: unknown;
@@ -743,7 +783,20 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
   if (!(derivedState === null
     || (typeof derivedState === "string" && (DERIVED_OBLIGATION_STATES as readonly string[]).includes(derivedState)))) {
     return null;
-  }  const items: ReviewHandoffItem[] = [];
+  }
+  const items: ReviewHandoffItem[] = [];
+  // #1541: the shared-bound disclosure counters — absent means unknown,
+  // never "the list is the whole set".
+  const requirementSourceTotal = record.unresolved_requirement_ids_source_total === undefined
+    ? null
+    : record.unresolved_requirement_ids_source_total;
+  if (!(requirementSourceTotal === null
+    || (typeof requirementSourceTotal === "number" && Number.isInteger(requirementSourceTotal) && requirementSourceTotal >= 0))) return null;
+  const checkSourceTotal = record.unresolved_required_checks_source_total === undefined
+    ? null
+    : record.unresolved_required_checks_source_total;
+  if (!(checkSourceTotal === null
+    || (typeof checkSourceTotal === "number" && Number.isInteger(checkSourceTotal) && checkSourceTotal >= 0))) return null;
   for (const raw of record.items) {
     const item = parseHandoffItem(raw);
     if (item === null) return null;
@@ -758,6 +811,15 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
   // #1538: the same cross-check for the two id lists.
   if (!countersAgreeWithList(record.unresolved_requirement_ids.length, requirementTotal, requirementTruncated)) return null;
   if (!countersAgreeWithList(record.unresolved_required_checks.length, checkTotal, checkTruncated)) return null;
+  // #1541: the shared-bound counters are cross-checked the same way. A
+  // count below the list it describes (or below the count the byte budget
+  // measured) contradicts itself: the shared cap only drops ids, so the
+  // count can never be smaller than the list. An UNKNOWN counter (`null` —
+  // a handoff published before #1541) is never a contradiction.
+  if (requirementSourceTotal !== null && requirementSourceTotal < record.unresolved_requirement_ids.length) return null;
+  if (requirementSourceTotal !== null && requirementTotal !== null && requirementSourceTotal < requirementTotal) return null;
+  if (checkSourceTotal !== null && checkSourceTotal < record.unresolved_required_checks.length) return null;
+  if (checkSourceTotal !== null && checkTotal !== null && checkSourceTotal < checkTotal) return null;
   // #1521: the same cross-check for the obligation rows — a document that
   // claims fewer blocking rows than it lists, or that claims no truncation
   // while its total disagrees with the list it carries, contradicts itself.
@@ -775,9 +837,11 @@ export function parseReviewHandoff(text: string): ReviewHandoff | null {
     unresolved_requirement_ids: [...record.unresolved_requirement_ids],
     unresolved_requirement_ids_total: requirementTotal,
     unresolved_requirement_ids_truncated: requirementTruncated,
+    unresolved_requirement_ids_source_total: requirementSourceTotal,
     unresolved_required_checks: [...record.unresolved_required_checks],
     unresolved_required_checks_total: checkTotal,
     unresolved_required_checks_truncated: checkTruncated,
+    unresolved_required_checks_source_total: checkSourceTotal,
     unresolved_review_obligations: obligationRows,
     unresolved_review_obligations_total: obligationTotal,
     unresolved_review_obligations_truncated: obligationTruncated,

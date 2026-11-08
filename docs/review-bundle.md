@@ -82,7 +82,9 @@ here for readability — real output has no newlines):
   "findings_total": 1,
   "findings_truncated": false,
   "unresolved_requirement_ids": [],
+  "unresolved_requirement_ids_source_total": 0,
   "unresolved_required_checks": [],
+  "unresolved_required_checks_source_total": 0,
   "unresolved_review_obligations": [
     {
       "id": "must-check-1",
@@ -127,6 +129,19 @@ These ids are enforcement output, not model output. They let a consumer see
 which obligation stayed open instead of only seeing that coverage was
 incomplete. Each list holds at most 20 ids, and each id is at most 64
 characters.
+
+The 20-id cap is a second bound, and it applies before the bundle is
+written. When the cap drops an id, the bundle says so:
+
+- `unresolved_requirement_ids_source_total` counts the distinct requirement
+  ids the enforcement pass produced before the cap shortened the list.
+- `unresolved_required_checks_source_total` counts the required-check ids the
+  same way.
+
+A count larger than the listed length means the shared cap dropped ids.
+Treat the list as incomplete. A count equal to the listed length means the
+cap dropped nothing. An absent count is unknown. Never read an absent count
+as zero, because the cap could have shortened the list without saying so.
 
 ### Blocking review obligations and derived coverage
 
@@ -270,6 +285,8 @@ still parses. The published handoff's parser refuses the same contradictions.
   budget, each charged at its exact serialized byte length, ahead of the
   findings; a row the budget cannot carry is disclosed, not hidden, so a
   long row can never push the document over the cap.
+- The shared-cap counters are reserved in the same budget, so the disclosure
+  never pushes the document over the cap either.
 - Every text field passes secret redaction and a length cap before it is
   serialized. The document carries no model transcripts, no raw tool
   output, no rendered Markdown, and no evidence blobs.
@@ -363,6 +380,11 @@ A consumer MUST:
   blocked nothing, and an `unresolved` row is an availability failure —
   coverage, never a defect (#1505). A document that carries any of them as a
   blocking obligation did not come from this action, so it is refused.
+- Treat an unknown shared-cap count as an incomplete list. A `null`
+  `*_source_total` means that the document discloses no count, so the shared
+  20-entry id cap could have shortened that list. A consumer MUST NOT read
+  `null` as zero, and MUST NOT read it as "the list is the whole set".
+
 ### Document shape
 
 The document is one line of JSON with a fixed key order. Example (wrapped
@@ -394,9 +416,11 @@ here for readability, real output has no newlines):
   "unresolved_requirement_ids": ["REQ-7"],
   "unresolved_requirement_ids_total": 1,
   "unresolved_requirement_ids_truncated": false,
+  "unresolved_requirement_ids_source_total": 1,
   "unresolved_required_checks": ["tests cover the new path"],
   "unresolved_required_checks_total": 1,
   "unresolved_required_checks_truncated": false,
+  "unresolved_required_checks_source_total": 1,
   "unresolved_review_obligations": [
     {
       "id": "must-check-1",
@@ -408,7 +432,8 @@ here for readability, real output has no newlines):
   ],
   "unresolved_review_obligations_total": 1,
   "unresolved_review_obligations_truncated": false,
-  "derived_obligation_state": "complete"}
+  "derived_obligation_state": "complete"
+}
 ```
 
 - `items` holds the FINAL post-enforcement findings. That is the artifact's
@@ -460,10 +485,21 @@ here for readability, real output has no newlines):
   `unresolved_requirement_ids_truncated` and
   `unresolved_required_checks_truncated` say whether the byte budget dropped
   an id from that list. Never read a shortened list as the whole set.
+- `unresolved_requirement_ids_source_total` and
+  `unresolved_required_checks_source_total` count the distinct ids the
+  enforcement pass produced before the shared 20-entry id cap shortened the
+  list. That cap applies upstream, so the byte-budget counts above can never
+  disclose it. A source count larger than `*_total` means the shared cap
+  dropped ids. A `*_total` larger than the listed length means the byte
+  budget dropped ids.
 - A handoff published before #1538 carries no id counters. The parser then
   reports the count and the flag as unknown (`null`). An unknown flag is
   never read as `false`, because such a document may still hide a dropped
   id.
+- A handoff published before #1541 carries no shared-cap count. The parser
+  then reports it as unknown (`null`). An unknown count is never read as
+  zero, and never read as "the list is the whole set", because the shared cap
+  could have shortened that list without saying so.
 
 ### Blocking review obligations and derived coverage
 
@@ -520,6 +556,8 @@ derived state.
   so the base is shrunk first: the last ids of the longer id list are dropped
   one at a time (requirements first on a tie) until the document fits. The
   empty-list base is far below the cap, so the bound always holds.
+- The shared-cap counters ride the base too (#1541). The byte budget measures
+  them as well, so the disclosure never pushes the document over the cap.
 - At most 25 findings are listed (`REVIEW_HANDOFF_MAX_ITEMS`).
 - At most 10 obligation rows are listed on the PUBLISHED handoff
   (`REVIEW_HANDOFF_MAX_OBLIGATIONS`) — the complete set lives in the local
@@ -531,7 +569,21 @@ derived state.
   (`REVIEW_HANDOFF_MAX_SUGGESTION_CHARS`). A longer replacement is omitted
   rather than cut off.
 - The published body grows by at most the 8 KiB document plus the container
-  that holds it.
+  that holds it, and the whole published body is bounded at 65,536 UTF-8
+  bytes (`MAX_PUBLISHED_BODY_BYTES`) — the byte form of the forge's
+  65,536-character comment ceiling (#1554). At the publish boundary only the
+  model-authored review prose is ever trimmed to fit; the machine documents
+  and action-owned notices are never trimmed, and any trim is disclosed in
+  the body's final line. The trim-time fence scan recognizes fence
+  delimiters behind blockquote and list-item container prefixes, so an
+  unfinished fence opened inside a container is dropped whole too. Its
+  opener and closer rules are indent-disciplined in both directions — a
+  too-deep delimiter is indented code, never a fence; a closer is never
+  less indented than its opener; a container that ends mid-fence makes
+  every later delimiter a new opener — so an uncertain fence state trims
+  back to the opener rather than leaving hostile prose inside a live
+  fence. The prose always has room because every
+  action-owned block's own bounds keep it far below the ceiling.
 - Every text field passes secret redaction and a length cap before it is
   serialized. The HTML characters are written as JSON escapes, so the
   published body never carries a raw tag out of the payload.

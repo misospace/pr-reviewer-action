@@ -465,7 +465,11 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
   const trace = readJsonObject(join(runDir, "requirement-trace.json"));
   if (trace !== null && Array.isArray(trace.rows)
     && trace.rows.every((row) => row !== null && typeof row === "object" && !Array.isArray(row))) {
-    fields.unresolvedRequirementIds = unresolvedTraceRequirementIds(trace as never);
+    // #1541: this path publishes the ids WITHOUT a shared-cap count: the
+    // count is a producer's statement about its own pass, and this
+    // recomputation is not that pass. An absent count is read downstream as
+    // UNKNOWN — never zero, never "the list is the whole set".
+    fields.unresolvedRequirementIds = unresolvedTraceRequirementIds(trace as never).ids;
   }
 
   const coverageRecord = readJsonObject(join(runDir, "review-coverage.json"));
@@ -1037,6 +1041,13 @@ export function reviewDerivedPublishFields(review: RunReviewResult): Partial<Pub
     // so such a run keeps the pre-#1518 publish-input shape.
     ...(review.unresolvedRequirementIds !== undefined ? { unresolvedRequirementIds: review.unresolvedRequirementIds } : {}),
     ...(review.unresolvedRequiredChecks !== undefined ? { unresolvedRequiredChecks: review.unresolvedRequiredChecks } : {}),
+    // #1541: the count the enforcement pass produced BEFORE the shared id cap
+    // shortened those lists. It rides the published handoff so a consumer can
+    // tell that the cap dropped ids. Absent when the run never reviewed (the
+    // admission skip path), so such a run keeps the pre-#1541 publish-input
+    // shape.
+    ...(review.unresolvedRequirementIdsSourceTotal !== undefined ? { unresolvedRequirementIdsSourceTotal: review.unresolvedRequirementIdsSourceTotal } : {}),
+    ...(review.unresolvedRequiredChecksSourceTotal !== undefined ? { unresolvedRequiredChecksSourceTotal: review.unresolvedRequiredChecksSourceTotal } : {}),
     // #1521: the obligation ROWS that blocked the review, so the published
     // handoff names WHAT blocked it and not only an opaque id. Absent when
     // the run never reviewed (the admission skip path), on the same presence

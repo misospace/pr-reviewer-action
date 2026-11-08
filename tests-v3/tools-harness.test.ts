@@ -3456,6 +3456,10 @@ test("#1379: the trace-gap repair continuation inherits the credits and cannot s
     // #1503: the repair loop now runs up to TRACE_REPAIR_MAX_ROUNDS (was one),
     // so a second round is needed to stop it (no tool call → no-tool-calls).
     openAiText("no more"),
+    // #1552: the refused-call repair round gathered no NEW evidence, but the
+    // conversation already carries evidence — the trace-only turn still runs
+    // (and returns nothing usable here, so nothing merges).
+    openAiText("I cannot trace R1 from what I have."),
   ];
   let n = 0;
   const { result } = await runToolHarness(deps({
@@ -3465,10 +3469,13 @@ test("#1379: the trace-gap repair continuation inherits the credits and cannot s
   }));
   assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
   // The repair ran, issued one call, executed nothing (refused), and produced
-  // no new evidence — so no trace-only turn was spent on it.
-  assert.equal(result.trace_repair_continuation?.outcome, "skipped_no_evidence");
+  // no new evidence — but #1552 still spends the trace-only serialization
+  // turn on the conversation's existing evidence; it returns no usable claim,
+  // so nothing merges and the standing verdict stands.
+  assert.equal(result.trace_repair_continuation?.outcome, "continued_trace_only");
   assert.equal(result.trace_repair_continuation?.tool_calls, 0);
-  assert.equal(n, 6);
+  assert.equal(result.trace_repair_continuation?.claims_merged, 0);
+  assert.equal(n, 7);
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
   const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
   assert.equal(telemetry.budget?.required_evidence_requests_hint, 4);

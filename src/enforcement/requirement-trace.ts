@@ -76,7 +76,7 @@ import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { markRelaxationNotesSuperseded, type ReviewArtifact } from "./artifact.js";
 import { workspaceRegularFile, workspaceFsPath, workspacePathExists, workspacePathHasSymlinkComponent } from "../context/workspace-path.js";
 import { detectLanguage, isTestPath } from "../context/change-anchors.js";
-import { boundedIdList } from "../context/id-lists.js";
+import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 
 export const TRACE_DISPOSITIONS: readonly string[] = ["met", "unmet", "not_applicable", "unverifiable"];
 
@@ -2351,16 +2351,33 @@ export const MAX_TRACE_REPAIR_SUMMARY_ERROR_CHARS = 200;
  * because that module imports from this one — an import in the other
  * direction would cycle. */
 export interface TraceGapContinuationSummary {
-  /** `continued` | `skipped_no_budget` | `skipped_probe_error` |
-   * `skipped_refresh_failed` | `skipped_no_evidence` (harness-owned enum;
-   * `skipped_refresh_failed` names a failed repair round — the #1503
-   * trace-only turn replaced the full-verdict refresh the name refers to). */
+  /** `continued` | `continued_trace_only` | `skipped_no_budget` |
+   * `skipped_probe_error` | `skipped_refresh_failed` | `skipped_wire_unsafe`
+   * (harness-owned enum; `skipped_refresh_failed` names a failed repair round
+   * — the #1503 trace-only turn replaced the full-verdict refresh the name
+   * refers to). #1552: `continued_trace_only` marks a repair round that
+   * executed no tool call but whose trace-only serialization turn still ran
+   * against the conversation's already-gathered evidence (the #1539 shape);
+   * `skipped_wire_unsafe` marks a round whose trace instruction would have
+   * rendered as an adjacent user turn. The historical `skipped_no_evidence`
+   * value can appear only in artifacts written before #1552. */
   outcome: string;
   unresolved_ids: string[];
   /** #1503: the trace-only repair turn merged at least one claim into the
    * standing verdict artifact (`claims_merged` is the count). */
   trace_claims_merged: boolean;
   claims_merged: number;
+  /** #1552: optional bounded fields forwarded from the harness's
+   * `trace_repair_continuation` record when present — the repair round's
+   * sanitized stop reason and executed-call count, the DEDICATED repair
+   * allowance that remained after the round (`repair_requests_remaining`),
+   * and why the trace-only turn was suppressed (`trace_skipped_reason`:
+   * `wire_unsafe`). Absent on records that never carry them (probe errors,
+   * budget skips), so old artifacts keep their shape. */
+  stop_reason?: string;
+  tool_calls?: number;
+  repair_requests_remaining?: number;
+  trace_skipped_reason?: string;
 }
 
 /** #1044: bounded, sanitized summary of the #959 trace-repair pass, attached
@@ -2408,6 +2425,19 @@ export interface RequirementTraceRepairOutcome {
   /** #1145: present when the native loop's own continuation ran or was
    * skipped (absent for runs where no probe fired at all). */
   continuation?: TraceGapContinuationSummary;
+  /** #1552: the targeted rows' PRE-repair repair-state classification
+   * (`missing` | `insufficient_claim` | `evidence_unverified`), keyed by
+   * sanitized id and capped like `missing_ids` — present-but-`unverifiable`
+   * rows the pass targeted are visible here even though they can never
+   * appear in `missing_ids` (they carry a row). Named "targeted" because the
+   * states describe the rows as the pass FOUND them, not after the merge
+   * (the post-merge state lives in the trace section and `missing_ids`).
+   * Enum-validated; absent when the caller did not classify rows. */
+  targeted_row_states?: Record<string, string>;
+  /** #1552: rows the merge appended or replaced — the
+   * parsed-claim count alone can overstate the merge. Absent when the pass
+   * returned no claims or changed nothing. */
+  rows_merged?: number;
 }
 
 /** #1044: the summary's `missing_ids` are sanitized (control characters and
@@ -2711,27 +2741,58 @@ export function missingTraceRequirementIds(coveragePayload: unknown, inScopeIds:
   return inScopeIds.filter((id) => !present.has(id));
 }
 
-/** #959: append repaired claims after the verdict's own coverage payload,
- * keeping only ids that had NO claim (never overwriting an existing claim, so
- * a claim with bad locations stays fail-closed). Returns the merged array.
- * Defensive on a non-array `repaired` (the "never throws" contract holds even
- * if a future caller bypasses the types). */
-export function mergeTraceClaims(coveragePayload: unknown, repaired: readonly unknown[] | undefined): unknown[] {
-  const merged: unknown[] = Array.isArray(coveragePayload) ? [...coveragePayload] : [];
-  const present = new Set<string>();
-  for (const claim of merged) {
-    if (!claim || typeof claim !== "object" || Array.isArray(claim)) continue;
-    const rid = (claim as { requirement_id?: unknown }).requirement_id;
-    if (typeof rid === "string") present.add(rid);
-  }
+/** #1552: replacement-aware merge for trace-repair claims (supersedes the
+ * historical append-only `mergeTraceClaims`, which #1552 removed once both
+ * production call sites moved to the replacement-aware rule; same defensive
+ * parsing contract — never throws). What happens to an id that ALREADY
+ * carries a claim:
+ * - no existing row → appended (the historical append-only rule);
+ * - an existing row whose id is in `allowedIds` and whose stored
+ *   `disposition` is `"unverifiable"`, `"met"` or `"not_applicable"` →
+ *   REPLACED in place (same index). The allowed set is always the
+ *   validator-derived target set (validator rows still `unverifiable`, plus
+ *   missing ids), so a stored `met`/`not_applicable` row inside it is one the
+ *   validator DOWNGRADED — the #1539 shape where the model claimed `met` but
+ *   the citation did not hold up, and a re-derived claim may legitimately
+ *   succeed where the first failed. A stored `unmet` row is the reviewer's
+ *   own affirmative known-gap finding (#1095) and is never replaced, nor is
+ *   a row with a missing or non-string disposition;
+ * - any other id → untouched and the repaired claim is dropped: outside the
+ *   validated target set nothing is ever overwritten, and with no
+ *   `allowedIds` at all the merge is append-only (the conservative default
+ *   for a future caller without a validated target set).
+ * Returns the merged array plus `appended`/`replaced` counts — a pure
+ * replacement leaves the array length unchanged, so callers must count via
+ * these fields (a length delta of 0 is NOT "nothing merged"). */
+export function mergeTraceRepairClaims(
+  coveragePayload: unknown,
+  repaired: readonly unknown[] | undefined,
+  allowedIds?: ReadonlySet<string>,
+): { coverage: unknown[]; appended: number; replaced: number } {
+  const coverage: unknown[] = Array.isArray(coveragePayload) ? [...coveragePayload] : [];
+  let appended = 0;
+  let replaced = 0;
   for (const claim of Array.isArray(repaired) ? repaired : []) {
     if (!claim || typeof claim !== "object" || Array.isArray(claim)) continue;
     const rid = (claim as { requirement_id?: unknown }).requirement_id;
-    if (typeof rid !== "string" || present.has(rid)) continue;
-    present.add(rid);
-    merged.push(claim);
+    if (typeof rid !== "string") continue;
+    const index = coverage.findIndex((row) => {
+      if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+      return (row as { requirement_id?: unknown }).requirement_id === rid;
+    });
+    if (index === -1) {
+      coverage.push(claim);
+      appended++;
+      continue;
+    }
+    if (allowedIds === undefined || !allowedIds.has(rid)) continue;
+    const disposition = (coverage[index] as { disposition?: unknown }).disposition;
+    if (disposition === "unverifiable" || disposition === "met" || disposition === "not_applicable") {
+      coverage[index] = claim;
+      replaced++;
+    }
   }
-  return merged;
+  return { coverage, appended, replaced };
 }
 
 const MAX_RENDERED_ROWS = 20;
@@ -2749,16 +2810,21 @@ const COLLAPSE_THRESHOLD = 5;
  *
  * The list is deduplicated, keeps the trace's order, and is bounded by the
  * shared id cap, so a large ledger cannot flood the published handoff.
+ *
+ * #1541: the returned count is the number of distinct ids the trace produced
+ * BEFORE the shared id cap shortened the list, so a publisher can disclose
+ * that the cap dropped ids instead of passing a shortened list off as the
+ * whole set.
  */
-export function unresolvedTraceRequirementIds(trace: RequirementTraceArtifact): string[] {
-  if (trace === null || typeof trace !== "object" || !Array.isArray(trace.rows)) return [];
+export function unresolvedTraceRequirementIds(trace: RequirementTraceArtifact): BoundedIdList {
+  if (trace === null || typeof trace !== "object" || !Array.isArray(trace.rows)) return { ids: [], total: 0 };
   const ids: string[] = [];
   for (const row of trace.rows) {
     if (row.disposition !== "unmet" && row.disposition !== "unverifiable") continue;
     if (typeof row.requirement_id !== "string" || row.requirement_id === "") continue;
     ids.push(row.requirement_id);
   }
-  return boundedIdList(ids);
+  return boundedIdListWithTotal(ids);
 }
 
 /**

@@ -26,8 +26,8 @@ import {
 extractRequirementTerms,
 filePredicateSignal,
 ledgerRequirementsById,
-linePredicateSignal,
-  mergeTraceClaims,
+  linePredicateSignal,
+  mergeTraceRepairClaims,
   missingTraceRequirementIds,
   renderRequirementTraceMarkdown,
   changedSubjectText,
@@ -2299,19 +2299,66 @@ test("#959: missingTraceRequirementIds distinguishes a missing claim from an unu
   assert.deepEqual(missingTraceRequirementIds(coverage, []), []);
 });
 
-test("#959: mergeTraceClaims appends only ids with no existing claim, never overwriting one", () => {
-  const existing = [{ requirement_id: "req-1", disposition: "met", enforcement: [] }];
-  const merged = mergeTraceClaims(existing, [
-    { requirement_id: "req-1", disposition: "met", enforcement: [{ file: "src/x.ts", line: 1 }] },
-    { requirement_id: "req-2", disposition: "met", enforcement: [{ file: "src/y.ts", line: 1 }] },
+test("#1552: mergeTraceRepairClaims replaces in place only rows the validated target set covers", () => {
+  const existing = [
+    { requirement_id: "req-1", disposition: "met", enforcement: [] },
+    { requirement_id: "req-2", disposition: "unverifiable", reason: "not verified" },
+    { requirement_id: "req-3", disposition: "unmet", reason: "gap" },
+    { requirement_id: "req-4", disposition: "not_applicable" },
+    { requirement_id: "req-5" }, // missing disposition — never replaced
+  ];
+  const fresh = { requirement_id: "req-2", disposition: "met", enforcement: [{ file: "src/a.ts", line: 3 }] };
+  // The target set is the validator-derived one: req-2 is validator-
+  // unverifiable, req-1 is validator-met (downgraded shape: the model claimed
+  // met but the citation did not hold up), req-3 is the adversarial
+  // backstop case — fed INTO the set on purpose to pin the guard — and
+  // req-4/req-5 are settled or unclassifiable.
+  const allowed = new Set(["req-1", "req-2", "req-3"]);
+  const { coverage, appended, replaced } = mergeTraceRepairClaims(existing, [
+    fresh,
+    { requirement_id: "req-1", disposition: "met", enforcement: [{ file: "src/x.ts", line: 1 }] }, // in-set downgraded met → replaced
+    { requirement_id: "req-3", disposition: "met", enforcement: [{ file: "src/z.ts", line: 1 }] }, // unmet → dropped EVEN IN-SET (the #1095 backstop)
+    { requirement_id: "req-4", disposition: "met", enforcement: [] }, // not in set → dropped
+    { requirement_id: "req-5", disposition: "met", enforcement: [] }, // not in set → dropped
+    { requirement_id: "req-6", disposition: "met", enforcement: [{ file: "src/b.ts", line: 1 }] }, // appended
     "junk",
+  ], allowed);
+  // pure replacement leaves length delta 0 — counts, not
+  // length, merge report.
+  assert.equal(coverage.length, 6);
+  assert.equal(appended, 1);
+  assert.equal(replaced, 2);
+  assert.deepEqual(coverage[0], { requirement_id: "req-1", disposition: "met", enforcement: [{ file: "src/x.ts", line: 1 }] }, "in-set downgraded met row replaced IN PLACE");
+  assert.deepEqual(coverage[1], fresh, "unverifiable row replaced IN PLACE (index preserved)");
+  assert.deepEqual(coverage[2], existing[2], "unmet row untouched even in-set");
+  assert.deepEqual(coverage[3], existing[3], "not_applicable row untouched out-of-set");
+  assert.deepEqual(coverage[4], existing[4], "missing-disposition row untouched out-of-set");
+  assert.equal((coverage[5] as { requirement_id: string }).requirement_id, "req-6");
+  // No allowed set at all → append-only (the conservative default for a
+  // caller without a validated target set): nothing is ever replaced.
+  const appendOnly = mergeTraceRepairClaims(existing, [
+    fresh,
+    { requirement_id: "req-1", disposition: "met", enforcement: [{ file: "src/x.ts", line: 1 }] },
   ]);
-  assert.equal(merged.length, 2);
-  assert.deepEqual(merged[0], existing[0]);
-  assert.equal((merged[1] as { requirement_id: string }).requirement_id, "req-2");
-  assert.deepEqual(mergeTraceClaims(undefined, [{ requirement_id: "req-9" }]), [{ requirement_id: "req-9" }]);
-  // Defensive: a non-array `repaired` must not throw (the "never throws" contract).
-  assert.deepEqual(mergeTraceClaims(existing, undefined), existing);
+  assert.equal(appendOnly.replaced, 0);
+  assert.deepEqual(appendOnly.coverage[0], existing[0]);
+  assert.deepEqual(appendOnly.coverage[1], existing[1]);
+  // Defensive: hostile input never throws (the "never throws" contract).
+  assert.deepEqual(mergeTraceRepairClaims(undefined, [{ requirement_id: "req-9" }]), {
+    coverage: [{ requirement_id: "req-9" }],
+    appended: 1,
+    replaced: 0,
+  });
+  assert.deepEqual(mergeTraceRepairClaims(existing, undefined), { coverage: existing, appended: 0, replaced: 0 });
+  // A row claiming a hostile duplicate id replaces only the FIRST match.
+  const dupes = [
+    { requirement_id: "req-2", disposition: "unverifiable" },
+    { requirement_id: "req-2", disposition: "met" },
+  ];
+  const dupResult = mergeTraceRepairClaims(dupes, [{ requirement_id: "req-2", disposition: "met" }], new Set(["req-2"]));
+  assert.equal(dupResult.replaced, 1);
+  assert.deepEqual(dupResult.coverage[0], { requirement_id: "req-2", disposition: "met" });
+  assert.deepEqual(dupResult.coverage[1], { requirement_id: "req-2", disposition: "met" });
 });
 
 test("#959: a hostile repair reason cannot forge a heading or bullet in the trace section", () => {
@@ -2464,6 +2511,37 @@ test("#1044: traceRepairOutcomeSummary maps pass statuses to summary outcomes", 
   const partial = traceRepairOutcomeSummary({ ...base, missingIds: ["req-2"], result: repairResult("ok", { claims: [{ requirement_id: "req-1" }] }) });
   assert.equal(partial.outcome, "merged");
   assert.deepEqual(partial.missing_ids, ["req-2"]);
+});
+
+test("#1552: traceRepairOutcomeSummary carries sanitized, enum-validated, capped row states", () => {
+  const states = {
+    "req-1": "insufficient_claim",
+    "req-2": "evidence_unverified",
+    "req-3": "missing",
+    "req-4": "forged\x00state",
+    "req-5": "met",
+    "req-6": 42 as unknown as string,
+    "req-7": "insufficient\n_claim",
+  };
+  const summary = traceRepairOutcomeSummary({ attempted: false, outcome: "skipped_by_gate", missingIds: ["req-1"], rowStates: states });
+  assert.deepEqual(summary.targeted_row_states, {
+    "req-1": "insufficient_claim",
+    "req-2": "evidence_unverified",
+    "req-3": "missing",
+    "req-7": "insufficient_claim",
+  });
+  // Absent/empty rowStates stay absent — the old artifact shape is kept.
+  assert.equal(traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: [] }).targeted_row_states, undefined);
+  assert.equal(
+    traceRepairOutcomeSummary({ attempted: false, outcome: "no_missing_ids", missingIds: [], rowStates: {} }).targeted_row_states,
+    undefined,
+  );
+  // rows_merged: finite-truncated, omitted when absent/zero, present when the
+  // merge changed rows.
+  assert.equal(traceRepairOutcomeSummary({ attempted: true, outcome: null, missingIds: [], result: repairResult("ok") }).rows_merged, undefined);
+  assert.equal(traceRepairOutcomeSummary({ attempted: true, outcome: null, missingIds: [], result: repairResult("ok"), rowsMerged: 0 }).rows_merged, undefined);
+  const rows = traceRepairOutcomeSummary({ attempted: true, outcome: null, missingIds: [], result: repairResult("ok"), rowsMerged: 2 });
+  assert.equal(rows.rows_merged, 2);
 });
 
 test("#1044: traceRepairOutcomeSummary sanitizes control characters, caps fields, and masks configured credentials", () => {
