@@ -2413,8 +2413,11 @@ export interface RequirementTraceRepairOutcome {
   /** #1504: why the standalone pass was invoked or suppressed —
    * `no_native_loop_repair` (tools-off / no native-loop repair attempt for
    * this artifact), `native_loop_no_trace_claims` (the loop's repair produced
-   * no mergeable trace claims), or `native_loop_repair_merged_claims`
-   * (suppressed). Enum-validated, never provider text. */
+   * no mergeable trace claims), `native_loop_repair_merged_claims`
+   * (suppressed: the loop's merge completed the repair), or
+   * `native_loop_repair_left_unresolved` (the loop's merge left unresolved
+   * repair targets, so the bounded fallback recovered). Enum-validated, never
+   * provider text. */
   invocation_reason?: string;
   /** #1504: the first attempt's serialization-failure class when the single
    * bounded retry fired — `empty` (HTTP success, no extractable content) or
@@ -2422,6 +2425,16 @@ export interface RequirementTraceRepairOutcome {
   first_failure_class?: string | null;
   /** #1504: whether the one bounded serialization retry was used. */
   serialization_retry?: boolean;
+  /** #1502 follow-up: whether the one bounded validator-feedback retry fired
+   * (the pass's returned claims were deterministically rejected and the model
+   * was asked once to fix the citations). Shares the pass's one-retry budget
+   * with the serialization retry — at most one retry of either class fires. */
+  validation_retried?: boolean;
+  /** #1502 follow-up: the first attempt's per-id deterministic rejection
+   * labels (joined "; ", sanitized and capped) when the validation retry
+   * fired; absent otherwise. Diagnostics only — the labels are the
+   * validator's own note enums, never model prose. */
+  validation_rejections?: Record<string, string>;
   /** #1145: present when the native loop's own continuation ran or was
    * skipped (absent for runs where no probe fired at all). */
   continuation?: TraceGapContinuationSummary;

@@ -2018,6 +2018,44 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       if (Object.keys(targetedRowStates).length >= MAX_TRACE_REPAIR_SUMMARY_IDS) break;
     }
     const repairRequirements = repairTargetIds.length > 0 ? ledgerRequirementsById(ledgerValue, repairTargetIds) : [];
+    // #1502 follow-up: deterministic feedback for the pass's returned claims —
+    // the SAME validator the publication path runs, scoped to the targeted
+    // ids. A targeted id whose returned (or omitted) claim still validates
+    // `unverifiable` is reported with its non-environmental note labels so the
+    // pass's single validation retry can fix the citations (the production
+    // #1553 shape: the pass replaced the claim blind and the replacement
+    // failed the same deterministic way with nothing the wiser). The labels
+    // are the validator's own note enums — never model prose — and the retry
+    // stays inside the pass's one-retry budget. Fail-soft: a throwing
+    // validation disables the feedback (behavior as before).
+    const repairTargetIdSet = new Set(repairTargetIds);
+    const validateRepairedClaims = (claims: readonly Record<string, unknown>[]): Record<string, readonly string[]> => {
+      const rejections: Record<string, readonly string[]> = {};
+      try {
+        const trace = validateRequirementTrace(claims, ledgerValue, workspace, traceChanged, {
+          ownership: traceOwnership.rules,
+          paths: tracePaths,
+          prBody: tracePrBody,
+          ciState: traceCiState,
+        });
+        const environmental = (note: string): boolean =>
+          note.startsWith("provenance:")
+          || note.startsWith("external-state-ci")
+          || note.startsWith("external-state-pending")
+          || note.startsWith("documentation-pending");
+        for (const row of trace.rows) {
+          if (!repairTargetIdSet.has(row.requirement_id)) continue;
+          if (row.disposition !== "unverifiable") continue;
+          const labels = (Array.isArray(row.notes) ? row.notes : [])
+            .filter((note): note is string => typeof note === "string" && !environmental(note))
+            .slice(0, 3);
+          rejections[row.requirement_id] = labels.length > 0 ? labels : ["unverifiable"];
+        }
+      } catch {
+        return {};
+      }
+      return rejections;
+    };
     const repairRequirementsText =
       missingTraceIds.length > 0 || unverifiableIds.length > 0
         ? `${missingTraceIds.length} row(s) with no claim and ${unverifiableIds.length} present-but-unverifiable row(s) unresolved`
@@ -2026,10 +2064,15 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     // repair counts only when the accepted artifact IS the loop's verdict
     // (the conversation its claims were merged into); a continuation record
     // without merged claims is the serialization-failure shape this pass
-    // exists to recover.
+    // exists to recover. #1502 follow-up: a merge that left unresolved
+    // repair targets behind is a FAILED repair, not a completed one — the
+    // production #1559 shape (a parseable claim merged for the row, the row
+    // still validated `unverifiable`, the fallback stood down) — so the
+    // bounded fallback recovers instead of suppressing.
     const repairInvocation = resolveStandaloneTraceRepairInvocation({
       nativeLoopVerdictArtifact: !escalatedToSmart && primary.nativeLoopVerdict,
       continuation: traceGapContinuation,
+      unresolvedTargetsRemain: repairTargetIds.length > 0,
     });
     const summaryBase = {
       missingIds: missingTraceIds,
@@ -2132,6 +2175,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
             priority: GOVERNOR_PRIORITY_AUTHORITATIVE,
             signal: cancellation.scope.signal,
           }),
+          // #1502 follow-up: the deterministic validator-feedback seam — the
+          // pass's returned claims are validated HERE, before the merge, and
+          // a rejected claim gets exactly one bounded fix-the-citation retry.
+          validateClaims: validateRepairedClaims,
         });
       } catch (cause) {
         repairThrow = cause;
@@ -2157,6 +2204,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
           mergedRows = merge.appended + merge.replaced;
           repairTarget.requirement_coverage = merge.coverage;
           log(`requirement trace: repair pass returned ${repaired.claims.length} claim(s) (${merge.appended} appended, ${merge.replaced} replaced)`);
+          if (repaired.validationRetried) {
+            const rejectedIds = Object.keys(repaired.validationRejections ?? {}).join(", ");
+            log(`requirement trace: validator rejected the pass's first-round claim(s) for ${rejectedIds !== "" ? rejectedIds : "unknown ids"}; the bounded validator-feedback retry fired`);
+          }
         } else {
           log(`requirement trace: repair pass returned no claims (${repaired.status}${repaired.error ? `: ${redactText(maskKnownSecrets(repaired.error, [repairLane.apiKey]))}` : ""})`);
         }
@@ -2176,6 +2227,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
           invocation_reason: repairInvocation.reason,
           first_failure_class: repaired.firstFailureClass,
           serialization_retry: repaired.retried,
+          // #1502 follow-up: the validator-feedback retry and the first
+          // round's deterministic rejection labels (already sanitized by the
+          // pass) — how the pass's citations failed on their first try is
+          // otherwise unobservable from the run directory.
+          validation_retried: repaired.validationRetried,
+          ...(repaired.validationRejections !== null && Object.keys(repaired.validationRejections).length > 0
+            ? { validation_rejections: repaired.validationRejections }
+            : {}),
           // #1552: rows the merge appended or replaced (appended + replaced) —
           // the parsed-claim count alone can overstate the merge when the
           // target set and the replacement guard disagree.

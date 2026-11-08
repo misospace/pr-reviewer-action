@@ -46,10 +46,12 @@ PENDING_DISPOSITION,
 import {
   buildTraceRepairRetryMessage,
   buildTraceRepairUserMessage,
+  buildTraceRepairValidationFeedback,
   harnessEvidenceDigest,
   normalizeTraceRepairPayload,
   resolveStandaloneTraceRepairInvocation,
   runRequirementTraceRepairPass,
+  sanitizeValidationRejections,
   traceRepairOutcomeSummary,
   traceRepairRouteForArtifact,
   TRACE_REPAIR_SYSTEM_PROMPT,
@@ -2466,12 +2468,175 @@ test("#959: runRequirementTraceRepairPass is fail-soft and bounded", async () =>
   });
   assert.equal(ok.status, "ok");
   assert.equal(ok.claims.length, 1);
+  // Without a validateClaims callback the new stage is inert (behavior and
+  // result shape as before #1502).
+  assert.equal(ok.validationRetried, false);
+  assert.equal(ok.validationRejections, null);
+});
+
+// ── #1502 follow-up: the validator-feedback retry ─────────────────────────
+
+const RETRY_PASS_CONFIG = {
+  apiFormat: "openai", model: "m", baseUrl: "http://x", apiKey: "k", maxTokens: 4096,
+  temperature: null, responseFormat: "off", tokensParam: "max_tokens", stream: false,
+  timeoutSec: 30, inputMaxBytes: 48000,
+} as const;
+
+const RETRY_WIRE_CLAIM = {
+  requirement_id: "req-1", disposition: "met",
+  enforcement: [{ file: "src/a.ts", line: 1 }], test: [{ file: "tests/a.test.ts", line: 1 }], reason: "r",
+};
+
+function retryWire(content: string): Promise<{ ok: true; raw: { choices: Array<{ message: { content: string } }> } }> {
+  return Promise.resolve({ ok: true, raw: { choices: [{ message: { content } }] } });
+}
+
+function retryCover(claim: unknown): string {
+  return JSON.stringify({ requirement_coverage: [claim] });
+}
+
+function retryUserContent(payload: unknown): string {
+  const messages = (payload as { messages?: Array<{ role: string; content: string }> }).messages ?? [];
+  return messages.find((message) => message.role === "user")?.content ?? "";
+}
+
+test("#1502: the validator-feedback retry fixes rejected citations and carries the full original request", async () => {
+  const goodClaim = { ...RETRY_WIRE_CLAIM, enforcement: [{ file: "src/b.ts", line: 2 }] };
+  const payloads: unknown[] = [];
+  let call = 0;
+  const pass = await runRequirementTraceRepairPass({
+    requirements: [{ id: "req-1", text: "must validate X" }], title: "t", files: [], diff: "DIFFTEXT",
+    config: RETRY_PASS_CONFIG,
+    requestFn: (payload) => {
+      payloads.push(payload);
+      call += 1;
+      return retryWire(retryCover(call === 1 ? RETRY_WIRE_CLAIM : goodClaim));
+    },
+    validateClaims: (claims) => {
+      const out: Record<string, readonly string[]> = {};
+      for (const claim of claims) {
+        if ((claim as { enforcement?: Array<{ file: string }> }).enforcement?.[0]?.file === "src/a.ts") {
+          out[(claim as { requirement_id: string }).requirement_id] = ["downgraded-no-valid-enforcement-location"];
+        }
+      }
+      return out;
+    },
+  });
+  assert.equal(pass.status, "ok");
+  assert.equal(pass.validationRetried, true);
+  assert.deepEqual(pass.validationRejections, { "req-1": "downgraded-no-valid-enforcement-location" });
+  // The validating retry claim replaced the rejected first-round claim.
+  assert.equal(pass.claims.length, 1);
+  assert.equal((pass.claims[0]!.enforcement as Array<{ file: string }>)[0]!.file, "src/b.ts");
+  // Two model calls total: first attempt + the one validation retry.
+  assert.equal(call, 2);
+  // The retry is single-turn: it carries the rejection labels AND the full
+  // original request (diff included), not a bare follow-up.
+  const retryUser = retryUserContent(payloads[1]);
+  assert.match(retryUser, /downgraded-no-valid-enforcement-location/);
+  assert.match(retryUser, /DIFFTEXT/);
+  assert.match(retryUser, /req-1: must validate X/);
+});
+
+test("#1502: the validation stage is fail-soft and shares the one-retry budget with serialization", async () => {
+  const requirements = [{ id: "req-1", text: "must validate X" }];
+  const reject = (): Record<string, readonly string[]> => ({ "req-1": ["downgraded-no-valid-test-location"] });
+
+  // A retry claim that is STILL rejected replaces the first-round claim (both
+  // fail closed downstream; the retry saw the validator feedback).
+  let call = 0;
+  const stillBad = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => { call += 1; return retryWire(retryCover(RETRY_WIRE_CLAIM)); },
+    validateClaims: reject,
+  });
+  assert.equal(call, 2);
+  assert.equal(stillBad.status, "ok");
+  assert.equal(stillBad.validationRetried, true);
+  assert.equal(stillBad.claims.length, 1);
+
+  // A feedback-retry transport failure keeps the first attempt's claims.
+  let calls = 0;
+  const transportFeedback = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => { calls += 1; return calls === 1 ? retryWire(retryCover(RETRY_WIRE_CLAIM)) : Promise.reject(new Error("boom")); },
+    validateClaims: reject,
+  });
+  assert.equal(transportFeedback.status, "ok");
+  assert.equal(transportFeedback.claims.length, 1);
+  assert.equal(transportFeedback.validationRetried, true);
+
+  // A throwing validator disables the feedback: no retry, claims as parsed.
+  let calls2 = 0;
+  const throwing = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => { calls2 += 1; return retryWire(retryCover(RETRY_WIRE_CLAIM)); },
+    validateClaims: () => { throw new Error("no"); },
+  });
+  assert.equal(calls2, 1);
+  assert.equal(throwing.status, "ok");
+  assert.equal(throwing.validationRetried, false);
+  assert.equal(throwing.validationRejections, null);
+
+  // The serialization retry consumed the budget: no validation retry on top.
+  let calls3 = 0;
+  const serialized = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => {
+      calls3 += 1;
+      return calls3 === 1 ? retryWire("not json at all") : retryWire(retryCover(RETRY_WIRE_CLAIM));
+    },
+    validateClaims: reject,
+  });
+  assert.equal(calls3, 2);
+  assert.equal(serialized.retried, true);
+  assert.equal(serialized.validationRetried, false);
+  assert.equal(serialized.claims.length, 1);
+});
+
+test("#1502: the validator-feedback block carries sanitized ids and labels, and the sanitizer bounds persistence", () => {
+  const feedback = buildTraceRepairValidationFeedback({
+    rejections: {
+      "req-1": ["downgraded-no-valid-enforcement-location", "downgraded-no-valid-test-location"],
+      "bad\x01id`x": ["enforcement-location-copies-without-comparing"],
+    },
+  });
+  assert.match(feedback, /req-1: downgraded-no-valid-enforcement-location; downgraded-no-valid-test-location/);
+  assert.match(feedback, /REJECTED/);
+  assert.match(feedback, /badidx/);
+  assert.doesNotMatch(feedback, /\x01/);
+  assert.match(feedback, /The full original request follows unchanged below/);
+
+  const sanitized = sanitizeValidationRejections({
+    "req-1": ["downgraded-no-valid-test-location"],
+    "": ["dropped-empty-id"],
+    dup: ["a", "b", "c", "d"],
+  });
+  assert.deepEqual(sanitized, { "req-1": "downgraded-no-valid-test-location", dup: "a; b; c" });
+});
+
+test("#1502: the summary carries the validation retry and the first round's rejection labels", () => {
+  const base = { attempted: true as const, outcome: null as null, missingIds: ["req-1"] };
+  const retried = traceRepairOutcomeSummary({
+    ...base,
+    result: repairResult("ok", { claims: [{ requirement_id: "req-1" }], validationRetried: true, validationRejections: { "req-1": "downgraded-no-valid-test-location" } }),
+  });
+  assert.equal(retried.validation_retried, true);
+  assert.deepEqual(retried.validation_rejections, { "req-1": "downgraded-no-valid-test-location" });
+
+  const plain = traceRepairOutcomeSummary({ ...base, result: repairResult("ok", { claims: [{ requirement_id: "req-1" }] }) });
+  assert.equal(plain.validation_retried, false);
+  assert.equal(plain.validation_rejections, undefined);
+
+  // The thrown fail-soft boundary reports a definite false, never undefined.
+  const thrown = traceRepairOutcomeSummary({ ...base, result: null, thrownError: new Error("boom") });
+  assert.equal(thrown.validation_retried, false);
 });
 
 // ── #1044: bounded requirement_trace_repair summary ──────────────────────
 
 function repairResult(status: TraceRepairPassResult["status"], overrides: Partial<TraceRepairPassResult> = {}): TraceRepairPassResult {
-  return { claims: [], status, errorKind: null, error: null, diffClipped: false, firstFailureClass: null, retried: false, ...overrides };
+  return { claims: [], status, errorKind: null, error: null, diffClipped: false, firstFailureClass: null, retried: false, validationRetried: false, validationRejections: null, ...overrides };
 }
 
 test("#1044: traceRepairOutcomeSummary maps pass statuses to summary outcomes", () => {
@@ -2895,6 +3060,35 @@ test("#1504: resolveStandaloneTraceRepairInvocation suppresses only a native-loo
   assert.deepEqual(
     resolveStandaloneTraceRepairInvocation({ nativeLoopVerdictArtifact: false, continuation: null }),
     { invoke: true, reason: "no_native_loop_repair" },
+  );
+});
+
+test("#1502: resolveStandaloneTraceRepairInvocation recovers when the loop's merge left unresolved targets", () => {
+  // The production #1559 shape: the loop's trace-only repair merged a
+  // parseable claim for the row, the row still validated `unverifiable`, and
+  // the fallback stood down. A merged claim the deterministic validator still
+  // rejects is a FAILED repair — the bounded fallback owns the recovery.
+  assert.deepEqual(
+    resolveStandaloneTraceRepairInvocation({ nativeLoopVerdictArtifact: true, continuation: { trace_claims_merged: true }, unresolvedTargetsRemain: true }),
+    { invoke: true, reason: "native_loop_repair_left_unresolved" },
+  );
+  // A completed merge (nothing left unresolved) still stands the second
+  // repair model down — #1504's rule, unchanged on the success path.
+  assert.deepEqual(
+    resolveStandaloneTraceRepairInvocation({ nativeLoopVerdictArtifact: true, continuation: { trace_claims_merged: true }, unresolvedTargetsRemain: false }),
+    { invoke: false, reason: "native_loop_repair_merged_claims" },
+  );
+  // The flag is optional: absent keeps the pre-#1502 semantics (the pure
+  // function cannot see the classification; the caller always passes it).
+  assert.deepEqual(
+    resolveStandaloneTraceRepairInvocation({ nativeLoopVerdictArtifact: true, continuation: { trace_claims_merged: true } }),
+    { invoke: false, reason: "native_loop_repair_merged_claims" },
+  );
+  // The no-claims shape is unaffected by the flag: the fallback recovers it
+  // under its own reason.
+  assert.deepEqual(
+    resolveStandaloneTraceRepairInvocation({ nativeLoopVerdictArtifact: true, continuation: { trace_claims_merged: false }, unresolvedTargetsRemain: true }),
+    { invoke: true, reason: "native_loop_no_trace_claims" },
   );
 });
 
