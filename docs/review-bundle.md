@@ -292,11 +292,15 @@ exact `head_sha` the conclusion binds. It is present on EVERY state,
 green can never hide the conclusion. `approved` appears only when a commit-bound native
 APPROVE actually submitted for a non-empty exact head, with complete
 coverage, required checks complete or unconfigured, and no degraded
-bypass — an APPROVE that landed through the body-only fallback (no
-`commit_id`) binds no head and reads `incomplete`/`native_approval_unbound`. A malformed attestation refuses the whole document at parse, and a
-refused document must be read as absent, never as approval. The consumer
-contract and the full reason-code list:
-[Verdicts and publishing](verdicts-and-publishing.md#trusted-review-attestation-1576).
+  bypass — an APPROVE that landed through the body-only fallback (no
+  `commit_id`) binds no head and reads `incomplete`/`native_approval_unbound`.
+  `blocked` appears only when the block stands: publication was not
+  attempted, or a native REQUEST_CHANGES review landed. A failed publication
+  that landed no native REQUEST_CHANGES review reads `unavailable`, never
+  `blocked`. A malformed attestation refuses the whole document at parse, and a
+  refused document must be read as absent, never as approval. The consumer
+  contract and the full reason-code list:
+  [Verdicts and publishing](verdicts-and-publishing.md#trusted-review-attestation-1576).
 
 ## Bounds and redaction (by construction)
 

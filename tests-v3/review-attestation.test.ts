@@ -196,6 +196,33 @@ test("#1576: crash, request_changes and skip attest unavailable, blocked and ski
       headSha: HEAD,
       publication: { status: "failed", native: { event: "REQUEST_CHANGES", submitted: false } },
     }), { conclusion: "unavailable", reason_code: "native_submission_failed", head_sha: HEAD });
+    // #1580 review fix: a FAILED publication with NO native record at all
+    // lands no block. The publish seam can fail before it ever reaches the
+    // native submission (its outer catch, a mode guard, a stale-head
+    // re-check) and records no native event, so the run must NOT attest a
+    // landed/trustworthy block it cannot prove.
+    assert.deepEqual(attest({
+      reviewProduced: true,
+      verdict: "request_changes",
+      headSha: HEAD,
+      publication: { status: "failed" },
+    }), { conclusion: "unavailable", reason_code: "publication_failed", head_sha: HEAD });
+    // The same case with a native record for a DIFFERENT event proves no
+    // REQUEST_CHANGES block either: the publication failure is the cause.
+    assert.deepEqual(attest({
+      reviewProduced: true,
+      verdict: "request_changes",
+      headSha: HEAD,
+      publication: { status: "failed", native: { event: "COMMENT", submitted: false } },
+    }), { conclusion: "unavailable", reason_code: "publication_failed", head_sha: HEAD });
+    // A native REQUEST_CHANGES review that DID land is a block on the pull
+    // request: it stands even when the publication failed afterwards.
+    assert.deepEqual(attest({
+      reviewProduced: true,
+      verdict: "request_changes",
+      headSha: HEAD,
+      publication: { status: "failed", native: { event: "REQUEST_CHANGES", submitted: true } },
+    }), { conclusion: "blocked", reason_code: "request_changes", head_sha: HEAD });
     // `fellBack` demotes only APPROVE: a landed REQUEST_CHANGES through the
     // body-only fallback is still a landed block, and a COMMENT abstention
     // through it is still an abstention.
@@ -323,11 +350,11 @@ function attestationOf(outputs: Record<string, string>) {
   return parseReviewAttestation(JSON.parse(outputs["review-attestation"] ?? "null"));
 }
 
-function verdictBody(findings: unknown[] = []): string {
+function verdictBody(findings: unknown[] = [], verdict = "approve"): string {
   return JSON.stringify({
     id: "c1", object: "chat.completion", model: "m",
     choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({
-      verdict: "approve", review_markdown: "Looks fine.\n", smart_review_requested: false, smart_review_reason: null,
+      verdict, review_markdown: "Looks fine.\n", smart_review_requested: false, smart_review_reason: null,
       findings, requirement_coverage: null, required_check_dispositions: [],
     }) }, finish_reason: "stop" }],
     usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 },
@@ -345,10 +372,16 @@ async function startGithubMock(overrides?: {
   requests: CapturedRequest[];
   reviewEvents: string[];
   flipHead: (sha: string) => void;
+  /** Makes every SUBSEQUENT pull read omit `head.sha`, so the publish
+   * boundary's exact-head re-check cannot prove the current head and refuses
+   * to publish. The publish seam fails BEFORE it attempts any native
+   * submission, so it records NO native event (#1580 review fix). */
+  breakHead: () => void;
   close: () => Promise<void>;
 }> {
   const reviewEvents: string[] = [];
   let headSha = HEAD;
+  let headBroken = false;
   const server = await startMockServer((req, body, res) => {
     const url = req.url ?? "";
     res.setHeader("Content-Type", "application/json");
@@ -402,7 +435,9 @@ async function startGithubMock(overrides?: {
       }
       res.end(JSON.stringify({
         number: 7, state: "open", draft: false, title: "Update README", body: "",
-        head: { sha: headSha, ref: "feature", repo: { full_name: "o/r" } },
+        head: headBroken
+          ? { ref: "feature", repo: { full_name: "o/r" } }
+          : { sha: headSha, ref: "feature", repo: { full_name: "o/r" } },
         base: { sha: "b".repeat(40), ref: "main", repo: { full_name: "o/r" } },
         user: { login: "someone" }, changed_files: 1, additions: 1, deletions: 0,
         html_url: "https://github.com/o/r/pull/7",
@@ -421,6 +456,9 @@ async function startGithubMock(overrides?: {
     reviewEvents,
     flipHead: (sha: string): void => {
       headSha = sha;
+    },
+    breakHead: (): void => {
+      headBroken = true;
     },
   };
 }
@@ -606,6 +644,52 @@ test("#1576: a newer push at the publication boundary attests incomplete/superse
     const bundle = parseReviewBundle(outputs["review-bundle"] ?? "");
     assert.equal(bundle!.state, "superseded");
     assert.equal(bundle!.head_sha, HEAD, "the bundle pins the exact head that was reviewed");
+    assert.deepEqual(bundle!.attestation, a);
+  } finally {
+    await model.close();
+    await github.close();
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("#1576: a request_changes block whose publication failed with no native record attests unavailable, not blocked", async () => {
+  // #1580 review fix, end to end: the publish seam's exact-head re-check
+  // cannot prove the current head, so publication FAILS BEFORE any native
+  // submission is attempted and the seam records NO native event at all. A
+  // request_changes verdict must not attest a landed/trustworthy block it
+  // cannot prove — the run reads `unavailable`/`publication_failed`.
+  const workspace = mkdtempSync(join(tmpdir(), "attestation-noblock-workspace-"));
+  const runnerTemp = mkdtempSync(join(tmpdir(), "attestation-noblock-temp-"));
+  const github = await startGithubMock();
+  const eventPath = join(runnerTemp, "event.json");
+  writeCommentEvent(eventPath, "/ai-review", true);
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    // The model answers with a BLOCKING finding, so the strict policy
+    // derives the request_changes verdict the publish seam would turn into a
+    // native REQUEST_CHANGES review — but the head break below stops the
+    // seam before that submission is attempted.
+    res.end(verdictBody([
+      { severity: "major", category: "bug", file: "README.md", line: 1, message: "a real defect" },
+    ], "request_changes"));
+    // The head becomes unprovable once the review is done, so only the
+    // publish boundary's re-check sees it (same shape as the superseded
+    // test's head flip).
+    github.breakHead();
+  });
+  const env = actionEnv({ eventPath, runnerTemp, workspace, githubUrl: github.url, modelUrl: model.url, publishMode: "review_verdict" });
+  try {
+    const exitCode = await actionMain(env);
+    assert.equal(exitCode, 1, "the failed publication still fails the run");
+    const outputs = readOutputs(env.GITHUB_OUTPUT!);
+    assert.equal(outputs["verdict"], "request_changes", "the review verdict is still request_changes");
+    assert.equal(outputs["publish-status"], "failed", "the publication failed");
+    assert.deepEqual(github.reviewEvents, [], "no native review was submitted");
+    const a = attestationOf(outputs);
+    assert.deepEqual(a, { conclusion: "unavailable", reason_code: "publication_failed", head_sha: HEAD });
+    assert.notEqual(a!.conclusion, "blocked", "a failed publication must never attest a landed block");
+    const bundle = parseReviewBundle(outputs["review-bundle"] ?? "");
     assert.deepEqual(bundle!.attestation, a);
   } finally {
     await model.close();

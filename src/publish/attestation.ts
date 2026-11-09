@@ -15,8 +15,10 @@
  *   automation may treat as a trusted approval. A body-only fallback
  *   submission (#1249) omits `commit_id` and is NOT bound to the reviewed
  *   head — it can never attest `approved`.
- * - `blocked`: the final verdict is a non-degraded `request_changes` (and a
- *   native REQUEST_CHANGES review landed when publication was attempted).
+ * - `blocked`: the final verdict is a non-degraded `request_changes` and no
+ *   failed publication disproves the block. A publication that FAILED lands
+ *   no block of its own, so it reads `unavailable` unless the native record
+ *   proves a REQUEST_CHANGES review actually landed.
  * - `incomplete`: a review ran but its conclusion is not trustworthy for
  *   this head — withheld approval, an approval that landed without commit
  *   binding, partial coverage, superseded head, or advisory-only
@@ -25,7 +27,7 @@
  *   an unavailable model, a degraded zero-evidence fallback, no verdict, or
  *   a failed native publication attempt.
  * - `skipped`: no review ran (precheck skip, follow-up consumption, plain
- *   no-op). A carried verdict never promotes a skip to `approved`/`blocked`
+ *   no-op). A carried verdict never promotes it to `approved`/`blocked`
  *   — the earlier run's attestation owns that decision.
  *
  * Fail-closed invariants:
@@ -36,6 +38,10 @@
  * - `approved` is unreachable unless the native submission record proves a
  *   commit-bound APPROVE landed for a non-empty exact head SHA; a body-only
  *   fallback landing (no `commit_id`) is unbound and certifies nothing.
+ * - `blocked` is unreachable when the publication FAILED without a proved
+ *   landed native REQUEST_CHANGES review: the run attempted a block that is
+ *   not known to have reached the pull request, so it attests the
+ *   publication failure instead.
  * - Advisory publication (comment/review_comment modes, withheld approvals,
  *   platforms without a native review surface) can never reach `approved`.
  */
@@ -94,7 +100,8 @@ export const REVIEW_ATTESTATION_REASON_CODES = [
    * (#1249): the request omitted `commit_id`, so the approval is not bound
    * to the reviewed head. It certifies nothing for this exact head. */
   "native_approval_unbound",
-  /** The publication attempt failed for a non-approval cause. */
+  /** The publication attempt failed for a non-approval cause, and no native
+   * block was proved to have landed. */
   "publication_failed",
   /** The head SHA the attestation would bind could not be proven. */
   "head_unknown",
@@ -165,18 +172,31 @@ export function computeReviewAttestation(signals: ReviewAttestationSignals): Rev
   if (signals.degraded === true) return finish("unavailable", "degraded_no_evidence");
   const verdict = signals.verdict ?? "";
   if (verdict === "request_changes") {
-    // A non-degraded request_changes verdict is a trusted block. It stays
-    // `blocked` whether or not publication was attempted (a run with
-    // publish disabled still blocks), but when publication WAS attempted
-    // and the native REQUEST_CHANGES submission itself failed, the block
-    // did not land on the pull request and the honest conclusion is the
-    // capability failure — symmetric with `native_approval_failed`.
-    const attemptedNativeBlock = signals.publication?.native;
-    if (signals.publication?.status === "failed"
-      && attemptedNativeBlock?.event === "REQUEST_CHANGES"
-      && attemptedNativeBlock.submitted !== true) {
-      return finish("unavailable", "native_submission_failed");
+    // A non-degraded request_changes verdict is a trusted block. The block
+    // counts as LANDED only when the native record proves a REQUEST_CHANGES
+    // review actually landed.
+    const native = signals.publication?.native;
+    if (native !== undefined && native.event === "REQUEST_CHANGES" && native.submitted === true) {
+      return finish("blocked", "request_changes");
     }
+    // A FAILED publication lands no block of its own. The publish seam can
+    // fail before any native submission is attempted (its outer catch, a
+    // mode guard, a stale-head re-check) and then records no native event
+    // at all — so a failed publication with no proved landed native block
+    // must never attest `blocked` (#1580 review fix).
+    if (signals.publication?.status === "failed") {
+      // The API rejected the REQUEST_CHANGES submission: the block did not
+      // reach the pull request. The capability failed, not the block —
+      // symmetric with `native_approval_failed`.
+      if (native !== undefined && native.event === "REQUEST_CHANGES") {
+        return finish("unavailable", "native_submission_failed");
+      }
+      // No native record at all: nothing proves a block landed. The
+      // publication failure is the honest cause.
+      return finish("unavailable", "publication_failed");
+    }
+    // Publication was never attempted, or it landed: the verdict's block
+    // stands (the bundle pins the exact head; consumers compare it).
     return finish("blocked", "request_changes");
   }
   if (verdict !== "approve") return finish("unavailable", "no_verdict");
