@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Gate: the self-hosted qualification harness stays wired into CI and docs (#1486).
 
-The harness script (tests/self_hosted_e2e_qualification.sh) lands with
-#1482. This gate runs before the harness exists, so the wiring cannot rot
-while the harness is missing:
+The harness script (tests/self_hosted_e2e_qualification.sh) landed with
+#1482. This gate pins the wiring so it cannot rot:
 
 - the qualification workflow runs on a manual dispatch only, and the
   unprivileged pull_request CI stays secret-free;
-- the make target and the workflow drive the same harness path;
-- the workflow itself, and the harness script once it lands, route every
-  forge read and write through the configured forge capability, never
-  through a forge CLI or a raw HTTP client that reaches a remote forge;
-- the docs point at the runbook instead of reserving the qualification as
-  pending work.
+- the make target and the workflow drive the same harness path, and the
+  job still fails closed when the harness script is absent;
+- the workflow and the harness script route every forge read and write
+  through the configured forge capability, never through a forge CLI or
+  a raw HTTP client that reaches a remote forge;
+- the docs describe the harness as landed and point at the runbook,
+  never claiming a qualification that did not run.
 """
 from __future__ import annotations
 
@@ -207,6 +207,10 @@ def test_the_qualification_job_passes_the_model_settings_to_the_harness() -> Non
         "PR_REVIEWER_GITHUB_APP_PRIVATE_KEY": (
             "${{ secrets.SELF_HOSTED_GITHUB_APP_PRIVATE_KEY }}"
         ),
+        "PR_REVIEWER_GITHUB_APP_INSTALLATION_ID": (
+            "${{ vars.SELF_HOSTED_GITHUB_APP_INSTALLATION_ID }}"
+        ),
+        "SELF_HOSTED_GITHUB_REPOSITORY": "${{ vars.SELF_HOSTED_GITHUB_REPOSITORY }}",
         "GITHUB_API_URL": "${{ vars.SELF_HOSTED_GITHUB_API_URL }}",
     }
     for name, value in expected.items():
@@ -370,8 +374,12 @@ def test_the_runbook_documents_the_run_steps() -> None:
     assert HARNESS_PATH in text, text
     assert f"make {TARGET_NAME}" in text, text
     assert TARGET_NAME in text, text
-    assert "not implemented yet" in text, (
-        "the runbook must state that the harness does not exist yet, so the "
+    assert "landed with #1482" in text, (
+        "the runbook must describe the harness as landed, not reserve it as "
+        "pending work"
+    )
+    assert "No qualification has run" in text, (
+        "the runbook must state that no qualification has run yet, so the "
         "doc cannot claim a qualification that did not happen"
     )
 
@@ -413,6 +421,8 @@ RUNBOOK_SETTINGS = (
     "AI_API_KEY",
     "PR_REVIEWER_GITHUB_APP_ID",
     "PR_REVIEWER_GITHUB_APP_PRIVATE_KEY",
+    "PR_REVIEWER_GITHUB_APP_INSTALLATION_ID",
+    "SELF_HOSTED_GITHUB_REPOSITORY",
     "GITHUB_API_URL",
     "FORGEJO_TOKEN",
 )
