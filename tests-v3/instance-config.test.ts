@@ -134,6 +134,27 @@ test("endpoints are scheme-checked absolute URLs without embedded credentials", 
   }
 });
 
+test("model profile model id is optional, bounded, and control-free (#1496)", () => {
+  const withModel = {
+    ...baseInstance(),
+    "model-profiles": [{ name: "fast", endpoint: "http://127.0.0.1:4000", "api-format": "openai", credential: "ref", model: "qwen3-coder:30b" }],
+  };
+  const ok = validate(withModel);
+  assert.equal(ok.modelProfiles[0]!.model, "qwen3-coder:30b");
+  // Absent → the sentinel "" (consumers never branch on undefined).
+  assert.equal(validate(baseInstance()).modelProfiles[0]!.model, "");
+  const profileWith = (model: unknown) => ({
+    ...baseInstance(),
+    "model-profiles": [{ name: "fast", endpoint: "http://127.0.0.1:4000", "api-format": "openai", credential: "ref", model }],
+  });
+  expectError(profileWith(3), "must be a non-empty string");
+  expectError(profileWith(""), "must be a non-empty string");
+  expectError(profileWith("bad\r\nmodel"), "must not contain control characters");
+  expectError(profileWith("m".repeat(513)), "must be at most 512 characters");
+  // Exactly at the ceiling passes — the cap is inclusive.
+  assert.equal(validate(profileWith("m".repeat(512))).modelProfiles[0]!.model, "m".repeat(512));
+});
+
 test("executor profiles are a closed set — an arbitrary image/PodSpec/host path has nowhere to land", () => {
   for (const field of ["image", "podSpec", "nodeSelector", "hostPath", "command"] as const) {
     expectError(

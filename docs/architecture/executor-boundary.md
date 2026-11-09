@@ -38,11 +38,28 @@ receives only:
 | `deadlineAtMs` | epoch-ms deadline; `0` = none |
 | `workspace` | the `WorkspaceInfo` the #732 acquisition layer produced (isolated exact-head worktree; the executor owns its `close()`) |
 | `profiles` | `executor`/`model`/`evidence` profile **names** — approved by the operator's instance config; repository config selects names only |
+| `modelSelection` | the operator's resolved model selection (#1496): `baseUrl` (the selected model profile's endpoint), `modelId` (the wire model id, from the profile's `model` key), and `apiFormat`. Required on every execution — there is no default model, so the validator refuses an envelope without one, and the host composition refuses a selected profile that names no model id. The worker threads it into the engine's `ai-base-url` / `ai-model` / `ai-api-format` inputs, replacing the empty input set that made worker-driven reviews unable to reach the model. The credential NEVER rides here: it stays the #735 `model` reference below, and its projected material reaches the worker only through the credential handoff's `PR_REVIEWER_CREDENTIAL_MODEL` variable |
 | `credentials` | opaque short-lived credential **references** (`ExecutionCredentialRef`); the #735 broker resolves them operator-side — no material ever crosses this boundary |
 | `runDir` / `requestPath` / `resultPath` | controller-owned run directory (the executor creates it and the recovery record; the worker writes only the result file), the request-envelope file the executor serializes before launch, and the **result storage coordinate** the worker must write its structured result to |
 
+**The model selection is credential-free by the same contract.**
+`modelSelection.baseUrl` passes `forgeApiUrlProblem` — the ONE
+credential-free http(s) endpoint check this envelope has — because the AI
+base URL is persisted verbatim into every envelope exactly like the forge
+base, and a token riding it would be persisted with it. `modelId` is a
+bounded, control-free identifier; `apiFormat` is the closed two-value
+union. The asymmetry with `forgeApiUrl` is deliberate: the forge base may
+be `""` where the platform carries a default, the AI base may not — a
+review without a model endpoint can produce no verdict, so absence is
+refusal at validation, never an empty engine input (#1496). The wire
+credential stays on the #735 path end to end: the envelope carries only
+the `model` reference, the executor projects resolved material under
+`executionCredentialEnvName("model")` (`PR_REVIEWER_CREDENTIAL_MODEL`),
+and the worker reads that one variable into the engine's `ai-api-key`
+input — never into a log line, the result file, or the envelope.
+
 **Stdout is never the result protocol.** The worker writes its structured
-result JSON to the file at `resultPath`; captured stdout/stderr are
+result as a JSON file at `resultPath`; captured stdout/stderr are
 diagnostics only, byte-capped by the runtime primitives.
 
 **The forge API base coordinate is credential-free by contract.**

@@ -62,6 +62,10 @@ export const MAX_INSTANCE_CONFIG_BYTES = 262_144;
 /** Hard ceiling for a model profile's declared context window. */
 export const MAX_MODEL_CONTEXT_TOKENS = 10_000_000;
 
+/** Hard ceiling on a model profile's model id. The executor envelope mirrors
+ * this ceiling (#1496) — keep them in sync; drift fails closed there. */
+const MAX_MODEL_ID_CHARS = 512;
+
 /** Hard ceiling for an executor profile's per-worker review concurrency. */
 export const MAX_EXECUTOR_MAX_REVIEWS = 64;
 
@@ -93,6 +97,12 @@ export interface ModelProfile {
   /** Opaque credential reference resolved by the credential broker (#735).
    * Never an inline secret — the schema has no field that could hold one. */
   readonly credential: string;
+  /** The model id sent to the endpoint on the wire. `""` means the operator
+   * configured none (sentinel discipline — consumers never branch on
+   * undefined), and a run whose selected profile carries no model id is
+   * REFUSED at execution-envelope composition (#1496). The schema stays
+   * permissive so a non-review instance config still validates. */
+  readonly model: string;
   readonly contextTokens: number | null;
   readonly pricing: ModelPricing | null;
 }
@@ -343,15 +353,21 @@ function validateProfilePricing(value: unknown, path: string): ModelPricing {
 
 function validateModelProfile(value: unknown, path: string): ModelProfile {
   const item = objectAt(value, path);
-  rejectUnknown(item, ["name", "endpoint", "api-format", "credential", "context-tokens", "pricing"], path);
+  rejectUnknown(item, ["name", "endpoint", "api-format", "credential", "model", "context-tokens", "pricing"], path);
   const name = profileNameAt(item.name, `${path}.name`);
   const apiFormat = item["api-format"];
   if (apiFormat !== "openai" && apiFormat !== "anthropic") fail(`${path}.api-format`, "must be 'openai' or 'anthropic'");
+  let model = "";
+  if (item.model !== undefined) {
+    model = stringAt(item.model, `${path}.model`);
+    if (model.length > MAX_MODEL_ID_CHARS) fail(`${path}.model`, `must be at most ${MAX_MODEL_ID_CHARS} characters`);
+  }
   return Object.freeze({
     name,
     endpoint: endpointAt(item.endpoint, `${path}.endpoint`),
     apiFormat,
     credential: credentialRefAt(item.credential, `${path}.credential`),
+    model,
     contextTokens: item["context-tokens"] === undefined ? null : integerAt(item["context-tokens"], `${path}.context-tokens`, 1, MAX_MODEL_CONTEXT_TOKENS),
     pricing: item.pricing === undefined ? null : validateProfilePricing(item.pricing, `${path}.pricing`),
   });

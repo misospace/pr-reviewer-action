@@ -67,6 +67,10 @@ model-profiles:                       # required, >= 1
     endpoint: http://model.internal:4000
     api-format: openai                # openai | anthropic
     credential: litellm-primary
+    model: <id>                       # optional; model id on the wire —
+                                      # required for worker-driven reviews
+                                      # (a run whose profile omits it is
+                                      # refused)
     context-tokens: 200000            # optional, hard-capped
     pricing:                          # optional cost metadata
       input-per-million: 0.5

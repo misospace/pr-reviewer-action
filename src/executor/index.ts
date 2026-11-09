@@ -43,6 +43,7 @@ export type {
   ExecutionCredentialRef,
   ExecutionFailureCategory,
   ExecutionHandle,
+  ExecutionModelSelection,
   ExecutionPhase,
   ExecutionProfiles,
   ExecutionReconcileOutcome,

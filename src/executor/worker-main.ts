@@ -21,7 +21,12 @@
  *   observable through the result-file protocol.
  * - No environment beyond the two coordination variables plus generic
  *   PATH/HOME/TMPDIR keys is required: request/job/repo-derived data
- *   reaches the worker exclusively inside the envelope file.
+ *   reaches the worker exclusively inside the envelope file — except the
+ *   projected model credential variable: when the executor projects the
+ *   `model` credential's resolved material (#735), it arrives under the
+ *   variable `executionCredentialEnvName("model")` derives, and the worker
+ *   reads it (never from `process.env`) as the optional `ai-api-key`
+ *   input (#735/#1496).
  *
  * The worker is a DRIVER, not a policy layer: it maps the validated
  * `ExecutionRequest` onto the engine's `ReviewRequest` (the same mapping
@@ -68,6 +73,7 @@ import { EXECUTION_REQUEST_ENV_KEY } from "./local.js";
 import { ensureContained, readBoundedFileNoFollow, writeFileNoFollow } from "./paths.js";
 import { boundedFailureMessage } from "./result-file.js";
 import {
+  executionCredentialEnvName,
   MAX_EXECUTION_RESULT_FILE_BYTES,
   validateExecutionRequest,
   validateExecutionResult,
@@ -317,6 +323,32 @@ export async function workerMain(
   // ── The engine request, mapped the way `engine/cli.ts` maps its request
   // file's fields onto the engine's contract.
   const tail: string[] = [];
+
+  // #1496: the operator's model selection rides the envelope — the worker
+  // container has no ambient model environment, so the non-secret
+  // coordinates the engine needs to start a model call cannot be resolved
+  // from anything outside the envelope. The credential itself NEVER rides
+  // the envelope: it stays on the #735 broker path and the worker reads
+  // the executor-projected material from the derived environment variable
+  // (read from the `env` parameter handed in, never `process.env`). It is
+  // secret material: it is only ever placed into the engine inputs object
+  // below and must never reach a log line, stderr, diagnostics, or the
+  // result file (the `log`/`error` sinks push into `tail`, which lands in
+  // the result's diagnostics — so the value must not appear in any string
+  // passed to them either).
+  const engineInputs: Record<string, string> = {
+    "ai-base-url": request.modelSelection.baseUrl,
+    "ai-model": request.modelSelection.modelId,
+    "ai-api-format": request.modelSelection.apiFormat,
+  };
+  // The credential input is optional: a self-hosted endpoint may be
+  // unauthenticated, in which case nothing is projected and the key is
+  // absent entirely (never an empty string).
+  const modelCredentialMaterial = env[executionCredentialEnvName("model")] ?? "";
+  if (modelCredentialMaterial !== "") {
+    engineInputs["ai-api-key"] = modelCredentialMaterial;
+  }
+
   const engineRequest: ReviewRequest = {
     signal: controller.signal,
     repository: request.repoFullName,
@@ -330,10 +362,14 @@ export async function workerMain(
     // value passes through verbatim (never `??`, which never fires on "").
     forgejoApiUrl: request.forgeApiUrl,
     ciChecksFile: join(request.runDir, CI_CHECKS_ARTIFACT_NAME),
-    // The envelope carries no contract inputs by design: operator
-    // configuration is operator-side state, and repository config is
-    // resolved by the engine from the trusted base ref (`baseRef` above).
-    inputs: {},
+    // #1496: the envelope carries the operator's model selection — unlike
+    // the pre-#1496 empty input set, the worker has no ambient model
+    // environment to fall back to, so the endpoint/model/format
+    // coordinates ride the envelope (and the optional credential material
+    // rides the #735 projected environment variable, never the envelope).
+    // Repository config is still resolved by the engine from the trusted
+    // base ref (`baseRef` above).
+    inputs: engineInputs,
     // The worker environment is the executor's generic allowlist, never
     // forge context; downstream adapters resolve what they can from the
     // platform and repository identity in the envelope.

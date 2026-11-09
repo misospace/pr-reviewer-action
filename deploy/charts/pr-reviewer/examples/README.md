@@ -59,6 +59,7 @@ stringData:
         endpoint: https://model-endpoint.example.com/v1
         api-format: openai
         credential: model-key
+        model: <model-id>
     default-model-profile: local-fast
     executor-profiles:
       - name: in-process

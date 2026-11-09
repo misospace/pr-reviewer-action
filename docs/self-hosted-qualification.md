@@ -129,9 +129,11 @@ installation token for each repository. See
 
 ## Known limits
 
-- The execution envelope carries the forge platform and its API base URL. It
-  does not carry the model settings (#1496). A worker-driven review cannot
-  reach the model until that issue lands. The harness records such a
-  scenario as `worker_error`.
+- The execution envelope carries the forge platform, its API base URL, and
+  the operator's model settings (#1496 landed): the AI base URL, the wire
+  model id, and the wire format ride the envelope, and the model
+  credential reaches the worker through the #735 projection. The harness
+  must therefore configure a model profile that names a `model` id; a
+  profile without one refuses the review at composition.
 - The scenarios land one at a time. A run reports only the scenarios that
   exist on the day of the run.

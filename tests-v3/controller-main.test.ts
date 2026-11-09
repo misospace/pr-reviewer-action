@@ -80,6 +80,7 @@ model-profiles:
   - name: fast
     endpoint: http://127.0.0.1:9/v1
     api-format: openai
+    model: test-model
     credential: model-cred
 default-model-profile: fast
 executor-profiles:
@@ -920,6 +921,7 @@ test("a credential-bearing Kubernetes run projects its Secret through the real s
       createdAtMs: 0,
     }),
     profiles: Object.freeze({ executor: "k8s", model: "fast", evidence: "default" }),
+    modelSelection: Object.freeze({ baseUrl: "http://127.0.0.1:9/v1", modelId: "test-model", apiFormat: "openai" as const }),
     credentials: refs,
     runDir,
     requestPath: join(runDir, "request.json"),

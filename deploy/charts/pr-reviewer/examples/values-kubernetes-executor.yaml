@@ -29,6 +29,7 @@ controller:
         endpoint: https://model-endpoint.example.com/v1
         api-format: openai
         credential: model-key
+        model: <model-id>
     default-model-profile: primary
     executor-profiles:
       - name: k8s-jobs

@@ -103,6 +103,7 @@ import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import {
   EXECUTION_CREDENTIAL_NAME_RE,
+  executionCredentialEnvName,
   MAX_EXECUTION_DIAGNOSTICS_CHARS,
   MAX_EXECUTION_FAILURE_MESSAGE_CHARS,
   validateExecutionRequest,
@@ -190,11 +191,10 @@ function identityLabels(request: ExecutionRequest): Readonly<Record<string, stri
   });
 }
 
-/** The derived credential-env-var prefix and its grammar: a credential
- * REFERENCE (never the secret) becomes a projected `secretKeyRef` env
- * var the worker reads; the derived name is validated fail-closed. */
-const CREDENTIAL_ENV_PREFIX = "PR_REVIEWER_CREDENTIAL_";
-const CREDENTIAL_ENV_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+// The credential-env derivation (prefix + grammar + fail-closed check)
+// lives in ./types.ts as `executionCredentialEnvName`, shared with the
+// worker that CONSUMES the projected `model` credential (#1496): the
+// projecting executor and the consuming worker can never drift.
 
 /** The bounded retry budget for a destructive cluster call: three
  * attempts with a small ramp between them (25 ms, then 50 ms). A
@@ -489,18 +489,6 @@ export interface KubernetesApi {
   listJobs(namespace: string, labelSelector: Readonly<Record<string, string>>): Promise<readonly KubernetesJobSummary[]>;
 }
 
-/** The pod-side env var for one credential reference, derived from the
- * bounded kebab-case credential name. */
-function credentialEnvName(name: string): string {
-  const derived = CREDENTIAL_ENV_PREFIX + name.toUpperCase().replaceAll("-", "_");
-  if (!CREDENTIAL_ENV_NAME_RE.test(derived)) {
-    throw new ExecutionRequestError(
-      `credential name '${name}' does not derive a valid environment variable name`,
-    );
-  }
-  return derived;
-}
-
 /** The request path must be covered by exactly one volume mapping (the
  * claim is mounted at the SAME path on both sides, so no transformation
  * happens — coverage is the only question). Longest matching root wins;
@@ -663,7 +651,7 @@ export function buildReviewJobManifest(
       }
       seenNames.add(credential.name);
       env.push({
-        name: credentialEnvName(credential.name),
+        name: executionCredentialEnvName(credential.name),
         valueFrom: { secretKeyRef: { name: credentialSecretName, key: credential.name } },
       });
     }

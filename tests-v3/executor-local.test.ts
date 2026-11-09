@@ -69,6 +69,7 @@ function makeRequest(overrides: Partial<ExecutionRequest> = {}): Fixture {
       createdAtMs: 0,
     }),
     profiles: Object.freeze({ executor: "local-dev", model: "fast", evidence: "default" }),
+    modelSelection: Object.freeze({ baseUrl: "https://model.example/v1", modelId: "test-model", apiFormat: "openai" as const }),
     credentials: Object.freeze([]) as readonly { name: string; reference: string }[],
     runDir,
     requestPath: path.join(runDir, "request.json"),
@@ -1098,6 +1099,72 @@ test("validateExecutionRequest enforces the forge API base coordinate (#1433)", 
   assert.throws(
     () => validateExecutionRequest({ ...valid, forgeApiUrl: `https://github.example/${"x".repeat(2048)}` }),
     /at most 2048 bytes/,
+  );
+});
+
+test("validateExecutionRequest enforces the model selection coordinate (#1496)", () => {
+  const { request } = makeRequest();
+  const valid = JSON.parse(JSON.stringify(request));
+  const selection = { baseUrl: "https://model.example/v1", modelId: "test-model", apiFormat: "openai" };
+  // A complete selection round-trips, frozen, on both wire formats.
+  assert.deepEqual(validateExecutionRequest({ ...valid, modelSelection: selection }).modelSelection, selection);
+  assert.equal(
+    validateExecutionRequest({ ...valid, modelSelection: { ...selection, apiFormat: "anthropic" } }).modelSelection.apiFormat,
+    "anthropic",
+  );
+  // The field is REQUIRED: a model-less envelope is the #1496 failure this
+  // contract closes, so absence is refused at validation, never degraded.
+  const { modelSelection: _omitted, ...without } = valid;
+  assert.throws(() => validateExecutionRequest(without), /modelSelection must be a mapping/);
+  assert.throws(() => validateExecutionRequest({ ...valid, modelSelection: null }), /modelSelection must be a mapping/);
+  assert.throws(() => validateExecutionRequest({ ...valid, modelSelection: "https://model.example" }), /modelSelection must be a mapping/);
+  // #252: a secret-shaped nested key cannot ride the selection even though
+  // the field is documented credential-free — the closed shape refuses it.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, modelSelection: { ...selection, apiKey: "sk-live" } }),
+    /modelSelection: unsupported field .apiKey./,
+  );
+  // baseUrl: non-empty and the SAME credential-free endpoint hygiene as the
+  // forge base — userinfo, query, path token, wrong scheme all refused.
+  assert.throws(() => validateExecutionRequest({ ...valid, modelSelection: { ...selection, baseUrl: "" } }), /baseUrl must be non-empty/);
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, modelSelection: { ...selection, baseUrl: "https://user:sk-secret@model.example" } }),
+    /must not embed credentials/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, modelSelection: { ...selection, baseUrl: "https://model.example?api_key=sk-secret" } }),
+    /query/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, modelSelection: { ...selection, baseUrl: "https://model.example/7f3a9c1e55b20d84aa613c9f02bb71d6/v1" } }),
+    /credential-shaped path segment/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, modelSelection: { ...selection, baseUrl: "ftp://model.example" } }),
+    /http or https/,
+  );
+  // modelId: non-empty, bounded (512 passes, 513 refuses), control-free.
+  assert.throws(() => validateExecutionRequest({ ...valid, modelSelection: { ...selection, modelId: "" } }), /modelId must be non-empty/);
+  assert.equal(
+    validateExecutionRequest({ ...valid, modelSelection: { ...selection, modelId: "x".repeat(512) } }).modelSelection.modelId.length,
+    512,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, modelSelection: { ...selection, modelId: "x".repeat(513) } }),
+    /modelId must be at most 512 characters/,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, modelSelection: { ...selection, modelId: "model\u0000name" } }),
+    /modelId must not contain control characters/,
+  );
+  // apiFormat: the closed two-value union, nothing else.
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, modelSelection: { ...selection, apiFormat: "grpc" } }),
+    /apiFormat must be .openai. or .anthropic./,
+  );
+  assert.throws(
+    () => validateExecutionRequest({ ...valid, modelSelection: { ...selection, apiFormat: "" } }),
+    /apiFormat must be .openai. or .anthropic./,
   );
 });
 

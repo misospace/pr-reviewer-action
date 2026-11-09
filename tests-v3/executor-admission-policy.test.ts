@@ -325,6 +325,7 @@ function makeRequest(overrides: Partial<ExecutionRequest> = {}): ExecutionReques
       createdAtMs: 0,
     },
     profiles: { executor: "k8s", model: "fast", evidence: "default" },
+    modelSelection: { baseUrl: "https://model.example/v1", modelId: "test-model", apiFormat: "openai" },
     credentials: [],
     runDir,
     requestPath: `${runDir}/request.json`,

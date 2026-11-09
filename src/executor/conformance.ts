@@ -117,6 +117,11 @@ export function defaultConformanceRequest(scenario: ConformanceScenario): Execut
       model: "conformance",
       evidence: "conformance",
     }),
+    modelSelection: Object.freeze({
+      baseUrl: "https://model.invalid/v1",
+      modelId: "conformance-model",
+      apiFormat: "openai" as const,
+    }),
     credentials: Object.freeze([]) as readonly ExecutionCredentialRef[],
     runDir,
     requestPath: `${runDir}/request.json`,

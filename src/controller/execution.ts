@@ -44,6 +44,7 @@ import {
   EXECUTION_ID_RE,
   validateExecutionRequest,
   type ExecutionCredentialRef,
+  type ExecutionModelSelection,
   type ExecutionProfiles,
   type ExecutionRequest,
   type Executor,
@@ -129,6 +130,15 @@ export interface RequestBuilderDeps {
    * integration for that platform; "" is the GitHub default only — a
    * Forgejo job without an endpoint fails `validateExecutionRequest`. */
   resolveForgeApiUrl(job: ReviewJob): Promise<string>;
+  /** The operator-resolved model selection for the run (#1496): the AI
+   * base URL, the model id on the wire, and the wire format of the model
+   * profile the run's approved profile names selected. Like
+   * `resolveForgeApiUrl`, this is operator-side state only — never
+   * repository config, never event content — and the credential stays on
+   * the #735 reference path. The host owns the refusal: a selection that
+   * cannot be resolved (unknown profile, profile with no model id) must
+   * reject the build, never degrade to a model-less envelope. */
+  resolveModelSelection(job: ReviewJob, profiles: ExecutionProfiles): Promise<ExecutionModelSelection>;
   /** Opaque credential REFERENCES for the run's worker plan (#735) —
    * references only; the broker resolves material at the final handoff. */
   credentialRefs(job: ReviewJob, runId: string): Promise<readonly CredentialRef[]>;
@@ -165,6 +175,9 @@ export function createControllerRequestBuilder(deps: RequestBuilderDeps): Contro
   if (typeof deps.resolveForgeApiUrl !== "function") {
     throw new TypeError("RequestBuilderDeps.resolveForgeApiUrl must be a function");
   }
+  if (typeof deps.resolveModelSelection !== "function") {
+    throw new TypeError("RequestBuilderDeps.resolveModelSelection must be a function");
+  }
   if (typeof deps.credentialRefs !== "function") {
     throw new TypeError("RequestBuilderDeps.credentialRefs must be a function");
   }
@@ -196,6 +209,11 @@ export function createControllerRequestBuilder(deps: RequestBuilderDeps): Contro
       const info: WorkspaceInfo = handle.info;
       const profiles = await deps.resolveProfiles(job);
       const forgeApiUrl = await deps.resolveForgeApiUrl(job);
+      // The operator's model selection joins the envelope beside the
+      // forge API base for the same #1433 reason (#1496): a worker
+      // container has no ambient model environment, and without it the
+      // required ai-base-url/ai-model inputs have no route to the engine.
+      const modelSelection = await deps.resolveModelSelection(job, profiles);
       const refs = await deps.credentialRefs(job, runId);
       // The reference field is an opaque handle (#735): an operator who
       // pasted material into it must fail at composition time, before the
@@ -228,6 +246,7 @@ export function createControllerRequestBuilder(deps: RequestBuilderDeps): Contro
         deadlineAtMs: job.deadlineAtMs,
         workspace: info,
         profiles,
+        modelSelection,
         credentials,
         runDir,
         requestPath,

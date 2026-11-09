@@ -372,6 +372,7 @@ test("worker-set: no secrets in durable payload — plan and executor request st
       createdAtMs: 1_000,
     },
     profiles: { executor: "local", model: "profile-a", evidence: "linked-sources" },
+    modelSelection: { baseUrl: "https://model.example/v1", modelId: "test-model", apiFormat: "openai" },
     credentials: plan.credentials,
     runDir: "/controller/runs/run-1",
     requestPath: "/controller/runs/run-1/request.json",

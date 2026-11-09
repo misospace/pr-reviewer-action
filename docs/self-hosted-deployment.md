@@ -213,9 +213,11 @@ not run. Its run steps are in
   operations, health, and metrics are served.
 - The execution envelope carries the forge platform and its API base
   URL (`ExecutionRequest.forgeApiUrl`, mapped to `forgejoApiUrl` in
-  `worker-main.ts`, #1433). It does not carry model configuration. The
-  worker maps the engine inputs as `inputs: {}`, so the required
-  `ai-base-url` and `ai-model` values have no route to the engine
-  (#1496). Until #1496 lands, worker execution cannot complete a model
-  review on either platform. A worker-driven review fails closed as
-  `worker_error`.
+  `worker-main.ts`, #1433), and the operator's model selection
+  (`ExecutionRequest.modelSelection`: the AI base URL, the wire model id,
+  and the wire format, mapped to `ai-base-url` / `ai-model` /
+  `ai-api-format` engine inputs, #1496). The model credential never rides
+  the envelope: it stays the #735 `model` reference, whose projected
+  material the worker reads into `ai-api-key`. A model profile must name
+  a `model` id; selecting a profile without one refuses the review at
+  composition, never a model-less worker launch.
