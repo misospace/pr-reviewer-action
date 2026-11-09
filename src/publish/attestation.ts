@@ -82,6 +82,10 @@ export const REVIEW_ATTESTATION_REASON_CODES = [
   /** The native APPROVE submission itself failed — the run is neither
    * approved nor silently incomplete; the approval attempt failed. */
   "native_approval_failed",
+  /** The native REQUEST_CHANGES submission itself failed — the block did
+   * not land on the pull request, so the run attests the capability
+   * failure, not a landed block. */
+  "native_submission_failed",
   /** The publication attempt failed for a non-approval cause. */
   "publication_failed",
   /** The head SHA the attestation would bind could not be proven. */
@@ -150,7 +154,21 @@ export function computeReviewAttestation(signals: ReviewAttestationSignals): Rev
   if (signals.modelUnavailable === true) return finish("unavailable", "model_unavailable");
   if (signals.degraded === true) return finish("unavailable", "degraded_no_evidence");
   const verdict = signals.verdict ?? "";
-  if (verdict === "request_changes") return finish("blocked", "request_changes");
+  if (verdict === "request_changes") {
+    // A non-degraded request_changes verdict is a trusted block. It stays
+    // `blocked` whether or not publication was attempted (a run with
+    // publish disabled still blocks), but when publication WAS attempted
+    // and the native REQUEST_CHANGES submission itself failed, the block
+    // did not land on the pull request and the honest conclusion is the
+    // capability failure — symmetric with `native_approval_failed`.
+    const attemptedNativeBlock = signals.publication?.native;
+    if (signals.publication?.status === "failed"
+      && attemptedNativeBlock?.event === "REQUEST_CHANGES"
+      && attemptedNativeBlock.submitted !== true) {
+      return finish("unavailable", "native_submission_failed");
+    }
+    return finish("blocked", "request_changes");
+  }
   if (verdict !== "approve") return finish("unavailable", "no_verdict");
   if ((signals.requiredChecks ?? "none") === "incomplete") return finish("incomplete", "required_checks_incomplete");
   if ((signals.incompleteReason ?? "none") !== "none"

@@ -172,6 +172,23 @@ test("#1576: crash, request_changes and skip attest unavailable, blocked and ski
     ...cleanApprove,
     publication: { status: "published", native: { event: "REQUEST_CHANGES", submitted: true } },
   }), { conclusion: "blocked", reason_code: "request_changes", head_sha: HEAD });
+  // A native REQUEST_CHANGES submission the API rejected is the capability
+  // failure, not a landed block — symmetric with `native_approval_failed`.
+  assert.deepEqual(attest({
+    reviewProduced: true,
+    verdict: "request_changes",
+    headSha: HEAD,
+    publication: { status: "failed", native: { event: "REQUEST_CHANGES", submitted: false } },
+  }), { conclusion: "unavailable", reason_code: "native_submission_failed", head_sha: HEAD });
+  // A request_changes verdict whose review was superseded by a newer push
+  // still blocks on the verdict (the bundle pins the exact head; consumers
+  // compare it).
+  assert.deepEqual(attest({
+    reviewProduced: true,
+    verdict: "request_changes",
+    headSha: HEAD,
+    publication: { status: "superseded" },
+  }), { conclusion: "blocked", reason_code: "request_changes", head_sha: HEAD });
   assert.deepEqual(attest({ reviewProduced: false, headSha: HEAD }), {
     conclusion: "skipped", reason_code: "skipped", head_sha: HEAD,
   });
@@ -292,9 +309,11 @@ async function startGithubMock(overrides?: { failReviews?: boolean }): Promise<{
   url: string;
   requests: CapturedRequest[];
   reviewEvents: string[];
+  flipHead: (sha: string) => void;
   close: () => Promise<void>;
 }> {
   const reviewEvents: string[] = [];
+  let headSha = HEAD;
   const server = await startMockServer((req, body, res) => {
     const url = req.url ?? "";
     res.setHeader("Content-Type", "application/json");
@@ -343,7 +362,7 @@ async function startGithubMock(overrides?: { failReviews?: boolean }): Promise<{
       }
       res.end(JSON.stringify({
         number: 7, state: "open", draft: false, title: "Update README", body: "",
-        head: { sha: HEAD, ref: "feature", repo: { full_name: "o/r" } },
+        head: { sha: headSha, ref: "feature", repo: { full_name: "o/r" } },
         base: { sha: "b".repeat(40), ref: "main", repo: { full_name: "o/r" } },
         user: { login: "someone" }, changed_files: 1, additions: 1, deletions: 0,
         html_url: "https://github.com/o/r/pull/7",
@@ -357,7 +376,13 @@ async function startGithubMock(overrides?: { failReviews?: boolean }): Promise<{
     res.statusCode = 404;
     res.end(JSON.stringify({ message: "not found" }));
   });
-  return { ...server, reviewEvents };
+  return {
+    ...server,
+    reviewEvents,
+    flipHead: (sha: string): void => {
+      headSha = sha;
+    },
+  };
 }
 
 function actionEnv(paths: {
@@ -493,6 +518,44 @@ test("#1576: a rejected native APPROVE submission attests unavailable and the ru
     assert.deepEqual(bundle!.attestation, a);
   } finally {
     process.stdout.write = originalWrite;
+    await model.close();
+    await github.close();
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("#1576: a newer push at the publication boundary attests incomplete/superseded_head", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "attestation-supersede-workspace-"));
+  const runnerTemp = mkdtempSync(join(tmpdir(), "attestation-supersede-temp-"));
+  const github = await startGithubMock();
+  const eventPath = join(runnerTemp, "event.json");
+  writeCommentEvent(eventPath, "/ai-review", true);
+  // The head flips as soon as the model answers: the publication boundary
+  // re-check sees the newer push and withholds the review.
+  let flipped = false;
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody());
+    if (!flipped) {
+      flipped = true;
+      github.flipHead("c".repeat(40));
+    }
+  });
+  const env = actionEnv({ eventPath, runnerTemp, workspace, githubUrl: github.url, modelUrl: model.url, publishMode: "review_verdict" });
+  try {
+    const exitCode = await actionMain(env);
+    assert.equal(exitCode, 0, "a superseded publication still exits 0 (#1257)");
+    assert.deepEqual(github.reviewEvents, [], "nothing was submitted for the stale head");
+    const outputs = readOutputs(env.GITHUB_OUTPUT!);
+    assert.equal(outputs["publish-status"], "superseded");
+    const a = attestationOf(outputs);
+    assert.deepEqual(a, { conclusion: "incomplete", reason_code: "superseded_head", head_sha: HEAD });
+    const bundle = parseReviewBundle(outputs["review-bundle"] ?? "");
+    assert.equal(bundle!.state, "superseded");
+    assert.equal(bundle!.head_sha, HEAD, "the bundle pins the exact head that was reviewed");
+    assert.deepEqual(bundle!.attestation, a);
+  } finally {
     await model.close();
     await github.close();
     rmSync(workspace, { recursive: true, force: true });

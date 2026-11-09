@@ -252,7 +252,11 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
       }, { crashed: true });
     } catch {
       // The failure bundle is best-effort: a bundle-write failure must
-      // never mask the original error the pipeline propagates.
+      // never mask the original error the pipeline propagates. #1576: the
+      // append-based output writer is last-write-wins, so a crash AFTER a
+      // boundary already emitted an attestation overwrites it with
+      // `unavailable`/`run_crashed` — fail-closed on purpose: a consumer
+      // never sees a trusted approval from a run that ended in a crash.
     }
     throw error;
   }

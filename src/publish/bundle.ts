@@ -299,8 +299,10 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
   }
   // #1576: the attestation rides its own key on every state. Its fields are
   // closed-vocabulary tokens and an action-owned head SHA (never model
-  // text), so no redaction surface is needed — but the shape is re-checked
-  // here so a caller cannot smuggle a foreign object onto the trust key.
+  // text), so no redaction surface is needed. The builder projects the
+  // shape; the parser re-validates it against the closed vocabularies and
+  // refuses the whole document on any mismatch, so a foreign object can
+  // never survive a round trip on this trust key.
   if (input.attestation !== undefined) {
     envelope.attestation = {
       conclusion: input.attestation.conclusion,

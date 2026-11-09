@@ -230,8 +230,11 @@ export interface PublishResult {
    * comments and inline-findings COMMENT reviews carry no verdict). This is
    * the record the trusted-review attestation consumes: an advisory
    * publication and a native approval must be distinguishable without
-   * parsing human-readable messages. */
-  native?: { event: NativeReviewEvent; submitted: boolean };
+   * parsing human-readable messages. `fellBack` marks the body-only
+   * plain-review fallback (#1249): the event landed, but no longer bound to
+   * a commit_id, so head binding rests on the pre-submission exact-head
+   * guard plus the consumer's own head comparison. */
+  native?: { event: NativeReviewEvent; submitted: boolean; fellBack?: true };
 }
 
 const VERDICT_PREFIXES: Record<"approve" | "request_changes", string> = {
@@ -2762,14 +2765,26 @@ export async function publishReview(
         // failures — the attempted event rides the result either way.
         if (event === "APPROVE") {
           for (const line of APPROVAL_FAILURE_GUIDANCE) messages.push(line);
-          return { status: "failed", messages, error: `native approval failed for #${input.prNumber}`, native: { event, submitted: false } };
+          return {
+            status: "failed",
+            messages,
+            error: `native approval failed for #${input.prNumber}`,
+            native: { event, submitted: false, ...(submitted.fellBack ? { fellBack: true as const } : {}) },
+          };
         }
-        return { status: "failed", messages, error: `native review submission failed: ${submitted.error ?? "unknown error"}`, native: { event, submitted: false } };
+        return {
+          status: "failed",
+          messages,
+          error: `native review submission failed: ${submitted.error ?? "unknown error"}`,
+          native: { event, submitted: false, ...(submitted.fellBack ? { fellBack: true as const } : {}) },
+        };
       }
       nativeReviewId = submitted.reviewId;
       // #1576: a verdict-bearing native review landed — the ONLY event that
-      // can certify the `approved` attestation downstream.
-      nativeSubmission = { event, submitted: true };
+      // can certify the `approved` attestation downstream. The body-only
+      // fallback (#1249) is disclosed, never hidden, because it landed
+      // without a commit binding.
+      nativeSubmission = { event, submitted: true, ...(submitted.fellBack ? { fellBack: true as const } : {}) };
       messages.push(`Submitted native review (${event}) with ${submitted.inlineCount} inline comment(s)`);
       }
     }
