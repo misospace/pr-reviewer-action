@@ -1981,6 +1981,9 @@ test("#935: an untouched standards requirement is not_applicable with a reason a
     // The reviewer can still report one unmet, and then it counts.
     const reported = validateRequirementTrace([{ requirement_id: "req-db", disposition: "unmet", reason: "drops the down migration" }], ledger, ws, changed);
     assert.equal(reported.incomplete, true);
+    assert.ok(reported.rows[0]?.notes.includes("out-of-scope-reported-unmet"));
+    assert.match(finalTraceFailureLog(reported), /req-db:unmet\/not_applicable\[out-of-scope-reported-unmet\]/);
+    assert.doesNotMatch(finalTraceFailureLog(reported), /drops the down migration/);
   } finally {
     rmSync(ws, { recursive: true, force: true });
   }
@@ -5838,6 +5841,8 @@ test("#1062: a well-formed unmet on a non-code row stays a blocking gap", () => 
     assert.equal(trace.rows[0]?.disposition, "unmet");
     assert.ok(trace.rows[0]?.notes.includes("non-code-reported-unmet"));
     assert.equal(trace.incomplete, true);
+    assert.match(finalTraceFailureLog(trace), /req-ci:unmet\/external_state\[non-code-reported-unmet\]/);
+    assert.doesNotMatch(finalTraceFailureLog(trace), /the CI suite is currently red/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
