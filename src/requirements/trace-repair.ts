@@ -92,8 +92,12 @@ export const TRACE_CLAIM_OUTPUT_CONTRACT =
   + "production code. `met` requires BOTH a valid enforcement location and a valid test location, and the "
   + "enforcement must be a real predicate — a comparison, guard, throw/assert, or match call — not just an "
   + "assignment or object-literal property that copies the value (naming the field is not enforcing it). "
-  + "The predicate's line must also carry a word from the requirement's own wording (or the `symbol`) — "
-  + "unless the cited file is a declared owner of the requirement in the repository's "
+  + "The predicate's line must carry a word from the requirement's own wording (or the `symbol`) — or the "
+  + "cited line declares a local identifier (`const`/`let`/`var`) whose name the predicate's condition "
+  + "references within two lines, e.g. cite `const openAt = unclosedFenceStart(text);` and let "
+  + "`if (openAt >= 0)` carry the predicate (identifier segments count: `fence` matches "
+  + "`unclosedFenceStart`). "
+  + "Unless the cited file is a declared owner of the requirement in the repository's "
   + "`.github/pr-reviewer-owners.yml`, in which case the predicate must sit on the cited line itself and "
   + "the requirement's wording is not needed. "
   + "`not_applicable`, `unmet`, and `unverifiable` all require a `reason`. A `met` claim for a requirement listed as distributed must cite one enforcement location and one matching test in each named seam; a real predicate in a cited seam is enough there — no word from the requirement's wording is needed. Return strict "
@@ -142,28 +146,44 @@ export function traceRepairRouteForArtifact(input: { escalated: boolean; fromFal
  *   claims: the serialization-failure shape the standalone pass exists to
  *   recover;
  * - `native_loop_repair_merged_claims` — suppression: the loop's trace-only
- *   repair already merged parseable claims into THIS artifact, so no second
- *   independent repair model is launched even when rows remain unresolved
- *   (the remaining rows fail closed, per #1492). */
+ *   repair merged parseable claims into THIS artifact and left NO unresolved
+ *   repair target behind, so the merge is a completed repair and no second
+ *   independent repair model is launched;
+ * - `native_loop_repair_left_unresolved` — the loop's trace-only repair
+ *   merged parseable claims but the post-merge classification still yields
+ *   unresolved repair targets (#1502 follow-up: a merged claim the
+ *   deterministic validator still rejects is a FAILED repair, not a
+ *   completed one — the production #1559 shape where a parseable claim for
+ *   the row merged and the row still validated `unverifiable`, and the
+ *   bounded fallback stood down). The bounded fallback owns the recovery;
+ *   if it too fails, the remaining rows fail closed per #1492. */
 export type TraceRepairInvocationReason =
   | "no_native_loop_repair"
   | "native_loop_no_trace_claims"
-  | "native_loop_repair_merged_claims";
+  | "native_loop_repair_merged_claims"
+  | "native_loop_repair_left_unresolved";
 
 /** #1504: decide whether the standalone pass runs for the accepted artifact,
  * and why. `nativeLoopVerdictArtifact` — the accepted artifact is the native
  * loop's own in-conversation verdict (the conversation the loop's trace-only
  * repair merges into); `continuation` — the harness's trace-repair
- * continuation record, when it wrote one. Pure; unit-tested. */
+ * continuation record, when it wrote one; `unresolvedTargetsRemain` —
+ * whether the POST-merge classification still yields unresolved repair
+ * targets (missing ids or present-but-`unverifiable` rows). Pure;
+ * unit-tested. */
 export function resolveStandaloneTraceRepairInvocation(input: {
   nativeLoopVerdictArtifact: boolean;
   continuation: { trace_claims_merged: boolean } | null;
+  unresolvedTargetsRemain?: boolean;
 }): { invoke: boolean; reason: TraceRepairInvocationReason } {
   if (
     input.nativeLoopVerdictArtifact
     && input.continuation !== null
     && input.continuation.trace_claims_merged === true
   ) {
+    if (input.unresolvedTargetsRemain === true) {
+      return { invoke: true, reason: "native_loop_repair_left_unresolved" };
+    }
     return { invoke: false, reason: "native_loop_repair_merged_claims" };
   }
   if (input.continuation !== null) return { invoke: true, reason: "native_loop_no_trace_claims" };
@@ -458,6 +478,69 @@ export function buildTraceRepairRetryMessage(input: {
   return `${head}Requirement ids to trace:\n${fence}\n${body}\n${fence}\n`;
 }
 
+/** #1502 follow-up: the single bounded validator-feedback retry. When the
+ * pass's returned claims are deterministically REJECTED by the same validator
+ * the publication path uses (the caller validates via `validateClaims`), the
+ * model is asked ONCE to fix its citations, told exactly which deterministic
+ * labels each id failed with, and handed the FULL original request again (the
+ * pass is single-turn: without the original context the retry could only
+ * guess). Shares the pass's one-retry budget with the serialization retry —
+ * at most one retry of either class fires per pass. */
+const MAX_VALIDATION_LABELS_PER_ID = 3;
+const MAX_VALIDATION_LABEL_CHARS = 96;
+
+export function buildTraceRepairValidationFeedback(input: {
+  rejections: Readonly<Record<string, readonly string[]>>;
+}): string {
+  const lines: string[] = [];
+  for (const [rawId, labels] of Object.entries(input.rejections)) {
+    if (lines.length >= MAX_TRACE_REPAIR_CLAIMS) break;
+    const id = rawId.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_TRACE_REPAIR_SUMMARY_ID_CHARS);
+    if (id === "") continue;
+    const clean = (labels ?? [])
+      .filter((label): label is string => typeof label === "string")
+      .map((label) => label.replace(/[\x00-\x1f\x7f`]/g, " ").trim().slice(0, MAX_VALIDATION_LABEL_CHARS))
+      .filter((label) => label !== "")
+      .slice(0, MAX_VALIDATION_LABELS_PER_ID)
+      .join("; ");
+    lines.push(`- ${escapeControlChars(id)}: ${escapeControlChars(clean || "unverifiable")}`);
+  }
+  return [
+    "The deterministic requirement-trace validator REJECTED the claim(s) your previous reply carried:",
+    lines.join("\n") || "(none)",
+    "",
+    "Fix the citations so the validator can accept them: `enforcement` must point at a line that carries a real "
+      + "predicate (a comparison, guard, throw/assert, or match call) and — unless the cited file is a declared owner "
+      + "of the requirement — also carries a word from the requirement's own wording (or the `symbol`); alternatively, "
+      + "cite the `const`/`let`/`var` declaration line that binds an identifier the nearby predicate's condition "
+      + "references within two lines (identifier segments count: `fence` matches `unclosedFenceStart`). `test` must "
+      + "point at an actual test or fixture file in the pull request head. The full original request follows "
+      + "unchanged below.",
+    "",
+  ].join("\n");
+}
+
+/** Sanitize first-round rejection labels for persistence: sanitized ids,
+ * joined labels, bounded like the rest of the #1044 summary. */
+export function sanitizeValidationRejections(
+  rejections: Readonly<Record<string, readonly string[]>>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [rawId, labels] of Object.entries(rejections)) {
+    if (Object.keys(out).length >= MAX_TRACE_REPAIR_SUMMARY_IDS) break;
+    const id = rawId.replace(/[\x00-\x1f\x7f`]/g, "").slice(0, MAX_TRACE_REPAIR_SUMMARY_ID_CHARS);
+    if (id === "" || id in out) continue;
+    const clean = (labels ?? [])
+      .filter((label): label is string => typeof label === "string")
+      .map((label) => label.replace(/[\x00-\x1f\x7f`]/g, " ").trim().slice(0, MAX_VALIDATION_LABEL_CHARS))
+      .filter((label) => label !== "")
+      .slice(0, MAX_VALIDATION_LABELS_PER_ID)
+      .join("; ");
+    if (clean !== "") out[id] = clean;
+  }
+  return out;
+}
+
 function sanitizeLocations(raw: unknown): Array<{ file: string; line: number }> {
   if (!Array.isArray(raw)) return [];
   const locations: Array<{ file: string; line: number }> = [];
@@ -571,6 +654,14 @@ export interface TraceRepairPassInput {
   evidenceDigest?: string | undefined;
   config: TraceRepairModelConfig;
   requestFn: SpecialistRequestFn;
+  /** #1502 follow-up: deterministic validation of the pass's returned claims,
+   * wired by the caller to the SAME validator the publication path uses
+   * (`validateRequirementTrace` over the targeted ids). Returns the
+   * deterministic rejection labels for every targeted id whose claim did not
+   * verify — including targeted ids the response omitted entirely (the retry
+   * re-asks for those too); ids that verified are absent. A throwing or
+   * absent callback disables the stage (fail-soft; behavior as before). */
+  validateClaims?: (claims: readonly Record<string, unknown>[]) => Record<string, readonly string[]>;
 }
 
 export interface TraceRepairPassResult {
@@ -584,6 +675,12 @@ export interface TraceRepairPassResult {
   firstFailureClass: string | null;
   /** #1504: whether the one bounded serialization retry was used. */
   retried: boolean;
+  /** #1502 follow-up: whether the one bounded validator-feedback retry fired
+   * (shares the pass's one-retry budget with the serialization retry). */
+  validationRetried: boolean;
+  /** #1502 follow-up: the first attempt's per-id deterministic rejection
+   * labels (sanitized) when the validation retry fired; null otherwise. */
+  validationRejections: Record<string, string> | null;
 }
 
 /** Run the bounded repair pass. Never throws: any failure is reported through
@@ -654,7 +751,76 @@ export async function runRequirementTraceRepairPass(input: TraceRepairPassInput)
     error: string | null,
     firstFailureClass: string | null,
     retried: boolean,
-  ): TraceRepairPassResult => ({ claims: [], status, errorKind, error, diffClipped, firstFailureClass, retried });
+  ): TraceRepairPassResult => ({ claims: [], status, errorKind, error, diffClipped, firstFailureClass, retried, validationRetried: false, validationRejections: null });
+
+  // #1502 follow-up: the one bounded validator-feedback retry. Runs on a
+  // first-attempt parse success whose claims the caller's deterministic
+  // validator rejected — including a WELL-FORMED response that omitted every
+  // requested id entirely (the #1488 shape this pass exists to recover: the
+  // caller's validator reports those ids `not-traced-by-reviewer` and the
+  // retry re-asks with the full original request). Shares the one-retry
+  // budget with the serialization retry (a pass that already used the
+  // serialization retry never also validation-retries). Any failure inside
+  // the stage (throwing validator, transport failure, unparsable retry
+  // response) keeps the first attempt's claims — the stage can only ever ADD
+  // a better claim set, never lose a mergeable one, and a claim that still
+  // fails validation fails closed at the publication path exactly as before
+  // (#1492).
+  const finishOk = async (
+    claims: Record<string, unknown>[],
+    serializationRetried: boolean,
+    firstFailureClass: string | null,
+    emptyStatus: "ok" | "empty",
+  ): Promise<TraceRepairPassResult> => {
+    const status: TraceRepairPassResult["status"] = claims.length > 0 ? "ok" : emptyStatus;
+    const base = { status, errorKind: null, error: null, diffClipped, firstFailureClass, retried: serializationRetried };
+    if (input.validateClaims === undefined || serializationRetried) {
+      return { claims, ...base, validationRetried: false, validationRejections: null };
+    }
+    let rejections: Record<string, readonly string[]> = {};
+    try {
+      const reported = input.validateClaims(claims);
+      if (reported !== null && typeof reported === "object") rejections = reported;
+    } catch {
+      rejections = {};
+    }
+    const rejectedIds = Object.keys(rejections)
+      .filter((id) => allowedIds.has(id) && Array.isArray(rejections[id]) && rejections[id].length > 0);
+    if (rejectedIds.length === 0) {
+      return { claims, ...base, validationRetried: false, validationRejections: null };
+    }
+    const sanitizedRejections = sanitizeValidationRejections(rejections);
+    const rejectedSet = new Set(rejectedIds);
+    const requirementsById = new Map(input.requirements.map((requirement) => [requirement.id, requirement]));
+    const retryRequirements = rejectedIds
+      .map((id) => requirementsById.get(id))
+      .filter((entry): entry is TraceRepairRequirement => entry !== undefined);
+    if (retryRequirements.length > 0) {
+      // The combined retry request is re-fitted to the SAME configured input
+      // bound the original request used: the feedback block rides on top of
+      // a message that was already fitted to inputMaxBytes, so without this
+      // clamp the retry could exceed the configured repair-input bound. The
+      // clamp is newline-aware and cuts at the tail (inside the diff block,
+      // untrusted data by contract — a prompt surface, not a published one);
+      // `diffClipped` keeps reporting the ORIGINAL diff fit.
+      const [feedbackUser] = fitUtf8(`${buildTraceRepairValidationFeedback({ rejections })}\n${user}`, input.config.inputMaxBytes);
+      const feedback = await request(buildPayload(feedbackUser));
+      if (feedback.kind === "response") {
+        const reparsed = parseTraceRepairResponse(feedback.text, allowedIds);
+        const merged = [...claims];
+        for (const claim of reparsed.claims) {
+          const rid = claim.requirement_id;
+          if (typeof rid !== "string" || !rejectedSet.has(rid)) continue;
+          const index = merged.findIndex((existing) => existing.requirement_id === rid);
+          if (index >= 0) merged[index] = claim;
+          else merged.push(claim);
+        }
+        const mergedStatus: TraceRepairPassResult["status"] = merged.length > 0 ? "ok" : status;
+        return { claims: merged, status: mergedStatus, errorKind: null, error: null, diffClipped, firstFailureClass, retried: serializationRetried, validationRetried: true, validationRejections: sanitizedRejections };
+      }
+    }
+    return { claims, ...base, validationRetried: true, validationRejections: sanitizedRejections };
+  };
 
   // ── First attempt ────────────────────────────────────────────────────
   const first = await request(buildPayload(user));
@@ -665,14 +831,24 @@ export async function runRequirementTraceRepairPass(input: TraceRepairPassInput)
   } else {
     const parsed = parseTraceRepairResponse(first.text, allowedIds);
     if (parsed.claims.length > 0) {
-      return { claims: parsed.claims, status: "ok", errorKind: null, error: null, diffClipped, firstFailureClass: null, retried: false };
+      return await finishOk(parsed.claims, false, null, "ok");
+    }
+    if (parsed.errors.length === 0 && input.validateClaims !== undefined) {
+      // #1566 (review): a well-formed payload that affirmatively carries no
+      // claim for the requested ids is not a serialization failure, but with
+      // validator feedback wired it is still a REJECTED response — the
+      // targeted ids were omitted entirely, so the bounded feedback retry
+      // gives the model one informed shot at them. Without a callback the
+      // historical final "empty" stands.
+      return await finishOk([], false, null, "empty");
     }
     if (parsed.errors.length > 0) firstFailureClass = "malformed";
   }
   if (firstFailureClass === null) {
     // A well-formed payload that affirmatively carries no usable claim for
-    // the requested ids: not a serialization failure — fail closed as today.
-    return { claims: [], status: "empty", errorKind: null, error: null, diffClipped, firstFailureClass: null, retried: false };
+    // the requested ids, with no validator feedback wired: not a
+    // serialization failure — fail closed as today.
+    return { claims: [], status: "empty", errorKind: null, error: null, diffClipped, firstFailureClass: null, retried: false, validationRetried: false, validationRejections: null };
   }
 
   // ── The one bounded serialization retry (#1504) ──────────────────────
@@ -683,7 +859,9 @@ export async function runRequirementTraceRepairPass(input: TraceRepairPassInput)
   }
   const reparsed = parseTraceRepairResponse(retry.text, allowedIds);
   if (reparsed.claims.length > 0) {
-    return { claims: reparsed.claims, status: "ok", errorKind: null, error: null, diffClipped, firstFailureClass, retried: true };
+    // #1502 follow-up: the serialization retry consumed the pass's one-retry
+    // budget — its claims are returned without a validation-feedback retry.
+    return { claims: reparsed.claims, status: "ok", errorKind: null, error: null, diffClipped, firstFailureClass, retried: true, validationRetried: false, validationRejections: null };
   }
   const errorKind = reparsed.errors.length > 0 ? "malformed" : "empty";
   return failClosed("error", errorKind, reparsed.errors[0] ?? null, firstFailureClass, true);
@@ -820,12 +998,18 @@ export function traceRepairOutcomeSummary(input: {
       status: "error",
       error_kind: "thrown",
       error: message === null ? null : cleanError(message),
+      validation_retried: false,
       ...route,
       ...invocationReason,
       ...continuation,
       ...rowStates,
     };
   }
+  const validationRejections =
+    input.result.validationRejections !== null && input.result.validationRejections !== undefined
+      && Object.keys(input.result.validationRejections).length > 0
+      ? { validation_rejections: input.result.validationRejections }
+      : {};
   return {
     attempted: true,
     outcome: STATUS_TO_OUTCOME[input.result.status] ?? "errored",
@@ -837,6 +1021,8 @@ export function traceRepairOutcomeSummary(input: {
     diff_clipped: input.result.diffClipped,
     first_failure_class: input.result.firstFailureClass,
     serialization_retry: input.result.retried,
+    validation_retried: input.result.validationRetried,
+    ...validationRejections,
     ...route,
     ...invocationReason,
     ...continuation,

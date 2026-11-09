@@ -157,6 +157,7 @@ function capReason(value: unknown): string {
 class FileTextCache {
   private readonly linesByFile = new Map<string, string[] | null>();
   private readonly signalsByFile = new Map<string, boolean[] | null>();
+  private readonly viewsByFile = new Map<string, FileCodeViews | null>();
   constructor(private readonly workspace: string) {}
 
   private load(file: string): string[] | null {
@@ -204,6 +205,20 @@ class FileTextCache {
     const signals = lines === null ? null : filePredicateSignal(lines);
     this.signalsByFile.set(file, signals);
     return signals;
+  }
+
+  /** The file's per-line code views (#1347), or `null` when it is not a
+   * readable regular file in the checkout. Computed once per file with the
+   * SAME production blanking `predicateSignals` uses, so the signal view and
+   * the text view can never disagree about what is code. The #1566 linkage
+   * check reads the blanked view so a bound identifier (or a declaration)
+   * that exists only inside a comment or a string can never count. */
+  codeViews(file: string): FileCodeViews | null {
+    if (this.viewsByFile.has(file)) return this.viewsByFile.get(file) ?? null;
+    const lines = this.load(file);
+    const views = lines === null ? null : computeCodeViews(lines, true);
+    this.viewsByFile.set(file, views);
+    return views;
   }
 }
 
@@ -898,10 +913,45 @@ function citedLinePredicateFound(locations: readonly TraceLocation[], cache: Fil
 
 /**
  * True when at least one of the given (already location-valid) enforcement
- * locations has a term from `terms` and a predicate signal on the SAME
- * line, within `PREDICATE_WINDOW_RADIUS` lines of the cited one — the
- * line-level co-occurrence is what rules out a term merely being named
- * somewhere nearby while the actual comparison lives in unrelated code.
+ * locations has a term from `terms` and a predicate signal near each other,
+ * within `PREDICATE_WINDOW_RADIUS` lines of the cited one.
+ *
+ * Historical rule (pre-#1566): the term and the predicate signal had to sit
+ * on the SAME line. Production falsified that as a calibration bug rather
+ * than an anti-copy feature: real enforcement routinely splits the two
+ * halves across adjacent lines (`const openAt = unclosedFenceStart(text);`
+ * carries the requirement's "fence" only inside a camelCase identifier and
+ * is not predicate-shaped; the real comparison `if (openAt >= 0)` is the
+ * next line and carries no requirement word — the #1562 review row
+ * `req-a241097fa88c` at `src/publish/publish.ts:616` failed on exactly this
+ * geometry, and no honest citation of the pair could ever pass). Two bounded
+ * relaxations, each anchored by the citation:
+ *
+ * - the term line and the predicate line may differ by at most
+ *   `TERM_PREDICATE_MAX_LINE_GAP` lines (both still inside the citation
+ *   window) — but ONLY when the two halves are DETERMINISTICALLY LINKED:
+ *   the term line must bind a local identifier (a `const`/`let`/`var`
+ *   declaration, single-level destructuring included, read on the #1347
+ *   BLANKED code view so a declaration in a comment or a string cannot
+ *   bind) whose name appears in the predicate line's GOVERNING EXPRESSION
+ *   — the parenthesized condition of a conditional/loop/switch keyword,
+ *   else the whole blanked line — e.g. `const openAt =
+ *   unclosedFenceStart(text);` followed by `if (openAt >= 0)`. A mention in
+ *   a string, a comment, or a conditional body is not participation; a term
+ *   line that binds nothing (an object-property copy, a comment, a bare
+ *   expression) can never link a nearby predicate, so the historical
+ *   same-line rule stands for it — fail closed. This is what keeps an
+ *   unrelated comparison two lines from a copy line from certifying `met`
+ *   (#1566 blocker);
+ * - a term also matches as a camelCase/snake_case identifier segment
+ *   (`unclosedFenceStart` carries "fence"), via `termMatchRegExp`.
+ *
+ * The line-level co-occurrence within the citation window is still what
+ * rules out a term merely being named somewhere unrelated: a copy-only
+ * cited line with no predicate in its window still fails (#854), and a
+ * comparison far from any requirement word still fails. The relaxation is
+ * strictly wider than same-line but far narrower than file-level search,
+ * which would pass #854's own file.
  *
  * When `terms` is empty (the requirement text yielded no usable candidate —
  * e.g. it is all stopwords/short words), the predicate check is skipped and
@@ -910,28 +960,233 @@ function citedLinePredicateFound(locations: readonly TraceLocation[], cache: Fil
  * itself found nothing to check.
  *
  * Note the asymmetry the two halves read: the shape test sees the scrubbed
- * code view (#1347) while the term test still matches the raw line, so a
- * genuine predicate followed by `// ceiling` on the same line counts. Pre-#1347
- * behavior on the term half, kept deliberately: a requirement word a reviewer
- * quotes in a comment beside the real comparison is evidence of the citation,
- * not the copy, this gate exists to refuse.
+ * code view (#1347) while the term test matches the raw line AND its
+ * segmented view, so a genuine predicate followed by `// ceiling` on the
+ * same line counts. Pre-#1347 behavior on the term half, kept deliberately:
+ * a requirement word a reviewer quotes in a comment beside the real
+ * comparison is evidence of the citation, not the copy, this gate exists to
+ * refuse.
  */
+export const TERM_PREDICATE_MAX_LINE_GAP = 2;
+
+/** Split camelCase / snake_case identifier boundaries into spaces so a
+ * requirement term that surfaces only inside an identifier
+ * (`unclosedFenceStart`, `MAX_COMMENT_BYTES`) is visible to the `\b`-bounded
+ * term match. Runs on one source line and, with `termMatchRegExp`, on the
+ * term list itself. */
+function splitIdentifierSegments(text: string): string {
+  return text
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Za-z0-9])_([A-Za-z0-9])/g, "$1 $2");
+}
+
+/** The term-match alternation for `enforcementPredicateFound`: every term in
+ * its raw form (the historical bare-word match on the raw line) plus its
+ * segmented form (`sourceSha` → "source Sha") for the segmented line view,
+ * so compound identifiers match their spaced segments too. Deduplicated;
+ * bounded by the extractor's own term cap. */
+function termMatchRegExp(terms: readonly string[]): RegExp {
+  const alternatives: string[] = [];
+  for (const term of terms) {
+    if (typeof term !== "string" || term === "") continue;
+    const raw = escapeRegExp(term);
+    if (!alternatives.includes(raw)) alternatives.push(raw);
+    const segmented = escapeRegExp(splitIdentifierSegments(term)).replace(/ /g, "\\s+");
+    if (!alternatives.includes(segmented)) alternatives.push(segmented);
+  }
+  return new RegExp(`\\b(?:${alternatives.join("|")})\\b`, "i");
+}
+
+/** #1566 blocker: the part of a BLANKED predicate line the linkage check
+ * reads. A conditional/loop/switch keyword yields its parenthesized
+ * condition (first `if(`/`while(`/`for(`/`switch(` with a balanced close);
+ * throw/assert/match/comparison/ternary shapes have no separate body, so
+ * the whole blanked line stands. Reading the condition alone is what keeps
+ * an identifier that only appears in the conditional BODY — or in a string
+ * or comment, which the blanked view has already removed — from certifying
+ * a link it does not participate in. */
+function governingPredicateText(blankedLine: string): string {
+  const keyword = /\b(?:if|while|for|switch)\s*\(/.exec(blankedLine);
+  if (keyword === null) return blankedLine;
+  const open = keyword.index + keyword[0].length - 1;
+  let depth = 0;
+  for (let index = open; index < blankedLine.length; index += 1) {
+    const ch = blankedLine[index];
+    if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return blankedLine.slice(open + 1, index);
+    }
+  }
+  return blankedLine.slice(open + 1);
+}
+
+/** #1566 blocker: the local identifiers one source line BINDS — read on the
+ * #1347 BLANKED code view, so a declaration written inside a comment or a
+ * string cannot bind — and restricted to the DECLARATIONS THAT CARRY THE
+ * REQUIREMENT'S TERM: a line may bind several identifiers
+ * (`const sourceSha = ctx.sourceSha; const marker = true;`), and a nearby
+ * predicate may only link through the term-bearing declaration's bound
+ * name, never through an unrelated sibling's. A declarator is term-bearing
+ * when the term matches its LHS (including a destructuring key that is
+ * renamed away: `fenceStart: openAt` still carries "fence") or its
+ * initializer, on the raw or the segment-split view. In a destructuring
+ * list a term riding a SPECIFIC entry (its key or its bound name) anchors
+ * only that entry's binding — a sibling binding never links. Binding
+ * names: plain `const`/`let`/`var` declarations and single-level
+ * destructuring (`const { a, b: c } =`, `const [x, y = 1] =`; rename and
+ * default included, so the binding name survives). Everything else binds
+ * nothing: an object-property entry (`sourceSha: ctx.sourceSha`), a bare
+ * expression. The split-line predicate rule links a predicate to such a
+ * declaration whose bound name the predicate's governing expression uses;
+ * an unestablishable link fails closed to the historical same-line rule. */
+const MAX_BOUND_IDENTIFIERS = 8;
+const BOUND_IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
+
+function topLevelIndex(text: string, ch: string): number {
+  let depth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const current = text[index];
+    if (current === "(" || current === "[" || current === "{") depth += 1;
+    else if (current === ")" || current === "]" || current === "}") depth -= 1;
+    else if (current === ch && depth === 0) return index;
+  }
+  return -1;
+}
+
+function topLevelEqualsIndex(text: string): number {
+  let depth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const current = text[index];
+    if (current === "(" || current === "[" || current === "{") depth += 1;
+    else if (current === ")" || current === "]" || current === "}") depth -= 1;
+    else if (current === "=" && depth === 0 && text[index + 1] !== "=" && text[index - 1] !== "="
+      && text[index - 1] !== "<" && text[index - 1] !== ">" && text[index + 1] !== ">") return index;
+  }
+  return -1;
+}
+
+function boundNamesFromLhs(lhs: string): Array<{ key: string | null; name: string }> {
+  const trimmed = lhs.trim();
+  if (BOUND_IDENTIFIER_RE.test(trimmed)) return [{ key: null, name: trimmed }];
+  const list = /^\{([\s\S]*)\}$/.exec(trimmed) ?? /^\[([\s\S]*)\]$/.exec(trimmed);
+  if (list === null) return [];
+  const entries: Array<{ key: string | null; name: string }> = [];
+  for (const part of list[1]!.split(",")) {
+    const name = (part.includes(":") ? part.slice(part.indexOf(":") + 1) : part).split("=")[0]!.trim().replace(/^\.\.\./, "");
+    if (!BOUND_IDENTIFIER_RE.test(name)) continue;
+    const key = part.includes(":") ? part.slice(0, part.indexOf(":")).trim() : null;
+    if (!entries.some((entry) => entry.name === name)) entries.push({ key, name });
+  }
+  return entries;
+}
+
+function boundTermBearingIdentifiers(blankedLine: string, termRe: RegExp): string[] {
+  const out: string[] = [];
+  for (const keyword of blankedLine.matchAll(/\b(?:const|let|var)\b/g)) {
+    if (out.length >= MAX_BOUND_IDENTIFIERS) return out;
+    const statementStart = keyword.index + keyword[0].length;
+    const semi = topLevelIndex(blankedLine.slice(statementStart), ";");
+    const statement = blankedLine.slice(statementStart, semi === -1 ? blankedLine.length : statementStart + semi);
+    // Split the declarator list at top-level commas: destructuring braces
+    // and call parens hold their commas above depth 0, so `const { a, b: c }
+    // = f(x, y)` stays one declarator while `const a = x, b = y` splits.
+    const declarators: string[] = [];
+    let depth = 0;
+    let current = "";
+    for (const ch of statement) {
+      if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+      else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
+      if (ch === "," && depth === 0) {
+        declarators.push(current);
+        current = "";
+        continue;
+      }
+      current += ch;
+    }
+    declarators.push(current);
+    for (const declarator of declarators) {
+      if (out.length >= MAX_BOUND_IDENTIFIERS) break;
+      const eq = topLevelEqualsIndex(declarator);
+      if (eq === -1) continue;
+      const lhs = declarator.slice(0, eq);
+      const init = declarator.slice(eq + 1);
+      const names = boundNamesFromLhs(lhs);
+      if (names.length === 0) continue;
+      // A term that rides a SPECIFIC entry (its destructuring key or its
+      // bound name) anchors only that entry's binding. A term that rides
+      // only the SHARED initializer anchors a binding only when the
+      // declarator is unambiguous — with several sibling bindings the
+      // initializer cannot say which one carries the requirement, so the
+      // declarator links nothing (fail closed, #1566 review).
+      const initTermBearing = termRe.test(init) || termRe.test(splitIdentifierSegments(init));
+      const termBearingEntries = names.filter((entry) =>
+        entry.key !== null
+          ? termRe.test(entry.key) || termRe.test(splitIdentifierSegments(entry.key))
+            || termRe.test(entry.name) || termRe.test(splitIdentifierSegments(entry.name))
+          : termRe.test(entry.name) || termRe.test(splitIdentifierSegments(entry.name)));
+      const linkable = termBearingEntries.length > 0
+        ? termBearingEntries
+        : initTermBearing && names.length === 1
+          ? names
+          : [];
+      for (const entry of linkable) {
+        if (out.length >= MAX_BOUND_IDENTIFIERS) break;
+        if (!out.includes(entry.name)) out.push(entry.name);
+      }
+    }
+  }
+  return out;
+}
+
 export function enforcementPredicateFound(
   locations: readonly TraceLocation[],
   terms: readonly string[],
   cache: FileTextCache,
 ): boolean {
   if (terms.length === 0) return true;
-  const termRe = new RegExp(`\\b(?:${terms.map(escapeRegExp).join("|")})\\b`, "i");
+  const termRe = termMatchRegExp(terms);
   for (const loc of locations) {
     const lines = cache.lines(loc.file);
     const signals = cache.predicateSignals(loc.file);
     if (lines === null || signals === null || loc.line > lines.length) continue;
+    const views = cache.codeViews(loc.file);
+    if (views === null) continue;
     const window = windowLines(lines, loc.line, PREDICATE_WINDOW_RADIUS);
     const windowSignals = windowLines(signals, loc.line, PREDICATE_WINDOW_RADIUS);
-    for (const [index, line] of window.entries()) {
-      if (windowSignals[index] !== true) continue;
-      if (termRe.test(line)) return true;
+    const blankedWindow = windowLines(views.blanked, loc.line, PREDICATE_WINDOW_RADIUS);
+    const termLineIndexes: number[] = [];
+    for (const [index, rawLine] of window.entries()) {
+      if (termRe.test(rawLine) || termRe.test(splitIdentifierSegments(rawLine))) termLineIndexes.push(index);
+    }
+    if (termLineIndexes.length === 0) continue;
+    // Bindings are per term line, read from the BLANKED view (a declaration
+    // in a comment or a string cannot bind) and restricted to the
+    // term-bearing declarations, computed once: the split-line link below is
+    // the only consumer.
+    const boundByTermLine = new Map<number, string[]>();
+    for (const termIndex of termLineIndexes) {
+      const bound = boundTermBearingIdentifiers(blankedWindow[termIndex] ?? "", termRe);
+      if (bound.length > 0) boundByTermLine.set(termIndex, bound);
+    }
+    for (const [index, signal] of windowSignals.entries()) {
+      if (signal !== true) continue;
+      // Historical rule: the term and the predicate on the SAME line.
+      if (termLineIndexes.includes(index)) return true;
+      // #1566 blocker: a NEARBY predicate only counts when the term line
+      // binds a local identifier that the predicate's GOVERNING EXPRESSION
+      // references — read on the blanked view, so a mention in a string, a
+      // comment, or a conditional body cannot certify a link. Co-occurrence
+      // alone proves nothing: an unrelated comparison two lines from a
+      // term-bearing copy line stays `unverifiable` (fail closed).
+      const governing = governingPredicateText(blankedWindow[index] ?? "");
+      const linked = termLineIndexes.some((termIndex) => {
+        if (Math.abs(termIndex - index) > TERM_PREDICATE_MAX_LINE_GAP) return false;
+        const bound = boundByTermLine.get(termIndex);
+        if (bound === undefined) return false;
+        return bound.some((name) => new RegExp(`\\b${escapeRegExp(name)}\\b`).test(governing));
+      });
+      if (linked) return true;
     }
   }
   return false;
@@ -963,7 +1218,13 @@ function declaredOwnerGlobsFor(text: string, ownership: readonly RequirementOwne
  * anti-copy core once the lexical half is gone). A citation that is neither a
  * declared owner nor carries the requirement's vocabulary still fails, so
  * the boundary does not become fail-open; the lexical check is unchanged for
- * every other shape (including the documented empty-terms skip). */
+ * every other shape (including the documented empty-terms skip).
+ *
+ * #1566: owner-matched citations never fall through to the proximity-
+ * relaxed lexical path below — the owner rule's predicate-on-the-cited-line
+ * is the whole anti-copy core there, and a neighbouring comparison within
+ * the relaxed term/predicate gap must not rescue a copy-only cited line in
+ * a declared owner file. Only non-owner citations take the lexical path. */
 function enforcementPredicateSatisfied(
   validLocations: readonly TraceLocation[],
   terms: readonly string[],
@@ -973,6 +1234,8 @@ function enforcementPredicateSatisfied(
   if (ownerGlobs.length > 0) {
     const ownerCitations = validLocations.filter((loc) => citationMatchesPatterns(loc, ownerGlobs));
     if (ownerCitations.length > 0 && citedLinePredicateFound(ownerCitations, cache)) return true;
+    const nonOwnerCitations = validLocations.filter((loc) => !citationMatchesPatterns(loc, ownerGlobs));
+    return enforcementPredicateFound(nonOwnerCitations, terms, cache);
   }
   return enforcementPredicateFound(validLocations, terms, cache);
 }
@@ -2413,8 +2676,11 @@ export interface RequirementTraceRepairOutcome {
   /** #1504: why the standalone pass was invoked or suppressed —
    * `no_native_loop_repair` (tools-off / no native-loop repair attempt for
    * this artifact), `native_loop_no_trace_claims` (the loop's repair produced
-   * no mergeable trace claims), or `native_loop_repair_merged_claims`
-   * (suppressed). Enum-validated, never provider text. */
+   * no mergeable trace claims), `native_loop_repair_merged_claims`
+   * (suppressed: the loop's merge completed the repair), or
+   * `native_loop_repair_left_unresolved` (the loop's merge left unresolved
+   * repair targets, so the bounded fallback recovered). Enum-validated, never
+   * provider text. */
   invocation_reason?: string;
   /** #1504: the first attempt's serialization-failure class when the single
    * bounded retry fired — `empty` (HTTP success, no extractable content) or
@@ -2422,6 +2688,16 @@ export interface RequirementTraceRepairOutcome {
   first_failure_class?: string | null;
   /** #1504: whether the one bounded serialization retry was used. */
   serialization_retry?: boolean;
+  /** #1502 follow-up: whether the one bounded validator-feedback retry fired
+   * (the pass's returned claims were deterministically rejected and the model
+   * was asked once to fix the citations). Shares the pass's one-retry budget
+   * with the serialization retry — at most one retry of either class fires. */
+  validation_retried?: boolean;
+  /** #1502 follow-up: the first attempt's per-id deterministic rejection
+   * labels (joined "; ", sanitized and capped) when the validation retry
+   * fired; absent otherwise. Diagnostics only — the labels are the
+   * validator's own note enums, never model prose. */
+  validation_rejections?: Record<string, string>;
   /** #1145: present when the native loop's own continuation ran or was
    * skipped (absent for runs where no probe fired at all). */
   continuation?: TraceGapContinuationSummary;
