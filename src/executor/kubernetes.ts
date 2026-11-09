@@ -120,7 +120,6 @@ import { EXECUTION_REQUEST_ENV_KEY, EXECUTION_RESULT_ENV_KEY } from "./local.js"
 import type { KubernetesExecutorSpec } from "../config/instance-config.js";
 import {
   UNSPECIFIED_REFUSAL_CODE,
-  WORKER_CREDENTIAL_REFUSAL_CODES,
   isClosedRefusalCode,
   type ProjectedWorkerCredential,
   type WorkerCredentialResolution,
