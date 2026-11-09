@@ -115,6 +115,35 @@ export type ReviewAttestationReasonCode = (typeof REVIEW_ATTESTATION_REASON_CODE
  * 64-hex SHA-256, the shapes the engine's own revision guard accepts). */
 const ATTESTATION_HEAD_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
+/** The conclusion/reason pairs the decision table can emit, keyed by every
+ * reason code (the `Record` type makes adding a code without an entry a
+ * compile error). The parser accepts only these pairs: a valid reason code
+ * under an unrelated conclusion — `approved` with `request_changes`, for
+ * instance — is a malformed attestation, never an approval (#1580 review
+ * fix). */
+export const REVIEW_ATTESTATION_CONCLUSION_REASONS: Readonly<
+  Record<ReviewAttestationReasonCode, readonly ReviewAttestationConclusion[]>
+> = {
+  native_approval_submitted: ["approved"],
+  request_changes: ["blocked"],
+  required_checks_incomplete: ["incomplete"],
+  coverage_incomplete: ["incomplete"],
+  approval_withheld: ["incomplete"],
+  advisory_only: ["incomplete"],
+  not_published: ["incomplete"],
+  superseded_head: ["incomplete"],
+  run_crashed: ["unavailable"],
+  model_unavailable: ["unavailable"],
+  degraded_no_evidence: ["unavailable"],
+  no_verdict: ["unavailable"],
+  native_approval_failed: ["unavailable"],
+  native_submission_failed: ["unavailable"],
+  native_approval_unbound: ["incomplete"],
+  publication_failed: ["unavailable"],
+  head_unknown: ["unavailable"],
+  skipped: ["skipped"],
+};
+
 export interface ReviewAttestation {
   conclusion: ReviewAttestationConclusion;
   reason_code: ReviewAttestationReasonCode;
@@ -256,7 +285,9 @@ export function serializeReviewAttestation(attestation: ReviewAttestation): stri
  * 40/64-hex git object id (the shapes the engine's own revision guard
  * accepts), other conclusions may pin "" for an unprovable head, and any
  * other token is refused — a non-SHA value can never be read as a head
- * binding. */
+ * binding. The conclusion/reason pair must also be one the decision table
+ * can emit: a valid reason code under an unrelated conclusion is refused.
+ * */
 export function parseReviewAttestation(value: unknown): ReviewAttestation | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
@@ -264,6 +295,11 @@ export function parseReviewAttestation(value: unknown): ReviewAttestation | null
     || !(REVIEW_ATTESTATION_CONCLUSIONS as readonly string[]).includes(record.conclusion)) return null;
   if (typeof record.reason_code !== "string"
     || !(REVIEW_ATTESTATION_REASON_CODES as readonly string[]).includes(record.reason_code)) return null;
+  // Coherence: the pair must be one `computeReviewAttestation` can emit.
+  // An `approved` conclusion carrying an unrelated reason code is malformed
+  // — never an approval.
+  const reasons = REVIEW_ATTESTATION_CONCLUSION_REASONS[record.reason_code as ReviewAttestationReasonCode];
+  if (!reasons.includes(record.conclusion as ReviewAttestationConclusion)) return null;
   if (typeof record.head_sha !== "string") return null;
   const headIsSha = ATTESTATION_HEAD_SHA_RE.test(record.head_sha);
   // `approved` MUST name a full exact head SHA (an unprovable head can

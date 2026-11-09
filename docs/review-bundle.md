@@ -299,7 +299,9 @@ coverage, required checks complete or unconfigured, and no degraded
   newer push superseded it, or a native REQUEST_CHANGES review landed. A
   failed publication that landed no native REQUEST_CHANGES review reads
   `unavailable`, never `blocked`. A malformed attestation refuses the whole document at parse, and a
-  refused document must be read as absent, never as approval. The consumer
+  refused document must be read as absent, never as approval. The parser accepts only
+  `conclusion`/`reason_code` pairs the decision table can emit, so a valid reason code under an
+  unrelated conclusion is refused. The consumer
   contract and the full reason-code list:
   [Verdicts and publishing](verdicts-and-publishing.md#trusted-review-attestation-1576).
 

@@ -25,6 +25,7 @@ import {
   parseReviewAttestation,
   serializeReviewAttestation,
   REVIEW_ATTESTATION_CONCLUSIONS,
+  REVIEW_ATTESTATION_CONCLUSION_REASONS,
   REVIEW_ATTESTATION_REASON_CODES,
   type ReviewAttestationSignals,
 } from "../src/publish/attestation.js";
@@ -291,6 +292,16 @@ test("#1576: serialization round-trips and the parser fails closed", () => {
     { conclusion: "approved", reason_code: "native_approval_submitted", head_sha: "HEAD" },
     { conclusion: "approved", reason_code: "native_approval_submitted", head_sha: HEAD.slice(0, 7) },
     { conclusion: "approved", reason_code: "native_approval_submitted", head_sha: `${HEAD}zz` },
+    // A valid reason code under an unrelated conclusion is a malformed
+    // attestation, never an approval (#1580 review fix).
+    { conclusion: "approved", reason_code: "request_changes", head_sha: HEAD },
+    { conclusion: "approved", reason_code: "publication_failed", head_sha: HEAD },
+    { conclusion: "approved", reason_code: "native_approval_unbound", head_sha: HEAD },
+    { conclusion: "approved", reason_code: "skipped", head_sha: HEAD },
+    { conclusion: "blocked", reason_code: "native_approval_submitted", head_sha: HEAD },
+    { conclusion: "skipped", reason_code: "native_approval_submitted", head_sha: HEAD },
+    { conclusion: "unavailable", reason_code: "native_approval_submitted", head_sha: HEAD },
+    { conclusion: "incomplete", reason_code: "run_crashed", head_sha: HEAD },
   ];
   for (const value of rejects) {
     assert.equal(parseReviewAttestation(value), null, `${JSON.stringify(value)} must be refused`);
@@ -309,6 +320,62 @@ test("#1576: serialization round-trips and the parser fails closed", () => {
   // above is a member.
   assert.ok(REVIEW_ATTESTATION_CONCLUSIONS.includes("approved"));
   assert.ok(REVIEW_ATTESTATION_REASON_CODES.includes("native_approval_submitted"));
+});
+
+test("#1576: the parser accepts only conclusion/reason pairs the table emits", () => {
+  // Every reason code is keyed (the Record type enforces this at compile
+  // time; asserted here for runtime drift protection).
+  for (const code of REVIEW_ATTESTATION_REASON_CODES) {
+    const conclusions = REVIEW_ATTESTATION_CONCLUSION_REASONS[code];
+    assert.ok(conclusions.length > 0, `${code} carries at least one conclusion`);
+    for (const conclusion of conclusions) {
+      assert.ok(REVIEW_ATTESTATION_CONCLUSIONS.includes(conclusion), `${code} → ${conclusion} is in the vocabulary`);
+    }
+  }
+  // A sweep over the signal space: every attestation computeReviewAttestation
+  // emits must parse back — no emitted pair may be unreachable by the parser.
+  const verdicts = ["approve", "request_changes", ""] as const;
+  const requiredChecks = ["complete", "incomplete", "none", undefined] as const;
+  const statuses = ["published", "superseded", "failed", undefined] as const;
+  const natives = [
+    undefined,
+    { event: "APPROVE", submitted: true },
+    { event: "APPROVE", submitted: false },
+    { event: "APPROVE", submitted: true, fellBack: true },
+    { event: "REQUEST_CHANGES", submitted: true },
+    { event: "REQUEST_CHANGES", submitted: false },
+    { event: "COMMENT", submitted: true },
+  ] as const;
+  const flagCombos = [
+    {},
+    { crashed: true },
+    { reviewProduced: false },
+    { modelUnavailable: true },
+    { degraded: true },
+  ] as const;
+  for (const flags of flagCombos) {
+    for (const verdict of verdicts) {
+      for (const requiredChecksState of requiredChecks) {
+        for (const status of statuses) {
+          for (const native of natives) {
+            for (const headSha of [HEAD, ""]) {
+              const signals: ReviewAttestationSignals = { ...flags, verdict, headSha };
+              if (requiredChecksState !== undefined) signals.requiredChecks = requiredChecksState;
+              if (status !== undefined) {
+                signals.publication = native === undefined ? { status } : { status, native };
+              }
+              const a = attest(signals);
+              assert.deepEqual(
+                parseReviewAttestation(JSON.parse(serializeReviewAttestation(a))),
+                a,
+                `${JSON.stringify(a)} must round-trip`,
+              );
+            }
+          }
+        }
+      }
+    }
+  }
 });
 
 function bundleBase(overrides: Partial<ReviewBundleInput> = {}): ReviewBundleInput {

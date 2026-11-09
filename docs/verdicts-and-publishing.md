@@ -78,7 +78,7 @@ The action writes a `review-attestation` step output: single-line JSON with `con
 
 Downstream merge automation must:
 
-1. Read `steps.<review-step>.outputs.review-attestation` and parse it as JSON. A missing or unparseable value means no attestation. Never read it as approval.
+1. Read `steps.<review-step>.outputs.review-attestation` and parse it as JSON. A missing or unparseable value means no attestation. Never read it as approval. The attestation parser is fail-closed: `head_sha` must be a full 40/64-hex git object id for `approved` (or empty for a non-approved conclusion), and the `conclusion`/`reason_code` pair must be one the decision table can emit — a valid reason code under an unrelated conclusion is refused.
 2. Treat the review as a trusted approval only when `conclusion` is `approved` and `head_sha` equals the current PR head.
 3. Stop on `blocked`. Read `incomplete`, `unavailable`, and `skipped` as "no approval", not as defects: each names its cause through `reason_code`. `unavailable` is never a merge signal, even when the review's own verdict was a block whose publication failed.
 
