@@ -40,6 +40,7 @@ import { isIncompleteReason, renderFindingsSummary, severityCountsLabel, MAX_REV
 import { resolveReviewTriageDecision } from "../model/triage.js";
 import type { HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { MAX_FEEDBACK_COMMENT_IDS } from "../platform/publish-api.js";
+import { FORGE_COMMENT_MAX_BYTES } from "../platform/comment-ceiling.js";
 import type { CollaboratorPermissionReading, NativeReviewComment, NativeReviewRequest, NativeReviewSurface, PublishPlatformApi } from "../platform/publish-api.js";
 
 export type PublishMode = "comment" | "review_comment" | "review_verdict" | "review_blockers";
@@ -388,8 +389,12 @@ export function resolveIncompleteReason(input: {
  * prose was the one unbounded surface, so the aggregate guard at the
  * publish boundary trims only that prose and discloses the trim in the
  * body. A verbose review can therefore never starve the complete
- * action-owned obligations document out of the published body. */
-export const MAX_PUBLISHED_BODY_BYTES = 65_536;
+ * action-owned obligations document out of the published body.
+ *
+ * The bound is derived from the single shared ceiling declaration
+ * (`FORGE_COMMENT_MAX_BYTES` in `src/platform/comment-ceiling.ts`, #1569)
+ * rather than redeclared here. */
+export const MAX_PUBLISHED_BODY_BYTES = FORGE_COMMENT_MAX_BYTES;
 
 /** #1557: thrown by `buildPublishedBody` when the aggregate ceiling cannot be
  * honored because nothing is trimmable — the action-owned blocks and tail

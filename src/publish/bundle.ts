@@ -29,6 +29,7 @@
  */
 import { redactText } from "../context/redact.js";
 import { pyCodepointSlice } from "../platform/py.js";
+import { FORGE_COMMENT_MAX_BYTES } from "../platform/comment-ceiling.js";
 import { findingIdentityFromRecord } from "../outcomes/identity.js";
 import { boundedIdListWithTotal, sourceIdCount } from "../context/id-lists.js";
 import {
@@ -68,8 +69,14 @@ export function isReviewBundleState(value: unknown): value is ReviewBundleState 
 /** Hard ceiling on the whole serialized document (UTF-8 bytes). The bundle
  * rides a step output and a run-directory file; nothing in it is worth more
  * than this, and a consumer can rely on the cap without trusting the
- * producer. */
-export const REVIEW_BUNDLE_MAX_BYTES = 65_536;
+ * producer.
+ *
+ * The bound is derived from the single shared forge comment-ceiling
+ * declaration (`FORGE_COMMENT_MAX_BYTES` in
+ * `src/platform/comment-ceiling.ts`, #1569) rather than redeclared here:
+ * the bundle rides inside the published comment body, so its ceiling must
+ * stay exactly the comment ceiling (#1558). */
+export const REVIEW_BUNDLE_MAX_BYTES = FORGE_COMMENT_MAX_BYTES;
 
 /** Findings admitted before the `findings_truncated` disclosure fires. */
 export const REVIEW_BUNDLE_MAX_FINDINGS = 100;

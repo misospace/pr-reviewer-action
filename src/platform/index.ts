@@ -25,6 +25,7 @@ export { pullRequestHeadRef, pullHeadRefspec, type AcquisitionPlatform } from ".
 export { GITHUB_API_BASE, LINKED_SOURCE_GITHUB_BASE, parsePlatformBaseUrl, PlatformUrlError } from "./urls.js";
 export { validateEndpoint } from "./endpoint.js";
 export { ciAttemptTimeoutMs, isTransientCiRead } from "./bounded.js";
+export { FORGE_COMMENT_MAX_BYTES } from "./comment-ceiling.js";
 export { ForgejoEnrichClient, GitHubEnrichClient, validEnrichEndpoint } from "./enrich.js";
 export { SemanticFixtureAdapter, semanticFixtureDir } from "./semantic-fixture.js";
 export { isPublicAddress, parseIpLiteral } from "./ip-policy.js";

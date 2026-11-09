@@ -41,6 +41,7 @@ import { buildCloneCredential } from "../ingress/clone-credentials.js";
 import { toFetchCredentials } from "../acquisition/git-env.js";
 import { MirrorCache } from "../acquisition/mirror.js";
 import { derivePrStateReading, type PrStateReading } from "../platform/pr.js";
+import { FORGE_COMMENT_MAX_BYTES } from "../platform/comment-ceiling.js";
 import { DEFAULT_MANAGED_MARKER } from "../context/pr-thread.js";
 import { authorityReadingFromPayload, type AuthorityReading } from "../precheck/comment-authority.js";
 import type { FollowUpForgeAdapter } from "../ingress/followup-host.js";
@@ -71,14 +72,15 @@ function webOriginFromApiBase(apiBaseUrl: string): string {
   return base;
 }
 
-/** The forge comment-body ceiling (#1558): 65,536 bytes — the same bound
- * the GitHub App ingress client enforces before its write
- * (`MAX_COMMENT_BYTES` in `src/ingress/github-app-client.ts`), and the
- * bound the review body is guarded against in #1554. It is applied as a
- * BYTE bound, counting UTF-8 bytes, the stricter measure: a body over
- * the ceiling is not trimmed by the forge, it is REFUSED, and a refused
- * publication loses the whole result. */
-export const FORGE_COMMENT_MAX_BYTES = 65_536;
+/** The forge comment-body ceiling, re-exported from its single home
+ * (`src/platform/comment-ceiling.ts`, #1569): the same bound the GitHub
+ * App ingress client enforces before its write (`MAX_COMMENT_BYTES` in
+ * `src/ingress/github-app-client.ts`), and the bound the review body is
+ * guarded against in #1554. It is applied as a BYTE bound, counting UTF-8
+ * bytes, the stricter measure: a body over the ceiling is not trimmed by
+ * the forge, it is REFUSED, and a refused publication loses the whole
+ * result. */
+export { FORGE_COMMENT_MAX_BYTES };
 
 /** Assemble `marker + fence + payload + fence` with the fence chosen
  * LONGER than any backtick run inside the payload, so hostile review
