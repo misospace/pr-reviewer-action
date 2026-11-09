@@ -647,8 +647,11 @@ test("#1488 canary (negative twin): when the probe's trace-only repair and the s
     assert.equal(state.grounded, true, "the trace-only turn saw the evidence the bounded repair reads produced");
 
     // The standalone fallback fired (the recovery path for a zero-claim
-    // in-conversation repair) but also returned no claims.
-    assert.equal(state.standaloneRequests, 1, "the standalone repair pass must fire when the native-loop repair merged nothing");
+    // in-conversation repair) but also returned no claims — twice: the
+    // well-formed no-claims response is a rejected response with validator
+    // feedback wired, so the bounded retry re-asked for the omitted ids and
+    // this scripted model omitted them again.
+    assert.equal(state.standaloneRequests, 2, "first attempt plus the validator-feedback retry for the omitted ids");
     const persisted = JSON.parse(readFileSync(join(runDir, "ai-output.json"), "utf8")) as {
       requirement_trace_repair?: { attempted: boolean; outcome: string; route?: string; invocation_reason?: string; claims: number; missing_ids: string[] };
     };
