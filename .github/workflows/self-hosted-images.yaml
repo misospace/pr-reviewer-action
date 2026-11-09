@@ -1,0 +1,116 @@
+name: Self-hosted images
+
+# #1584: publish the #738 controller and worker runtime images to GHCR for
+# the self-hosted operator canary. Manual dispatch from protected `main`
+# only: the job fails closed on any other ref, the publish job never runs
+# from a pull request, and the only credentials in play are the workflow's
+# own GITHUB_TOKEN (contents: read, packages: write). This workflow is
+# entirely separate from the Action release pipeline (release-please /
+# manual-release): it writes no tags, no releases, and no dist artifacts.
+#
+# Both targets are built from ONE checked-out commit so the controller and
+# worker images always share a runtime/protocol revision. Tags are
+# immutable-by-convention sha-<commit> tags; no floating `latest` and no
+# release tag is pushed in this scope.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-hosted-images
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    # workflow_dispatch can be started from any branch that carries this
+    # file; the canary contract requires protected `main` (a reviewed,
+    # protected commit), so anything else refuses here.
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout the dispatch commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Normalize the GHCR image owner
+        # GHCR image paths must be lowercase; build the tags from the
+        # lowercased owner so an uppercase owner name can never produce a
+        # tag the registry would reject.
+        run: echo "GHCR_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Provenance attestations are disabled so the pushed artifact is a
+      # plain single manifest: the digest reported below is then exactly
+      # the digest `docker pull` / Kubernetes resolves for operators
+      # pinning `image@sha256:...`.
+      - name: Build and push controller (linux/amd64)
+        id: controller
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: deploy/images/Dockerfile
+          target: controller
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-controller:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push worker (linux/amd64)
+        id: worker
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: deploy/images/Dockerfile
+          target: worker
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-worker:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Record published digests
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          CONTROLLER_DIGEST: ${{ steps.controller.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Fail loudly on a missing digest instead of printing a bare
+          # image reference in the summary.
+          [ -n "$CONTROLLER_DIGEST" ] || { echo "controller digest is empty" >&2; exit 1; }
+          [ -n "$WORKER_DIGEST" ] || { echo "worker digest is empty" >&2; exit 1; }
+          {
+            echo "## Self-hosted images published (#1584 canary)"
+            echo
+            echo "Source commit: \`${SOURCE_SHA}\` (both images built from this one commit)."
+            echo
+            echo "| image | digest reference |"
+            echo "|---|---|"
+            echo "| controller | \`ghcr.io/${GHCR_OWNER}/pr-reviewer-controller@${CONTROLLER_DIGEST}\` |"
+            echo "| worker | \`ghcr.io/${GHCR_OWNER}/pr-reviewer-worker@${WORKER_DIGEST}\` |"
+            echo
+            echo "Pin the Helm controller image with the controller reference and the"
+            echo "instance-config \`kubernetes.image\` with the worker reference; see"
+            echo "\`deploy/images/README.md\` and \`docs/self-hosted-deployment.md\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Surface the exact references in the job log as well.
+          echo "controller: ghcr.io/${GHCR_OWNER}/pr-reviewer-controller@${CONTROLLER_DIGEST}"
+          echo "worker:     ghcr.io/${GHCR_OWNER}/pr-reviewer-worker@${WORKER_DIGEST}"

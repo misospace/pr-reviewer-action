@@ -243,3 +243,79 @@ test("chart keeps dependency artifacts loadable and gitignored; CI gates render"
   // (SC2251: errexit is skipped): negative assertions use if/exit.
   assert.doesNotMatch(workflow, /^\s*!\s/gm);
 });
+
+test("#1584 image-publishing workflow: dispatch-only on main, least privilege, immutable tags", () => {
+  const path = ".github/workflows/self-hosted-images.yaml";
+  const workflow = read(path);
+  const parsed = parse(workflow) as {
+    on: { workflow_dispatch: unknown };
+    permissions: { contents: string };
+    jobs: Record<string, {
+      if?: string;
+      permissions: { contents: string; packages: string };
+      steps: { uses?: string; run?: string; with?: Record<string, unknown> }[];
+    }>;
+  };
+
+  // Manual dispatch only — never a pull_request or push trigger: the
+  // publish job must have no surface reachable from untrusted PR code.
+  assert.ok(parsed.on, "triggers must parse");
+  assert.deepEqual(Object.keys(parsed.on), ["workflow_dispatch"]);
+  // Top-level and job permissions are least-privileged; only the publish
+  // job gains packages: write.
+  assert.deepEqual(parsed.permissions, { contents: "read" });
+  const jobs = Object.entries(parsed.jobs);
+  assert.equal(jobs.length, 1);
+  const [jobName, job] = jobs[0]!;
+  // Canary source is protected main, fail closed everywhere else.
+  assert.match(job.if ?? "", /github\.ref == 'refs\/heads\/main'/);
+  assert.deepEqual(job.permissions, { contents: "read", packages: "write" });
+
+  const script = job.steps.map((step) => step.run ?? "").join("\n");
+  // Immutable tags only: the sha-<commit> tag, no floating latest and no
+  // release tag in the initial scope.
+  const tags = job.steps.flatMap(
+    (step) => (typeof step.with?.["tags"] === "string" ? [step.with["tags"] as string] : []),
+  );
+  assert.equal(tags.length, 2);
+  for (const tag of tags) {
+    assert.match(tag, /:sha-\$\{\{ github\.sha \}\}$/);
+    // GHCR paths must be lowercase: the owner is normalized once, not
+    // interpolated raw from the (potentially mixed-case) repository owner.
+    assert.match(tag, /ghcr\.io\/\$\{\{ env\.GHCR_OWNER \}\}\/pr-reviewer-(controller|worker):/);
+  }
+  assert.match(workflow, /GHCR_OWNER=\$\{GITHUB_REPOSITORY_OWNER,,\}/);
+  assert.doesNotMatch(workflow, /:latest|:v[0-9]/);
+  // Both targets from the one Dockerfile, single-arch canary.
+  for (const target of ["controller", "worker"]) {
+    assert.ok(
+      job.steps.some(
+        (step) => step.with?.["target"] === target && step.with?.["push"] === true,
+      ),
+      `the ${target} target must be built and pushed`,
+    );
+    assert.match(workflow, new RegExp(`ghcr\\.io/\\$\\{\\{ env\\.GHCR_OWNER \\}\\}/pr-reviewer-${target}`));
+  }
+  assert.equal(job.steps.filter((step) => step.with?.["platforms"] === "linux/amd64").length, 2);
+  // Digests land in the run summary for the operator's digest pinning.
+  assert.match(script, /GITHUB_STEP_SUMMARY/);
+  for (const target of ["controller", "worker"]) {
+    assert.match(
+      workflow,
+      new RegExp(`${target.toUpperCase()}_DIGEST: \\$\\{\\{ steps\\.${target}\\.outputs\\.digest \\}\\}`),
+    );
+  }
+  // Checkout never hands its token to the build, and GHCR login uses the
+  // workflow's own GITHUB_TOKEN — no other credential surface exists.
+  const checkout = job.steps.find((step) => step.uses?.includes("actions/checkout"));
+  assert.equal((checkout?.with ?? {})["persist-credentials"], false);
+  const login = job.steps.find((step) => step.uses?.includes("docker/login-action"));
+  assert.equal((login?.with ?? {})["registry"], "ghcr.io");
+  assert.equal((login?.with ?? {})["password"], "${{ secrets.GITHUB_TOKEN }}");
+  // Every action is pinned by commit SHA (40 hex chars), matching the
+  // repository-wide pinning convention.
+  for (const uses of job.steps.map((step) => step.uses ?? "")) {
+    if (uses) assert.match(uses, /@[0-9a-f]{40}( # |$)/, `${uses} must be pinned by commit SHA`);
+  }
+  void jobName;
+});

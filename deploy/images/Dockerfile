@@ -10,10 +10,11 @@
 # in, so the runtime stages need NO node_modules.
 
 # ── build stage ────────────────────────────────────────────────────────
-# Base image is pinned to the major tag; production builds must resolve
-# this to a sha256 digest (renovate/dependabot digest pinning) before the
-# image is published to a registry.
-FROM node:26-slim AS build
+# Base image pinned by sha256 digest (the node:26-slim multi-arch index,
+# resolved at publish time and kept current by Renovate digest pinning) so
+# a rebuilt image is reproducible from the same source commit. A mutable
+# tag must never be published from.
+FROM node:26-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS build
 WORKDIR /build
 
 # Dependency lock first for layer caching.
@@ -32,8 +33,9 @@ RUN npm run build
 # ── shared runtime base ────────────────────────────────────────────────
 # `git` is required by the worker engine inside the acquired workspace
 # and kept in both targets for image parity. Lists are cleaned and
-# recommendations dropped to keep the surface minimal.
-FROM node:26-slim AS runtime
+# recommendations dropped to keep the surface minimal. Same digest pin as
+# the build stage (one base revision for the whole file).
+FROM node:26-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*

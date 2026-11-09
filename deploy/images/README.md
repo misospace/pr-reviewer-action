@@ -18,6 +18,29 @@ docker build -f deploy/images/Dockerfile --target controller -t <registry>/pr-re
 docker build -f deploy/images/Dockerfile --target worker      -t <registry>/pr-reviewer-worker:<tag> .
 ```
 
+For the operator canary, the dedicated GitHub Actions workflow publishes
+both images to GHCR from one checked-out commit:
+
+- workflow: `.github/workflows/self-hosted-images.yaml` — manual
+  `workflow_dispatch`, dispatched from the `main` branch (the job refuses
+  any other ref; branch protection itself is repository configuration);
+- published refs:
+  `ghcr.io/misospace/pr-reviewer-controller:sha-<commit>` and
+  `ghcr.io/misospace/pr-reviewer-worker:sha-<commit>`, both tagged with the
+  source commit and reported as exact `image@sha256:...` references in the
+  run summary;
+- platform: `linux/amd64` only in the initial canary scope;
+- permissions: the job runs with `contents: read` + `packages: write` and
+  logs into GHCR with `GITHUB_TOKEN`; image building never shares a job
+  with the Action release pipeline and never runs from pull-request code;
+- no `latest` and no release tag is pushed by this workflow.
+
+**Package visibility prerequisite:** a newly created GHCR package starts
+private. Before the cluster can pull, either make the package public
+(package settings → visibility) or create a registry pull secret with a
+token that can read it, and attach it to the chart's namespace and the
+worker ServiceAccount.
+
 Both images are self-contained: `pg` is bundled into the single esbuild
 output `dist/index.js`, so neither image carries `node_modules`. The
 `controller` target exposes webhook `8080` and admin `8081`; the admin
@@ -27,17 +50,20 @@ listener binds loopback by default and the chart sets
 
 ## Pinning policy
 
-- The Dockerfile bases are pinned to the `node:24-slim` major tag with a
-  digest comment. **Before publishing a release image, resolve both base
-  images to a sha256 digest** (`docker pull node:24-slim` +
-  `docker image inspect`) and replace the tag with the digest, so a
-  rebuilt image is byte-reproducible from the same source commit.
-- Published images should be tagged with the release tag (`vX.Y.Z`, from
-  `.release-please-manifest.json` — the same stamp `PR_REVIEWER_BUILD_STAMP=release`
-  bakes into the bundle) **and** pushed by digest. Consumers (the chart's
-  `workerExecutor.image`, instance-config `kubernetes.image` fields)
-  SHOULD pin `@sha256:...` digests: a tag is mutable, a digest is the
-  exact bytes the controller will execute.
+- The Dockerfile bases are pinned **by sha256 digest** (the `node:26-slim`
+  multi-arch index digest, identical in both `FROM` lines), so a rebuilt
+  image is byte-reproducible from the same source commit. Renovate digest
+  pinning keeps the pin current; never publish from a mutable tag.
+- The canary workflow tags each published image with the source commit
+  (`sha-<commit>`) and reports its digest. Consumers — the chart's
+  `controller.controllers.main.containers.main.image` (repository + tag
+  fields) and the
+  instance config's `kubernetes.image` field for the worker — SHOULD pin
+  `@sha256:...` digests taken from the run summary: a tag is mutable, a
+  digest is the exact bytes the controller will execute.
+- Release-tagged images (`vX.Y.Z`, from `.release-please-manifest.json`) are
+  out of the initial canary scope; when added, they should follow the same
+  digest-reporting pattern rather than replacing it.
 - The release stamp is not baked by the Dockerfile itself; release
   pipelines should run the build with `PR_REVIEWER_BUILD_STAMP=release`
   available (CI-driven) or accept the unstamped dev bundle for local use.
