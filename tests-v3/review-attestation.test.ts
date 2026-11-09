@@ -245,6 +245,15 @@ test("#1576: crash, request_changes and skip attest unavailable, blocked and ski
     headSha: HEAD,
     publication: { status: "superseded" },
   }), { conclusion: "blocked", reason_code: "request_changes", head_sha: HEAD });
+  // An ADVISORY publication of a request_changes verdict also blocks: only a
+  // FAILED publication can prove the block never landed (#1580 review fix).
+  // The `blocked` row in docs/verdicts-and-publishing.md names this case.
+  assert.deepEqual(attest({
+    reviewProduced: true,
+    verdict: "request_changes",
+    headSha: HEAD,
+    publication: { status: "published" },
+  }), { conclusion: "blocked", reason_code: "request_changes", head_sha: HEAD });
   assert.deepEqual(attest({ reviewProduced: false, headSha: HEAD }), {
     conclusion: "skipped", reason_code: "skipped", head_sha: HEAD,
   });

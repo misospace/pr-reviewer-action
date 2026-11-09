@@ -69,8 +69,8 @@ The action writes a `review-attestation` step output: single-line JSON with `con
 | Conclusion | Meaning |
 | --- | --- |
 | `approved` | A commit-bound native APPROVE review actually submitted for the exact head, with complete coverage, required checks complete or unconfigured, and no degraded bypass. This is the ONLY conclusion that certifies a trusted approval. |
-| `blocked` | The final non-degraded verdict is `request_changes` and the block stands: publication was not attempted, or a native REQUEST_CHANGES review landed. When publication failed and no native REQUEST_CHANGES review landed, the run reads `unavailable` instead (`native_submission_failed` when the API rejected that submission, `publication_failed` when the failure left no native record). |
-| `incomplete` | A review ran, but its conclusion is not trustworthy for this head: the publish boundary withheld the approval, the APPROVE landed through the body-only fallback without a `commit_id` (unbound to the reviewed head), coverage was partial, a newer push superseded the publication, or publication carried no verdict-bearing native event (advisory-only). |
+| `blocked` | The final non-degraded verdict is `request_changes` and the block stands: publication was not attempted, the publication landed without a native REQUEST_CHANGES event (an advisory publication), a newer push superseded the publication, or a native REQUEST_CHANGES review landed. When publication failed and no native REQUEST_CHANGES review landed, the run reads `unavailable` instead (`native_submission_failed` when the API rejected that submission, `publication_failed` when the failure left no native record). |
+| `incomplete` | An `approve` review ran, but its conclusion is not trustworthy for this head: the publish boundary withheld the approval, the APPROVE landed through the body-only fallback without a `commit_id` (unbound to the reviewed head), coverage was partial, a newer push superseded the publication, or publication carried no verdict-bearing native event (advisory-only). |
 | `unavailable` | The review capability itself failed: a crash, the model-unavailable notice, a degraded zero-evidence fallback, no verdict, a failed native submission, or a failed publication that landed no native REQUEST_CHANGES review. |
 | `skipped` | No review ran (precheck skip, follow-up consumption, plain no-op). A carried verdict belongs to the earlier run's attestation and never promotes a skip. |
 
@@ -80,7 +80,7 @@ Downstream merge automation must:
 
 1. Read `steps.<review-step>.outputs.review-attestation` and parse it as JSON. A missing or unparseable value means no attestation. Never read it as approval.
 2. Treat the review as a trusted approval only when `conclusion` is `approved` and `head_sha` equals the current PR head.
-3. Stop on `blocked`. Read `incomplete`, `unavailable`, and `skipped` as "no approval", not as defects: each names its cause through `reason_code`.
+3. Stop on `blocked`. Read `incomplete`, `unavailable`, and `skipped` as "no approval", not as defects: each names its cause through `reason_code`. `unavailable` is never a merge signal, even when the review's own verdict was a block whose publication failed.
 
 Signal decision (#1576): the attestation is deliberately a step output plus a bundle field, not a new check-run or commit status. A new status check would surprise branch protection the moment an operator marks checks required, and a failing check with file annotations would read as a fake code defect. The job-level signal is unchanged: the step exit code plus the opt-in `fail-on-request-changes` gate. The attestation adds the distinction a green job alone can never make.
 
