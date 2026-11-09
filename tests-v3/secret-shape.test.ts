@@ -16,13 +16,22 @@ test("SECRET_SHAPE redacts every declared credential shape", () => {
   const cases: [string, string][] = [
     // openai-style sk- token
     ["sk-abcdefghijklmnop", "[REDACTED]"],
-    // github classic + fine-grained tokens
+    // github tokens: every gh[pousr]_ prefix alternative
     ["ghp_ABCDEFGHIJKLMNOPQRSTUV", "[REDACTED]"],
+    ["gho_ABCDEFGHIJKLMNOPQRSTUV", "[REDACTED]"],
+    ["ghu_ABCDEFGHIJKLMNOPQRSTUV", "[REDACTED]"],
+    ["ghs_ABCDEFGHIJKLMNOPQRSTUV", "[REDACTED]"],
+    ["ghr_ABCDEFGHIJKLMNOPQRSTUV", "[REDACTED]"],
+    // github fine-grained token
     ["github_pat_ABCDEFGHIJKLMNOPQRST", "[REDACTED]"],
     // gitlab personal access token
     ["glpat-abcdefghijklmnop", "[REDACTED]"],
-    // slack-style xox[baprs]- token
+    // slack tokens: every xox[baprs]- prefix alternative
     ["xoxb-0123456789", "[REDACTED]"],
+    ["xoxa-0123456789", "[REDACTED]"],
+    ["xoxp-0123456789", "[REDACTED]"],
+    ["xoxr-0123456789", "[REDACTED]"],
+    ["xoxs-0123456789", "[REDACTED]"],
     // AWS access key id
     ["AKIAIOSFODNN7EXAMPLE", "[REDACTED]"],
     // google api key
