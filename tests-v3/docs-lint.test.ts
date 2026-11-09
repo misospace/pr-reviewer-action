@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
+import { linesInsideCodeFences } from "./helpers.js";
 
 function loadV2Map(): Map<string, string> {
   const contract = parse(readFileSync("contracts/action-v3.yml", "utf8")) as {
@@ -98,4 +99,88 @@ test("README.md and docs/*.md use kebab-case contract ids, not v2 snake_case", (
   }
 
   assert.deepEqual(violations, [], `found v2 snake_case input/output ids in docs:\n${violations.join("\n")}`);
+});
+
+// #1568: merge/rebase accumulation left three duplicated module bullets in
+// docs/architecture/code-map.md (`src/enforcement/`, `src/publish/`,
+// `src/requirements/trace-repair.ts`), and the copies contradicted each other
+// on current semantics. The guard below fails the suite when a bullet lead-in
+// occurs more than once, and pins the #1505 enforcement wording so a stale
+// copy cannot silently win.
+const BULLET_LEAD_IN = /^\s*-\s+\*\*(.+?)\*\*/;
+
+// The lead-in is compared normalized, so a copy that renders the same module
+// differently (indented, or without the backticks) still counts as the same
+// bullet instead of slipping past the guard.
+function normalizeLeadIn(lead: string): string {
+  return lead.replace(/[`*]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function bulletLeadInOccurrences(doc: string): Map<string, number[]> {
+  const occurrences = new Map<string, number[]>();
+  const fenced = linesInsideCodeFences(doc);
+  doc.split("\n").forEach((line, idx) => {
+    if (fenced.has(idx)) return;
+    const lead = BULLET_LEAD_IN.exec(line)?.[1];
+    if (lead === undefined) return;
+    const key = normalizeLeadIn(lead);
+    const seen = occurrences.get(key);
+    if (seen) seen.push(idx + 1);
+    else occurrences.set(key, [idx + 1]);
+  });
+  return occurrences;
+}
+
+// The bullet is a single ~20 KB line, so a head-only excerpt would hide the
+// offending clause. Quote a window around the anchor the assertion is about.
+function windowAround(text: string, anchor: string, radius = 200): string {
+  const at = text.indexOf(anchor);
+  if (at < 0) return text.slice(0, 300) + (text.length > 300 ? "..." : "");
+  const start = Math.max(0, at - radius);
+  const end = Math.min(text.length, at + anchor.length + radius);
+  return `${start > 0 ? "..." : ""}${text.slice(start, end)}${end < text.length ? "..." : ""}`;
+}
+
+test("docs/architecture/code-map.md has no duplicated module bullets and states the #1505 enforcement semantics", () => {
+  const file = join("docs", "architecture", "code-map.md");
+  const text = readFileSync(file, "utf8");
+  const lines = text.split("\n");
+  const occurrences = bulletLeadInOccurrences(text);
+
+  const dupes: string[] = [];
+  for (const [lead, nums] of occurrences) {
+    if (nums.length > 1) dupes.push(`${lead} (lines ${nums.join(", ")})`);
+  }
+  assert.deepEqual(dupes, [], `duplicated module bullet lead-in(s) in ${file}:\n${dupes.join("\n")}`);
+
+  // The guard must bite: a duplicated lead-in — even one that renders the
+  // module differently — has to be reported, or a stale copy could return.
+  const synthetic = ["- **`src/enforcement/`** — first copy", "  - **`src/enforcement/`** — indented copy"].join("\n");
+  assert.equal(
+    bulletLeadInOccurrences(synthetic).get("src/enforcement/")?.length,
+    2,
+    "the duplicate detector must report a repeated module bullet lead-in",
+  );
+
+  const enforcementLines = occurrences.get("src/enforcement/") ?? [];
+  assert.equal(
+    enforcementLines.length,
+    1,
+    `expected exactly one \`src/enforcement/\` bullet in ${file}, found ${enforcementLines.length} (line(s): ${enforcementLines.join(", ") || "none"})`,
+  );
+  const enforcementLine = enforcementLines[0] ?? 0;
+  const enforcement = enforcementLine > 0 ? (lines[enforcementLine - 1] ?? "") : "";
+
+  assert.ok(
+    enforcement.includes("only for an `unmet` (confirmed-negative) FORCING row"),
+    `the \`src/enforcement/\` bullet must scope enforcement to an \`unmet\` (confirmed-negative) FORCING row; got: ${windowAround(enforcement, "FORCING row")}`,
+  );
+  assert.ok(
+    !enforcement.includes("ANY unresolved FORCING row"),
+    `the \`src/enforcement/\` bullet must not claim enforcement for ANY unresolved FORCING row; got: ${windowAround(enforcement, "ANY unresolved FORCING row")}`,
+  );
+  assert.ok(
+    enforcement.includes("withholds the trusted native approve at the publish boundary"),
+    `the \`src/enforcement/\` bullet must state that an unresolved row withholds the trusted native approve at the publish boundary; got: ${windowAround(enforcement, "publish boundary")}`,
+  );
 });
