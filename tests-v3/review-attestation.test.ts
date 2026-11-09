@@ -284,10 +284,27 @@ test("#1576: serialization round-trips and the parser fails closed", () => {
     { conclusion: "approved", reason_code: "looks_good", head_sha: HEAD },
     { conclusion: "approved", reason_code: "native_approval_submitted", head_sha: 7 },
     { conclusion: "APPROVED", reason_code: "native_approval_submitted", head_sha: HEAD },
+    // A non-SHA head_sha is refused: a malformed token must never be read
+    // as a head binding, least of all for `approved`.
+    { conclusion: "approved", reason_code: "native_approval_submitted", head_sha: "" },
+    { conclusion: "approved", reason_code: "native_approval_submitted", head_sha: "not-a-sha" },
+    { conclusion: "approved", reason_code: "native_approval_submitted", head_sha: "HEAD" },
+    { conclusion: "approved", reason_code: "native_approval_submitted", head_sha: HEAD.slice(0, 7) },
+    { conclusion: "approved", reason_code: "native_approval_submitted", head_sha: `${HEAD}zz` },
   ];
   for (const value of rejects) {
     assert.equal(parseReviewAttestation(value), null, `${JSON.stringify(value)} must be refused`);
   }
+  // A real 40-hex head round-trips, and the empty head (unprovable) parses
+  // as a valid attestation of a non-approved conclusion.
+  assert.deepEqual(
+    parseReviewAttestation(JSON.parse(serializeReviewAttestation(a))),
+    a,
+  );
+  assert.deepEqual(
+    parseReviewAttestation(JSON.parse(serializeReviewAttestation(attest({ crashed: true })))),
+    { conclusion: "unavailable", reason_code: "run_crashed", head_sha: "" },
+  );
   // The vocabularies are closed and every unit-test conclusion/reason pair
   // above is a member.
   assert.ok(REVIEW_ATTESTATION_CONCLUSIONS.includes("approved"));
@@ -337,6 +354,7 @@ test("#1576: the attestation rides every bundle state and the parser guards it",
     { conclusion: "success", reason_code: "native_approval_submitted", head_sha: HEAD },
     { conclusion: "approved", reason_code: "native_approval_submitted" },
     "approved",
+    { conclusion: "approved", reason_code: "native_approval_submitted", head_sha: "not-a-sha" },
   ]) {
     const doc = JSON.parse(buildReviewBundle(bundleBase({ attestation: approved })));
     doc.attestation = bogus;

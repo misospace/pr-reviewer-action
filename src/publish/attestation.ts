@@ -111,6 +111,10 @@ export const REVIEW_ATTESTATION_REASON_CODES = [
 ] as const;
 export type ReviewAttestationReasonCode = (typeof REVIEW_ATTESTATION_REASON_CODES)[number];
 
+/** A bindable attestation head: a full git object id (40-hex SHA-1 or
+ * 64-hex SHA-256, the shapes the engine's own revision guard accepts). */
+const ATTESTATION_HEAD_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
 export interface ReviewAttestation {
   conclusion: ReviewAttestationConclusion;
   reason_code: ReviewAttestationReasonCode;
@@ -248,7 +252,11 @@ export function serializeReviewAttestation(attestation: ReviewAttestation): stri
  * the bundle's `attestation` section): exact vocabulary, string types, or
  * null. Anything this refuses must be treated as absent — a malformed
  * attestation must never be read as any conclusion, least of all
- * `approved`. */
+ * `approved`. The `head_sha` is shape-checked: `approved` must pin a full
+ * 40/64-hex git object id (the shapes the engine's own revision guard
+ * accepts), other conclusions may pin "" for an unprovable head, and any
+ * other token is refused — a non-SHA value can never be read as a head
+ * binding. */
 export function parseReviewAttestation(value: unknown): ReviewAttestation | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
@@ -257,6 +265,11 @@ export function parseReviewAttestation(value: unknown): ReviewAttestation | null
   if (typeof record.reason_code !== "string"
     || !(REVIEW_ATTESTATION_REASON_CODES as readonly string[]).includes(record.reason_code)) return null;
   if (typeof record.head_sha !== "string") return null;
+  const headIsSha = ATTESTATION_HEAD_SHA_RE.test(record.head_sha);
+  // `approved` MUST name a full exact head SHA (an unprovable head can
+  // never carry it); other conclusions may pin "" for a crash whose head
+  // was never proven. Any other shape is a malformed attestation.
+  if (record.conclusion === "approved" ? !headIsSha : !(headIsSha || record.head_sha === "")) return null;
   return {
     conclusion: record.conclusion as ReviewAttestationConclusion,
     reason_code: record.reason_code as ReviewAttestationReasonCode,
