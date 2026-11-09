@@ -1808,6 +1808,10 @@ export async function submitNativeReview(
   // flag, and the caller's event-aware failure reporting — must run for it
   // too; letting the throw escape into publishReview's outer catch would
   // skip the fallback attempt and lose the attempted-event context.
+  // "Failed submission" is only what the client knows: a transport error can
+  // also arrive AFTER the server accepted the primary review, so the retry
+  // carries the same double-submit window as the existing `ok: false` retry
+  // semantics — no dedup is introduced here.
   let created: { ok: boolean; error?: string; reviewId?: number | string };
   try {
     created = await api.createReview(request);
