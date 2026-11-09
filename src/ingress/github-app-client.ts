@@ -41,6 +41,7 @@
 // seam does not own, fails closed instead of overwriting a foreign comment or
 // duplicating the managed output beside it.
 import { PlatformRequestError, requestJson, type FetchLike, type RequestOptions } from "../platform/http.js";
+import { FORGE_COMMENT_MAX_BYTES } from "../platform/comment-ceiling.js";
 import { ownerMatchesIdentity, type TrustedOwnerIdentity } from "../platform/owner-identity.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
 import { requireCapability } from "./capabilities.js";
@@ -77,9 +78,10 @@ const MAX_PAGES = 20;
 const COMMENT_PAGE_SIZE = 100;
 const MAX_COMMENT_PAGES = 10;
 
-/** GitHub's own comment body ceiling; anything larger is refused rather than
- * posted and rejected. */
-const MAX_COMMENT_BYTES = 65_536;
+/** The forge comment body ceiling, imported from its single home
+ * (`src/platform/comment-ceiling.ts`, #1569); anything larger is refused
+ * locally rather than posted and rejected by the forge. */
+const MAX_COMMENT_BYTES = FORGE_COMMENT_MAX_BYTES;
 const MAX_MARKER_CHARS = 512;
 const MAX_CONTEXT_CHARS = 100;
 const MAX_REQUEST_BYTES = 262_144;
