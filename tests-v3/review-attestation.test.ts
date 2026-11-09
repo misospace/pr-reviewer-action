@@ -376,6 +376,25 @@ test("#1576: the parser accepts only conclusion/reason pairs the table emits", (
       }
     }
   }
+  // The coverage branch is driven only by `reviewResult`/`incompleteReason`/
+  // `partialCoverage`, which the grid above does not vary — sweep it
+  // directly so its emitted pair is round-tripped too.
+  for (const reviewResult of ["", "clean", "findings", "partial"]) {
+    for (const incompleteReason of [undefined, "none", "execution", "requirement_trace", "both"]) {
+      for (const partialCoverage of [undefined, true]) {
+        const signals: ReviewAttestationSignals = { ...cleanApprove, verdict: "approve" };
+        if (reviewResult !== "") signals.reviewResult = reviewResult;
+        if (incompleteReason !== undefined) signals.incompleteReason = incompleteReason;
+        if (partialCoverage !== undefined) signals.partialCoverage = partialCoverage;
+        const a = attest(signals);
+        assert.deepEqual(
+          parseReviewAttestation(JSON.parse(serializeReviewAttestation(a))),
+          a,
+          `${JSON.stringify(a)} must round-trip`,
+        );
+      }
+    }
+  }
 });
 
 function bundleBase(overrides: Partial<ReviewBundleInput> = {}): ReviewBundleInput {
