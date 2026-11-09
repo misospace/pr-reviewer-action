@@ -13,6 +13,7 @@ import {
   renderPartialCoverageNotice,
   resolveCleanupFlag,
   sanitizeForPublication,
+  submitNativeReview,
 } from "../src/publish/publish.js";
 import { cleanupManagedReviews, retireManagedInlineComments, resolveSupersededThreads, hideSupersededManagedReviews } from "../src/publish/cleanup.js";
 import { buildComments, prescriptionKey, prescriptionKeyDigest, FEEDBACK_AFFORDANCE, INLINE_DISCLAIMER } from "../src/publish/inline-findings.js";
@@ -706,6 +707,55 @@ test("approval submission failure includes remediation guidance", async () => {
   assert.equal(result.status, "failed");
   assert.equal(result.error, "native approval failed for #42");
   for (const line of APPROVAL_FAILURE_GUIDANCE) assert.ok(result.messages.includes(line));
+});
+
+// #1581: a createReview that THROWS is the same failed submission as an
+// `ok: false` return. submitNativeReview converts the throw into a result
+// record (with `fellBack` and the error), so publishReview's event-aware
+// failure handling runs instead of the throw escaping to its outer catch.
+test("#1581: a throwing createReview becomes a fellBack failure record", async () => {
+  const api = new MockPublishApi();
+  api.createReview = async (request) => { api.submitted.push(request); throw new Error("socket hang up"); };
+  const result = await submitNativeReview(api, { event: "REQUEST_CHANGES", body: "review body", commitId: HEAD, comments: [] });
+  assert.deepEqual(result, { ok: false, inlineCount: 0, fellBack: true, error: "socket hang up" });
+  assert.equal(api.submitted.length, 2, "the body-only fallback is still attempted after the throw");
+  assert.equal(api.submitted[1]!.commit_id, undefined, "the fallback attempt is not commit-bound");
+});
+
+test("#1581: a throwing primary submission lands the plain fallback with fellBack", async () => {
+  const api = new MockPublishApi();
+  let first = true;
+  api.createReview = async (request) => {
+    api.submitted.push(request);
+    if (first) { first = false; throw new Error("anchor raced a push"); }
+    return { ok: true, reviewId: 77 };
+  };
+  const result = await submitNativeReview(api, { event: "COMMENT", body: "review body", commitId: HEAD, comments: [] });
+  assert.deepEqual(result, { ok: true, inlineCount: 0, fellBack: true, reviewId: 77 });
+  assert.equal(api.submitted[0]!.commit_id, HEAD, "the primary attempt was commit-bound");
+  assert.equal(api.submitted[1]!.commit_id, undefined, "the landed fallback is not commit-bound");
+});
+
+test("#1581: a blocked native review whose attempts throw fails through the record, not the outer catch", async () => {
+  const api = new MockPublishApi();
+  api.createReview = async (request) => { api.submitted.push(request); throw new Error("transport exploded"); };
+  const result = await publishReview(input({ mode: "review_verdict", verdict: "request_changes" }), api, { diffText: DIFF });
+  assert.equal(result.status, "failed");
+  assert.equal(result.error, "native review submission failed: transport exploded",
+    "the thrown message rides the record's error into the event-aware failure path");
+  assert.ok(result.messages.some((line) => line.includes("falling back to plain review")),
+    "the fallback attempt is disclosed in the step messages");
+  assert.equal(api.submitted.length, 2, "both attempts went through the API");
+});
+
+test("#1581: a native approval whose attempts throw still fails closed with guidance", async () => {
+  const api = new MockPublishApi();
+  api.createReview = async (request) => { api.submitted.push(request); throw new Error("boom"); };
+  const result = await publishReview(input({ mode: "review_verdict" }), api, { diffText: "" });
+  assert.equal(result.status, "failed");
+  assert.equal(result.error, "native approval failed for #42");
+  for (const line of APPROVAL_FAILURE_GUIDANCE) assert.ok(result.messages.includes(line));
+  assert.deepEqual(api.reviews, [], "no review lands — a throw must never become a false approval");
 });
 
 test("publication head boundary skips superseded review and fails closed when unknown", async () => {
