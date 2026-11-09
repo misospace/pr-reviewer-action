@@ -108,7 +108,7 @@ import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedRevie
 import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
-import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
+import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, finalTraceFailureLog, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { classifyTraceRepairRows, createTraceGapProbe, traceGapContinuationSummary, type TraceRepairRowClassification } from "../requirements/trace-gap-probe.js";
 import { MAX_TRACE_REPAIR_CLAIMS, harnessEvidenceDigest, resolveStandaloneTraceRepairInvocation, runRequirementTraceRepairPass, traceRepairOutcomeSummary, traceRepairRouteForArtifact } from "../requirements/trace-repair.js";
 import { pyJsonDumps } from "../evidence/pyjson.js";
@@ -2726,6 +2726,11 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   ws.write("requirement-trace.json", new Uint8Array(0));
   if (requirementTraceResult !== null && requirementTraceResult.applied) {
     ws.write("requirement-trace.json", Buffer.from(`${pyJsonDumps(requirementTraceResult.trace as never)}\n`, "utf8"));
+    // #1575: the persisted JSON is not uploaded by our ordinary PR workflow.
+    // Make the FINAL post-repair validator outcome diagnosable without more
+    // model calls. This logs only fixed code labels and safe requirement ids.
+    const finalFailure = finalTraceFailureLog(requirementTraceResult.trace);
+    if (finalFailure !== "") log(finalFailure);
   }
 
   // ── Outputs + step summary (review.sh tail) ──────────────────────────

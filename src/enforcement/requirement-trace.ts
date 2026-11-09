@@ -145,6 +145,39 @@ export interface RequirementTraceArtifact {
 
 export const ARTIFACT_VERSION = 1;
 
+/** #1575: bounded action-owned final rejection evidence in ordinary job logs.
+ * Never include repository text, model reasons, citation paths, or dynamic
+ * group names; only fixed validator diagnostic codes and shape-checked IDs. */
+export const MAX_TRACE_FINAL_DIAGNOSTIC_ROWS = 8;
+const FINAL_TRACE_DIAGNOSTIC_NOTES = new Set([
+  "not-traced-by-reviewer", "trace-repair-ran-no-claims", "disposition-invalid",
+  "missing-reason", "non-code-reported-unmet", "out-of-scope-reported-unmet",
+  "distributed-enforcement-group-uncovered",
+  "distributed-test-group-uncovered", "distributed-test-location-uncovered",
+  "distributed-topology-overflow", "enforcement-location-copies-without-comparing",
+  "downgraded-no-valid-enforcement-location", "downgraded-no-valid-test-location",
+  "structural-citation-line-out-of-range", "structural-proof-unconfirmed",
+]);
+
+export function finalTraceFailureLog(trace: RequirementTraceArtifact): string {
+  if (!trace.incomplete) return "";
+  const unresolved = trace.rows.filter((row) => row.disposition === "unverifiable" || row.disposition === "unmet");
+  if (unresolved.length === 0) return "";
+  const detail = unresolved.slice(0, MAX_TRACE_FINAL_DIAGNOSTIC_ROWS).map((row) => {
+    const id = /^req-[a-z0-9]{1,64}$/.test(row.requirement_id) ? row.requirement_id : "invalid-id";
+    const proof = [
+      "runtime_behavior", "structural_state", "test_required",
+      "distributed", "external_state", "documentation", "not_applicable",
+    ].includes(row.proof) ? row.proof : "unknown-proof";
+    const codes = [...new Set(row.notes.map((note) => note.split(":")[0] ?? "")
+      .filter((code) => FINAL_TRACE_DIAGNOSTIC_NOTES.has(code)))].slice(0, 4);
+    return `${id}:${row.disposition}/${proof}[${codes.join(",") || "no-diagnostic-code"}]`;
+  });
+  const omitted = unresolved.length - detail.length;
+  return `requirement trace: final unresolved=${unresolved.length}/${trace.rows.length}: ${detail.join("; ")}${omitted > 0 ? `; omitted=${omitted}` : ""}`;
+}
+
+
 function capReason(value: unknown): string {
   if (typeof value !== "string") return "";
   const text = value.trim();
