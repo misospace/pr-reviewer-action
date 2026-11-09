@@ -151,7 +151,8 @@ export const ARTIFACT_VERSION = 1;
 export const MAX_TRACE_FINAL_DIAGNOSTIC_ROWS = 8;
 const FINAL_TRACE_DIAGNOSTIC_NOTES = new Set([
   "not-traced-by-reviewer", "trace-repair-ran-no-claims", "disposition-invalid",
-  "missing-reason", "distributed-enforcement-group-uncovered",
+  "missing-reason", "non-code-reported-unmet", "out-of-scope-reported-unmet",
+  "distributed-enforcement-group-uncovered",
   "distributed-test-group-uncovered", "distributed-test-location-uncovered",
   "distributed-topology-overflow", "enforcement-location-copies-without-comparing",
   "downgraded-no-valid-enforcement-location", "downgraded-no-valid-test-location",
