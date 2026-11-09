@@ -1763,7 +1763,10 @@ export function evaluateApprovalGuardrails(options: {
  * Submit the native review bound to the reviewed commit, attaching inline
  * comments when present. If the platform rejects the JSON payload (e.g. an
  * anchor raced a new push), fall back to the body-only review so publishing
- * never breaks because of inline findings or commit binding. #1249: the
+ * never breaks because of inline findings or commit binding. #1581: a
+ * rejected payload and a thrown transport/API failure are the same failed
+ * submission — both produce a result record (with `fellBack` and the error),
+ * so the caller's event-aware failure handling never sees a raw throw. #1249: the
  * body-only fallback can carry a `fallbackBody` — under a non-strict verdict
  * policy the findings table is not part of the native review body, so the
  * plain retry would otherwise drop every finding the inline comments carried.
@@ -1799,11 +1802,31 @@ export async function submitNativeReview(
   if (inlineCount > 0) {
     request.comments = options.comments;
   }
-  const created = await api.createReview(request);
+  // #1581: a createReview that THROWS is a failed submission exactly like an
+  // `ok: false` return (the #1518 pattern at the inline-findings site). The
+  // record-based flow below — the body-only fallback retry, the `fellBack`
+  // flag, and the caller's event-aware failure reporting — must run for it
+  // too; letting the throw escape into publishReview's outer catch would
+  // skip the fallback attempt and lose the attempted-event context.
+  // "Failed submission" is only what the client knows: a transport error can
+  // also arrive AFTER the server accepted the primary review, so the retry
+  // carries the same double-submit window as the existing `ok: false` retry
+  // semantics — no dedup is introduced here.
+  let created: { ok: boolean; error?: string; reviewId?: number | string };
+  try {
+    created = await api.createReview(request);
+  } catch (error) {
+    created = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
   if (created.ok) {
     return { ok: true, inlineCount, fellBack: false, ...(created.reviewId !== undefined ? { reviewId: created.reviewId } : {}) };
   }
-  const plain = await api.createReview({ body: options.fallbackBody ?? options.body, event: options.event });
+  let plain: { ok: boolean; error?: string; reviewId?: number | string };
+  try {
+    plain = await api.createReview({ body: options.fallbackBody ?? options.body, event: options.event });
+  } catch (error) {
+    plain = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
   if (plain.ok) {
     return { ok: true, inlineCount, fellBack: true, ...(plain.reviewId !== undefined ? { reviewId: plain.reviewId } : {}) };
   }
