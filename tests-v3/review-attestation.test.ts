@@ -5,7 +5,10 @@
  * true native APPROVE -> `approved`; native REQUEST_CHANGES -> `blocked`;
  * skip -> `skipped`; native API failure -> `unavailable`) and the guards
  * that make `approved` unreachable without a landed native approval on a
- * proven exact head.
+ * proven exact head. An APPROVE that landed through the body-only
+ * plain-review fallback (#1249) omitted `commit_id` and binds no head —
+ * it reads `incomplete`/`native_approval_unbound`, never `approved`
+ * (#1580 review fix).
  *
  * The integration half drives the real `actionMain()` entry against the
  * same mocked GitHub/model seam as `review-bundle.test.ts` and reads both
@@ -13,6 +16,7 @@
  * `attestation` section) back, asserting they agree. */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,6 +71,18 @@ test("#1576: without a landed native APPROVE an approve verdict never reaches ap
       ...cleanApprove,
       publication: { status: "published", native: { event: "COMMENT", submitted: true } },
     }, "incomplete", "approval_withheld"],
+    // An APPROVE that landed through the body-only plain-review fallback
+    // (#1249) omitted `commit_id`: it binds no head, so it certifies
+    // nothing for this exact head — never `approved` (#1580 review fix).
+    ["unbound-approval", {
+      ...cleanApprove,
+      publication: { status: "published", native: { event: "APPROVE", submitted: true, fellBack: true } },
+    }, "incomplete", "native_approval_unbound"],
+    // A failed unbound APPROVE attempt stays the submission failure.
+    ["submit-failed-unbound", {
+      ...cleanApprove,
+      publication: { status: "failed", native: { event: "APPROVE", submitted: false, fellBack: true } },
+    }, "unavailable", "native_approval_failed"],
     // A native APPROVE submission that FAILED is unavailable, not silently
     // incomplete and never approved.
     ["submit-failed", {
@@ -305,7 +321,13 @@ function verdictBody(findings: unknown[] = []): string {
   });
 }
 
-async function startGithubMock(overrides?: { failReviews?: boolean }): Promise<{
+async function startGithubMock(overrides?: {
+  failReviews?: boolean;
+  /** Rejects only the COMMIT-BOUND submission (a body containing
+   * `commit_id`), so the publish path lands on the body-only plain-review
+   * fallback (#1249) — the submission that certifies no head. */
+  commitBoundReviewsFail?: boolean;
+}): Promise<{
   url: string;
   requests: CapturedRequest[];
   reviewEvents: string[];
@@ -322,6 +344,11 @@ async function startGithubMock(overrides?: { failReviews?: boolean }): Promise<{
         if (overrides?.failReviews === true) {
           res.statusCode = 500;
           res.end(JSON.stringify({ message: "review submission rejected" }));
+          return;
+        }
+        if (overrides?.commitBoundReviewsFail === true && body.includes("commit_id")) {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ message: "commit-bound review rejected" }));
           return;
         }
         try {
@@ -393,6 +420,10 @@ function actionEnv(paths: {
   modelUrl: string;
   publishMode: string;
   omitPrNumber?: boolean;
+  toolMode?: string;
+  /** Configures the fallback tier on the SAME model server (routed by the
+   * request's `model` field) and fails the primary over after one attempt. */
+  fallback?: boolean;
 }): NodeJS.ProcessEnv {
   return {
     PATH: process.env.PATH,
@@ -417,11 +448,19 @@ function actionEnv(paths: {
     "INPUT_AI-MODEL": "m",
     "INPUT_AI-STREAM": "false",
     "INPUT_AI-API-KEY": "k",
-    "INPUT_TOOL-MODE": "off",
+    "INPUT_TOOL-MODE": paths.toolMode ?? "off",
     "INPUT_DEEP-REVIEW": "false",
     "INPUT_CI-STATUS-CHECK": "false",
     "INPUT_REREVIEW-COMMAND": "/ai-review",
     "INPUT_PUBLISH-MODE": paths.publishMode,
+    ...(paths.fallback === true ? {
+      "INPUT_AI-FALLBACK-MODEL": "fb",
+      "INPUT_AI-FALLBACK-BASE-URL": paths.modelUrl,
+      "INPUT_AI-FALLBACK-API-KEY": "k",
+      "INPUT_AI-PRIMARY-RETRIES": "0",
+      "INPUT_AI-PRIMARY-RETRY-DELAY-SEC": "0",
+      "INPUT_REVIEW-ROUTING-MODE": "off",
+    } : {}),
   };
 }
 
@@ -563,13 +602,16 @@ test("#1576: a newer push at the publication boundary attests incomplete/superse
   }
 });
 
-test("#1576: an exhausted provider attests unavailable, never approved, and never blocks as a defect (#1565)", async () => {
+test("#1576: every model route 429 attests unavailable on the notice path", async () => {
   const workspace = mkdtempSync(join(tmpdir(), "attestation-outage-workspace-"));
   const runnerTemp = mkdtempSync(join(tmpdir(), "attestation-outage-temp-"));
   const github = await startGithubMock();
   const eventPath = join(runnerTemp, "event.json");
   writeCommentEvent(eventPath, "/ai-review", true);
-  // Every model route returns HTTP 429 — the provider is exhausted.
+  // Every model route returns HTTP 429 — the provider is exhausted, so the
+  // run publishes the model-unavailable notice (on-model-failure default).
+  // This is the NOTICE path; the fallback-approved #1565 shape has its own
+  // test below.
   const model = await startMockServer((_req, _body, res) => {
     res.statusCode = 429;
     res.setHeader("Content-Type", "application/json");
@@ -584,6 +626,102 @@ test("#1576: an exhausted provider attests unavailable, never approved, and neve
     assert.equal(a!.conclusion, "unavailable");
     assert.equal(a!.reason_code, "model_unavailable");
     assert.notEqual(a!.conclusion, "approved");
+    const bundle = parseReviewBundle(outputs["review-bundle"] ?? "");
+    assert.deepEqual(bundle!.attestation, a);
+  } finally {
+    await model.close();
+    await github.close();
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+function gitInit(dir: string): void {
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "init"], { cwd: dir });
+}
+
+test("#1576: the #1565 shape - primary 429 after a zero-evidence loop, fallback advisory approve - never attests approved", async () => {
+  // The #1565 scenario end to end: the primary answers the native-loop
+  // planning turn with no tool calls (the loop records
+  // `native_loop_degraded`, zero evidence gathered), then every final
+  // verdict request to the primary hits HTTP 429 (provider exhausted). The
+  // FALLBACK supplies the authoritative `approve` verdict. The degraded gate
+  // bypass marks the run zero-evidence, the publish boundary withholds the
+  // native approval, and the attestation reads the capability failure —
+  // never `approved`, even though the run exits 0 green.
+  const workspace = mkdtempSync(join(tmpdir(), "attestation-1565-workspace-"));
+  const runnerTemp = mkdtempSync(join(tmpdir(), "attestation-1565-temp-"));
+  const github = await startGithubMock();
+  const eventPath = join(runnerTemp, "event.json");
+  writeCommentEvent(eventPath, "/ai-review", true);
+  writeFileSync(join(workspace, "README.md"), "hello\nworld\n");
+  gitInit(workspace);
+  // One model server hosts both tiers, routed by the request's `model`:
+  // the primary ("m") answers tool-bearing (native-loop) turns with a plain
+  // no-tool-call verdict and 429s every final verdict request; the fallback
+  // ("fb") always answers with the advisory approve.
+  const model = await startMockServer((_req, body, res) => {
+    const request = JSON.parse(String(body)) as { model?: string; tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (request.model === "fb") {
+      res.end(verdictBody());
+      return;
+    }
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      res.end(verdictBody());
+      return;
+    }
+    res.statusCode = 429;
+    res.end(JSON.stringify({ error: { message: "Token Plan rate limit exhausted" } }));
+  });
+  const env = actionEnv({
+    eventPath, runnerTemp, workspace,
+    githubUrl: github.url, modelUrl: model.url,
+    publishMode: "review_verdict", toolMode: "native_loop", fallback: true,
+  });
+  try {
+    const exitCode = await actionMain(env);
+    assert.equal(exitCode, 0, "the degraded fallback review still exits green (#1565)");
+    assert.ok(!github.reviewEvents.includes("APPROVE"),
+      `the withheld approval must not submit a native APPROVE: ${github.reviewEvents.join(",")}`);
+    const outputs = readOutputs(env.GITHUB_OUTPUT!);
+    const a = attestationOf(outputs);
+    assert.deepEqual(a, { conclusion: "unavailable", reason_code: "degraded_no_evidence", head_sha: HEAD });
+    const bundle = parseReviewBundle(outputs["review-bundle"] ?? "");
+    assert.deepEqual(bundle!.attestation, a);
+  } finally {
+    await model.close();
+    await github.close();
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runnerTemp, { recursive: true, force: true });
+  }
+});
+
+test("#1576: an APPROVE landed through the body-only fallback is unbound - incomplete, never approved", async () => {
+  // The publish path retries an rejected commit-bound submission as a
+  // body-only review WITHOUT `commit_id` (#1249). Such an APPROVE binds no
+  // head, so even a green publication with the exact reviewed head must
+  // attest `incomplete`/`native_approval_unbound` (#1580 review fix).
+  const workspace = mkdtempSync(join(tmpdir(), "attestation-unbound-workspace-"));
+  const runnerTemp = mkdtempSync(join(tmpdir(), "attestation-unbound-temp-"));
+  const github = await startGithubMock({ commitBoundReviewsFail: true });
+  const eventPath = join(runnerTemp, "event.json");
+  writeCommentEvent(eventPath, "/ai-review", true);
+  const model = await startMockServer((_req, _body, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody());
+  });
+  const env = actionEnv({ eventPath, runnerTemp, workspace, githubUrl: github.url, modelUrl: model.url, publishMode: "review_verdict" });
+  try {
+    const exitCode = await actionMain(env);
+    assert.equal(exitCode, 0, "the fallback submission still publishes green");
+    assert.deepEqual(github.reviewEvents, ["APPROVE"], "the unbound APPROVE did land");
+    const outputs = readOutputs(env.GITHUB_OUTPUT!);
+    assert.equal(outputs["publish-status"], "published");
+    const a = attestationOf(outputs);
+    assert.deepEqual(a, { conclusion: "incomplete", reason_code: "native_approval_unbound", head_sha: HEAD });
     const bundle = parseReviewBundle(outputs["review-bundle"] ?? "");
     assert.deepEqual(bundle!.attestation, a);
   } finally {

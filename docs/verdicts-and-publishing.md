@@ -68,13 +68,13 @@ The action writes a `review-attestation` step output: single-line JSON with `con
 
 | Conclusion | Meaning |
 | --- | --- |
-| `approved` | A native APPROVE review actually submitted for the exact head, with complete coverage, required checks complete or unconfigured, and no degraded bypass. This is the ONLY conclusion that certifies a trusted approval. |
+| `approved` | A commit-bound native APPROVE review actually submitted for the exact head, with complete coverage, required checks complete or unconfigured, and no degraded bypass. This is the ONLY conclusion that certifies a trusted approval. |
 | `blocked` | The final non-degraded verdict is `request_changes`. When publication was attempted and the native REQUEST_CHANGES submission itself was rejected, the run reads `unavailable`/`native_submission_failed` instead, mirroring a failed approval submission. |
-| `incomplete` | A review ran, but its conclusion is not trustworthy for this head: the publish boundary withheld the approval, coverage was partial, a newer push superseded the publication, or publication carried no verdict-bearing native event (advisory-only). |
+| `incomplete` | A review ran, but its conclusion is not trustworthy for this head: the publish boundary withheld the approval, the APPROVE landed through the body-only fallback without a `commit_id` (unbound to the reviewed head), coverage was partial, a newer push superseded the publication, or publication carried no verdict-bearing native event (advisory-only). |
 | `unavailable` | The review capability itself failed: a crash, the model-unavailable notice, a degraded zero-evidence fallback, no verdict, or a failed native submission (including a native APPROVE whose submission the API rejected). |
 | `skipped` | No review ran (precheck skip, follow-up consumption, plain no-op). A carried verdict belongs to the earlier run's attestation and never promotes a skip. |
 
-`reason_code` names the deterministic cause from a closed vocabulary (for example `native_approval_submitted`, `request_changes`, `approval_withheld`, `coverage_incomplete`, `degraded_no_evidence`, `model_unavailable`, `native_approval_failed`, `native_submission_failed`, `superseded_head`, `skipped`). `head_sha` is the exact commit the conclusion binds. It is empty when the run could not prove the head, and an empty head never carries `approved`.
+`reason_code` names the deterministic cause from a closed vocabulary (for example `native_approval_submitted`, `request_changes`, `approval_withheld`, `native_approval_unbound`, `coverage_incomplete`, `degraded_no_evidence`, `model_unavailable`, `native_approval_failed`, `native_submission_failed`, `superseded_head`, `skipped`). `head_sha` is the exact commit the conclusion binds. It is empty when the run could not prove the head, and an empty head never carries `approved`.
 
 Downstream merge automation must:
 

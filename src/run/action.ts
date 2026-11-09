@@ -476,8 +476,11 @@ async function runActionPipeline(
   let publishFailed = false;
   let publishStatus: "published" | "superseded" | "failed" | undefined;
   // #1576: the verdict-bearing native submission record, relayed from the
-  // publish outcome — the ONLY proof that can certify `approved`.
-  let publishNative: { event: string; submitted: boolean } | undefined;
+  // publish outcome — the ONLY proof that can certify `approved`. A
+  // `fellBack` record (the body-only plain-review fallback, #1249) landed
+  // without a `commit_id` and certifies no head — the attestation reads
+  // that flag and never attests `approved` from it.
+  let publishNative: { event: string; submitted: boolean; fellBack?: true } | undefined;
   if (shouldPublish(stage)) {
     // #590: the review→publish-environment mapping and the per-run evidence
     // fields are shared with the host-neutral platform runner (entrypoints.ts),

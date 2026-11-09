@@ -9,15 +9,18 @@
  * the run already records — never a second model call.
  *
  * The closed conclusion vocabulary:
- * - `approved`: a native APPROVE review was actually submitted for the
- *   exact reviewed head, with complete required checks, complete coverage
- *   and no degraded bypass. This is the ONLY conclusion a merge automation
- *   may treat as a trusted approval.
+ * - `approved`: a commit-bound native APPROVE review was actually submitted
+ *   for the exact reviewed head, with complete required checks, complete
+ *   coverage and no degraded bypass. This is the ONLY conclusion a merge
+ *   automation may treat as a trusted approval. A body-only fallback
+ *   submission (#1249) omits `commit_id` and is NOT bound to the reviewed
+ *   head — it can never attest `approved`.
  * - `blocked`: the final verdict is a non-degraded `request_changes` (and a
  *   native REQUEST_CHANGES review landed when publication was attempted).
  * - `incomplete`: a review ran but its conclusion is not trustworthy for
- *   this head — withheld approval, partial coverage, superseded head, or
- *   advisory-only publication.
+ *   this head — withheld approval, an approval that landed without commit
+ *   binding, partial coverage, superseded head, or advisory-only
+ *   publication.
  * - `unavailable`: the review capability itself was unavailable — a crash,
  *   an unavailable model, a degraded zero-evidence fallback, no verdict, or
  *   a failed native publication attempt.
@@ -30,8 +33,9 @@
  *   an action-owned signal the pipeline already produced (verdict,
  *   required-check state, review result, incomplete reason, degraded gate
  *   bypass, publication status and native submission result).
- * - `approved` is unreachable unless the native submission record proves an
- *   APPROVE landed for a non-empty exact head SHA.
+ * - `approved` is unreachable unless the native submission record proves a
+ *   commit-bound APPROVE landed for a non-empty exact head SHA; a body-only
+ *   fallback landing (no `commit_id`) is unbound and certifies nothing.
  * - Advisory publication (comment/review_comment modes, withheld approvals,
  *   platforms without a native review surface) can never reach `approved`.
  */
@@ -86,6 +90,10 @@ export const REVIEW_ATTESTATION_REASON_CODES = [
    * not land on the pull request, so the run attests the capability
    * failure, not a landed block. */
   "native_submission_failed",
+  /** The APPROVE landed through the body-only plain-review fallback
+   * (#1249): the request omitted `commit_id`, so the approval is not bound
+   * to the reviewed head. It certifies nothing for this exact head. */
+  "native_approval_unbound",
   /** The publication attempt failed for a non-approval cause. */
   "publication_failed",
   /** The head SHA the attestation would bind could not be proven. */
@@ -136,7 +144,9 @@ export interface ReviewAttestationSignals {
    * review surface carry verdict-bearing events). */
   publication?: {
     status: "published" | "superseded" | "failed";
-    native?: { event: string; submitted: boolean };
+    /** `fellBack` marks the body-only plain-review fallback (#1249): the
+     * event landed without a `commit_id`, so it binds no head. */
+    native?: { event: string; submitted: boolean; fellBack?: boolean };
   };
 }
 
@@ -193,6 +203,11 @@ export function computeReviewAttestation(signals: ReviewAttestationSignals): Rev
   if (native === undefined) return finish("incomplete", "advisory_only");
   if (native.event === "APPROVE" && native.submitted === true) {
     if (head === "") return finish("unavailable", "head_unknown");
+    // The body-only fallback (#1249) submitted the APPROVE WITHOUT a
+    // `commit_id`: GitHub binds such a review to whatever head is current
+    // at submission time, so it certifies nothing about THIS reviewed head.
+    // An unbound approval is never `approved` (review finding on #1580).
+    if (native.fellBack === true) return finish("incomplete", "native_approval_unbound");
     return finish("approved", "native_approval_submitted");
   }
   // A COMMENT submission on an otherwise-complete approve review is the
