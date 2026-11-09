@@ -40,6 +40,8 @@ documentationProofSource,
 DOC_SCAN_MAX_FILE_BYTES,
 PENDING_DISPOSITION,
   validateRequirementTrace,
+  finalTraceFailureLog,
+  MAX_TRACE_FINAL_DIAGNOSTIC_ROWS,
   type RequirementOwnership,
   type RequirementTraceArtifact,
 } from "../src/enforcement/requirement-trace.js";
@@ -88,6 +90,44 @@ const VALID_TEST_LOCATION = { file: "tests/real.test.ts", line: 1 };
 /** This repository's own checkout — the standards source and the shared
  * escaping seam are read from it, exactly as a review reads them at head. */
 const REPO_ROOT = resolve(__dirname, "..", "..");
+
+test("#1575: final trace diagnostics report rejection codes without untrusted content", () => {
+  const row = (id: string, notes: string[]): RequirementTraceArtifact["rows"][number] => ({
+    requirement_id: id, disposition: "unverifiable", proof: "runtime_behavior",
+    enforcement: [], test: [], reason: "SECRET_FROM_MODEL", notes,
+  });
+  const trace: RequirementTraceArtifact = {
+    version: 1, incomplete: true, errors: [], rows: [
+      row("req-a241097fa88c", [
+        "enforcement-location-copies-without-comparing",
+        "distributed-test-group-uncovered:SECRET_GROUP_NAME",
+        "provenance:SECRET_FROM_REPO",
+        "unexpected:SECRET_UNKNOWN",
+      ]),
+      row("req-!!SECRET_ID", ["downgraded-no-valid-test-location"]),
+    ],
+  };
+  const log = finalTraceFailureLog(trace);
+  assert.match(log, /final unresolved=2\/2/);
+  assert.match(log, /req-a241097fa88c:unverifiable\/runtime_behavior/);
+  assert.match(log, /enforcement-location-copies-without-comparing/);
+  assert.match(log, /distributed-test-group-uncovered/);
+  assert.match(log, /invalid-id:unverifiable\/runtime_behavior\[downgraded-no-valid-test-location\]/);
+  assert.doesNotMatch(log, /SECRET|provenance|unexpected|SECRET_GROUP_NAME/);
+  assert.equal(finalTraceFailureLog({ ...trace, incomplete: false }), "");
+  assert.equal(finalTraceFailureLog({ ...trace, rows: [], incomplete: true }), "");
+});
+
+test("#1575: final trace diagnostics cap the number of reported rows", () => {
+  const rows: RequirementTraceArtifact["rows"] = Array.from({ length: MAX_TRACE_FINAL_DIAGNOSTIC_ROWS + 2 }, (_, i) => ({
+    requirement_id: `req-${i}`, disposition: "unverifiable", proof: "test_required",
+    enforcement: [], test: [], reason: "", notes: ["not-traced-by-reviewer"],
+  }));
+  const log = finalTraceFailureLog({ version: 1, rows, incomplete: true, errors: [] });
+  assert.match(log, /omitted=2/);
+  assert.doesNotMatch(log, /req-8:/);
+  assert.match(log, /req-7:/);
+});
 
 test("validateRequirementTrace: empty ledger scope is a no-op", () => {
   const workspace = makeWorkspace();
