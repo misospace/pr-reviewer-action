@@ -15,10 +15,9 @@
  *   automation may treat as a trusted approval. A body-only fallback
  *   submission (#1249) omits `commit_id` and is NOT bound to the reviewed
  *   head — it can never attest `approved`.
- * - `blocked`: the final verdict is a non-degraded `request_changes` and no
- *   failed publication disproves the block. A publication that FAILED lands
- *   no block of its own, so it reads `unavailable` unless the native record
- *   proves a REQUEST_CHANGES review actually landed.
+ * - `blocked`: the final verdict is a non-degraded `request_changes` and a
+ *   native REQUEST_CHANGES review provably landed on the pull request —
+ *   the same positive proof `approved` requires of a native APPROVE.
  * - `incomplete`: a review ran but its conclusion is not trustworthy for
  *   this head — withheld approval, an approval that landed without commit
  *   binding, partial coverage, superseded head, or advisory-only
@@ -38,10 +37,13 @@
  * - `approved` is unreachable unless the native submission record proves a
  *   commit-bound APPROVE landed for a non-empty exact head SHA; a body-only
  *   fallback landing (no `commit_id`) is unbound and certifies nothing.
- * - `blocked` is unreachable when the publication FAILED without a proved
- *   landed native REQUEST_CHANGES review: the run attempted a block that is
- *   not known to have reached the pull request, so it attests the
- *   publication failure instead.
+ * - `blocked` is unreachable unless the native record proves a
+ *   REQUEST_CHANGES review actually landed on the pull request: a failed
+ *   publication reads `unavailable` (`native_submission_failed` when the
+ *   API rejected the submission, `publication_failed` when no native
+ *   record exists), and publication that was never attempted, withheld at
+ *   the head re-check, or landed only advisory reads `incomplete`
+ *   (`not_published`, `superseded_head`, `advisory_only`).
  * - Advisory publication (comment/review_comment modes, withheld approvals,
  *   platforms without a native review surface) can never reach `approved`.
  */
@@ -73,8 +75,8 @@ export const REVIEW_ATTESTATION_REASON_CODES = [
    * advisory comment/review_comment run, or a platform without a native
    * review surface. */
   "advisory_only",
-  /** A complete approve review was produced but publication was not
-   * attempted — nothing certifies it on the pull request. */
+  /** A complete review was produced but publication was not attempted —
+   * nothing (approval or block) certifies it on the pull request. */
   "not_published",
   /** A newer push landed at the publication boundary; the review describes
    * a head that is no longer current. */
@@ -228,9 +230,16 @@ export function computeReviewAttestation(signals: ReviewAttestationSignals): Rev
       // publication failure is the honest cause.
       return finish("unavailable", "publication_failed");
     }
-    // Publication was never attempted, or it landed: the verdict's block
-    // stands (the bundle pins the exact head; consumers compare it).
-    return finish("blocked", "request_changes");
+    // No landed native block: `blocked` requires the same positive proof
+    // `approved` does — a native REQUEST_CHANGES review that actually
+    // reached the pull request (#1580 review fix). Publication that was
+    // never attempted, withheld at the head re-check, or landed only
+    // advisory (comment mode / no native surface) attests the cause
+    // instead, mirroring the approve path's `not_published`,
+    // `superseded_head` and `advisory_only` rows.
+    if (signals.publication === undefined) return finish("incomplete", "not_published");
+    if (signals.publication.status === "superseded") return finish("incomplete", "superseded_head");
+    return finish("incomplete", "advisory_only");
   }
   if (verdict !== "approve") return finish("unavailable", "no_verdict");
   if ((signals.requiredChecks ?? "none") === "incomplete") return finish("incomplete", "required_checks_incomplete");

@@ -180,8 +180,12 @@ test("#1576: the provider-exhausted advisory paths attest unavailable, never app
 
 test("#1576: crash, request_changes and skip attest unavailable, blocked and skipped", () => {
   assert.deepEqual(attest({ crashed: true }), { conclusion: "unavailable", reason_code: "run_crashed", head_sha: "" });
+  // #1580 review fix: `blocked` requires the same positive proof `approved`
+  // does — a landed native REQUEST_CHANGES review. Publication that was
+  // never attempted attests the cause instead (symmetric with the approve
+  // path's `not_published` row): nothing certifies the block on the PR.
   assert.deepEqual(attest({ reviewProduced: true, verdict: "request_changes", headSha: HEAD }), {
-    conclusion: "blocked", reason_code: "request_changes", head_sha: HEAD,
+    conclusion: "incomplete", reason_code: "not_published", head_sha: HEAD,
   });
   // A landed native REQUEST_CHANGES blocks even with inconsistent verdict
   // fields (defensive fail-closed).
@@ -237,24 +241,26 @@ test("#1576: crash, request_changes and skip attest unavailable, blocked and ski
       ...cleanApprove,
       publication: { status: "published", native: { event: "COMMENT", submitted: true, fellBack: true } },
     }), { conclusion: "incomplete", reason_code: "approval_withheld", head_sha: HEAD });
-  // A request_changes verdict whose review was superseded by a newer push
-  // still blocks on the verdict (the bundle pins the exact head; consumers
-  // compare it).
+  // A request_changes verdict whose publication was withheld at the head
+  // re-check (a newer push) attests the staleness cause, not a landed
+  // block: nothing reached the pull request (symmetric with the approve
+  // path's `superseded_head` row).
   assert.deepEqual(attest({
     reviewProduced: true,
     verdict: "request_changes",
     headSha: HEAD,
     publication: { status: "superseded" },
-  }), { conclusion: "blocked", reason_code: "request_changes", head_sha: HEAD });
-  // An ADVISORY publication of a request_changes verdict also blocks: only a
-  // FAILED publication can prove the block never landed (#1580 review fix).
-  // The `blocked` row in docs/verdicts-and-publishing.md names this case.
+  }), { conclusion: "incomplete", reason_code: "superseded_head", head_sha: HEAD });
+  // An ADVISORY publication of a request_changes verdict (comment mode, or
+  // a platform without a native review surface) lands no native block, so
+  // it attests the advisory cause — never `blocked` (#1580 review fix,
+  // symmetric with the approve path's `advisory_only` row).
   assert.deepEqual(attest({
     reviewProduced: true,
     verdict: "request_changes",
     headSha: HEAD,
     publication: { status: "published" },
-  }), { conclusion: "blocked", reason_code: "request_changes", head_sha: HEAD });
+  }), { conclusion: "incomplete", reason_code: "advisory_only", head_sha: HEAD });
   assert.deepEqual(attest({ reviewProduced: false, headSha: HEAD }), {
     conclusion: "skipped", reason_code: "skipped", head_sha: HEAD,
   });
