@@ -77,9 +77,14 @@ How it runs:
 Pin the digests at the two consumption points (never a mutable tag):
 
 1. **Helm controller image** — `controller.controllers.main.containers.main.image`
-   in your chart values.
+   in your chart values. The `common` library chart accepts a `digest`
+   field next to `repository` and `tag` and renders
+   `repository[:tag]@digest`, so set `image.digest` to the value from the
+   run summary; do not put the digest into `repository`.
 2. **Worker image** — the instance config's `kubernetes.image` field in the
-   Kubernetes executor profile.
+   Kubernetes executor profile. That field is one full reference string,
+   so include the digest in it:
+   `ghcr.io/misospace/pr-reviewer-worker@sha256:<digest>`.
 
 The example values under `deploy/charts/pr-reviewer/examples/` show the
 shape; replace their placeholders with the digest references from the run

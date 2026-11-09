@@ -51,16 +51,40 @@ listener binds loopback by default and the chart sets
 ## Pinning policy
 
 - The Dockerfile bases are pinned **by sha256 digest** (the `node:26-slim`
-  multi-arch index digest, identical in both `FROM` lines), so a rebuilt
-  image is byte-reproducible from the same source commit. Renovate digest
-  pinning keeps the pin current; never publish from a mutable tag.
+  multi-arch index digest, identical in both `FROM` lines). Every rebuild
+  therefore starts from the same base image bytes. The finished image is
+  not byte-reproducible: `apt-get` resolves the `git` package from a
+  mutable repository, and the build stage output changes between runs.
+  The digest the run summary reports for a published image is the only
+  exact reference to what that run pushed. Renovate digest pinning keeps
+  the base pin current. Never publish from a mutable tag.
 - The canary workflow tags each published image with the source commit
-  (`sha-<commit>`) and reports its digest. Consumers — the chart's
-  `controller.controllers.main.containers.main.image` (repository + tag
-  fields) and the
-  instance config's `kubernetes.image` field for the worker — SHOULD pin
-  `@sha256:...` digests taken from the run summary: a tag is mutable, a
-  digest is the exact bytes the controller will execute.
+  (`sha-<commit>`) and reports its digest in the run summary. A tag is
+  mutable, but a digest is the exact bytes the controller will execute.
+  Pin the digest at both consumption points.
+- **Controller image (chart):** the `common` library chart reads the
+  image from `controller.controllers.main.containers.main.image`, and
+  its image specification accepts a `digest` field next to `repository`
+  and `tag`. Set `digest` to the value from the run summary. The chart
+  renders `repository[:tag]@digest`, and `tag` is then only a readable
+  label. Do not put `@sha256:...` into `repository`: the chart then
+  rejects the values or renders a broken reference.
+
+  ```yaml
+  controller:
+    controllers:
+      main:
+        containers:
+          main:
+            image:
+              repository: ghcr.io/misospace/pr-reviewer-controller
+              digest: sha256:<digest from the run summary>
+  ```
+
+- **Worker image (instance config):** `kubernetes.image` is one full
+  image reference string, so write the digest into the string itself:
+  `ghcr.io/misospace/pr-reviewer-worker@sha256:<digest from the run
+  summary>`.
 - Release-tagged images (`vX.Y.Z`, from `.release-please-manifest.json`) are
   out of the initial canary scope; when added, they should follow the same
   digest-reporting pattern rather than replacing it.
