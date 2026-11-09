@@ -46,10 +46,12 @@ PENDING_DISPOSITION,
 import {
   buildTraceRepairRetryMessage,
   buildTraceRepairUserMessage,
+  buildTraceRepairValidationFeedback,
   harnessEvidenceDigest,
   normalizeTraceRepairPayload,
   resolveStandaloneTraceRepairInvocation,
   runRequirementTraceRepairPass,
+  sanitizeValidationRejections,
   traceRepairOutcomeSummary,
   traceRepairRouteForArtifact,
   TRACE_REPAIR_SYSTEM_PROMPT,
@@ -443,11 +445,18 @@ test("#1343: the citation rule is disclosed where the reviewer is asked for clai
   assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /declared owner/);
   assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /pr-reviewer-owners\.yml/);
   assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /the predicate must sit on the cited line itself/);
+  // #1566 (review): the split-line linked shape the validator accepts must
+  // be disclosed on both surfaces too — a compliant model cannot repair the
+  // #1562 citation geometry with a prompt that only knows the same-line rule.
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /predicate's condition\s*\n?\s*references within two lines/);
+  assert.match(TRACE_REPAIR_SYSTEM_PROMPT, /unclosedFenceStart/);
   const fragment = readFileSync("scripts/prompt_fragments/requirement_trace.txt", "utf8");
   assert.match(fragment, /carrying a word from the requirement's own wording/);
   assert.match(fragment, /declared owner/);
   assert.match(fragment, /pr-reviewer-owners\.yml/);
   assert.match(fragment, /the cited line itself must carry the predicate/);
+  assert.match(fragment, /bound identifier the predicate's condition references within two lines/);
+  assert.match(fragment, /unclosedFenceStart/);
 });
 
 /**
@@ -1528,6 +1537,351 @@ test("predicate window: a term + predicate signal far outside the ±3 window doe
   }
 });
 
+test("#1566: a term inside a camelCase identifier on one line and the predicate on the next satisfies 'met'", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The #1562 production shape (row req-a241097fa88c at publish.ts:616):
+    // the honest citation is a two-line pair — the const line carries the
+    // requirement's word ONLY inside a camelCase identifier and is not
+    // predicate-shaped, and the real comparison is the next line. Same-line
+    // co-occurrence rejected every honest citation of this pair forever.
+    writeFile(workspace, "src/fit.ts", [
+      "export function fitProse(markdown: string): string {",
+      "  const openAt = unclosedFenceStart(markdown);",
+      "  if (openAt >= 0) return markdown.slice(0, openAt);",
+      "  return markdown;",
+      "}",
+      "function unclosedFenceStart(text: string): number {",
+      "  for (let i = 0; i < text.length; i += 1) {",
+      "    if (text.charAt(i) === '~') return i;",
+      "  }",
+      "  return -1;",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-fence", text: "the publish-body fence scan must cut hostile prose at an unclosed fence delimiter before publishing", kind: "acceptance" }]);
+    for (const citedLine of [2, 3]) {
+      const claims = [{
+        requirement_id: "req-fence",
+        disposition: "met",
+        enforcement: [{ file: "src/fit.ts", line: citedLine }],
+        test: [VALID_TEST_LOCATION],
+        reason: "the fence scan cut runs when openAt is non-negative",
+      }];
+      const result = validateRequirementTrace(claims, ledger, workspace);
+      assert.equal(result.rows[0]?.disposition, "met", `citing line ${citedLine}`);
+      assert.deepEqual(result.rows[0]?.notes, [], `citing line ${citedLine}`);
+      assert.equal(result.incomplete, false);
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1566: a nearby predicate only counts when the term line binds an identifier it references", () => {
+  const workspace = makeWorkspace();
+  try {
+    const ledger = ledgerWith([{ id: "req-1", text: SOURCE_SHA_REQUIREMENT, kind: "acceptance" }]);
+    const claimAt = (file: string, line: number) => [{
+      requirement_id: "req-1",
+      disposition: "met",
+      enforcement: [{ file, line }],
+      test: [VALID_TEST_LOCATION],
+      reason: "compares",
+    }];
+
+    // The blocker's false positive: a copy line carrying the term plus an
+    // UNRELATED comparison two lines away proves nothing. The term line
+    // binds no local identifier, so no split-line link is establishable and
+    // the historical same-line rule stands — fail closed.
+    writeFile(workspace, "src/gap2-unlinked.ts", [
+      "sourceSha: ctx.sourceSha,",
+      "// padding",
+      "if (a !== b) { throw new Error('x'); }",
+    ]);
+    const unlinked = validateRequirementTrace(claimAt("src/gap2-unlinked.ts", 1), ledger, workspace);
+    assert.equal(unlinked.rows[0]?.disposition, "unverifiable");
+    assert.ok(unlinked.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+
+    // A requirement term in a nearby COMMENT binds nothing either: the term
+    // match reads the raw line, but a comment cannot bind an identifier, so
+    // the unrelated predicate stays unverified.
+    writeFile(workspace, "src/gap2-comment.ts", [
+      "// the sourceSha copy lands here before anything else",
+      "// padding",
+      "if (a !== b) { throw new Error('x'); }",
+    ]);
+    const commentTerm = validateRequirementTrace(claimAt("src/gap2-comment.ts", 1), ledger, workspace);
+    assert.equal(commentTerm.rows[0]?.disposition, "unverifiable");
+    assert.ok(commentTerm.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+
+    // Legitimate split-line enforcement: the term line BINDS `openAt` (its
+    // term rides the camelCase identifier in the initializer) and the
+    // predicate two lines away REFERENCES that bound identifier. The throw
+    // message carries no requirement word, so only the binding link can
+    // pass this.
+    const fenceLedger = ledgerWith([{ id: "req-fence", text: "the publish-body fence scan must cut hostile prose at an unclosed fence delimiter before publishing", kind: "acceptance" }]);
+    writeFile(workspace, "src/gap2-linked.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "// padding",
+      "if (openAt >= 0) { throw new Error('x'); }",
+    ]);
+    const linked = validateRequirementTrace([{
+      requirement_id: "req-fence",
+      disposition: "met",
+      enforcement: [{ file: "src/gap2-linked.ts", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the fence cut throws when openAt is non-negative",
+    }], fenceLedger, workspace);
+    assert.equal(linked.rows[0]?.disposition, "met");
+    assert.deepEqual(linked.rows[0]?.notes, []);
+
+    // Beyond the two-line limit: even WITH the binding link, a predicate
+    // three lines from the term line stays unverified.
+    writeFile(workspace, "src/gap3-linked.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "// padding",
+      "// padding",
+      "if (openAt >= 0) { throw new Error('x'); }",
+    ]);
+    const tooFar = validateRequirementTrace([{
+      requirement_id: "req-fence",
+      disposition: "met",
+      enforcement: [{ file: "src/gap3-linked.ts", line: 1 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the fence cut throws when openAt is non-negative",
+    }], fenceLedger, workspace);
+    assert.equal(tooFar.rows[0]?.disposition, "unverifiable");
+    assert.ok(tooFar.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1566: a destructuring sibling binding never links — the term anchors only its own entry", () => {
+  const workspace = makeWorkspace();
+  try {
+    const fenceLedger = ledgerWith([{ id: "req-fence", text: "the publish-body fence scan must cut hostile prose at an unclosed fence delimiter before publishing", kind: "acceptance" }]);
+    const fenceClaimAt = (file: string, line: number) => [{
+      requirement_id: "req-fence",
+      disposition: "met",
+      enforcement: [{ file, line }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the fence cut throws when openAt is non-negative",
+    }];
+
+    // The review's repro: only `fenceStart`/`openAt` carries the term; the
+    // sibling `fallback` binding must not link an unrelated predicate.
+    writeFile(workspace, "src/des-sibling-unlinked.ts", [
+      "const { fenceStart: openAt, fallback = -1 } = scanProse(markdown);",
+      "if (fallback) { throw new Error('x'); }",
+    ]);
+    const siblingUnlinked = validateRequirementTrace(fenceClaimAt("src/des-sibling-unlinked.ts", 1), fenceLedger, workspace);
+    assert.equal(siblingUnlinked.rows[0]?.disposition, "unverifiable");
+
+    // Positive control: the term-bearing entry's own binding links.
+    writeFile(workspace, "src/des-sibling-linked.ts", [
+      "const { fenceStart: openAt, fallback = -1 } = scanProse(markdown);",
+      "if (openAt >= 0) { throw new Error('x'); }",
+    ]);
+    const siblingLinked = validateRequirementTrace(fenceClaimAt("src/des-sibling-linked.ts", 1), fenceLedger, workspace);
+    assert.equal(siblingLinked.rows[0]?.disposition, "met");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1566: the link goes through the term-bearing declaration only — never a sibling binding", () => {
+  const workspace = makeWorkspace();
+  try {
+    const shaLedger = ledgerWith([{ id: "req-1", text: SOURCE_SHA_REQUIREMENT, kind: "acceptance" }]);
+    const shaClaimAt = (file: string, line: number) => [{
+      requirement_id: "req-1",
+      disposition: "met",
+      enforcement: [{ file, line }],
+      test: [VALID_TEST_LOCATION],
+      reason: "compares the resolved source sha",
+    }];
+
+    // The review's repro: the line binds BOTH the requirement-bearing
+    // declaration and an unrelated flag. The unrelated predicate must not
+    // certify through the sibling — only the term-bearing declaration's
+    // bound name may link.
+    writeFile(workspace, "src/sibling.ts", [
+      "const sourceSha = ctx.sourceSha; const marker = true;",
+      "if (marker) { throw new Error('x'); }",
+    ]);
+    const sibling = validateRequirementTrace(shaClaimAt("src/sibling.ts", 1), shaLedger, workspace);
+    assert.equal(sibling.rows[0]?.disposition, "unverifiable");
+    assert.ok(sibling.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+
+    // Positive control: the same line, the predicate referencing the
+    // term-bearing binding itself.
+    writeFile(workspace, "src/sibling-linked.ts", [
+      "const sourceSha = ctx.sourceSha; const marker = true;",
+      "if (sourceSha !== ctx.expected) { throw new Error('x'); }",
+    ]);
+    const siblingLinked = validateRequirementTrace(shaClaimAt("src/sibling-linked.ts", 1), shaLedger, workspace);
+    assert.equal(siblingLinked.rows[0]?.disposition, "met");
+
+    // Comma declarators split: the term rides the SECOND declarator, so an
+    // unrelated predicate over the first stays unverified while a predicate
+    // over the term-bearing one links.
+    writeFile(workspace, "src/comma-unlinked.ts", [
+      "const marker = true, sourceSha = ctx.sourceSha;",
+      "if (marker) { throw new Error('x'); }",
+    ]);
+    const commaUnlinked = validateRequirementTrace(shaClaimAt("src/comma-unlinked.ts", 1), shaLedger, workspace);
+    assert.equal(commaUnlinked.rows[0]?.disposition, "unverifiable");
+
+    writeFile(workspace, "src/comma-linked.ts", [
+      "const marker = true, sourceSha = ctx.sourceSha;",
+      "if (sourceSha === ctx.expected) { publish(); }",
+    ]);
+    const commaLinked = validateRequirementTrace(shaClaimAt("src/comma-linked.ts", 1), shaLedger, workspace);
+    assert.equal(commaLinked.rows[0]?.disposition, "met");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1566: the linkage reads code, not comments or strings — and the reference must govern", () => {
+  const workspace = makeWorkspace();
+  try {
+    const fenceLedger = ledgerWith([{ id: "req-fence", text: "the publish-body fence scan must cut hostile prose at an unclosed fence delimiter before publishing", kind: "acceptance" }]);
+    const fenceClaimAt = (file: string, line: number) => [{
+      requirement_id: "req-fence",
+      disposition: "met",
+      enforcement: [{ file, line }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the fence cut throws when openAt is non-negative",
+    }];
+
+    // STRING-only reference: the identifier appears on the predicate line
+    // only inside a string literal. The blanked view removes it, and the
+    // governing condition (`a !== b`) never references the bound name.
+    writeFile(workspace, "src/string-ref.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      'if (a !== b) { throw new Error("openAt"); }',
+    ]);
+    const stringRef = validateRequirementTrace(fenceClaimAt("src/string-ref.ts", 1), fenceLedger, workspace);
+    assert.equal(stringRef.rows[0]?.disposition, "unverifiable");
+    assert.ok(stringRef.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+
+    // COMMENT-only reference on the predicate line: same removal.
+    writeFile(workspace, "src/comment-ref.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "if (a !== b) { throw new Error('x'); } // links openAt",
+    ]);
+    const commentRef = validateRequirementTrace(fenceClaimAt("src/comment-ref.ts", 1), fenceLedger, workspace);
+    assert.equal(commentRef.rows[0]?.disposition, "unverifiable");
+
+    // CONDITIONAL-BODY-ONLY reference: the identifier is real code on the
+    // predicate line but sits in the conditional BODY, not the governing
+    // condition — the link must not certify.
+    writeFile(workspace, "src/body-ref.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "if (a !== b) { limit = openAt; }",
+    ]);
+    const bodyRef = validateRequirementTrace(fenceClaimAt("src/body-ref.ts", 1), fenceLedger, workspace);
+    assert.equal(bodyRef.rows[0]?.disposition, "unverifiable");
+
+    // FAKE DECLARATION in a comment: the raw line matches the term (the
+    // term half reads the raw line by design), but a comment binds nothing
+    // on the blanked view, so no linkage is establishable.
+    writeFile(workspace, "src/fake-decl.ts", [
+      "// const openAt = unclosedFenceStart(markdown);",
+      "if (a !== b) { throw new Error('x'); }",
+    ]);
+    const fakeDecl = validateRequirementTrace(fenceClaimAt("src/fake-decl.ts", 1), fenceLedger, workspace);
+    assert.equal(fakeDecl.rows[0]?.disposition, "unverifiable");
+
+    // POSITIVE controls: the reference in the GOVERNING CONDITION passes —
+    // `if` and `while` conditions alike — while the same identifier in the
+    // body of an unrelated conditional never does.
+    writeFile(workspace, "src/cond-ref.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "if (openAt >= 0) { throw new Error('x'); }",
+    ]);
+    const condRef = validateRequirementTrace(fenceClaimAt("src/cond-ref.ts", 1), fenceLedger, workspace);
+    assert.equal(condRef.rows[0]?.disposition, "met");
+
+    writeFile(workspace, "src/while-ref.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "while (openAt >= 0) { openAt = cutProse(markdown); }",
+    ]);
+    const whileRef = validateRequirementTrace(fenceClaimAt("src/while-ref.ts", 1), fenceLedger, workspace);
+    assert.equal(whileRef.rows[0]?.disposition, "met");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1566: the split-line link survives destructuring bindings and rejects a same-name-but-unbound predicate", () => {
+  const workspace = makeWorkspace();
+  try {
+    const fenceLedger = ledgerWith([{ id: "req-fence", text: "the publish-body fence scan must cut hostile prose at an unclosed fence delimiter before publishing", kind: "acceptance" }]);
+    const fenceClaimAt = (file: string, line: number) => [{
+      requirement_id: "req-fence",
+      disposition: "met",
+      enforcement: [{ file, line }],
+      test: [VALID_TEST_LOCATION],
+      reason: "the fence cut throws when openAt is non-negative",
+    }];
+
+    // Destructuring: the bound names are the binding targets (rename and
+    // default included), and the predicate references one of them.
+    writeFile(workspace, "src/destructure.ts", [
+      "const { fenceStart: openAt, fallback = -1 } = scanProse(markdown);",
+      "if (openAt >= 0) { throw new Error('unclosed fence'); }",
+    ]);
+    const destructured = validateRequirementTrace(fenceClaimAt("src/destructure.ts", 2), fenceLedger, workspace);
+    assert.equal(destructured.rows[0]?.disposition, "met");
+
+    // The binding link requires the REFERENCE: the term line binds
+    // `openAt`, but the nearby predicate neither carries the term on its
+    // own line nor references any bound identifier — co-occurrence alone
+    // stays insufficient.
+    writeFile(workspace, "src/unbound.ts", [
+      "const openAt = unclosedFenceStart(markdown);",
+      "// padding",
+      "if (a !== b) { throw new Error('x'); }",
+    ]);
+    const unbound = validateRequirementTrace(fenceClaimAt("src/unbound.ts", 1), fenceLedger, workspace);
+    assert.equal(unbound.rows[0]?.disposition, "unverifiable");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#1566 adversarial: segmented term matching must not turn an identifier-bearing copy line into enforcement", () => {
+  const workspace = makeWorkspace();
+  try {
+    // The #252 probe: the cited line carries the requirement's word as a
+    // camelCase/snake_case identifier segment (which the segmented view now
+    // matches) but only COPIES the value — and no predicate line sits within
+    // the proximity bound of it. Segment matching alone must never pass this.
+    writeFile(workspace, "src/copyseg.ts", [
+      "export function render(c) {",
+      "  const maxCommentBytes = c.max_comment_bytes;",
+      "  return { body: c.body };",
+      "}",
+    ]);
+    const ledger = ledgerWith([{ id: "req-comment", text: "the renderer must bound the comment bytes it writes under the forge ceiling", kind: "acceptance" }]);
+    const claims = [{
+      requirement_id: "req-comment",
+      disposition: "met",
+      enforcement: [{ file: "src/copyseg.ts", line: 2 }],
+      test: [VALID_TEST_LOCATION],
+      reason: "maxCommentBytes names the comment bytes bound",
+    }];
+    const result = validateRequirementTrace(claims, ledger, workspace);
+    assert.equal(result.rows[0]?.disposition, "unverifiable");
+    assert.ok(result.rows[0]?.notes.includes("enforcement-location-copies-without-comparing"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("predicate check is skipped (documented limitation) when the requirement text yields no usable terms", () => {
   const workspace = makeWorkspace();
   try {
@@ -2466,12 +2820,250 @@ test("#959: runRequirementTraceRepairPass is fail-soft and bounded", async () =>
   });
   assert.equal(ok.status, "ok");
   assert.equal(ok.claims.length, 1);
+  // Without a validateClaims callback the new stage is inert (behavior and
+  // result shape as before #1502).
+  assert.equal(ok.validationRetried, false);
+  assert.equal(ok.validationRejections, null);
+});
+
+// ── #1502 follow-up: the validator-feedback retry ─────────────────────────
+
+const RETRY_PASS_CONFIG = {
+  apiFormat: "openai", model: "m", baseUrl: "http://x", apiKey: "k", maxTokens: 4096,
+  temperature: null, responseFormat: "off", tokensParam: "max_tokens", stream: false,
+  timeoutSec: 30, inputMaxBytes: 48000,
+} as const;
+
+const RETRY_WIRE_CLAIM = {
+  requirement_id: "req-1", disposition: "met",
+  enforcement: [{ file: "src/a.ts", line: 1 }], test: [{ file: "tests/a.test.ts", line: 1 }], reason: "r",
+};
+
+function retryWire(content: string): Promise<{ ok: true; raw: { choices: Array<{ message: { content: string } }> } }> {
+  return Promise.resolve({ ok: true, raw: { choices: [{ message: { content } }] } });
+}
+
+function retryCover(claim: unknown): string {
+  return JSON.stringify({ requirement_coverage: [claim] });
+}
+
+function retryUserContent(payload: unknown): string {
+  const messages = (payload as { messages?: Array<{ role: string; content: string }> }).messages ?? [];
+  return messages.find((message) => message.role === "user")?.content ?? "";
+}
+
+test("#1502: the validator-feedback retry fixes rejected citations and carries the full original request", async () => {
+  const goodClaim = { ...RETRY_WIRE_CLAIM, enforcement: [{ file: "src/b.ts", line: 2 }] };
+  const payloads: unknown[] = [];
+  let call = 0;
+  const pass = await runRequirementTraceRepairPass({
+    requirements: [{ id: "req-1", text: "must validate X" }], title: "t", files: [], diff: "DIFFTEXT",
+    config: RETRY_PASS_CONFIG,
+    requestFn: (payload) => {
+      payloads.push(payload);
+      call += 1;
+      return retryWire(retryCover(call === 1 ? RETRY_WIRE_CLAIM : goodClaim));
+    },
+    validateClaims: (claims) => {
+      const out: Record<string, readonly string[]> = {};
+      for (const claim of claims) {
+        if ((claim as { enforcement?: Array<{ file: string }> }).enforcement?.[0]?.file === "src/a.ts") {
+          out[(claim as { requirement_id: string }).requirement_id] = ["downgraded-no-valid-enforcement-location"];
+        }
+      }
+      return out;
+    },
+  });
+  assert.equal(pass.status, "ok");
+  assert.equal(pass.validationRetried, true);
+  assert.deepEqual(pass.validationRejections, { "req-1": "downgraded-no-valid-enforcement-location" });
+  // The validating retry claim replaced the rejected first-round claim.
+  assert.equal(pass.claims.length, 1);
+  assert.equal((pass.claims[0]!.enforcement as Array<{ file: string }>)[0]!.file, "src/b.ts");
+  // Two model calls total: first attempt + the one validation retry.
+  assert.equal(call, 2);
+  // The retry is single-turn: it carries the rejection labels AND the full
+  // original request (diff included), not a bare follow-up.
+  const retryUser = retryUserContent(payloads[1]);
+  assert.match(retryUser, /downgraded-no-valid-enforcement-location/);
+  assert.match(retryUser, /DIFFTEXT/);
+  assert.match(retryUser, /req-1: must validate X/);
+});
+
+test("#1502: the validation stage is fail-soft and shares the one-retry budget with serialization", async () => {
+  const requirements = [{ id: "req-1", text: "must validate X" }];
+  const reject = (): Record<string, readonly string[]> => ({ "req-1": ["downgraded-no-valid-test-location"] });
+
+  // A retry claim that is STILL rejected replaces the first-round claim (both
+  // fail closed downstream; the retry saw the validator feedback).
+  let call = 0;
+  const stillBad = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => { call += 1; return retryWire(retryCover(RETRY_WIRE_CLAIM)); },
+    validateClaims: reject,
+  });
+  assert.equal(call, 2);
+  assert.equal(stillBad.status, "ok");
+  assert.equal(stillBad.validationRetried, true);
+  assert.equal(stillBad.claims.length, 1);
+
+  // A feedback-retry transport failure keeps the first attempt's claims.
+  let calls = 0;
+  const transportFeedback = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => { calls += 1; return calls === 1 ? retryWire(retryCover(RETRY_WIRE_CLAIM)) : Promise.reject(new Error("boom")); },
+    validateClaims: reject,
+  });
+  assert.equal(transportFeedback.status, "ok");
+  assert.equal(transportFeedback.claims.length, 1);
+  assert.equal(transportFeedback.validationRetried, true);
+
+  // A throwing validator disables the feedback: no retry, claims as parsed.
+  let calls2 = 0;
+  const throwing = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => { calls2 += 1; return retryWire(retryCover(RETRY_WIRE_CLAIM)); },
+    validateClaims: () => { throw new Error("no"); },
+  });
+  assert.equal(calls2, 1);
+  assert.equal(throwing.status, "ok");
+  assert.equal(throwing.validationRetried, false);
+  assert.equal(throwing.validationRejections, null);
+
+  // The serialization retry consumed the budget: no validation retry on top.
+  let calls3 = 0;
+  const serialized = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => {
+      calls3 += 1;
+      return calls3 === 1 ? retryWire("not json at all") : retryWire(retryCover(RETRY_WIRE_CLAIM));
+    },
+    validateClaims: reject,
+  });
+  assert.equal(calls3, 2);
+  assert.equal(serialized.retried, true);
+  assert.equal(serialized.validationRetried, false);
+  assert.equal(serialized.claims.length, 1);
+});
+
+test("#1502: a well-formed response that omits every requested id still gets the validator-feedback retry", async () => {
+  const requirements = [{ id: "req-1", text: "must validate X" }];
+  const reject = (): Record<string, readonly string[]> => ({ "req-1": ["not-traced-by-reviewer"] });
+  const emptyCoverage = '{"requirement_coverage":[]}';
+
+  // The #1488 shape with feedback wired: a well-formed payload with no
+  // claims is a REJECTED response — the retry re-asks with the full original
+  // request, and its claim is appended.
+  const goodClaim = { ...RETRY_WIRE_CLAIM, enforcement: [{ file: "src/b.ts", line: 2 }] };
+  const payloads: unknown[] = [];
+  let call = 0;
+  const recovered = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "DIFFTEXT", config: RETRY_PASS_CONFIG,
+    requestFn: (payload) => {
+      payloads.push(payload);
+      call += 1;
+      return retryWire(call === 1 ? emptyCoverage : retryCover(goodClaim));
+    },
+    validateClaims: reject,
+  });
+  assert.equal(recovered.status, "ok");
+  assert.equal(recovered.claims.length, 1);
+  assert.equal(recovered.validationRetried, true);
+  assert.deepEqual(recovered.validationRejections, { "req-1": "not-traced-by-reviewer" });
+  // The retry is single-turn: the rejection labels AND the full original
+  // request (diff included) ride it.
+  const retryUser = retryUserContent(payloads[1]);
+  assert.match(retryUser, /not-traced-by-reviewer/);
+  assert.match(retryUser, /DIFFTEXT/);
+
+  // The retry also produces nothing: the historical final "empty" stands,
+  // with the retry attempt recorded.
+  let calls2 = 0;
+  const stillEmpty = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => { calls2 += 1; return retryWire(emptyCoverage); },
+    validateClaims: reject,
+  });
+  assert.equal(calls2, 2);
+  assert.equal(stillEmpty.status, "empty");
+  assert.equal(stillEmpty.validationRetried, true);
+  assert.equal(stillEmpty.claims.length, 0);
+
+  // Without a validateClaims callback the historical no-retry "empty" stands.
+  let calls3 = 0;
+  const noFeedback = await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "", config: RETRY_PASS_CONFIG,
+    requestFn: () => { calls3 += 1; return retryWire(emptyCoverage); },
+  });
+  assert.equal(calls3, 1);
+  assert.equal(noFeedback.status, "empty");
+  assert.equal(noFeedback.validationRetried, false);
+});
+
+test("#1502: the validation-feedback retry stays inside the configured input bound", async () => {
+  const requirements = [{ id: "req-1", text: "must validate X" }];
+  const payloads: unknown[] = [];
+  await runRequirementTraceRepairPass({
+    requirements, title: "t", files: [], diff: "x".repeat(5000),
+    config: { ...RETRY_PASS_CONFIG, inputMaxBytes: 3000 },
+    requestFn: (payload) => {
+      payloads.push(payload);
+      return retryWire('{"requirement_coverage":[]}');
+    },
+    validateClaims: () => ({ "req-1": ["not-traced-by-reviewer"] }),
+  });
+  // The feedback prefix rides ON TOP of an already-fitted request, so the
+  // combined retry message must be re-fitted to the same bound — not the
+  // original bound plus the feedback bytes.
+  assert.ok(Buffer.byteLength(retryUserContent(payloads[0]!), "utf8") <= 3000);
+  const retryUser = retryUserContent(payloads[1]!);
+  assert.ok(Buffer.byteLength(retryUser, "utf8") <= 3000, `retry user was ${Buffer.byteLength(retryUser, "utf8")} bytes`);
+  assert.match(retryUser, /not-traced-by-reviewer/);
+});
+
+test("#1502: the validator-feedback block carries sanitized ids and labels, and the sanitizer bounds persistence", () => {
+  const feedback = buildTraceRepairValidationFeedback({
+    rejections: {
+      "req-1": ["downgraded-no-valid-enforcement-location", "downgraded-no-valid-test-location"],
+      "bad\x01id`x": ["enforcement-location-copies-without-comparing"],
+    },
+  });
+  assert.match(feedback, /req-1: downgraded-no-valid-enforcement-location; downgraded-no-valid-test-location/);
+  assert.match(feedback, /REJECTED/);
+  assert.match(feedback, /badidx/);
+  assert.doesNotMatch(feedback, /\x01/);
+  assert.match(feedback, /The full original request follows unchanged below/);
+
+  const sanitized = sanitizeValidationRejections({
+    "req-1": ["downgraded-no-valid-test-location"],
+    "": ["dropped-empty-id"],
+    dup: ["a", "b", "c", "d"],
+  });
+  assert.deepEqual(sanitized, { "req-1": "downgraded-no-valid-test-location", dup: "a; b; c" });
+});
+
+test("#1502: the summary carries the validation retry and the first round's rejection labels", () => {
+  const base = { attempted: true as const, outcome: null as null, missingIds: ["req-1"] };
+  const retried = traceRepairOutcomeSummary({
+    ...base,
+    result: repairResult("ok", { claims: [{ requirement_id: "req-1" }], validationRetried: true, validationRejections: { "req-1": "downgraded-no-valid-test-location" } }),
+  });
+  assert.equal(retried.validation_retried, true);
+  assert.deepEqual(retried.validation_rejections, { "req-1": "downgraded-no-valid-test-location" });
+
+  const plain = traceRepairOutcomeSummary({ ...base, result: repairResult("ok", { claims: [{ requirement_id: "req-1" }] }) });
+  assert.equal(plain.validation_retried, false);
+  assert.equal(plain.validation_rejections, undefined);
+
+  // The thrown fail-soft boundary reports a definite false, never undefined.
+  const thrown = traceRepairOutcomeSummary({ ...base, result: null, thrownError: new Error("boom") });
+  assert.equal(thrown.validation_retried, false);
 });
 
 // ── #1044: bounded requirement_trace_repair summary ──────────────────────
 
 function repairResult(status: TraceRepairPassResult["status"], overrides: Partial<TraceRepairPassResult> = {}): TraceRepairPassResult {
-  return { claims: [], status, errorKind: null, error: null, diffClipped: false, firstFailureClass: null, retried: false, ...overrides };
+  return { claims: [], status, errorKind: null, error: null, diffClipped: false, firstFailureClass: null, retried: false, validationRetried: false, validationRejections: null, ...overrides };
 }
 
 test("#1044: traceRepairOutcomeSummary maps pass statuses to summary outcomes", () => {
@@ -2895,6 +3487,35 @@ test("#1504: resolveStandaloneTraceRepairInvocation suppresses only a native-loo
   assert.deepEqual(
     resolveStandaloneTraceRepairInvocation({ nativeLoopVerdictArtifact: false, continuation: null }),
     { invoke: true, reason: "no_native_loop_repair" },
+  );
+});
+
+test("#1502: resolveStandaloneTraceRepairInvocation recovers when the loop's merge left unresolved targets", () => {
+  // The production #1559 shape: the loop's trace-only repair merged a
+  // parseable claim for the row, the row still validated `unverifiable`, and
+  // the fallback stood down. A merged claim the deterministic validator still
+  // rejects is a FAILED repair — the bounded fallback owns the recovery.
+  assert.deepEqual(
+    resolveStandaloneTraceRepairInvocation({ nativeLoopVerdictArtifact: true, continuation: { trace_claims_merged: true }, unresolvedTargetsRemain: true }),
+    { invoke: true, reason: "native_loop_repair_left_unresolved" },
+  );
+  // A completed merge (nothing left unresolved) still stands the second
+  // repair model down — #1504's rule, unchanged on the success path.
+  assert.deepEqual(
+    resolveStandaloneTraceRepairInvocation({ nativeLoopVerdictArtifact: true, continuation: { trace_claims_merged: true }, unresolvedTargetsRemain: false }),
+    { invoke: false, reason: "native_loop_repair_merged_claims" },
+  );
+  // The flag is optional: absent keeps the pre-#1502 semantics (the pure
+  // function cannot see the classification; the caller always passes it).
+  assert.deepEqual(
+    resolveStandaloneTraceRepairInvocation({ nativeLoopVerdictArtifact: true, continuation: { trace_claims_merged: true } }),
+    { invoke: false, reason: "native_loop_repair_merged_claims" },
+  );
+  // The no-claims shape is unaffected by the flag: the fallback recovers it
+  // under its own reason.
+  assert.deepEqual(
+    resolveStandaloneTraceRepairInvocation({ nativeLoopVerdictArtifact: true, continuation: { trace_claims_merged: false }, unresolvedTargetsRemain: true }),
+    { invoke: true, reason: "native_loop_no_trace_claims" },
   );
 });
 

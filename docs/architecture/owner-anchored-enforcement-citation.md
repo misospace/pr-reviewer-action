@@ -45,7 +45,11 @@ model contributes citations only.
 
 **The predicate must be on the cited line for the owner-anchored rows.** The
 lexical half was what bounded *which* line could qualify (the term and the
-predicate had to co-occur on one line); once the subject is established by
+predicate had to co-occur on one line; since the #1566 calibration fix the
+non-owner lexical path also accepts a cited declaration line that binds the
+requirement's term and a predicate whose governing condition references that
+binding within two lines — an unestablishable link fails closed to the
+same-line rule); once the subject is established by
 declaration, that bound is gone, so the predicate itself must sit on the line
 the reviewer cited. A copy-only cited line standing next to an unrelated
 comparison does not pass — that is the case the issue's acceptance criterion
