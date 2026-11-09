@@ -92,6 +92,7 @@ function makeRequest(jobId: string, attempt: number): ExecutionRequest {
       createdAtMs: 0,
     }),
     profiles: Object.freeze({ executor: "local-dev", model: "fast", evidence: "default" }),
+    modelSelection: Object.freeze({ baseUrl: "https://model.example/v1", modelId: "test-model", apiFormat: "openai" as const }),
     credentials: Object.freeze([]),
     runDir,
     requestPath: `${runDir}/request.json`,

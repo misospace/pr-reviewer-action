@@ -1270,6 +1270,40 @@ export async function startControllerDaemon(
       }
       return sameKind[0]?.endpoint ?? "";
     },
+    // The operator's model selection (#1496), resolved the same
+    // operator-side way as the forge API base: the run's approved model
+    // PROFILE NAME (from the host's effective-config resolution — names
+    // only) keys the instance config's model-profiles entry, and its
+    // endpoint / wire model id / API format ride the envelope. Every
+    // unresolved step REFUSES the request (the builder's build() rejects
+    // → the scheduler's failed-outcome path) rather than launching a
+    // worker that can never reach the model: an unknown profile name is
+    // corrupted routing state, and a profile without a wire model id is
+    // the exact #1496 gap — "discover it at model-call time" is what this
+    // guard forbids. The profile CREDENTIAL never appears here: it stays
+    // an opaque #735 reference in `credentials`, and its projected
+    // material reaches the worker only through the executor's credential
+    // handoff.
+    resolveModelSelection: async (job, profiles) => {
+      const profile = options.instance.modelProfiles.find(
+        (entry) => entry.name === profiles.model,
+      );
+      if (profile === undefined) {
+        throw new RangeError(
+          `job's approved model profile '${profiles.model}' is not defined in the instance config: the envelope model selection cannot be resolved without guessing`,
+        );
+      }
+      if (profile.model === "") {
+        throw new RangeError(
+          `model profile '${profiles.model}' defines no model id on the wire: a worker-driven review cannot reach the model without one (set 'model' on the profile)`,
+        );
+      }
+      return Object.freeze({
+        baseUrl: profile.endpoint,
+        modelId: profile.model,
+        apiFormat: profile.apiFormat,
+      });
+    },
     credentialRefs: (job, runId) => options.credentialRefs(job, runId),
     ...(options.createWorkspace !== undefined ? { createWorkspace: options.createWorkspace } : {}),
   });

@@ -58,8 +58,18 @@ function instanceConfig(): InstanceConfig {
     version: 1,
     unknownProfilePolicy: "reject",
     forges: [],
-    modelProfiles: [],
-    defaultModelProfile: "",
+    modelProfiles: [
+      {
+        name: "m",
+        endpoint: "https://model.invalid/v1",
+        apiFormat: "openai",
+        credential: "m-cred",
+        model: "daemon-test-model",
+        contextTokens: null,
+        pricing: null,
+      },
+    ],
+    defaultModelProfile: "m",
     executorProfiles: [
       {
         name: "default",
@@ -735,6 +745,98 @@ test("an identity-less job refuses at build when several integrations share its 
       `refusal must not echo '${material}': ${record!.failureReason}`,
     );
   }
+});
+
+test("the daemon stamps the operator's model selection into every execution envelope (#1496)", async (t) => {
+  const h = await start({});
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  assert.equal(await h.daemon.ingest(event()), "scheduled");
+  await waitFor(() => h.fake.started.length === 1);
+  // The selection is the APPROVED model profile's operator-side state:
+  // endpoint, wire model id, and wire format — never the credential,
+  // which stays the #735 reference.
+  assert.deepEqual(h.fake.started[0]!.modelSelection, {
+    baseUrl: "https://model.invalid/v1",
+    modelId: "daemon-test-model",
+    apiFormat: "openai",
+  });
+});
+
+test("a selected model profile with no wire model id refuses the build, never launches (#1496)", async (t) => {
+  // The #1496 gap itself, rail-guarded: a profile that names an endpoint
+  // but no model id can never reach the model, so composing the envelope
+  // refuses the request (the scheduler's failed-outcome path) instead of
+  // launching a worker doomed to "Required input 'ai-model' is missing".
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: {
+        ...instanceConfig(),
+        modelProfiles: [
+          {
+            name: "m",
+            endpoint: "https://model.invalid/v1",
+            apiFormat: "openai",
+            credential: "m-cred",
+            model: "",
+            contextTokens: null,
+            pricing: null,
+          },
+        ],
+      } as InstanceConfig,
+      queueStore: store,
+      maxAttempts: 1,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const job = buildReviewJob(event());
+  assert.notEqual(job, null);
+  await h.daemon.enqueue(job!);
+  await waitFor(() => {
+    const record = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
+    return record !== undefined && record.state === "failed";
+  });
+  assert.equal(h.fake.started.length, 0, "the model-less job never launched a worker");
+  const failed = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
+  assert.match(failed!.failureReason ?? "", /no model id on the wire/);
+});
+
+test("an approved model profile unknown to the instance config refuses the build (#1496)", async (t) => {
+  // Corrupted routing state (an approved name no profile answers) is
+  // refused rather than guessed: the envelope cannot be composed from a
+  // profile that does not exist.
+  const store = new InMemoryQueueStore();
+  const h = await start({
+    options: {
+      instance: { ...instanceConfig(), modelProfiles: [] } as InstanceConfig,
+      queueStore: store,
+      maxAttempts: 1,
+      retryBaseMs: 1,
+      retryMaxMs: 1,
+    },
+  });
+  t.after(async () => {
+    await h.daemon.stop().catch(() => undefined);
+    cleanup(h);
+  });
+  const job = buildReviewJob(event());
+  assert.notEqual(job, null);
+  await h.daemon.enqueue(job!);
+  await waitFor(() => {
+    const record = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
+    return record !== undefined && record.state === "failed";
+  });
+  assert.equal(h.fake.started.length, 0, "the unknown-profile job never launched a worker");
+  const failed = store.load().records.find((entry) => entry.job.jobId === job!.jobId);
+  assert.match(failed!.failureReason ?? "", /not defined in the instance config/);
 });
 
 test("an unresolvable or cross-platform forge-integration identity refuses the request (#1440)", async (t) => {

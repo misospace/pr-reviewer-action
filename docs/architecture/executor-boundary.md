@@ -38,11 +38,28 @@ receives only:
 | `deadlineAtMs` | epoch-ms deadline; `0` = none |
 | `workspace` | the `WorkspaceInfo` the #732 acquisition layer produced (isolated exact-head worktree; the executor owns its `close()`) |
 | `profiles` | `executor`/`model`/`evidence` profile **names** — approved by the operator's instance config; repository config selects names only |
+| `modelSelection` | the operator's resolved model selection (#1496): `baseUrl` (the selected model profile's endpoint), `modelId` (the wire model id, from the profile's `model` key), and `apiFormat`. Required on every execution — there is no default model, so the validator refuses an envelope without one, and the host composition refuses a selected profile that names no model id. The worker threads it into the engine's `ai-base-url` / `ai-model` / `ai-api-format` inputs, replacing the empty input set that made worker-driven reviews unable to reach the model. The credential NEVER rides here: it stays the #735 `model` reference below, and its projected material reaches the worker only through the credential handoff's `PR_REVIEWER_CREDENTIAL_MODEL` variable |
 | `credentials` | opaque short-lived credential **references** (`ExecutionCredentialRef`); the #735 broker resolves them operator-side — no material ever crosses this boundary |
 | `runDir` / `requestPath` / `resultPath` | controller-owned run directory (the executor creates it and the recovery record; the worker writes only the result file), the request-envelope file the executor serializes before launch, and the **result storage coordinate** the worker must write its structured result to |
 
+**The model selection is credential-free by the same contract.**
+`modelSelection.baseUrl` passes `forgeApiUrlProblem` — the ONE
+credential-free http(s) endpoint check this envelope has — because the AI
+base URL is persisted verbatim into every envelope exactly like the forge
+base, and a token riding it would be persisted with it. `modelId` is a
+bounded, control-free identifier; `apiFormat` is the closed two-value
+union. The asymmetry with `forgeApiUrl` is deliberate: the forge base may
+be `""` where the platform carries a default, the AI base may not — a
+review without a model endpoint can produce no verdict, so absence is
+refusal at validation, never an empty engine input (#1496). The wire
+credential stays on the #735 path end to end: the envelope carries only
+the `model` reference, the executor projects resolved material under
+`executionCredentialEnvName("model")` (`PR_REVIEWER_CREDENTIAL_MODEL`),
+and the worker reads that one variable into the engine's `ai-api-key`
+input — never into a log line, the result file, or the envelope.
+
 **Stdout is never the result protocol.** The worker writes its structured
-result JSON to the file at `resultPath`; captured stdout/stderr are
+result as a JSON file at `resultPath`; captured stdout/stderr are
 diagnostics only, byte-capped by the runtime primitives.
 
 **The forge API base coordinate is credential-free by contract.**
@@ -258,8 +275,31 @@ foreign backend's result could reach the scheduler as a successful head.
 acquired workspace root, a deadline derived from `deadlineAtMs`, and a
 strict child-environment allowlist: PATH/HOME/TMPDIR-class keys plus
 exactly `PR_REVIEWER_EXECUTION_REQUEST` and
-`PR_REVIEWER_EXECUTION_RESULT`. No request-, job-, or repository-derived
-key ever enters the environment or argv. A deadline that is already past
+`PR_REVIEWER_EXECUTION_RESULT` — plus the projected #735 credential
+variables (`PR_REVIEWER_CREDENTIAL_*`, one per granted credential name)
+when the request carries credential references. No other request-, job-,
+or repository-derived key ever enters the environment or argv.
+
+**The local credential projection is the same #735 composition the
+Kubernetes executor performs, minus the cluster Secret.** A
+credential-carrying request resolves its opaque references LATE (after
+the durable envelope is written, which carries only references) and
+all-or-nothing through the same `WorkerCredentialResolver` seam: a
+missing resolver, a resolver refusal, a resolved set that does not match
+the request's allowlist, empty material, or a name that cannot derive a
+valid environment variable is a `launch_refused` — nothing launches
+half-credentialed, and the resolver's free-text reason is never echoed
+(only the closed `WORKER_CREDENTIAL_REFUSAL_CODES` vocabulary,
+`unspecified` otherwise). A cancellation or an expired deadline that
+lands during the handoff wins the race and launches nothing. The
+resolved material rides ONLY the child's environment — never the
+envelope, the recovery record, diagnostics, or any log line — and dies
+with the worker tree: there is no durable material artifact, so
+`material-not-removed` never applies locally (material can survive a
+cancellation only inside a worker that was not terminated, which is
+already reported as `worker-not-terminated`). A credential-free request
+never consults the resolver, and its child environment stays exactly the
+minimal allowlist. A deadline that is already past
 at `start` never launches (an expired timeout must not read as "no
 timeout"): the execution settles failed `deadline` immediately, with no
 envelope, no state record, and no child process. The per-run state record
@@ -500,8 +540,13 @@ fail-closed, so an unlistable cluster refuses the launch.
 - **Credentials compose with #735; they never alias it.** The durable
   request carries opaque broker REFERENCES only — a reference is never a
   Kubernetes object name (`result-channel:<runId>` is a valid reference
-  that could never be one). At launch the executor performs the late,
-  all-or-nothing handoff through two injected seams: a
+  that could never be one). The resolver seam and its refusal vocabulary
+  live in the shared executor contract (`src/executor/types.ts`) so the
+  projecting executors cannot drift; the local reference executor composes
+  the SAME late, all-or-nothing handoff without a store — it projects the
+  resolved material directly into the child's environment (see the local
+  backend section above). At launch the Kubernetes executor performs the
+  late, all-or-nothing handoff through two injected seams: a
   `WorkerCredentialResolver` (the daemon binds #735
   `resolveWorkerCredentials`; the executor re-checks the resolved set
   against the request's allowlist — exactly one non-empty entry per

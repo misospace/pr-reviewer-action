@@ -103,6 +103,7 @@ import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import {
   EXECUTION_CREDENTIAL_NAME_RE,
+  executionCredentialEnvName,
   MAX_EXECUTION_DIAGNOSTICS_CHARS,
   MAX_EXECUTION_FAILURE_MESSAGE_CHARS,
   validateExecutionRequest,
@@ -117,8 +118,13 @@ import {
 } from "./types.js";
 import { EXECUTION_REQUEST_ENV_KEY, EXECUTION_RESULT_ENV_KEY } from "./local.js";
 import type { KubernetesExecutorSpec } from "../config/instance-config.js";
-import { RESOLUTION_REFUSAL_CODES } from "../credentials/types.js";
-import type { ResolutionRefusalCode } from "../credentials/types.js";
+import {
+  UNSPECIFIED_REFUSAL_CODE,
+  isClosedRefusalCode,
+  type ProjectedWorkerCredential,
+  type WorkerCredentialResolution,
+  type WorkerCredentialResolver,
+} from "./types.js";
 import { boundedFailureMessage, readWorkerResultFile } from "./result-file.js";
 import { ensureContained, writeFileNoFollow } from "./paths.js";
 
@@ -190,11 +196,10 @@ function identityLabels(request: ExecutionRequest): Readonly<Record<string, stri
   });
 }
 
-/** The derived credential-env-var prefix and its grammar: a credential
- * REFERENCE (never the secret) becomes a projected `secretKeyRef` env
- * var the worker reads; the derived name is validated fail-closed. */
-const CREDENTIAL_ENV_PREFIX = "PR_REVIEWER_CREDENTIAL_";
-const CREDENTIAL_ENV_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+// The credential-env derivation (prefix + grammar + fail-closed check)
+// lives in ./types.ts as `executionCredentialEnvName`, shared with the
+// worker that CONSUMES the projected `model` credential (#1496): the
+// projecting executor and the consuming worker can never drift.
 
 /** The bounded retry budget for a destructive cluster call: three
  * attempts with a small ramp between them (25 ms, then 50 ms). A
@@ -233,73 +238,6 @@ export function kubernetesJobName(runId: string): string {
 export function kubernetesCredentialSecretName(runId: string): string {
   const digest = createHash("sha256").update(runId, "utf8").digest("hex");
   return `prv-cred-${digest.slice(0, 24)}`;
-}
-
-/** One run-scoped credential whose opaque reference has been resolved
- * by the controller-side #735 broker. `value` is live material: it
- * crosses the projection seam transiently and never anywhere else — not
- * the Job manifest, the envelope, labels, diagnostics, or any error
- * message. */
-export interface ProjectedWorkerCredential {
-  /** The credential name from the request; doubles as the Secret key. */
-  readonly name: string;
-  /** The resolved material, handed off for projection only. */
-  readonly value: string;
-}
-
-/** The executor's CLOSED vocabulary for a resolver's refusal code: the
- * values of #735's `ResolutionRefusalCode` union, and nothing else.
- *
- * The set is DERIVED from the broker's own runtime array, so the two
- * cannot drift: a hand-copied list is a list that rots the first time a
- * code is added to the broker.
- *
- * A refusal code is an EXACT membership question, never a pattern
- * match: a grammar-compatible string that carries material (`sk_live_…`
- * is a perfectly good identifier) must never reach durable diagnostics.
- * The resolver's free-text `reason` is never echoed at all. */
-export const WORKER_CREDENTIAL_REFUSAL_CODES: readonly ResolutionRefusalCode[] =
-  Object.freeze([...RESOLUTION_REFUSAL_CODES]);
-
-/** The refusal code the executor may ECHO: #735's closed union, and
- * nothing else. The executor's own marker for a resolver answer outside
- * the vocabulary is `unspecified` — an internal value that is NOT a
- * member of this union and never a member of
- * `WORKER_CREDENTIAL_REFUSAL_CODES`. */
-export type WorkerCredentialRefusalCode = ResolutionRefusalCode;
-
-/** The executor's marker for a resolver answer that is not a member of
- * the closed vocabulary: it says "the answer was outside the
- * vocabulary", never what the answer was. */
-const UNSPECIFIED_REFUSAL_CODE = "unspecified";
-
-/** Exact membership in the closed refusal vocabulary. The seam is
- * injected, so the runtime cannot trust the resolver's answer to be
- * one of the closed codes — a buggy resolver can hand back anything
- * that satisfies the TypeScript type at runtime. */
-function isClosedRefusalCode(code: string): code is ResolutionRefusalCode {
-  return (WORKER_CREDENTIAL_REFUSAL_CODES as readonly string[]).includes(code);
-}
-
-/** The resolver's closed answer: the whole resolved set, or a refusal.
- * A refusal surfaces ONLY its closed `code` in durable diagnostics —
- * the free-text `reason` stays controller-side (the daemon logs it
- * inside its own resolver) because this executor deliberately trusts
- * no resolver text at all, mirroring #735's all-or-nothing handoff and
- * its closed `ResolutionRefusalCode` union. */
-export type WorkerCredentialResolution =
-  | { readonly ok: true; readonly credentials: readonly ProjectedWorkerCredential[] }
-  | { readonly ok: false; readonly code: WorkerCredentialRefusalCode; readonly reason: string };
-
-/** The LATE, operator-side resolution seam (#735): the controller daemon
- * binds this to `resolveWorkerCredentials` over its vault and
- * result-channel authority, closing over the run's scope identity. The
- * executor only ever sees the resolved set for the exact request it is
- * launching; it re-checks the set against the request's allowlist so a
- * buggy resolver cannot hand a worker more (or less) than the run was
- * granted. */
-export interface WorkerCredentialResolver {
-  resolve(request: ExecutionRequest): Promise<WorkerCredentialResolution>;
 }
 
 /** The per-run Secret the store implementation must materialize. The
@@ -489,18 +427,6 @@ export interface KubernetesApi {
   listJobs(namespace: string, labelSelector: Readonly<Record<string, string>>): Promise<readonly KubernetesJobSummary[]>;
 }
 
-/** The pod-side env var for one credential reference, derived from the
- * bounded kebab-case credential name. */
-function credentialEnvName(name: string): string {
-  const derived = CREDENTIAL_ENV_PREFIX + name.toUpperCase().replaceAll("-", "_");
-  if (!CREDENTIAL_ENV_NAME_RE.test(derived)) {
-    throw new ExecutionRequestError(
-      `credential name '${name}' does not derive a valid environment variable name`,
-    );
-  }
-  return derived;
-}
-
 /** The request path must be covered by exactly one volume mapping (the
  * claim is mounted at the SAME path on both sides, so no transformation
  * happens — coverage is the only question). Longest matching root wins;
@@ -663,7 +589,7 @@ export function buildReviewJobManifest(
       }
       seenNames.add(credential.name);
       env.push({
-        name: credentialEnvName(credential.name),
+        name: executionCredentialEnvName(credential.name),
         valueFrom: { secretKeyRef: { name: credentialSecretName, key: credential.name } },
       });
     }
@@ -1764,7 +1690,7 @@ export class KubernetesExecutor implements Executor {
         reason: "the resolved credential set does not match the request's credential allowlist",
       };
     }
-    if (resolution.credentials.some((entry) => entry.value === "")) {
+    if (resolution.credentials.some((entry) => entry.value === "" || typeof entry.value !== "string")) {
       return { kind: "refused", reason: "the resolved credential material is empty" };
     }
     try {

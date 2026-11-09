@@ -4,8 +4,11 @@
  * unreadable or invalid envelope), the result-file protocol (a valid,
  * executor-contract-conforming result is written for every terminal
  * outcome), and the cancellation/deadline semantics agreed with the local
- * executor's classification. The review runner is injected — the worker
- * must not need model calls to be testable. */
+ * executor's classification, and the #1496 model-selection mapping
+ * (envelope coordinates → engine inputs, #735 projected credential →
+ * optional `ai-api-key` input that never reaches the result file). The
+ * review runner is injected — the worker must not need model calls to be
+ * testable. */
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -18,6 +21,7 @@ import {
   type ExecutionRequest,
   type ExecutionResult,
 } from "../src/executor/index.js";
+import { executionCredentialEnvName } from "../src/executor/types.js";
 import { workerMain } from "../src/executor/worker-main.js";
 import type { WorkerEngineOutcome } from "../src/executor/worker-main.js";
 import type { ReviewDependencies, ReviewRequest } from "../src/engine/types.js";
@@ -59,6 +63,11 @@ function makeRequest(overrides: Partial<ExecutionRequest> = {}): Fixture {
       createdAtMs: 0,
     }),
     profiles: Object.freeze({ executor: "local-dev", model: "fast", evidence: "default" }),
+    modelSelection: Object.freeze({
+      baseUrl: "https://model.example/v1",
+      modelId: "test-model-42",
+      apiFormat: "openai" as const,
+    }),
     credentials: Object.freeze([]) as readonly { name: string; reference: string }[],
     runDir,
     requestPath: path.join(runDir, "request.json"),
@@ -245,6 +254,71 @@ test("the engine's verified reviewed head is the result head when the envelope p
     assertConformingResult(fixture.request, { status: "completed", resultHeadSha: HEAD });
   } finally {
     cleanup(fixture);
+  }
+});
+
+// ── model selection (#1496) ─────────────────────────────────────────────
+
+test("the envelope's model selection reaches the engine inputs verbatim (#1496)", async () => {
+  const fixture = makeRequest();
+  try {
+    const { run, deps } = fakeRunner(async (_request, dependencies) => {
+      writeFileSync(path.join(dependencies.runDir, "ai-output.json"), "{}", "utf8");
+      return { reviewedHeadSha: HEAD };
+    });
+    const exit = await workerMain([fixture.request.requestPath], {}, deps);
+    assert.equal(exit, 0);
+    assert.equal(run.requests.length, 1);
+    const inputs = run.requests[0]?.inputs ?? {};
+    assert.equal(inputs["ai-base-url"], fixture.request.modelSelection.baseUrl);
+    assert.equal(inputs["ai-model"], fixture.request.modelSelection.modelId);
+    assert.equal(inputs["ai-api-format"], fixture.request.modelSelection.apiFormat);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("the projected model credential becomes the ai-api-key input and never lands in the result (#735/#1496)", async () => {
+  const fixture = makeRequest();
+  const secret = "sk-test-material";
+  try {
+    const { run, deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+    writeFileSync(path.join(fixture.request.runDir, "ai-output.json"), "{}", "utf8");
+    const exit = await workerMain(
+      [fixture.request.requestPath],
+      { [executionCredentialEnvName("model")]: secret },
+      deps,
+    );
+    assert.equal(exit, 0);
+    // The #735 projected material arrives under the shared derivation and
+    // becomes the engine's optional credential input.
+    assert.equal(run.requests[0]?.inputs["ai-api-key"], secret);
+    // The secret must appear NOWHERE in the written result file: the
+    // diagnostics tail (fed by the worker's log/error sinks) is the leak
+    // vector, and the result file is the only file the worker writes.
+    const resultText = readFileSync(fixture.request.resultPath, "utf8");
+    assert.equal(resultText.includes(secret), false);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("absent or empty projected credential material leaves no ai-api-key input (#735/#1496)", async () => {
+  for (const envCase of [
+    {} as NodeJS.ProcessEnv,
+    { [executionCredentialEnvName("model")]: "" } as NodeJS.ProcessEnv,
+  ]) {
+    const fixture = makeRequest();
+    try {
+      const { run, deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+      writeFileSync(path.join(fixture.request.runDir, "ai-output.json"), "{}", "utf8");
+      // A self-hosted endpoint can be unauthenticated: the input is absent
+      // entirely, never an empty-string key.
+      assert.equal(await workerMain([fixture.request.requestPath], envCase, deps), 0);
+      assert.equal(Object.prototype.hasOwnProperty.call(run.requests[0]?.inputs ?? {}, "ai-api-key"), false);
+    } finally {
+      cleanup(fixture);
+    }
   }
 });
 

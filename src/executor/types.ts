@@ -26,9 +26,12 @@
  */
 
 import { hasControlCharacters } from "../config/instance-config.js";
+import type { ApiFormat } from "../config/types.js";
 import type { ReviewJobKind } from "../jobs/types.js";
 import type { WorkspaceInfo } from "../acquisition/types.js";
 import { isPlainObject } from "../platform/object.js";
+import { RESOLUTION_REFUSAL_CODES } from "../credentials/types.js";
+import type { ResolutionRefusalCode } from "../credentials/types.js";
 
 /** Credential-reference name: lowercase kebab-case, bounded. */
 export const EXECUTION_CREDENTIAL_NAME_RE = /^[a-z][a-z0-9-]{0,63}$/;
@@ -49,6 +52,17 @@ export const EXECUTION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
  * than the config layer that produces the endpoint — keep the three in
  * sync; drift fails closed here, never open. */
 const MAX_EXECUTION_FORGE_API_URL_BYTES = 2_048;
+
+/** Largest byte length the non-secret AI model base URL may carry in a
+ * request envelope. Same ceiling as the forge API base (and the config
+ * layer's `MAX_ENDPOINT_BYTES`) — the envelope is never wider than the
+ * instance config that produces the endpoint. */
+const MAX_EXECUTION_AI_BASE_URL_BYTES = 2_048;
+
+/** Largest length a model id on the wire may carry in a request envelope.
+ * Provider model ids are short identifiers; the cap leaves generous room
+ * for namespaced/self-hosted ids while keeping the envelope bounded. */
+const MAX_EXECUTION_MODEL_ID_CHARS = 512;
 
 /** Path-field bound: the longest absolute path a request or result may
  * name. */
@@ -86,6 +100,124 @@ export interface ExecutionCredentialRef {
   readonly name: string;
   /** Opaque broker reference (never the secret itself). */
   readonly reference: string;
+}
+
+/** The prefix a worker-credential name derives its projected environment
+ * variable from. An executor hands resolved credential MATERIAL to the
+ * worker under `PR_REVIEWER_CREDENTIAL_<NAME>` (uppercased name, `-` →
+ * `_`); the worker reads its model key under exactly this derivation of
+ * the fixed `model` credential name (#735/#1496). Shared so the projecting
+ * executor and the consuming worker can never drift apart. */
+export const EXECUTION_CREDENTIAL_ENV_PREFIX = "PR_REVIEWER_CREDENTIAL_";
+
+/** The env-var name grammar a derived credential variable must satisfy. */
+const CREDENTIAL_ENV_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/** The worker environment variable that carries the resolved material for
+ * one credential NAME. Fails closed: a name that cannot derive a valid
+ * variable name is refused, never truncated or guessed. */
+export function executionCredentialEnvName(name: string): string {
+  const derived = EXECUTION_CREDENTIAL_ENV_PREFIX + name.toUpperCase().replaceAll("-", "_");
+  if (!CREDENTIAL_ENV_NAME_RE.test(derived)) {
+    throw new ExecutionRequestError(
+      `credential name '${name}' does not derive a valid environment variable name`,
+    );
+  }
+  return derived;
+}
+
+/** One run-scoped credential whose opaque reference has been resolved
+ * by the controller-side #735 broker. `value` is live material: it
+ * crosses the projection seam transiently and never anywhere else —
+ * not the envelope, not a recovery record, not diagnostics, not any
+ * error message. */
+export interface ProjectedWorkerCredential {
+  /** The credential name from the request. */
+  readonly name: string;
+  /** The resolved material, handed off for projection only. */
+  readonly value: string;
+}
+
+/** The executors' CLOSED vocabulary for a credential resolver's refusal
+ * code: the values of #735's `ResolutionRefusalCode` union, and nothing
+ * else. Shared by every projecting executor (Kubernetes and local alike)
+ * so none of them can drift from the broker's refusal grammar.
+ *
+ * The set is DERIVED from the broker's own runtime array, so the two
+ * cannot drift: a hand-copied list is a list that rots the first time a
+ * code is added to the broker.
+ *
+ * A refusal code is an EXACT membership question, never a pattern
+ * match: a grammar-compatible string that carries material (`sk_live_…`
+ * is a perfectly good identifier) must never reach durable diagnostics.
+ * The resolver's free-text `reason` is never echoed at all. */
+export const WORKER_CREDENTIAL_REFUSAL_CODES: readonly ResolutionRefusalCode[] =
+  Object.freeze([...RESOLUTION_REFUSAL_CODES]);
+
+/** The refusal code an executor may ECHO: #735's closed union, and
+ * nothing else. The executor's own marker for a resolver answer outside
+ * the vocabulary is `unspecified` — an internal value that is NOT a
+ * member of this union and never a member of
+ * `WORKER_CREDENTIAL_REFUSAL_CODES`. */
+export type WorkerCredentialRefusalCode = ResolutionRefusalCode;
+
+/** The executor's marker for a resolver answer that is not a member of
+ * the closed vocabulary: it says "the answer was outside the
+ * vocabulary", never what the answer was. */
+export const UNSPECIFIED_REFUSAL_CODE = "unspecified";
+
+/** Exact membership in the closed refusal vocabulary. The seam is
+ * injected, so the runtime cannot trust the resolver's answer to be
+ * one of the closed codes — a buggy resolver can hand back anything
+ * that satisfies the TypeScript type at runtime. */
+export function isClosedRefusalCode(code: string): code is ResolutionRefusalCode {
+  return (WORKER_CREDENTIAL_REFUSAL_CODES as readonly string[]).includes(code);
+}
+
+/** The credential resolver's closed answer: the whole resolved set, or a
+ * refusal. A refusal surfaces ONLY its closed `code` in durable
+ * diagnostics — the free-text `reason` stays controller-side (the
+ * daemon logs it inside its own resolver) because an executor
+ * deliberately trusts no resolver text at all, mirroring #735's
+ * all-or-nothing handoff and its closed `ResolutionRefusalCode` union. */
+export type WorkerCredentialResolution =
+  | { readonly ok: true; readonly credentials: readonly ProjectedWorkerCredential[] }
+  | { readonly ok: false; readonly code: WorkerCredentialRefusalCode; readonly reason: string };
+
+/** The LATE, operator-side resolution seam (#735): the controller daemon
+ * binds this to `resolveWorkerCredentials` over its vault and
+ * result-channel authority, closing over the run's scope identity. The
+ * executor only ever sees the resolved set for the exact request it is
+ * launching; it re-checks the set against the request's allowlist so a
+ * buggy resolver cannot hand a worker more (or less) than the run was
+ * granted. Shared by every projecting executor. */
+export interface WorkerCredentialResolver {
+  resolve(request: ExecutionRequest): Promise<WorkerCredentialResolution>;
+}
+
+/** The operator's resolved model selection for one execution (#1496): the
+ * non-secret half of "how this run reaches the model". A containerized
+ * worker has no ambient model environment, so — exactly like the forge
+ * API base (#1433) — the coordinate must ride the envelope or the review
+ * can never start a model call.
+ *
+ * "Non-secret" is a hard contract: the credential NEVER appears here. It
+ * stays on the #735 broker path (the `credentials` entry named `model`,
+ * whose projected material the worker reads from the derived environment
+ * variable), and `baseUrl` must pass the same credential-free endpoint
+ * hygiene as `forgeApiUrl` — a token riding the AI base URL would be
+ * persisted verbatim into every envelope. */
+export interface ExecutionModelSelection {
+  /** The operator-resolved AI base URL (the selected model profile's
+   * endpoint). Always required: unlike the forge API base there is no
+   * platform default an AI endpoint could fall back to, and a review
+   * without a model endpoint cannot produce a verdict. */
+  readonly baseUrl: string;
+  /** The model id on the wire (what the provider is asked for) — from the
+   * selected model profile's `model` key. Non-empty. */
+  readonly modelId: string;
+  /** The wire format of the endpoint (the selected profile's API format). */
+  readonly apiFormat: ApiFormat;
 }
 
 /** The approved profile NAMES an execution runs under. Names only —
@@ -140,6 +272,12 @@ export interface ExecutionRequest {
   readonly workspace: WorkspaceInfo;
   /** Approved profile names (never infrastructure). */
   readonly profiles: ExecutionProfiles;
+  /** The operator's resolved model selection (#1496): the non-secret AI
+   * base URL, the model id on the wire, and the wire format. Required on
+   * every review execution — there is no default model, so an envelope
+   * without a selection can never reach the model and is REFUSED at
+   * validation, never degraded to an empty engine input set. */
+  readonly modelSelection: ExecutionModelSelection;
   /** Opaque short-lived credential references; empty when the run needs
    * none. Never material secrets. */
   readonly credentials: readonly ExecutionCredentialRef[];
@@ -625,6 +763,56 @@ function validateWorkspaceShape(value: unknown, path: string): WorkspaceInfo {
   return workspace;
 }
 
+/** Envelope hygiene of the non-secret AI model base URL, or "" when it is
+ * a valid coordinate. It reuses `forgeApiUrlProblem` — the ONE
+ * credential-free http(s) endpoint check this contract has — because the
+ * AI base URL carries the identical promise: persisted verbatim into every
+ * envelope, never allowed to smuggle a credential (userinfo, query,
+ * fragment, or a credential-shaped path segment). A byte cap wider than
+ * the endpoint's own grammar would only ever reject on the cap, so the
+ * shared check runs first and the cap is belt-and-braces. */
+function aiBaseUrlProblem(value: string): string {
+  if (Buffer.byteLength(value, "utf8") > MAX_EXECUTION_AI_BASE_URL_BYTES) {
+    return `must be at most ${MAX_EXECUTION_AI_BASE_URL_BYTES} bytes`;
+  }
+  return forgeApiUrlProblem(value);
+}
+
+/** Fail-closed check of the operator's model selection (#1496). Every
+ * component is required: `baseUrl` must be a credential-free http(s)
+ * endpoint, `modelId` a non-empty bounded control-free identifier, and
+ * `apiFormat` one of the two wire formats. An absent or partial selection
+ * throws — a worker-driven review must be able to start a model call, and
+ * "we'll find out at model-call time" is exactly the failure this field
+ * closes. */
+function validateModelSelectionShape(value: unknown, path: string): ExecutionModelSelection {
+  if (!isPlainObject(value)) {
+    throw new ExecutionRequestError(
+      `${path} must be a mapping (a review execution cannot reach the model without a model selection)`,
+    );
+  }
+  rejectUnknownFields(value, ["baseUrl", "modelId", "apiFormat"], path);
+  const baseUrl = requireString(value, "baseUrl", path, { nonEmpty: true });
+  const baseProblem = aiBaseUrlProblem(baseUrl);
+  if (baseProblem !== "") {
+    throw new ExecutionRequestError(`${path}.baseUrl ${baseProblem}`);
+  }
+  const modelId = requireString(value, "modelId", path, { nonEmpty: true });
+  if (modelId.length > MAX_EXECUTION_MODEL_ID_CHARS) {
+    throw new ExecutionRequestError(
+      `${path}.modelId must be at most ${MAX_EXECUTION_MODEL_ID_CHARS} characters`,
+    );
+  }
+  if (hasControlCharacters(modelId)) {
+    throw new ExecutionRequestError(`${path}.modelId must not contain control characters`);
+  }
+  const apiFormat = value["apiFormat"];
+  if (apiFormat !== "openai" && apiFormat !== "anthropic") {
+    throw new ExecutionRequestError(`${path}.apiFormat must be 'openai' or 'anthropic'`);
+  }
+  return Object.freeze({ baseUrl, modelId, apiFormat });
+}
+
 function validateProfilesShape(value: unknown, path: string): ExecutionProfiles {
   if (!isPlainObject(value)) {
     throw new ExecutionRequestError(`${path} must be a mapping`);
@@ -656,7 +844,7 @@ function validateCredentialRef(value: unknown, path: string): ExecutionCredentia
 const REQUEST_KEYS = [
   "jobId", "runId", "attempt", "kind", "platform", "forgeApiUrl", "repoFullName",
   "prNumber", "headSha", "baseSha", "deadlineAtMs", "workspace", "profiles",
-  "credentials", "runDir", "requestPath", "resultPath",
+  "modelSelection", "credentials", "runDir", "requestPath", "resultPath",
 ] as const;
 
 /** Fail-closed validation of an execution request — the ONE definition of
@@ -671,7 +859,10 @@ const REQUEST_KEYS = [
  * control-free, and lexically inside `runDir`, and the non-secret forge API
  * base (`forgeApiUrl`) must be a credential-free http(s) endpoint wherever
  * it is present — and must be present for `forgejo`, which has no default
- * to fall back to (#1433). Returns a deep-frozen copy —
+ * to fall back to (#1433); and the model selection (`modelSelection`) must
+ * carry a credential-free AI base URL, a bounded non-empty model id, and a
+ * known wire format — every review execution must be able to reach the
+ * model (#1496). Returns a deep-frozen copy —
  * never the caller's own object — so a request cannot be mutated after it
  * was validated. Throws `ExecutionRequestError` on any problem. */
 export function validateExecutionRequest(value: unknown): ExecutionRequest {
@@ -716,6 +907,10 @@ export function validateExecutionRequest(value: unknown): ExecutionRequest {
     deadlineAtMs: requireFiniteMs(value, "deadlineAtMs", "execution request"),
     workspace: validateWorkspaceShape(value["workspace"], "execution request.workspace"),
     profiles: validateProfilesShape(value["profiles"], "execution request.profiles"),
+    modelSelection: validateModelSelectionShape(
+      value["modelSelection"],
+      "execution request.modelSelection",
+    ),
     credentials: Object.freeze(credentialsRaw.map((entry, index) => validateCredentialRef(entry, `execution request.credentials[${index}]`))),
     runDir: requireString(value, "runDir", "execution request", { nonEmpty: true }),
     requestPath: requireString(value, "requestPath", "execution request", { nonEmpty: true }),

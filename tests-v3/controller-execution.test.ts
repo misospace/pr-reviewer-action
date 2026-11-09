@@ -10,7 +10,12 @@ import assert from "node:assert/strict";
 import type { MirrorCache, WorkspaceHandle, WorkspaceInfo } from "../src/acquisition/index.js";
 import type { InstanceConfig, KubernetesExecutorSpec } from "../src/config/instance-config.js";
 import type { CredentialRef } from "../src/credentials/types.js";
-import type { ExecutionRequest, Executor } from "../src/executor/index.js";
+import type {
+  ExecutionModelSelection,
+  ExecutionProfiles,
+  ExecutionRequest,
+  Executor,
+} from "../src/executor/index.js";
 import { LocalExecutor } from "../src/executor/index.js";
 import type { JobRecord } from "../src/queue/types.js";
 import { newJobRecord } from "../src/queue/index.js";
@@ -94,6 +99,10 @@ interface BuilderHarness {
 function setup(overrides: {
   credentialRefs?: (job: ReviewJob, runId: string) => Promise<readonly CredentialRef[]>;
   resolveForgeApiUrl?: (job: ReviewJob) => Promise<string>;
+  resolveModelSelection?: (
+    job: ReviewJob,
+    profiles: ExecutionProfiles,
+  ) => Promise<ExecutionModelSelection>;
   runsRoot?: string;
 } = {}): BuilderHarness {
   const ws = fakeWorkspace();
@@ -110,9 +119,17 @@ function setup(overrides: {
       profileCalls.push(job);
       return Object.freeze({ executor: "default", model: "local-fast", evidence: "" === "" ? "strict" : "strict" });
     },
-    resolveForgeApiUrl:
-      overrides.resolveForgeApiUrl ??
-      (async (job) => (job.platform === "github" ? "https://api.github.com" : "https://forge.example")),
+      resolveForgeApiUrl:
+        overrides.resolveForgeApiUrl ??
+        (async (job) => (job.platform === "github" ? "https://api.github.com" : "https://forge.example")),
+      resolveModelSelection:
+        overrides.resolveModelSelection ??
+        (async (_job, profiles) =>
+          Object.freeze({
+            baseUrl: "https://model.example/v1",
+            modelId: `wire-${profiles.model}`,
+            apiFormat: "openai" as const,
+          })),
     credentialRefs:
       overrides.credentialRefs ??
       (async (job, runId) => {
@@ -245,6 +262,33 @@ test("a forgejo job with no configured forge endpoint refuses at composition, no
   // GitHub keeps its default: "" remains legal for that platform.
   const github = await h.builder.build(makeRecord("job-gh"));
   assert.equal(github.forgeApiUrl, "");
+});
+
+test("build stamps the operator's model selection into the envelope (#1496)", async () => {
+  const h = setup();
+  const request = await h.builder.build(makeRecord("job-model"));
+  // The selection is keyed by the run's approved MODEL profile NAME —
+  // the builder passes the profiles it resolved, never a guessed name.
+  assert.deepEqual(request.modelSelection, {
+    baseUrl: "https://model.example/v1",
+    modelId: "wire-local-fast",
+    apiFormat: "openai",
+  });
+});
+
+test("an unresolvable model selection refuses at composition, never a model-less envelope (#1496)", async () => {
+  // The builder owns no policy: it forwards the host's refusal, and the
+  // scheduler's failed-outcome path settles the run. A worker must never
+  // launch on an envelope that cannot reach the model.
+  const h = setup({
+    resolveModelSelection: async () => {
+      throw new RangeError("model profile defines no model id on the wire");
+    },
+  });
+  await assert.rejects(
+    () => h.builder.build(makeRecord("job-nomodel")),
+    /no model id on the wire/,
+  );
 });
 
 // ── executor selector ───────────────────────────────────────────────────
