@@ -4,12 +4,18 @@
  * Built on the v3 runtime's typed process lifecycle (`src/runtime/`): the
  * child is spawned argv-only through `runProcess` (POSIX process-group
  * leader, tree-terminated on deadline/cancel), and its environment is an
- * explicit allowlist — exactly the generic PATH/HOME/TMPDIR-style keys plus
- * the two executor coordination variables. NO request/job/repo-derived key
+ * explicit allowlist — exactly the generic PATH/HOME/TMPDIR-style keys, the
+ * two executor coordination variables, and the projected #735 credential
+ * variables the late credential handoff derives (`PR_REVIEWER_CREDENTIAL_*`,
+ * one per granted credential name). NO other request/job/repo-derived key
  * ever enters the environment: hostile repository-config data must not be
  * able to alter the command, its argv, or the child's env. The command and
  * argv come only from the operator's `LocalExecutorSpec`; PR-derived data
- * travels exclusively inside the request envelope file.
+ * travels exclusively inside the request envelope file, and resolved
+ * credential MATERIAL travels exclusively in the child's environment —
+ * never into the envelope, a recovery record, diagnostics, or a log line,
+ * and it dies with the worker tree (there is no durable material artifact
+ * for a local execution to clean up).
  *
  * Protocol: the executor writes the request envelope JSON to
  * `requestPath` BEFORE launching (the correlation source of truth) and
@@ -74,6 +80,9 @@ import { processCanExecute, processPresent, terminateProcessTreeByPid } from "..
 import type { LocalExecutorSpec } from "../config/instance-config.js";
 import {
   EXECUTION_ORPHANED_CATEGORY,
+  UNSPECIFIED_REFUSAL_CODE,
+  executionCredentialEnvName,
+  isClosedRefusalCode,
   validateExecutionRequest,
   ExecutionRequestError,
   type ExecutionCancelOutcome,
@@ -83,6 +92,9 @@ import {
   type ExecutionResult,
   type ExecutionStatusReport,
   type Executor,
+  type ProjectedWorkerCredential,
+  type WorkerCredentialResolution,
+  type WorkerCredentialResolver,
 } from "./types.js";
 import { boundedFailureMessage, readWorkerResultFile } from "./result-file.js";
 import { ensureContained, writeFileNoFollow, readBoundedFileNoFollow } from "./paths.js";
@@ -121,8 +133,12 @@ const FAILURE_CATEGORIES: readonly string[] = [
   "terminate_failed",
 ];
 
-/** Shared frozen cancellation outcomes. The local backend hands the worker
- * no credential material, so `material-not-removed` can never apply here. */
+/** Shared frozen cancellation outcomes. The local projection puts resolved
+ * credential material ONLY in the child's environment, which dies with the
+ * worker tree — there is no durable material artifact to remove, so
+ * `material-not-removed` can never apply here: the only way material can
+ * survive a cancellation is a worker that was not terminated, which is
+ * reported as `worker-not-terminated`. */
 const CANCEL_TERMINATED: ExecutionCancelOutcome = Object.freeze({ kind: "terminated" as const });
 const CANCEL_WORKER_NOT_TERMINATED: ExecutionCancelOutcome = Object.freeze({
   kind: "failed" as const,
@@ -183,6 +199,13 @@ export interface LocalExecutorDeps {
    * start time (Linux `/proc/<pid>/stat` field 22); a platform that
    * cannot prove one answers "" (unprovable). */
   readonly pidIdentity?: (pid: number) => Promise<string>;
+  /** The LATE, operator-side credential resolution seam (#735), the same
+   * seam the Kubernetes executor takes: the controller daemon binds it to
+   * `resolveWorkerCredentials` over its vault, closing over the run's
+   * scope identity. Optional — but a request that carries credential
+   * references without a wired resolver is a launch REFUSAL, never a
+   * half-credentialed worker. */
+  readonly credentialResolver?: WorkerCredentialResolver;
 }
 
 /** The default liveness probe: the runtime's own "can this pid still
@@ -281,6 +304,16 @@ async function terminateWorkerTree(
   return true;
 }
 
+/** The outcome of the local late credential handoff (#735): either the
+ * derived environment variables to project into the child's environment, a
+ * bounded launch refusal, or a pre-launch cancellation/deadline expiry
+ * that won the race against the handoff. */
+type LocalCredentialProjection =
+  | { readonly kind: "projected"; readonly env: ReadonlyMap<string, string> }
+  | { readonly kind: "refused"; readonly reason: string }
+  | { readonly kind: "cancelled" }
+  | { readonly kind: "expired" };
+
 interface LocalRun {
   readonly request: ExecutionRequest;
   readonly startedAtMs: number;
@@ -334,7 +367,10 @@ interface ExecutionStateRecord {
 /** One local worker execution, from envelope to collected result. */
 export class LocalExecutor implements Executor {
   private readonly spec: LocalExecutorSpec;
-  private readonly deps: Required<LocalExecutorDeps>;
+  private readonly deps: Required<Omit<LocalExecutorDeps, "credentialResolver">>;
+  /** The optional #735 credential resolution seam; a request that carries
+   * credential references without one is refused, never half-credentialed. */
+  private readonly credentialResolver: WorkerCredentialResolver | undefined;
   /** In-flight runs keyed by correlation runId. A settled run removes
    * itself: the map never outlives the execution. */
   private readonly runs = new Map<string, LocalRun>();
@@ -343,6 +379,7 @@ export class LocalExecutor implements Executor {
     this.spec = spec;
     const pidAlive = deps.pidAlive ?? defaultPidAlive;
     const pidPresent = deps.pidPresent ?? defaultPidPresent;
+    this.credentialResolver = deps.credentialResolver;
     this.deps = {
       runProcess: deps.runProcess ?? ((options) => runProcess(options)),
       nowMs: deps.nowMs ?? (() => Date.now()),
@@ -438,18 +475,50 @@ export class LocalExecutor implements Executor {
         ));
       }
       await writeFileNoFollow(validated.requestPath, JSON.stringify(validated, null, 2));
+
+      // The #735 late credential handoff, the same composition the
+      // Kubernetes executor performs: LATE (the durable envelope, which
+      // carries only opaque references, is already written) and
+      // all-or-nothing — a refusal, a cancellation, or an expired deadline
+      // during the handoff launches nothing, and no half-credential ever
+      // reaches a worker. The resolved material exists in this process for
+      // the shortest window the launch allows and rides ONLY the child's
+      // environment.
+      const projectedCredentials = await this.resolveRunCredentials(run);
+      if (projectedCredentials.kind === "refused") {
+        this.runs.delete(validated.runId);
+        resolveTerminateReady();
+        return refusedHandle(this.refusedResult(
+          validated,
+          "launch_refused",
+          `the execution was refused before launch: ${projectedCredentials.reason}`,
+        ));
+      }
+      if (projectedCredentials.kind !== "projected") {
+        this.runs.delete(validated.runId);
+        resolveTerminateReady();
+        return refusedHandle(this.preLaunchResult(validated, projectedCredentials.kind));
+      }
+
       // Crash-window record: the state file exists (pid 0 — not yet
       // launched) BEFORE the spawn, so a crash in the launch window leaves
       // something reconcile can classify instead of an unknown.
       await this.writeState(run, "starting");
 
       // The child environment is an allowlist, built only through the runtime
-      // mechanics; the two coordination variables are the sole per-run keys.
+      // mechanics; the two coordination variables and the projected
+      // credential variables are the sole per-run keys. The variable names
+      // come only from the validated request's credential allowlist through
+      // the shared `executionCredentialEnvName` derivation — never from
+      // repository data — and the values are the resolved material itself.
       const env = buildChildEnv(
         extendAllowlist(BASE_CHILD_ALLOWLIST, [EXECUTION_REQUEST_ENV_KEY, EXECUTION_RESULT_ENV_KEY]),
       );
       env[EXECUTION_REQUEST_ENV_KEY] = validated.requestPath;
       env[EXECUTION_RESULT_ENV_KEY] = validated.resultPath;
+      for (const [key, value] of projectedCredentials.env) {
+        env[key] = value;
+      }
 
       const processHandle = this.deps.runProcess({
         file: this.spec.command,
@@ -579,6 +648,133 @@ export class LocalExecutor implements Executor {
       resourceMs: 0,
       observedAtMs: this.deps.nowMs(),
     });
+  }
+
+  /** A frozen result for an execution that died before the worker was
+   * launched without being a launch refusal: a cancellation stays a
+   * cancellation and an expired deadline stays a bounded deadline
+   * failure — neither claims a worker that never ran. */
+  private preLaunchResult(
+    request: ExecutionRequest,
+    kind: "cancelled" | "expired",
+  ): ExecutionResult {
+    if (kind === "cancelled") {
+      return Object.freeze({
+        runId: request.runId,
+        jobId: request.jobId,
+        status: "cancelled" as const,
+        resultHeadSha: "" as const,
+        failureCategory: "" as const,
+        failureMessage: "" as const,
+        resultArtifactPath: "" as const,
+        diagnostics: "the execution was cancelled before the worker was launched",
+        artifactPaths: Object.freeze([]) as readonly string[],
+        resourceMs: 0,
+        observedAtMs: this.deps.nowMs(),
+      });
+    }
+    return this.refusedResult(
+      request,
+      "deadline",
+      "the execution deadline expired before the worker was launched",
+    );
+  }
+
+  /** The pre-launch gate: a cancelled run and an expired deadline both win
+   * against the credential handoff that just awaited. A cancelled run must
+   * never start a worker, and an expired deadline must never create one. */
+  private launchGate(run: LocalRun): "cancelled" | "expired" | null {
+    if (run.cancelRequested || run.signal.aborted) return "cancelled";
+    if (run.request.deadlineAtMs !== 0 && run.request.deadlineAtMs - this.deps.nowMs() <= 0) {
+      return "expired";
+    }
+    return null;
+  }
+
+  /** The #735 → local composition: resolve the run's opaque credential
+   * references through the injected resolver, then derive the child
+   * environment variables the resolved material is projected under.
+   * Credential-free requests skip the seam entirely (no resolver is
+   * consulted, and the environment stays exactly as it was). Returns a
+   * bounded refusal — never material, never a resolver's free text — when
+   * the handoff cannot complete: the caller launches nothing, and a
+   * worker is never half-credentialed.
+   *
+   * The resolved set is re-checked against the request's allowlist
+   * (exactly one non-empty entry per granted credential name), so a buggy
+   * resolver can neither widen the grant (foreign names riding the
+   * handoff) nor narrow it (a worker missing a credential the run was
+   * promised), and a name that cannot derive a valid environment variable
+   * is refused, never truncated or guessed. */
+  private async resolveRunCredentials(
+    run: LocalRun,
+  ): Promise<LocalCredentialProjection> {
+    const request = run.request;
+    if (request.credentials.length === 0) {
+      return { kind: "projected", env: new Map() };
+    }
+    const resolver = this.credentialResolver;
+    if (resolver === undefined) {
+      return {
+        kind: "refused",
+        reason: "the execution carries credential references but no credential projection path is wired (a credential resolver is required)",
+      };
+    }
+    let resolution: WorkerCredentialResolution;
+    try {
+      resolution = await resolver.resolve(request);
+    } catch {
+      // A cancellation or an expired deadline that landed while the
+      // resolver was in flight wins over the resolver's own failure: the
+      // run is dead, and a dead run is not a launch refusal.
+      const gate = this.launchGate(run);
+      if (gate !== null) return { kind: gate };
+      // A throwing resolver gets a fixed reason: an operator-side error
+      // object is not this executor's diagnostics surface.
+      return { kind: "refused", reason: "the credential resolver failed" };
+    }
+    // The resolver awaited: a run that was cancelled — or whose deadline
+    // expired — while it waited must never receive material.
+    const gate = this.launchGate(run);
+    if (gate !== null) return { kind: gate };
+    if (!resolution.ok) {
+      // Echo ONLY the closed refusal vocabulary: a resolver's code that
+      // is not a member of it (a buggy resolver's grammar-compatible
+      // string, which could carry material) is echoed as `unspecified`,
+      // and the free-text reason never rides durable diagnostics at all.
+      const code = isClosedRefusalCode(resolution.code)
+        ? resolution.code
+        : UNSPECIFIED_REFUSAL_CODE;
+      return { kind: "refused", reason: `credential resolution refused (${code})` };
+    }
+    const expected = request.credentials.map((entry) => entry.name).sort();
+    const grantedSorted = [...resolution.credentials.map((entry) => entry.name)].sort();
+    if (
+      grantedSorted.length !== expected.length
+      || grantedSorted.some((name, index) => name !== expected[index])
+    ) {
+      return {
+        kind: "refused",
+        reason: "the resolved credential set does not match the request's credential allowlist",
+      };
+    }
+    if (resolution.credentials.some((entry) => entry.value === "" || typeof entry.value !== "string")) {
+      return { kind: "refused", reason: "the resolved credential material is empty" };
+    }
+    const env = new Map<string, string>();
+    for (const entry of resolution.credentials) {
+      try {
+        env.set(executionCredentialEnvName(entry.name), entry.value);
+      } catch (err) {
+        return {
+          kind: "refused",
+          reason: `the execution was refused before launch: ${
+            err instanceof Error ? err.message : "the credential name is invalid"
+          }`,
+        };
+      }
+    }
+    return { kind: "projected", env };
   }
 
   /** Crash-recovery reconciliation: classify an execution found on disk for
@@ -717,9 +913,12 @@ export class LocalExecutor implements Executor {
    *
    * Fail closed: a termination that cannot be CONFIRMED is reported
    * `failed` (`worker-not-terminated`), never `terminated` — the caller
-   * must keep treating the execution as possibly alive. The local backend
-   * hands the worker no credential material, so `material-not-removed`
-   * never applies here. */
+   * must keep treating the execution as possibly alive. The local
+   * projection puts resolved credential material ONLY in the child's
+   * environment, which dies with the worker tree — there is no durable
+   * material artifact to remove, so `material-not-removed` never applies
+   * here: the only way material can survive a cancellation is a worker
+   * that was not terminated, which this outcome already reports. */
   async cancel(request: ExecutionRequest): Promise<ExecutionCancelOutcome> {
     const validated = validateExecutionRequest(request);
     const run = this.runs.get(validated.runId);

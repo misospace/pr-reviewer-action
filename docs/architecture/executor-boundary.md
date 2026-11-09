@@ -275,8 +275,31 @@ foreign backend's result could reach the scheduler as a successful head.
 acquired workspace root, a deadline derived from `deadlineAtMs`, and a
 strict child-environment allowlist: PATH/HOME/TMPDIR-class keys plus
 exactly `PR_REVIEWER_EXECUTION_REQUEST` and
-`PR_REVIEWER_EXECUTION_RESULT`. No request-, job-, or repository-derived
-key ever enters the environment or argv. A deadline that is already past
+`PR_REVIEWER_EXECUTION_RESULT` — plus the projected #735 credential
+variables (`PR_REVIEWER_CREDENTIAL_*`, one per granted credential name)
+when the request carries credential references. No other request-, job-,
+or repository-derived key ever enters the environment or argv.
+
+**The local credential projection is the same #735 composition the
+Kubernetes executor performs, minus the cluster Secret.** A
+credential-carrying request resolves its opaque references LATE (after
+the durable envelope is written, which carries only references) and
+all-or-nothing through the same `WorkerCredentialResolver` seam: a
+missing resolver, a resolver refusal, a resolved set that does not match
+the request's allowlist, empty material, or a name that cannot derive a
+valid environment variable is a `launch_refused` — nothing launches
+half-credentialed, and the resolver's free-text reason is never echoed
+(only the closed `WORKER_CREDENTIAL_REFUSAL_CODES` vocabulary,
+`unspecified` otherwise). A cancellation or an expired deadline that
+lands during the handoff wins the race and launches nothing. The
+resolved material rides ONLY the child's environment — never the
+envelope, the recovery record, diagnostics, or any log line — and dies
+with the worker tree: there is no durable material artifact, so
+`material-not-removed` never applies locally (material can survive a
+cancellation only inside a worker that was not terminated, which is
+already reported as `worker-not-terminated`). A credential-free request
+never consults the resolver, and its child environment stays exactly the
+minimal allowlist. A deadline that is already past
 at `start` never launches (an expired timeout must not read as "no
 timeout"): the execution settles failed `deadline` immediately, with no
 envelope, no state record, and no child process. The per-run state record
@@ -517,8 +540,13 @@ fail-closed, so an unlistable cluster refuses the launch.
 - **Credentials compose with #735; they never alias it.** The durable
   request carries opaque broker REFERENCES only — a reference is never a
   Kubernetes object name (`result-channel:<runId>` is a valid reference
-  that could never be one). At launch the executor performs the late,
-  all-or-nothing handoff through two injected seams: a
+  that could never be one). The resolver seam and its refusal vocabulary
+  live in the shared executor contract (`src/executor/types.ts`) so the
+  projecting executors cannot drift; the local reference executor composes
+  the SAME late, all-or-nothing handoff without a store — it projects the
+  resolved material directly into the child's environment (see the local
+  backend section above). At launch the Kubernetes executor performs the
+  late, all-or-nothing handoff through two injected seams: a
   `WorkerCredentialResolver` (the daemon binds #735
   `resolveWorkerCredentials`; the executor re-checks the resolved set
   against the request's allowlist — exactly one non-empty entry per

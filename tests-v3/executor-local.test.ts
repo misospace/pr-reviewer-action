@@ -24,11 +24,14 @@ import {
   EXECUTION_STATE_FILE,
   LocalExecutor,
   MAX_EXECUTION_FAILURE_MESSAGE_CHARS,
+  executionCredentialEnvName,
   validateExecutionRequest,
   validateExecutionResult,
   type ExecutionRequest,
   type ExecutionResult,
   type LocalExecutorDeps,
+  type WorkerCredentialResolution,
+  type WorkerCredentialResolver,
 } from "../src/executor/index.js";
 
 const WORKER = path.resolve(__dirname, "..", "..", "tests-v3", "fixtures", "executor-worker.mjs");
@@ -1001,6 +1004,393 @@ test("the child env is the allowlist plus the two executor vars, whatever the re
       !JSON.stringify(launch.env).includes("rm -rf"),
       "no request-derived value may leak into the child environment",
     );
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+// ── the #735 late credential handoff (local projection) ─────────────────
+
+const MODEL_MATERIAL = "sk-local-test-material-0123456789abcdef";
+
+function fakeResolver(
+  impl: (request: ExecutionRequest) => Promise<WorkerCredentialResolution>,
+): WorkerCredentialResolver & { calls: number } {
+  const resolver = {
+    calls: 0,
+    async resolve(request: ExecutionRequest): Promise<WorkerCredentialResolution> {
+      resolver.calls += 1;
+      return await impl(request);
+    },
+  };
+  return resolver;
+}
+
+test("a credential-free request never consults the resolver and the env stays minimal", async () => {
+  const fixture = makeRequest({});
+  try {
+    const resolver = fakeResolver(async () => {
+      throw new Error("the resolver must not be consulted for a credential-free request");
+    });
+    const { launches, deps } = recordingDeps({ credentialResolver: resolver });
+    const handle = await executor("ok", deps).start(fixture.request, new AbortController().signal);
+    await handle.collect();
+    assert.equal(resolver.calls, 0);
+    assert.equal(launches.length, 1);
+    const allowed = new Set([
+      "PATH", "HOME", "TMPDIR", EXECUTION_REQUEST_ENV_KEY, EXECUTION_RESULT_ENV_KEY,
+    ]);
+    for (const key of Object.keys(launches[0]!.env)) {
+      assert.ok(allowed.has(key), `unexpected env key '${key}' reached the child`);
+    }
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a credential-bearing request projects the resolved material into the child env and nowhere else", async () => {
+  const fixture = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+  });
+  try {
+    const resolver = fakeResolver(async () => ({
+      ok: true as const,
+      credentials: [{ name: "model", value: MODEL_MATERIAL }],
+    }));
+    const { launches, deps } = recordingDeps({ credentialResolver: resolver });
+    const handle = await executor("ok", deps).start(fixture.request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.status, "completed");
+
+    // The material reaches the child under the SHARED env-name derivation.
+    const env = launches[0]!.env;
+    assert.equal(env[executionCredentialEnvName("model")], MODEL_MATERIAL);
+    // Exactly one projected key was added to the allowlist.
+    const allowed = new Set([
+      "PATH", "HOME", "TMPDIR", EXECUTION_REQUEST_ENV_KEY, EXECUTION_RESULT_ENV_KEY,
+      executionCredentialEnvName("model"),
+    ]);
+    for (const key of Object.keys(env)) {
+      assert.ok(allowed.has(key), `unexpected env key '${key}' reached the child`);
+    }
+
+    // The material never reaches the envelope, the recovery record, the
+    // result file, or the collected diagnostics — only the child env.
+    const envelope = readFileSync(fixture.request.requestPath, "utf8");
+    const state = readFileSync(path.join(fixture.request.runDir, EXECUTION_STATE_FILE), "utf8");
+    assert.ok(!envelope.includes(MODEL_MATERIAL), "the envelope must never carry material");
+    assert.ok(!state.includes(MODEL_MATERIAL), "the recovery record must never carry material");
+    assert.ok(
+      !JSON.stringify(result).includes(MODEL_MATERIAL),
+      "the collected result must never carry material",
+    );
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a credential-bearing request without a wired resolver is refused, never half-credentialed", async () => {
+  const fixture = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+  });
+  try {
+    const { launches, deps } = recordingDeps();
+    const handle = await executor("ok", deps).start(fixture.request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(
+      result.failureMessage,
+      /carries credential references but no credential projection path is wired/,
+    );
+    assert.equal(launches.length, 0);
+    // No state record: the execution never launched, so a restart may
+    // start fresh.
+    assert.ok(!existsSync(path.join(fixture.request.runDir, EXECUTION_STATE_FILE)));
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a resolver refusal echoes only the closed vocabulary, never the resolver's own text", async () => {
+  const hostileCode = "sk_live_abcdef0123456789";
+  const fixture = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+  });
+  try {
+    const { launches, deps } = recordingDeps({
+      credentialResolver: fakeResolver(async () => ({
+        ok: false as const,
+        // A grammar-compatible hostile string that could carry material.
+        code: hostileCode as never,
+        reason: `vault unreachable: ${MODEL_MATERIAL}`,
+      })),
+    });
+    const handle = await executor("ok", deps).start(fixture.request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(result.failureMessage, /credential resolution refused \(unspecified\)/);
+    assert.ok(
+      !result.failureMessage.includes(hostileCode),
+      "an off-vocabulary refusal code must never reach durable diagnostics",
+    );
+    assert.ok(
+      !result.failureMessage.includes(MODEL_MATERIAL),
+      "the resolver's free-text reason must never reach durable diagnostics",
+    );
+    assert.equal(launches.length, 0);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a closed-vocabulary resolver refusal is echoed verbatim", async () => {
+  const fixture = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+  });
+  try {
+    const { deps } = recordingDeps({
+      credentialResolver: fakeResolver(async () => ({
+        ok: false as const,
+        code: "invalid_request",
+        reason: "no worker credential plan exists for this correlation identity",
+      })),
+    });
+    const handle = await executor("ok", deps).start(fixture.request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(result.failureMessage, /credential resolution refused \(invalid_request\)/);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a resolved set that does not match the request's allowlist is refused", async () => {
+  const fixture = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+  });
+  try {
+    // A wider grant: a foreign name rides the handoff.
+    const { launches, deps } = recordingDeps({
+      credentialResolver: fakeResolver(async () => ({
+        ok: true as const,
+        credentials: [
+          { name: "model", value: MODEL_MATERIAL },
+          { name: "forge-clone", value: "forge-material" },
+        ],
+      })),
+    });
+    const handle = await executor("ok", deps).start(fixture.request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(
+      result.failureMessage,
+      /does not match the request's credential allowlist/,
+    );
+    assert.equal(launches.length, 0);
+  } finally {
+    cleanup(fixture);
+  }
+
+  // A narrower grant: the worker would be missing a promised credential.
+  const narrow = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+  });
+  try {
+    const { launches, deps } = recordingDeps({
+      credentialResolver: fakeResolver(async () => ({
+        ok: true as const,
+        credentials: [],
+      })),
+    });
+    const handle = await executor("ok", deps).start(narrow.request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(
+      result.failureMessage,
+      /does not match the request's credential allowlist/,
+    );
+    assert.equal(launches.length, 0);
+  } finally {
+    cleanup(narrow);
+  }
+});
+
+test("empty resolved material is refused", async () => {
+  const fixture = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+  });
+  try {
+    const { launches, deps } = recordingDeps({
+      credentialResolver: fakeResolver(async () => ({
+        ok: true as const,
+        credentials: [{ name: "model", value: "" }],
+      })),
+    });
+    const handle = await executor("ok", deps).start(fixture.request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(result.failureMessage, /the resolved credential material is empty/);
+    assert.equal(launches.length, 0);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a runtime-hostile resolver answer with non-string material is refused, never projected", async () => {
+  const fixture = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+  });
+  try {
+    // The seam is injected: a buggy or hostile resolver can hand back
+    // anything that satisfies the TypeScript type at runtime. A
+    // non-string "value" is not material — it is refused, never placed
+    // into the child environment.
+    const { launches, deps } = recordingDeps({
+      credentialResolver: fakeResolver(async () => ({
+        ok: true as const,
+        credentials: [{ name: "model", value: 123 as unknown as string }],
+      })),
+    });
+    const handle = await executor("ok", deps).start(fixture.request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(result.failureMessage, /the resolved credential material is empty/);
+    assert.equal(launches.length, 0);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("Executor.cancel(request) landing during the credential handoff also wins: nothing is launched", async () => {
+  const fixture = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+  });
+  try {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const instance = executor("ok", {
+      credentialResolver: fakeResolver(async () => {
+        await gate;
+        return { ok: true as const, credentials: [{ name: "model", value: MODEL_MATERIAL }] };
+      }),
+    });
+    const startPromise = instance.start(fixture.request, new AbortController().signal);
+    // Let the start reach the in-flight resolver, then cancel through the
+    // correlation-keyed Executor.cancel seam while the handoff is pending.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const cancelPromise = instance.cancel(fixture.request);
+    release();
+    const [handle, cancelOutcome] = await Promise.all([startPromise, cancelPromise]);
+    const result = await handle.collect();
+    assert.equal(result.status, "cancelled");
+    // The worker never launched, so nothing could be terminated: the
+    // cancellation outcome fails closed, never claims a termination.
+    assert.equal(cancelOutcome.kind, "failed");
+    if (cancelOutcome.kind === "failed") {
+      assert.equal(cancelOutcome.reason, "worker-not-terminated");
+    }
+    assert.equal(
+      (instance as unknown as { runs: Map<string, unknown> }).runs.size,
+      0,
+      "a refused run must not stay in flight",
+    );
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a throwing resolver is a fixed-reason refusal, never an operator error dump", async () => {
+  const fixture = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+  });
+  try {
+    const { launches, deps } = recordingDeps({
+      credentialResolver: fakeResolver(async () => {
+        throw new Error(`vault exploded: ${MODEL_MATERIAL}`);
+      }),
+    });
+    const handle = await executor("ok", deps).start(fixture.request, new AbortController().signal);
+    const result = await handle.collect();
+    assert.equal(result.failureCategory, "launch_refused");
+    assert.match(result.failureMessage, /the credential resolver failed/);
+    assert.ok(
+      !result.failureMessage.includes(MODEL_MATERIAL),
+      "a throwing resolver's error text must never reach durable diagnostics",
+    );
+    assert.equal(launches.length, 0);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a cancellation landing during the credential handoff wins: nothing is launched", async () => {
+  const fixture = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+  });
+  try {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const controller = new AbortController();
+    const { launches, deps } = recordingDeps({
+      credentialResolver: fakeResolver(async () => {
+        await gate;
+        return { ok: true as const, credentials: [{ name: "model", value: MODEL_MATERIAL }] };
+      }),
+    });
+    const startPromise = executor("ok", deps).start(fixture.request, controller.signal);
+    // Let the start reach the in-flight resolver, then cancel during it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort();
+    release();
+    const handle = await startPromise;
+    const result = await handle.collect();
+    assert.equal(result.status, "cancelled");
+    assert.equal(launches.length, 0);
+    // The material was resolved but never handed to anything: no state
+    // record either (a fresh start is allowed after a restart).
+    assert.ok(!existsSync(path.join(fixture.request.runDir, EXECUTION_STATE_FILE)));
+    assert.ok(
+      !readFileSync(fixture.request.requestPath, "utf8").includes(MODEL_MATERIAL),
+    );
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("a deadline expiring during the credential handoff is a bounded deadline failure", async () => {
+  const fixture = makeRequest({
+    credentials: [{ name: "model", reference: "vault:model-profile-a" }],
+    deadlineAtMs: 1_000,
+  });
+  try {
+    let now = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { launches, deps } = recordingDeps({
+      nowMs: () => now,
+      credentialResolver: fakeResolver(async () => {
+        await gate;
+        return { ok: true as const, credentials: [{ name: "model", value: MODEL_MATERIAL }] };
+      }),
+    });
+    const startPromise = executor("ok", deps).start(fixture.request, new AbortController().signal);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    now = 2_000; // the deadline expires while the handoff is in flight
+    release();
+    const handle = await startPromise;
+    const result = await handle.collect();
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureCategory, "deadline");
+    assert.match(result.failureMessage, /deadline expired before the worker was launched/);
+    assert.equal(launches.length, 0);
   } finally {
     cleanup(fixture);
   }

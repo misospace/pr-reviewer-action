@@ -26,8 +26,8 @@ import {
   kubernetesCredentialSecretName,
   kubernetesJobName,
   type KubernetesCredentialSecret,
-  type ProjectedWorkerCredential,
 } from "../src/executor/kubernetes.js";
+import type { ProjectedWorkerCredential } from "../src/executor/types.js";
 
 const SA_TOKEN = "sa-token-xyzzy";
 const MATERIAL_A = "super-secret-material-alpha";

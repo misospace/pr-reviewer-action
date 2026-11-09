@@ -996,8 +996,14 @@ export async function controllerMain(
     ...(deps.executors?.local === undefined
       ? {
           // The default local binding: the real executor over the
-          // operator's fixed argv (the worker-image contract).
-          local: (spec) => new LocalExecutor(spec),
+          // operator's fixed argv (the worker-image contract), with the
+          // same #735 credential seam the Kubernetes binding takes — a
+          // credential-bearing local execution is resolved late and
+          // projected into the child environment, never launched
+          // half-credentialed.
+          local: (spec) => new LocalExecutor(spec, {
+            credentialResolver: credentialBinding.resolver,
+          }),
         }
       : {}),
     ...(deps.executors?.kubernetes === undefined && clusterApi !== null

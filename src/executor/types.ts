@@ -30,6 +30,8 @@ import type { ApiFormat } from "../config/types.js";
 import type { ReviewJobKind } from "../jobs/types.js";
 import type { WorkspaceInfo } from "../acquisition/types.js";
 import { isPlainObject } from "../platform/object.js";
+import { RESOLUTION_REFUSAL_CODES } from "../credentials/types.js";
+import type { ResolutionRefusalCode } from "../credentials/types.js";
 
 /** Credential-reference name: lowercase kebab-case, bounded. */
 export const EXECUTION_CREDENTIAL_NAME_RE = /^[a-z][a-z0-9-]{0,63}$/;
@@ -122,6 +124,75 @@ export function executionCredentialEnvName(name: string): string {
     );
   }
   return derived;
+}
+
+/** One run-scoped credential whose opaque reference has been resolved
+ * by the controller-side #735 broker. `value` is live material: it
+ * crosses the projection seam transiently and never anywhere else —
+ * not the envelope, not a recovery record, not diagnostics, not any
+ * error message. */
+export interface ProjectedWorkerCredential {
+  /** The credential name from the request. */
+  readonly name: string;
+  /** The resolved material, handed off for projection only. */
+  readonly value: string;
+}
+
+/** The executors' CLOSED vocabulary for a credential resolver's refusal
+ * code: the values of #735's `ResolutionRefusalCode` union, and nothing
+ * else. Shared by every projecting executor (Kubernetes and local alike)
+ * so none of them can drift from the broker's refusal grammar.
+ *
+ * The set is DERIVED from the broker's own runtime array, so the two
+ * cannot drift: a hand-copied list is a list that rots the first time a
+ * code is added to the broker.
+ *
+ * A refusal code is an EXACT membership question, never a pattern
+ * match: a grammar-compatible string that carries material (`sk_live_…`
+ * is a perfectly good identifier) must never reach durable diagnostics.
+ * The resolver's free-text `reason` is never echoed at all. */
+export const WORKER_CREDENTIAL_REFUSAL_CODES: readonly ResolutionRefusalCode[] =
+  Object.freeze([...RESOLUTION_REFUSAL_CODES]);
+
+/** The refusal code an executor may ECHO: #735's closed union, and
+ * nothing else. The executor's own marker for a resolver answer outside
+ * the vocabulary is `unspecified` — an internal value that is NOT a
+ * member of this union and never a member of
+ * `WORKER_CREDENTIAL_REFUSAL_CODES`. */
+export type WorkerCredentialRefusalCode = ResolutionRefusalCode;
+
+/** The executor's marker for a resolver answer that is not a member of
+ * the closed vocabulary: it says "the answer was outside the
+ * vocabulary", never what the answer was. */
+export const UNSPECIFIED_REFUSAL_CODE = "unspecified";
+
+/** Exact membership in the closed refusal vocabulary. The seam is
+ * injected, so the runtime cannot trust the resolver's answer to be
+ * one of the closed codes — a buggy resolver can hand back anything
+ * that satisfies the TypeScript type at runtime. */
+export function isClosedRefusalCode(code: string): code is ResolutionRefusalCode {
+  return (WORKER_CREDENTIAL_REFUSAL_CODES as readonly string[]).includes(code);
+}
+
+/** The credential resolver's closed answer: the whole resolved set, or a
+ * refusal. A refusal surfaces ONLY its closed `code` in durable
+ * diagnostics — the free-text `reason` stays controller-side (the
+ * daemon logs it inside its own resolver) because an executor
+ * deliberately trusts no resolver text at all, mirroring #735's
+ * all-or-nothing handoff and its closed `ResolutionRefusalCode` union. */
+export type WorkerCredentialResolution =
+  | { readonly ok: true; readonly credentials: readonly ProjectedWorkerCredential[] }
+  | { readonly ok: false; readonly code: WorkerCredentialRefusalCode; readonly reason: string };
+
+/** The LATE, operator-side resolution seam (#735): the controller daemon
+ * binds this to `resolveWorkerCredentials` over its vault and
+ * result-channel authority, closing over the run's scope identity. The
+ * executor only ever sees the resolved set for the exact request it is
+ * launching; it re-checks the set against the request's allowlist so a
+ * buggy resolver cannot hand a worker more (or less) than the run was
+ * granted. Shared by every projecting executor. */
+export interface WorkerCredentialResolver {
+  resolve(request: ExecutionRequest): Promise<WorkerCredentialResolution>;
 }
 
 /** The operator's resolved model selection for one execution (#1496): the

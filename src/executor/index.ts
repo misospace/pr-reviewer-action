@@ -31,9 +31,13 @@ export {
   MAX_EXECUTION_FAILURE_MESSAGE_CHARS,
   MAX_EXECUTION_HEAD_SHA_CHARS,
   MAX_EXECUTION_RESULT_FILE_BYTES,
+  UNSPECIFIED_REFUSAL_CODE,
+  WORKER_CREDENTIAL_REFUSAL_CODES,
   ExecutionRequestError,
   ExecutionResultError,
+  executionCredentialEnvName,
   forgeApiUrlProblem,
+  isClosedRefusalCode,
   validateExecutionRequest,
   validateExecutionResult,
 } from "./types.js";
@@ -51,6 +55,10 @@ export type {
   ExecutionResult,
   ExecutionStatusReport,
   Executor,
+  ProjectedWorkerCredential,
+  WorkerCredentialRefusalCode,
+  WorkerCredentialResolution,
+  WorkerCredentialResolver,
 } from "./types.js";
 
 export {
@@ -85,7 +93,6 @@ export type { QueueRequestBuilder } from "./queue.js";
 
 export {
   WORKER_CONTAINER_NAME,
-  WORKER_CREDENTIAL_REFUSAL_CODES,
   WORKER_IDENTITY_VALUE,
   WORKER_NETWORK_POSTURE,
   WORKER_RUN_AS_ID,
@@ -108,10 +115,6 @@ export type {
   KubernetesJobManifest,
   KubernetesJobStatus,
   KubernetesJobSummary,
-  ProjectedWorkerCredential,
-  WorkerCredentialRefusalCode,
-  WorkerCredentialResolution,
-  WorkerCredentialResolver,
 } from "./kubernetes.js";
 
 export {
