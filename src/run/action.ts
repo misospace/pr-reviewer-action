@@ -14,6 +14,13 @@ import { buildPublishApi, publishEnvFromReview, publishInputFromEnv, publishWith
 import { runActionFollowUp } from "./followup-action.js";
 import { publishStepRuns } from "../publish/publish.js";
 import { buildReviewBundle, type ReviewBundleInput, type ReviewBundleState } from "../publish/bundle.js";
+import {
+  computeReviewAttestation,
+  serializeReviewAttestation,
+  type ReviewAttestation,
+  type ReviewAttestationSignals,
+} from "../publish/attestation.js";
+import { MODEL_UNAVAILABLE_ENGINE } from "../prompt/failure.js";
 import { ACTION_VERSION } from "../version.js";
 import { rawInputsFromEnv, runReview } from "./review.js";
 import { createRunDir } from "./run-dir.js";
@@ -75,19 +82,32 @@ function parseBundlePrNumber(value: string | undefined): number | null {
  * field, and the document is a single-line `JSON.stringify` value, so the
  * step-output writer cannot have its assignment forged by finding text.
  * Exactly one call per run reaches an output boundary (skip, review, or
- * failure); the file copy is best-effort and must never fail the run. */
+ * failure); the file copy is best-effort and must never fail the run.
+ *
+ * #1576: every boundary additionally writes the `review-attestation` step
+ * output — the one unambiguous machine-readable conclusion
+ * (`approved | blocked | incomplete | unavailable | skipped` plus reason
+ * code and exact head) — and carries the same attestation object inside the
+ * bundle, so the two machine surfaces can never disagree about what this
+ * run concluded. */
 function emitReviewBundle(
   env: NodeJS.ProcessEnv,
   runDir: string,
   reviewId: string,
   input: Omit<ReviewBundleInput, "reviewId" | "generatedAt">,
+  attestationSignals: ReviewAttestationSignals,
 ): void {
+  const attestation = computeReviewAttestation(attestationSignals);
   const bundle = buildReviewBundle({
     ...input,
+    attestation,
     reviewId,
     generatedAt: new Date().toISOString(),
   });
-  writeOutputs(env, [["review-bundle", bundle]]);
+  writeOutputs(env, [
+    ["review-bundle", bundle],
+    ["review-attestation", serializeReviewAttestation(attestation)],
+  ]);
   if (runDir !== "") {
     try {
       writeFileSync(join(runDir, "review-bundle.json"), `${bundle}\n`);
@@ -229,7 +249,7 @@ export async function actionMain(env: NodeJS.ProcessEnv = process.env): Promise<
         identity: { diffFingerprint: "", analysisEngine: "", actionVersion: ACTION_VERSION },
         failureReason: error instanceof Error && error.message !== "" ? error.message : "unknown error",
         findings: [],
-      });
+      }, { crashed: true });
     } catch {
       // The failure bundle is best-effort: a bundle-write failure must
       // never mask the original error the pipeline propagates.
@@ -279,7 +299,7 @@ async function runActionPipeline(
       identity: { diffFingerprint: "", analysisEngine: "", actionVersion: ACTION_VERSION },
       skipReason: "comment-not-on-pr",
       findings: [],
-    });
+    }, { reviewProduced: false, headSha: eventHeadSha ?? "" });
     process.stderr.write("[v3] Review skipped: comment-not-on-pr\n");
     appendStepSummary(env, "**AI PR Review skipped:** `comment-not-on-pr`");
     return 0;
@@ -323,7 +343,7 @@ async function runActionPipeline(
         identity: { diffFingerprint: "", analysisEngine: "", actionVersion: ACTION_VERSION },
         skipReason: followUpReason,
         findings: [],
-      });
+      }, { reviewProduced: false, headSha: eventHeadSha ?? "" });
       // Only fixed constants on both surfaces — no comment body, prompt, or
       // answer text ever reaches the log or the step summary.
       process.stderr.write(`[v3] Follow-up handled: ${followUpReason}\n`);
@@ -398,6 +418,11 @@ async function runActionPipeline(
       },
       skipReason: pre.skip_reason ?? "",
       findings: [],
+    }, {
+      // #1576: a skipped run attests NOTHING about approval — a carried
+      // verdict belongs to the earlier run's attestation, never this one.
+      reviewProduced: false,
+      headSha: review.reviewedHeadSha || pre.head_sha || "",
     });
     // #903: this branch used to exit silently — outputs written, no log
     // line, no step summary — so a labeler-triggered skip showed the same
@@ -446,6 +471,9 @@ async function runActionPipeline(
   // ── Publish ───────────────────────────────────────────────────────────
   let publishFailed = false;
   let publishStatus: "published" | "superseded" | "failed" | undefined;
+  // #1576: the verdict-bearing native submission record, relayed from the
+  // publish outcome — the ONLY proof that can certify `approved`.
+  let publishNative: { event: string; submitted: boolean } | undefined;
   if (shouldPublish(stage)) {
     // #590: the review→publish-environment mapping and the per-run evidence
     // fields are shared with the host-neutral platform runner (entrypoints.ts),
@@ -469,6 +497,7 @@ async function runActionPipeline(
     // (see the publish-status contract description).
     writeOutputs(env, [["publish-status", publish.status]]);
     publishStatus = publish.status;
+    publishNative = publish.native;
     publishFailed = publish.exitCode !== 0;
   }
 
@@ -480,11 +509,29 @@ async function runActionPipeline(
     review.outputs.reviewResult,
     review.partialCoverage !== undefined,
   );
+  // The exact head this run reviewed — the bundle head SHA and the
+  // #1576 attestation head SHA are ONE value, so the two machine surfaces
+  // can never bind their conclusions to different commits.
+  const reviewedHeadSha = review.reviewedHeadSha || eventHeadSha || pre.head_sha;
+  const attestationSignals: ReviewAttestationSignals = {
+    reviewProduced: true,
+    modelUnavailable: review.outputs.analysisEngine === MODEL_UNAVAILABLE_ENGINE,
+    degraded: review.outputs.degradedGateBypass === true,
+    verdict: review.outputs.verdict,
+    requiredChecks: review.outputs.requiredChecks,
+    reviewResult: review.outputs.reviewResult,
+    incompleteReason: review.outputs.incompleteReason,
+    partialCoverage: review.partialCoverage !== undefined,
+    headSha: reviewedHeadSha,
+    ...(publishStatus !== undefined
+      ? { publication: { status: publishStatus, ...(publishNative !== undefined ? { native: publishNative } : {}) } }
+      : {}),
+  };
   emitReviewBundle(env, runDir, reviewId, {
     state: bundleState,
     repository: stage.REPO ?? "",
     prNumber: parseBundlePrNumber(stage.PR_NUMBER),
-    headSha: review.reviewedHeadSha || eventHeadSha || pre.head_sha,
+    headSha: reviewedHeadSha,
     baseSha: pre.base_sha,
     identity: {
       diffFingerprint: review.diffFingerprint,
@@ -515,7 +562,7 @@ async function runActionPipeline(
     // review exactly like the published handoff does.
     ...(review.unresolvedReviewObligations !== undefined ? { unresolvedReviewObligations: review.unresolvedReviewObligations } : {}),
     ...(review.derivedObligationState !== undefined ? { derivedObligationState: review.derivedObligationState } : {}),
-  });
+  }, attestationSignals);
 
   // ── Re-review label ───────────────────────────────────────────────────
   await maybeClearRereviewLabel(stage, event);

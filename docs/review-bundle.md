@@ -35,6 +35,11 @@ A consumer MUST:
   the document claims no truncation, and a truncation claim whose count
   matches the list exactly are contradictions. Refuse such a document
   (#1542).
+- For merge decisions, read `attestation`, not `state` or
+  `disposition.verdict`: the lifecycle state and the verdict output
+  describe the review, while `attestation.conclusion` is the only trusted
+  approval signal (#1576). The identical object rides the dedicated
+  `review-attestation` step output.
 
 ## Document shape
 
@@ -65,6 +70,11 @@ here for readability — real output has no newlines):
     "degraded": false
   },
   "publication": { "status": "published" },
+  "attestation": {
+    "conclusion": "blocked",
+    "reason_code": "request_changes",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
   "findings": [
     {
       "id": "3f2a…64 hex chars…",
@@ -274,6 +284,18 @@ still parses. The published handoff's parser refuses the same contradictions.
   run's bundle, not this one.
 - `publication.status` (`published` / `superseded` / `failed`) appears only
   when publication was attempted — same rule as `publish-status` (#1257).
+- `attestation` (#1576) carries the machine-verifiable final review
+conclusion: `conclusion` (`approved` / `blocked` / `incomplete` /
+`unavailable` / `skipped`), a closed-vocabulary `reason_code`, and the
+exact `head_sha` the conclusion binds. It is present on EVERY state,
+`skipped` and `failed` included, so a lifecycle state that merely looks
+green can never hide the conclusion. `approved` appears only when a native
+APPROVE actually submitted for a non-empty exact head, with complete
+coverage, required checks complete or unconfigured, and no degraded
+bypass. A malformed attestation refuses the whole document at parse, and a
+refused document must be read as absent, never as approval. The consumer
+contract and the full reason-code list:
+[Verdicts and publishing](verdicts-and-publishing.md#trusted-review-attestation-1576).
 
 ## Bounds and redaction (by construction)
 
