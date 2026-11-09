@@ -269,7 +269,7 @@ test("#1584 image-publishing workflow: dispatch-only on main, least privilege, i
     jobs: Record<string, {
       if?: string;
       permissions: { contents: string; packages: string };
-      steps: { uses?: string; run?: string; with?: Record<string, unknown> }[];
+      steps: { uses?: string; run?: string; env?: Record<string, unknown>; with?: Record<string, unknown> }[];
     }>;
   };
 
@@ -301,6 +301,51 @@ test("#1584 image-publishing workflow: dispatch-only on main, least privilege, i
   }
   assert.match(workflow, /GHCR_OWNER=\$\{GITHUB_REPOSITORY_OWNER,,\}/);
   assert.doesNotMatch(workflow, /:latest|:v[0-9]/);
+  // GHCR has no registry-side tag immutability, so the workflow itself
+  // must refuse to replace an existing sha-<commit> tag: a rerun of a
+  // non-byte-reproducible build would otherwise silently move the tag off
+  // the digest the run summary published. The guard must inspect the
+  // exact two sha-<commit> tags, fail on a present tag, fail closed on any
+  // uncertain registry answer, and run before the first push step.
+  const guardStep = job.steps.find((step) => (step.run ?? "").includes("docker manifest inspect"));
+  assert.ok(guardStep, "a guard step must inspect the published sha tags");
+  const guardRun = guardStep.run ?? "";
+  assert.match(guardRun, /set -euo pipefail/);
+  assert.deepEqual(guardStep.env, {
+    CONTROLLER_TAG: "ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-controller:sha-${{ github.sha }}",
+    WORKER_TAG: "ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-worker:sha-${{ github.sha }}",
+  });
+  for (const tagVar of ["CONTROLLER_TAG", "WORKER_TAG"]) {
+    assert.match(guardRun, new RegExp(`\\$\\{?${tagVar}\\}?`), `the guard must check $${tagVar}`);
+  }
+  // A present tag refuses the run...
+  assert.match(guardRun, /already exists/);
+  // ...and so does any registry answer that is not an explicit absence:
+  // only the spec's 404 codes (MANIFEST_UNKNOWN / NAME_UNKNOWN /
+  // not-found) pass, so ambiguous failures like TLS "unknown authority"
+  // or an OCI UNKNOWN error code fail closed (fail the job, never push
+  // blind).
+  assert.match(guardRun, /manifest\.unknown\|name\.unknown\|not found/);
+  // Orientation locks: the existing-tag refusal must sit in the branch
+  // where the inspect SUCCEEDED, and the uncertain-state refusal in the
+  // branch where the absence classifier did NOT match.
+  assert.match(
+    guardRun,
+    /if out=\$\(docker manifest inspect "\$tag" 2>&1\); then\s*\n\s*echo "::error::\$\{tag\} already exists/,
+    "the existing-tag refusal must be the inspect-success branch",
+  );
+  assert.match(
+    guardRun,
+    /if ! printf '%s\\n' "\$out" \| grep -Eqi/,
+    "the uncertain-state refusal must be the classifier-did-not-match branch",
+  );
+  assert.match(guardRun, /exit 1/);
+  const guardIndex = job.steps.indexOf(guardStep);
+  const firstPushIndex = job.steps.findIndex((step) => step.with?.["push"] === true);
+  assert.ok(
+    firstPushIndex !== -1 && guardIndex < firstPushIndex,
+    "the tag guard must run before any push step",
+  );
   // Both targets from the one Dockerfile, single-arch canary.
   for (const target of ["controller", "worker"]) {
     assert.ok(

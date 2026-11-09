@@ -65,6 +65,11 @@ How it runs:
 - **Provenance.** The run summary reports each image's digest and a
   copy-paste-ready `image@sha256:...` reference plus the exact source
   commit. No `latest`, no release tag.
+- **Tag immutability.** GHCR has no registry-side immutable-tag setting,
+  so the job enforces it before building: it inspects both `sha-<commit>`
+  tags and stops the run when one already exists, or when the registry
+  state is uncertain (fail closed). Within this workflow a rerun can
+  never move a published tag; publish a new commit instead.
 - **Permissions.** The job runs with `contents: read` and `packages: write`
   and logs into GHCR with `GITHUB_TOKEN`. Image building is fully separate
   from the Action release pipeline (which owns tag/release writes) and

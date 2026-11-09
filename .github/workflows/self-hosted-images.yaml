@@ -10,8 +10,10 @@ name: Self-hosted images
 #
 # Both targets are built from ONE checked-out commit so the controller and
 # worker images always share a runtime/protocol revision. Tags are
-# immutable-by-convention sha-<commit> tags; no floating `latest` and no
-# release tag is pushed in this scope.
+# immutable sha-<commit> tags: GHCR has no registry-side tag-immutability
+# setting, so the job itself refuses to replace a tag that already exists
+# (see the pre-push guard below). No floating `latest` and no release tag
+# is pushed in this scope.
 on:
   workflow_dispatch:
 
@@ -53,6 +55,40 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to replace a published sha tag
+        # GHCR has no registry-side tag immutability (a push always
+        # overwrites), so immutability is enforced here: a rebuild is not
+        # byte-identical (see the Dockerfile pinning policy), so re-pushing
+        # the same sha-<commit> tag would silently move it off the digest
+        # the run summary published. The guard fails closed: the job
+        # proceeds only when the registry explicitly answers that the tag
+        # is absent, and refuses on any other error (auth, network,
+        # unexpected state).
+        env:
+          CONTROLLER_TAG: ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-controller:sha-${{ github.sha }}
+          WORKER_TAG: ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-worker:sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for tag in "$CONTROLLER_TAG" "$WORKER_TAG"; do
+            if out=$(docker manifest inspect "$tag" 2>&1); then
+              echo "::error::${tag} already exists in GHCR. sha-<commit> tags are immutable: a rerun would silently replace the published reference. Publish a new commit instead."
+              exit 1
+            fi
+            # Fail closed: only an explicit registry absence (404
+            # MANIFEST_UNKNOWN / NAME_UNKNOWN / not found) proves the tag
+            # is absent. Anything else — auth, TLS ("unknown authority"),
+            # network, an OCI UNKNOWN error code — refuses the run. (An
+            # access denial also means this same GITHUB_TOKEN could not
+            # overwrite the tag later, so refusing can never mask an
+            # overwrite; at worst it fails one run loudly.)
+            if ! printf '%s\n' "$out" | grep -Eqi 'manifest.unknown|name.unknown|not found'; then
+              echo "registry answer for ${tag}:" >&2
+              printf '%s\n' "$out" >&2
+              echo "::error::cannot confirm that ${tag} is absent; refusing to push over uncertain registry state."
+              exit 1
+            fi
+          done
 
       # Provenance attestations are disabled so the pushed artifact is a
       # plain single manifest: the digest reported below is then exactly
