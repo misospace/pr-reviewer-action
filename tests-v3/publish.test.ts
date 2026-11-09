@@ -722,6 +722,18 @@ test("#1581: a throwing createReview becomes a fellBack failure record", async (
   assert.equal(api.submitted[1]!.commit_id, undefined, "the fallback attempt is not commit-bound");
 });
 
+test("#1581: the fallback attempt's error takes precedence over the primary rejection", async () => {
+  const api = new MockPublishApi();
+  api.reviewResults = [{ ok: false, error: "anchor raced" }];
+  const base = api.createReview.bind(api);
+  api.createReview = async (request) => {
+    if (request.commit_id !== undefined) return base(request);
+    throw new Error("socket hang up");
+  };
+  const result = await submitNativeReview(api, { event: "COMMENT", body: "review body", commitId: HEAD, comments: [] });
+  assert.deepEqual(result, { ok: false, inlineCount: 0, fellBack: true, error: "socket hang up" });
+});
+
 test("#1581: a throwing primary submission lands the plain fallback with fellBack", async () => {
   const api = new MockPublishApi();
   let first = true;
