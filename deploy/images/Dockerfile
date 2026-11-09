@@ -12,8 +12,11 @@
 # ── build stage ────────────────────────────────────────────────────────
 # Base image pinned by sha256 digest (the node:26-slim multi-arch index,
 # resolved at publish time and kept current by Renovate digest pinning) so
-# a rebuilt image is reproducible from the same source commit. A mutable
-# tag must never be published from.
+# every rebuild starts from the same base image bytes. The finished image
+# is NOT byte-reproducible: apt-get resolves git from a mutable
+# repository and the build stage output changes between runs — the
+# run-summary digest of a published image is the only exact reference to
+# it. A mutable tag must never be published from.
 FROM node:26-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS build
 WORKDIR /build
 

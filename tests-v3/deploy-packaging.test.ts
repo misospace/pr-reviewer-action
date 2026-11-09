@@ -215,6 +215,22 @@ test("Dockerfile: non-root USER 1000, exec-form entrypoint, worker argv", () => 
   // git is installed without recommendations and lists are cleaned.
   assert.match(dockerfile, /apt-get install -y --no-install-recommends git/);
   assert.match(dockerfile, /rm -rf \/var\/lib\/apt\/lists/);
+  // #1584: every external base image stays pinned by sha256 digest, and
+  // the whole file builds on ONE base revision. Stage-name FROMs are
+  // internal links, not registry references.
+  const stageNames = new Set(
+    [...dockerfile.matchAll(/^FROM \S+ AS ([a-z0-9-]+)$/gm)].map((match) => match[1]!),
+  );
+  const externalBases = [...dockerfile.matchAll(/^FROM (\S+)(?: AS [a-z0-9-]+)?$/gm)]
+    .map((match) => match[1]!)
+    .filter((reference) => !stageNames.has(reference));
+  assert.equal(externalBases.length, 2, "build and runtime stages each pull one base image");
+  const baseDigests = externalBases.map((reference) => {
+    const pinned = /^[^\s@]+@sha256:([0-9a-f]{64})$/.exec(reference);
+    assert.ok(pinned, `base image ${reference} must be pinned by sha256 digest, not a mutable tag`);
+    return pinned[1]!;
+  });
+  assert.equal(new Set(baseDigests).size, 1, "both stages must pin the same base revision");
 });
 
 test("chart keeps dependency artifacts loadable and gitignored; CI gates render", () => {
@@ -271,7 +287,6 @@ test("#1584 image-publishing workflow: dispatch-only on main, least privilege, i
   assert.match(job.if ?? "", /github\.ref == 'refs\/heads\/main'/);
   assert.deepEqual(job.permissions, { contents: "read", packages: "write" });
 
-  const script = job.steps.map((step) => step.run ?? "").join("\n");
   // Immutable tags only: the sha-<commit> tag, no floating latest and no
   // release tag in the initial scope.
   const tags = job.steps.flatMap(
@@ -297,12 +312,30 @@ test("#1584 image-publishing workflow: dispatch-only on main, least privilege, i
     assert.match(workflow, new RegExp(`ghcr\\.io/\\$\\{\\{ env\\.GHCR_OWNER \\}\\}/pr-reviewer-${target}`));
   }
   assert.equal(job.steps.filter((step) => step.with?.["platforms"] === "linux/amd64").length, 2);
-  // Digests land in the run summary for the operator's digest pinning.
-  assert.match(script, /GITHUB_STEP_SUMMARY/);
+  // #1584: the run summary must carry the exact pull-able references for
+  // BOTH images and the source commit they were built from, wired from
+  // the build outputs and github.sha — this is the operator's only exact
+  // provenance record of a publish run.
   for (const target of ["controller", "worker"]) {
     assert.match(
       workflow,
       new RegExp(`${target.toUpperCase()}_DIGEST: \\$\\{\\{ steps\\.${target}\\.outputs\\.digest \\}\\}`),
+    );
+  }
+  assert.match(workflow, /SOURCE_SHA: \$\{\{ github\.sha \}\}/);
+  const summaryStep = job.steps.find((step) => (step.run ?? "").includes("GITHUB_STEP_SUMMARY"))?.run ?? "";
+  assert.notEqual(summaryStep, "", "a step must write the run summary");
+  // Anchor to the brace group redirected into the summary itself: the
+  // same references are echoed to the job log, and the log echo alone
+  // must not satisfy the contract.
+  const summaryBlock = /\n[ \t]*\{[\s\S]*?\n[ \t]*\} >> "\$GITHUB_STEP_SUMMARY"/.exec(summaryStep)?.[0] ?? "";
+  assert.notEqual(summaryBlock, "", "a brace block must be redirected into GITHUB_STEP_SUMMARY");
+  assert.match(summaryBlock, /Source commit: \\?`\$\{SOURCE_SHA\}\\?`/);
+  for (const target of ["controller", "worker"]) {
+    assert.match(
+      summaryBlock,
+      new RegExp(`pr-reviewer-${target}@\\$\\{${target.toUpperCase()}_DIGEST\\}`),
+      `the run summary block must carry the ${target} image@digest reference`,
     );
   }
   // Checkout never hands its token to the build, and GHCR login uses the
