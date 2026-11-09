@@ -188,14 +188,27 @@ test("#1576: crash, request_changes and skip attest unavailable, blocked and ski
     ...cleanApprove,
     publication: { status: "published", native: { event: "REQUEST_CHANGES", submitted: true } },
   }), { conclusion: "blocked", reason_code: "request_changes", head_sha: HEAD });
-  // A native REQUEST_CHANGES submission the API rejected is the capability
-  // failure, not a landed block — symmetric with `native_approval_failed`.
-  assert.deepEqual(attest({
-    reviewProduced: true,
-    verdict: "request_changes",
-    headSha: HEAD,
-    publication: { status: "failed", native: { event: "REQUEST_CHANGES", submitted: false } },
-  }), { conclusion: "unavailable", reason_code: "native_submission_failed", head_sha: HEAD });
+    // A native REQUEST_CHANGES submission the API rejected is the capability
+    // failure, not a landed block — symmetric with `native_approval_failed`.
+    assert.deepEqual(attest({
+      reviewProduced: true,
+      verdict: "request_changes",
+      headSha: HEAD,
+      publication: { status: "failed", native: { event: "REQUEST_CHANGES", submitted: false } },
+    }), { conclusion: "unavailable", reason_code: "native_submission_failed", head_sha: HEAD });
+    // `fellBack` demotes only APPROVE: a landed REQUEST_CHANGES through the
+    // body-only fallback is still a landed block, and a COMMENT abstention
+    // through it is still an abstention.
+    assert.deepEqual(attest({
+      reviewProduced: true,
+      verdict: "request_changes",
+      headSha: HEAD,
+      publication: { status: "published", native: { event: "REQUEST_CHANGES", submitted: true, fellBack: true } },
+    }), { conclusion: "blocked", reason_code: "request_changes", head_sha: HEAD });
+    assert.deepEqual(attest({
+      ...cleanApprove,
+      publication: { status: "published", native: { event: "COMMENT", submitted: true, fellBack: true } },
+    }), { conclusion: "incomplete", reason_code: "approval_withheld", head_sha: HEAD });
   // A request_changes verdict whose review was superseded by a newer push
   // still blocks on the verdict (the bundle pins the exact head; consumers
   // compare it).
