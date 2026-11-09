@@ -57,7 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ ! -f tests/self_hosted_e2e_qualification.sh ]]; then
-            echo "::error::The self-hosted qualification harness (tests/self_hosted_e2e_qualification.sh) is absent. It lands with #1482. The job fails instead of reporting a qualification that did not run."
+            echo "::error::The self-hosted qualification harness (tests/self_hosted_e2e_qualification.sh) is absent from this checkout. It landed with #1482. The job fails instead of reporting a qualification that did not run."
             exit 1
           fi
 

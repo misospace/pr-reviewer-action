@@ -24,9 +24,14 @@ set -euo pipefail
 # Rules (docs/self-hosted-qualification.md): every forge read and write
 # the review pipeline performs travels through the configured forge
 # capability inside the controller. The harness itself never calls a
-# forge CLI and never reaches a remote forge API with a raw HTTP client:
-# raw calls here target only the loopback instance and services the
-# harness provisioned itself. Credentials (model key, App private key,
+# forge CLI against forge state and never reaches a remote forge API
+# with a raw HTTP client: raw calls here target only the loopback
+# instance and services the harness provisioned itself. The single
+# provisioning exception is the in-container server CLI
+# (`docker exec <disposable> forgejo admin user create`): the forge
+# capability cannot create the disposable instance's first admin, so
+# that call is instance setup on a container the harness owns, the same
+# pattern as tests/forgejo_e2e_smoke.sh. Credentials (model key, App private key,
 # forge token, admin token, webhook secret) ride only in the process
 # environment or in curl config files, never in argv, URLs, or log lines.
 # A GitHub App installation token minted by the controller follows the
@@ -395,7 +400,7 @@ version: 1
 forges:
   - name: qualification-github
     kind: github
-$(if [[ "$GITHUB_API_URL" != "https://api.github.com" ]]; then printf '    endpoint: "%s"\n' "$GITHUB_API_URL"; fi)
+    endpoint: "$GITHUB_API_URL"
     credential: github
 $(write_model_section)
 adoption:
@@ -562,7 +567,8 @@ jq -n \
     user: { login: "reviewer" }
   }' > "$TMP/webhook.json"
 
-WEBHOOK_SIGNATURE="$("$NODE_BIN" -e '
+# The webhook secret rides the node process environment, never argv.
+WEBHOOK_SIGNATURE="$(WEBHOOK_SECRET="$WEBHOOK_SECRET" "$NODE_BIN" -e '
 const fs = require("fs");
 const crypto = require("crypto");
 console.log(crypto.createHmac("sha256", process.env.WEBHOOK_SECRET).update(fs.readFileSync(process.argv[1])).digest("hex"));
