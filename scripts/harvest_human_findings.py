@@ -25,8 +25,9 @@ disqualify a finding that was valid when it was made. The bot dismisses its
 own older reviews as newer heads land, which flips ``state`` to ``DISMISSED``
 after the fact — so the approval decision is read from the bot's
 ``ai-pr-reviewer:{...}`` metadata marker (``pr_reviewer/metadata.py``) when
-present (``review_result: "clean"``), and only falls back to the raw
-``state`` when no marker parses.
+present (``review_result`` is an approve-verdict class: ``clean`` or
+``findings`` — approve with non-blocking findings only), and only falls
+back to the raw ``state`` when no marker parses.
 
 GitHub reads only — every request goes through ``pr_reviewer.forge``,
 the configured forge capability, the one module that knows how to
@@ -225,10 +226,19 @@ def determine_bot_approval(
     both cases return unapproved rather than silently qualifying.
 
     Among the reviews at or before that timestamp, prefers the bot's
-    ``ai-pr-reviewer:{...}`` metadata marker (``review_result == "clean"``)
-    over the review's raw ``state``, since a later dismissal (the bot
-    superseding its own stale review) flips ``state`` to ``DISMISSED``
-    without changing what the marker recorded at the time. Returns
+    ``ai-pr-reviewer:{...}`` metadata marker (``review_result``) over the
+    review's raw ``state``, since a later dismissal (the bot superseding
+    its own stale review) flips ``state`` to ``DISMISSED`` without
+    changing what the marker recorded at the time. Both approve-verdict
+    marker classes count as an approval: ``clean`` (approve, no
+    findings) and ``findings`` (approve with non-blocking findings only —
+    under the strict verdict policy any blocking finding forces
+    ``request_changes``/``issues``, so ``findings`` can only ride an
+    approve verdict). ``partial`` is an abstention (coverage or
+    required-checks gap — the review never established completeness) and
+    ``issues`` a request_changes; neither is an approval (#1601: the
+    organic #1586 miss was recorded under an approve-with-findings
+    review the old ``clean``-only rule silently dropped). Returns
     ``(approved, base_sha)`` — ``base_sha`` is the marker's ``base_sha``
     field when it is a full 40-hex commit sha, else ``None``.
     """
@@ -256,7 +266,7 @@ def determine_bot_approval(
         if isinstance(raw_base, str) and _FULL_SHA_RE.fullmatch(raw_base):
             base_sha = raw_base
         result = str(marker.get("review_result", "")).lower()
-        return result == "clean", base_sha
+        return result in ("clean", "findings"), base_sha
     return chosen.get("state") == "APPROVED", base_sha
 
 

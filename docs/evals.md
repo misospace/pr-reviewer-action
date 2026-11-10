@@ -767,10 +767,16 @@ maintainer PR issue comments that read as blocking ("merge blocker",
 "blocker", "before merge", "request changes" — head = the latest PR commit
 before the comment's timestamp), and keeps a finding only when the reviewer
 bot's own review at that exact head was an approval. That decision reads the
-bot's `ai-pr-reviewer:{...}` metadata marker (`review_result: "clean"`) in
-preference to the review's raw `state`, since the bot dismisses its own
-stale reviews as new heads land — a `state: DISMISSED` review can still have
-recorded an approval in its marker at the time. `defect.file`/`line_range`
+bot's `ai-pr-reviewer:{...}` metadata marker (`review_result`) in preference
+to the review's raw `state`, since the bot dismisses its own stale reviews as
+new heads land — a `state: DISMISSED` review can still have recorded an
+approval in its marker at the time. Both approve-verdict marker classes count
+as an approval: `clean` (approve, no findings) and `findings` (approve with
+non-blocking findings only — under the strict verdict policy any blocking
+finding forces `request_changes`/`issues`, so `findings` can only ride an
+approve verdict; #1601's #1586 example was dropped by the old `clean`-only
+rule). `partial` is an abstention (coverage or required-checks gap) and
+`issues` a request_changes; neither is an approval. `defect.file`/`line_range`
 come from an inline review comment when one is attached to the review,
 otherwise from a changed-file path named in the finding text. GitHub reads
 only (`gh api` or `urllib` with a token from the environment); it never
@@ -779,6 +785,20 @@ hardcoded. A weekly workflow
 (`.github/workflows/harvest-human-findings.yaml`, plus `workflow_dispatch`)
 runs it and opens or updates a single PR with new entries for human
 curation; it never pushes to `main`.
+
+**Curated entries** (#1601): findings the harvester correctly or necessarily
+misses are added by hand in the same entry shape, with two extra `source`
+fields. `miss_class` keeps the quality classes separate: `missed_blocker`
+(native approve verdict missed the defect), `partial_abstention_miss`
+(production review at the head was a `partial` abstention — not an approval —
+and still missed the defect), and `false_positive` (reserved for clean-side
+material). `provenance` names the human review, its exact-head timestamps,
+the production bot review's own marker facts, and why the entry was curated
+instead of harvested. `production_bot_at_head` is honest about non-approval
+states (`PARTIAL` records a `review_result: partial` marker). Each failure
+mechanism is paired with a `clean`-list negative control (a fixed head of the
+same PR, or a truly clean head exercising the same mechanism) so flagging
+every similar file cannot pass as detection.
 
 ```bash
 export GITHUB_TOKEN=...

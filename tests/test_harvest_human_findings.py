@@ -124,6 +124,56 @@ def test_determine_bot_approval_marker_issues_not_approved():
     assert approved is False
 
 
+def test_determine_bot_approval_marker_findings_is_an_approval():
+    """Approve with non-blocking findings (`review_result: "findings"`) is
+    an approval: under the strict verdict policy any blocking finding
+    forces request_changes/issues, so `findings` can only ride an approve
+    verdict (#1601 — the organic #1586 miss rode exactly this class)."""
+    reviews = [
+        {
+            "user": {"login": BOT},
+            "state": "APPROVED",
+            "commit_id": HEAD,
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "body": _marker(review_result="findings"),
+        }
+    ]
+    approved, base_sha = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T00:00:00Z")
+    assert approved is True
+    assert base_sha == BASE
+
+
+def test_determine_bot_approval_marker_findings_survives_dismissal():
+    reviews = [
+        {
+            "user": {"login": BOT},
+            "state": "DISMISSED",
+            "commit_id": HEAD,
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "body": _marker(review_result="findings"),
+        }
+    ]
+    approved, _ = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T00:00:00Z")
+    assert approved is True
+
+
+def test_determine_bot_approval_marker_partial_is_not_an_approval():
+    """`partial` is an abstention (coverage/required-checks gap), not a
+    trusted approval — a finding under a partial review stays unharvested
+    (#1601's #1565 example is curated manually for exactly this reason)."""
+    reviews = [
+        {
+            "user": {"login": BOT},
+            "state": "COMMENTED",
+            "commit_id": HEAD,
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "body": _marker(review_result="partial"),
+        }
+    ]
+    approved, _ = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T00:00:00Z")
+    assert approved is False
+
+
 def test_determine_bot_approval_no_marker_falls_back_to_state():
     reviews = [
         {
