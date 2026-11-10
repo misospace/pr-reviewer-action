@@ -72,6 +72,10 @@ export interface ReviewObligation {
    * of them — the evidence must reach the location the derivation flagged.
    * Absent on every other source (their rows carry no location). */
   anchors?: string[];
+  /** #1594: deterministic CI-evidence provenance for a row the CI gate's
+   * head-bound test-execution evidence discharged. Set only by
+   * `reconcileObligationsWithCiEvidence`; absent on every other row. */
+  resolvedBy?: { kind: "ci-evidence"; check: string; headSha: string };
 }
 
 /** One row of the harness-authored candidates artifact, verbatim. */
@@ -707,9 +711,18 @@ export function reviewObligationsToArtifact(obligations: readonly ReviewObligati
     version: 1,
     // #1449: `anchors` is additive — it rides only on derived rows, so a
     // run without derived rows keeps the artifact byte-identical.
-    obligations: obligations.map(({ id, source, text, status, cause, anchors }) => (
-      anchors === undefined ? { id, source, text, status, cause } : { id, source, text, status, cause, anchors }
-    )),
+    // #1594: `resolved_by` follows the same additive pattern — it rides only
+    // on CI-evidence-discharged rows, so an unreconciled run keeps the
+    // artifact byte-identical.
+    obligations: obligations.map(({ id, source, text, status, cause, anchors, resolvedBy }) => ({
+      id,
+      source,
+      text,
+      status,
+      cause,
+      ...(anchors === undefined ? {} : { anchors }),
+      ...(resolvedBy === undefined ? {} : { resolved_by: { kind: resolvedBy.kind, check: resolvedBy.check, head_sha: resolvedBy.headSha } }),
+    })),
   };
 }
 
@@ -720,6 +733,8 @@ const OBLIGATION_STATUSES: ReadonlySet<string> = new Set(["satisfied", "unmet", 
 const OBLIGATION_CAUSES: ReadonlySet<string> = new Set([
   "tool-capability", "budget-exhausted", "provider-failure", "missing-source-evidence", "derivation-incomplete",
 ]);
+/** #1594: the head-SHA shape `reconcileObligationsWithCiEvidence` writes. */
+const CI_EVIDENCE_HEAD_SHA_RE = /^[0-9a-f]{7,64}$/i;
 
 /**
  * #1537: read `reviewObligationsToArtifact`'s output back into rows. The
@@ -735,7 +750,8 @@ const OBLIGATION_CAUSES: ReadonlySet<string> = new Set([
  * parser applies to a published document, so a half-trusted row can never
  * reach the published handoff through this seam. The same rule covers the
  * row's SHAPE: `reviewObligationsToArtifact` writes exactly the keys `id`,
- * `source`, `text`, `status`, `cause` (plus the optional #1449 `anchors`),
+ * `source`, `text`, `status`, `cause` (plus the optional #1449 `anchors` and
+ * the optional #1594 `resolved_by`),
  * and always records `cause` (a vocabulary string, or `null` for a row with
  * no cause), so a row carrying any other property — or omitting `cause` —
  * is not a row this runtime wrote and refuses the artifact too.
@@ -754,7 +770,7 @@ export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
     const row = raw as Record<string, unknown>;
     for (const key of Object.keys(row)) {
-      if (key !== "id" && key !== "source" && key !== "text" && key !== "status" && key !== "cause" && key !== "anchors") return null;
+      if (key !== "id" && key !== "source" && key !== "text" && key !== "status" && key !== "cause" && key !== "anchors" && key !== "resolved_by") return null;
     }
     if (typeof row.id !== "string" || row.id === "") return null;
     if (typeof row.source !== "string" || !OBLIGATION_SOURCES.has(row.source)) return null;
@@ -763,6 +779,21 @@ export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[
     if (!(row.cause === null || (typeof row.cause === "string" && OBLIGATION_CAUSES.has(row.cause)))) return null;
     if (row.anchors !== undefined
       && !(Array.isArray(row.anchors) && row.anchors.every((anchor) => typeof anchor === "string"))) return null;
+    // #1594: the resolved_by shape is validated strictly (closed kind, usable
+    // check name, SHA-shaped head) — a half-trusted provenance record is as
+    // unreadable as a half-trusted row, so it refuses the WHOLE artifact.
+    let resolvedBy: ReviewObligation["resolvedBy"];
+    if (row.resolved_by !== undefined) {
+      if (row.resolved_by === null || typeof row.resolved_by !== "object" || Array.isArray(row.resolved_by)) return null;
+      const provenance = row.resolved_by as Record<string, unknown>;
+      for (const key of Object.keys(provenance)) {
+        if (key !== "kind" && key !== "check" && key !== "head_sha") return null;
+      }
+      if (provenance.kind !== "ci-evidence") return null;
+      if (typeof provenance.check !== "string" || provenance.check === "") return null;
+      if (typeof provenance.head_sha !== "string" || !CI_EVIDENCE_HEAD_SHA_RE.test(provenance.head_sha)) return null;
+      resolvedBy = { kind: "ci-evidence", check: provenance.check, headSha: provenance.head_sha };
+    }
     rows.push({
       id: row.id,
       source: row.source as ReviewObligationSource,
@@ -770,6 +801,7 @@ export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[
       status: row.status as ReviewObligation["status"],
       cause: (typeof row.cause === "string" ? row.cause : null) as ReviewObligation["cause"],
       ...(row.anchors !== undefined ? { anchors: row.anchors as string[] } : {}),
+      ...(resolvedBy === undefined ? {} : { resolvedBy }),
     });
   }
   return rows;

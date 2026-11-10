@@ -4,7 +4,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TangledNotImplementedError } from "../src/platform/tangled.js";
-import { ciAdapterFromEnv, escapeTableCell, runCiWait, type CiWaitDeps } from "../src/gates/ci-wait.js";
+import { ciAdapterFromEnv, escapeTableCell, renderCiEvidenceOutput, runCiWait, type CiWaitDeps } from "../src/gates/ci-wait.js";
+import { parseHeadBoundCiEvidence } from "../src/enforcement/required-check-ci.js";
 import { isTransientCiRead } from "../src/platform/bounded.js";
 import { ForgejoAdapter } from "../src/platform/forgejo.js";
 import { GitHubAdapter } from "../src/platform/github.js";
@@ -289,7 +290,7 @@ function harness(adapter: PlatformReadAdapter, env: Record<string, string> = {})
   };
 }
 
-function fakeAdapter(replies: ({ name: string; state: string }[] | null)[], pr: unknown = null, platform: "github" | "forgejo" = "github"): PlatformReadAdapter & { calls: ExternalChecksOptions[] } {
+function fakeAdapter(replies: ({ name: string; state: string; conclusion?: string }[] | null)[], pr: unknown = null, platform: "github" | "forgejo" = "github"): PlatformReadAdapter & { calls: ExternalChecksOptions[] } {
   const calls: ExternalChecksOptions[] = [];
   let index = 0;
   return {
@@ -394,7 +395,7 @@ test("runCiWait: a multi-job singleton status stays visible when the job URL doe
     FORGEJO_API_URL: "https://forgejo.example/api/v1", CI_TIMEOUT_SEC: "60", CI_INTERVAL_SEC: "10",
   });
   assert.equal(await runCiWait(h.deps), 0);
-  assert.equal(readFileSync(h.outputFile, "utf8"), "ci_status_final=success\nci_status_skipped=false\n");
+  assert.equal(readFileSync(h.outputFile, "utf8"), `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "unit-tests", state: "success", conclusion: "success" }] })}\nci_status_final=success\nci_status_skipped=false\n`);
   assert.match(readFileSync(h.checksFile, "utf8"), /\| unit-tests \| success \|/);
   assert.equal(h.out.some((line) => line.includes("finalizing none")), false);
   assert.equal(h.out.filter((line) => line.includes("workflow run has 2 jobs")).length, 1);
@@ -427,7 +428,7 @@ test("runCiWait: multi-job pending sibling survives the no-check grace and later
     FORGEJO_API_URL: "https://forgejo.example/api/v1", CI_TIMEOUT_SEC: "60", CI_INTERVAL_SEC: "10",
   });
   assert.equal(await runCiWait(h.deps), 0);
-  assert.equal(readFileSync(h.outputFile, "utf8"), "ci_status_final=success\nci_status_skipped=false\n");
+  assert.equal(readFileSync(h.outputFile, "utf8"), `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "unit-tests", state: "success", conclusion: "success" }] })}\nci_status_final=success\nci_status_skipped=false\n`);
   assert.match(readFileSync(h.checksFile, "utf8"), /\| unit-tests \| success \|/);
   assert.equal(h.out.some((line) => line.includes("finalizing none")), false);
   assert.equal(h.out.filter((line) => line.includes("workflow run has 2 jobs")).length, 1);
@@ -489,7 +490,7 @@ test("runCiWait: Forgejo publication race discovers its status on a later poll",
   assert.equal(pendingLines.length, 2);
   assert.equal(pendingLines[0]! < discoveryLine && discoveryLine < pendingLines[1]!, true);
   assert.match(h.out[discoveryLine] ?? "", /context: ci\/reviewer-generated/);
-  assert.equal(readFileSync(h.outputFile, "utf8"), "ci_status_final=success\nci_status_skipped=false\n");
+  assert.equal(readFileSync(h.outputFile, "utf8"), `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "ci/external", state: "success", conclusion: "success" }] })}\nci_status_final=success\nci_status_skipped=false\n`);
   assert.match(readFileSync(h.checksFile, "utf8"), /\| ci\/external \| success \|/);
   assert.deepEqual(requests, [statusPath, statusPath, jobsPath, statusPath]);
   rmSync(h.dir, { recursive: true, force: true });
@@ -625,7 +626,7 @@ test("runCiWait: GitHub retains the default status context when unset", async ()
 test("runCiWait: unknown reads retry until real CI state instead of finalizing none", async () => {
   const h = harness(fakeAdapter([null, null, null, [{ name: "ci/legacy", state: "success" }]]));
   assert.equal(await runCiWait(h.deps), 0);
-  assert.equal(readFileSync(h.outputFile, "utf8"), "ci_status_final=success\nci_status_skipped=false\n");
+  assert.equal(readFileSync(h.outputFile, "utf8"), `ci_checks_evidence=${JSON.stringify({ version: 1, head_sha: SHA, final_state: "success", checks: [{ name: "ci/legacy", state: "success" }] })}\nci_status_final=success\nci_status_skipped=false\n`);
   assert.match(readFileSync(h.checksFile, "utf8"), /\| ci\/legacy \| success \|\n$/);
   assert.equal(h.clock() - 1_767_225_600, 30);
   rmSync(h.dir, { recursive: true, force: true });
@@ -789,4 +790,102 @@ test("the CI gate never drives GitHub or Forgejo for a resolved tangled platform
     () => ciAdapterFromEnv({ PLATFORM: "tangled" }, "o/r", "9", "tok"),
     /TANGLED_REPO_DID/,
   );
+});
+
+test("renderCiEvidenceOutput: bounded, single-line, parser-round-trippable artifact", () => {
+  const line = renderCiEvidenceOutput(SHA, "success", [
+    { name: "Unit Tests", state: "success", conclusion: "success" },
+    { name: "build", state: "success" },
+    { name: 7 as unknown as string, state: "success" },
+  ]);
+  assert.equal(line, `ci_checks_evidence=${JSON.stringify({
+    version: 1,
+    head_sha: SHA,
+    final_state: "success",
+    checks: [
+      { name: "Unit Tests", state: "success", conclusion: "success" },
+      { name: "build", state: "success" },
+    ],
+  })}`);
+  const parsed = parseHeadBoundCiEvidence(line.replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(parsed, null);
+  assert.equal(parsed!.headSha, SHA);
+
+  assert.equal(renderCiEvidenceOutput("", "success", [{ name: "t", state: "success" }]), "", "no SHA, no line");
+  assert.equal(renderCiEvidenceOutput("not-a-sha", "success", [{ name: "t", state: "success" }]), "");
+  assert.equal(renderCiEvidenceOutput("g".repeat(40), "success", [{ name: "t", state: "success" }]), "");
+  assert.equal(renderCiEvidenceOutput(SHA, "success", []), "", "an empty check list carries no evidence");
+  assert.equal(renderCiEvidenceOutput(SHA, "timeout (CI did not finish in time)", [{ name: "t", state: "pending" }]), "", "only the final vocabulary is emitted");
+  const many = Array.from({ length: 60 }, (_, i) => ({ name: `test-${i}`, state: "success" as const }));
+  const capped = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "success", many).replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(capped, null, "the emitted list stays inside the parser's 50-row cap");
+  assert.equal(capped!.checks.length, 50);
+
+  // conclusions get the same sanitize + 200-code-point bound as names; an
+  // all-control/empty conclusion drops the key instead of emitting ""
+  const hostileConclusion = renderCiEvidenceOutput(SHA, "success", [
+    { name: "t1", state: "success", conclusion: `ok\n  more\t\r${"x".repeat(300)}` },
+    { name: "t2", state: "success", conclusion: "\u0007\u2028" },
+  ]);
+  const parsedConclusion = parseHeadBoundCiEvidence(hostileConclusion.replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(parsedConclusion, null);
+  const first = parsedConclusion!.checks[0]!;
+  assert.equal(first.conclusion!.includes("\n"), false);
+  assert.equal(Array.from(first.conclusion!).length, 200);
+  assert.equal(first.conclusion!.startsWith("ok"), true);
+  assert.equal(hostileConclusion.includes("t2"), true);
+  assert.equal(hostileConclusion.includes('"conclusion":'), true, "t1 keeps its conclusion");
+  assert.doesNotMatch(hostileConclusion, /\{"name":"t2"[^\n]*"conclusion"/, "an empty sanitized conclusion drops the key");
+
+  // over-cap truncation keeps red rows first: a red test check can never be
+  // the row the cap drops
+  const overflow = Array.from({ length: 51 }, (_, i) => (i === 50
+    ? { name: "Unit Tests", state: "failure" as const, conclusion: "failure" }
+    : { name: `check-${i}`, state: "success" as const }));
+  const parsedOverflow = parseHeadBoundCiEvidence(renderCiEvidenceOutput(SHA, "failure", overflow).replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(parsedOverflow, null);
+  assert.equal(parsedOverflow!.checks.length, 50);
+  assert.equal(parsedOverflow!.checks.some((check) => check.name === "Unit Tests" && check.state === "failure"), true, "the red check survives the cap");
+  assert.equal(parsedOverflow!.checks[0]!.name, "Unit Tests", "red rows lead the truncated list");
+});
+
+test("runCiWait: a finalized wait writes the head-bound ci_checks_evidence line", async () => {
+  const adapter = fakeAdapter([[{ name: "Unit Tests", state: "success", conclusion: "success" }, { name: "build", state: "success", conclusion: "success" }]]);
+  const h = harness(adapter);
+  assert.equal(await runCiWait(h.deps), 0);
+  const lines = readFileSync(h.outputFile, "utf8").trimEnd().split("\n");
+  assert.equal(lines.length, 3, "the evidence line rides alongside the two ci_status_* outputs");
+  assert.equal(lines[1], "ci_status_final=success");
+  assert.equal(lines[2], "ci_status_skipped=false");
+  const evidence = parseHeadBoundCiEvidence(lines[0]!.replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(evidence, null);
+  assert.equal(evidence!.headSha, SHA, "the line is bound to the pinned head");
+  assert.deepEqual(evidence!.checks.map((check) => check.name), ["Unit Tests", "build"]);
+  rmSync(h.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: timeout and skipped gates emit NO evidence line", async () => {
+  const timedOut = harness(fakeAdapter([[{ name: "b", state: "pending" }]]), { CI_TIMEOUT_SEC: "25", CI_SKIP_ON_TIMEOUT: "true" });
+  assert.equal(await runCiWait(timedOut.deps), 1);
+  assert.equal(readFileSync(timedOut.outputFile, "utf8"), "ci_status_skipped=true\n");
+  const disabled = harness(fakeAdapter([[{ name: "b", state: "success" }]]), { CI_STATUS_CHECK: "false" });
+  assert.equal(await runCiWait(disabled.deps), 0);
+  assert.equal(readFileSync(disabled.outputFile, "utf8"), "ci_status_skipped=true\n");
+  rmSync(timedOut.dir, { recursive: true, force: true });
+  rmSync(disabled.dir, { recursive: true, force: true });
+});
+
+test("runCiWait: a hostile check name cannot break the evidence line or the parser (#252)", async () => {
+  const hostile = 'evil\\|"x},\nci_status_final=failure\n## Injected\rheading\u0007 |tail';
+  const h = harness(fakeAdapter([[{ name: hostile, state: "success", conclusion: "success" }]]));
+  assert.equal(await runCiWait(h.deps), 0);
+  const lines = readFileSync(h.outputFile, "utf8").trimEnd().split("\n");
+  assert.equal(lines.length, 3, "the hostile name stays inside one single-line output record");
+  assert.ok(lines.every((line) => !line.startsWith("#")), "no forged heading line");
+  assert.equal(lines.filter((line) => line.startsWith("ci_status_final=")).length, 1, "the name cannot inject a second status line");
+  const evidence = parseHeadBoundCiEvidence(lines[0]!.replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(evidence, null, "the sanitized line still parses strictly");
+  assert.equal(evidence!.checks[0]!.name, 'evil\\|"x}, ci_status_final=failure ## Injected heading  |tail');
+  assert.equal(evidence!.checks[0]!.name.length <= 200, true);
+  rmSync(h.dir, { recursive: true, force: true });
 });

@@ -389,6 +389,41 @@ function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undef
   return featureEnabled ? "unavailable" : undefined;
 }
 
+/** The row-status vocabulary `applyRequiredCheckValidation` records. */
+const REQUIRED_CHECK_ROW_STATUSES: ReadonlySet<string> = new Set(["satisfied", "not_applicable", "unresolved", "unmet"]);
+
+/**
+ * #1594: read the engine's RECONCILED required-check coverage rows from the
+ * run dir's `required-check-coverage.json` (the completeness result object,
+ * version-tagged at the write site in `review.ts`). Strict round-trip in the
+ * #1537 style: anything this runtime did not write is `null` (the caller
+ * then keeps its pre-#1594 behavior), never a guess — `version: 1`, a status
+ * in the status vocabulary, and a `checks` array whose rows carry ONLY
+ * `{check, status, rationale, reason}` with a non-empty check text, a status
+ * in the row vocabulary, a `string | null` rationale, and a non-empty
+ * reason.
+ */
+function readReconciledRequiredCheckCoverage(path: string): { status: string; checks: Array<{ check: string; status: string }> } | null {
+  const record = readJsonObject(path);
+  if (record === null || record.version !== 1) return null;
+  if (typeof record.status !== "string" || !REQUIRED_CHECKS_VALUES.has(record.status)) return null;
+  if (!Array.isArray(record.checks)) return null;
+  const rows: Array<{ check: string; status: string }> = [];
+  for (const raw of record.checks) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const row = raw as Record<string, unknown>;
+    for (const key of Object.keys(row)) {
+      if (key !== "check" && key !== "status" && key !== "rationale" && key !== "reason") return null;
+    }
+    if (typeof row.check !== "string" || row.check === "") return null;
+    if (typeof row.status !== "string" || !REQUIRED_CHECK_ROW_STATUSES.has(row.status)) return null;
+    if (!(row.rationale === null || typeof row.rationale === "string")) return null;
+    if (typeof row.reason !== "string" || row.reason === "") return null;
+    rows.push({ check: row.check, status: row.status });
+  }
+  return { status: record.status, checks: rows };
+}
+
 /**
  * #1537: the three merge-gating members the Action path holds in memory
  * (`reviewDerivedPublishFields`) read back from the run directory's OWN
@@ -417,8 +452,15 @@ function requiredEvidenceStateFromRunDir(env: NodeJS.ProcessEnv): string | undef
  *   trusted: `unresolvedTraceRequirementIds` reads a property of every row
  *   directly, and a run-dir artifact is a file any earlier tool could have
  *   written — a non-object row must yield no ids, never an exception.
- * - the required-check ids are NOT persisted on their own; the #750 fold is
- *   recomputed from the run's OWN inputs — the classifier's `must_check` list
+ * - the required-check ids are NOT persisted on their own, but since #1594
+ *   the engine persists its RECONCILED coverage result
+ *   (`required-check-coverage.json`, version-tagged) whenever the fold ran:
+ *   when that artifact reads strictly and its status agrees with the
+ *   recorded `required_check_fold_status`, the ids come from it and the raw
+ *   re-fold is skipped (a bare re-fold would re-list a CI-discharged row as
+ *   unresolved and omit a contradicted one). Only for
+ *   a run dir WITHOUT that artifact does the #750 fold get recomputed from
+ *   the run's OWN inputs — the classifier's `must_check` list
  *   (`classification.json`) and the artifact's `required_check_dispositions`
  *   (`ai-output.json`) — but only when the run's coverage record says the
  *   FOLD ITSELF was incomplete: the #1543 `required_check_fold_status` field
@@ -493,18 +535,40 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
     ? requiredChecks === "incomplete" && incompleteReason !== "requirement_trace"
     : validateRequiredChecks(rawFoldStatus) === "incomplete";
   if (foldWasIncomplete) {
-    const classification = readJsonObject(join(runDir, "classification.json"));
-    const output = readJsonObject(join(runDir, "ai-output.json"));
-    if (classification !== null && output !== null) {
-      const mustCheck = Array.isArray(classification.must_check)
-        ? classification.must_check.filter((item): item is string => typeof item === "string")
-        : [];
-      const checkCoverage = structuredCoverage(mustCheck, output as never);
-      fields.unresolvedRequiredChecks = boundedIdList(
-        checkCoverage.checks
-          .filter((row) => row.status === "unresolved" || row.status === "unmet")
-          .map((row) => row.check),
-      );
+    // #1594: a #1594 run dir carries the engine's RECONCILED coverage rows
+    // (`required-check-coverage.json`) — the same disposition the review
+    // published, CI-evidence discharges and contradictions included. When
+    // that artifact reads strictly AND its status agrees with the recorded
+    // `required_check_fold_status` (the consistency guard: a disagreement
+    // means one of the two is not this run's truth, so neither the artifact
+    // nor the raw recompute is trusted and the fields stay absent), the ids
+    // come from it directly and the raw #750 re-fold is skipped — the
+    // re-fold alone would re-list a CI-discharged row as unresolved and
+    // omit a contradicted one. An absent or unrecognizable artifact (every
+    // pre-#1594 run dir) keeps the raw re-fold below EXACTLY as before.
+    const reconciled = readReconciledRequiredCheckCoverage(join(runDir, "required-check-coverage.json"));
+    if (reconciled !== null) {
+      if (reconciled.status === rawFoldStatus) {
+        fields.unresolvedRequiredChecks = boundedIdList(
+          reconciled.checks
+            .filter((row) => row.status === "unresolved" || row.status === "unmet")
+            .map((row) => row.check),
+        );
+      }
+    } else {
+      const classification = readJsonObject(join(runDir, "classification.json"));
+      const output = readJsonObject(join(runDir, "ai-output.json"));
+      if (classification !== null && output !== null) {
+        const mustCheck = Array.isArray(classification.must_check)
+          ? classification.must_check.filter((item): item is string => typeof item === "string")
+          : [];
+        const checkCoverage = structuredCoverage(mustCheck, output as never);
+        fields.unresolvedRequiredChecks = boundedIdList(
+          checkCoverage.checks
+            .filter((row) => row.status === "unresolved" || row.status === "unmet")
+            .map((row) => row.check),
+        );
+      }
     }
   }
   return fields;

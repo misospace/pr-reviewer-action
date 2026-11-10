@@ -31,6 +31,13 @@ import type { ExternalChecksOptions, PlatformReadAdapter } from "../platform/typ
  *   skip); the `ci_status_*` outputs; the atomic `ci-checks-context.md`
  *   evidence file and its temp-file cleanup on TERM/INT.
  *
+ * #1594 adds one v3-only output: on a FINALIZED wait (never on timeout or
+ * skip) the gate also writes a `ci_checks_evidence=` line — the compact-JSON,
+ * head-bound check list the enforcement pass reconciles required-check
+ * completion against (`src/enforcement/required-check-ci.ts`). It stays out
+ * of the published action outputs (the `ciGateOutputs` whitelist does not
+ * name it) and re-presents only data this gate already read.
+ *
  * One deliberate divergence from v2 (covered by the retained node:test
  * regression): reads use `transientAsUnknown`, so a transient read failure is
  * "unknown, retry" rather than the v2 fold to `[]`, which let
@@ -130,6 +137,46 @@ export function escapeTableCell(value: unknown): string {
 
 function renderRows(checks: readonly ExternalCheck[]): string {
   return checks.map((check) => `| ${escapeTableCell(check.name)} | ${escapeTableCell(check.conclusion ?? check.state)} |`).join("\n");
+}
+
+/** #1594: the head-bound check-evidence gate output — the compact-JSON
+ * artifact the enforcement pass reconciles required-check completion against
+ * (src/enforcement/required-check-ci.ts). Written ONLY on a finalized wait
+ * (never on timeout or skip), so a mid-wait or skipped gate produces no
+ * evidence. Check names and conclusions remain untrusted DATA: control runs
+ * collapse, both are bounded to 200 code points, empty values are dropped,
+ * and a malformed SHA yields no line at all. The row list is capped at 50
+ * (matching the strict parser); when truncating, rows with state `failure`
+ * are kept first (in original relative order) so a red test check can never
+ * be the one dropped, then the remaining slots fill in original order. The
+ * line is NOT in the `ciGateOutputs` action-output whitelist, so it never
+ * reaches published action outputs. */
+export function renderCiEvidenceOutput(sha: string, finalState: string, checks: readonly ExternalCheck[]): string {
+  try {
+    if (!/^[0-9a-f]{7,64}$/i.test(sha)) return "";
+    if (finalState !== "success" && finalState !== "failure" && finalState !== "none") return "";
+    const rows: Array<{ name: string; state: string; conclusion?: string }> = [];
+    for (const check of checks) {
+      if (typeof check.name !== "string" || typeof check.state !== "string") continue;
+      const name = Array.from(check.name.replace(CELL_BREAK_RE, " ").trim()).slice(0, 200).join("");
+      if (name === "") continue;
+      const conclusion = typeof check.conclusion === "string"
+        ? Array.from(check.conclusion.replace(CELL_BREAK_RE, " ").trim()).slice(0, 200).join("")
+        : "";
+      rows.push({
+        name,
+        state: check.state,
+        ...(conclusion === "" ? {} : { conclusion }),
+      });
+    }
+    if (rows.length === 0) return "";
+    const capped = rows.length > 50
+      ? [...rows.filter((row) => row.state === "failure"), ...rows.filter((row) => row.state !== "failure")].slice(0, 50)
+      : rows;
+    return `ci_checks_evidence=${jqCompact({ version: 1, head_sha: sha, final_state: finalState, checks: capped })}`;
+  } catch {
+    return "";
+  }
 }
 
 class Finished {
@@ -266,6 +313,8 @@ export async function runCiWait(deps: CiWaitDeps): Promise<number> {
 
   const finalize = (state: string): never => {
     renderEvidence(state);
+    const evidenceLine = renderCiEvidenceOutput(sha, state, checks ?? []);
+    if (evidenceLine !== "") output(evidenceLine);
     output(`ci_status_final=${state}`);
     output("ci_status_skipped=false");
     throw new Finished(0);

@@ -25,6 +25,7 @@ import {
   evaluateRequiredCheckCoverage,
   type RequiredCheckCoverage,
 } from "./required-checks.js";
+import { reconcileRequiredCheckRows, type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 import type { NormalizedRequiredCheckDisposition } from "../model/types.js";
 
@@ -75,6 +76,11 @@ export function applyRequiredCheckValidation(
     enabled: string;
     mode: string;
     mustCheck: readonly string[];
+    /** #1594: the CI gate's head-bound check evidence (null/absent = no
+     * reconciliation, byte-identical pre-#1594 behavior). */
+    ciEvidence?: HeadBoundCiEvidence | null;
+    /** The exact head this review is bound to, for the evidence head match. */
+    reviewedHeadSha?: string;
   },
 ): RequiredCheckValidationResult {
   const enabled = (options.enabled || "auto").trim().toLowerCase();
@@ -94,7 +100,26 @@ export function applyRequiredCheckValidation(
     // #750: the structured disposition contract is authoritative. Key
     // absence is no longer a bridge to the legacy keyword match (module
     // docstring): every check is conservatively unresolved.
-    const coverage = structuredCoverage(mustCheck, artifact);
+    let coverage = structuredCoverage(mustCheck, artifact);
+    // #1594: trusted head-bound CI evidence reconciles the rows BEFORE any
+    // derivation: a validated head-bound green test-execution check
+    // discharges a test-run ask; a validated failed one contradicts a
+    // model `satisfied`. With no evidence nothing runs and the pass stays
+    // byte-identical to pre-#1594.
+    if (options.ciEvidence !== null && options.ciEvidence !== undefined) {
+      const reconciled = reconcileRequiredCheckRows(coverage.checks, options.ciEvidence, options.reviewedHeadSha ?? "");
+      // The `none` status means the fold never ran (zero checks) and stays
+      // preserved; otherwise the status recomputes over the reconciled
+      // rows: clean iff every row is satisfied/not_applicable with an `ok`
+      // or CI-discharged `ci-evidence` reason.
+      const recomputed = coverage.status === "none" || reconciled.rows.length === 0
+        ? coverage.status
+        : reconciled.rows.every((row) => (row.status === "satisfied" || row.status === "not_applicable")
+            && (row.reason === "ok" || row.reason === "ci-evidence"))
+          ? "complete"
+          : "incomplete";
+      coverage = { ...coverage, checks: reconciled.rows, status: recomputed };
+    }
     status = coverage.status === "none" ? "none" : coverage.status;
     // Not clean = unresolved, or dispositioned `unmet` (#1381: performed
     // and failed — never clean coverage, so it is listed, never crash or
@@ -122,6 +147,11 @@ export function applyRequiredCheckValidation(
 
     if (status === "incomplete" && (mode === "warn" || mode === "fail")) {
       const bullets = notClean.map((item) => `- ${item}`).join("\n");
+      // #1594: when a validated head-bound CI contradiction downgraded a
+      // row, the section must publish the mismatch explicitly — the reader
+      // sees ONE disposition (the evidence), with the claimed one named as
+      // contradicted, never both claims standing.
+      const contradicted = coverage.checks.some((row) => row.reason === "ci-evidence-contradiction");
       artifact.review_markdown = (
         (artifact.review_markdown || "")
         + "\n\n### Unaddressed required checks\n"
@@ -130,6 +160,10 @@ export function applyRequiredCheckValidation(
         + "for them (unresolved, or dispositioned `unmet` — performed and "
         + "failed):\n\n"
         + bullets
+        + (contradicted
+          ? "\n\nAt least one of these rows had a reviewer disposition claiming "
+            + "satisfaction; validated head-bound CI evidence contradicts that claim (#1594)."
+          : "")
       );
     }
     if (status === "incomplete" && mode === "fail") {
