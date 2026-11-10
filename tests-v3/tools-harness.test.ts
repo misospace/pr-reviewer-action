@@ -1028,6 +1028,55 @@ test("#1598 review: the fallback tier dials the BOUND resolved lane, never a re-
   assert.match(logs.join("\n"), /native_loop: verdict reserve 150s of 600s wall clock \(#1464\)/);
 });
 
+test("#1598 review (info): a loop that stops before its wall-clock ceiling records measured elapsed_sec, not the ceiling", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Uncapped loop: the 600s ceiling (reserve 150, exploration boundary
+  // anchor+450) never binds — the model stops making tool calls after one
+  // round. The clock advances 1s per read so the artifact's
+  // tool_loop_telemetry.usage.elapsed_sec must be the MEASURED loop delta,
+  // not the configured TOOL_LOOP_WALL_CLOCK_SEC. Read map follows the
+  // #1464 tests: anchor 1, loop start 2, then per round: exceeded,
+  // reserve, model-wait clamp, executor entry, executor remaining; the
+  // common-exit elapsed close-out reads right after the loop's final
+  // between-rounds pair.
+  let clock = 0;
+  let transportCalls = 0;
+  const reads: number[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("investigation complete, no more tools"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "600" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey) => scripted[transportCalls++],
+    timeFn: () => {
+      clock += 1;
+      reads.push(clock);
+      return clock;
+    },
+  }));
+  assert.equal(transportCalls, 3, "one exploratory round, the no-tool-call stop turn, then the closing verdict");
+  assert.equal(result.stop_reason, "model-stopped", "the loop finished on its own, not on the clock");
+  assert.equal(result.rounds, 2, "the tool round plus the no-tool-call stop turn");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
+  const elapsed = Number((telemetry.usage as Record<string, unknown>).elapsed_sec);
+  assert.ok(Number.isFinite(elapsed) && elapsed >= 0);
+  assert.equal((telemetry.budget as Record<string, unknown>).wall_clock_sec, 600, "the ceiling itself is still reported in the budget block");
+  assert.ok(elapsed < 600, `elapsed must be the measured loop delta, not the configured ceiling, got ${elapsed}`);
+  // Pin the read map: read 2 is the loop start, the loop's final read is the
+  // elapsed close-out; elapsed equals exactly that measured delta.
+  assert.equal(reads[1], 2, "the loop start is the second budget-clock read");
+  const loopEndRead = reads[10]!;
+  assert.equal(elapsed, loopEndRead - 2, "elapsed_sec is final-minus-start on the fake clock");
+  assert.equal(elapsed, 9);
+});
+
 test("#1464 review: #1459 shape — the last allowed round cannot push the remaining below the reserve and the verdict gets the full slice", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
