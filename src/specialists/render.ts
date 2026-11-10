@@ -7,42 +7,10 @@
  * heading, or inject instructions into a later prompt. */
 
 import { redactText } from "../context/redact.js";
-import { MAX_FENCE, SPECIALIST_ROLES_ORDER, type SpecialistArtifact, type SpecialistLead } from "./types.js";
+import { escapeControlChars, longestBacktickRun, safeFence } from "../context/fence.js";
+import { SPECIALIST_ROLES_ORDER, type SpecialistArtifact, type SpecialistLead } from "./types.js";
 
-const CONTROL_RE = /[\x00-\x1f\x7f]/g;
 const BACKTICK_RUN_RE = /`+/g;
-
-function escapeControlChars(text: string): string {
-  return text.replace(CONTROL_RE, (ch) => {
-    if (ch === "\n") return "\\n";
-    if (ch === "\t") return "\\t";
-    if (ch === "\r") return "\\r";
-    return `\\u${ch.codePointAt(0)!.toString(16).padStart(4, "0")}`;
-  });
-}
-
-function longestBacktickRun(text: string): number {
-  let longest = 0;
-  for (const match of text.matchAll(BACKTICK_RUN_RE)) {
-    if (match[0].length > longest) longest = match[0].length;
-  }
-  return longest;
-}
-
-/** Return `[neutralizedContent, fence]` where `fence` is backticks strictly
- * longer than any backtick run in `content`. Hostile runs of `MAX_FENCE` or
- * more backticks are neutralized (a run of 11+ is reduced to 10) so the
- * emitted fence can never be matched by the content. */
-function safeFence(content: string): [string, string] {
-  let longest = longestBacktickRun(content);
-  let body = content;
-  if (longest + 1 > MAX_FENCE) {
-    body = body.replace(BACKTICK_RUN_RE, (run) => (run.length >= 11 ? "`".repeat(10) : run));
-    longest = Math.min(longest, 10);
-  }
-  const fence = "`".repeat(Math.max(longest + 1, 4));
-  return [body, fence];
-}
 
 function leadLine(lead: Pick<SpecialistLead, "severity" | "category" | "file" | "line" | "message" | "trigger" | "consequence">): string {
   const message = escapeControlChars(lead.message ?? "");

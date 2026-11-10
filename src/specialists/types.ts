@@ -70,10 +70,6 @@ export const MAX_INPUT_BYTES = 1_000_000;
  * `DEEP_REVIEW_MAX_TOKENS`) still overrides it for small-output-cap models. */
 export const DEFAULT_SPECIALIST_MAX_TOKENS = 16384;
 
-/** Largest markdown fence (in backticks) the renderer will emit; longer
- * hostile runs are neutralized so the fence stays closed. */
-export const MAX_FENCE = 12;
-
 export const ERRORS_TRUNCATED_MARKER = "errors_truncated";
 
 export interface SpecialistLead {
