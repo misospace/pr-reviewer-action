@@ -168,9 +168,11 @@ const QUOTA_PHRASES: ReadonlyArray<readonly [phrase: string, signature: string]>
   // LiteLLM surfaced on #1585's organic run (#1599).
   ["token plan usage limit reached", LITELLM_MINIMAX_TOKEN_PLAN],
   ["token plan usage limit has been reached", LITELLM_MINIMAX_TOKEN_PLAN],
-  // The same body's remediation sentence: the plan must be upgraded or bought.
+  // The same body's remediation sentence, with the "please" clause of the
+  // observed wording as an anchor: too generic to admit an unanchored form,
+  // which would misattribute other providers' plan-upgrade prose to MiniMax.
   ["upgrade your token plan or purchase credits", LITELLM_MINIMAX_TOKEN_PLAN],
-  ["upgrade your plan or buy credits", LITELLM_MINIMAX_TOKEN_PLAN],
+  ["please upgrade your plan or buy credits", LITELLM_MINIMAX_TOKEN_PLAN],
   // OpenAI's account-quota exhaustion sentence (distinct from its
   // per-minute rate-limit prose, which the transient veto refuses anyway).
   ["you exceeded your current quota", "openai_quota_exceeded"],
