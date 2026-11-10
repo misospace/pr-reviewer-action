@@ -128,7 +128,14 @@ export function writeStepSummary(stepSummaryPath: string, input: SummaryInput): 
     ...(smartHarness !== null && toolMode === "native_loop"
       ? {
         smartTools: {
-          issuedToolCalls: Array.isArray(smartHarness.tool_calls) ? (smartHarness.tool_calls as unknown[]).length : 0,
+          // #1597: the same distinct counts the primary row (and the marker)
+          // carries: executed = attempted executions, successful = the ok
+          // subset, issued = everything the model asked for.
+          executedRequestCount: typeof smartHarness.executed_request_count === "number" ? smartHarness.executed_request_count : 0,
+          successfulToolCalls: Array.isArray(smartHarness.tool_calls)
+            ? (smartHarness.tool_calls as unknown[]).filter((call) => (call as { status?: string }).status === "ok").length
+            : 0,
+          issuedToolCalls: typeof smartHarness.planned_request_count === "number" ? smartHarness.planned_request_count : 0,
           rounds: typeof smartHarness.rounds === "number" ? smartHarness.rounds : 0,
           requests: numberAt(smartHarness.usage, "requests") ?? numberAt(smartHarness.native_loop_usage, "requests") ?? 0,
           stopReason: String(smartHarness.stop_reason ?? smartHarness.native_loop_degraded ?? smartHarness.skip_reason ?? smartHarness.error ?? "unknown"),

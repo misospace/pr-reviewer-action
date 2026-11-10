@@ -879,6 +879,18 @@ test("#1552: the exact #1539 shape — exhausted 40-call investigation, zero-too
   assert.equal(result.stop_reason, "tool-call-budget-exhausted");
   assert.equal(result.budget_exhausted, true);
   assert.equal((result.tool_calls as unknown[]).length, 40);
+  // #1597: the repair-continuation fold leaves ONE partition snapshot: the
+  // zero-call repair round adds nothing, so the exploration loop's
+  // 40 issued / 40 executed / 40 successful (every evidence file exists)
+  // with no refusals survives the fold unchanged.
+  assert.equal(result.planned_request_count, 40);
+  assert.equal(result.executed_request_count, 40);
+  assert.equal(result.successful_request_count, 40);
+  assert.equal(result.refused_request_count, 0);
+  assert.equal(result.deduplicated_request_count, 0);
+  assert.equal(result.planned_request_count,
+    result.executed_request_count! + result.refused_request_count! + result.deduplicated_request_count!);
+  assert.equal(result.executed_request_count, (result.tool_calls as unknown[]).length);
   assert.deepEqual(result.trace_repair_continuation, {
     attempted: true,
     outcome: "continued_trace_only",

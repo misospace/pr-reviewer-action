@@ -122,6 +122,17 @@ export interface MetadataOptions {
    * feature is enabled; omitted otherwise so pre-#1449 marker bytes are
    * preserved. */
   derived_obligation_state?: string | null;
+  /** #1597: the tool-loop execution partitions beyond `tool_calls` (the
+   * EXECUTED count): `tool_calls_issued` everything the model asked for,
+   * `tool_calls_successful` the ok-status subset of the executed calls,
+   * `tool_calls_refused`/`tool_calls_deduplicated` the non-executed
+   * dispositions, under the invariant
+   * issued = executed + refused + deduplicated. Omitted when the harness
+   * artifact predates #1597 or never ran — never synthesized. */
+  tool_calls_issued?: number | null;
+  tool_calls_successful?: number | null;
+  tool_calls_refused?: number | null;
+  tool_calls_deduplicated?: number | null;
 }
 
 /** Build a metadata marker string for insertion into managed comments
@@ -242,7 +253,19 @@ data.confidence_total_tokens = options.confidence_total_tokens;
 // run without the derived-obligation feature serializes byte-identical
 // pre-#1449 marker, and older parsers ignore keys they do not know.
 if (options.derived_obligation_state !== null && options.derived_obligation_state !== undefined && options.derived_obligation_state !== "") {
-data.derived_obligation_state = options.derived_obligation_state;
+ data.derived_obligation_state = options.derived_obligation_state;
+}
+// #1597 additive keys: appended last, same discipline as every key above —
+// a run whose harness artifact carries no partition fields (pre-#1597
+// shape, or no tool harness) serializes byte-identically to the pre-#1597
+// marker, and older parsers ignore keys they do not know. Non-negative
+// integers only: an unusable value omits the key, it is never published
+// as a wrong count.
+for (const key of ["tool_calls_issued", "tool_calls_successful", "tool_calls_refused", "tool_calls_deduplicated"] as const) {
+  const value = options[key];
+  if (value !== null && value !== undefined && Number.isInteger(value) && value >= 0) {
+    data[key] = value;
+  }
 }
 return `<!-- ai-pr-reviewer:${jsonCompact(data)} -->`;
 }

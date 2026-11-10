@@ -184,8 +184,8 @@ test("#1585: a primary transport failure with zero executed calls runs the fallb
     // The primary harness degraded on the transport failure with no evidence.
     const primaryHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
     assert.equal(primaryHarness.native_loop_degraded, "request-error");
-    assert.equal(primaryHarness.executed_request_count, 0);
-    assert.equal(primaryHarness.dispatched_call_count, 0, "the degraded primary dispatched no call at all");
+    assert.equal(primaryHarness.executed_request_count, 0, "the degraded primary dispatched no call at all (the settled attempted-executor count)");
+    assert.equal(primaryHarness.successful_request_count, 0, "and it succeeded on none either");
 
     // The fallback harness ran the investigation on the FALLBACK lane.
     const fallbackHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.fallback.json"), "utf8")) as Record<string, unknown>;
@@ -412,11 +412,13 @@ test("#1598: partial primary evidence (executed calls with a request-error stop)
   }
 });
 
-test("#1598: a FAILED primary tool call followed by a transport error is recorded as a dispatched call and never triggers the fallback harness", async () => {
-  // The spend signal is the DISPATCHED count, not the success-only one: the
-  // primary's only call FAILED (so `executed_request_count` stays 0), and the
-  // run then died on a transport error. A trigger that read the success-only
-  // count would read this as "zero executed calls".
+test("#1598: a FAILED primary tool call followed by a transport error is recorded as an executed (attempted) call and never triggers the fallback harness", async () => {
+  // The spend signal is the #1597 SETTLED `executed_request_count` — every
+  // call that reached an executor, successful OR failed — never the ok-only
+  // `successful_request_count`: the primary's only call FAILED (so the
+  // successful count stays 0), and the run then died on a transport error.
+  // A trigger that read the success-only count would read this as "zero
+  // executed calls".
   //
   // The guard that blocks the failover here is the DEGRADED-flag check (the
   // model issued a call, so the loop did not degrade) — the production
@@ -457,8 +459,8 @@ test("#1598: a FAILED primary tool call followed by a transport error is recorde
     assert.match(result.outputs.reviewMarkdown, /FALLBACK-CORPUS-1598/);
     const primaryHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
     assert.equal(primaryHarness.stop_reason, "request-error");
-    assert.equal(primaryHarness.executed_request_count, 0, "the failed call is not a successful execution");
-    assert.equal(primaryHarness.dispatched_call_count, 1, "the failed call was still dispatched — and paid for");
+    assert.equal(primaryHarness.executed_request_count, 1, "the failed call was attempted on an executor — the settled counter counts it; it was paid for");
+    assert.equal(primaryHarness.successful_request_count, 0, "and it is not a successful execution");
     assert.equal(primaryHarness.native_loop_degraded, undefined, "the loop issued a call, so it did not degrade");
     assert.equal(fallbackEvidenceFailoverEligible(primaryHarness), false, "a paid-for primary call is never eligible for the failover");
     assert.ok(!existsSync(join(runDir, "tool-harness.fallback.json")), "a paid-for primary call must never be followed by a second investigation on the fallback lane");
@@ -473,34 +475,35 @@ test("#1598: a FAILED primary tool call followed by a transport error is recorde
   }
 });
 
-test("#1598: the failover trigger needs the primary's DISPATCHED call count, not its successful one", async () => {
+test("#1598: the failover trigger needs the primary's executed (attempted) call count, not the ok-only one", async () => {
   // The guard is the trigger's whole contract, so pin it directly: a
-  // transport-degraded primary that dispatched a call (the successful-execution
-  // count reads 0) is NOT eligible, an artifact that does not report the
-  // dispatched count is unknown (never eligible), and only a transport-degraded
-  // primary with zero dispatched calls is.
+  // transport-degraded primary that attempted a call (the settled
+  // executed_request_count is 1 while the ok-only successful count is 0) is
+  // NOT eligible, an artifact that does not report the executed count is
+  // unknown (never eligible), and only a transport-degraded primary with
+  // zero attempted calls is.
   assert.equal(
-    fallbackEvidenceFailoverEligible({ native_loop_degraded: "request-error", dispatched_call_count: 0, executed_request_count: 0 }),
+    fallbackEvidenceFailoverEligible({ native_loop_degraded: "request-error", executed_request_count: 0, successful_request_count: 0 }),
     true,
-    "a transport failure with zero dispatched calls is the #1585 failover shape",
+    "a transport failure with zero attempted calls is the #1585 failover shape",
   );
   assert.equal(
-    fallbackEvidenceFailoverEligible({ native_loop_degraded: "request-error", dispatched_call_count: 1, executed_request_count: 0 }),
+    fallbackEvidenceFailoverEligible({ native_loop_degraded: "request-error", executed_request_count: 1, successful_request_count: 0 }),
     false,
-    "a dispatched-but-failed call was paid for — the failover must not restart the investigation",
+    "an attempted-but-failed call was paid for — the failover must not restart the investigation",
   );
   assert.equal(
-    fallbackEvidenceFailoverEligible({ native_loop_degraded: "request-error", executed_request_count: 0 }),
+    fallbackEvidenceFailoverEligible({ native_loop_degraded: "request-error", successful_request_count: 0 }),
     false,
-    "an artifact without the dispatched count is unknown — fail closed",
+    "an artifact without the executed count is unknown — fail closed",
   );
   assert.equal(
-    fallbackEvidenceFailoverEligible({ native_loop_degraded: "wall-clock-exceeded", dispatched_call_count: 0 }),
+    fallbackEvidenceFailoverEligible({ native_loop_degraded: "wall-clock-exceeded", executed_request_count: 0 }),
     false,
     "a deadline stop is not a transport failure",
   );
   assert.equal(
-    fallbackEvidenceFailoverEligible({ native_loop_degraded: "model-stopped", dispatched_call_count: 0 }),
+    fallbackEvidenceFailoverEligible({ native_loop_degraded: "model-stopped", executed_request_count: 0 }),
     false,
     "an ordinary model stop is not a transport failure",
   );
@@ -510,7 +513,7 @@ test("#1598: the failover trigger needs the primary's DISPATCHED call count, not
 test("#1598 review: the failover's wall-clock share is the configured envelope minus the primary's whole recorded spend", () => {
   const primary = (spend: unknown): Record<string, unknown> => ({
     native_loop_degraded: "request-error",
-    dispatched_call_count: 0,
+    executed_request_count: 0,
     tool_loop_telemetry: { usage: { elapsed_sec: spend } },
   });
   assert.equal(fallbackEvidenceWallClockRemainingSec(primary(120), 30, 600), 450, "a loop that spent 120s and a corpus-verdict attempt that spent 30s of 600s leave 450s (#1598 review round 4: the verdict attempt counts too)");
@@ -650,7 +653,7 @@ test("#1598 review: a near-exhausted loop wall-clock budget never restarts spend
     assert.match(result.outputs.reviewMarkdown, /FALLBACK-VERDICT-1598/, "the fallback lane still reviews, on the corpus only");
     const primaryHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
     assert.equal(primaryHarness.native_loop_degraded, "request-error", "the primary degraded on a transport failure");
-    assert.equal(primaryHarness.dispatched_call_count, 0, "with zero dispatched calls — the trigger's own shape");
+    assert.equal(primaryHarness.executed_request_count, 0, "with zero attempted calls — the trigger's own shape");
     const telemetry = primaryHarness.tool_loop_telemetry as { usage?: { elapsed_sec?: unknown } };
     const spend = Number(telemetry.usage?.elapsed_sec);
     assert.ok(Number.isFinite(spend) && spend >= 0, `the primary records its wall-clock spend, got ${telemetry.usage?.elapsed_sec}`);
@@ -717,7 +720,7 @@ test("#1598 review: the primary corpus-verdict attempt's spend counts against th
     assert.match(result.outputs.reviewMarkdown, /FALLBACK-CORPUS-ROUND4/, "the fallback lane reviews on the corpus only");
     const primaryHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
     assert.equal(primaryHarness.native_loop_degraded, "request-error", "the primary degraded on a transport failure");
-    assert.equal(primaryHarness.dispatched_call_count, 0, "the trigger's own shape held — suppression came from the envelope, not the trigger");
+    assert.equal(primaryHarness.executed_request_count, 0, "the trigger's own shape held — suppression came from the envelope, not the trigger");
     const telemetry = primaryHarness.tool_loop_telemetry as { usage?: { elapsed_sec?: unknown } };
     const loopSpend = Number(telemetry.usage?.elapsed_sec);
     assert.ok(Number.isFinite(loopSpend) && loopSpend < 10, `the loop itself spent almost nothing, got ${telemetry.usage?.elapsed_sec}`);

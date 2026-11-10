@@ -1040,6 +1040,11 @@ export function reviewDerivedPublishFields(review: RunReviewResult): Partial<Pub
     ...(review.toolBudget !== undefined ? { toolBudget: review.toolBudget } : {}),
     ...(review.toolBudgetSource !== undefined ? { toolBudgetSource: review.toolBudgetSource } : {}),
     ...(review.toolCallsUsed !== undefined ? { toolCalls: review.toolCallsUsed } : {}),
+    // #1597: the remaining execution partitions ride the same handoff.
+    ...(review.toolCallsIssued !== undefined ? { toolCallsIssued: review.toolCallsIssued } : {}),
+    ...(review.toolCallsSuccessful !== undefined ? { toolCallsSuccessful: review.toolCallsSuccessful } : {}),
+    ...(review.toolCallsRefused !== undefined ? { toolCallsRefused: review.toolCallsRefused } : {}),
+    ...(review.toolCallsDeduplicated !== undefined ? { toolCallsDeduplicated: review.toolCallsDeduplicated } : {}),
     ...(review.toolRoundsUsed !== undefined ? { toolRounds: review.toolRoundsUsed } : {}),
     ...(review.toolMaxRounds !== undefined ? { maxRounds: review.toolMaxRounds } : {}),
     ...(review.contextBudget !== undefined ? { contextBudget: review.contextBudget } : {}),

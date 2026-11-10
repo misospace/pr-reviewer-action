@@ -526,12 +526,17 @@ test("evidence/tool helpers preserve exact sections, reasons, precedence, null b
   });
   assert.ok(evidence.review_markdown.endsWith("## Evidence Provider Blockers\nOne or more configured evidence providers reported blocker-level findings (sec). Resolve blocker findings before approval."));
 
-  for (const [harness, reason] of [[{ planning_error: "planning", error: "execution", executed_request_count: 2 }, "planning"], [{ error: "execution" }, "execution"], [{ executed_request_count: 2, tool_results: [{ status: "failed" }] }, "all tool requests failed"]] as Array<[any, string]>) {
+  for (const [harness, reason] of [[{ planning_error: "planning", error: "execution", executed_request_count: 2 }, "planning"], [{ error: "execution" }, "execution"], [{ successful_request_count: 2, tool_results: [{ status: "failed" }] }, "all tool requests failed"]] as Array<[any, string]>) {
     const a = artifact();
     const outcome = applyToolHarnessFailureEnforcement(a, harness);
     assert.equal(outcome.reason, `Tool harness failure detected (${reason}). The tool harness failed during planning or execution; this workflow is configured fail-closed for tool harness failures.`);
     assert.ok(a.review_markdown.includes(`## Tool Harness Failure\nThe tool harness failed during planning or execution (${reason}).`));
   }
+  // #1597: the fail-closed gate keeps the historical successful-only
+  // predicate; an executed (attempted) count > 0 with zero successful calls
+  // must NOT flip the verdict — the ok-only semantics did not, and approval
+  // behavior must not shift with the telemetry rename.
+  assert.deepEqual(applyToolHarnessFailureEnforcement(artifact(), { executed_request_count: 2, successful_request_count: 0, tool_results: [{ status: "error" }, { status: "error" }] }), { applied: false, reason: "" });
   assert.deepEqual(applyToolHarnessFailureEnforcement(artifact(), null), { applied: false, reason: "" });
   assert.deepEqual(applyToolMinSuccessfulEnforcement(artifact(), 1, { tool_results: [{ status: "ok" }] }), { applied: false, reason: "" });
 });

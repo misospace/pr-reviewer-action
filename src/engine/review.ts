@@ -222,8 +222,17 @@ export interface RunReviewResult {
   /** #847: which source won ("primary-override" | "smart-override" |
    * "explicit" | "tier-default" | "size-scaled"). */
   toolBudgetSource?: string;
-  /** #847: tool calls the loop actually executed against that budget. */
+  /** #847; #1597: tool calls the loop actually EXECUTED against that budget
+   * (attempted executions; the ok-only subset is `toolCallsSuccessful`). */
   toolCallsUsed?: number;
+  /** #1597: the remaining execution partitions from the same snapshot:
+   * everything the model issued, the successful subset, and the refused and
+   * deduplicated non-executed dispositions. Undefined when the harness
+   * artifact predates #1597 or never ran. */
+  toolCallsIssued?: number;
+  toolCallsSuccessful?: number;
+  toolCallsRefused?: number;
+  toolCallsDeduplicated?: number;
   /** #895: rounds the loop actually used, and the resolved round cap it ran
    * against (see `adaptiveLoopBudgets` in src/tools/loop.ts). */
   toolRoundsUsed?: number;
@@ -559,12 +568,17 @@ function resolveReviewObligations(
     ? review.required_check_dispositions as Array<{ check: string; status: string; rationale?: string | null }>
     : null;
   const folded = foldObligationDispositions([...obligations, ...derivedRows], dispositions);
-  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; executed_request_count?: unknown } | null;
+  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown } | null;
   const cause = deriveUnresolvedCause({
     stopReason: typeof harness?.stop_reason === "string" ? harness.stop_reason : null,
     harnessError: harness?.error != null ? String(harness.error) : null,
     planningError: harness?.planning_error != null ? String(harness.planning_error) : null,
-    degraded: typeof harness?.executed_request_count === "number" && harness.executed_request_count === 0,
+    // #1597: the cause predicate asks "did the investigation produce ANY
+    // usable evidence" — the ok-status count, historically carried under
+    // the executed-only name. Read the truthfully-named field; the
+    // executed count now includes failed attempts and would mask a
+    // all-calls-errored run.
+    degraded: typeof harness?.successful_request_count === "number" && harness.successful_request_count === 0,
   });
   // Only an `unresolved` row carries the evidence-gathering cause; a
   // `satisfied` row was resolved positively and an `unmet` row negatively.
@@ -3348,6 +3362,11 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCalls: toolBudgetTelemetry.calls } : {}),
+    // #1597: the remaining partitions, additive marker keys.
+    ...(toolBudgetTelemetry.issued !== undefined ? { toolCallsIssued: toolBudgetTelemetry.issued } : {}),
+    ...(toolBudgetTelemetry.successful !== undefined ? { toolCallsSuccessful: toolBudgetTelemetry.successful } : {}),
+    ...(toolBudgetTelemetry.refused !== undefined ? { toolCallsRefused: toolBudgetTelemetry.refused } : {}),
+    ...(toolBudgetTelemetry.deduplicated !== undefined ? { toolCallsDeduplicated: toolBudgetTelemetry.deduplicated } : {}),
     ...(toolBudgetTelemetry.rounds !== undefined ? { toolRounds: toolBudgetTelemetry.rounds } : {}),
     ...(toolBudgetTelemetry.maxRounds !== undefined ? { maxRounds: toolBudgetTelemetry.maxRounds } : {}),
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
@@ -3388,6 +3407,12 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCallsUsed: toolBudgetTelemetry.calls } : {}),
+    // #1597: the remaining partitions on the run result (the marker carries
+    // the same snapshot above).
+    ...(toolBudgetTelemetry.issued !== undefined ? { toolCallsIssued: toolBudgetTelemetry.issued } : {}),
+    ...(toolBudgetTelemetry.successful !== undefined ? { toolCallsSuccessful: toolBudgetTelemetry.successful } : {}),
+    ...(toolBudgetTelemetry.refused !== undefined ? { toolCallsRefused: toolBudgetTelemetry.refused } : {}),
+    ...(toolBudgetTelemetry.deduplicated !== undefined ? { toolCallsDeduplicated: toolBudgetTelemetry.deduplicated } : {}),
     ...(toolBudgetTelemetry.rounds !== undefined ? { toolRoundsUsed: toolBudgetTelemetry.rounds } : {}),
     ...(toolBudgetTelemetry.maxRounds !== undefined ? { toolMaxRounds: toolBudgetTelemetry.maxRounds } : {}),
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
@@ -3569,11 +3594,27 @@ export function partialCoverageOf(harness: Record<string, unknown> | null): Part
  * before the budget was resolved (or never ran) contributes nothing, and
  * the marker then omits `tool_budget`/`tool_budget_source`/`tool_calls`
  * exactly as it did before #847.
+ *
+ * #1597: `calls` is the loop's EXECUTED count — every call the loop
+ * attempted on the executor, executor status irrelevant (the population of
+ * the outcome log line and the `tool_calls` trace), so a budget stop reads
+ * `tool_calls == tool_budget` instead of the old successful-only number.
+ * The distinct machine counts ride alongside whenever the artifact carries
+ * them: `issued` (everything the model asked for), `successful` (the ok
+ * subset), `refused` and `deduplicated` (the non-executed dispositions),
+ * under the invariant `issued = executed + refused + deduplicated` and
+ * `successful <= executed`. An artifact written before #1597 keeps its
+ * old bytes: the new fields are simply absent and the new marker keys are
+ * omitted, never synthesized.
  */
 export function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
   budget?: number;
   source?: string;
   calls?: number;
+  issued?: number;
+  successful?: number;
+  refused?: number;
+  deduplicated?: number;
   rounds?: number;
   maxRounds?: number;
   contextBudget?: number;
@@ -3581,7 +3622,20 @@ export function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): 
   stopReason?: string;
 } {
   if (harness === null) return {};
-  const out: { budget?: number; source?: string; calls?: number; rounds?: number; maxRounds?: number; contextBudget?: number; contextPeak?: number; stopReason?: string } = {};
+  const out: {
+    budget?: number;
+    source?: string;
+    calls?: number;
+    issued?: number;
+    successful?: number;
+    refused?: number;
+    deduplicated?: number;
+    rounds?: number;
+    maxRounds?: number;
+    contextBudget?: number;
+    contextPeak?: number;
+    stopReason?: string;
+  } = {};
   if (typeof harness.tool_request_budget === "number") out.budget = harness.tool_request_budget;
   if (typeof harness.tool_budget_source === "string" && harness.tool_budget_source !== "") {
     out.source = harness.tool_budget_source;
@@ -3605,6 +3659,13 @@ export function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): 
     out.stopReason = (harness.tool_loop_telemetry as Record<string, unknown>).stop_reason as string;
   }
   if (typeof harness.executed_request_count === "number") out.calls = harness.executed_request_count;
+  // #1597: the remaining partitions, lifted independently — an artifact
+  // missing any of them omits that marker key rather than synthesizing a
+  // count (no derivation from message counts or model text).
+  if (typeof harness.planned_request_count === "number") out.issued = harness.planned_request_count;
+  if (typeof harness.successful_request_count === "number") out.successful = harness.successful_request_count;
+  if (typeof harness.refused_request_count === "number") out.refused = harness.refused_request_count;
+  if (typeof harness.deduplicated_request_count === "number") out.deduplicated = harness.deduplicated_request_count;
   // #895: the rounds actually used and the resolved round cap the loop ran
   // against, lifted from the #702 telemetry object (`usage.rounds_used` /
   // `budget.max_rounds`) so the marker can show whether the round cap (not
@@ -3778,7 +3839,9 @@ function gateForkForForks(env: StageEnv, forkFlag: string): { md: string; json: 
   if (forkFlag === "true" && (env.TOOL_ENABLE_FOR_FORKS ?? "false").toLowerCase() !== "true") {
     return {
       md: "Tool harness was skipped for a cross-repository pull request. Set tool_enable_for_forks=true to override.\n",
-      json: '{"mode":"native_loop","planned_request_count":0,"executed_request_count":0,"dispatched_call_count":0,"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}\n',
+      json: '{"mode":"native_loop","planned_request_count":0,"executed_request_count":0,'
+        + '"successful_request_count":0,"refused_request_count":0,"deduplicated_request_count":0,'
+        + '"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}\n',
     };
   }
   return null;
@@ -4417,31 +4480,29 @@ async function producePrimaryReview(input: ReviewCallInput & {
  *
  * - the primary native loop degraded on a transport failure
  *   (`native_loop_degraded === "request-error"`), and
- * - it dispatched ZERO tool calls (`dispatched_call_count === 0`).
+ * - it dispatched ZERO tool calls (`executed_request_count === 0`).
  *
- * The counter is the DISPATCHED one (successful OR failed), never
- * `executed_request_count` — that field counts only the successful
- * executions, so a primary call that FAILED reads as zero executed calls,
- * and a trigger built on it could restart an investigation the primary had
- * already paid for (#1598: "no restarting a partially executed primary
- * investigation"; "don't repeat already-paid investigation").
+ * The counter is the #1597 SETTLED `executed_request_count` — every call
+ * that reached an executor, successful OR failed, the same population as
+ * the `tool_calls` trace. It is the spend signal, never the ok-only
+ * `successful_request_count`: a primary call that FAILED was still paid
+ * for, and a trigger built on the success-only count could restart an
+ * investigation the primary had already paid for (#1598: "no restarting a
+ * partially executed primary investigation"; "don't repeat already-paid
+ * investigation"). Before #1597 settled the field, the failover needed its
+ * own dispatched counter; the settled population is exactly that, so the
+ * trigger reads it directly.
  *
- * Today the degraded flag is written only where the model issued no call at
- * all, so the two conditions coincide in production; reading the DISPATCHED
- * counter makes the spend guard state the contract instead of inferring it
- * from a sibling field, and it stays correct if a future loop path can
- * degrade AFTER a call.
- *
- * Fail-closed: an artifact that does not report the dispatched count is
+ * Fail-closed: an artifact that does not report the executed count is
  * UNKNOWN, and unknown state never fires the trigger — the run keeps
  * today's corpus-only fallback review instead of spending on a second
  * investigation. */
 export function fallbackEvidenceFailoverEligible(primaryHarness: Record<string, unknown> | null): boolean {
   if (primaryHarness === null) return false;
   if (primaryHarness.native_loop_degraded !== "request-error") return false;
-  const dispatched = primaryHarness.dispatched_call_count;
-  if (typeof dispatched !== "number" || !Number.isFinite(dispatched)) return false;
-  return dispatched === 0;
+  const executed = primaryHarness.executed_request_count;
+  if (typeof executed !== "number" || !Number.isFinite(executed)) return false;
+  return executed === 0;
 }
 
 /** #1598 (review): the wall-clock share the failover's investigation may
@@ -4554,7 +4615,7 @@ async function runFallbackEvidenceHarness(input: {
     // The synthetic keeps the degraded fail-closed shape regardless of the
     // thrown cause (the cause distinction rides the log line above); a
     // degraded fallback artifact preserves the #978 no-evidence eligibility.
-    input.ws.write("tool-harness.fallback.json", '{"tier":"fallback","mode":"native_loop","error":"execution failed","native_loop_degraded":"request-error","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"dispatched_call_count":0,"tool_results":[]}\n');
+    input.ws.write("tool-harness.fallback.json", '{"tier":"fallback","mode":"native_loop","error":"execution failed","native_loop_degraded":"request-error","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"successful_request_count":0,"refused_request_count":0,"deduplicated_request_count":0,"tool_results":[]}\n');
   } finally {
     if (savedTier === undefined) delete input.env.TOOL_HARNESS_TIER;
     else input.env.TOOL_HARNESS_TIER = savedTier;
@@ -4605,7 +4666,6 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
     const forkGate = gateForkForForks(env, forkFlag);
     if (forkGate !== null) {
       ws.write("tool-harness.smart.md", "Smart tool harness skipped for a cross-repository pull request.\n");
-      ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","skipped":true,"skip_reason":"fork-pr","rounds":0,"planned_request_count":0,"executed_request_count":0,"dispatched_call_count":0,"tool_results":[]}\n');
       log("Smart tool harness skipped for a cross-repository pull request.");
     } else {
       // Build the smart-tier corpus BEFORE the harness: the native loop
@@ -4631,7 +4691,6 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
         await runToolHarnessPhase(ws, env, input.workspace, log, input.signal, undefined, input.ghApi);
       } catch (cause) {
         errorLog(`smart tool harness failed: ${cause instanceof Error ? cause.message : String(cause)}`);
-        ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","error":"execution failed","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"dispatched_call_count":0,"tool_results":[]}\n');
       } finally {
         for (const [key, value] of savedSmartEnv) {
           if (value === undefined) delete env[key];
