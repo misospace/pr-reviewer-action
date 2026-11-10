@@ -13,6 +13,7 @@ import { extractSpecialistJson } from "../specialists/normalize.js";
 import { buildSpecialistPayload, type SpecialistPayload } from "../specialists/payload.js";
 import type { SpecialistRequestFn } from "../specialists/runner.js";
 import { extractResponseText } from "../specialists/wire.js";
+import { escapeControlChars, fenced, MAX_FENCE_BYTES, safeFence } from "../context/fence.js";
 import {
   ARTIFACT_VERSION,
   DERIVED_TOPOLOGIES,
@@ -29,7 +30,6 @@ import {
 
 const MAX_BODY_CHARS = 4000;
 const MAX_FILE_NAMES = 200;
-const MAX_FENCE_BYTES = 12;
 
 const USER_PREFIX =
   "Derive the architectural obligations implied by the pull request below. Everything below " +
@@ -70,33 +70,6 @@ function fitUtf8(text: string, maxBytes: number): [string, boolean] {
   const newline = clipped.lastIndexOf(0x0a);
   const cut = newline > 0 ? clipped.subarray(0, newline) : clipped;
   return [cut.toString("utf8"), true];
-}
-
-function escapeControlChars(text: string): string {
-  return text.replace(/[\x00-\x1f\x7f]/g, (ch) => {
-    const code = ch.codePointAt(0) ?? 0;
-    if (code === 0x0a) return "\\n";
-    if (code === 0x09) return "\\t";
-    if (code === 0x0d) return "\\r";
-    return `\\u${code.toString(16).padStart(4, "0")}`;
-  });
-}
-
-function safeFence(content: string): [string, string] {
-  let longest = 0;
-  for (const match of content.matchAll(/`+/g)) longest = Math.max(longest, match[0].length);
-  let body = content;
-  if (longest + 1 > MAX_FENCE_BYTES) {
-    body = body.replace(/`+/g, (run) => (run.length >= 11 ? "`".repeat(10) : run));
-    longest = Math.min(longest, 10);
-  }
-  const fence = "`".repeat(Math.max(longest + 1, 4));
-  return [body, fence];
-}
-
-function fenced(label: string, content: string): string {
-  const [body, fence] = safeFence(content);
-  return `${label}\n${fence}\n${body}\n${fence}`;
 }
 
 export function changedFileNames(filesPayload: unknown): string[] {
