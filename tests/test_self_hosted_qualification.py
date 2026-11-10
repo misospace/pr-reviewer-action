@@ -12,7 +12,10 @@ The harness script (tests/self_hosted_e2e_qualification.sh) landed with
   through the configured forge capability, never through a forge CLI or
   a raw HTTP client that reaches a remote forge;
 - the docs describe the harness as landed and point at the runbook,
-  never claiming a qualification that did not run.
+  never claiming a qualification that did not run;
+- every disposable instance config adopts its allowlist
+  (`discovered-default: adopt`), so the scenarios can actually enqueue a
+  review.
 """
 from __future__ import annotations
 
@@ -116,6 +119,28 @@ def _reaches_a_local_forge(path: Path, number: int) -> bool:
         if re.search(rf"\$\{{{name}\b}}|\${name}\b", command):
             return True
     return False
+
+
+# The disposable instance-config heredocs of the harness, by target path.
+# The adoption guard below must cover every one of them, so a newly added
+# scenario config cannot silently reintroduce an adoption block that never
+# enables its allowlist.
+INSTANCE_CONFIG_TARGETS = (
+    "$TMP/instance-forgejo.yaml",
+    "$TMP/instance-github.yaml",
+)
+
+
+def _instance_config_heredocs(script: str) -> dict[str, str]:
+    """Map every instance-config heredoc target to its raw body."""
+    return {
+        target: body
+        for target, body in re.findall(
+            r'(?m)^cat > "(\$TMP/instance-[a-z]+\.yaml)" <<CFGEOF\n(.*?)\nCFGEOF$',
+            script,
+            re.DOTALL,
+        )
+    }
 
 
 def test_the_qualification_workflow_runs_on_a_manual_dispatch_only() -> None:
@@ -367,6 +392,38 @@ def test_the_harness_script_never_reaches_a_remote_forge_directly() -> None:
         "capability. Only a raw call against the harness's own disposable "
         "local Forgejo instance is allowed:\n" + "\n".join(offenders)
     )
+
+
+# A `mode: allowlist` adoption block alone cannot queue a review: the
+# instance-config default for a newly discovered repository is `skip`
+# (`validateAdoption`, src/config/instance-config.ts), so an allowlisted
+# repository only reaches `eligible`, `createAdoptionIdentityResolver`
+# returns null for it, and neither the Forgejo webhook nor the GitHub
+# reconciler ever enqueues a worker — both wait_published loops would time
+# out. The harness's disposable configs therefore pin `discovered-default:
+# adopt` over their narrow allowlists (review of be86aac, PR #1586).
+def test_every_disposable_instance_config_adopts_its_allowlist() -> None:
+    harness = ROOT / HARNESS_PATH
+    if not harness.exists():
+        pytest.skip(f"{HARNESS_PATH} lands with #1482")
+    script = harness.read_text(encoding="utf-8")
+    heredocs = _instance_config_heredocs(script)
+    assert sorted(heredocs) == sorted(INSTANCE_CONFIG_TARGETS), (
+        "the adoption guard must cover every instance-config heredoc; "
+        "extend INSTANCE_CONFIG_TARGETS when a scenario config is added: "
+        + ", ".join(sorted(heredocs))
+    )
+    for target, body in heredocs.items():
+        block = re.search(r"(?m)^adoption:\n  mode: allowlist\n  allowlist: \[[^\]]+\]\n", body)
+        assert block, (
+            f"{target} must keep a narrow, non-empty allowlist adoption "
+            f"block:\n{body}"
+        )
+        assert re.search(r"(?m)^  discovered-default: adopt$", body), (
+            f"{target}: `mode: allowlist` alone holds the allowlisted "
+            "repository at `eligible` (discovered-default defaults to "
+            "skip), so no review is ever enqueued:\n" + body
+        )
 
 
 def test_the_runbook_documents_the_run_steps() -> None:

@@ -390,9 +390,14 @@ forges:
     endpoint: "$FORGEJO_API_URL"
     credential: forgejo
 $(write_model_section)
+# discovered-default: adopt is what makes the allowlist effective for a
+# fresh disposable control plane: with the skip default an allowlisted
+# repository only reaches eligible, the adoption identity resolver
+# returns null for it, and no worker is ever enqueued (review of be86aac).
 adoption:
   mode: allowlist
   allowlist: ["reviewer/sample"]
+  discovered-default: adopt
 CFGEOF
 
 cat > "$TMP/instance-github.yaml" <<CFGEOF
@@ -403,9 +408,12 @@ forges:
     endpoint: "$GITHUB_API_URL"
     credential: github
 $(write_model_section)
+# Same as the Forgejo config: without discovered-default: adopt the
+# allowlisted reconciler target holds at eligible and never enqueues.
 adoption:
   mode: allowlist
   allowlist: ["$SELF_HOSTED_GITHUB_REPOSITORY"]
+  discovered-default: adopt
 CFGEOF
 
 # ── controller helper ──
