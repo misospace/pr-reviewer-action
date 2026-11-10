@@ -45,6 +45,58 @@ Image properties:
 For release publishing, pin the base image digests as described in
 `deploy/images/README.md`, then push digest-pinned references.
 
+### Published GHCR images (#1584 canary)
+
+The dedicated workflow `.github/workflows/self-hosted-images.yaml` builds
+both targets from one checked-out commit and pushes them to GHCR:
+
+| image | reference |
+|-------|-----------|
+| controller | `ghcr.io/misospace/pr-reviewer-controller:sha-<commit>` |
+| worker | `ghcr.io/misospace/pr-reviewer-worker:sha-<commit>` |
+
+How it runs:
+
+- **Trigger.** Manual `workflow_dispatch` only; the job fails closed unless
+  it is dispatched from the `main` branch, so the published images always
+  come from the branch the repository protects (branch protection itself is
+  repository configuration, outside the workflow's control). Dispatch it
+  from Actions → Self-hosted images.
+- **Provenance.** The run summary reports each image's digest and a
+  copy-paste-ready `image@sha256:...` reference plus the exact source
+  commit. No `latest`, no release tag.
+- **Tag immutability.** GHCR has no registry-side immutable-tag setting,
+  so the job enforces it before building: it inspects both `sha-<commit>`
+  tags and stops the run when one already exists, or when the registry
+  state is uncertain (fail closed). Within this workflow a rerun can
+  never move a published tag; publish a new commit instead.
+- **Permissions.** The job runs with `contents: read` and `packages: write`
+  and logs into GHCR with `GITHUB_TOKEN`. Image building is fully separate
+  from the Action release pipeline (which owns tag/release writes) and
+  never runs from pull-request code.
+- **Visibility prerequisite.** A newly created GHCR package starts private.
+  Either set the package to public or create a registry pull secret with
+  read access and attach it where the chart pulls (controller namespace and
+  worker ServiceAccount) — see `deploy/images/README.md`.
+
+Pin the digests at the two consumption points (never a mutable tag):
+
+1. **Helm controller image** — `controller.controllers.main.containers.main.image`
+   in your chart values. The `common` library chart accepts a `digest`
+   field next to `repository` and `tag` and renders
+   `repository[:tag]@digest`, so set `image.digest` to the value from the
+   run summary; do not put the digest into `repository`.
+2. **Worker image** — the instance config's `kubernetes.image` field in the
+   Kubernetes executor profile. That field is one full reference string,
+   so include the digest in it:
+   `ghcr.io/misospace/pr-reviewer-worker@sha256:<digest>`.
+
+The example values under `deploy/charts/pr-reviewer/examples/` show the
+shape; replace their placeholders with the digest references from the run
+summary. When you upgrade, upgrade both pins together: worker and
+controller protocol revisions are coordinated by building both images from
+the same commit.
+
 ## The chart
 
 `deploy/charts/pr-reviewer/` is built on the bjw-s-labs `common` library
@@ -199,6 +251,11 @@ gates a merge. The harness script lands with #1482; until then a
 dispatched job fails closed instead of reporting a qualification that did
 not run. Its run steps are in
 [Self-hosted qualification](self-hosted-qualification.md).
+
+The `.github/workflows/self-hosted-images.yaml` job builds and pushes the
+controller and worker images to GHCR on a manual dispatch from `main`
+([Published GHCR images](#published-ghcr-images-1584-canary) above); it
+also never gates a merge.
 
 ## Known limits
 

@@ -215,6 +215,22 @@ test("Dockerfile: non-root USER 1000, exec-form entrypoint, worker argv", () => 
   // git is installed without recommendations and lists are cleaned.
   assert.match(dockerfile, /apt-get install -y --no-install-recommends git/);
   assert.match(dockerfile, /rm -rf \/var\/lib\/apt\/lists/);
+  // #1584: every external base image stays pinned by sha256 digest, and
+  // the whole file builds on ONE base revision. Stage-name FROMs are
+  // internal links, not registry references.
+  const stageNames = new Set(
+    [...dockerfile.matchAll(/^FROM \S+ AS ([a-z0-9-]+)$/gm)].map((match) => match[1]!),
+  );
+  const externalBases = [...dockerfile.matchAll(/^FROM (\S+)(?: AS [a-z0-9-]+)?$/gm)]
+    .map((match) => match[1]!)
+    .filter((reference) => !stageNames.has(reference));
+  assert.equal(externalBases.length, 2, "build and runtime stages each pull one base image");
+  const baseDigests = externalBases.map((reference) => {
+    const pinned = /^[^\s@]+@sha256:([0-9a-f]{64})$/.exec(reference);
+    assert.ok(pinned, `base image ${reference} must be pinned by sha256 digest, not a mutable tag`);
+    return pinned[1]!;
+  });
+  assert.equal(new Set(baseDigests).size, 1, "both stages must pin the same base revision");
 });
 
 test("chart keeps dependency artifacts loadable and gitignored; CI gates render", () => {
@@ -242,4 +258,142 @@ test("chart keeps dependency artifacts loadable and gitignored; CI gates render"
   // actionlint's shellcheck pass rejects a bare `!` outside a condition
   // (SC2251: errexit is skipped): negative assertions use if/exit.
   assert.doesNotMatch(workflow, /^\s*!\s/gm);
+});
+
+test("#1584 image-publishing workflow: dispatch-only on main, least privilege, immutable tags", () => {
+  const path = ".github/workflows/self-hosted-images.yaml";
+  const workflow = read(path);
+  const parsed = parse(workflow) as {
+    on: { workflow_dispatch: unknown };
+    permissions: { contents: string };
+    jobs: Record<string, {
+      if?: string;
+      permissions: { contents: string; packages: string };
+      steps: { uses?: string; run?: string; env?: Record<string, unknown>; with?: Record<string, unknown> }[];
+    }>;
+  };
+
+  // Manual dispatch only — never a pull_request or push trigger: the
+  // publish job must have no surface reachable from untrusted PR code.
+  assert.ok(parsed.on, "triggers must parse");
+  assert.deepEqual(Object.keys(parsed.on), ["workflow_dispatch"]);
+  // Top-level and job permissions are least-privileged; only the publish
+  // job gains packages: write.
+  assert.deepEqual(parsed.permissions, { contents: "read" });
+  const jobs = Object.entries(parsed.jobs);
+  assert.equal(jobs.length, 1);
+  const [jobName, job] = jobs[0]!;
+  // Canary source is protected main, fail closed everywhere else.
+  assert.match(job.if ?? "", /github\.ref == 'refs\/heads\/main'/);
+  assert.deepEqual(job.permissions, { contents: "read", packages: "write" });
+
+  // Immutable tags only: the sha-<commit> tag, no floating latest and no
+  // release tag in the initial scope.
+  const tags = job.steps.flatMap(
+    (step) => (typeof step.with?.["tags"] === "string" ? [step.with["tags"] as string] : []),
+  );
+  assert.equal(tags.length, 2);
+  for (const tag of tags) {
+    assert.match(tag, /:sha-\$\{\{ github\.sha \}\}$/);
+    // GHCR paths must be lowercase: the owner is normalized once, not
+    // interpolated raw from the (potentially mixed-case) repository owner.
+    assert.match(tag, /ghcr\.io\/\$\{\{ env\.GHCR_OWNER \}\}\/pr-reviewer-(controller|worker):/);
+  }
+  assert.match(workflow, /GHCR_OWNER=\$\{GITHUB_REPOSITORY_OWNER,,\}/);
+  assert.doesNotMatch(workflow, /:latest|:v[0-9]/);
+  // GHCR has no registry-side tag immutability, so the workflow itself
+  // must refuse to replace an existing sha-<commit> tag: a rerun of a
+  // non-byte-reproducible build would otherwise silently move the tag off
+  // the digest the run summary published. The guard must inspect the
+  // exact two sha-<commit> tags, fail on a present tag, fail closed on any
+  // uncertain registry answer, and run before the first push step.
+  const guardStep = job.steps.find((step) => (step.run ?? "").includes("docker manifest inspect"));
+  assert.ok(guardStep, "a guard step must inspect the published sha tags");
+  const guardRun = guardStep.run ?? "";
+  assert.match(guardRun, /set -euo pipefail/);
+  assert.deepEqual(guardStep.env, {
+    CONTROLLER_TAG: "ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-controller:sha-${{ github.sha }}",
+    WORKER_TAG: "ghcr.io/${{ env.GHCR_OWNER }}/pr-reviewer-worker:sha-${{ github.sha }}",
+  });
+  for (const tagVar of ["CONTROLLER_TAG", "WORKER_TAG"]) {
+    assert.match(guardRun, new RegExp(`\\$\\{?${tagVar}\\}?`), `the guard must check $${tagVar}`);
+  }
+  // A present tag refuses the run...
+  assert.match(guardRun, /already exists/);
+  // ...and so does any registry answer that is not an explicit absence:
+  // only the spec's 404 codes (MANIFEST_UNKNOWN / NAME_UNKNOWN /
+  // not-found) pass, so ambiguous failures like TLS "unknown authority"
+  // or an OCI UNKNOWN error code fail closed (fail the job, never push
+  // blind).
+  assert.match(guardRun, /manifest\.unknown\|name\.unknown\|not found/);
+  // Orientation locks: the existing-tag refusal must sit in the branch
+  // where the inspect SUCCEEDED, and the uncertain-state refusal in the
+  // branch where the absence classifier did NOT match.
+  assert.match(
+    guardRun,
+    /if out=\$\(docker manifest inspect "\$tag" 2>&1\); then\s*\n\s*echo "::error::\$\{tag\} already exists/,
+    "the existing-tag refusal must be the inspect-success branch",
+  );
+  assert.match(
+    guardRun,
+    /if ! printf '%s\\n' "\$out" \| grep -Eqi/,
+    "the uncertain-state refusal must be the classifier-did-not-match branch",
+  );
+  assert.match(guardRun, /exit 1/);
+  const guardIndex = job.steps.indexOf(guardStep);
+  const firstPushIndex = job.steps.findIndex((step) => step.with?.["push"] === true);
+  assert.ok(
+    firstPushIndex !== -1 && guardIndex < firstPushIndex,
+    "the tag guard must run before any push step",
+  );
+  // Both targets from the one Dockerfile, single-arch canary.
+  for (const target of ["controller", "worker"]) {
+    assert.ok(
+      job.steps.some(
+        (step) => step.with?.["target"] === target && step.with?.["push"] === true,
+      ),
+      `the ${target} target must be built and pushed`,
+    );
+    assert.match(workflow, new RegExp(`ghcr\\.io/\\$\\{\\{ env\\.GHCR_OWNER \\}\\}/pr-reviewer-${target}`));
+  }
+  assert.equal(job.steps.filter((step) => step.with?.["platforms"] === "linux/amd64").length, 2);
+  // #1584: the run summary must carry the exact pull-able references for
+  // BOTH images and the source commit they were built from, wired from
+  // the build outputs and github.sha — this is the operator's only exact
+  // provenance record of a publish run.
+  for (const target of ["controller", "worker"]) {
+    assert.match(
+      workflow,
+      new RegExp(`${target.toUpperCase()}_DIGEST: \\$\\{\\{ steps\\.${target}\\.outputs\\.digest \\}\\}`),
+    );
+  }
+  assert.match(workflow, /SOURCE_SHA: \$\{\{ github\.sha \}\}/);
+  const summaryStep = job.steps.find((step) => (step.run ?? "").includes("GITHUB_STEP_SUMMARY"))?.run ?? "";
+  assert.notEqual(summaryStep, "", "a step must write the run summary");
+  // Anchor to the brace group redirected into the summary itself: the
+  // same references are echoed to the job log, and the log echo alone
+  // must not satisfy the contract.
+  const summaryBlock = /\n[ \t]*\{[\s\S]*?\n[ \t]*\} >> "\$GITHUB_STEP_SUMMARY"/.exec(summaryStep)?.[0] ?? "";
+  assert.notEqual(summaryBlock, "", "a brace block must be redirected into GITHUB_STEP_SUMMARY");
+  assert.match(summaryBlock, /Source commit: \\?`\$\{SOURCE_SHA\}\\?`/);
+  for (const target of ["controller", "worker"]) {
+    assert.match(
+      summaryBlock,
+      new RegExp(`pr-reviewer-${target}@\\$\\{${target.toUpperCase()}_DIGEST\\}`),
+      `the run summary block must carry the ${target} image@digest reference`,
+    );
+  }
+  // Checkout never hands its token to the build, and GHCR login uses the
+  // workflow's own GITHUB_TOKEN — no other credential surface exists.
+  const checkout = job.steps.find((step) => step.uses?.includes("actions/checkout"));
+  assert.equal((checkout?.with ?? {})["persist-credentials"], false);
+  const login = job.steps.find((step) => step.uses?.includes("docker/login-action"));
+  assert.equal((login?.with ?? {})["registry"], "ghcr.io");
+  assert.equal((login?.with ?? {})["password"], "${{ secrets.GITHUB_TOKEN }}");
+  // Every action is pinned by commit SHA (40 hex chars), matching the
+  // repository-wide pinning convention.
+  for (const uses of job.steps.map((step) => step.uses ?? "")) {
+    if (uses) assert.match(uses, /@[0-9a-f]{40}( # |$)/, `${uses} must be pinned by commit SHA`);
+  }
+  void jobName;
 });

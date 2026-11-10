@@ -62,6 +62,9 @@ controller:
         main:
           image:
             repository: ghcr.io/example/pr-reviewer-controller
+            # Digest pin from the image-publish run summary; the tag is
+            # then only a readable label (rendered as repo:tag@digest).
+            digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
             tag: "3.8.0"
 
   service:
