@@ -4331,6 +4331,7 @@ async function producePrimaryReview(input: ReviewCallInput & {
     ghApi: input.ghApi,
     ...(input.signal !== undefined ? { signal: input.signal } : {}),
     primaryHarness: harness,
+    primaryVerdictElapsedSec: primary.elapsedSec,
   });
   if (fallbackHarnessRan) {
     const fallbackHarness = safeJson(ws.read("tool-harness.fallback.json"));
@@ -4444,25 +4445,33 @@ export function fallbackEvidenceFailoverEligible(primaryHarness: Record<string, 
 }
 
 /** #1598 (review): the wall-clock share the failover's investigation may
- * spend, as a pure function of the primary artifact.
+ * spend, as a pure function of the primary's measured whole-run spend.
  *
  * The failover runs a SECOND native investigation, so it must draw from the
- * same loop wall-clock envelope the primary exchange was configured with —
+ * same wall-clock envelope the primary exchange was configured with —
  * a primary that spent T seconds before its transport failure leaves the
- * failover `tool-loop-wall-clock-sec − T`, never a second full budget. The
- * primary loop's own spend is the #702 usage telemetry
+ * failover `tool-loop-wall-clock-sec − T`, never a second full budget.
+ *
+ * T is the WHOLE spend between the envelope's start and this decision, not
+ * just the loop's own time (#1598 review round 4): between the degraded loop
+ * and the failover the engine also ran the primary CORPUS-verdict attempt
+ * (`primary.elapsedSec` — #1305 attempt accounting on the failed tier call,
+ * the run's injected clock), and the loop artifact's #702 telemetry
  * (`tool_loop_telemetry.usage.elapsed_sec` — the loop's measured elapsed,
  * distinct from `budget.wall_clock_sec`, which on an uncapped loop records
- * the configured ceiling), which
- * every loop run — including the degraded transport stop this trigger
- * requires — carries.
+ * the configured ceiling) stops when the loop stops. Subtracting only the
+ * loop's telemetry would let the failover's `deadline = now + remaining`
+ * slide past the original envelope by the verdict attempt's duration —
+ * a slow primary verdict call would silently BUY the failover extra time.
  *
- * Fail-closed: an artifact that does not report a finite non-negative spend
- * returns null and the caller keeps today's corpus-only fallback review
- * instead of spending on an unbounded second investigation. A known spend
- * returns `max(0, loopWallClockSec − spend)`. */
+ * Fail-closed: EITHER spend unknown — an artifact without a finite
+ * non-negative telemetry elapsed, or a tier call that did not report its
+ * elapsed — returns null and the caller keeps today's corpus-only fallback
+ * review instead of spending on a mis-bounded second investigation. Known
+ * spends return `max(0, loopWallClockSec − loopSpend − verdictSpend)`. */
 export function fallbackEvidenceWallClockRemainingSec(
   primaryHarness: Record<string, unknown> | null,
+  primaryVerdictElapsedSec: number | undefined,
   loopWallClockSec: number,
 ): number | null {
   if (primaryHarness === null) return null;
@@ -4470,9 +4479,11 @@ export function fallbackEvidenceWallClockRemainingSec(
   if (telemetry === null || typeof telemetry !== "object") return null;
   const usage = (telemetry as Record<string, unknown>).usage;
   if (usage === null || typeof usage !== "object") return null;
-  const spend = (usage as Record<string, unknown>).elapsed_sec;
-  if (typeof spend !== "number" || !Number.isFinite(spend) || spend < 0) return null;
-  return Math.max(0, loopWallClockSec - spend);
+  const loopSpend = (usage as Record<string, unknown>).elapsed_sec;
+  if (typeof loopSpend !== "number" || !Number.isFinite(loopSpend) || loopSpend < 0) return null;
+  const verdictSpend = primaryVerdictElapsedSec;
+  if (typeof verdictSpend !== "number" || !Number.isFinite(verdictSpend) || verdictSpend < 0) return null;
+  return Math.max(0, loopWallClockSec - loopSpend - verdictSpend);
 }
 
 /** #1598/#1585: the fallback tier's evidence-failover harness phase. The
@@ -4496,22 +4507,26 @@ async function runFallbackEvidenceHarness(input: {
   ghApi?: HarnessDeps["ghApi"];
   signal?: AbortSignal;
   primaryHarness: Record<string, unknown> | null;
+  primaryVerdictElapsedSec: number | undefined;
 }): Promise<boolean> {
   const toolMode = (input.env.TOOL_MODE ?? "off").toLowerCase();
   if (toolMode !== "native_loop") return false;
   if (!fallbackEvidenceFailoverEligible(input.primaryHarness)) return false;
   // #1598 (review): bounded spend — the failover draws from the SAME loop
   // wall-clock envelope the primary exchange was configured with, never a
-  // second full budget. The primary loop's recorded spend leaves the
+  // second full budget. The primary's WHOLE recorded spend — the loop's own
+  // telemetry plus the corpus-verdict attempt that ran between the degraded
+  // loop and this decision (#1598 review round 4: the envelope's start is
+  // the loop, and every measured second since then counts) — leaves the
   // remaining share; a share at or below the verdict reserve's 30s floor
-  // (or an unknown spend) keeps today's corpus-only fallback review —
-  // fail closed, never restart spend on an exhausted or unmeasurable
-  // budget. The gate is deliberately stricter than the reserve arithmetic
-  // itself (which caps the reserve at half of a small envelope): a share
-  // that leaves less than the 30s floor cannot fund a meaningful
+  // (or an unknown spend on either side) keeps today's corpus-only fallback
+  // review — fail closed, never restart spend on an exhausted or
+  // unmeasurable budget. The gate is deliberately stricter than the reserve
+  // arithmetic itself (which caps the reserve at half of a small envelope):
+  // a share that leaves less than the 30s floor cannot fund a meaningful
   // investigation plus its closing verdict.
   const [, loopWallClockSec] = resolveLoopLimits(input.env, "primary");
-  const wallClockRemainingSec = fallbackEvidenceWallClockRemainingSec(input.primaryHarness, loopWallClockSec);
+  const wallClockRemainingSec = fallbackEvidenceWallClockRemainingSec(input.primaryHarness, input.primaryVerdictElapsedSec, loopWallClockSec);
   if (wallClockRemainingSec === null || wallClockRemainingSec <= VERDICT_WALL_CLOCK_RESERVE_MIN_SEC) return false;
   // The fork privilege separation owns this decision (docs/fork-review.md):
   // a gated run never gains a second tool loop through failover.
