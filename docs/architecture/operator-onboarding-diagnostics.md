@@ -54,9 +54,12 @@ operator is actually asking — *what will THIS daemon do* — because:
 Rejected alternatives:
 
 - **Standalone script** (`scripts/doctor.mjs` parsing operator values):
-  second config authority (above); also cannot see process state, and the
-  repo has no dependency surface for a second YAML consumer of the chart's
-  values.
+  second config authority (above); also cannot see process state. The
+  dependency surface exists — `yaml` is already a pinned dependency and
+  `src/config/instance-config.ts` already parses YAML — so the rejection
+  rests on authority, not capability: a script re-reading the chart's
+  values would be a second, independently maintained interpretation of the
+  same fail-closed env contract.
 - **In-cluster CLI re-reading the same env**: still a second loader of the
   same authority; the snapshot problem above; and it double-loads the
   instance config that startup validation already refused to start on.
