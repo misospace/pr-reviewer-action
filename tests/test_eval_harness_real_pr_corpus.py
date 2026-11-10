@@ -9,9 +9,11 @@ No network: the checkout tests use only local, filesystem-backed git repos.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -1211,3 +1213,238 @@ class TestRealRuntimeIgnoresCommittedDecoyArtifacts:
         assert "hidden-backdoor.py" not in real_files
         corpus = (run.run_dir / "review-corpus.md").read_text(encoding="utf-8")
         assert "marker.txt" in corpus
+
+
+# ---------------------------------------------------------------------------
+# Entry-level retained fixtures on real-PR corpus entries (#1609)
+# ---------------------------------------------------------------------------
+
+_FIXTURE_DIFF = (
+    "diff --git a/a.py b/a.py\n"
+    "--- /dev/null\n"
+    "+++ b/a.py\n"
+    "@@ -0,0 +1,2 @@\n"
+    "+import os\n"
+    '+DEFAULT_TIMEOUT = os.getenv("TIMEOUT")\n'
+)
+
+
+def _fixture_doc(number: int = 1) -> dict:
+    return {
+        "schema": 1,
+        "scenario": number,
+        "pr_json": {
+            "number": number,
+            "title": "fixture PR",
+            "body": "",
+            "head": {"sha": f"fixture-{number}-head", "ref": "pr"},
+            "base": {"sha": f"fixture-{number}-base", "ref": "main"},
+            "user": {"login": "fixture"},
+        },
+        "diff": _FIXTURE_DIFF,
+        "pr_files": [{
+            "filename": "a.py", "status": "added",
+            "additions": 2, "deletions": 0, "changes": 2,
+        }],
+        "files": [{"path": "a.py", "content": 'import os\nDEFAULT_TIMEOUT = os.getenv("TIMEOUT")\n'}],
+    }
+
+
+def _write_fixture(corpus_dir: Path, name: str, fixture: dict) -> str:
+    data = json.dumps(fixture, indent=2) + "\n"
+    (corpus_dir / name).write_text(data, encoding="utf-8")
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def _fixture_corpus_file(tmp_path: Path, sha: str, name: str = "fixture.json") -> Path:
+    entry = {
+        "id": "v1", "repo_full_name": "acme/repo", "number": 1,
+        "head_sha": GOOD_SHA, "base_sha": "b" * 40,
+        "defect": {"description": "d", "file": "a.py", "line_range": [2, 2]},
+        "fixture": {"path": name, "sha256": sha},
+    }
+    path = tmp_path / "corpus.json"
+    path.write_text(
+        json.dumps({"real_pr_corpus": {"vulnerable": [entry], "clean": []}}),
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestRealPRCorpusFixtureRefs:
+    """#1609: RealPRCorpus entries may pin a retained fixture ref (path +
+    sha256 under the corpus directory), loaded eagerly like BenchmarkCorpus's
+    #712 refs so a corrupt ref fails at corpus load and every error names the
+    scenario that pinned it."""
+
+    def test_from_file_loads_a_pinned_fixture(self, tmp_path):
+        sha = _write_fixture(tmp_path, "fixture.json", _fixture_doc())
+        corpus = RealPRCorpus.from_file(_fixture_corpus_file(tmp_path, sha))
+        scenario = corpus.vulnerable[0]
+        assert scenario.semantic_fixture is not None
+        data, fixture_path = scenario.semantic_fixture
+        assert data["pr_json"]["number"] == 1
+        assert fixture_path == (tmp_path / "fixture.json").resolve()
+
+    def test_to_pr_entry_carries_the_fixture_tuple(self, tmp_path):
+        sha = _write_fixture(tmp_path, "fixture.json", _fixture_doc())
+        scenario = RealPRCorpus.from_file(_fixture_corpus_file(tmp_path, sha)).vulnerable[0]
+        entry = scenario.to_pr_entry()
+        assert entry["_semantic_fixture"] is scenario.semantic_fixture
+        # The live-replay identity fields survive: a fixture entry still pins
+        # the real PR it documents.
+        assert entry["head_sha"] == GOOD_SHA
+        assert entry["base_sha"] == "b" * 40
+
+    def test_entry_without_fixture_has_no_semantic_fixture(self, tmp_path):
+        path = tmp_path / "corpus.json"
+        path.write_text(
+            json.dumps({"real_pr_corpus": {"vulnerable": [], "clean": [{
+                "repo_full_name": "acme/repo", "number": 2,
+                "head_sha": GOOD_SHA, "expected_clean": True,
+            }]}}),
+            encoding="utf-8",
+        )
+        scenario = RealPRCorpus.from_file(path).clean[0]
+        assert scenario.semantic_fixture is None
+        assert "_semantic_fixture" not in scenario.to_pr_entry()
+
+    def test_non_object_fixture_ref_is_refused(self, tmp_path):
+        sha = _write_fixture(tmp_path, "fixture.json", _fixture_doc())
+        path = _fixture_corpus_file(tmp_path, sha)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["real_pr_corpus"]["vulnerable"][0]["fixture"] = "fixture.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ValueError, match="v1: fixture must be an object"):
+            RealPRCorpus.from_file(path)
+
+    def test_hash_mismatch_names_the_scenario(self, tmp_path):
+        sha = _write_fixture(tmp_path, "fixture.json", _fixture_doc())
+        path = _fixture_corpus_file(tmp_path, "c" * 64)
+        with pytest.raises(ValueError, match="v1: semantic fixture hash mismatch"):
+            RealPRCorpus.from_file(path)
+
+    def test_unsafe_fixture_path_is_refused(self, tmp_path):
+        _write_fixture(tmp_path, "fixture.json", _fixture_doc())
+        path = _fixture_corpus_file(tmp_path, "c" * 64, name="../escape.json")
+        with pytest.raises(ValueError, match="v1"):
+            RealPRCorpus.from_file(path)
+
+    def test_missing_fixture_file_is_refused(self, tmp_path):
+        path = _fixture_corpus_file(tmp_path, "c" * 64, name="absent.json")
+        with pytest.raises(ValueError, match="v1"):
+            RealPRCorpus.from_file(path)
+
+    def test_symlinked_fixture_path_is_refused(self, tmp_path):
+        """A symlink inside the corpus root that points outside it is the one
+        traversal vector the lexical path guard cannot see; the resolve()
+        containment re-check must catch it."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        _write_fixture(outside, "real.json", _fixture_doc())
+        corpus_dir = tmp_path / "corpus"
+        corpus_dir.mkdir()
+        (corpus_dir / "link.json").symlink_to(outside / "real.json")
+        sha = hashlib.sha256((outside / "real.json").read_bytes()).hexdigest()
+        path = _fixture_corpus_file(corpus_dir, sha, name="link.json")
+        with pytest.raises(ValueError, match="v1"):
+            RealPRCorpus.from_file(path)
+
+    def test_fixture_payload_that_disagrees_with_its_diff_is_refused(self, tmp_path):
+        """#1609 review fix: a fixture whose tree does not carry the diff's
+        new side would otherwise pass the ref check and silently mis-score
+        the row (defect_file_in_diff reads the diff, defect_lines reads the
+        materialized tree). Integrity is checked at corpus load."""
+        fixture = _fixture_doc()
+        fixture["files"] = [{"path": "a.py", "content": "a different tree\nthe diff never produced\n"}]
+        sha = _write_fixture(tmp_path, "fixture.json", fixture)
+        with pytest.raises(ValueError, match="v1"):
+            RealPRCorpus.from_file(_fixture_corpus_file(tmp_path, sha))
+
+
+class TestRunReviewForPrFixturePath:
+    """A fixture-backed real-PR entry takes the semantic-fixture path: the
+    runtime is invoked against the materialized repository with the fixture
+    env (and FORCE_REVIEW) set, and never clones the merged PR."""
+
+    def _stub_script(self, tmp_path: Path) -> tuple[Path, Path]:
+        out_path = tmp_path / "stub-env.txt"
+        script = tmp_path / "stub-review.sh"
+        script.write_text(f"#!/bin/sh\nenv > {out_path}\n", encoding="utf-8")
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        return script, out_path
+
+    def _scenario_with_fixture(self, tmp_path: Path) -> RealPRScenario:
+        sha = _write_fixture(tmp_path, "fixture.json", _fixture_doc())
+        return RealPRCorpus.from_file(_fixture_corpus_file(tmp_path, sha)).vulnerable[0]
+
+    def test_fixture_entry_runs_offline_against_the_materialized_repo(self, tmp_path, monkeypatch):
+        script, out_path = self._stub_script(tmp_path)
+        monkeypatch.setattr("eval_harness.RUNTIME_ENTRYPOINT", tmp_path / "unused")
+        scenario = self._scenario_with_fixture(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+
+        run = run_review_for_pr(scenario.to_pr_entry(), "tools_off", work_dir, {}, review_script=script)
+
+        assert run.error is None
+        assert run.commit_sha  # the materialized fixture commit
+        env_text = out_path.read_text(encoding="utf-8")
+        assert "SEMANTIC_FIXTURE_MODE=true\n" in env_text
+        assert f"SEMANTIC_FIXTURE_DIR={run.repo_path}" in env_text
+        assert "FORCE_REVIEW=true" in env_text
+        assert "SKIP_IF_DIFF_UNCHANGED=false" in env_text
+        assert run.repo_path is not None
+        assert run.repo_path.exists()
+        # The materialized checkout carries the fixture's head tree.
+        assert (run.repo_path / "a.py").is_file()
+        assert (run.repo_path / ".semantic-fixture" / "pr.json").is_file()
+
+    def test_fixture_entry_never_clones_or_checkouts(self, tmp_path, monkeypatch):
+        script, _out = self._stub_script(tmp_path)
+        monkeypatch.setattr("eval_harness.RUNTIME_ENTRYPOINT", tmp_path / "unused")
+        scenario = self._scenario_with_fixture(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+
+        run = run_review_for_pr(scenario.to_pr_entry(), "tools_off", work_dir, {}, review_script=script)
+
+        assert run.error is None
+        # The live-clone path would have created work_dir/acme-repo; a
+        # fixture entry materializes its own repository instead.
+        assert run.repo_path is not None
+        assert run.repo_path != work_dir / "acme-repo"
+        assert not (work_dir / "acme-repo").exists()
+
+
+@pytest.mark.skipif(
+    shutil.which("node") is None or not _DIST_ENTRYPOINT.is_file(),
+    reason="needs node and a built dist/index.js (npm run build)",
+)
+class TestContextOnlyFixtureEntryEndToEnd:
+    """#1609 regression: --context-only over a real-PR corpus entry that pins
+    a retained fixture builds full review context offline. Before the seam,
+    the #1301 closed/merged admission gate refused every historical entry
+    (all pin merged PRs) and every row reported context_built: false."""
+
+    def test_context_only_builds_context_for_a_fixture_entry(self, tmp_path):
+        sha = _write_fixture(tmp_path, "fixture.json", _fixture_doc())
+        corpus = RealPRCorpus.from_file(_fixture_corpus_file(tmp_path, sha))
+        model_config = {
+            "model": "context-only", "base_url": "http://127.0.0.1:9/v1",
+            "api_key": "none", "github_token": "dummy-token",
+            "extra_env": {**REPLAY_ENV, **CONTEXT_ONLY_ENV},
+        }
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+
+        report = run_real_pr_corpus(corpus, ["tools_off"], work_dir, model_config, context_only=True)
+
+        assert report["metadata"]["context_built"] == 1
+        row = report["per_scenario"][0]
+        assert row["id"] == "v1"
+        assert row["fixture"] is True
+        assert row["context_built"] is True
+        assert row["defect_file_in_diff"] is True
+        assert row["defect_lines"] == 1
+        assert row["defect_lines_in_context"] == 1

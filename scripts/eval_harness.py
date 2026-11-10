@@ -54,6 +54,7 @@ from pr_reviewer.semantic_eval import (
     aggregate_semantic_runs,
     evaluate_semantic_capability as evaluate_semantic_run,
     validate_semantic_corpus,
+    validate_semantic_fixture_integrity,
 )
 
 
@@ -158,6 +159,12 @@ class ReviewRun:
     # bookkeeping only (a caller that needs a run's artifacts after the
     # fact, e.g. score_context, reads through this); not part of to_dict.
     run_dir: Path | None = None
+    # The checkout the run actually reviewed (the pinned PR-head clone, or the
+    # freshly materialized semantic-fixture repository). Internal bookkeeping
+    # like run_dir: score_context needs it for `git show` against the head
+    # tree, and under a fixture entry the harness's work_dir naming guess
+    # would point at a directory that was never created. Not part of to_dict.
+    repo_path: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"mode": self.mode, "pr_number": self.pr_number}
@@ -309,6 +316,17 @@ class RealPRScenario:
     expected_clean: Any
     defect: RealPRDefect | None
     raw: dict[str, Any] = field(default_factory=dict)
+    # Entry-level retained fixture (#1609), loaded eagerly by
+    # RealPRCorpus.from_file when the entry pins a ``fixture`` ref: the
+    # (fixture data, fixture path) tuple from _load_semantic_fixture, in the
+    # same shape BenchmarkCorpus entries carry under the private
+    # ``_semantic_fixture`` pr-entry key. The corpus PRs are long merged, so
+    # the #1301 closed/merged admission gate refuses a live replay before any
+    # context assembly; a pinned fixture instead materializes the exact
+    # authored diff through the #712 semantic-fixture path, which serves the
+    # PR identity offline (open, not-draft) without weakening the gate for
+    # production paths.
+    semantic_fixture: tuple[dict[str, Any], Path] | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RealPRScenario:
@@ -325,7 +343,12 @@ class RealPRScenario:
 
     def to_pr_entry(self) -> dict[str, Any]:
         """The subset run_review_for_pr needs: number/repo_full_name/head_sha,
-        plus ``base_sha`` when the entry pins the diff base."""
+        plus ``base_sha`` when the entry pins the diff base.
+
+        When the entry pins a retained fixture, the loaded tuple rides along
+        under the private ``_semantic_fixture`` key so run_review_for_pr takes
+        the offline materialization path instead of cloning and checking out
+        the (long merged) PR head."""
         entry = {
             "number": self.number,
             "repo_full_name": self.repo_full_name,
@@ -334,6 +357,8 @@ class RealPRScenario:
         base_sha = self.raw.get("base_sha")
         if base_sha:
             entry["base_sha"] = base_sha
+        if self.semantic_fixture is not None:
+            entry["_semantic_fixture"] = self.semantic_fixture
         return entry
 
 
@@ -426,6 +451,29 @@ class RealPRCorpus:
         vulnerable = [RealPRScenario.from_dict(e) for e in vulnerable_raw]
         clean = [RealPRScenario.from_dict(e) for e in clean_raw]
         validate_real_pr_corpus(vulnerable, clean)
+        # Entry-level retained fixtures (#1609): load eagerly like
+        # BenchmarkCorpus's #712 refs so a corrupt ref fails at corpus load,
+        # not mid-benchmark, and every error names the scenario that pinned it.
+        # The payload is integrity-checked too (validate_semantic_fixture_integrity
+        # reverse-applies the diff against the fixture tree): a fixture whose
+        # diff and files disagree would otherwise silently mis-score the row —
+        # defect_file_in_diff reads the diff while defect_lines reads the
+        # materialized tree, so the two halves can contradict each other.
+        pinned = [(s, s.raw.get("fixture")) for s in [*vulnerable, *clean] if "fixture" in s.raw]
+        if pinned:
+            fixture_root = SemanticCorpus(fixture_root=path.parent)
+            for scenario, ref in pinned:
+                if not isinstance(ref, dict):
+                    raise ValueError(
+                        f"{scenario.id}: fixture must be an object with "
+                        f"'path' and 'sha256', got {type(ref).__name__}"
+                    )
+                try:
+                    fixture_data, fixture_path = _load_semantic_fixture(fixture_root, ref)
+                    validate_semantic_fixture_integrity(fixture_data)
+                except (ValueError, OSError) as exc:
+                    raise ValueError(f"{scenario.id}: {exc}") from exc
+                scenario.semantic_fixture = (fixture_data, fixture_path)
         return cls(vulnerable=vulnerable, clean=clean)
 
 
@@ -1998,6 +2046,7 @@ def run_review_for_pr(
             if not repo_path.exists():
                 run.error = f"Repo {repo_full_name} not available locally"
                 return run
+        run.repo_path = repo_path
 
         # #838: every artifact this run's review produces or is seeded with
         # (the pinned pr.diff/pr-files.seed.json below, and everything the
@@ -2753,6 +2802,11 @@ def generate_real_pr_report(
             "head_sha": scenario.head_sha,
             "kind": kind,
         }
+        # #1609: mark entries replayed offline through a retained fixture —
+        # the run's commit_sha is then the materialized fixture commit, not
+        # the head_sha above, and a mixed report must state which is which.
+        if scenario.semantic_fixture is not None:
+            entry["fixture"] = True
         if scenario.defect is not None:
             entry["defect"] = {
                 "description": scenario.defect.description,
@@ -3001,9 +3055,21 @@ def run_real_pr_corpus(
                 reps.append(run)
                 label = mode if runs_per_mode == 1 else f"{mode} {rep + 1}/{runs_per_mode}"
                 if context_only:
-                    repo_path = work_dir / scenario.repo_full_name.replace("/", "-")
+                    # score_context needs the checkout the run actually
+                    # reviewed: under a fixture entry that is the freshly
+                    # materialized semantic-fixture repository, whose temp-dir
+                    # name only the run knows (#1609), never the work_dir
+                    # naming the live-clone path uses.
+                    repo_path = run.repo_path if run.repo_path is not None else (
+                        work_dir / scenario.repo_full_name.replace("/", "-")
+                    )
                     run_artifact_dir = run.run_dir if run.run_dir is not None else repo_path
-                    row = {"id": scenario.id, "kind": kind, **score_context(repo_path, run_artifact_dir, scenario)}
+                    row = {
+                        "id": scenario.id,
+                        "kind": kind,
+                        **({"fixture": True} if scenario.semantic_fixture is not None else {}),
+                        **score_context(repo_path, run_artifact_dir, scenario),
+                    }
                     context_rows.append(row)
                     print(f"    [context] {json.dumps(row)}", file=sys.stderr)
                     continue
