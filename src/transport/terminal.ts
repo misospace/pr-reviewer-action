@@ -25,6 +25,9 @@ import type { TransportFailure } from "./http.js";
  *   key paths (any status), or an allowlisted literal PHRASE in a provider
  *   message (4xx only — see the status gate below). A bare substring, a
  *   heuristic, or "the body sounds negative" never decides;
+ * - a phrase may require a COMPANION anchor in the SAME text, so a generic
+ *   sentence (a plan-upgrade remediation clause) decides only beside the
+ *   provider-specific wording it belongs to;
  * - every result is an allowlisted id (`signature`), never provider prose, so
  *   nothing from an untrusted body can travel into a log line or an artifact
  *   through this module;
@@ -152,13 +155,25 @@ const MODEL_TOKENS: ReadonlyMap<string, string> = new Map([
 ]);
 
 /**
+ * A decisive phrase, the signature it yields, and an optional COMPANION
+ * anchor set.
+ *
+ * A companion is required when the phrase ALONE is too generic to attribute:
+ * the match counts only if the SAME matched text also contains one of the
+ * companion substrings. It is the phrase-level twin of the transient veto —
+ * both are read from the same text, so a generic sentence never decides
+ * anything by itself.
+ */
+type QuotaPhrase = readonly [phrase: string, signature: string, companion?: readonly string[]];
+
+/**
  * Decisive phrases: case-insensitive allowlisted literal substrings. The list
  * is intentionally tight — each entry is a phrase a provider emits ONLY for a
  * permanent condition, with its rationale inline. Adding a phrase is how this
  * class grows; broadening a match (regex, fuzzy, "the body mentions quota")
  * is how this class would start cancelling real retries.
  */
-const QUOTA_PHRASES: ReadonlyArray<readonly [phrase: string, signature: string]> = [
+const QUOTA_PHRASES: ReadonlyArray<QuotaPhrase> = [
   // MiniMax/LiteLLM's token-plan exhaustion (reported alongside provider code
   // 2056): the plan's period allowance is spent, so the next period — not the
   // next attempt — recovers. The CODE is deliberately not evidence on its own
@@ -168,11 +183,9 @@ const QUOTA_PHRASES: ReadonlyArray<readonly [phrase: string, signature: string]>
   // LiteLLM surfaced on #1585's organic run (#1599).
   ["token plan usage limit reached", LITELLM_MINIMAX_TOKEN_PLAN],
   ["token plan usage limit has been reached", LITELLM_MINIMAX_TOKEN_PLAN],
-  // The same body's remediation sentence, with the "please" clause of the
-  // observed wording as an anchor: too generic to admit an unanchored form,
-  // which would misattribute other providers' plan-upgrade prose to MiniMax.
+  // The same body's remediation sentence. The first wording names the token
+  // plan itself, so it is attributable as it stands.
   ["upgrade your token plan or purchase credits", LITELLM_MINIMAX_TOKEN_PLAN],
-  ["please upgrade your plan or buy credits", LITELLM_MINIMAX_TOKEN_PLAN],
   // OpenAI's account-quota exhaustion sentence (distinct from its
   // per-minute rate-limit prose, which the transient veto refuses anyway).
   ["you exceeded your current quota", "openai_quota_exceeded"],
@@ -182,6 +195,13 @@ const QUOTA_PHRASES: ReadonlyArray<readonly [phrase: string, signature: string]>
   // A pre-paid balance at zero: topping up, not waiting, is the fix.
   ["insufficient balance", "provider_insufficient_balance"],
   ["insufficient credit", "provider_insufficient_credit"],
+  // The generic remediation clause, listed LAST so a more specific provider
+  // sentence in the same message keeps its own signature. The clause alone is
+  // ordinary plan-upgrade prose, so it counts only when the SAME text also
+  // names the token plan or the provider (#1605 review: an unanchored
+  // remediation clause misattributed another provider's plan-upgrade response
+  // to permanent MiniMax exhaustion).
+  ["please upgrade your plan or buy credits", LITELLM_MINIMAX_TOKEN_PLAN, ["token plan", "minimax"]],
 ];
 
 const MODEL_PHRASES: ReadonlyArray<readonly [phrase: string, signature: string]> = [
@@ -229,6 +249,15 @@ const TRANSIENT_MARKERS: readonly string[] = [
   "too many requests",
   "resource_exhausted",
   "requests per",
+  // Per-minute WINDOWS are short-window conditions: the window resets, so they
+  // belong to the retry budget, not to permanent exhaustion. The markers stay
+  // UNIT-ANCHORED on purpose — "requests per" above (RPM) and these (TPM, in
+  // the abbreviated and the spelled-out spelling, singular and plural). A
+  // message that only mentions a rate clause without its unit ("limited to 60
+  // per minute") must not lose a permanent condition such as
+  // `insufficient balance` to this veto (#1605 review).
+  "tokens per min",
+  "token per min",
   "slow down",
 ];
 
@@ -280,12 +309,17 @@ interface PhraseMatch {
 }
 
 /** First decisive phrase in `text`, or null — including null when a transient
- * marker vetoes the match. */
+ * marker vetoes the match, or when a phrase's companion anchor is absent. */
 function matchPhrase(text: string): PhraseMatch | null {
   if (containsTransientMarker(text)) return null;
   const haystack = text.toLowerCase();
-  for (const [phrase, signature] of QUOTA_PHRASES) {
-    if (haystack.includes(phrase)) return { reason: "quota_exhausted", signature, phrase };
+  for (const [phrase, signature, companion] of QUOTA_PHRASES) {
+    if (!haystack.includes(phrase)) continue;
+    // A companion anchor is required when the phrase alone is too generic to
+    // attribute: the SAME text must name the provider (or the product) the
+    // phrase belongs to.
+    if (companion !== undefined && !companion.some((anchor) => haystack.includes(anchor))) continue;
+    return { reason: "quota_exhausted", signature, phrase };
   }
   for (const [phrase, signature] of MODEL_PHRASES) {
     if (haystack.includes(phrase)) return { reason: "model_unavailable", signature, phrase };

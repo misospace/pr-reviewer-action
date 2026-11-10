@@ -99,11 +99,29 @@ test("#1599: the observed 'has been reached' wording classifies terminal without
     error: { message: `minimax: ${observed}`, type: "rate_limit_error" },
   })));
   assert.deepEqual(terminal, { reason: "quota_exhausted", signature: "litellm_minimax_token_plan", httpStatus: 429 });
-  // The remediation sentence is decisive on its own too, with neither the
-  // usage-limit sentence nor the code present.
-  assert.deepEqual(classifyTerminalProviderFailure(httpFailure(429, json({
+  // The remediation clause ALONE decides nothing: it is generic plan-upgrade
+  // prose, so on its own it cannot be attributed to MiniMax (and another
+  // provider's plan-upgrade response must not become permanent exhaustion).
+  assert.equal(classifyTerminalProviderFailure(httpFailure(429, json({
     error: { message: "To avoid interruption, please upgrade your plan or buy credits." },
+  }))), null, "an unanchored remediation clause names no provider, so it is not terminal");
+  // Beside the token plan it names, it is decisive again.
+  assert.deepEqual(classifyTerminalProviderFailure(httpFailure(429, json({
+    error: { message: "Token Plan quota exhausted. Please upgrade your plan or buy credits." },
   }))), { reason: "quota_exhausted", signature: "litellm_minimax_token_plan", httpStatus: 429 });
+  // …and beside the provider name, too.
+  assert.deepEqual(classifyTerminalProviderFailure(httpFailure(429, json({
+    error: { message: "minimax: To avoid interruption, please upgrade your plan or buy credits." },
+  }))), { reason: "quota_exhausted", signature: "litellm_minimax_token_plan", httpStatus: 429 });
+  // Another provider's plan-upgrade response stays retryable.
+  assert.equal(classifyTerminalProviderFailure(httpFailure(429, json({
+    error: { message: "Your organization plan has expired. Please upgrade your plan or buy credits to continue." },
+  }))), null, "another provider's plan-upgrade prose is not MiniMax exhaustion");
+  // A more specific provider sentence in the same message keeps its own
+  // signature: the generic remediation clause is listed last.
+  assert.deepEqual(classifyTerminalProviderFailure(httpFailure(429, json({
+    error: { message: "You exceeded your current quota. Please upgrade your plan or buy credits for your token plan." },
+  }))), { reason: "quota_exhausted", signature: "openai_quota_exceeded", httpStatus: 429 });
   // The redacted diagnostic form stays stable and prose-free.
   assert.equal(terminalProviderFailureLine(terminal!), "terminal provider failure: quota_exhausted (litellm_minimax_token_plan) HTTP 429");
 });
@@ -113,6 +131,22 @@ test("#1599: transient and unrelated 429s stay retryable beside the new phrases"
   assert.equal(classifyTerminalProviderFailure(httpFailure(429, json({
     error: { message: "The token plan usage limit has been reached for requests per minute; try again shortly." },
   }))), null);
+  // The same sentence with a TPM window: a per-minute window resets, so it is
+  // transient and must not cancel the retry budget.
+  assert.equal(classifyTerminalProviderFailure(httpFailure(429, json({
+    error: { message: "The token plan usage limit has been reached for tokens per minute" },
+  }))), null, "a TPM-window token-plan sentence is transient");
+  assert.equal(classifyTerminalProviderFailure(httpFailure(429, json({
+    error: { message: "The token plan usage limit has been reached for tokens per min." },
+  }))), null, "the abbreviated TPM window form is transient too");
+  assert.equal(classifyTerminalProviderFailure(httpFailure(429, json({
+    error: { message: "The token plan usage limit has been reached for token per minute" },
+  }))), null, "the singular TPM window form is transient too");
+  // The window markers are unit-anchored, so a permanent condition keeps its
+  // terminal classification when the message only mentions a rate clause.
+  assert.deepEqual(classifyTerminalProviderFailure(httpFailure(429, json({
+    error: { message: "Insufficient balance. Requests are limited to 60 per minute." },
+  }))), { reason: "quota_exhausted", signature: "provider_insufficient_balance", httpStatus: 429 });
   // Other transient marker classes veto the new phrases the same way.
   assert.equal(classifyTerminalProviderFailure(httpFailure(429, json({
     error: { message: "The token plan usage limit has been reached, but the service is temporarily overloaded; please retry later." },
