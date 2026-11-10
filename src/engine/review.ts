@@ -4452,7 +4452,8 @@ export function fallbackEvidenceFailoverEligible(primaryHarness: Record<string, 
  * failover `tool-loop-wall-clock-sec − T`, never a second full budget. The
  * primary loop's own spend is the #702 usage telemetry
  * (`tool_loop_telemetry.usage.elapsed_sec` — the loop's measured elapsed,
- * distinct from the `budget.wall_clock_sec` configured ceiling), which
+ * distinct from `budget.wall_clock_sec`, which on an uncapped loop records
+ * the configured ceiling), which
  * every loop run — including the degraded transport stop this trigger
  * requires — carries.
  *
@@ -4502,10 +4503,13 @@ async function runFallbackEvidenceHarness(input: {
   // #1598 (review): bounded spend — the failover draws from the SAME loop
   // wall-clock envelope the primary exchange was configured with, never a
   // second full budget. The primary loop's recorded spend leaves the
-  // remaining share; a share too small to fit the closing verdict's
-  // deterministic reserve (or an unknown spend) keeps today's corpus-only
-  // fallback review — fail closed, never restart spend on an exhausted or
-  // unmeasurable budget.
+  // remaining share; a share at or below the verdict reserve's 30s floor
+  // (or an unknown spend) keeps today's corpus-only fallback review —
+  // fail closed, never restart spend on an exhausted or unmeasurable
+  // budget. The gate is deliberately stricter than the reserve arithmetic
+  // itself (which caps the reserve at half of a small envelope): a share
+  // that leaves less than the 30s floor cannot fund a meaningful
+  // investigation plus its closing verdict.
   const [, loopWallClockSec] = resolveLoopLimits(input.env, "primary");
   const wallClockRemainingSec = fallbackEvidenceWallClockRemainingSec(input.primaryHarness, loopWallClockSec);
   if (wallClockRemainingSec === null || wallClockRemainingSec <= VERDICT_WALL_CLOCK_RESERVE_MIN_SEC) return false;
