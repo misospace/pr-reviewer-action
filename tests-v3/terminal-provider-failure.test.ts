@@ -83,9 +83,40 @@ test("#1080: the 2056 code alone is never terminal, and a bare 2056 in prose nev
   assert.deepEqual(classifyTerminalProviderFailure(httpFailure(429, json({
     error: { message: "Token Plan usage limit reached ( 2056 )." },
   }))), { reason: "quota_exhausted", signature: "litellm_minimax_token_plan", httpStatus: 429 });
-  assert.deepEqual(classifyTerminalProviderFailure(httpFailure(429, json({
-    error: { message: "Token Plan usage limit reached." },
-  }))), { reason: "quota_exhausted", signature: "litellm_minimax_token_plan", httpStatus: 429 });
+assert.deepEqual(classifyTerminalProviderFailure(httpFailure(429, json({
+error: { message: "Token Plan usage limit reached." },
+}))), { reason: "quota_exhausted", signature: "litellm_minimax_token_plan", httpStatus: 429 });
+});
+
+test("#1599: the observed 'has been reached' wording classifies terminal without any 2056", () => {
+// The real organic body (#1585 run): LiteLLM nests MiniMax's message verbatim
+// — "The Token Plan usage limit has been reached. To avoid interruption,
+// please upgrade your plan or buy credits" — a tense the allowlist missed,
+// so the run retried the unserviceable primary for ~50s. The wording class
+// on the message alone; the numeric 2056 is absent here on purpose.
+const observed = "The Token Plan usage limit has been reached. To avoid interruption, please upgrade your plan or buy credits";
+const terminal = classifyTerminalProviderFailure(httpFailure(429, json({
+error: { message: `minimax: ${observed}`, type: "rate_limit_error" },
+})));
+assert.deepEqual(terminal, { reason: "quota_exhausted", signature: "litellm_minimax_token_plan", httpStatus: 429 });
+// The remediation sentence is decisive on its own too, with neither the
+// usage-limit sentence nor the code present.
+assert.deepEqual(classifyTerminalProviderFailure(httpFailure(429, json({
+error: { message: "To avoid interruption, please upgrade your plan or buy credits." },
+}))), { reason: "quota_exhausted", signature: "litellm_minimax_token_plan", httpStatus: 429 });
+// The redacted diagnostic form stays stable and prose-free.
+assert.equal(terminalProviderFailureLine(terminal!), "terminal provider failure: quota_exhausted (litellm_minimax_token_plan) HTTP 429");
+});
+
+test("#1599: transient and unrelated 429s stay retryable beside the new phrases", () => {
+// Windowed RPM prose must not pick up "usage limit" as exhaustion.
+assert.equal(classifyTerminalProviderFailure(httpFailure(429, json({
+error: { message: "The token plan usage limit has been reached for requests per minute; try again shortly." },
+}))), null);
+// A near-miss that names neither allowlisted sentence is not promoted.
+assert.equal(classifyTerminalProviderFailure(httpFailure(429, json({
+error: { message: "Your usage limit has been reached for this hour." },
+}))), null);
 });
 
 test("#1080: structured insufficient_quota fast-fails, and an exact token outranks the transient veto", () => {

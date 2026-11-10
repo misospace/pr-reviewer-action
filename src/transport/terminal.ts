@@ -163,10 +163,14 @@ const QUOTA_PHRASES: ReadonlyArray<readonly [phrase: string, signature: string]>
   // 2056): the plan's period allowance is spent, so the next period — not the
   // next attempt — recovers. The CODE is deliberately not evidence on its own
   // (a bare `2056` in any body is just an unrelated number); these sentences
-  // are the decisive part.
+  // are the decisive part. Both observed tenses are allowlisted: the shorter
+  // "usage limit reached" wording (#1080) and the "has been reached" variant
+  // LiteLLM surfaced on #1585's organic run (#1599).
   ["token plan usage limit reached", LITELLM_MINIMAX_TOKEN_PLAN],
+  ["token plan usage limit has been reached", LITELLM_MINIMAX_TOKEN_PLAN],
   // The same body's remediation sentence: the plan must be upgraded or bought.
   ["upgrade your token plan or purchase credits", LITELLM_MINIMAX_TOKEN_PLAN],
+  ["upgrade your plan or buy credits", LITELLM_MINIMAX_TOKEN_PLAN],
   // OpenAI's account-quota exhaustion sentence (distinct from its
   // per-minute rate-limit prose, which the transient veto refuses anyway).
   ["you exceeded your current quota", "openai_quota_exceeded"],
