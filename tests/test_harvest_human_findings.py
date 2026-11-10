@@ -165,6 +165,22 @@ def test_determine_bot_approval_marker_findings_survives_dismissal():
     assert approved is True
 
 
+def test_determine_bot_approval_dismissed_marker_issues_is_not_an_approval():
+    """A dismissed review is not approved on the marker's word alone: a
+    dismissed `issues` review was a blocking request, not an approval."""
+    reviews = [
+        {
+            "user": {"login": BOT},
+            "state": "DISMISSED",
+            "commit_id": HEAD,
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "body": _marker(review_result="issues"),
+        }
+    ]
+    approved, _ = hhf.determine_bot_approval(reviews, {BOT}, HEAD, "2026-01-01T00:00:00Z")
+    assert approved is False
+
+
 def test_determine_bot_approval_marker_findings_commented_is_not_an_approval():
     """A `findings` marker is not a native APPROVE (#1601 review).
 
@@ -254,7 +270,9 @@ def test_determine_bot_approval_marker_findings_without_state_fails_closed():
 def test_determine_bot_approval_marker_partial_approved_is_not_an_approval():
     """`partial` is an abstention: even a native APPROVE event does not
     make an abstaining review an approval (the marker records that the
-    review never established completeness)."""
+    review never established completeness). The publish path never emits
+    that pair — an abstaining review is published as a native comment — so
+    this pins the fail-closed rule rather than a production shape."""
     reviews = [
         {
             "user": {"login": BOT},

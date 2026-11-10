@@ -782,12 +782,17 @@ dropped by the old `clean`-only rule). `partial` is an abstention (coverage or
 required-checks gap) and `issues` a request_changes; neither is an approval.
 A dismissed review is the one case the native event cannot settle — the bot
 dismisses its own stale reviews as new heads land, which hides the original
-event — so the marker carries it, exactly as it always has.
+event — so the marker carries it, exactly as it always has. When the bot
+re-reviews the same head, the later publication is the one that counts: a
+later native comment (a coverage abstention, a scope-withheld review) leaves
+the earlier approval unable to qualify the finding.
 `defect.file`/`line_range`
 come from an inline review comment when one is attached to the review,
 otherwise from a changed-file path named in the finding text. GitHub reads
-only (`gh api` or `urllib` with a token from the environment); it never
-writes to GitHub. Repos, maintainer logins and bot logins are inputs, never
+only, and every read goes through the configured forge capability
+(`pr_reviewer.forge`): the script never shells out to a forge CLI and never
+hand-rolls a request, and it never writes to GitHub. Repos, maintainer logins
+and bot logins are inputs, never
 hardcoded. A weekly workflow
 (`.github/workflows/harvest-human-findings.yaml`, plus `workflow_dispatch`)
 runs it and opens or updates a single PR with new entries for human

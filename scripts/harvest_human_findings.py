@@ -172,10 +172,14 @@ class GitHubClient:
 # review's *result* class — coverage-complete findings, a coverage gap,
 # blocking findings — not the native event, so a `review_result: findings`
 # marker can ride a COMMENTED review (advisory/comment mode, blockers-only
-# mode, a scope-withheld review).
-_NATIVE_NON_APPROVAL_STATES = frozenset({"COMMENTED", "CHANGES_REQUESTED"})
+# mode, a scope-withheld review). Both spellings are listed: GitHub reports
+# `COMMENTED`/`CHANGES_REQUESTED`, other forges the shorter event tokens.
+_NATIVE_NON_APPROVAL_STATES = frozenset(
+    {"COMMENTED", "COMMENT", "CHANGES_REQUESTED", "REQUEST_CHANGES"}
+)
 
-# Native states that carry an approval event.
+# Native states that carry an approval event (`APPROVE` is the event spelling
+# some forges report; `APPROVED` is the state token).
 _NATIVE_APPROVAL_STATES = frozenset({"APPROVED", "APPROVE"})
 
 # Marker `review_result` classes that ride an approve verdict: `clean`
@@ -275,6 +279,17 @@ def determine_bot_approval(
     says (#1601: the organic #1586 miss was recorded under an
     approve-with-findings review the old ``clean``-only rule silently
     dropped). Any other native state (``PENDING``, missing) fails closed.
+
+    Two consequences of the native-event precedence are deliberate. A
+    dismissed review is the one case the native event cannot settle — the
+    action dismisses only its own verdict-state reviews (an ``APPROVED`` or
+    ``CHANGES_REQUESTED`` row it supersedes), so the marker stands in for a
+    verdict event the forge no longer shows. And when the bot re-reviews the
+    same head, the later publication is the one that counts: if that later
+    review is a native comment (a coverage abstention, a scope-withheld
+    review), the earlier approval no longer qualifies the finding even
+    though the bot approved the head once.
+
     Returns ``(approved, base_sha)`` — ``base_sha`` is the marker's
     ``base_sha`` field when it is a full 40-hex commit sha, else ``None``.
     """
