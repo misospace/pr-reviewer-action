@@ -1034,6 +1034,17 @@ export interface LoopOutcome {
   rounds: number;
   /** Everything the model asked for, incl. refused calls. */
   toolCallsIssued: number;
+  /** #1597: calls refused WITHOUT executing (invalid arguments, over-budget,
+   * reserve-window refusal) — the tri-partition invariant is
+   * `toolCallsIssued === executed.length + toolCallsRefused + toolCallsDeduplicated`
+   * (per-round: `requested === executed + refused + deduplicated`, #1199). */
+  toolCallsRefused: number;
+  /** #1597: calls deduplicated (same request key already seen) without
+   * executing. The successful count (executed calls whose executor status is
+   * "ok") is derived by the caller over `executed`, never stored on the
+   * outcome, so a success-only count can never be confused for the executed
+   * count here (#1597). */
+  toolCallsDeduplicated: number;
   stopReason: string;
   finalText: string;
   /** True when the model never issued a single tool call: the caller degrades
@@ -1326,6 +1337,8 @@ export async function driveToolLoop(
     executed: [],
     rounds: 0,
     toolCallsIssued: 0,
+    toolCallsRefused: 0,
+    toolCallsDeduplicated: 0,
     stopReason: STOP_NO_TOOL_CALLS,
     finalText: "",
     degraded: false,
@@ -1981,6 +1994,12 @@ export async function driveToolLoop(
 
     // #1199: the turn's telemetry, emitted once per model turn. A round that
     // ends on budget exhaustion still records its turn before the stop below.
+    // #1597: the run-wide disposition counters are aggregated here from the
+    // same per-round tri-partition the record carries, so the harness
+    // artifact's issued/executed/refused/deduplicated fields come from this
+    // one settled snapshot.
+    outcome.toolCallsRefused += roundRefused;
+    outcome.toolCallsDeduplicated += roundDedup;
     emitRound({
       roundIndex: outcome.rounds,
       requested: calls.length,

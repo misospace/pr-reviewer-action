@@ -22,6 +22,11 @@ export interface ToolHarnessArtifact {
   planning_error?: string | null;
   error?: string | null;
   planned_request_count?: number;
+  /** #1597: the ok-status count, truthfully named. `executed_request_count`
+   * now counts ATTEMPTED executions; this enforcement keeps the historical
+   * successful-only predicate exactly (fail-closed behavior must not shift
+   * with a diagnostics rename). */
+  successful_request_count?: number;
   executed_request_count?: number;
   tool_results?: Array<{ status?: string }>;
 }
@@ -85,8 +90,11 @@ function toolHarnessFailureReason(harness: ToolHarnessArtifact | null): string |
   if (harness.error !== undefined && harness.error !== null) {
     return String(harness.error);
   }
-  const executed = harness.executed_request_count ?? 0;
-  if (executed > 0) {
+  // #1597: read the successful count, exactly the value the historical
+  // `executed_request_count` carried — this fail-closed gate is approval
+  // policy, so it must not change when a diagnostics field is renamed.
+  const successful = harness.successful_request_count ?? 0;
+  if (successful > 0) {
     const statuses = harness.tool_results ?? [];
     if (!statuses.some((t) => t && t.status === "ok")) {
       return "all tool requests failed";

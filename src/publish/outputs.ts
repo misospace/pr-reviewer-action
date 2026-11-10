@@ -592,7 +592,11 @@ export interface HarnessSummaryTelemetry {
   successfulToolCalls?: number;
   rounds?: number;
   stopReason?: string;
-  /** Smart-tier extras (rendered only for the smart harness row). */
+  /** Smart-tier extras (rendered only for the smart harness row).
+   * #1597: `issuedToolCalls` is everything the model asked for
+   * (executed + refused + deduplicated), distinct from
+   * `executedRequestCount` (attempted executions) and
+   * `successfulToolCalls` (the ok subset). */
   issuedToolCalls?: number;
   requests?: number;
   verdictStatus?: string;
@@ -693,7 +697,7 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
   if (telemetry.smartTools) {
     const smart = telemetry.smartTools;
     rows.push(
-      `| Smart tools | ${smart.issuedToolCalls ?? 0} issued; rounds: ${smart.rounds ?? 0}; requests: ${smart.requests ?? 0}; stop: ${smart.stopReason ?? "unknown"}; verdict: ${smart.verdictStatus ?? "corpus"}; fallback: ${smart.fallback ?? "unknown"} |`,
+      `| Smart tools | ${smart.executedRequestCount ?? 0} executed (${smart.successfulToolCalls ?? 0} successful); issued: ${smart.issuedToolCalls ?? 0}; rounds: ${smart.rounds ?? 0}; requests: ${smart.requests ?? 0}; stop: ${smart.stopReason ?? "unknown"}; verdict: ${smart.verdictStatus ?? "corpus"}; fallback: ${smart.fallback ?? "unknown"} |`,
     );
   }
   if (telemetry.nativeVerdict) {
