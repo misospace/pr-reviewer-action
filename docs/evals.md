@@ -768,6 +768,24 @@ that PR's snapshot, and the pins do not participate in the run: the run's
 Entries without a fixture keep the
 live clone path and stay subject to the gate.
 
+The shipped corpora each retain one grounded fixture:
+
+- `evals/corpus-real-prs.json` pins `pr-reviewer-action-99-135` to
+  `real-pr-fixtures/pr-99.json`. The fixture carries the full real diff of
+  PR #99 and the real PR-head contents of both changed files.
+- `evals/corpus-human-findings.json` pins
+  `misospace/pr-reviewer-action#233@25854c65` to
+  `real-pr-fixtures/pr-233.json`. The fixture carries the real PR-head
+  content of the defect file (`pr_reviewer/sse_reassembler.py`) and the real
+  diff for that one file. The full PR touched 13 files; the diff keeps only
+  the defect file.
+
+Each fixture's `provenance` field states exactly what it retains. Run the
+documented `--context-only` command to measure it: the fixture row reports
+`context_built: true` with the defect evidence in the assembled corpus, and
+each row without a fixture reports `context_built: false` because the gate
+refuses the merged PR.
+
 ### Semantic-fixture directory placement
 
 Offline runs that serve the PR identity through the semantic-fixture seam

@@ -1365,6 +1365,27 @@ class TestRealPRCorpusFixtureRefs:
         with pytest.raises(ValueError, match="v1"):
             RealPRCorpus.from_file(_fixture_corpus_file(tmp_path, sha))
 
+    def test_shipped_corpora_retain_a_grounded_fixture_each(self):
+        """#1609: each shipped real-PR corpus retains at least one grounded
+        historical fixture, so the documented --context-only command builds
+        context for a real pinned case offline. Loading the shipped corpora
+        also re-runs the ref checks (path containment, sha256) and the
+        payload integrity check (reverse-applied diff) at corpus load."""
+        shipped = {
+            "corpus-real-prs.json": "pr-reviewer-action-99-135",
+            "corpus-human-findings.json": "misospace/pr-reviewer-action#233@25854c65",
+        }
+        for name, scenario_id in shipped.items():
+            corpus = RealPRCorpus.from_file(_REPO_ROOT / "evals" / name)
+            pinned = [
+                s for s in [*corpus.vulnerable, *corpus.clean]
+                if s.semantic_fixture is not None
+            ]
+            assert [s.id for s in pinned] == [scenario_id]
+            data, _fixture_path = pinned[0].semantic_fixture
+            # Grounding: the fixture documents which historical PR it retains.
+            assert data["provenance"]["historical_pr"] == pinned[0].number
+
 
 class TestRunReviewForPrFixturePath:
     """A fixture-backed real-PR entry takes the semantic-fixture path: the

@@ -24,7 +24,11 @@
           "production_bot_flagged_same": false,
           "anchor_confidence": "medium"
         },
-        "base_sha": "fa9995d3e60b5ca712589441f1f8c41009a09b43"
+        "base_sha": "fa9995d3e60b5ca712589441f1f8c41009a09b43",
+        "fixture": {
+          "path": "real-pr-fixtures/pr-233.json",
+          "sha256": "a4f3e60ec0fdfafdf43480f929c93104d045a3f369cc61bd1d8c2550f709a69f"
+        }
       },
       {
         "id": "misospace/pr-reviewer-action#234@e508aecb",
