@@ -44,13 +44,14 @@ Flags:
 | `--repo OWNER/NAME` | Repository to harvest (repeatable). |
 | `--since` / `--until` | `YYYY-MM-DD`; filters on PR `updated_at`. The PR-list walk stops at the first PR older than `--since` (newest-updated first). |
 | `--bot-login` | Reviewer bot login (repeatable). Defines whose records are attempts and enables native-event attribution. Without it, attempt authorship cannot be attributed, so the collector fails closed with zero rows — bot identity is an input, never hardcoded or inferred from a marker. |
+| `--action-version` | Action version token in scope, e.g. `3.5.0` or `v3.5.0` (repeatable). Keeps only the rows published by that version; a row whose version is `unknown` is excluded, because it cannot be proven to be in scope. The token is at most 32 characters (`ACTION_VERSION_LIMIT`, the bound the published version is truncated at), so a longer token is rejected before the run starts. |
 | `--max-prs` | Per-repo PR cap (default 100). |
 | `--max-pages` | Page-walk bound per list read (default 20); truncation is reported in `collection.truncated`, never silently trusted. |
 | `--per-page` | Page size (default 100). |
 | `--out PATH` | JSON report path (default: stdout only). |
 | `--from-json PATH` | Offline mode: replay a fixture of the same records the forge calls would return; bypasses all network. |
 | `--attestations PATH` | Optional JSON array of trusted-review attestation records `{"conclusion","reason_code","head_sha"}`, attached per head as additional trusted evidence only. |
-| `--adjudications PATH` | Optional JSON array of human-label records `{"pr": N, "head_sha": "...", "label": "missed_blocker"\|"false_blocker"}`; the only input of the `correctness` rollup. |
+| `--adjudications PATH` | Optional JSON array of human-label records `{"pr": N, "head_sha": "...", "label": "confirmed_blocker"\|"missed_blocker"\|"false_blocker"}`; the only input of the `correctness` rollup. |
 
 Forge reads go exclusively through `pr_reviewer.forge.ForgeClient`
 (`default_forge()`) on `repos/{owner}/{repo}/pulls`,
@@ -86,8 +87,9 @@ exactly the same keys.
 
 Fields: `repo`, `pr`, `head_sha`, `review_id` (native review id, or null
 for a sticky comment), `source` (`native_review` | `comment`),
-`created_at`, `action_version` (parsed from the engine line; `unknown`
-when absent), `review_result`, `coverage`, `required_checks`,
+`created_at`, `action_version` (parsed from the engine line; the
+publisher's own spelling, for example `v3.5.0`; `unknown` when absent),
+`review_result`, `coverage`, `required_checks`,
 `incomplete_reason`, `tool_stop_reason`, `review_route`,
 `verdict_prose` (a model verdict text claim from a marker verdict-like
 field, read defensively: the marker schema the action ships today
@@ -100,6 +102,37 @@ non-null), `attestation_conclusion`/`attestation_reason_code` (when an
 attestation record matches the row head), `disposition`, `superseded_head`
 (a later head exists on the PR at collection time), `rerun_of` (prior
 attempt's id at the *same* head, same source kind), `raw_link`.
+
+## Action-version scope
+
+`--action-version` narrows the collected rows after the collection and
+before the rollups, so every denominator in the report describes the
+scoped population. Two report fields say what the scope did:
+
+- `collection.scope.action_versions`: the requested scope as the
+  normalized tokens that were applied. Normalizing strips surrounding
+  whitespace, strips one leading `v` or `V`, and lowercases the rest, so
+  `3.5.0`, `v3.5.0` and `V3.5.0` are the same token. This list is the
+  scope that was applied: the report never names a scope the run did not
+  apply. A token that normalizes to an empty string stays in the list as
+  an empty token, because it was requested and named no version.
+- `collection.scope.excluded`: the attempts the scope excluded, by
+  reason, and only the reasons that occurred:
+  - `action_version_unknown`: the row carries no usable version, so it
+    cannot be proven to be in scope. That is a row whose published body
+    has no engine line, so its version is `unknown`.
+  - `action_version_other`: the row carries a known version that is not
+    one of the requested tokens.
+
+The comparison is normalized on both sides; the row itself keeps the
+publisher's own spelling of the version (`v3.5.0`), in the row's
+`action_version` and in the `by_action_version` breakdown. A scope token
+that normalizes to an empty string (for example `v`, or a blank token)
+names no version, so it keeps no row: the run fails closed instead of
+reading an empty scope as "everything". A scope with no token at all is
+no scope: every row is kept and nothing is excluded. Through the CLI a
+blank token never reaches this point, because the token grammar rejects
+it first.
 
 ## Disposition taxonomy
 
@@ -134,6 +167,30 @@ attestation) is `unknown_missing_native`; and a missing marker is
 `unknown_no_marker` no matter what workflow context suggests. There is no
 workflow-success short circuit and no comment-prose short circuit.
 
+### Attempts that publish nothing
+
+The attempt kinds whose review outcome is unobservable are named in
+`collection.policy.unobservable_attempts`: `canceled_job`, `never_run`,
+and `skipped_run`.
+
+- `canceled_job` and `never_run`: a canceled job and a job that never
+  ran publish nothing at all. They leave no row, so they are never
+  folded into a disposition and are never counted.
+- `skipped_run`: a skipped run publishes no review artifact. Its skip
+  note goes to the step summary only, so no published body carries it
+  and the `skipped` disposition does not fire on organic published
+  data. Two paths post a bot-authored reply comment instead of a review:
+  the fork-PR skip reply (`src/run/action.ts`) and a follow-up answer
+  (`src/followup/reply.ts`). Neither reply body carries the
+  `ai-pr-reviewer` metadata marker nor the engine line, so the collector
+  records those replies as rows with the `unknown_no_marker` disposition
+  and the action version `unknown`. Such a row counts as unknown
+  telemetry, never as a completed review.
+
+The collector reads published artifacts only and never reads workflow or
+check status, so it cannot tell a canceled job from a job that never
+ran and never claims it did.
+
 ## Rollups
 
 Two separate keys, never merged:
@@ -142,14 +199,44 @@ Two separate keys, never merged:
   with breakdowns by `incomplete_reason`, `required_checks`,
   `tool_stop_reason`, `review_route` (an absent route value buckets under
   its real name, `legacy` — the fallback route), and `action_version`; an
-  explicit `denominators` object (total attempts, eligible attempts,
-  attempts with a marker, attempts with a native event, attempts with
-  unknown/missing telemetry) and `missing_data` counts. The summary text
-  states the denominators: a small sample is a count, never proof of a
-  completion rate.
-- **`correctness`** — computed **only** from `--adjudications` records:
-  `missed_blockers`, `false_blockers`, `adjudicated_total`,
-  `unknown_excluded` (unknown labels and records matching no collected
-  row), plus `precision` and `recall` over the adjudicated rows only
-  (`None` when nothing was adjudicated). Correctness is never inferred
-  from comments resolved, merge state, CI green, or model agreement.
+  explicit `denominators` object (`total_attempts`, `eligible_attempts`,
+  `attempts_with_marker`, `attempts_with_native_event`,
+  `attempts_with_unknown_or_missing_telemetry`, `scoped_out_attempts`)
+  and `missing_data` counts. `total_attempts` counts the attempts that
+  stayed inside the requested scope, and `scoped_out_attempts` counts
+  the attempts that scope excluded (0 when no scope was requested).
+
+  The summary text states the denominators in prose: the collected total
+  (the attempts collected before the scope filter), the eligible count,
+  and the marker, native-event and unknown/missing-telemetry counts. A
+  small sample is a count, never proof of a completion rate. The summary
+  also states that attempts which published nothing are not counted,
+  because this collector reads published artifacts only, and, when a
+  version scope was requested, how many attempts that scope excluded.
+- **`correctness`** — computed **only** from `--adjudications` records
+  matched to collected rows by `(pr, head_sha)`. The three known labels
+  are `confirmed_blocker` (a human confirmed the attempt reported a real
+  blocker), `missed_blocker` (a human confirmed the attempt missed a real
+  blocker), and `false_blocker` (a human confirmed the attempt reported a
+  blocker that was not real).
+
+  The unit is the **head**, not the attempt. An adjudication record
+  names a head, so one record applies to every attempt at that head, and
+  two attempts at one head (a rerun) share the adjudication key. One
+  effective label per head: several records for the same head with the
+  same known label count once, while records for the same head with
+  different known labels are contradictory, so that head leaves every
+  count and denominator and is counted once in `contradictory_excluded`.
+
+  The fields are `confirmed_blockers`, `missed_blockers`,
+  `false_blockers`, `adjudicated_heads` (the heads with one effective
+  known label), `unknown_excluded` (the excluded **records**: a label
+  outside the known vocabulary, a record matching no collected head, and
+  a record that is not a record at all), `contradictory_excluded` (the
+  excluded **heads**), `precision`, and `recall`, where
+  `precision = confirmed / (confirmed + false_blockers)` and
+  `recall = confirmed / (confirmed + missed_blockers)`, each `None` when
+  its denominator is zero. The two exclusion counters never mix units: a
+  head is not counted as a record, and a record is not counted as a
+  head. Correctness is never inferred from comments resolved, merge
+  state, CI green, or model agreement.

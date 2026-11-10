@@ -13,9 +13,9 @@ semantics.
 
 What this script must never do, by construction: it never calls a model
 or a provider, never schedules anything, never closes or edits the
-attestation tracking issue (#1563), never posts anything to the forge,
-and never writes raw comment bodies, secrets, or tokens into its report —
-only parsed, bounded fields and HTML links.
+attestation tracking issue, never posts anything to the forge, and never
+writes raw comment bodies, secrets, or tokens into its report: only
+parsed, bounded fields and HTML links reach it.
 
 Forge reads go through ``pr_reviewer.forge``, the configured forge
 capability — the one module that knows how to authenticate, refuses
@@ -31,8 +31,12 @@ Offline mode (``--from-json``) replays a fixture containing the same
 records the forge calls would return and bypasses all network access,
 so the whole pipeline is analyzable without any forge at all.
 
-Everything is agnostic: repos and bot logins are inputs (``--repo``,
-``--bot-login``), never hardcoded.
+Everything is agnostic: repos, bot logins, and the action-version scope
+are inputs (``--repo``, ``--bot-login``, ``--action-version``), never
+hardcoded. The version scope narrows the collected rows after the
+collection and before the rollups, so every denominator describes the
+scoped population, and the report still names the collected total the
+scope was applied to.
 """
 
 from __future__ import annotations
@@ -55,7 +59,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pr_reviewer.forge import ForgeClient, ForgeError, default_forge  # noqa: E402
-from pr_reviewer.review_completion import build_report, collect_rows  # noqa: E402
+from pr_reviewer.review_completion import (  # noqa: E402
+    ACTION_VERSION_LIMIT,
+    build_report,
+    collect_rows,
+    filter_by_action_version,
+)
 
 # Input shapes, mirroring ``scripts/forge_cli.py``: every value that
 # reaches a request path or names a record is validated before use, and a
@@ -63,6 +72,14 @@ from pr_reviewer.review_completion import build_report, collect_rows  # noqa: E4
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 LOGIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-_\[\]\.]{0,80}\Z")
+
+# An action-version token: an optional leading ``v``, then letters,
+# digits, ``.``, ``-``, and ``+``. The token never reaches a request
+# path, but it is still bounded by the published version bound
+# (``ACTION_VERSION_LIMIT``, the core's single source of truth), because
+# a longer token could never match a published version. A rejected token
+# is reported by field name only.
+VERSION_RE = re.compile(r"\A[vV]?[A-Za-z0-9][A-Za-z0-9.+-]*\Z")
 
 EXIT_OK = 0
 EXIT_ERROR = 2
@@ -311,6 +328,12 @@ def build_parser() -> _QuietParser:
         help="reviewer bot login for native-event attribution (repeatable)",
     )
     parser.add_argument(
+        "--action-version",
+        action="append",
+        default=[],
+        help="action version token in scope, e.g. 3.5.0 or v3.5.0 (repeatable)",
+    )
+    parser.add_argument(
         "--max-prs",
         type=_positive_int,
         default=100,
@@ -367,6 +390,13 @@ def _validate(args: argparse.Namespace) -> None:
     for login in args.bot_login:
         if not LOGIN_RE.match(login):
             raise _invalid("--bot-login")
+    for version in args.action_version:
+        if (
+            not version
+            or len(version) > ACTION_VERSION_LIMIT
+            or not VERSION_RE.match(version)
+        ):
+            raise _invalid("--action-version")
     if args.out is not None and args.out.is_dir():
         raise _invalid("--out")
     if args.from_json is not None and not args.from_json.is_file():
@@ -453,13 +483,23 @@ def main(argv: list[str] | None = None) -> int:
     offline = args.from_json is not None
     client = None if offline else default_forge()
     rows, names, truncated, attestations, adjudications = collect(args, client)
+    # The scope filter runs after the collection and before the rollups, so
+    # every denominator in the report describes the scoped population. The
+    # pre-scope count is kept, so the report can name the collected
+    # population honestly instead of claiming the scoped count was
+    # everything that was collected.
+    collected_total = len(rows)
+    scoped_rows, scope_excluded = filter_by_action_version(rows, args.action_version)
     report = build_report(
-        rows,
+        scoped_rows,
         mode="offline" if offline else "live",
         repos=names,
         truncated=truncated,
         attestations=attestations,
         adjudications=adjudications,
+        action_versions=args.action_version,
+        scope_excluded=scope_excluded,
+        collected_total=collected_total,
     )
     emit_report(report, args.out, client.token if client else None)
     return EXIT_OK

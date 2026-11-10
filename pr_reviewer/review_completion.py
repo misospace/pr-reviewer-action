@@ -25,6 +25,30 @@ attestation with ``conclusion == "approved"``. A model approve-prose
 claim plus ``review_result: partial`` is never trusted; a native APPROVED
 over partial/unknown coverage is ``partial_or_abstained``; with neither
 native approval nor attestation the row is ``unknown_missing_native``.
+
+The collection scope is explicit: an action-version scope keeps only the
+rows whose published version is in the requested set, and a row whose
+version is ``unknown`` is excluded from a scoped run because it cannot be
+proven to be in scope. The comparison normalizes both sides (surrounding
+whitespace, one leading ``v`` or ``V``, and case); the row keeps the
+publisher's own spelling of the version.
+
+Correctness is counted in heads, not attempts: an adjudication record
+names a head, so one record applies to every attempt at that head.
+
+The publish-nothing policy is exact. A canceled job and a job that never
+ran publish nothing at all, so they leave no row and are never folded
+into a disposition. A skipped run publishes no review artifact either:
+its skip note goes to the step summary only, so no published body
+carries it and the ``skipped`` disposition does not fire on organic
+data. Two paths post a bot-authored reply comment instead of a review
+(the fork-PR skip reply and a follow-up answer). Neither reply body
+carries the metadata marker, so the collector records those replies as
+rows with the ``unknown_no_marker`` disposition and the action version
+``unknown``. Such a row counts as unknown telemetry, never as a
+completed review. The report names the attempt kinds whose review
+outcome is unobservable in ``collection.policy.unobservable_attempts``
+instead of claiming to have counted them.
 """
 
 from __future__ import annotations
@@ -48,6 +72,11 @@ _SKIP_NOTE_RE = re.compile(r"\*\*AI PR Review skipped:\*\*")
 
 # Marker ``head_sha`` values that do not bind the marker to a head.
 _UNBOUND_HEAD = ("", "unknown")
+
+# The version token a published body carries when it names no version.
+# A row with this version cannot be proven to be inside a requested
+# action-version scope, so a scoped run excludes it.
+_UNKNOWN_VERSION = "unknown"
 
 # Native review events this collector records. Anything else is recorded
 # as null rather than echoed verbatim (bounded vocabulary, like the
@@ -73,6 +102,12 @@ _UNKNOWN_OR_MISSING = (
 # Coverage values that make a run's completion unsafe to trust.
 _UNTRUSTED_COVERAGE = ("partial", "unknown")
 
+# The attempt kinds whose review outcome is unobservable: a canceled
+# job and a job that never ran publish nothing at all, and a skipped
+# run publishes no review artifact. They leave no review row, so they
+# are never folded into a disposition.
+_UNOBSERVABLE_ATTEMPTS = ("canceled_job", "never_run", "skipped_run")
+
 # Marker keys consulted for the model verdict prose claim, in order. The
 # value is recorded as an untrusted claim only; no disposition treats it
 # as evidence.
@@ -83,7 +118,13 @@ _VERDICT_KEYS = ("verdict", "native_verdict", "carried_verdict")
 _FIELD_LIMIT = 200
 _HEAD_LIMIT = 64
 _LINK_LIMIT = 300
-_VERSION_LIMIT = 32
+
+# The published version token's length bound. A parsed version is
+# truncated here, so a requested scope token longer than this could
+# never match a published version; the CLI reuses this bound to reject
+# such a token before the run starts.
+ACTION_VERSION_LIMIT = 32
+_VERSION_LIMIT = ACTION_VERSION_LIMIT
 
 
 def bound(value: Any, limit: int = _FIELD_LIMIT) -> str | None:
@@ -112,8 +153,8 @@ def parse_action_version(body: str) -> str:
     """
     match = _ACTION_VERSION_RE.search(body or "")
     if not match:
-        return "unknown"
-    return match.group(1)[:_VERSION_LIMIT] or "unknown"
+        return _UNKNOWN_VERSION
+    return match.group(1)[:ACTION_VERSION_LIMIT] or _UNKNOWN_VERSION
 
 
 def body_indicates_skip(body: str) -> bool:
@@ -512,26 +553,143 @@ def _counts(values: Iterable[str | None], absent_label: str = "absent") -> dict[
     return dict(sorted(result.items()))
 
 
-def operational_rollup(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _normalize_version_token(token: str) -> str:
+    """A version token normalized for comparison.
+
+    Surrounding whitespace goes, one leading ``v`` or ``V`` goes, and
+    what is left is lowercased. Both sides of a scope comparison go
+    through this, so a requested ``3.5.0`` matches a published
+    ``v3.5.0`` and the other way round, and the comparison does not
+    depend on the case of either side.
+
+    The row keeps the publisher's own spelling (for example
+    ``v3.5.0``): only the comparison is normalized.
+    """
+    if not isinstance(token, str):
+        return ""
+    text = token.strip()
+    if text[:1] in ("v", "V"):
+        text = text[1:]
+    return text.lower()
+
+
+def _scope_tokens(versions: Iterable[str] | str | None) -> list[str]:
+    """The requested action-version scope as a list of raw tokens.
+
+    A bare string is one version, not a sequence of characters. A token
+    that names no version at all stays in the list: it was requested,
+    and the run has to answer for it.
+    """
+    if versions is None:
+        return []
+    if isinstance(versions, str):
+        versions = [versions]
+    return [version for version in versions if isinstance(version, str)]
+
+
+def _normalized_scope(versions: Iterable[str] | str | None) -> list[str]:
+    """The requested scope as normalized tokens, in request order.
+
+    A token that normalizes to an empty string stays in the list: it
+    named no version, and the report has to say that a scope was
+    requested and matched nothing. The report and the filter both
+    normalize through :func:`_normalize_version_token`, so the scope the
+    report names and the scope that was applied are the same tokens.
+    """
+    return [_normalize_version_token(token) for token in _scope_tokens(versions)]
+
+
+def filter_by_action_version(
+    rows: list[dict[str, Any]],
+    versions: Iterable[str] | str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """The rows inside the requested action-version scope, and the exclusions.
+
+    A scope with no token at all is no scope: every row is kept and
+    nothing is excluded. A row whose parsed version is ``unknown`` cannot
+    be proven to be in the requested scope, so a scoped run excludes it
+    and counts it under ``action_version_unknown``. A row with a known
+    version outside the scope is excluded and counted under
+    ``action_version_other``. Only the reasons that occurred appear in
+    the counts.
+
+    A scope token that normalizes to an empty string names no version,
+    so it keeps no row: the run fails closed rather than reading an
+    empty scope as "everything".
+    """
+    requested = _scope_tokens(versions)
+    if not requested:
+        return list(rows), {}
+
+    scope = {token for token in _normalized_scope(requested) if token}
+
+    kept: list[dict[str, Any]] = []
+    excluded: dict[str, int] = {}
+    for row in rows:
+        version = row.get("action_version")
+        token = _normalize_version_token(version) if isinstance(version, str) else ""
+        if not token or token == _UNKNOWN_VERSION:
+            excluded["action_version_unknown"] = excluded.get("action_version_unknown", 0) + 1
+            continue
+        if token not in scope:
+            excluded["action_version_other"] = excluded.get("action_version_other", 0) + 1
+            continue
+        kept.append(row)
+    return kept, excluded
+
+
+def operational_rollup(
+    rows: list[dict[str, Any]],
+    *,
+    collected_total: int | None = None,
+    action_versions: list[str] | None = None,
+    scope_excluded: dict[str, int] | None = None,
+) -> dict[str, Any]:
     """The ``operational_completion`` rollup over normalized rows.
 
     Counts review attempts by disposition with breakdowns by the marker's
     own telemetry fields. The summary states denominators in prose: a
-    small sample is a count, never proof of a completion rate.
+    small sample is a count, never proof of a completion rate. It also
+    states the attempts that are not counted at all because they
+    published nothing, and how many attempts the requested
+    action-version scope excluded.
+
+    ``rows`` is the in-scope population, so
+    ``denominators.total_attempts`` counts the attempts that stayed
+    inside the scope. ``collected_total`` is how many attempts were
+    collected before the scope filter, so the prose names the collected
+    population instead of claiming the scoped count was everything.
+    ``action_versions`` is the normalized scope, and its presence is what
+    says a scope was applied at all.
     """
     total = len(rows)
+    collected = (
+        collected_total
+        if isinstance(collected_total, int) and not isinstance(collected_total, bool)
+        else total
+    )
     eligible = [row for row in rows if not row["superseded_head"]]
     with_marker = [row for row in rows if row["review_result"] is not None]
     with_native = [row for row in rows if row["native_event"] is not None]
     unknown_or_missing = [row for row in rows if row["disposition"] in _UNKNOWN_OR_MISSING]
+    scoped_out = sum((scope_excluded or {}).values()) if action_versions else 0
+
+    summary = (
+        f"{len(eligible)} eligible review attempts of {collected} collected "
+        f"({len(with_marker)} with a marker, {len(with_native)} with a native "
+        f"event, {len(unknown_or_missing)} with unknown/missing telemetry). "
+        "These are denominators and counts, not proof of a completion rate. "
+        "Attempts that published nothing (canceled or never-run jobs) are not "
+        "counted: this collector reads published artifacts only."
+    )
+    if action_versions:
+        summary += (
+            " Excluded by the requested action-version scope: "
+            f"{scoped_out} attempts."
+        )
 
     return {
-        "summary": (
-            f"{len(eligible)} eligible review attempts of {total} collected "
-            f"({len(with_marker)} with a marker, {len(with_native)} with a native "
-            f"event, {len(unknown_or_missing)} with unknown/missing telemetry). "
-            "These are denominators and counts, not proof of a completion rate."
-        ),
+        "summary": summary,
         "by_disposition": _counts(row["disposition"] for row in rows),
         # The same breakdown over eligible (non-superseded) rows only, so
         # a rate computed against ``denominators.eligible_attempts`` uses
@@ -554,6 +712,7 @@ def operational_rollup(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "attempts_with_marker": len(with_marker),
             "attempts_with_native_event": len(with_native),
             "attempts_with_unknown_or_missing_telemetry": len(unknown_or_missing),
+            "scoped_out_attempts": scoped_out,
         },
         "missing_data": {
             "no_marker": sum(
@@ -572,9 +731,17 @@ def operational_rollup(rows: list[dict[str, Any]]) -> dict[str, Any]:
 # Adjudication labels this rollup understands. Anything else is a human
 # label the collector does not interpret; it is excluded from the
 # precision/recall denominators and counted, never silently dropped.
+# The three known labels are the confusion matrix over one head: a
+# confirmed blocker is a true positive, a missed blocker is a false
+# negative, a false blocker is a false positive.
+_LABEL_CONFIRMED_BLOCKER = "confirmed_blocker"
 _LABEL_MISSED_BLOCKER = "missed_blocker"
 _LABEL_FALSE_BLOCKER = "false_blocker"
-_KNOWN_LABELS = (_LABEL_MISSED_BLOCKER, _LABEL_FALSE_BLOCKER)
+_KNOWN_LABELS = (
+    _LABEL_CONFIRMED_BLOCKER,
+    _LABEL_MISSED_BLOCKER,
+    _LABEL_FALSE_BLOCKER,
+)
 
 
 def correctness_rollup(
@@ -585,52 +752,99 @@ def correctness_rollup(
     Correctness comes exclusively from ``--adjudications`` records
     (``{"pr", "head_sha", "label"}``) matched to collected rows by
     ``(pr, head_sha)``. It is never inferred from comments resolved,
-    merge state, CI green, or model agreement. Labels outside the known
-    pair are excluded from the precision/recall denominators and counted
-    as ``unknown_excluded``.
+    merge state, CI green, or model agreement.
+
+    The unit is the HEAD, not the attempt. An adjudication record names
+    a head, so one record applies to every attempt at that head, and two
+    attempts at one head (a rerun) share the adjudication key.
+    ``adjudicated_heads`` counts the heads with one effective known
+    label. Several records for the same head with the same known label
+    count once, while records for the same head with different known
+    labels are contradictory, so that head leaves every count and
+    denominator and is counted once in ``contradictory_excluded``. The
+    records themselves are excluded and counted one by one in
+    ``unknown_excluded``: a record with a label outside the known
+    vocabulary, a record matching no collected head, and a record that
+    is not a record at all.
     """
     row_keys = {(row["pr"], row["head_sha"]) for row in rows if row["head_sha"]}
-    missed = 0
-    false_blockers = 0
+    labels_by_head: dict[tuple, set[str]] = {}
     unknown_excluded = 0
-    adjudicated_total = 0
     for record in adjudications or []:
         if not isinstance(record, dict):
+            # A record that is not a record cannot name a head: it is
+            # excluded and counted, never dropped.
+            unknown_excluded += 1
             continue
-        label = record.get("label")
-        key = (record.get("pr"), record.get("head_sha"))
+        pr = record.get("pr")
+        head_sha = record.get("head_sha")
+        if (
+            not isinstance(pr, int)
+            or isinstance(pr, bool)
+            or not isinstance(head_sha, str)
+        ):
+            # A record that cannot name a collected row is not evidence
+            # about one: it is excluded and counted, never dropped.
+            unknown_excluded += 1
+            continue
+        key = (pr, head_sha)
         if key not in row_keys:
             # An adjudication naming an attempt this pass did not collect
             # is not evidence about a collected row; it is excluded.
             unknown_excluded += 1
             continue
+        label = record.get("label")
         if label not in _KNOWN_LABELS:
             # A human label this rollup does not interpret: excluded from
             # the precision/recall denominators and counted, never dropped.
             unknown_excluded += 1
             continue
-        if label == _LABEL_MISSED_BLOCKER:
+        labels_by_head.setdefault(key, set()).add(label)
+
+    confirmed = 0
+    missed = 0
+    false_blockers = 0
+    contradictory_excluded = 0
+    for labels in labels_by_head.values():
+        if len(labels) > 1:
+            # Contradictory labels for one head: the head leaves every
+            # count and denominator and is counted once as excluded.
+            contradictory_excluded += 1
+            continue
+        label = next(iter(labels))
+        if label == _LABEL_CONFIRMED_BLOCKER:
+            confirmed += 1
+        elif label == _LABEL_MISSED_BLOCKER:
             missed += 1
         else:
             false_blockers += 1
-        adjudicated_total += 1
+    adjudicated_heads = confirmed + missed + false_blockers
 
     precision: float | None = None
     recall: float | None = None
-    if adjudicated_total > 0:
-        precision = round(1 - false_blockers / adjudicated_total, 4)
-        recall = round(1 - missed / adjudicated_total, 4)
+    precision_denominator = confirmed + false_blockers
+    if precision_denominator > 0:
+        precision = round(confirmed / precision_denominator, 4)
+    recall_denominator = confirmed + missed
+    if recall_denominator > 0:
+        recall = round(confirmed / recall_denominator, 4)
 
     return {
         "summary": (
-            f"Correctness from {adjudicated_total} adjudicated attempts "
-            f"({unknown_excluded} records excluded as unknown/unmatched); "
-            "never inferred from merge state, CI, or model agreement."
+            f"Correctness from {adjudicated_heads} adjudicated heads "
+            f"({confirmed} confirmed, {missed} missed, {false_blockers} false; "
+            f"records excluded: {unknown_excluded}, heads excluded: "
+            f"{contradictory_excluded}): precision and recall count only "
+            "human-confirmed "
+            "outcomes, a head nobody adjudicated is absent rather than "
+            "correct, and a small sample is not proof."
         ),
+        "confirmed_blockers": confirmed,
         "missed_blockers": missed,
         "false_blockers": false_blockers,
-        "adjudicated_total": adjudicated_total,
+        "adjudicated_heads": adjudicated_heads,
         "unknown_excluded": unknown_excluded,
+        "contradictory_excluded": contradictory_excluded,
         "precision": precision,
         "recall": recall,
     }
@@ -644,15 +858,39 @@ def build_report(
     truncated: bool,
     attestations: list[dict[str, Any]] | None = None,
     adjudications: list[dict[str, Any]] | None = None,
+    action_versions: Iterable[str] | str | None = None,
+    scope_excluded: dict[str, int] | None = None,
+    collected_total: int | None = None,
 ) -> dict[str, Any]:
-    """The full harvest report: collection facts, rows, both rollups."""
+    """The full harvest report: collection facts, rows, both rollups.
+
+    The scope is normalized once here, so the scope the report names and
+    the scope the rollup was given are the same tokens: a scope with no
+    token at all is reported as empty and applies to nothing, and a token
+    that normalizes to an empty string is reported as an empty token,
+    because it was requested and named no version.
+    """
+    scope = _normalized_scope(action_versions)
+    excluded = dict(scope_excluded or {})
     return {
         "collection": {
             "mode": mode,
             "repos": list(repos),
             "truncated": bool(truncated),
+            "scope": {
+                "action_versions": scope,
+                "excluded": excluded,
+            },
+            "policy": {
+                "unobservable_attempts": list(_UNOBSERVABLE_ATTEMPTS),
+            },
         },
         "rows": rows,
-        "operational_completion": operational_rollup(rows),
+        "operational_completion": operational_rollup(
+            rows,
+            collected_total=collected_total,
+            action_versions=scope,
+            scope_excluded=excluded,
+        ),
         "correctness": correctness_rollup(rows, adjudications),
     }
