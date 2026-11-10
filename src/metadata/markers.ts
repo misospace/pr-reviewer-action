@@ -510,7 +510,9 @@ export interface RunMarkerContext {
   /** #847: the #810/#702 budget provenance ("primary-override" |
    * "smart-override" | "explicit" | "tier-default" | "size-scaled"). */
   toolBudgetSource?: string;
-  /** #847: tool calls the loop actually executed against that budget. */
+  /** #847; #1597: tool calls the loop actually EXECUTED against that budget
+   * (attempted executions — the same population as the outcome log line;
+   * before #1597 this key carried the ok-only count). */
   toolCalls?: number;
   /** #895: rounds the loop actually used against `maxRounds` (see
    * `adaptiveLoopBudgets` in src/tools/loop.ts). */
@@ -524,6 +526,18 @@ export interface RunMarkerContext {
    * from, recorded on every harness run so budget stops with complete
    * coverage stay visible (#810 measurement). */
   toolStopReason?: string;
+  /** #1597: the execution partitions beyond `toolCalls` (the EXECUTED
+   * count — attempted executions, executor status irrelevant):
+   * `toolCallsIssued` everything the model asked for, `toolCallsSuccessful`
+   * the ok subset, `toolCallsRefused`/`toolCallsDeduplicated` the
+   * non-executed dispositions; invariant
+   * issued = executed + refused + deduplicated. Omitted when the harness
+   * artifact carries none (pre-#1597 shape, or no harness run) — the marker
+   * keeps its pre-#1597 bytes then. */
+  toolCallsIssued?: number;
+  toolCallsSuccessful?: number;
+  toolCallsRefused?: number;
+  toolCallsDeduplicated?: number;
   /** #915 build-time stamp; ""/unset means unstamped and is omitted. */
   actionVersion?: string;
   /** #978: true when the final verdict is eligible for the gate bypass. */
@@ -680,6 +694,13 @@ confidence_score: confidenceScore,
     ...(context.derivedObligationState === "complete" || context.derivedObligationState === "unresolved" || context.derivedObligationState === "unavailable"
       ? { derived_obligation_state: context.derivedObligationState }
       : {}),
+    // #1597: the execution partitions, appended last under the additive-key
+    // discipline — an artifact without them keeps the pre-#1597 marker bytes
+    // exactly. buildMetadataMarker re-validates each value.
+    ...(context.toolCallsIssued !== undefined ? { tool_calls_issued: context.toolCallsIssued } : {}),
+    ...(context.toolCallsSuccessful !== undefined ? { tool_calls_successful: context.toolCallsSuccessful } : {}),
+    ...(context.toolCallsRefused !== undefined ? { tool_calls_refused: context.toolCallsRefused } : {}),
+    ...(context.toolCallsDeduplicated !== undefined ? { tool_calls_deduplicated: context.toolCallsDeduplicated } : {}),
   });
 }
 

@@ -32,7 +32,11 @@ Every key below is the literal JSON key in the marker.
 | `ci_state` | string, omitted | Folded external-CI conclusion at the reviewed head (`success`/`failure`/`pending`/`none`). Omitted when CI wasn't read. |
 | `tool_budget` | number, omitted | The effective tool-call ceiling for this run. It starts from `resolveToolMaxRequests`; when primary requirement-trace is active, the bounded four-request trace-closure allowance is included so `tool_calls` never appears to exceed the published ceiling. See [`docs/tool-loop.md`](tool-loop.md#tool-call-budget-tier-defaults-size-scaling). Omitted when no tool harness ran. |
 | `tool_budget_source` | string, omitted | Which input won the ordinary exploration ceiling before any bounded trace-closure allowance: `primary-override`, `smart-override`, `explicit`, `tier-default`, or `size-scaled`. Omitted alongside `tool_budget`. |
-| `tool_calls` | number, omitted | Tool calls the loop actually executed against that budget. Omitted alongside `tool_budget`. |
+| `tool_calls` | number, omitted | Tool calls the loop actually EXECUTED against that budget (#1597: attempted executions — the same population as the run log's "N tool call(s) executed" line and the `tool_calls` trace; executor errors included). Before #1597 this key carried the successful-only count; that number is now published as `tool_calls_successful`. A budget stop reads `tool_calls == tool_budget`. Omitted alongside `tool_budget`. |
+| `tool_calls_issued` | number, omitted | All tool calls the model asked for: executed + refused + deduplicated (#1597). Omitted when the harness artifact carries no partition fields (pre-#1597 shape, or no tool harness ran). |
+| `tool_calls_successful` | number, omitted | Executed calls whose executor answered `ok` — the historical value of `tool_calls` (#1597). Omitted alongside `tool_calls_issued`. |
+| `tool_calls_refused` | number, omitted | Calls the loop refused without executing them: invalid arguments, over-budget, or reserve-window refusals (#1597). Omitted alongside `tool_calls_issued`. |
+| `tool_calls_deduplicated` | number, omitted | Calls answered with the duplicate-note without running (#1597). Omitted alongside `tool_calls_issued`. |
 | `tool_rounds` | number, omitted | Rounds the loop actually used. Omitted when no tool harness ran or the loop reported no round count. |
 | `max_rounds` | number, omitted | The resolved round cap the loop ran against for this run (see [`docs/tool-loop.md`](tool-loop.md#round-cap)). Omitted alongside `tool_rounds`. |
 | `verdict_reserve_sec` | number, omitted | The wall-clock slice the native loop reserved for the closing in-conversation verdict this run (`verdictWallClockReserveSec`'s deterministic result — see [`docs/tool-loop.md`](tool-loop.md#verdict-wall-clock-reserve)). `0` when the reserve is off; omitted when no tool harness ran. |
@@ -52,6 +56,25 @@ Two more action-owned markers can follow on their own line, outside the
 kept for publication traceability) and
 `<!-- ai-pr-review-fingerprint:<fp> -->` (the diff+config fingerprint the
 skip-on-unchanged check reads).
+
+### Tool-call partitions (#1597)
+
+The loop counts each issued call exactly once, at one settled snapshot —
+the loop's own disposition pass — and every published surface reads that
+snapshot, never a re-derivation: the harness artifact's top-level
+`planned_request_count` / `executed_request_count` /
+`successful_request_count` / `refused_request_count` /
+`deduplicated_request_count`, the artifact's `tool_loop_telemetry.usage`
+block (`tool_calls_issued` / `tool_calls_executed` /
+`tool_calls_successful` / `tool_calls_refused` /
+`tool_calls_deduplicated`), the step-summary rows, and the marker keys
+above. The invariants are `issued = executed + refused + deduplicated` and
+`successful <= executed`. Counts are never synthesized from message counts
+or model claims: a surface missing a partition (a pre-#1597 artifact, a
+harness that aborted before the loop) omits the key instead of guessing a
+number. The #1145 trace-gap repair continuation folds its own dispositions
+into the same counts, so a repaired run stays internally consistent with
+its `tool_stop_reason`.
 
 ## Action outputs related to telemetry
 

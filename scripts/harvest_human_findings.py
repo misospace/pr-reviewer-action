@@ -25,8 +25,13 @@ disqualify a finding that was valid when it was made. The bot dismisses its
 own older reviews as newer heads land, which flips ``state`` to ``DISMISSED``
 after the fact — so the approval decision is read from the bot's
 ``ai-pr-reviewer:{...}`` metadata marker (``pr_reviewer/metadata.py``) when
-present (``review_result: "clean"``), and only falls back to the raw
-``state`` when no marker parses.
+present (``review_result`` is an approve-verdict class: ``clean`` or
+``findings`` — approve with non-blocking findings only), and only falls
+back to the raw ``state`` when no marker parses. The marker records the
+review's *result* class, not the native event, so the native event
+outranks it: an explicit ``COMMENTED``/``CHANGES_REQUESTED`` review never
+approved the head (whatever the marker says), while ``DISMISSED`` hides
+its original event and the marker carries that case.
 
 GitHub reads only — every request goes through ``pr_reviewer.forge``,
 the configured forge capability, the one module that knows how to
@@ -161,6 +166,29 @@ class GitHubClient:
 # Pure helpers (unit-testable without any network access)
 # ---------------------------------------------------------------------------
 
+# Native review states that are an explicit non-approval (#1601 review): the
+# forge reports the review as a comment or a blocking request, so no approval
+# event was ever submitted for that head. The metadata marker records the
+# review's *result* class — coverage-complete findings, a coverage gap,
+# blocking findings — not the native event, so a `review_result: findings`
+# marker can ride a COMMENTED review (advisory/comment mode, blockers-only
+# mode, a scope-withheld review). Both spellings are listed: GitHub reports
+# `COMMENTED`/`CHANGES_REQUESTED`, other forges the shorter event tokens.
+_NATIVE_NON_APPROVAL_STATES = frozenset(
+    {"COMMENTED", "COMMENT", "CHANGES_REQUESTED", "REQUEST_CHANGES"}
+)
+
+# Native states that carry an approval event (`APPROVE` is the event spelling
+# some forges report; `APPROVED` is the state token).
+_NATIVE_APPROVAL_STATES = frozenset({"APPROVED", "APPROVE"})
+
+# Marker `review_result` classes that ride an approve verdict: `clean`
+# (approve, no findings) and `findings` (approve with non-blocking findings
+# only — under the strict verdict policy any blocking finding forces
+# `request_changes`/`issues`, so `findings` can only ride an approve
+# verdict).
+_APPROVE_MARKER_RESULTS = frozenset({"clean", "findings"})
+
 
 def is_blocking_comment(body: str) -> bool:
     """True when a comment body reads as a maintainer merge-blocking finding."""
@@ -224,13 +252,46 @@ def determine_bot_approval(
     ``finding_created_at`` can't be time-bounded against anything either —
     both cases return unapproved rather than silently qualifying.
 
-    Among the reviews at or before that timestamp, prefers the bot's
-    ``ai-pr-reviewer:{...}`` metadata marker (``review_result == "clean"``)
-    over the review's raw ``state``, since a later dismissal (the bot
+    Among the reviews at or before that timestamp, reads the bot's
+    ``ai-pr-reviewer:{...}`` metadata marker (``review_result``) together
+    with the review's raw ``state``, since a later dismissal (the bot
     superseding its own stale review) flips ``state`` to ``DISMISSED``
-    without changing what the marker recorded at the time. Returns
-    ``(approved, base_sha)`` — ``base_sha`` is the marker's ``base_sha``
-    field when it is a full 40-hex commit sha, else ``None``.
+    without changing what the marker recorded at the time.
+
+    The marker records the review's *result* class, not the native event,
+    so the two are combined, never conflated (#1601 review): an explicit
+    ``COMMENTED``/``CHANGES_REQUESTED`` native state is an explicit
+    non-approval and fails closed whatever the marker says — an advisory
+    or blockers-only review can carry a ``findings`` marker while no
+    approval was ever submitted for that head, and harvesting a human
+    finding under it would record a reviewer-approved miss the bot never
+    approved. Both approve-verdict marker classes count as an approval:
+    ``clean`` (approve, no findings) and ``findings`` (approve with
+    non-blocking findings only — under the strict verdict policy any
+    blocking finding forces ``request_changes``/``issues``, so ``findings``
+    can only ride an approve verdict) — but only when the native event
+    agrees (``APPROVED``) or is no longer observable (``DISMISSED``: the
+    original event is gone, so the marker is the surviving evidence, the
+    same historical case the ``clean`` class always carried).
+    ``partial`` is an abstention (coverage or required-checks gap — the
+    review never established completeness) and ``issues`` a
+    request_changes; neither is an approval, whatever the native state
+    says (#1601: the organic #1586 miss was recorded under an
+    approve-with-findings review the old ``clean``-only rule silently
+    dropped). Any other native state (``PENDING``, missing) fails closed.
+
+    Two consequences of the native-event precedence are deliberate. A
+    dismissed review is the one case the native event cannot settle — the
+    action dismisses only its own verdict-state reviews (an ``APPROVED`` or
+    ``CHANGES_REQUESTED`` row it supersedes), so the marker stands in for a
+    verdict event the forge no longer shows. And when the bot re-reviews the
+    same head, the later publication is the one that counts: if that later
+    review is a native comment (a coverage abstention, a scope-withheld
+    review), the earlier approval no longer qualifies the finding even
+    though the bot approved the head once.
+
+    Returns ``(approved, base_sha)`` — ``base_sha`` is the marker's
+    ``base_sha`` field when it is a full 40-hex commit sha, else ``None``.
     """
     if not finding_created_at:
         return False, None
@@ -248,6 +309,7 @@ def determine_bot_approval(
         return False, None
     candidates.sort(key=lambda r: r.get("submitted_at") or "")
     chosen = candidates[-1]
+    state = str(chosen.get("state") or "").upper()
     body = chosen.get("body") or ""
     marker = parse_metadata(body)
     base_sha = None
@@ -256,8 +318,21 @@ def determine_bot_approval(
         if isinstance(raw_base, str) and _FULL_SHA_RE.fullmatch(raw_base):
             base_sha = raw_base
         result = str(marker.get("review_result", "")).lower()
-        return result == "clean", base_sha
-    return chosen.get("state") == "APPROVED", base_sha
+        # The native event outranks the marker: an explicit COMMENTED /
+        # CHANGES_REQUESTED review never approved the head, whatever the
+        # marker records.
+        if state in _NATIVE_NON_APPROVAL_STATES:
+            return False, base_sha
+        # An abstention (`partial`) or a request_changes (`issues`) is never
+        # an approval, whatever the native state says.
+        if result not in _APPROVE_MARKER_RESULTS:
+            return False, base_sha
+        # Approve-class marker: the native event decides whenever it is
+        # observable. DISMISSED hides the original event (the bot dismissed
+        # its own superseded review), so the marker carries that case;
+        # anything else (PENDING, a missing state) fails closed.
+        return state in _NATIVE_APPROVAL_STATES or state == "DISMISSED", base_sha
+    return state in _NATIVE_APPROVAL_STATES, base_sha
 
 
 def inline_comment_anchor(

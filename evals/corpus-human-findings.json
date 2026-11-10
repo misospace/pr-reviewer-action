@@ -1421,8 +1421,75 @@
           "severity": "major",
           "file": "internal/executor/executor.go"
         }
+      },
+      {
+        "id": "misospace/pr-reviewer-action#1586@be86aac4",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 1586,
+        "head_sha": "be86aac49da86e4c31e5fc8856c2efe4782a5025",
+        "base_sha": "922ae02388789b25e3bb3823adb5076036477e6f",
+        "source": {
+          "url": "https://github.com/misospace/pr-reviewer-action/pull/1586#pullrequestreview-5836577431",
+          "production_bot_at_head": "APPROVED",
+          "production_bot_flagged_same": false,
+          "anchor_confidence": "high",
+          "miss_class": "missed_blocker",
+          "provenance": "Human CHANGES_REQUESTED review by joryirving 2026-11-10T03:59:49Z (review 5836577431) with inline comment at tests/self_hosted_e2e_qualification.sh:394 naming the repeated omission near line 407. Production bot review 5831998272 at the same head was submitted as a native APPROVE 2026-11-09T20:08:58Z (approve verdict, one info finding) with marker review_result=findings; its native state later flipped to DISMISSED when the bot superseded it at the newer head 452e053c, and a dismissed review's original event is no longer visible, so the marker is the surviving evidence of the approval. Curated manually for #1601: the finding postdates the last weekly harvest run, and the harvester's clean-only approval rule dropped approve-with-findings reviews until #1601 fixed it."
+        },
+        "defect": {
+          "description": "Both disposable self-hosted E2E instance configs in tests/self_hosted_e2e_qualification.sh (Forgejo block at lines 393-395 and GitHub block at lines 406-408) set adoption.mode: allowlist but omit discovered-default, which validateAdoption() (src/config/instance-config.ts) defaults to skip. decideAdoption() therefore holds every allowlisted repository at 'eligible' instead of walking it to 'enabled', and createAdoptionIdentityResolver() returns null for a fresh disposable control plane with no adopted-repository records, so neither the Forgejo signed webhook nor the GitHub reconciler can enqueue a worker and both wait_published loops time out. The qualification scenarios require automatic adoption of their allowlisted test repositories, so the omission is a real scheduling defect, not the intended conservative default.",
+          "severity": "major",
+          "file": "tests/self_hosted_e2e_qualification.sh",
+          "line_range": [
+            394,
+            394
+          ]
+        }
+      },
+      {
+        "id": "misospace/pr-reviewer-action#1565@e789b638",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 1565,
+        "head_sha": "e789b63825374910f67e69ec14a81eaf20fb5667",
+        "base_sha": "ee24b2db8d2b770e65f4bc050d9f3c846e06075d",
+        "source": {
+          "url": "https://github.com/misospace/pr-reviewer-action/pull/1565#pullrequestreview-5818952668",
+          "production_bot_at_head": "PARTIAL",
+          "production_bot_flagged_same": false,
+          "anchor_confidence": "medium",
+          "miss_class": "partial_abstention_miss",
+          "provenance": "Human CHANGES_REQUESTED review by joryirving 2026-11-08T17:48:41Z (review 5818952668), body-only; anchor comes from the src/context/rereview-evidence.ts:318-376 path named in the review text (medium confidence). Production bot review 5816482380 at the same head was state COMMENTED with marker review_result=partial and required_checks=incomplete (requirement_trace) — an abstention, not an approval — so the harvester correctly declines it and this entry is curated manually for #1601; the bot's narrative nonetheless recommended approve despite the partial marker. The defect was fixed later on the same PR (commits 9092497 and 82676f2)."
+        },
+        "defect": {
+          "description": "On re-review evidence reuse, readTreeEntries (src/context/rereview-evidence.ts:318-376) parses git ls-tree records as [, type, oid] and treats every type === \"blob\" entry as a reusable regular file, but a Git symlink is also a blob (mode 120000) whose blob stores the target pathname, not the target contents. With link -> target.txt unchanged across both heads while target.txt changes, the delta reports only 'M target.txt' and both heads report the same 120000 blob OID for link, so the symlink is seeded as byte-identical prior evidence unless related-code invalidation happens to discover the dependency — violating the fail-closed evidence-reuse/impact rule. Only regular blob modes (100644/100755) may seed; symlink, typechange, and mode-contradiction entries must refuse or drop reuse.",
+          "severity": "major",
+          "file": "src/context/rereview-evidence.ts",
+          "line_range": [
+            318,
+            376
+          ]
+        }
       }
     ],
-    "clean": []
+    "clean": [
+      {
+        "id": "misospace/pr-reviewer-action#1565@d9472195-clean",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 1565,
+        "head_sha": "d94721954c333d862d43b90b8340351c9d404507",
+        "base_sha": "ee24b2db8d2b770e65f4bc050d9f3c846e06075d",
+        "expected_clean": true,
+        "summary": "Fixed-head negative control for the #1565 symlink mechanism: the same re-review evidence-reuse change after the symlink fix landed (commits 9092497 and 82676f2) — readTreeEntries now parses the ls-tree mode, seeds only regular blob modes, drops symlink entries quietly, and refuses reuse on any mode/OID contradiction. Flagging the fixed symlink handling (or the now-guarded symlink/typechange/mode-flip paths) as a blocker here is a false positive."
+      },
+      {
+        "id": "misospace/pr-reviewer-action#946@1529026b-clean",
+        "repo_full_name": "misospace/pr-reviewer-action",
+        "number": 946,
+        "head_sha": "1529026b19fde60b70402a43dc8998b8f7f43bba",
+        "base_sha": "19f0f6b4dd554851a1899f5d1a6a4a9d8f513b4c",
+        "expected_clean": true,
+        "summary": "Truly-clean negative control for the #1586 config-default mechanism: the PR that introduced the adoption contract itself (validateAdoption/decideAdoption in src/config/instance-config.ts and src/config/adoption.ts). discovered-default deliberately defaults to skip — the conservative hold-at-eligible behavior is the specified design and operators adopt repositories explicitly — so flagging the skip default (or a config that relies on explicit adoption) as a scheduling blocker here is a false positive; the #1586 defect is only real where a scenario requires automatic adoption."
+      }
+    ]
   }
 }
