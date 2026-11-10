@@ -672,8 +672,12 @@ class TestContextOnly:
 
     def test_shipped_human_findings_corpus_is_valid(self):
         corpus = RealPRCorpus.from_file(CORPUS_PATH.parent / "corpus-human-findings.json")
-        assert len(corpus.vulnerable) >= 50 and not corpus.clean
+        assert len(corpus.vulnerable) >= 50
         assert all(s.defect and s.defect.file for s in corpus.vulnerable)
+        # #1601: curated vulnerable entries carry paired clean-list negative
+        # controls, so flagging every similar file cannot pass as detection.
+        assert corpus.clean
+        assert all(s.expected_clean is True for s in corpus.clean)
 
     def test_854_entry_pins_the_equivalent_path_resolver_shape(self):
         """#875: the pr-reviewer-action#854 entry pins the canonical pull
