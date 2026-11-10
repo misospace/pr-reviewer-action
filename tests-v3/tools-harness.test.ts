@@ -18,6 +18,7 @@ import type { StageEnv } from "../src/run/env.js";
 import { prioritizeDiff } from "../src/corpus/diff-priority.js";
 import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../src/corpus/assemble.js";
 import { markerReviewResult, renderPartialCoverageNotice } from "../src/publish/publish.js";
+import { toolBudgetRoute } from "../src/tools/budget.js";
 import { publishInputFromEnv } from "../src/run/entrypoints.js";
 import { resolvePartialCoverage, toolBudgetTelemetryOf } from "../src/engine/review.js";
 import type { PartialCoverage } from "../src/tools/coverage.js";
@@ -4031,4 +4032,116 @@ test("#1466: the production transport adapter attaches the probe to BOTH respons
   } finally {
     await server.close();
   }
+});
+
+// ── #1598: the fallback evidence-failover tier ──────────────────────────────
+
+test("#1598: TOOL_HARNESS_TIER=fallback runs the native loop on the RESOLVED fallback lane", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("fallback evidence gathered"), validVerdict()];
+  const seen: Array<{ baseUrl: string; apiKey: string; payload: Record<string, unknown> }> = [];
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "fallback",
+      REPO: "o/r",
+      // Primary lane values that must NOT be used by the fallback loop.
+      AI_BASE_URL: "http://primary.test/v1",
+      AI_MODEL: "primary-m",
+      AI_API_KEY: "primary-key",
+      AI_FALLBACK_BASE_URL: "http://fallback.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_FALLBACK_API_KEY: "fallback-key",
+      AI_STREAM: "false",
+    },
+    transport: async (baseUrl, _format, payload, apiKey) => {
+      seen.push({ baseUrl, apiKey, payload: payload as Record<string, unknown> });
+      return scripted[transportCalls++];
+    },
+  }));
+  assert.equal(result.tier, "fallback");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.ok(seen.length >= 3, `expected the loop turns + verdict, got ${seen.length}`);
+  for (const call of seen) {
+    assert.equal(call.baseUrl, "http://fallback.test/v1", "the fallback loop must dial the fallback lane's endpoint");
+    assert.equal(call.apiKey, "fallback-key", "the fallback loop must use the fallback lane's credential");
+    assert.equal(call.payload.model, "fallback-m", "the fallback loop must send the fallback lane's model");
+  }
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.fallback.json"), "utf8"));
+  assert.equal(artifact.tier, "fallback");
+  assert.equal(artifact.stop_reason, "model-stopped");
+  assert.ok((artifact.executed_request_count ?? 0) >= 1);
+  assert.ok(fs.existsSync(path.join(root, "ai-response.fallback.json")));
+  assert.ok(!fs.existsSync(path.join(root, "tool-harness.json")), "the fallback tier must not write into the primary slot");
+});
+
+test("#1598: the fallback loop streams and reasons on the fallback lane's own settings", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  const payloads: Array<Record<string, unknown>> = [];
+  let transportCalls = 0;
+  const scripted = [openAiCall("c1", "read_file", '{"path":"review-corpus.fallback.truncated.md"}'), openAiText("fallback evidence gathered"), validVerdict()];
+  await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "fallback",
+      REPO: "o/r",
+      AI_FALLBACK_BASE_URL: "http://fallback.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_STREAM: "false",
+      AI_FALLBACK_STREAM: "true",
+      AI_FALLBACK_REASONING_EFFORT: "low",
+    },
+    transport: async (_baseUrl, _format, payload) => {
+      payloads.push(payload as Record<string, unknown>);
+      return scripted[transportCalls++];
+    },
+  }));
+  assert.ok(payloads.length >= 2);
+  for (const payload of payloads) {
+    assert.equal(payload.stream, true, "ai-fallback-stream=true must reach the fallback loop's requests");
+    assert.equal(payload.reasoning_effort, "low", "the fallback lane's effort override must reach the loop");
+  }
+});
+
+test("#1598: an empty ai-fallback-stream inherits the base stream setting", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  const payloads: Array<Record<string, unknown>> = [];
+  let transportCalls = 0;
+  const scripted = [openAiCall("c1", "read_file", '{"path":"review-corpus.fallback.truncated.md"}'), openAiText("fallback evidence gathered"), validVerdict()];
+  await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "fallback",
+      REPO: "o/r",
+      AI_FALLBACK_BASE_URL: "http://fallback.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_STREAM: "false",
+      AI_FALLBACK_STREAM: "",
+    },
+    transport: async (_baseUrl, _format, payload) => {
+      payloads.push(payload as Record<string, unknown>);
+      return scripted[transportCalls++];
+    },
+  }));
+  assert.ok(payloads.length >= 2);
+  for (const payload of payloads) {
+    assert.equal(payload.stream, false, "an empty ai-fallback-stream inherits the base ai-stream");
+    assert.equal(payload.reasoning_effort, undefined, "an unconfigured fallback effort sends nothing");
+  }
+});
+
+test("#1598: the fallback tier maps to the primary loop-limit profile and budget route", () => {
+  assert.equal(loopLimitsProfile("fallback"), "primary");
+  assert.equal(toolBudgetRoute("fallback", {}), "primary");
+  assert.equal(resolveLoopLimits({ TOOL_MAX_ROUNDS: "2" } as Record<string, string | undefined>, "fallback")[0], 2);
+});
+
+test("#1598: an unknown tool harness tier still fails closed", async () => {
+  const { deps } = workspace();
+  await assert.rejects(
+    runToolHarness(deps({ env: { TOOL_HARNESS_TIER: "quantum" } })),
+    /invalid tool harness tier/,
+  );
 });

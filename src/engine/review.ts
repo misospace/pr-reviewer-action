@@ -5,7 +5,7 @@ import { resolveRepositoryConfig } from "../config/repository-config.js";
 import { resolveRequirementOwners } from "../config/requirement-owners.js";
 import { assertSupportedNode } from "../runtime/node-version.js";
 import { createCancellationScope, type CancellationScope } from "../runtime/signals.js";
-import { resolveTierBudgets } from "../corpus/budgets.js";
+import { FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES, resolveTierBudgets } from "../corpus/budgets.js";
 import { prioritizeDiff } from "../corpus/diff-priority.js";
 import { truncateClean } from "../corpus/truncate.js";
 import { readFileSync } from "node:fs";
@@ -1917,6 +1917,8 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   const primary = await producePrimaryReview({
     env, ws, profiles, streamBool, userMessage, log, errorLog, annotate, clock, sleep: dependencies.sleep, budgets,
     signal: cancellation.scope.signal,
+    generatedPaths, standards, runDir, workspace,
+    ghApi: adapter.ghApi.bind(adapter),
   });
   checkpoint();
   let analysisEngine = primary.analysisEngine;
@@ -1926,6 +1928,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // ── Escalation (#721: reviewer-requested only) ───────────────────────
   let escalationReasons = "";
   let enforcementHarness = "tool-harness.json";
+  // #1598: when the fallback evidence failover ran, the fallback harness
+  // artifact is the enforcement evidence surface (the loop that actually
+  // investigated). Smart escalation cannot follow: the #721 gate requires a
+  // primary-produced artifact (`fromPrimary`), so a fallback-authored review
+  // never escalates and no override exists on this path.
+  if (primary.fromFallback && primary.fallbackNativeLoopRan && ws.isFile("tool-harness.fallback.json")) {
+    enforcementHarness = "tool-harness.fallback.json";
+  }
   // #1504: true when the smart review succeeded and its artifact is the
   // authoritative one — the trace repair must then ride the smart lane.
   let escalatedToSmart = false;
@@ -1969,6 +1979,14 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
       log("Smart model failed after escalation; publishing the primary review");
     }
     artifact = safeJson(ws.read("ai-output.json")) ?? (artifact as Record<string, unknown>);
+  }
+
+  // #1598: the fallback native verdict's loop owns the accepted artifact's
+  // conversation, so its trace-only repair record lives in the FALLBACK
+  // harness artifact — the same treatment the primary native verdict gets.
+  // A successful smart escalation keeps the primary/smart handling untouched.
+  if (!escalatedToSmart && primary.fromFallback && primary.nativeLoopVerdict && ws.isFile("tool-harness.fallback.json")) {
+    traceGapContinuation = traceGapContinuationSummary(safeJson(ws.read("tool-harness.fallback.json")));
   }
 
   // ── #959: one bounded trace-repair pass ──────────────────────────────
@@ -2736,9 +2754,16 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // ── Outputs + step summary (review.sh tail) ──────────────────────────
   const harnessForMarker = safeJson(ws.read(enforcementHarness));
   const cacheHitRatio = buildCacheHitRatioOutput(harnessForMarker);
+  // #1598: the escalated tool-calls surface follows the enforcement harness
+  // actually used — smart, or the fallback tier's when its evidence failover
+  // authored the authoritative artifact.
+  const escalatedHarnessTier = enforcementHarness === "tool-harness.smart.json"
+    ? "smart"
+    : enforcementHarness === "tool-harness.fallback.json" ? "fallback" : null;
   const toolCalls = buildToolCallsOutput(
     safeJson(ws.read("tool-harness.json")),
-    enforcementHarness === "tool-harness.smart.json" ? safeJson(ws.read("tool-harness.smart.json")) : null,
+    escalatedHarnessTier !== null ? safeJson(ws.read(enforcementHarness)) : null,
+    escalatedHarnessTier ?? "smart",
   );
   // #810: the harness's own deterministic coverage record for the published
   // route (smart when escalated), never the model's claim. Computed here
@@ -3252,6 +3277,7 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     reviewRecord,
     primaryHarness: safeJson(ws.read("tool-harness.json")),
     smartHarness: safeJson(ws.read("tool-harness.smart.json")),
+    fallbackHarness: ws.isFile("tool-harness.fallback.json") ? safeJson(ws.read("tool-harness.fallback.json")) : null,
     coverage: safeJson(ws.read("requirement-coverage.json")),
     budgets,
     route: outputs.reviewRoute,
@@ -4150,20 +4176,26 @@ export function configuredKnownSecrets(env: StageEnv, profiles: TierProfiles): s
     .sort((a, b) => b.length - a.length);
 }
 
-/**
- * Historical byte ceiling (#1256) on the fallback recovery request's
- * re-truncated corpus: `min(this, the declared fallback capacity)` — or this
- * constant alone when no fallback window is declared. The cap is kept even
- * when the configured context windows would admit a larger corpus: the
- * fallback is availability recovery, not a larger-context retry, so it never
- * receives more than the historical default corpus bound (#940). */
-export const FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES = 120000;
+/** #1256: the historical byte ceiling on the fallback recovery request's
+ * re-truncated corpus now lives in src/corpus/budgets.ts (re-exported here
+ * for its existing import surface); #1598's assembled fallback corpus obeys
+ * the same cap. */
+export { FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES } from "../corpus/budgets.js";
 
 /** review.sh: the primary call (native-verdict fast path, then the standard
  * corpus review) and the fallback on total primary failure. */
 async function producePrimaryReview(input: ReviewCallInput & {
-  runDir?: string;
+  runDir: string;
   budgets: ReturnType<typeof resolveTierBudgets>;
+  /** #1598: what the fallback evidence-failover harness phase needs (the
+   * smart escalation's inputs, mirrored). */
+  generatedPaths: ReadonlySet<string>;
+  standards: { resolved: string | null; content: Uint8Array | null; changedInPr?: boolean };
+  /** The checkout the tool executors read (never the artifact run dir). */
+  workspace: string;
+  /** The run's configured forge read capability for the fallback tier's
+   * native loop (same adapter the primary tier binds). */
+  ghApi?: HarnessDeps["ghApi"];
 }): Promise<{
   artifact: Record<string, unknown> | null;
   analysisEngine: string;
@@ -4173,6 +4205,9 @@ async function producePrimaryReview(input: ReviewCallInput & {
    * the conversation the loop's trace-only repair merges into. Only this
    * artifact can suppress the standalone repair pass on the loop's behalf. */
   nativeLoopVerdict: boolean;
+  /** #1598: the fallback tier's evidence harness ran (its outcome — verdict
+   * or recorded failure — lives in tool-harness.fallback.json). */
+  fallbackNativeLoopRan: boolean;
 }> {
   const { env, ws, profiles, log, errorLog, budgets } = input;
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
@@ -4222,6 +4257,7 @@ async function producePrimaryReview(input: ReviewCallInput & {
           fromPrimary: true,
           fromFallback: false,
           nativeLoopVerdict: true,
+          fallbackNativeLoopRan: false,
         };
       } catch (cause) {
         errorLog(`native_loop verdict did not parse (${cause instanceof Error ? cause.message : "unknown"}); falling back to the standard review call`);
@@ -4249,6 +4285,7 @@ async function producePrimaryReview(input: ReviewCallInput & {
       fromPrimary: true,
       fromFallback: false,
       nativeLoopVerdict: false,
+      fallbackNativeLoopRan: false,
     };
   }
 
@@ -4274,14 +4311,77 @@ async function producePrimaryReview(input: ReviewCallInput & {
   errorLog(primary.terminal !== undefined
     ? `${firstProfile.label}: terminal=${primary.terminal}; bypassing retries; trying fallback: ${profiles.fallback.model} @ ${redactEndpointUrlCredential(profiles.fallback.baseUrl)} (${profiles.fallback.apiFormat})`
     : maskKnownSecrets(`${firstProfile.label} model unavailable after ${primary.attempts ?? "?"} attempt(s) in ${primary.elapsedSec ?? "?"}s (last failure: ${primary.lastFailure ?? "unknown"}); trying fallback: ${profiles.fallback.model} @ ${redactEndpointUrlCredential(profiles.fallback.baseUrl)} (${profiles.fallback.apiFormat})`, configuredKnownSecrets(env, profiles)));
+
+  // #1598/#1585: bounded evidence-phase failover. When the primary NATIVE
+  // tool loop stopped on a provider/transport failure BEFORE executing any
+  // investigation call, a fallback that only replaces the verdict call would
+  // inherit zero investigation. Run a fresh native investigation on the
+  // RESOLVED fallback lane first; its in-conversation verdict, when usable,
+  // IS the fallback review (the primary fast path's shape). A trigger that
+  // does not fire keeps today's byte-identical fallback path.
+  const fallbackHarnessRan = await runFallbackEvidenceHarness({
+    env, ws, profiles, log, errorLog, budgets,
+    generatedPaths: input.generatedPaths,
+    standards: input.standards,
+    workspace: input.workspace,
+    ghApi: input.ghApi,
+    ...(input.signal !== undefined ? { signal: input.signal } : {}),
+    primaryHarness: harness,
+  });
+  if (fallbackHarnessRan) {
+    const fallbackHarness = safeJson(ws.read("tool-harness.fallback.json"));
+    const status = String(fallbackHarness?.stop_reason ?? fallbackHarness?.native_loop_degraded ?? "");
+    const produced = fallbackHarness?.native_loop_verdict_produced === true;
+    const responseBytes = ws.read("ai-response.fallback.json");
+    if (status !== "request-error" && status !== "wall-clock-exceeded" && produced && responseBytes !== null && responseBytes.length > 0) {
+      try {
+        // The fallback loop dials the RESOLVED fallback lane (#1598), whose
+        // values can differ from the route-bound AI_* environment — mask
+        // every key AND every configured extra-header value, exactly like
+        // the primary fast path's re-parse (#1094).
+        const parsed = parseVerdictResponse(JSON.parse(Buffer.from(responseBytes).toString("utf8")), configuredKnownSecrets(env, profiles));
+        const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
+        ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
+        log("Fallback tool harness produced a verdict");
+        return {
+          artifact,
+          analysisEngine: annotateAnalysisEngine(
+            analysisEngineBase(profiles.fallback.model, profiles.fallback.baseUrl.trim(), profiles.fallback.apiFormat),
+            "fallback",
+            { ...(env.REVIEW_ROUTE !== undefined ? { reviewRoute: env.REVIEW_ROUTE } : {}) },
+          ),
+          fromPrimary: false,
+          fromFallback: true,
+          nativeLoopVerdict: true,
+          fallbackNativeLoopRan: true,
+        };
+      } catch (cause) {
+        errorLog(`fallback native_loop verdict did not parse: ${cause instanceof Error ? cause.message : "unknown"}`);
+      }
+    } else {
+      // #1598: the fallback harness itself failed (transport/wall-clock or no
+      // usable verdict). Availability recovery — never abort the fallback
+      // review, never fake a clean approval; the failure stays recorded in
+      // the artifact and the standard fallback corpus review proceeds.
+      errorLog(`fallback evidence harness did not produce a usable verdict (stop: ${status || "unknown"}); continuing with the standard fallback corpus review`);
+    }
+  }
+
   // #368: the fallback re-truncates the initial corpus. #940: the bound is
   // the declared fallback capacity — the fallback window can be smaller
   // than the primary tier's — never above the historical 120000-byte
-  // constant (#1256 pins the cap as named policy).
-  const fallbackCorpusBudget = budgets.fallback !== null
-    ? Math.min(FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES, budgets.fallback.maxCorpus)
-    : FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES;
-  ws.write("review-corpus.fallback.truncated.md", truncateClean(ws.read("review-corpus.md") ?? new Uint8Array(0), fallbackCorpusBudget, "…[content truncated]\n"));
+  // constant (#1256 pins the cap as named policy). #1598: when the evidence
+  // failover ran, the fallback corpus is REBUILT instead (the harness's tool
+  // evidence folded in); the untriggered path stays byte-identical.
+  if (fallbackHarnessRan) {
+    const build = assembleCorpus(ws, env, budgets, "fallback", "fallback", input.generatedPaths, input.standards);
+    if (build.overBudget) errorLog("ERROR: assembled fallback corpus exceeds its context budget");
+  } else {
+    const fallbackCorpusBudget = budgets.fallback !== null
+      ? Math.min(FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES, budgets.fallback.maxCorpus)
+      : FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES;
+    ws.write("review-corpus.fallback.truncated.md", truncateClean(ws.read("review-corpus.md") ?? new Uint8Array(0), fallbackCorpusBudget, "…[content truncated]\n"));
+  }
   const fallbackProfile = tierProfileFrom(profiles, "fallback", env);
   const fallback = await callTier("fallback", fallbackProfile, input, "review-corpus.fallback.truncated.md", "ai-request.fallback.json", "ai-response.fallback.json");
   if (fallback.ok) {
@@ -4296,12 +4396,68 @@ async function producePrimaryReview(input: ReviewCallInput & {
       fromPrimary: false,
       fromFallback: true,
       nativeLoopVerdict: false,
+      fallbackNativeLoopRan: fallbackHarnessRan,
     };
   }
   const outcome = handleModelFailure("Fallback model failed", env.ON_MODEL_FAILURE ?? "fail");
   if (outcome.action === "fail") throw new RunReviewError(outcome.reason);
   log("on_model_failure=notice: emitting a request_changes notice instead of failing the check");
   return noticeResult(ws, outcome);
+}
+
+/** #1598/#1585: the fallback tier's evidence-failover harness phase. The
+ * trigger is deliberately narrow — the primary native loop must have degraded
+ * on `request-error` with ZERO executed investigation calls, the fork gate
+ * must be inactive, and the fallback harness must not already exist
+ * (defensive idempotency). Anything else (any executed call, a budget/model-
+ * stopped/wall-clock stop, an active fork gate) keeps today's fallback path.
+ * Returns true when the phase ran; its outcome — verdict or recorded failure
+ * — lives in `tool-harness.fallback.json` and is read by the caller. */
+async function runFallbackEvidenceHarness(input: {
+  env: StageEnv;
+  ws: RunWorkspace;
+  profiles: TierProfiles;
+  log: (line: string) => void;
+  errorLog: (line: string) => void;
+  budgets: ReturnType<typeof resolveTierBudgets>;
+  generatedPaths: ReadonlySet<string>;
+  standards: { resolved: string | null; content: Uint8Array | null; changedInPr?: boolean };
+  workspace: string;
+  ghApi?: HarnessDeps["ghApi"];
+  signal?: AbortSignal;
+  primaryHarness: Record<string, unknown> | null;
+}): Promise<boolean> {
+  const toolMode = (input.env.TOOL_MODE ?? "off").toLowerCase();
+  if (toolMode !== "native_loop") return false;
+  if (input.primaryHarness?.native_loop_degraded !== "request-error") return false;
+  if (Number(input.primaryHarness.executed_request_count ?? 0) !== 0) return false;
+  // The fork privilege separation owns this decision (docs/fork-review.md):
+  // a gated run never gains a second tool loop through failover.
+  if (gateForkForForks(input.env, input.env.IS_FORK_PR ?? "false") !== null) return false;
+  if (input.ws.isFile("tool-harness.fallback.json")) return false;
+  const prebuild = assembleCorpus(input.ws, input.env, input.budgets, "fallback", "fallback", input.generatedPaths, input.standards);
+  if (prebuild.overBudget) input.errorLog("ERROR: assembled fallback corpus exceeds its context budget");
+  input.log("native_loop: primary gathered no evidence before transport failure; running fallback-lane investigation");
+  // #1515: the fallback loop is recovery class — the adapter reads
+  // TOOL_HARNESS_TIER itself, so the binding below steers both the tier's
+  // lane resolution and the governor priority.
+  const savedTier = input.env.TOOL_HARNESS_TIER;
+  input.env.TOOL_HARNESS_TIER = "fallback";
+  try {
+    await runToolHarnessPhase(input.ws, input.env, input.workspace, input.log, input.signal, undefined, input.ghApi);
+  } catch (cause) {
+    // #1094: a thrown message can quote a configured credential back — mask
+    // like every other diagnostics line in this stage.
+    input.errorLog(`fallback tool harness failed: ${maskKnownSecrets(cause instanceof Error ? cause.message : String(cause), configuredKnownSecrets(input.env, input.profiles))}`);
+    // The synthetic keeps the degraded fail-closed shape regardless of the
+    // thrown cause (the cause distinction rides the log line above); a
+    // degraded fallback artifact preserves the #978 no-evidence eligibility.
+    input.ws.write("tool-harness.fallback.json", '{"tier":"fallback","mode":"native_loop","error":"execution failed","native_loop_degraded":"request-error","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');
+  } finally {
+    if (savedTier === undefined) delete input.env.TOOL_HARNESS_TIER;
+    else input.env.TOOL_HARNESS_TIER = savedTier;
+  }
+  return true;
 }
 
 /** `on-model-failure: notice`: the notice verdict is already final JSON, so
@@ -4316,11 +4472,11 @@ async function producePrimaryReview(input: ReviewCallInput & {
 function noticeResult(
   ws: RunWorkspace,
   outcome: { aiOutputJson: string; analysisEngine: string },
-): { artifact: Record<string, unknown>; analysisEngine: string; fromPrimary: false; fromFallback: false; nativeLoopVerdict: false } {
+): { artifact: Record<string, unknown>; analysisEngine: string; fromPrimary: false; fromFallback: false; nativeLoopVerdict: false; fallbackNativeLoopRan: false } {
   const parsed = parseVerdictResponse({ choices: [{ message: { content: outcome.aiOutputJson } }] });
   const artifact = reviewArtifactFromParsed(parsed) as unknown as Record<string, unknown>;
   ws.write("ai-output.json", Buffer.from(`${pyJsonDumps(artifact)}\n`, "utf8"));
-  return { artifact, analysisEngine: outcome.analysisEngine, fromPrimary: false, fromFallback: false, nativeLoopVerdict: false };
+  return { artifact, analysisEngine: outcome.analysisEngine, fromPrimary: false, fromFallback: false, nativeLoopVerdict: false, fallbackNativeLoopRan: false };
 }
 
 interface SmartReviewInput extends ReviewCallInput {

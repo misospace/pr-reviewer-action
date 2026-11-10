@@ -8,12 +8,14 @@ import {
   buildBoundedRepoMap,
   buildReviewCorpus,
   CORPUS_DIFF_SECTION_ARTIFACT,
+  CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT,
   CORPUS_DIFF_SECTION_SMART_ARTIFACT,
   prepareStandardsContext,
   prepareToolHarness,
   type CorpusBuildResult,
   type CorpusWorkspace,
 } from "../corpus/assemble.js";
+import { FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES } from "../corpus/budgets.js";
 import type { PlatformReadAdapter } from "../platform/types.js";
 import { deriveIsFork } from "../platform/pr.js";
 import {
@@ -568,9 +570,9 @@ export async function authoritativeBodyRevision(adapter: PlatformReadAdapter): P
 export function assembleCorpus(
   ws: RunWorkspace,
   env: StageEnv,
-  budgets: { primary: TierBudgets; smart: TierBudgets },
-  tier: "primary" | "smart",
-  slot: "primary" | "smart",
+  budgets: { primary: TierBudgets; smart: TierBudgets; fallback?: TierBudgets | null },
+  tier: "primary" | "smart" | "fallback",
+  slot: "primary" | "smart" | "fallback",
   generatedPaths: ReadonlySet<string>,
   standards: { resolved: string | null; content: Uint8Array | null; changedInPr?: boolean },
 ): CorpusBuildResult {
@@ -590,7 +592,27 @@ export function assembleCorpus(
       ciChecksContent = null;
     }
   }
-  const tierBudgets = budgets[tier];
+  const tierBudgets = tier === "fallback"
+    ? // #1598/#1256: the fallback corpus budget is the #1256 cap — the
+      // historical re-truncation bound — narrowed by a declared fallback
+      // window, never widened past it. Diff/files keep the primary budgets:
+      // the fallback rides the primary-truncated sources (its own corpus
+      // budget caps the body).
+      {
+        maxCorpus: budgets.fallback != null
+          ? Math.min(FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES, budgets.fallback.maxCorpus)
+          : FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES,
+        maxDiff: budgets.primary.maxDiff,
+        maxFiles: budgets.primary.maxFiles,
+      }
+    : budgets[tier];
+  // #1598: the #1256 fallback cap is unconditional policy, not a
+  // declared-window-only guard, so the fallback slot's over-budget check is
+  // always armed — a fallback corpus never silently exceeds the historical
+  // bound the way an undeclared primary window's named-mode budget may.
+  const budgetGuard = tier === "fallback"
+    ? true
+    : tier === "smart" || !!(env.PRIMARY_MODEL_CONTEXT_TOKENS ?? env.MODEL_CONTEXT_TOKENS);
   const result = buildReviewCorpus(
     {
       manifestContextMd: ws.read("manifest-context.md"),
@@ -608,6 +630,7 @@ export function assembleCorpus(
       toolHarnessMd: ws.read("tool-harness.md"),
       repositorySkillAddendumMd: ws.read("repository-skill-addendum.md"),
       toolHarnessSmartMd: ws.read("tool-harness.smart.md"),
+      toolHarnessFallbackMd: ws.read("tool-harness.fallback.md"),
       evidenceProvidersMd: ws.read("evidence-providers.md"),
       imageDigestContextMd: ws.read("image-digest-context.md"),
       dependencyCoverageMd: ws.read("dependency-coverage.md"),
@@ -638,7 +661,7 @@ export function assembleCorpus(
       repoMapMaxBytes: Number(env.REPO_MAP_MAX_BYTES ?? "12000") || 12000,
       standardsFile: standards.resolved ?? "",
       ciChecksFile,
-      budgetGuard: tier === "smart" || !!(env.PRIMARY_MODEL_CONTEXT_TOKENS ?? env.MODEL_CONTEXT_TOKENS),
+      budgetGuard,
       generatedPaths,
     },
   );
@@ -649,8 +672,16 @@ export function assembleCorpus(
   // by model tier would leave the primary-named sidecar absent on fresh
   // runs. The harness's tier-keyed read follows the same primary/smart corpus
   // split: slot=primary builds the review-corpus.truncated.md corpus,
-  // slot=smart the review-corpus.smart.truncated.md one.
-  ws.write(slot === "smart" ? CORPUS_DIFF_SECTION_SMART_ARTIFACT : CORPUS_DIFF_SECTION_ARTIFACT, result.corpusDiffPayload);
+  // slot=smart the review-corpus.smart.truncated.md one, and #1598's
+  // slot=fallback the review-corpus.fallback.truncated.md one.
+  ws.write(
+    slot === "smart"
+      ? CORPUS_DIFF_SECTION_SMART_ARTIFACT
+      : slot === "fallback"
+        ? CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT
+        : CORPUS_DIFF_SECTION_ARTIFACT,
+    result.corpusDiffPayload,
+  );
   return result;
 }
 
@@ -695,6 +726,10 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     const harnessModel = typeof (payload as Record<string, unknown> | undefined)?.model === "string"
       ? (payload as Record<string, unknown>).model as string
       : "";
+    // #1598: the fallback tier's evidence loop is recovery class, like the
+    // smart loop (#1515) — it only ever runs after the primary already lost
+    // its investigation to a transport failure.
+    const recoveryTier = harnessTier === "smart" || harnessTier === "fallback";
     // #1466: count the request's ACTUAL wire calls. The #1200 hook fires once
     // per wire call — including the ones a 429/5xx backoff, a #824 clamp or a
     // #1047 strip discarded — so the count is the HTTP attempts the request
@@ -702,7 +737,7 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     let wireCalls = 0;
     const outcome = await sharedRunInferenceGovernor().admit(
       {
-        priority: harnessTier === "smart" ? GOVERNOR_PRIORITY_RECOVERY : GOVERNOR_PRIORITY_AUTHORITATIVE,
+        priority: recoveryTier ? GOVERNOR_PRIORITY_RECOVERY : GOVERNOR_PRIORITY_AUTHORITATIVE,
         endpointKey: inferenceEndpointKey({ baseUrl, apiFormat: wireFormat, model: harnessModel }),
         ...(signal !== undefined ? { signal } : {}),
       },

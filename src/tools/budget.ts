@@ -191,6 +191,12 @@ function clampedPositive(raw: string | undefined): number | null {
  * branch was unreachable and has been removed.
  */
 export function toolBudgetRoute(tier: string, env: EnvLike): ToolBudgetTier {
+  // #1598: the fallback-tier evidence loop rides the SAME tool-call budget as
+  // the primary lane — the fallback harness is availability recovery for the
+  // primary's failed investigation, not a second-class budget.
+  if (tier === "fallback") {
+    return "primary";
+  }
   if (tier === "smart") {
     return flagTrue(env.TOOL_ESCALATION) ? "escalated" : "smart";
   }

@@ -49,8 +49,8 @@ import { classificationLine, prMetadataLine } from "./projections.js";
 import { truncateClean } from "./truncate.js";
 import { prioritizeDiff, type PrioritizeDiffOptions } from "./diff-priority.js";
 
-export type CorpusTier = "primary" | "smart";
-export type CorpusSlot = "primary" | "smart";
+export type CorpusTier = "primary" | "smart" | "fallback";
+export type CorpusSlot = "primary" | "smart" | "fallback";
 
 /** Snapshot of every workspace file `build_review_corpus` and its corpus.sh
  * neighbors read. `null` means the file does not exist on disk (v2 `-f`/`-s`
@@ -75,6 +75,9 @@ export interface CorpusWorkspace {
   toolHarnessMd: Uint8Array | null;
   repositorySkillAddendumMd?: Uint8Array | null;
   toolHarnessSmartMd: Uint8Array | null;
+  /** #1598: the fallback slot's harness markdown. Optional so existing
+   * fixtures need no update: an absent field behaves like `null`. */
+  toolHarnessFallbackMd?: Uint8Array | null;
   evidenceProvidersMd: Uint8Array | null;
   imageDigestContextMd: Uint8Array | null;
   /** #1337: the deterministic dependency-upgrade coverage accounting
@@ -165,6 +168,10 @@ export interface CorpusBuildResult {
  * src/tools/coverage.ts. */
 export const CORPUS_DIFF_SECTION_ARTIFACT = "pr.diff.corpus-section.txt";
 export const CORPUS_DIFF_SECTION_SMART_ARTIFACT = "pr.diff.smart.corpus-section.txt";
+/** #1598: the fallback slot's sidecar — the fallback evidence loop plans from
+ * review-corpus.fallback.truncated.md, so its corpus-diff credit set is keyed
+ * to that slot too. */
+export const CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT = "pr.diff.fallback.corpus-section.txt";
 
 const BODY_FLOOR = 4100;
 const STANDARDS_CAP_DEFAULT = 16000;
@@ -176,6 +183,11 @@ const OFF_MODE_HARNESS_JSON =
   '{"mode":"off","planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n';
 const SMART_HARNESS_OMITTED =
   "Primary tool investigation omitted; conduct your own independent review.\n";
+/** #1598: the fallback slot's omission notice — same semantic as the smart
+ * one: the tier's own harness artifact is absent, so the loop must not read
+ * a stale other-tier trace as its own evidence. */
+const FALLBACK_HARNESS_OMITTED =
+  "Fallback tool investigation omitted; conduct your own independent review.\n";
 
 const enc = (text: string): Uint8Array => Buffer.from(text, "utf8");
 const bytes = (value: Uint8Array | null | undefined): Uint8Array => value ?? new Uint8Array(0);
@@ -326,7 +338,12 @@ export function buildReviewCorpus(
 
   // The initial review always owns the primary artifact slot; a smart-tier
   // run (escalation) gets its own slot, and the context profile — not the
-  // artifact name — follows the profile.
+  // artifact name — follows the profile. #1598: the fallback evidence slot
+  // mirrors the smart slot's artifact split (own corpus + harness artifact)
+  // while keeping the PRIMARY tier's diff/files truncations — the fallback
+  // corpus budget caps the body, and the fallback window can never exceed
+  // the primary's (#1256), so re-using the primary-truncated sources is the
+  // historical fallback shape.
   if (opts.tier === "smart") {
     if (opts.slot === "smart") {
       outputName = "review-corpus.smart.truncated.md";
@@ -346,6 +363,13 @@ export function buildReviewCorpus(
       }
     }
   }
+  if (opts.tier === "fallback" && opts.slot === "fallback") {
+    outputName = "review-corpus.fallback.truncated.md";
+    harnessFile = "tool-harness.fallback.md";
+    if (!nonEmpty(ws.toolHarnessFallbackMd) && nonEmpty(ws.toolHarnessMd)) {
+      write("tool-harness.fallback.md", enc(FALLBACK_HARNESS_OMITTED));
+    }
+  }
   write("repo-map.capped.md", buildBoundedRepoMap(ws.repoMapMd, opts.repoMapMaxBytes));
 
   const diffContent = opts.tier === "smart" ? artifacts.get(diffFile)! : bytes(ws.prDiffTruncated);
@@ -355,7 +379,9 @@ export function buildReviewCorpus(
       ? bytes(ws.toolHarnessMd)
       : artifacts.has(harnessFile)
         ? artifacts.get(harnessFile)!
-        : bytes(ws.toolHarnessSmartMd);
+        : opts.tier === "fallback"
+          ? bytes(ws.toolHarnessFallbackMd)
+          : bytes(ws.toolHarnessSmartMd);
 
   // Build non-standards body first (this is the portion subject to truncation).
   const body: Uint8Array[] = [];
@@ -643,7 +669,10 @@ export function buildReviewCorpus(
   // section in the final corpus. Unreachable by construction (the section's
   // bytes were carved out of the body budget above, and the shared
   // fits-sanity keeps signal and section in step), asserted defensively.
-  if (opts.slot !== "smart") {
+  // #1598: only the primary slot manages the SHARED presence signals — a
+  // fallback build that dropped a section under its smaller budget must not
+  // clear a signal the primary corpus still backs.
+  if (opts.slot === "primary") {
     const ledgerMarker = enc("# Explicit Requirement Ledger");
     if (nonEmpty(ws.requirementLedgerPresent) && indexOfSub(output, ledgerMarker) < 0) {
       write("requirement-ledger-present.txt", new Uint8Array(0));
