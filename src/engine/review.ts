@@ -18,7 +18,7 @@ import { buildHarnessObligations } from "../requirements/obligations.js";
 import { externalChecksConclusion } from "../precheck/decide.js";
 import { readStandardsFileAtRef, StandardsFileRefError } from "../context/standards-file-ref.js";
 import { discoverRepositorySkills, readRepositorySkill, renderExplicitSkill, renderSkillCatalog, repositorySkillsAllowed } from "../context/repository-skills.js";
-import { loopContextLimits, type HarnessDeps } from "../tools/harness.js";
+import { loopContextLimits, resolveLoopLimits, VERDICT_WALL_CLOCK_RESERVE_MIN_SEC, type HarnessDeps } from "../tools/harness.js";
 import { DEFAULT_STANDARDS_FILE_CANDIDATES } from "../context/standards-file.js";
 import { runChatRequest } from "../transport/transport.js";
 import {
@@ -911,6 +911,10 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   if ((env.TOOL_MODE ?? "off").toLowerCase() === "native_loop") {
     loopContextLimits(env, "primary");
     if (env.AI_SMART_MODEL) loopContextLimits(env, "smart");
+    // #1598 (review): the fallback tier's native loop enforces the fallback
+    // lane's own window, so a fallback window too small for the loop fails
+    // up front too — before the failover would ever need it.
+    if ((env.AI_FALLBACK_MODEL ?? "") !== "") loopContextLimits(env, "fallback");
   }
   env.MAX_CORPUS = String(budgets.primary.maxCorpus);
   env.MAX_DIFF = String(budgets.primary.maxDiff);
@@ -4439,6 +4443,37 @@ export function fallbackEvidenceFailoverEligible(primaryHarness: Record<string, 
   return dispatched === 0;
 }
 
+/** #1598 (review): the wall-clock share the failover's investigation may
+ * spend, as a pure function of the primary artifact.
+ *
+ * The failover runs a SECOND native investigation, so it must draw from the
+ * same loop wall-clock envelope the primary exchange was configured with —
+ * a primary that spent T seconds before its transport failure leaves the
+ * failover `tool-loop-wall-clock-sec − T`, never a second full budget. The
+ * primary loop's own spend is the #702 usage telemetry
+ * (`tool_loop_telemetry.usage.elapsed_sec` — the loop's measured elapsed,
+ * distinct from the `budget.wall_clock_sec` configured ceiling), which
+ * every loop run — including the degraded transport stop this trigger
+ * requires — carries.
+ *
+ * Fail-closed: an artifact that does not report a finite non-negative spend
+ * returns null and the caller keeps today's corpus-only fallback review
+ * instead of spending on an unbounded second investigation. A known spend
+ * returns `max(0, loopWallClockSec − spend)`. */
+export function fallbackEvidenceWallClockRemainingSec(
+  primaryHarness: Record<string, unknown> | null,
+  loopWallClockSec: number,
+): number | null {
+  if (primaryHarness === null) return null;
+  const telemetry = primaryHarness.tool_loop_telemetry;
+  if (telemetry === null || typeof telemetry !== "object") return null;
+  const usage = (telemetry as Record<string, unknown>).usage;
+  if (usage === null || typeof usage !== "object") return null;
+  const spend = (usage as Record<string, unknown>).elapsed_sec;
+  if (typeof spend !== "number" || !Number.isFinite(spend) || spend < 0) return null;
+  return Math.max(0, loopWallClockSec - spend);
+}
+
 /** #1598/#1585: the fallback tier's evidence-failover harness phase. The
  * trigger is deliberately narrow — the primary native loop must have degraded
  * on `request-error` with ZERO executed investigation calls, the fork gate
@@ -4464,6 +4499,16 @@ async function runFallbackEvidenceHarness(input: {
   const toolMode = (input.env.TOOL_MODE ?? "off").toLowerCase();
   if (toolMode !== "native_loop") return false;
   if (!fallbackEvidenceFailoverEligible(input.primaryHarness)) return false;
+  // #1598 (review): bounded spend — the failover draws from the SAME loop
+  // wall-clock envelope the primary exchange was configured with, never a
+  // second full budget. The primary loop's recorded spend leaves the
+  // remaining share; a share too small to fit the closing verdict's
+  // deterministic reserve (or an unknown spend) keeps today's corpus-only
+  // fallback review — fail closed, never restart spend on an exhausted or
+  // unmeasurable budget.
+  const [, loopWallClockSec] = resolveLoopLimits(input.env, "primary");
+  const wallClockRemainingSec = fallbackEvidenceWallClockRemainingSec(input.primaryHarness, loopWallClockSec);
+  if (wallClockRemainingSec === null || wallClockRemainingSec <= VERDICT_WALL_CLOCK_RESERVE_MIN_SEC) return false;
   // The fork privilege separation owns this decision (docs/fork-review.md):
   // a gated run never gains a second tool loop through failover.
   if (gateForkForForks(input.env, input.env.IS_FORK_PR ?? "false") !== null) return false;
@@ -4477,7 +4522,7 @@ async function runFallbackEvidenceHarness(input: {
   const savedTier = input.env.TOOL_HARNESS_TIER;
   input.env.TOOL_HARNESS_TIER = "fallback";
   try {
-    await runToolHarnessPhase(input.ws, input.env, input.workspace, input.log, input.signal, undefined, input.ghApi);
+    await runToolHarnessPhase(input.ws, input.env, input.workspace, input.log, input.signal, undefined, input.ghApi, wallClockRemainingSec);
   } catch (cause) {
     // #1094: a thrown message can quote a configured credential back — mask
     // like every other diagnostics line in this stage.

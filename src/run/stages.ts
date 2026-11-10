@@ -830,7 +830,7 @@ export function normalizedToOpenAiChat(response: NormalizedModelResponse): Recor
  * keeps the loop byte-for-byte pre-#1145. #1210: likewise `ghApi` — the
  * run's configured forge read capability, bound to the native loop's
  * gh_api/repo_contents executors. */
-export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal, traceGapProbe?: TraceGapProbe, ghApi?: HarnessDeps["ghApi"]): Promise<void> {
+export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDir: string, log: (line: string) => void, signal?: AbortSignal, traceGapProbe?: TraceGapProbe, ghApi?: HarnessDeps["ghApi"], wallClockSecCap?: number): Promise<void> {
   const deps: HarnessDeps & { signal?: AbortSignal, traceGapProbe?: TraceGapProbe } = {
     env,
     cwd: runDir,
@@ -845,6 +845,10 @@ export async function runToolHarnessPhase(ws: RunWorkspace, env: StageEnv, runDi
     log,
     ...(traceGapProbe !== undefined ? { traceGapProbe } : {}),
     ...(ghApi !== undefined ? { ghApi } : {}),
+    // #1598 (review): the evidence-failover phase passes the remaining share
+    // of the loop wall-clock envelope, so the second investigation can never
+    // start a second full budget. Unset keeps the configured ceiling.
+    ...(wallClockSecCap !== undefined ? { wallClockSecCap } : {}),
   };
   await runToolHarness(deps);
 }

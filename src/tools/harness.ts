@@ -269,8 +269,11 @@ function envIntIsSet(env: EnvLike, name: string): boolean {
  * toolBudgetRoute already does for the request budget. #1253: the tier is the
  * only signal — the unreachable REVIEW_CONTEXT_PROFILE=smart ambient override
  * has been removed. #1598: the fallback tier (#1585 evidence failover) maps
- * explicitly to the PRIMARY profile — same TOOL_MAX_ROUNDS /
- * TOOL_LOOP_WALL_CLOCK_SEC / TOOL_* keys, no fallback-specific loop env. */
+ * its LOOP LIMITS to the primary profile — same TOOL_MAX_ROUNDS /
+ * TOOL_LOOP_WALL_CLOCK_SEC / TOOL_* keys, no fallback-specific loop env.
+ * The context window is NOT part of that mapping: a loop-limit key names a
+ * policy knob, while the window is a property of the model the tier's lane
+ * dials, so `loopContextLimits` reads the tier's own key below. */
 export function loopLimitsProfile(tier: string): "primary" | "smart" {
   if (tier === "smart") return "smart";
   if (tier === "fallback") return "primary";
@@ -279,14 +282,17 @@ export function loopLimitsProfile(tier: string): "primary" | "smart" {
 
 /** #922: the tier's declared context window in tokens (the tier input, which
  * already inherits model-context-tokens), or null when none is declared.
- * #1598: the fallback tier reads the PRIMARY tier's window — the fallback
- * loop runs on the primary profile's context shape (its own corpus budget is
- * the #1256-capped fallback rule, not this window). */
+ * #1598 (review): the fallback tier reads its OWN lane's window
+ * (FALLBACK_MODEL_CONTEXT_TOKENS — the same key `resolveTierBudgets` applies
+ * to the fallback corpus budget). The fallback loop dials the fallback model,
+ * so a smaller fallback window must be enforced on the loop's conversation
+ * compaction and byte budgets, never the primary model's window. */
 export function declaredWindowTokens(env: EnvLike, tier: string): number | null {
   const tierKey = tier === "smart"
     ? "SMART_MODEL_CONTEXT_TOKENS"
-    // #1598: explicit primary mapping for the fallback tier.
-    : "PRIMARY_MODEL_CONTEXT_TOKENS";
+    : tier === "fallback"
+      ? "FALLBACK_MODEL_CONTEXT_TOKENS"
+      : "PRIMARY_MODEL_CONTEXT_TOKENS";
   const raw = ((env[tierKey]) || env.MODEL_CONTEXT_TOKENS || "").trim();
   return /^[0-9]+$/.test(raw) && Number(raw) > 0 ? Number(raw) : null;
 }
@@ -2655,8 +2661,12 @@ export interface HarnessDeps {
   /** #1210: the run's configured forge read capability, threaded to the
    * native loop's gh_api/repo_contents executors (mirrors
    * `PlatformAdapter.ghApi`). Absent keeps the pre-#1210
-   * "platform transport not configured" behavior byte for byte. */
+   * "platform transport not configured" behavior byte-for-byte. */
   ghApi?: (endpoint: string, opts?: { timeoutMs: number }) => Promise<{ data?: unknown; error?: string }>;
+  /** #1598 (review): remaining wall-clock seconds the native loop may spend
+   * (the evidence-failover caller's remaining share of the loop wall-clock
+   * envelope). Unset keeps the configured ceiling byte-for-byte. */
+  wallClockSecCap?: number;
 }
 
 /**
@@ -2821,9 +2831,16 @@ export interface RunNativeLoopInput {
   result: HarnessResult;
   tier: string;
   deps: HarnessDeps;
-  /** #1145: bounded evidence-repair continuation probe over the verdict the
-   * in-conversation verdict turn produced. Optional; unset preserves the
-   * pre-#1145 flow byte-for-byte. */
+  /** #1598 (review): remaining wall-clock seconds this loop may spend, passed
+   * by the evidence-failover caller so the second investigation draws from
+   * the same loop wall-clock envelope as the primary exchange instead of
+   * starting a second full budget. A cap NARROWS the configured
+   * `tool-loop-wall-clock-sec` (never extends it); unset keeps the
+   * configured ceiling byte-for-byte. */
+  wallClockSecCap?: number;
+  /** #1145: bounded evidence-repair continuation probe over the verdict
+   * the in-conversation verdict turn produced. Optional; unset preserves
+   * the pre-#1145 flow byte-for-byte. */
   traceGapProbe?: TraceGapProbe;
 }
 
@@ -2852,9 +2869,22 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
 
   const limitsProfile = loopLimitsProfile(input.tier);
   const [maxRounds, wallClock, roundsExplicit] = resolveLoopLimits(env, limitsProfile);
+  // #1598 (review): the failover loop draws from the same loop wall-clock
+  // envelope the primary exchange was configured with — the caller may pass
+  // the REMAINING share as a cap (never an extension). The verdict reserve
+  // derives from the effective wall clock, so the reserved closing-verdict
+  // slice survives the cap too.
+  const wallClockSecCap = input.wallClockSecCap;
+  const effectiveWallClock =
+    typeof wallClockSecCap === "number" && Number.isFinite(wallClockSecCap)
+      ? Math.max(0, Math.min(wallClock, wallClockSecCap))
+      : wallClock;
   const budgets = {
-    ...adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock, roundsExplicit),
-    maxConversationTokens: loopContextLimits(env, limitsProfile).maxConversationTokens,
+    ...adaptiveLoopBudgets(maxRounds, input.maxRequests, effectiveWallClock, roundsExplicit),
+    // The context window follows the TIER (the model the lane dials), not
+    // the loop-limit profile — #1598 (review): the fallback tier enforces
+    // its own FALLBACK_MODEL_CONTEXT_TOKENS window.
+    maxConversationTokens: loopContextLimits(env, input.tier).maxConversationTokens,
   };
   const traceRepairExtraRequests =
     input.tier === "primary" && input.traceGapProbe !== undefined
@@ -2866,12 +2896,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // `tool-loop-wall-clock-sec` ceiling. The deadline is a guaranteed number
   // (resolveLoopLimits clamps the wall-clock bounds), and every downstream
   // consumer (per-turn clamps, refusal results, verdict/acceptance/repair
-  // gating) treats it as one.
-  const deadline = timeFn() + wallClock;
+  // gating) treats it as one. #1598 (review): the ceiling is the EFFECTIVE
+  // wall clock — the configured budget narrowed by the failover caller's
+  // remaining-share cap.
+  const deadline = timeFn() + effectiveWallClock;
   // #1464: hold a deterministic slice of the wall clock for the closing
   // in-conversation verdict turn so the exploratory rounds cannot spend the
   // whole budget and leave the verdict to fail the pre-request deadline check.
-  const verdictReserveSec = verdictWallClockReserveSec(wallClock);
+  const verdictReserveSec = verdictWallClockReserveSec(effectiveWallClock);
   // #1464 (review): the reserve must actually be RESERVED, not only gated
   // between rounds. A round allowed to start with remaining just above the
   // reserve would otherwise clamp its model wait and tool execution against
@@ -2882,7 +2914,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // closing verdict turn keeps the whole-run deadline.
   const explorationDeadline = deadline - verdictReserveSec;
   log(
-    `  native_loop: verdict reserve ${verdictReserveSec}s of ${wallClock}s wall clock (#1464); ` +
+    `  native_loop: verdict reserve ${verdictReserveSec}s of ${effectiveWallClock}s wall clock (#1464); ` +
       "exploratory model waits and tool execution clamp to the reserve boundary",
   );
   // #1094 review round 3: the loop's NON-verdict response surfaces (tool-call
@@ -4485,7 +4517,10 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // are gone — the v3 contract declares those inputs removed, so the runtime
   // no longer honors them behind the contract's back.
   // #922: corpus and per-result bytes follow the declared window when set.
-  const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, loopLimitsProfile(tier));
+  // #1598 (review): the window follows the TIER — the fallback tier enforces
+  // its own FALLBACK_MODEL_CONTEXT_TOKENS-derived byte budgets (the loop
+  // LIMITS below still resolve on the primary profile's keys).
+  const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, tier);
   const turnTimeoutRaw = env.TOOL_TURN_TIMEOUT_SEC || "60";
   const turnTimeout = pyInt(turnTimeoutRaw, "TOOL_TURN_TIMEOUT_SEC");
   // #810: the default budget scales with the PR (changed files/lines +
@@ -4727,6 +4762,7 @@ turnTimeout,
     result,
     tier,
     deps,
+    ...(deps.wallClockSecCap !== undefined ? { wallClockSecCap: deps.wallClockSecCap } : {}),
     ...(deps.traceGapProbe !== undefined ? { traceGapProbe: deps.traceGapProbe } : {}),
   });
   if (!handled) {

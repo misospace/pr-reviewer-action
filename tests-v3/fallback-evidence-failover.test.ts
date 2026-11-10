@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { runReview } from "../src/run/review.js";
-import { fallbackEvidenceFailoverEligible } from "../src/engine/review.js";
+import { fallbackEvidenceFailoverEligible, fallbackEvidenceWallClockRemainingSec } from "../src/engine/review.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { startMockServer, sseResponse } from "./helpers.js";
 
@@ -417,6 +417,25 @@ test("#1598: the failover trigger needs the primary's DISPATCHED call count, not
   assert.equal(fallbackEvidenceFailoverEligible(null), false, "no primary harness means no failover");
 });
 
+test("#1598 review: the failover's wall-clock share is the configured envelope minus the primary's recorded spend", () => {
+  const primary = (spend: unknown): Record<string, unknown> => ({
+    native_loop_degraded: "request-error",
+    dispatched_call_count: 0,
+    tool_loop_telemetry: { usage: { elapsed_sec: spend } },
+  });
+  assert.equal(fallbackEvidenceWallClockRemainingSec(primary(120), 600), 480, "a primary that spent 120s of 600s leaves 480s");
+  assert.equal(fallbackEvidenceWallClockRemainingSec(primary(0), 600), 600, "an unspent primary leaves the full envelope");
+  assert.equal(fallbackEvidenceWallClockRemainingSec(primary(700), 600), 0, "an over-budget spend leaves nothing (never an extension)");
+  // Fail-closed: an artifact that does not report a finite non-negative
+  // spend is unknown, and unknown state never fires the failover.
+  assert.equal(fallbackEvidenceWallClockRemainingSec(null, 600), null, "no primary harness is unknown");
+  assert.equal(fallbackEvidenceWallClockRemainingSec({}, 600), null, "missing telemetry is unknown");
+  assert.equal(fallbackEvidenceWallClockRemainingSec({ tool_loop_telemetry: {} }, 600), null, "missing budget telemetry is unknown");
+  assert.equal(fallbackEvidenceWallClockRemainingSec(primary("0"), 600), null, "a non-numeric spend is unknown");
+  assert.equal(fallbackEvidenceWallClockRemainingSec(primary(-1), 600), null, "a negative spend is unknown");
+  assert.equal(fallbackEvidenceWallClockRemainingSec(primary(Number.NaN), 600), null, "a NaN spend is unknown");
+});
+
 test("#1598: a budget-exhausted primary stop never triggers the fallback harness", async () => {
   let primaryTurns = 0;
   const primary = await startMockServer((_req, _body, res) => {
@@ -500,6 +519,53 @@ test("#1598: a wall-clock-exhausted primary stop never triggers the fallback har
       const payload = JSON.parse(request.body) as { tools?: unknown[] };
       assert.ok(!Array.isArray(payload.tools) || payload.tools.length === 0, "the fallback lane must only run the corpus review, never a second tool loop");
     }
+  } finally {
+    await primary.close();
+    await fallback.close();
+    cleanup();
+  }
+});
+
+test("#1598 review: a near-exhausted loop wall-clock budget never restarts spend through failover", async () => {
+  // The failover draws from the SAME loop wall-clock envelope the primary
+  // exchange was configured with. With a 10s ceiling, the primary's
+  // transport-failure spend (however small) leaves less than the closing
+  // verdict's 30s reserve — so the failover must NOT fire, even though the
+  // primary degraded on a transport failure with zero dispatched calls
+  // (the exact #1585 shape that fires under the default 600s ceiling in
+  // the test above).
+  const { primary, fallback } = await failingPrimaryNativeFallback();
+  const fallbackBodies: string[] = [];
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "near-exhausted evidence\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: {
+        ...failoverInputs(primary.url, fallback.url),
+        "tool-loop-wall-clock-sec": "10",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+    assert.match(result.outputs.reviewMarkdown, /FALLBACK-VERDICT-1598/, "the fallback lane still reviews, on the corpus only");
+    const primaryHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(primaryHarness.native_loop_degraded, "request-error", "the primary degraded on a transport failure");
+    assert.equal(primaryHarness.dispatched_call_count, 0, "with zero dispatched calls — the trigger's own shape");
+    const telemetry = primaryHarness.tool_loop_telemetry as { usage?: { elapsed_sec?: unknown } };
+    const spend = Number(telemetry.usage?.elapsed_sec);
+    assert.ok(Number.isFinite(spend) && spend >= 0, `the primary records its wall-clock spend, got ${telemetry.usage?.elapsed_sec}`);
+    assert.ok(!existsSync(join(runDir, "tool-harness.fallback.json")), "a share too small for the verdict reserve must never start a second investigation");
+    for (const request of fallback.requests) {
+      fallbackBodies.push(request.body);
+      const payload = JSON.parse(request.body) as { tools?: unknown[] };
+      assert.ok(!Array.isArray(payload.tools) || payload.tools.length === 0, "the fallback lane must only run the corpus review, never a second tool loop");
+    }
+    assert.ok(fallbackBodies.length >= 1, "the fallback corpus review ran");
   } finally {
     await primary.close();
     await fallback.close();

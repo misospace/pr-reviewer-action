@@ -873,6 +873,97 @@ test("#1464 review: an exploratory round starting above the reserve gets a bound
   assert.equal((telemetry.budget as Record<string, unknown>).verdict_reserve_sec, 30);
 });
 
+test("#1598 review: the failover wall-clock cap narrows the fallback loop's envelope, reserve included", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // TOOL_LOOP_WALL_CLOCK_SEC 600 would put the exploration boundary at
+  // anchor+570, but the failover caller caps the envelope at the remaining
+  // 100s: the effective wall clock is 100 → reserve 30 → boundary anchor+70.
+  // The clock advances 10s per read and saturates at 80 — the exact #1464
+  // 100s shape — so the loop must stop at the reserve INSIDE the capped
+  // envelope instead of running to the 600s ceiling. The fallback tier's
+  // own lane keys (AI_FALLBACK_*) prove the capped loop is the failover one.
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const logs: string[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "fallback",
+      TOOL_LOOP_WALL_CLOCK_SEC: "600",
+      AI_FALLBACK_BASE_URL: "http://model.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_FALLBACK_API_KEY: "fallback-k",
+      AI_FALLBACK_API_FORMAT: "openai",
+    },
+    wallClockSecCap: 100,
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock = Math.min(clock + 10, 80);
+      return clock;
+    },
+    log: (line) => { logs.push(line); },
+  }));
+  assert.deepEqual(timeouts, [30, 30]);
+  assert.equal(result.stop_reason, STOP_WALL_CLOCK_RESERVE);
+  assert.equal(result.rounds, 1);
+  assert.equal(result.tier, "fallback");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.match(logs.join("\n"), /native_loop: verdict reserve 30s of 100s wall clock \(#1464\)/);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.fallback.json"), "utf8")) as Record<string, unknown>;
+  const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
+  assert.equal((telemetry.budget as Record<string, unknown>).verdict_reserve_sec, 30);
+});
+
+test("#1598 review: an unset wall-clock cap keeps the configured envelope byte-for-byte", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  // With no cap the fallback tier's envelope is the configured 600s: the
+  // clock saturating at 80 is far from the anchor+570 boundary, so the loop
+  // runs past round 1 (unlike the capped run above) and its verdict turn
+  // is granted the whole-deadline remaining, never a reserve clamp.
+  let clock = 0;
+  let transportCalls = 0;
+  const logs: string[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("fallback investigation complete"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "fallback",
+      TOOL_LOOP_WALL_CLOCK_SEC: "600",
+      AI_FALLBACK_BASE_URL: "http://model.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_FALLBACK_API_KEY: "fallback-k",
+      AI_FALLBACK_API_FORMAT: "openai",
+    },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, _timeout) => {
+      transportCalls += 1;
+      clock = Math.min(clock + 10, 80);
+      return scripted[transportCalls - 1];
+    },
+    timeFn: () => clock,
+    log: (line) => { logs.push(line); },
+  }));
+  assert.equal(transportCalls, 3);
+  assert.equal(result.stop_reason, "model-stopped");
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.match(logs.join("\n"), /native_loop: verdict reserve 150s of 600s wall clock \(#1464\)/);
+});
+
 test("#1464 review: #1459 shape — the last allowed round cannot push the remaining below the reserve and the verdict gets the full slice", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
@@ -2231,6 +2322,22 @@ test("#922: a declared window scales the loop's context limits per tier", () => 
   // The smart tier reads its own window, then the global one.
   assert.equal(loopContextLimits({ SMART_MODEL_CONTEXT_TOKENS: "400000", PRIMARY_MODEL_CONTEXT_TOKENS: "32768" }, "smart").maxConversationTokens, 100000);
   assert.equal(loopContextLimits({ MODEL_CONTEXT_TOKENS: "400000" }, "smart").maxConversationTokens, 100000);
+});
+
+test("#1598 review: the fallback tier's context limits read the FALLBACK window, not the primary one", () => {
+  // A smaller fallback window is enforced even when the primary declares a
+  // larger one — the fallback loop dials the fallback model.
+  assert.deepEqual(
+    loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000", FALLBACK_MODEL_CONTEXT_TOKENS: "262144" }, "fallback"),
+    { maxConversationTokens: 65536, corpusMaxBytes: 117964, maxResponseBytes: 15728 },
+  );
+  assert.equal(loopContextLimits({ FALLBACK_MODEL_CONTEXT_TOKENS: "1000000" }, "fallback").maxConversationTokens, 250000);
+  // Unset falls to the global key, then the v3.1 constants — and a primary
+  // window alone must NOT size the fallback tier.
+  assert.equal(loopContextLimits({ MODEL_CONTEXT_TOKENS: "400000" }, "fallback").maxConversationTokens, 100000);
+  assert.deepEqual(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000" }, "fallback"), { maxConversationTokens: 24000, corpusMaxBytes: 50000, maxResponseBytes: 12000 });
+  // The LOOP LIMITS still resolve on the primary profile's keys.
+  assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "2", TOOL_LOOP_WALL_CLOCK_SEC: "120" }, "fallback"), [2, 120, true]);
 });
 
 test("#922: explicit byte inputs override the window-derived limits", () => {
