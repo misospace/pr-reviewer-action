@@ -491,7 +491,7 @@ test("prepareStandardsContext marks the resolved file as the presence signal", (
 test("prepareToolHarness writes the pending marker only on empty/missing state", () => {
   const pending = prepareToolHarness("native_loop", null, null);
   assert.equal(dec(pending.get("tool-harness.md")), "Tool harness planning pending.\n");
-  assert.equal(dec(pending.get("tool-harness.json")), '{"mode":"off","planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');
+  assert.equal(dec(pending.get("tool-harness.json")), '{"mode":"off","planned_request_count":0,"executed_request_count":0,"dispatched_call_count":0,"tool_results":[]}\n');
 
   // Existing populated state is kept as-is (final findings replacement).
   const kept = prepareToolHarness("native_loop", enc("findings\n"), enc("{}\n"));
@@ -505,7 +505,7 @@ test("prepareToolHarness writes the pending marker only on empty/missing state",
   // Off mode truncates the markdown and always rewrites the JSON.
   const off = prepareToolHarness("off", enc("stale findings\n"), enc("stale\n"));
   assert.equal(dec(off.get("tool-harness.md")), "");
-  assert.equal(dec(off.get("tool-harness.json")), '{"mode":"off","planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');
+  assert.equal(dec(off.get("tool-harness.json")), '{"mode":"off","planned_request_count":0,"executed_request_count":0,"dispatched_call_count":0,"tool_results":[]}\n');
 });
 
 test("gateFeatureForForks cannot widen for a fork PR", () => {

@@ -4416,10 +4416,16 @@ async function producePrimaryReview(input: ReviewCallInput & {
  *
  * The counter is the DISPATCHED one (successful OR failed), never
  * `executed_request_count` — that field counts only the successful
- * executions, so a primary call that FAILED would read as zero executed
- * calls and the failover would restart an investigation the primary had
+ * executions, so a primary call that FAILED reads as zero executed calls,
+ * and a trigger built on it could restart an investigation the primary had
  * already paid for (#1598: "no restarting a partially executed primary
  * investigation"; "don't repeat already-paid investigation").
+ *
+ * Today the degraded flag is written only where the model issued no call at
+ * all, so the two conditions coincide in production; reading the DISPATCHED
+ * counter makes the spend guard state the contract instead of inferring it
+ * from a sibling field, and it stays correct if a future loop path can
+ * degrade AFTER a call.
  *
  * Fail-closed: an artifact that does not report the dispatched count is
  * UNKNOWN, and unknown state never fires the trigger — the run keeps

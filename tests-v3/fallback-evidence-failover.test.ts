@@ -322,12 +322,17 @@ test("#1598: partial primary evidence (executed calls with a request-error stop)
   }
 });
 
-test("#1598: a FAILED primary tool call followed by a transport error never triggers the fallback harness", async () => {
+test("#1598: a FAILED primary tool call followed by a transport error is recorded as a dispatched call and never triggers the fallback harness", async () => {
   // The spend signal is the DISPATCHED count, not the success-only one: the
   // primary's only call FAILED (so `executed_request_count` stays 0), and the
   // run then died on a transport error. A trigger that read the success-only
-  // count would read this as "zero executed calls" and restart an
-  // investigation the primary had already paid for.
+  // count would read this as "zero executed calls".
+  //
+  // The guard that blocks the failover here is the DEGRADED-flag check (the
+  // model issued a call, so the loop did not degrade) — the production
+  // harness cannot emit "degraded AND dispatched a call". The count guard
+  // itself is pinned directly by the predicate test below, which injects
+  // that exact shape.
   let primaryTurns = 0;
   const primary = await startMockServer((_req, _body, res) => {
     primaryTurns += 1;
@@ -364,6 +369,8 @@ test("#1598: a FAILED primary tool call followed by a transport error never trig
     assert.equal(primaryHarness.stop_reason, "request-error");
     assert.equal(primaryHarness.executed_request_count, 0, "the failed call is not a successful execution");
     assert.equal(primaryHarness.dispatched_call_count, 1, "the failed call was still dispatched — and paid for");
+    assert.equal(primaryHarness.native_loop_degraded, undefined, "the loop issued a call, so it did not degrade");
+    assert.equal(fallbackEvidenceFailoverEligible(primaryHarness), false, "a paid-for primary call is never eligible for the failover");
     assert.ok(!existsSync(join(runDir, "tool-harness.fallback.json")), "a paid-for primary call must never be followed by a second investigation on the fallback lane");
     for (const body of fallbackBodies) {
       const payload = JSON.parse(body) as { tools?: unknown[] };

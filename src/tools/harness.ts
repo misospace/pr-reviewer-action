@@ -4362,8 +4362,10 @@ export function summarizeLoopOutcome(
   result.executed_request_count = executedCount;
   result.tool_results = toolResults;
   // #1598: the DISPATCHED count (successful or failed) — the spend signal a
-  // consumer reads to learn whether the loop already paid for a call.
-  result.dispatched_call_count = Number(result.dispatched_call_count ?? 0) + outcome.executed.length;
+  // consumer reads to learn whether the loop already paid for a call. This
+  // function folds ONE loop's outcome, so it ASSIGNS the count (the #1145
+  // repair continuation, which runs later, adds its own calls on top).
+  result.dispatched_call_count = outcome.executed.length;
 
   if (outcome.finalText) {
     mdLines.push("## Evidence summary (from the tool loop, untrusted)");
