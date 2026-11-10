@@ -2150,6 +2150,15 @@ export type HarnessResult = Record<string, unknown> & {
   planning_error?: string;
   error?: string;
   stop_reason?: string;
+  /** #1597: the distinct execution partitions written by every loop path
+   * (issued / attempted-executed / ok-subset / refused / deduplicated),
+   * under issued = executed + refused + deduplicated and
+   * successful <= executed. */
+  planned_request_count?: number;
+  executed_request_count?: number;
+  successful_request_count?: number;
+  refused_request_count?: number;
+  deduplicated_request_count?: number;
   tool_budget_tier?: string;
   tool_request_budget?: number;
   tool_budget_source?: string;

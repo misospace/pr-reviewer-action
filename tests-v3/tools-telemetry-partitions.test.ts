@@ -292,3 +292,17 @@ test("#1597: toolBudgetTelemetryOf lifts every partition of the full artifact", 
 test("#1597: toolBudgetTelemetryOf(null) is an empty lift", () => {
   assert.deepEqual(toolBudgetTelemetryOf(null), {});
 });
+
+test("#1597: a marker built without partitions keeps its pre-#1597 bytes", () => {
+  const legacy = buildRunMetadataMarker({
+    headSha: "h",
+    baseSha: "b",
+    reviewResult: "clean",
+    toolBudget: 40,
+    toolCalls: 19,
+    toolRounds: 20,
+    toolStopReason: "tool-call-budget-exhausted",
+  });
+  assert.ok(legacy.includes('"tool_calls":19'), "the legacy single-count marker keeps its shape");
+  assert.ok(!legacy.includes("tool_calls_"), "a partition-less artifact gains no #1597 marker keys");
+});

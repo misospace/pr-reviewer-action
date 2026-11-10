@@ -4410,7 +4410,7 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
     const forkGate = gateForkForForks(env, forkFlag);
     if (forkGate !== null) {
       ws.write("tool-harness.smart.md", "Smart tool harness skipped for a cross-repository pull request.\n");
-      ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","skipped":true,"skip_reason":"fork-pr","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');
+      ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","skipped":true,"skip_reason":"fork-pr","rounds":0,"planned_request_count":0,"executed_request_count":0,"successful_request_count":0,"refused_request_count":0,"deduplicated_request_count":0,"tool_results":[]}\n');
       log("Smart tool harness skipped for a cross-repository pull request.");
     } else {
       // Build the smart-tier corpus BEFORE the harness: the native loop
@@ -4436,7 +4436,7 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
         await runToolHarnessPhase(ws, env, input.workspace, log, input.signal, undefined, input.ghApi);
       } catch (cause) {
         errorLog(`smart tool harness failed: ${cause instanceof Error ? cause.message : String(cause)}`);
-        ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","error":"execution failed","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');
+        ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","error":"execution failed","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"successful_request_count":0,"refused_request_count":0,"deduplicated_request_count":0,"tool_results":[]}\n');
       } finally {
         for (const [key, value] of savedSmartEnv) {
           if (value === undefined) delete env[key];
