@@ -1,0 +1,143 @@
+{
+  "repos": [
+    {
+      "full_name": "misospace/pr-reviewer-action",
+      "pulls": [
+        {
+          "number": 1579,
+          "head_sha": "a15790123456789abcdef0123456789abcdef012",
+          "updated_at": "2026-10-20T12:00:00Z",
+          "reviews": [
+            {
+              "id": 101,
+              "user": {
+                "login": "myoshia[bot]"
+              },
+              "state": "APPROVED",
+              "commit_id": "a15790123456789abcdef0123456789abcdef012",
+              "submitted_at": "2026-10-20T11:55:00Z",
+              "html_url": "https://github.com/misospace/pr-reviewer-action/pull/1579#pullrequestreview-101",
+              "body": "<!-- ai-pr-reviewer -->\n<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"a15790123456789abcdef0123456789abcdef012\",\"base_sha\":\"feed00010123456789abcdef0123456789abcdef\",\"review_result\":\"clean\",\"required_checks\":\"complete\",\"review_route\":\"primary\"} -->\n<!-- ai-pr-review-sha:a15790123456789abcdef0123456789abcdef012 -->\n**AI PR Review: approved**\n\n_Analysis engine: claude-code \u00b7 pr-reviewer-action 3.4.1_\n\nNo open findings."
+            },
+            {
+              "id": 102,
+              "user": {
+                "login": "joryirving"
+              },
+              "state": "COMMENTED",
+              "commit_id": "a15790123456789abcdef0123456789abcdef012",
+              "submitted_at": "2026-10-20T12:10:00Z",
+              "html_url": "https://github.com/misospace/pr-reviewer-action/pull/1579#pullrequestreview-102",
+              "body": "Human follow-up question about the gate."
+            }
+          ],
+          "comments": []
+        },
+        {
+          "number": 1580,
+          "head_sha": "b15800123456789abcdef0123456789abcdef012",
+          "updated_at": "2026-10-25T09:30:00Z",
+          "reviews": [
+            {
+              "id": 201,
+              "user": {
+                "login": "myoshia[bot]"
+              },
+              "state": "APPROVED",
+              "commit_id": "b15800123456789abcdef0123456789abcdef012",
+              "submitted_at": "2026-10-25T09:20:00Z",
+              "html_url": "https://github.com/misospace/pr-reviewer-action/pull/1580#pullrequestreview-201",
+              "body": "<!-- ai-pr-reviewer -->\n<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"b15800123456789abcdef0123456789abcdef012\",\"base_sha\":\"feed00010123456789abcdef0123456789abcdef\",\"review_result\":\"partial\",\"coverage\":\"partial\",\"incomplete_reason\":\"execution\",\"tool_stop_reason\":\"max-rounds\",\"review_route\":\"primary\"} -->\n<!-- ai-pr-review-sha:b15800123456789abcdef0123456789abcdef012 -->\n**AI PR Review: approve**\n\n_Analysis engine: claude-code \u00b7 pr-reviewer-action 3.5.0_\n\n_Coverage incomplete: the tool loop stopped on budget._"
+            }
+          ],
+          "comments": [
+            {
+              "id": 202,
+              "user": {
+                "login": "myoshia[bot]"
+              },
+              "created_at": "2026-10-25T09:40:00Z",
+              "html_url": "https://github.com/misospace/pr-reviewer-action/pull/1580#issuecomment-202",
+              "body": "Note: a successful check run covered this head. No marker here."
+            }
+          ]
+        },
+        {
+          "number": 1585,
+          "head_sha": "c1585b0123456789abcdef0123456789abcdef01",
+          "updated_at": "2026-11-01T16:45:00Z",
+          "reviews": [],
+          "comments": [
+            {
+              "id": 301,
+              "user": {
+                "login": "myoshia[bot]"
+              },
+              "created_at": "2026-10-30T10:00:00Z",
+              "html_url": "https://github.com/misospace/pr-reviewer-action/pull/1585#issuecomment-301",
+              "body": "<!-- ai-pr-reviewer -->\n<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"c1585a0123456789abcdef0123456789abcdef01\",\"base_sha\":\"feed00010123456789abcdef0123456789abcdef\",\"review_result\":\"clean\",\"required_checks\":\"complete\"} -->\n<!-- ai-pr-review-sha:c1585a0123456789abcdef0123456789abcdef01 -->\n**AI PR Review: approved**\n\n_Analysis engine: claude-code \u00b7 pr-reviewer-action 3.5.0_\n\nVerdict: approve. All checks green."
+            },
+            {
+              "id": 302,
+              "user": {
+                "login": "myoshia[bot]"
+              },
+              "created_at": "2026-11-01T16:30:00Z",
+              "html_url": "https://github.com/misospace/pr-reviewer-action/pull/1585#issuecomment-302",
+              "body": "<!-- ai-pr-reviewer -->\n<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"c1585b0123456789abcdef0123456789abcdef01\",\"base_sha\":\"feed00010123456789abcdef0123456789abcdef\",\"review_result\":\"clean\",\"required_checks\":\"complete\"} -->\n<!-- ai-pr-review-sha:c1585b0123456789abcdef0123456789abcdef01 -->\n**AI PR Review: approved**\n\n_Analysis engine: claude-code \u00b7 pr-reviewer-action 3.5.0_\n\nVerdict: approve. All checks green."
+            }
+          ]
+        },
+        {
+          "number": 1586,
+          "head_sha": "d1586n0123456789abcdef0123456789abcdef01",
+          "updated_at": "2026-11-05T08:15:00Z",
+          "reviews": [
+            {
+              "id": 401,
+              "user": {
+                "login": "myoshia[bot]"
+              },
+              "state": "APPROVED",
+              "commit_id": "d1586o0123456789abcdef0123456789abcdef01",
+              "submitted_at": "2026-11-04T14:00:00Z",
+              "html_url": "https://github.com/misospace/pr-reviewer-action/pull/1586#pullrequestreview-401",
+              "body": "<!-- ai-pr-reviewer -->\n<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"d1586o0123456789abcdef0123456789abcdef01\",\"base_sha\":\"feed00010123456789abcdef0123456789abcdef\",\"review_result\":\"clean\",\"required_checks\":\"complete\",\"review_route\":\"primary\"} -->\n<!-- ai-pr-review-sha:d1586o0123456789abcdef0123456789abcdef01 -->\n**AI PR Review: approved**\n\n_Analysis engine: claude-code \u00b7 pr-reviewer-action 3.5.0_"
+            },
+            {
+              "id": 402,
+              "user": {
+                "login": "myoshia[bot]"
+              },
+              "state": "COMMENTED",
+              "commit_id": "d1586n0123456789abcdef0123456789abcdef01",
+              "submitted_at": "2026-11-05T08:10:00Z",
+              "html_url": "https://github.com/misospace/pr-reviewer-action/pull/1586#pullrequestreview-402",
+              "body": "<!-- ai-pr-reviewer -->\n<!-- ai-pr-reviewer:{\"version\":1,\"head_sha\":\"d1586n0123456789abcdef0123456789abcdef01\",\"base_sha\":\"feed00010123456789abcdef0123456789abcdef\",\"review_result\":\"findings\",\"required_checks\":\"complete\",\"review_route\":\"escalated\"} -->\n<!-- ai-pr-review-sha:d1586n0123456789abcdef0123456789abcdef01 -->\n**AI PR Review: findings**\n\n_Analysis engine: claude-code \u00b7 pr-reviewer-action 3.5.0_\n\nTwo open findings (non-blocking)."
+            }
+          ],
+          "comments": []
+        }
+      ]
+    }
+  ],
+  "attestations": [
+    {
+      "conclusion": "approved",
+      "reason_code": "native_gate",
+      "head_sha": "c1585b0123456789abcdef0123456789abcdef01"
+    }
+  ],
+  "adjudications": [
+    {
+      "pr": 1579,
+      "head_sha": "a15790123456789abcdef0123456789abcdef012",
+      "label": "missed_blocker"
+    },
+    {
+      "pr": 1586,
+      "head_sha": "d1586n0123456789abcdef0123456789abcdef01",
+      "label": "false_blocker"
+    }
+  ]
+}
