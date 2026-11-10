@@ -7,6 +7,7 @@
  * with a visible footer. */
 
 import { redactText } from "../context/redact.js";
+import { escapeControlChars, safeFence } from "../context/fence.js";
 import type { Claim, ClaimsArtifact } from "./types.js";
 
 export const CLAIMS_TITLE = "Claims to Falsify";
@@ -27,44 +28,6 @@ export const CLAIMS_FRAMING =
   "- In review_markdown, state for each claim whether it held and for how many items (for " +
   'example "held: 7/7 items" or "violated: 1 of 5 items"). A claim you could not check is ' +
   "unverified, not held.";
-
-const CONTROL_RE = /[\x00-\x1f\x7f]/g;
-const BACKTICK_RUN_RE = /`+/g;
-
-function escapeControlChars(text: string): string {
-  return text.replace(CONTROL_RE, (ch) => {
-    const code = ch.codePointAt(0) ?? 0;
-    if (code === 0x0a) return "\\n";
-    if (code === 0x09) return "\\t";
-    if (code === 0x0d) return "\\r";
-    return `\\u${code.toString(16).padStart(4, "0")}`;
-  });
-}
-
-function longestBacktickRun(text: string): number {
-  let longest = 0;
-  for (const match of text.matchAll(BACKTICK_RUN_RE)) {
-    if (match[0].length > longest) longest = match[0].length;
-  }
-  return longest;
-}
-
-const MAX_FENCE = 12;
-
-/** `[neutralizedContent, fence]`: `fence` is backticks strictly longer than
- * any backtick run in `content`. A hostile run of `MAX_FENCE` or more
- * backticks is neutralized (reduced to 10) so the emitted fence can never be
- * matched by the content. */
-function safeFence(content: string): [string, string] {
-  let longest = longestBacktickRun(content);
-  let body = content;
-  if (longest + 1 > MAX_FENCE) {
-    body = body.replace(BACKTICK_RUN_RE, (run) => (run.length >= 11 ? "`".repeat(10) : run));
-    longest = Math.min(longest, 10);
-  }
-  const fence = "`".repeat(Math.max(longest + 1, 4));
-  return [body, fence];
-}
 
 function renderValue(value: string): string {
   return escapeControlChars(redactText(value));
