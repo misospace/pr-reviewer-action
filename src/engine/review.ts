@@ -3774,7 +3774,7 @@ function gateForkForForks(env: StageEnv, forkFlag: string): { md: string; json: 
   if (forkFlag === "true" && (env.TOOL_ENABLE_FOR_FORKS ?? "false").toLowerCase() !== "true") {
     return {
       md: "Tool harness was skipped for a cross-repository pull request. Set tool_enable_for_forks=true to override.\n",
-      json: '{"mode":"native_loop","planned_request_count":0,"executed_request_count":0,"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}\n',
+      json: '{"mode":"native_loop","planned_request_count":0,"executed_request_count":0,"dispatched_call_count":0,"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}\n',
     };
   }
   return null;
@@ -4405,6 +4405,34 @@ async function producePrimaryReview(input: ReviewCallInput & {
   return noticeResult(ws, outcome);
 }
 
+/** #1598/#1585: the evidence-failover trigger's guard, as a pure predicate.
+ *
+ * The failover runs a FRESH investigation on the fallback lane, so it may
+ * only fire when the primary lane paid for NO investigation at all:
+ *
+ * - the primary native loop degraded on a transport failure
+ *   (`native_loop_degraded === "request-error"`), and
+ * - it dispatched ZERO tool calls (`dispatched_call_count === 0`).
+ *
+ * The counter is the DISPATCHED one (successful OR failed), never
+ * `executed_request_count` — that field counts only the successful
+ * executions, so a primary call that FAILED would read as zero executed
+ * calls and the failover would restart an investigation the primary had
+ * already paid for (#1598: "no restarting a partially executed primary
+ * investigation"; "don't repeat already-paid investigation").
+ *
+ * Fail-closed: an artifact that does not report the dispatched count is
+ * UNKNOWN, and unknown state never fires the trigger — the run keeps
+ * today's corpus-only fallback review instead of spending on a second
+ * investigation. */
+export function fallbackEvidenceFailoverEligible(primaryHarness: Record<string, unknown> | null): boolean {
+  if (primaryHarness === null) return false;
+  if (primaryHarness.native_loop_degraded !== "request-error") return false;
+  const dispatched = primaryHarness.dispatched_call_count;
+  if (typeof dispatched !== "number" || !Number.isFinite(dispatched)) return false;
+  return dispatched === 0;
+}
+
 /** #1598/#1585: the fallback tier's evidence-failover harness phase. The
  * trigger is deliberately narrow — the primary native loop must have degraded
  * on `request-error` with ZERO executed investigation calls, the fork gate
@@ -4429,8 +4457,7 @@ async function runFallbackEvidenceHarness(input: {
 }): Promise<boolean> {
   const toolMode = (input.env.TOOL_MODE ?? "off").toLowerCase();
   if (toolMode !== "native_loop") return false;
-  if (input.primaryHarness?.native_loop_degraded !== "request-error") return false;
-  if (Number(input.primaryHarness.executed_request_count ?? 0) !== 0) return false;
+  if (!fallbackEvidenceFailoverEligible(input.primaryHarness)) return false;
   // The fork privilege separation owns this decision (docs/fork-review.md):
   // a gated run never gains a second tool loop through failover.
   if (gateForkForForks(input.env, input.env.IS_FORK_PR ?? "false") !== null) return false;
@@ -4452,7 +4479,7 @@ async function runFallbackEvidenceHarness(input: {
     // The synthetic keeps the degraded fail-closed shape regardless of the
     // thrown cause (the cause distinction rides the log line above); a
     // degraded fallback artifact preserves the #978 no-evidence eligibility.
-    input.ws.write("tool-harness.fallback.json", '{"tier":"fallback","mode":"native_loop","error":"execution failed","native_loop_degraded":"request-error","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');
+    input.ws.write("tool-harness.fallback.json", '{"tier":"fallback","mode":"native_loop","error":"execution failed","native_loop_degraded":"request-error","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"dispatched_call_count":0,"tool_results":[]}\n');
   } finally {
     if (savedTier === undefined) delete input.env.TOOL_HARNESS_TIER;
     else input.env.TOOL_HARNESS_TIER = savedTier;
@@ -4503,7 +4530,7 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
     const forkGate = gateForkForForks(env, forkFlag);
     if (forkGate !== null) {
       ws.write("tool-harness.smart.md", "Smart tool harness skipped for a cross-repository pull request.\n");
-      ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","skipped":true,"skip_reason":"fork-pr","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');
+      ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","skipped":true,"skip_reason":"fork-pr","rounds":0,"planned_request_count":0,"executed_request_count":0,"dispatched_call_count":0,"tool_results":[]}\n');
       log("Smart tool harness skipped for a cross-repository pull request.");
     } else {
       // Build the smart-tier corpus BEFORE the harness: the native loop
@@ -4529,7 +4556,7 @@ async function runSmartReview(input: SmartReviewInput): Promise<{ ok: boolean }>
         await runToolHarnessPhase(ws, env, input.workspace, log, input.signal, undefined, input.ghApi);
       } catch (cause) {
         errorLog(`smart tool harness failed: ${cause instanceof Error ? cause.message : String(cause)}`);
-        ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","error":"execution failed","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n');
+        ws.write("tool-harness.smart.json", '{"tier":"smart","mode":"native_loop","error":"execution failed","stop_reason":"request-error","rounds":0,"planned_request_count":0,"executed_request_count":0,"dispatched_call_count":0,"tool_results":[]}\n');
       } finally {
         for (const [key, value] of savedSmartEnv) {
           if (value === undefined) delete env[key];

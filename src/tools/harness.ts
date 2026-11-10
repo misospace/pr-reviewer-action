@@ -2167,6 +2167,17 @@ export type HarnessResult = Record<string, unknown> & {
   planning_error?: string;
   error?: string;
   stop_reason?: string;
+  /** #1598: EVERY tool call the loop DISPATCHED to an executor — successful
+   * OR failed. `executed_request_count` counts only the successful
+   * executions, so it cannot answer "did the run already pay for a call?":
+   * a failed call was paid for too. The three counters together describe one
+   * loop: `planned_request_count` (what the model asked for),
+   * `dispatched_call_count` (what was actually sent to an executor — the
+   * spend signal), `executed_request_count` (what succeeded). Consumers that
+   * gate on spend (the #1598 fallback-evidence failover trigger) read the
+   * DISPATCHED counter, never the success-only one. snake_case: persisted
+   * verbatim in the harness artifact. */
+  dispatched_call_count?: number;
   tool_budget_tier?: string;
   tool_request_budget?: number;
   tool_budget_source?: string;
@@ -3488,6 +3499,8 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   }));
   input.result.tool_results = outcome.executed.map((call) => maskKnownSecretsDeep(call.result, harnessSecrets));
   input.result.executed_request_count = outcome.executed.filter((c) => c.result.status === "ok").length;
+  // #1598: the DISPATCHED count (successful or failed) — the spend signal.
+  input.result.dispatched_call_count = outcome.executed.length;
   input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
   input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
   input.result.native_loop_error = outcome.error
@@ -3504,6 +3517,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.native_loop_degraded = outcome.stopReason;
     input.result.rounds = outcome.rounds;
     input.result.stop_reason = outcome.stopReason;
+    // #1598: a degraded run dispatched no call at all (the model issued none),
+    // so the spend counter is zero — recorded explicitly so a consumer can
+    // read ONE counter instead of inferring the count from the degraded flag.
+    input.result.dispatched_call_count = outcome.executed.length;
     if (outcome.error) input.result.native_loop_error = maskKnownSecrets(outcome.error, harnessSecrets);
     input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
     input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
@@ -4097,6 +4114,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             input.result.executed_request_count =
               Number(input.result.executed_request_count ?? 0) +
               repair.executed.filter((call) => call.result.status === "ok").length;
+            // #1598: the repair round's DISPATCHED calls count too (a failed
+            // repair read was paid for like any other call).
+            input.result.dispatched_call_count =
+              Number(input.result.dispatched_call_count ?? 0) + repair.executed.length;
             input.result.planned_request_count =
               Number(input.result.planned_request_count ?? 0) + repair.toolCallsIssued;
 
@@ -4340,6 +4361,9 @@ export function summarizeLoopOutcome(
   }
   result.executed_request_count = executedCount;
   result.tool_results = toolResults;
+  // #1598: the DISPATCHED count (successful or failed) — the spend signal a
+  // consumer reads to learn whether the loop already paid for a call.
+  result.dispatched_call_count = Number(result.dispatched_call_count ?? 0) + outcome.executed.length;
 
   if (outcome.finalText) {
     mdLines.push("## Evidence summary (from the tool loop, untrusted)");
@@ -4479,6 +4503,7 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     mode: "off",
     planned_request_count: 0,
     executed_request_count: 0,
+    dispatched_call_count: 0,
     tool_results: [],
     tool_budget_tier: maxRequests.route,
     tool_request_budget:

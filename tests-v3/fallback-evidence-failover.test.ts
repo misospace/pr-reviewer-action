@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { runReview } from "../src/run/review.js";
+import { fallbackEvidenceFailoverEligible } from "../src/engine/review.js";
 import type { PlatformReadAdapter } from "../src/platform/types.js";
 import { startMockServer, sseResponse } from "./helpers.js";
 
@@ -184,6 +185,7 @@ test("#1585: a primary transport failure with zero executed calls runs the fallb
     const primaryHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
     assert.equal(primaryHarness.native_loop_degraded, "request-error");
     assert.equal(primaryHarness.executed_request_count, 0);
+    assert.equal(primaryHarness.dispatched_call_count, 0, "the degraded primary dispatched no call at all");
 
     // The fallback harness ran the investigation on the FALLBACK lane.
     const fallbackHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.fallback.json"), "utf8")) as Record<string, unknown>;
@@ -318,6 +320,94 @@ test("#1598: partial primary evidence (executed calls with a request-error stop)
     await fallback.close();
     cleanup();
   }
+});
+
+test("#1598: a FAILED primary tool call followed by a transport error never triggers the fallback harness", async () => {
+  // The spend signal is the DISPATCHED count, not the success-only one: the
+  // primary's only call FAILED (so `executed_request_count` stays 0), and the
+  // run then died on a transport error. A trigger that read the success-only
+  // count would read this as "zero executed calls" and restart an
+  // investigation the primary had already paid for.
+  let primaryTurns = 0;
+  const primary = await startMockServer((_req, _body, res) => {
+    primaryTurns += 1;
+    res.setHeader("Content-Type", "application/json");
+    if (primaryTurns === 1) {
+      // A read of a file that does not exist: the executor fails it.
+      res.end(JSON.stringify(openAiToolCall("t1", "read_file", '{"path":"missing-file.txt"}')));
+      return;
+    }
+    res.statusCode = 429;
+    res.end('{"error":{"message":"rate limited"}}');
+  });
+  const fallbackBodies: string[] = [];
+  const fallback = await startMockServer((_req, body, res) => {
+    fallbackBodies.push(String(body));
+    res.setHeader("Content-Type", "application/json");
+    res.end(verdictBody(baseVerdict({ review_markdown: "FALLBACK-CORPUS-1598.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  try {
+    writeFileSync(join(runDir, "README.md"), "failed-call evidence\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false" },
+      inputs: failoverInputs(primary.url, fallback.url),
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      quiet: true,
+    });
+    assert.match(result.outputs.reviewMarkdown, /FALLBACK-CORPUS-1598/);
+    const primaryHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(primaryHarness.stop_reason, "request-error");
+    assert.equal(primaryHarness.executed_request_count, 0, "the failed call is not a successful execution");
+    assert.equal(primaryHarness.dispatched_call_count, 1, "the failed call was still dispatched — and paid for");
+    assert.ok(!existsSync(join(runDir, "tool-harness.fallback.json")), "a paid-for primary call must never be followed by a second investigation on the fallback lane");
+    for (const body of fallbackBodies) {
+      const payload = JSON.parse(body) as { tools?: unknown[] };
+      assert.ok(!Array.isArray(payload.tools) || payload.tools.length === 0, "the fallback lane must only run the corpus review, never a second tool loop");
+    }
+  } finally {
+    await primary.close();
+    await fallback.close();
+    cleanup();
+  }
+});
+
+test("#1598: the failover trigger needs the primary's DISPATCHED call count, not its successful one", async () => {
+  // The guard is the trigger's whole contract, so pin it directly: a
+  // transport-degraded primary that dispatched a call (the successful-execution
+  // count reads 0) is NOT eligible, an artifact that does not report the
+  // dispatched count is unknown (never eligible), and only a transport-degraded
+  // primary with zero dispatched calls is.
+  assert.equal(
+    fallbackEvidenceFailoverEligible({ native_loop_degraded: "request-error", dispatched_call_count: 0, executed_request_count: 0 }),
+    true,
+    "a transport failure with zero dispatched calls is the #1585 failover shape",
+  );
+  assert.equal(
+    fallbackEvidenceFailoverEligible({ native_loop_degraded: "request-error", dispatched_call_count: 1, executed_request_count: 0 }),
+    false,
+    "a dispatched-but-failed call was paid for — the failover must not restart the investigation",
+  );
+  assert.equal(
+    fallbackEvidenceFailoverEligible({ native_loop_degraded: "request-error", executed_request_count: 0 }),
+    false,
+    "an artifact without the dispatched count is unknown — fail closed",
+  );
+  assert.equal(
+    fallbackEvidenceFailoverEligible({ native_loop_degraded: "wall-clock-exceeded", dispatched_call_count: 0 }),
+    false,
+    "a deadline stop is not a transport failure",
+  );
+  assert.equal(
+    fallbackEvidenceFailoverEligible({ native_loop_degraded: "model-stopped", dispatched_call_count: 0 }),
+    false,
+    "an ordinary model stop is not a transport failure",
+  );
+  assert.equal(fallbackEvidenceFailoverEligible(null), false, "no primary harness means no failover");
 });
 
 test("#1598: a budget-exhausted primary stop never triggers the fallback harness", async () => {
