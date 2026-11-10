@@ -224,6 +224,17 @@ export interface PublishResult {
   messages: string[];
   error?: string;
   outcomes?: string;
+  /** #1576: the verdict-bearing native review submission, present only when
+   * one was ATTEMPTED (only `review_verdict`/`review_blockers` modes on a
+   * platform with a native review surface submit a verdict event; sticky
+   * comments and inline-findings COMMENT reviews carry no verdict). This is
+   * the record the trusted-review attestation consumes: an advisory
+   * publication and a native approval must be distinguishable without
+   * parsing human-readable messages. `fellBack` marks the body-only
+   * plain-review fallback (#1249): the event landed, but no longer bound to
+   * a commit_id, so head binding rests on the pre-submission exact-head
+   * guard plus the consumer's own head comparison. */
+  native?: { event: NativeReviewEvent; submitted: boolean; fellBack?: true };
 }
 
 const VERDICT_PREFIXES: Record<"approve" | "request_changes", string> = {
@@ -1899,6 +1910,10 @@ export async function publishReview(
   // cleanup retirement path below.
   const trustedOwnerForRun = createRunTrustedOwnerResolver(api);
   let nativeReviewId: number | string | undefined;
+  // #1576: the verdict-bearing native submission record for this run
+  // (attempted event + whether it landed). Absent when no verdict-bearing
+  // submission was attempted; the attestation reads it through the outcome.
+  let nativeSubmission: PublishResult["native"];
   // #1093: the sticky summary comment as the replacement checkpoint when
   // review_comment mode publishes no inline findings review (a clean re-review
   // must not emit an empty native "Inline findings" review just to anchor
@@ -2767,15 +2782,33 @@ export async function publishReview(
           // this run derived for them was ever published.
           outcomes = undefined;
         }
-        if (!submitted.ok) {
-          if (event === "APPROVE") {
-            for (const line of APPROVAL_FAILURE_GUIDANCE) messages.push(line);
-            return { status: "failed", messages, error: `native approval failed for #${input.prNumber}` };
-          }
-          return { status: "failed", messages, error: `native review submission failed: ${submitted.error ?? "unknown error"}` };
+      if (!submitted.ok) {
+        // #1576: the attestation must distinguish "the native APPROVE
+        // submission itself failed" (unavailable) from other publication
+        // failures — the attempted event rides the result either way.
+        if (event === "APPROVE") {
+          for (const line of APPROVAL_FAILURE_GUIDANCE) messages.push(line);
+          return {
+            status: "failed",
+            messages,
+            error: `native approval failed for #${input.prNumber}`,
+            native: { event, submitted: false, ...(submitted.fellBack ? { fellBack: true as const } : {}) },
+          };
         }
-        nativeReviewId = submitted.reviewId;
-        messages.push(`Submitted native review (${event}) with ${submitted.inlineCount} inline comment(s)`);
+        return {
+          status: "failed",
+          messages,
+          error: `native review submission failed: ${submitted.error ?? "unknown error"}`,
+          native: { event, submitted: false, ...(submitted.fellBack ? { fellBack: true as const } : {}) },
+        };
+      }
+      nativeReviewId = submitted.reviewId;
+      // #1576: a verdict-bearing native review landed — the ONLY event that
+      // can certify the `approved` attestation downstream. The body-only
+      // fallback (#1249) is disclosed, never hidden, because it landed
+      // without a commit binding.
+      nativeSubmission = { event, submitted: true, ...(submitted.fellBack ? { fellBack: true as const } : {}) };
+      messages.push(`Submitted native review (${event}) with ${submitted.inlineCount} inline comment(s)`);
       }
     }
   } catch (error) {
@@ -2961,5 +2994,11 @@ export async function publishReview(
   // path above (failed submission, #588 managed record) removed the artifact,
   // and the summary must not survive its export.
   if (outcomes !== undefined && outcomesSummary !== undefined) messages.push(outcomesSummary);
-  return { status: "published", messages, ...(outcomes !== undefined ? { outcomes } : {}) };
+  return {
+    status: "published",
+    messages,
+    ...(outcomes !== undefined ? { outcomes } : {}),
+    // #1576: the verdict-bearing native submission record, when one landed.
+    ...(nativeSubmission !== undefined ? { native: nativeSubmission } : {}),
+  };
 }

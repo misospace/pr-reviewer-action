@@ -822,6 +822,10 @@ export function publishInputFromEnv(env: NodeJS.ProcessEnv, platform: string): P
 export interface PublishOutcome {
   exitCode: number;
   status: PublishResult["status"];
+  /** #1576: the verdict-bearing native submission record from the publish
+   * result (see `PublishResult.native`), relayed so the Action host can
+   * decide the trusted-review attestation without message parsing. */
+  native?: PublishResult["native"];
 }
 
 /** Runs one publication, persists the #1027 findings ledger, relays the
@@ -865,7 +869,11 @@ export async function publishWithOutcome(input: PublishInput, seam: ReturnType<t
   }
   for (const message of result.messages) process.stdout.write(`${message}\n`);
   if (result.error) process.stderr.write(`${result.error}\n`);
-  return { exitCode: result.status === "failed" ? 1 : 0, status: result.status };
+  return {
+    exitCode: result.status === "failed" ? 1 : 0,
+    status: result.status,
+    ...(result.native !== undefined ? { native: result.native } : {}),
+  };
 }
 
 /** Publish and relay messages; fail-soft (1 only on a failed publication). */

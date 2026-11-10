@@ -58,6 +58,32 @@ The metadata marker's `review-result` output distinguishes four states, in prece
 
 The published review surfaces the same inputs: open findings and any coverage gap render at the top of the review body, and an override note (`_Verdict set from open findings (verdict-policy=strict): ..._`) explains any mismatch with the model's own verdict.
 
+## Trusted-review attestation (#1576)
+
+A green AI workflow and an `approve` in model prose are not a trusted approval. A run whose primary provider returned HTTP 429, whose fallback produced an advisory `approve` with zero tool-loop investigation, and whose `review-result` is `partial` can still exit 0 (#1565). The `review-attestation` output is the one machine-readable conclusion per run, so downstream merge automation never has to guess what green meant.
+
+The action writes a `review-attestation` step output: single-line JSON with `conclusion`, `reason_code`, and `head_sha`. The same object rides inside the `review-bundle` document as `attestation` (#1425). Every run that reaches an output boundary writes both, including skipped and failed runs. The conclusion is computed deterministically from signals the run already records: `verdict`, `verdict-source`, `required-checks`, `review-result`, `incomplete-reason`, the degraded gate bypass, the publication status, and the verdict-bearing native review submission result. No model call is involved.
+
+`conclusion` is exactly one of:
+
+| Conclusion | Meaning |
+| --- | --- |
+| `approved` | A commit-bound native APPROVE review actually submitted for the exact head, with complete coverage, required checks complete or unconfigured, and no degraded bypass. This is the ONLY conclusion that certifies a trusted approval. |
+| `blocked` | The final non-degraded verdict is `request_changes` and a native REQUEST_CHANGES review provably landed on the pull request — the same positive proof `approved` requires of a native APPROVE. When no native REQUEST_CHANGES review landed, the run attests the cause instead: a failed publication reads `unavailable` (`native_submission_failed` when the API rejected that submission, `publication_failed` when the failure left no native record), and publication that was never attempted, was withheld at the head re-check (a newer push), or landed only advisory (comment mode, no native surface) reads `incomplete` (`not_published`, `superseded_head`, `advisory_only`). |
+| `incomplete` | A review ran, but its conclusion does not certify anything on this head: an approve review whose approval was withheld, whose APPROVE landed through the body-only fallback without a `commit_id` (unbound to the reviewed head), whose coverage was partial, or whose publication was never attempted, superseded by a newer push, or advisory-only — and symmetrically a `request_changes` verdict whose native block never landed for any of those same causes (`not_published`, `superseded_head`, `advisory_only`). |
+| `unavailable` | The review capability itself failed: a crash, the model-unavailable notice, a degraded zero-evidence fallback, no verdict, a failed native submission, or a failed publication that landed no native REQUEST_CHANGES review. |
+| `skipped` | No review ran (precheck skip, follow-up consumption, plain no-op). A carried verdict belongs to the earlier run's attestation and never promotes a skip. |
+
+`reason_code` names the deterministic cause from a closed vocabulary (for example `native_approval_submitted`, `request_changes`, `approval_withheld`, `native_approval_unbound`, `coverage_incomplete`, `degraded_no_evidence`, `model_unavailable`, `native_approval_failed`, `native_submission_failed`, `publication_failed`, `superseded_head`, `skipped`). `head_sha` is the exact commit the conclusion binds. It is empty when the run could not prove the head, and an empty head never carries `approved`.
+
+Downstream merge automation must:
+
+1. Read `steps.<review-step>.outputs.review-attestation` and parse it as JSON. A missing or unparseable value means no attestation. Never read it as approval. The attestation parser is fail-closed: `head_sha` must be a full 40/64-hex git object id for `approved` (or empty for a non-approved conclusion), and the `conclusion`/`reason_code` pair must be one the decision table can emit — a valid reason code under an unrelated conclusion is refused.
+2. Treat the review as a trusted approval only when `conclusion` is `approved` and `head_sha` equals the current PR head.
+3. Stop on `blocked` (a landed native block). Read `incomplete`, `unavailable`, and `skipped` as "no approval" — and, for `blocked`'s demoted causes, "no landed block either" — not as defects: each names its cause through `reason_code`. `unavailable` is never a merge signal, even when the review's own verdict was a block whose publication failed.
+
+Signal decision (#1576): the attestation is deliberately a step output plus a bundle field, not a new check-run or commit status. A new status check would surprise branch protection the moment an operator marks checks required, and a failing check with file annotations would read as a fake code defect. The job-level signal is unchanged: the step exit code plus the opt-in `fail-on-request-changes` gate. The attestation adds the distinction a green job alone can never make.
+
 ## Publish modes
 
 `publish-mode` controls what the action actually posts to the PR:

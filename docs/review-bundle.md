@@ -35,6 +35,11 @@ A consumer MUST:
   the document claims no truncation, and a truncation claim whose count
   matches the list exactly are contradictions. Refuse such a document
   (#1542).
+- For merge decisions, read `attestation`, not `state` or
+  `disposition.verdict`: the lifecycle state and the verdict output
+  describe the review, while `attestation.conclusion` is the only trusted
+  approval signal (#1576). The identical object rides the dedicated
+  `review-attestation` step output.
 
 ## Document shape
 
@@ -64,7 +69,15 @@ here for readability — real output has no newlines):
     "incomplete_reason": "none",
     "degraded": false
   },
-  "publication": { "status": "published" },
+  "publication": {
+    "status": "published",
+    "native": { "event": "REQUEST_CHANGES", "submitted": true }
+  },
+  "attestation": {
+    "conclusion": "blocked",
+    "reason_code": "request_changes",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
   "findings": [
     {
       "id": "3f2a…64 hex chars…",
@@ -274,6 +287,29 @@ still parses. The published handoff's parser refuses the same contradictions.
   run's bundle, not this one.
 - `publication.status` (`published` / `superseded` / `failed`) appears only
   when publication was attempted — same rule as `publish-status` (#1257).
+- `attestation` (#1576) carries the machine-verifiable final review
+conclusion: `conclusion` (`approved` / `blocked` / `incomplete` /
+`unavailable` / `skipped`), a closed-vocabulary `reason_code`, and the
+exact `head_sha` the conclusion binds. It is present on EVERY state,
+`skipped` and `failed` included, so a lifecycle state that merely looks
+green can never hide the conclusion. `approved` appears only when a commit-bound native
+APPROVE actually submitted for a non-empty exact head, with complete
+coverage, required checks complete or unconfigured, and no degraded
+  bypass — an APPROVE that landed through the body-only fallback (no
+  `commit_id`) binds no head and reads `incomplete`/`native_approval_unbound`.
+  `blocked` appears only when a native REQUEST_CHANGES review provably
+  landed on the pull request — the same positive proof `approved` requires.
+  When no native block landed, the run attests the cause instead: a failed
+  publication reads `unavailable` (`native_submission_failed` when the API
+  rejected the submission, `publication_failed` when no native record
+  exists), and publication that was never attempted, was withheld at the
+  head re-check, or landed only advisory reads `incomplete`
+  (`not_published`, `superseded_head`, `advisory_only`). A malformed attestation refuses the whole document at parse, and a
+  refused document must be read as absent, never as approval. The parser accepts only
+  `conclusion`/`reason_code` pairs the decision table can emit, so a valid reason code under an
+  unrelated conclusion is refused. The consumer
+  contract and the full reason-code list:
+  [Verdicts and publishing](verdicts-and-publishing.md#trusted-review-attestation-1576).
 
 ## Bounds and redaction (by construction)
 

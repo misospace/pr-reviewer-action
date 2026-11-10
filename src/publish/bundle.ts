@@ -42,6 +42,7 @@ import {
   type ReviewObligationRow,
 } from "./handoff.js";
 import type { ReviewObligation } from "../enforcement/review-obligations.js";
+import { parseReviewAttestation, type ReviewAttestation } from "./attestation.js";
 
 /** The schema identifier. A consumer must refuse a document whose `schema`
  * is not byte-identical to this string (the ledger pattern, #1027). */
@@ -194,6 +195,13 @@ export interface ReviewBundleInput {
   unresolvedRequirementIdsSourceTotal?: number;
   /** #1541: the same honest count for the required-check ids. */
   unresolvedRequiredChecksSourceTotal?: number;
+  /** #1576: the machine-verifiable final review attestation (closed
+   * conclusion vocabulary + reason code + exact head). Present on EVERY
+   * state the host reaches — `skipped`, `failed` and `superseded` included —
+   * because the whole point is that a green-looking lifecycle state cannot
+   * hide the conclusion. The host supplies it from the same signals the
+   * bundle already carries, so the two documents can never disagree. */
+  attestation?: ReviewAttestation;
 }
 
 interface BundleFindingCandidate {
@@ -288,6 +296,19 @@ export function buildReviewBundle(input: ReviewBundleInput): string {
   }
   if (input.state === "failed") {
     envelope.failure_reason = redactBounded(input.failureReason ?? "unknown error", REVIEW_BUNDLE_MAX_FAILURE_REASON_CHARS);
+  }
+  // #1576: the attestation rides its own key on every state. Its fields are
+  // closed-vocabulary tokens and an action-owned head SHA (never model
+  // text), so no redaction surface is needed. The builder projects the
+  // shape; the parser re-validates it against the closed vocabularies and
+  // refuses the whole document on any mismatch, so a foreign object can
+  // never survive a round trip on this trust key.
+  if (input.attestation !== undefined) {
+    envelope.attestation = {
+      conclusion: input.attestation.conclusion,
+      reason_code: input.attestation.reason_code,
+      head_sha: input.attestation.head_sha,
+    };
   }
 
   const reviewsProduced = input.state === "complete" || input.state === "partial" || input.state === "superseded";
@@ -448,6 +469,12 @@ export interface ReviewBundle {
   /** #1521: the run's derived-obligation state, null when unknown. Present
    * only on a review-producing state. */
   derived_obligation_state?: PublishedDerivedObligationState | null;
+  /** #1576: the machine-verifiable final review attestation. Optional on
+   * parse (a bundle written before #1576 carries none and stays parseable);
+   * when present it is validated fail-closed, and a malformed attestation
+   * refuses the whole document — a consumer must never fall back to reading
+   * the lifecycle `state` as an approval signal. */
+  attestation?: ReviewAttestation;
   /** #1541: the number of DISTINCT merge-gating requirement ids the
    * deterministic enforcement pass produced, BEFORE the shared 20-entry id
    * cap shortened the list. A count larger than the listed length means the
@@ -580,6 +607,16 @@ if (!countersAgreeWithList(obligationRows.length, obligationTotal, obligationTru
     if (!(state === null
       || (typeof state === "string" && (DERIVED_OBLIGATION_STATES as readonly string[]).includes(state)))) return null;
   }
+  // #1576: an attestation key that fails its own vocabulary check refuses
+  // the document (the "malformed attestation is never read as any
+  // conclusion, least of all approved" rule). Its presence is NOT required:
+  // a bundle written before #1576 parses exactly as before.
+  let attestation: ReviewAttestation | undefined;
+  if (record.attestation !== undefined) {
+    const parsedAttestation = parseReviewAttestation(record.attestation);
+    if (parsedAttestation === null) return null;
+    attestation = parsedAttestation;
+  }
   // #1541: the shared-cap counters follow the same presence rule and are
   // cross-checked the same way. An absent counter is UNKNOWN (`null`), never
   // a count of zero: the shared cap could have shortened the list without
@@ -656,5 +693,8 @@ if (!countersAgreeWithList(obligationRows.length, obligationTotal, obligationTru
   if (record.derived_obligation_state !== undefined) {
     bundle.derived_obligation_state = record.derived_obligation_state as PublishedDerivedObligationState | null;
   }
+  // #1576: the validated attestation, present exactly when the document
+  // carried one.
+  if (attestation !== undefined) bundle.attestation = attestation;
   return bundle;
 }
