@@ -173,7 +173,8 @@ const FILES_MARKER = "…[file list truncated]";
 const STANDARDS_MARKER = "…[standards truncated]";
 const BODY_MARKER = "…[review corpus truncated to fit the model context budget]";
 const OFF_MODE_HARNESS_JSON =
-  '{"mode":"off","planned_request_count":0,"executed_request_count":0,"tool_results":[]}\n';
+  '{"mode":"off","planned_request_count":0,"executed_request_count":0,'
+  + '"successful_request_count":0,"refused_request_count":0,"deduplicated_request_count":0,"tool_results":[]}\n';
 const SMART_HARNESS_OMITTED =
   "Primary tool investigation omitted; conduct your own independent review.\n";
 

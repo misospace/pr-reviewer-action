@@ -2278,7 +2278,15 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
       },
       usage: {
         tool_calls_issued: result.planned_request_count ?? 0,
+        // #1597: `tool_calls_executed` counts ATTEMPTED executions (the
+        // trace population, executor status irrelevant). The ok-status
+        // subset is its own field; refused/deduplicated complete the
+        // partition, so `issued = executed + refused + deduplicated` is
+        // checkable from the artifact alone.
         tool_calls_executed: toolCalls.length,
+        tool_calls_successful: result.successful_request_count ?? 0,
+        tool_calls_refused: result.refused_request_count ?? 0,
+        tool_calls_deduplicated: result.deduplicated_request_count ?? 0,
         rounds_used: result.rounds ?? 0,
         requests_remaining_at_stop: meta.requests_remaining ?? 0,
         elapsed_sec: Number((Number(meta.elapsed_sec ?? 0.0)).toFixed(3)),
@@ -2360,6 +2368,10 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
     usage: {
       tool_calls_issued: 0,
       tool_calls_executed: 0,
+      // #1597: the full partition on every shape — nothing was consumed.
+      tool_calls_successful: 0,
+      tool_calls_refused: 0,
+      tool_calls_deduplicated: 0,
       rounds_used: 0,
       // Nothing was consumed: the full effective budget remains.
       requests_remaining_at_stop: effective,
@@ -3446,7 +3458,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     status: (call.result.status as string) ?? "error",
   }));
   input.result.tool_results = outcome.executed.map((call) => maskKnownSecretsDeep(call.result, harnessSecrets));
-  input.result.executed_request_count = outcome.executed.filter((c) => c.result.status === "ok").length;
+  // #1597: this path used to publish the ok-only count as
+  // `executed_request_count` (the marker's `tool_calls`). Same distinct
+  // counts and the same invariant as summarizeLoopOutcome — a fallback exit
+  // must never advertise a different counter than the loop's own log line.
+  input.result.executed_request_count = outcome.executed.length;
+  input.result.successful_request_count = outcome.executed.filter((c) => c.result.status === "ok").length;
+  input.result.refused_request_count = outcome.toolCallsRefused;
+  input.result.deduplicated_request_count = outcome.toolCallsDeduplicated;
   input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
   input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
   input.result.native_loop_error = outcome.error
@@ -4053,9 +4072,19 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
             }
             input.result.tool_calls = traceCalls;
             input.result.tool_results = traceResults;
+            // #1597: fold the continuation's distinct counts under the same
+            // invariant as the original loop (issued = executed + refused +
+            // deduplicated), so the post-repair artifact, marker and summary
+            // all describe one consistent execution snapshot.
             input.result.executed_request_count =
-              Number(input.result.executed_request_count ?? 0) +
+              Number(input.result.executed_request_count ?? 0) + repair.executed.length;
+            input.result.successful_request_count =
+              Number(input.result.successful_request_count ?? 0) +
               repair.executed.filter((call) => call.result.status === "ok").length;
+            input.result.refused_request_count =
+              Number(input.result.refused_request_count ?? 0) + repair.toolCallsRefused;
+            input.result.deduplicated_request_count =
+              Number(input.result.deduplicated_request_count ?? 0) + repair.toolCallsDeduplicated;
             input.result.planned_request_count =
               Number(input.result.planned_request_count ?? 0) + repair.toolCallsIssued;
 
@@ -4289,15 +4318,32 @@ export function summarizeLoopOutcome(
   }
   mdLines.push("");
 
+  // #1597: distinct machine counts from ONE settled execution snapshot.
+  // `executed_request_count` is every call the loop ATTEMPTED on the
+  // executor (status irrelevant) — the same population as the `tool_calls`
+  // trace and the outcome log line. The historical value of this field was
+  // the ok-status-only count; that counter now lives, truthfully named, on
+  // `successful_request_count`. `refused_request_count` and
+  // `deduplicated_request_count` are the non-executed dispositions.
+  // Invariant (see LoopOutcome in src/tools/loop.ts):
+  //   planned_request_count = executed_request_count
+  //                         + refused_request_count
+  //                         + deduplicated_request_count
+  // and successful_request_count <= executed_request_count.
   let executedCount = Number(result.executed_request_count ?? 0);
+  let successfulCount = Number(result.successful_request_count ?? 0);
   const toolResults: unknown[] = Array.isArray(result.tool_results) ? [...(result.tool_results as unknown[])] : [];
   for (let i = 0; i < outcome.executed.length; i++) {
     const executed = outcome.executed[i]!;
-    if (executed.result.status === "ok") executedCount++;
+    executedCount++;
+    if (executed.result.status === "ok") successfulCount++;
     toolResults.push(maskedResults[i]);
     mdLines.push(...toolResultMdLines(i + 1, executed.tool, maskedArgs[i]!, maskedResults[i]! as Record<string, unknown>));
   }
   result.executed_request_count = executedCount;
+  result.successful_request_count = successfulCount;
+  result.refused_request_count = Number(result.refused_request_count ?? 0) + outcome.toolCallsRefused;
+  result.deduplicated_request_count = Number(result.deduplicated_request_count ?? 0) + outcome.toolCallsDeduplicated;
   result.tool_results = toolResults;
 
   if (outcome.finalText) {
@@ -4435,6 +4481,11 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     mode: "off",
     planned_request_count: 0,
     executed_request_count: 0,
+    // #1597: the distinct counters, initialized so every artifact path that
+    // reports a call count reports the whole set (see summarizeLoopOutcome).
+    successful_request_count: 0,
+    refused_request_count: 0,
+    deduplicated_request_count: 0,
     tool_results: [],
     tool_budget_tier: maxRequests.route,
     tool_request_budget:

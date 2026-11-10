@@ -222,8 +222,17 @@ export interface RunReviewResult {
   /** #847: which source won ("primary-override" | "smart-override" |
    * "explicit" | "tier-default" | "size-scaled"). */
   toolBudgetSource?: string;
-  /** #847: tool calls the loop actually executed against that budget. */
+  /** #847; #1597: tool calls the loop actually EXECUTED against that budget
+   * (attempted executions; the ok-only subset is `toolCallsSuccessful`). */
   toolCallsUsed?: number;
+  /** #1597: the remaining execution partitions from the same snapshot:
+   * everything the model issued, the successful subset, and the refused and
+   * deduplicated non-executed dispositions. Undefined when the harness
+   * artifact predates #1597 or never ran. */
+  toolCallsIssued?: number;
+  toolCallsSuccessful?: number;
+  toolCallsRefused?: number;
+  toolCallsDeduplicated?: number;
   /** #895: rounds the loop actually used, and the resolved round cap it ran
    * against (see `adaptiveLoopBudgets` in src/tools/loop.ts). */
   toolRoundsUsed?: number;
@@ -559,12 +568,17 @@ function resolveReviewObligations(
     ? review.required_check_dispositions as Array<{ check: string; status: string; rationale?: string | null }>
     : null;
   const folded = foldObligationDispositions([...obligations, ...derivedRows], dispositions);
-  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; executed_request_count?: unknown } | null;
+  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown } | null;
   const cause = deriveUnresolvedCause({
     stopReason: typeof harness?.stop_reason === "string" ? harness.stop_reason : null,
     harnessError: harness?.error != null ? String(harness.error) : null,
     planningError: harness?.planning_error != null ? String(harness.planning_error) : null,
-    degraded: typeof harness?.executed_request_count === "number" && harness.executed_request_count === 0,
+    // #1597: the cause predicate asks "did the investigation produce ANY
+    // usable evidence" — the ok-status count, historically carried under
+    // the executed-only name. Read the truthfully-named field; the
+    // executed count now includes failed attempts and would mask a
+    // all-calls-errored run.
+    degraded: typeof harness?.successful_request_count === "number" && harness.successful_request_count === 0,
   });
   // Only an `unresolved` row carries the evidence-gathering cause; a
   // `satisfied` row was resolved positively and an `unmet` row negatively.
@@ -3318,6 +3332,11 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCalls: toolBudgetTelemetry.calls } : {}),
+    // #1597: the remaining partitions, additive marker keys.
+    ...(toolBudgetTelemetry.issued !== undefined ? { toolCallsIssued: toolBudgetTelemetry.issued } : {}),
+    ...(toolBudgetTelemetry.successful !== undefined ? { toolCallsSuccessful: toolBudgetTelemetry.successful } : {}),
+    ...(toolBudgetTelemetry.refused !== undefined ? { toolCallsRefused: toolBudgetTelemetry.refused } : {}),
+    ...(toolBudgetTelemetry.deduplicated !== undefined ? { toolCallsDeduplicated: toolBudgetTelemetry.deduplicated } : {}),
     ...(toolBudgetTelemetry.rounds !== undefined ? { toolRounds: toolBudgetTelemetry.rounds } : {}),
     ...(toolBudgetTelemetry.maxRounds !== undefined ? { maxRounds: toolBudgetTelemetry.maxRounds } : {}),
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
@@ -3358,6 +3377,12 @@ reviewMarkdown: String(reviewRecord.review_markdown ?? ""),
     ...(toolBudgetTelemetry.budget !== undefined ? { toolBudget: toolBudgetTelemetry.budget } : {}),
     ...(toolBudgetTelemetry.source !== undefined ? { toolBudgetSource: toolBudgetTelemetry.source } : {}),
     ...(toolBudgetTelemetry.calls !== undefined ? { toolCallsUsed: toolBudgetTelemetry.calls } : {}),
+    // #1597: the remaining partitions on the run result (the marker carries
+    // the same snapshot above).
+    ...(toolBudgetTelemetry.issued !== undefined ? { toolCallsIssued: toolBudgetTelemetry.issued } : {}),
+    ...(toolBudgetTelemetry.successful !== undefined ? { toolCallsSuccessful: toolBudgetTelemetry.successful } : {}),
+    ...(toolBudgetTelemetry.refused !== undefined ? { toolCallsRefused: toolBudgetTelemetry.refused } : {}),
+    ...(toolBudgetTelemetry.deduplicated !== undefined ? { toolCallsDeduplicated: toolBudgetTelemetry.deduplicated } : {}),
     ...(toolBudgetTelemetry.rounds !== undefined ? { toolRoundsUsed: toolBudgetTelemetry.rounds } : {}),
     ...(toolBudgetTelemetry.maxRounds !== undefined ? { toolMaxRounds: toolBudgetTelemetry.maxRounds } : {}),
     ...(toolBudgetTelemetry.contextBudget !== undefined ? { contextBudget: toolBudgetTelemetry.contextBudget } : {}),
@@ -3539,11 +3564,27 @@ export function partialCoverageOf(harness: Record<string, unknown> | null): Part
  * before the budget was resolved (or never ran) contributes nothing, and
  * the marker then omits `tool_budget`/`tool_budget_source`/`tool_calls`
  * exactly as it did before #847.
+ *
+ * #1597: `calls` is the loop's EXECUTED count — every call the loop
+ * attempted on the executor, executor status irrelevant (the population of
+ * the outcome log line and the `tool_calls` trace), so a budget stop reads
+ * `tool_calls == tool_budget` instead of the old successful-only number.
+ * The distinct machine counts ride alongside whenever the artifact carries
+ * them: `issued` (everything the model asked for), `successful` (the ok
+ * subset), `refused` and `deduplicated` (the non-executed dispositions),
+ * under the invariant `issued = executed + refused + deduplicated` and
+ * `successful <= executed`. An artifact written before #1597 keeps its
+ * old bytes: the new fields are simply absent and the new marker keys are
+ * omitted, never synthesized.
  */
 export function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): {
   budget?: number;
   source?: string;
   calls?: number;
+  issued?: number;
+  successful?: number;
+  refused?: number;
+  deduplicated?: number;
   rounds?: number;
   maxRounds?: number;
   contextBudget?: number;
@@ -3551,7 +3592,20 @@ export function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): 
   stopReason?: string;
 } {
   if (harness === null) return {};
-  const out: { budget?: number; source?: string; calls?: number; rounds?: number; maxRounds?: number; contextBudget?: number; contextPeak?: number; stopReason?: string } = {};
+  const out: {
+    budget?: number;
+    source?: string;
+    calls?: number;
+    issued?: number;
+    successful?: number;
+    refused?: number;
+    deduplicated?: number;
+    rounds?: number;
+    maxRounds?: number;
+    contextBudget?: number;
+    contextPeak?: number;
+    stopReason?: string;
+  } = {};
   if (typeof harness.tool_request_budget === "number") out.budget = harness.tool_request_budget;
   if (typeof harness.tool_budget_source === "string" && harness.tool_budget_source !== "") {
     out.source = harness.tool_budget_source;
@@ -3575,6 +3629,13 @@ export function toolBudgetTelemetryOf(harness: Record<string, unknown> | null): 
     out.stopReason = (harness.tool_loop_telemetry as Record<string, unknown>).stop_reason as string;
   }
   if (typeof harness.executed_request_count === "number") out.calls = harness.executed_request_count;
+  // #1597: the remaining partitions, lifted independently — an artifact
+  // missing any of them omits that marker key rather than synthesizing a
+  // count (no derivation from message counts or model text).
+  if (typeof harness.planned_request_count === "number") out.issued = harness.planned_request_count;
+  if (typeof harness.successful_request_count === "number") out.successful = harness.successful_request_count;
+  if (typeof harness.refused_request_count === "number") out.refused = harness.refused_request_count;
+  if (typeof harness.deduplicated_request_count === "number") out.deduplicated = harness.deduplicated_request_count;
   // #895: the rounds actually used and the resolved round cap the loop ran
   // against, lifted from the #702 telemetry object (`usage.rounds_used` /
   // `budget.max_rounds`) so the marker can show whether the round cap (not
@@ -3748,7 +3809,9 @@ function gateForkForForks(env: StageEnv, forkFlag: string): { md: string; json: 
   if (forkFlag === "true" && (env.TOOL_ENABLE_FOR_FORKS ?? "false").toLowerCase() !== "true") {
     return {
       md: "Tool harness was skipped for a cross-repository pull request. Set tool_enable_for_forks=true to override.\n",
-      json: '{"mode":"native_loop","planned_request_count":0,"executed_request_count":0,"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}\n',
+      json: '{"mode":"native_loop","planned_request_count":0,"executed_request_count":0,'
+        + '"successful_request_count":0,"refused_request_count":0,"deduplicated_request_count":0,'
+        + '"tool_results":[],"skipped":true,"skip_reason":"fork-pr"}\n',
     };
   }
   return null;

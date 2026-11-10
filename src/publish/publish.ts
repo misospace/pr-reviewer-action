@@ -188,6 +188,15 @@ export interface PublishInput {
    * every harness run so budget stops with complete coverage stay visible in
    * published markers. Omitted when no harness reported one. */
   toolStopReason?: string;
+  /** #1597: the tool-loop execution partitions beyond `toolCalls` (the
+   * EXECUTED count): issued / successful / refused / deduplicated, under
+   * the invariant issued = executed + refused + deduplicated. Absent when
+   * the harness artifact carries none — the marker then keeps its
+   * pre-#1597 bytes. */
+  toolCallsIssued?: number;
+  toolCallsSuccessful?: number;
+  toolCallsRefused?: number;
+  toolCallsDeduplicated?: number;
   /** #1003: the human-review triage answer, present ONLY when triage ran
    * (`review-triage` enabled) and the review produced one. Absent means
    * "did not run" and renders no section — never a silent "not required". */
@@ -2078,6 +2087,11 @@ export async function publishReview(
     ...(input.toolBudget !== undefined ? { toolBudget: input.toolBudget } : {}),
     ...(input.toolBudgetSource !== undefined && input.toolBudgetSource !== "" ? { toolBudgetSource: input.toolBudgetSource } : {}),
     ...(input.toolCalls !== undefined ? { toolCalls: input.toolCalls } : {}),
+    // #1597: the remaining partitions, additive marker keys.
+    ...(input.toolCallsIssued !== undefined ? { toolCallsIssued: input.toolCallsIssued } : {}),
+    ...(input.toolCallsSuccessful !== undefined ? { toolCallsSuccessful: input.toolCallsSuccessful } : {}),
+    ...(input.toolCallsRefused !== undefined ? { toolCallsRefused: input.toolCallsRefused } : {}),
+    ...(input.toolCallsDeduplicated !== undefined ? { toolCallsDeduplicated: input.toolCallsDeduplicated } : {}),
     ...(input.toolRounds !== undefined ? { toolRounds: input.toolRounds } : {}),
     ...(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : {}),
     ...(input.contextBudget !== undefined ? { contextBudget: input.contextBudget } : {}),
