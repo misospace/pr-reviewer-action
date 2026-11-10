@@ -1314,8 +1314,8 @@ class TestRealPRCorpusFixtureRefs:
         assert "_semantic_fixture" not in scenario.to_pr_entry()
 
     def test_non_object_fixture_ref_is_refused(self, tmp_path):
-        sha = _write_fixture(tmp_path, "fixture.json", _fixture_doc())
-        path = _fixture_corpus_file(tmp_path, sha)
+        _write_fixture(tmp_path, "fixture.json", _fixture_doc())
+        path = _fixture_corpus_file(tmp_path, "c" * 64)
         data = json.loads(path.read_text(encoding="utf-8"))
         data["real_pr_corpus"]["vulnerable"][0]["fixture"] = "fixture.json"
         path.write_text(json.dumps(data), encoding="utf-8")
