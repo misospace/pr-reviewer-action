@@ -190,6 +190,19 @@ def test_marker_with_unknown_head_sha_is_never_trusted():
     assert row["disposition"] == "partial_or_abstained"
 
 
+def test_unbound_head_sentinels_never_bind_a_marker():
+    """The unresolved-head sentinel set is the boundary, fed to itself.
+
+    Every spelling the publisher can write for "head could not be
+    resolved" binds no head, so a native APPROVED over such a marker is
+    never a trusted approval — case included.
+    """
+    for sentinel in ("", "unknown", "UNKNOWN", " Unknown "):
+        body = _marker(head_sha=sentinel)
+        row = rc.collect_rows(REPO, [_pull(1, HEAD, reviews=[_review(1, HEAD, "APPROVED", body)])], [BOT])[0]
+        assert row["disposition"] == "partial_or_abstained"
+
+
 def test_clean_marker_with_bound_native_approval_is_trusted():
     rows = rc.collect_rows(REPO, [_pull(1, HEAD, reviews=[_review(1, HEAD, "APPROVED")])], [BOT])
     assert rows[0]["disposition"] == "trusted_complete_approval"
@@ -401,6 +414,24 @@ def test_correctness_rollup_empty_is_none_not_zero():
     assert rollup["adjudicated_total"] == 0
     assert rollup["precision"] is None
     assert rollup["recall"] is None
+
+
+def test_correctness_rollup_excludes_hostile_label_types():
+    """A label that only resembles the known vocabulary is excluded.
+
+    A hostile adjudication file can put any JSON value in ``label``. A
+    shape that mirrors a known label (a dict, a list, a number) is not a
+    known label: it is excluded from the denominators and counted, never
+    counted as a blocker judgment.
+    """
+    for label in ({"kind": "missed_blocker"}, ["missed_blocker"], 1, None, ""):
+        rollup = rc.correctness_rollup(
+            _sample_rows(), [{"pr": 1, "head_sha": HEAD, "label": label}]
+        )
+        assert rollup["adjudicated_total"] == 0
+        assert rollup["missed_blockers"] == 0
+        assert rollup["false_blockers"] == 0
+        assert rollup["unknown_excluded"] == 1
 
 
 def test_correctness_rollup_ignores_unlabeled_sources():

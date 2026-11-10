@@ -126,19 +126,16 @@ def body_indicates_skip(body: str) -> bool:
     return bool(_SKIP_NOTE_RE.search(body or ""))
 
 
-def _marker_str(marker: dict[str, Any], key: str) -> str | None:
-    """A bounded, lowercased marker string field, or ``None`` when absent."""
-    return bound(marker.get(key), _HEAD_LIMIT)
-
-
 def _usable_head(sha: Any) -> bool:
     """True when a marker/commit SHA actually binds to a head.
 
     The invariant's letter: not empty and not the literal ``unknown``
     sentinel the publisher writes when the head could not be resolved.
+    ``_UNBOUND_HEAD`` is that sentinel set, so the check and the
+    vocabulary it consults stay in one place.
     """
-    text = sha if isinstance(sha, str) else ""
-    return bool(text.strip()) and text.strip().lower() != "unknown"
+    text = sha.strip().lower() if isinstance(sha, str) else ""
+    return text not in _UNBOUND_HEAD
 
 
 def _head_has_native_approval(head_sha: str, bot_reviews: list[dict[str, Any]]) -> bool:
@@ -607,14 +604,16 @@ def correctness_rollup(
             # is not evidence about a collected row; it is excluded.
             unknown_excluded += 1
             continue
+        if label not in _KNOWN_LABELS:
+            # A human label this rollup does not interpret: excluded from
+            # the precision/recall denominators and counted, never dropped.
+            unknown_excluded += 1
+            continue
         if label == _LABEL_MISSED_BLOCKER:
             missed += 1
-            adjudicated_total += 1
-        elif label == _LABEL_FALSE_BLOCKER:
-            false_blockers += 1
-            adjudicated_total += 1
         else:
-            unknown_excluded += 1
+            false_blockers += 1
+        adjudicated_total += 1
 
     precision: float | None = None
     recall: float | None = None
