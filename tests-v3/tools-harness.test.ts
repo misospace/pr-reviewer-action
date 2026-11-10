@@ -595,8 +595,7 @@ test("#1198 primary: a near-deadline loop turn gets the remaining budget and the
   let transportCalls = 0;
   const scripted = [
     openAiCall("c1", "read_file", '{"path":"src.ts"}'),
-    openAiText("fallback investigation complete"),
-    validVerdict(),
+    openAiCall("c2", "read_file", '{"path":"src.ts"}'),
   ];
   const { result } = await runToolHarness(deps({
     env: { TOOL_LOOP_WALL_CLOCK_SEC: "100" },
@@ -974,7 +973,7 @@ test("#1598 review: the fallback tier dials the BOUND resolved lane, never a re-
   // an env re-resolution inside the harness would hand an inherited fallback
   // lane the primary-override endpoint and credential. The bound lane is the
   // one the fallback verdict came from — the loop must dial exactly it.
-  const dialed: Array<{ baseUrl: string; apiKey: string; model: string }> = [];
+  const dialed: Array<{ baseUrl: string; apiKey: string; model: string; apiFormat: string; effort: unknown }> = [];
   let transportCalls = 0;
   const logs: string[] = [];
   let clock = 0;
@@ -990,18 +989,27 @@ test("#1598 review: the fallback tier dials the BOUND resolved lane, never a re-
       TOOL_LOOP_WALL_CLOCK_SEC: "600",
       // Post-rebind base keys: the primary-override lane's values. No
       // AI_FALLBACK_* URL/key — the fallback lane inherits the base, which
-      // is exactly why re-resolution here would diverge.
+      // is exactly why re-resolution here would diverge. The rebound effort
+      // is the primary lane's; the bound lane's own effort must win.
       AI_BASE_URL: "http://primary-override.test/v1",
       AI_API_KEY: "primary-override-key",
+      AI_REASONING_EFFORT: "low",
     },
     fallbackLane: {
       baseUrl: "http://fallback-lane.test/v1",
       model: "fallback-m",
       apiFormat: "openai",
       apiKey: "fallback-lane-key",
+      reasoningEffort: "high",
     },
-    transport: async (baseUrl, _apiFormat, payload, apiKey) => {
-      dialed.push({ baseUrl, apiKey, model: String((payload as Record<string, unknown>).model) });
+    transport: async (baseUrl, apiFormat, payload, apiKey) => {
+      dialed.push({
+        baseUrl,
+        apiKey,
+        model: String((payload as Record<string, unknown>).model),
+        apiFormat,
+        effort: (payload as Record<string, unknown>).reasoning_effort,
+      });
       transportCalls += 1;
       clock = Math.min(clock + 10, 80);
       return scripted[transportCalls - 1];
@@ -1014,7 +1022,9 @@ test("#1598 review: the fallback tier dials the BOUND resolved lane, never a re-
   assert.equal(result.native_loop_verdict_status, "accepted");
   assert.ok(dialed.every((call) => call.baseUrl === "http://fallback-lane.test/v1"
     && call.apiKey === "fallback-lane-key"
-    && call.model === "fallback-m"), `unexpected dial: ${JSON.stringify(dialed)}`);
+    && call.model === "fallback-m"
+    && call.apiFormat === "openai"
+    && call.effort === "high"), `unexpected dial: ${JSON.stringify(dialed)}`);
   assert.match(logs.join("\n"), /native_loop: verdict reserve 150s of 600s wall clock \(#1464\)/);
 });
 

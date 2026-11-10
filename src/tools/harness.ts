@@ -2674,9 +2674,10 @@ export interface HarnessDeps {
    * from `env` here is unsafe because the auto route rebinds the base
    * `AI_BASE_URL`/`AI_API_KEY`/`AI_API_FORMAT` keys to the primary override
    * (src/engine/review.ts), and an inherited fallback lane would then read
-   * the primary-override endpoint/key/format. The production caller always
-   * binds this; direct callers (tests) without it keep the env resolution. */
-  fallbackLane?: Pick<ResolvedTier, "baseUrl" | "model" | "apiFormat" | "apiKey">;
+   * the primary-override endpoint/key/format — and, through the same rebind,
+   * the primary lane's reasoning effort. The production caller always binds
+   * this; direct callers (tests) without it keep the env resolution. */
+  fallbackLane?: Pick<ResolvedTier, "baseUrl" | "model" | "apiFormat" | "apiKey" | "reasoningEffort">;
 }
 
 /**
@@ -3025,11 +3026,25 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // request byte-identical to a build without the feature. #1598: the
   // fallback tier resolves the fallback lane's effort
   // (ai-fallback-reasoning-effort, base-inherited) — no SMART_REASONING_EFFORT
-  // binding exists for it.
+  // binding exists for it. #1598 (review): a BOUND fallback lane carries its
+  // own resolved effort and it wins — the auto route rebinds the base
+  // AI_REASONING_EFFORT key to the primary lane's effort (src/engine/
+  // review.ts), so a late env resolution would put the primary lane's effort
+  // on the fallback loop's wire while the fallback verdict came from the
+  // original lane, exactly the divergence the bound endpoint/key/format fix
+  // removes.
   const effortTier = input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary";
+  // A BOUND fallback lane is authoritative including "" — its resolved effort
+  // is already normalized, and an effort-less fallback lane must omit the
+  // field, never inherit the route-rebound base key's value.
+  const boundLaneEffort = input.tier === "fallback" && input.deps.fallbackLane !== undefined
+    ? input.deps.fallbackLane.reasoningEffort
+    : null;
   const boundEffort = input.tier === "smart" ? (env.SMART_REASONING_EFFORT ?? "").trim() : "";
   const tierEffort = () => tierReasoningEffort(effortTier, env);
-  const reasoningEffort = boundEffort === "" ? tierEffort() : normalizeReasoningEffort(boundEffort) ?? tierEffort();
+  const reasoningEffort = boundLaneEffort !== null
+    ? boundLaneEffort
+    : boundEffort === "" ? tierEffort() : normalizeReasoningEffort(boundEffort) ?? tierEffort();
   // #998 (#1049 review): the opt-in is per-lane, because a smart route may
   // target a different Anthropic-compatible backend than the primary one.
   // An effort held back by the missing assertion is announced once here, not
