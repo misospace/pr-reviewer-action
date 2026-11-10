@@ -4526,7 +4526,12 @@ async function runFallbackEvidenceHarness(input: {
   const savedTier = input.env.TOOL_HARNESS_TIER;
   input.env.TOOL_HARNESS_TIER = "fallback";
   try {
-    await runToolHarnessPhase(input.ws, input.env, input.workspace, input.log, input.signal, undefined, input.ghApi, wallClockRemainingSec);
+    // #1598 (review): bind the ALREADY-resolved fallback lane (resolved at
+    // the top of this run, before any route rebind mutated the base AI_*
+    // keys). Re-resolving from env here would hand an inherited fallback
+    // lane the primary-override endpoint/key/format while
+    // callTier('fallback', ...) still dials the original resolved lane.
+    await runToolHarnessPhase(input.ws, input.env, input.workspace, input.log, input.signal, undefined, input.ghApi, wallClockRemainingSec, input.profiles.fallback);
   } catch (cause) {
     // #1094: a thrown message can quote a configured credential back — mask
     // like every other diagnostics line in this stage.

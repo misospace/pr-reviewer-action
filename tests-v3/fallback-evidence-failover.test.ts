@@ -234,6 +234,96 @@ test("#1585: a primary transport failure with zero executed calls runs the fallb
   }
 });
 
+test("#1598 review: an inherited fallback lane dials the ORIGINAL base lane after the auto route rebinds the base keys", async () => {
+  // joryirving's change request (PRRT_kwDOSDff6c6134Dd): on the auto route the
+  // engine rebinds the base AI_BASE_URL/AI_API_KEY/AI_API_FORMAT keys to the
+  // primary override (src/engine/review.ts) AFTER resolving the tier
+  // profiles. A fallback harness that re-resolves its lane from env would
+  // then hand an INHERITED fallback lane (no ai-fallback-base-url/key/format)
+  // the primary-override endpoint and credential, while the fallback verdict
+  // still came from the original base lane. The bound lane keeps the loop on
+  // the verdict lane: the base server, with the base credential.
+  const primaryOverride = await startMockServer((_req, _body, res) => {
+    res.statusCode = 429;
+    res.end(MINIMAX_429_BODY);
+  });
+  let baseToolTurns = 0;
+  const base = await startMockServer((_req, body, res) => {
+    const payload = JSON.parse(String(body)) as { tools?: unknown[] };
+    res.setHeader("Content-Type", "application/json");
+    if (Array.isArray(payload.tools) && payload.tools.length > 0) {
+      baseToolTurns += 1;
+      res.end(JSON.stringify(
+        baseToolTurns === 1
+          ? openAiToolCall("t1", "read_file", '{"path":"README.md"}')
+          : openAiText("fallback investigation complete"),
+      ));
+      return;
+    }
+    res.end(verdictBody(baseVerdict({ review_markdown: "FALLBACK-VERDICT-1598 marker.\n" })));
+  });
+  const { runDir, cleanup } = withRunDir();
+  const errors: string[] = [];
+  try {
+    writeFileSync(join(runDir, "README.md"), "FALLBACK-EVIDENCE-1598 marker\n");
+    gitInit(runDir);
+    const result = await runReview({
+      env: { IS_FORK_PR: "false", GITHUB_STEP_SUMMARY: join(runDir, "step-summary.md") },
+      inputs: {
+        "github-token": "tok", repo: "o/r", "pr-number": "7",
+        // The base lane is also the inherited fallback lane: no
+        // ai-fallback-base-url / ai-fallback-api-key / ai-fallback-api-format.
+        "ai-base-url": base.url,
+        "ai-model": "base-m",
+        "ai-api-key": "base-key",
+        "ai-api-format": "openai",
+        "ai-stream": "false",
+        // The auto route: the primary override rebinds the base keys to the
+        // primaryOverride lane. The fallback lane keeps only its model —
+        // endpoint, key, and format are INHERITED from the base lane, which
+        // is exactly the shape the finding names.
+        "ai-primary-base-url": primaryOverride.url,
+        "ai-primary-model": "primary-m",
+        "ai-primary-api-key": "primary-key",
+        "ai-fallback-model": "fallback-m",
+        "review-routing-mode": "auto",
+        "ai-primary-retries": "0", "ai-primary-retry-delay-sec": "0",
+        "tool-mode": "native_loop", "deep-review": "false",
+      },
+      runDir,
+      workspace: runDir,
+      platformAdapter: mockPlatform(),
+      sleep: async () => {},
+      error: (line) => { errors.push(line); },
+      quiet: true,
+    });
+
+    // The fallback loop's in-conversation verdict IS the published review.
+    assert.match(result.outputs.reviewMarkdown, /FALLBACK-VERDICT-1598/);
+
+    // The fallback harness ran, and every model call it made went to the
+    // ORIGINAL base lane with the base credential and the fallback model.
+    const fallbackHarness = JSON.parse(readFileSync(join(runDir, "tool-harness.fallback.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(fallbackHarness.tier, "fallback");
+    assert.equal(fallbackHarness.native_loop_verdict_status, "accepted");
+    assert.ok(base.requests.length >= 3, `expected corpus call + loop turns + verdict on the base lane, got ${base.requests.length}`);
+    assert.ok(base.requests.every((request) => request.headers.authorization === "Bearer base-key"), "the fallback loop must dial the inherited base credential, never the primary-override key");
+    for (const request of base.requests) {
+      const payload = JSON.parse(request.body) as Record<string, unknown>;
+      assert.equal(payload.model, "fallback-m", "the fallback loop must send the fallback lane's model");
+    }
+    // The primary-override lane served only its own bounded primary attempts
+    // — the fallback loop never dialed it.
+    assert.ok(primaryOverride.requests.length <= 4, `expected bounded primary attempts, got ${primaryOverride.requests.length}`);
+    assert.ok(primaryOverride.requests.every((request) => request.headers.authorization === "Bearer primary-key"));
+    assert.ok(errors.some((line) => line.includes("trying fallback")), `expected the pre-fallback line, got:\n${errors.join("\n")}`);
+  } finally {
+    await primaryOverride.close();
+    await base.close();
+    cleanup();
+  }
+});
+
 test("#1598: a primary loop that gathers evidence never triggers the fallback harness", async () => {
   let primaryTurns = 0;
   const primary = await startMockServer((_req, body, res) => {

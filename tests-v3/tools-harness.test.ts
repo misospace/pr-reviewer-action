@@ -595,7 +595,8 @@ test("#1198 primary: a near-deadline loop turn gets the remaining budget and the
   let transportCalls = 0;
   const scripted = [
     openAiCall("c1", "read_file", '{"path":"src.ts"}'),
-    openAiCall("c2", "read_file", '{"path":"src.ts"}'),
+    openAiText("fallback investigation complete"),
+    validVerdict(),
   ];
   const { result } = await runToolHarness(deps({
     env: { TOOL_LOOP_WALL_CLOCK_SEC: "100" },
@@ -961,6 +962,59 @@ test("#1598 review: an unset wall-clock cap keeps the configured envelope byte-f
   assert.equal(transportCalls, 3);
   assert.equal(result.stop_reason, "model-stopped");
   assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.match(logs.join("\n"), /native_loop: verdict reserve 150s of 600s wall clock \(#1464\)/);
+});
+
+test("#1598 review: the fallback tier dials the BOUND resolved lane, never a re-resolution of the route-rebound env", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // The engine rebinds the base AI_* keys to the primary override on the
+  // auto route (src/engine/review.ts) AFTER resolving the tier profiles, so
+  // an env re-resolution inside the harness would hand an inherited fallback
+  // lane the primary-override endpoint and credential. The bound lane is the
+  // one the fallback verdict came from — the loop must dial exactly it.
+  const dialed: Array<{ baseUrl: string; apiKey: string; model: string }> = [];
+  let transportCalls = 0;
+  const logs: string[] = [];
+  let clock = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("fallback investigation complete"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "fallback",
+      TOOL_LOOP_WALL_CLOCK_SEC: "600",
+      // Post-rebind base keys: the primary-override lane's values. No
+      // AI_FALLBACK_* URL/key — the fallback lane inherits the base, which
+      // is exactly why re-resolution here would diverge.
+      AI_BASE_URL: "http://primary-override.test/v1",
+      AI_API_KEY: "primary-override-key",
+    },
+    fallbackLane: {
+      baseUrl: "http://fallback-lane.test/v1",
+      model: "fallback-m",
+      apiFormat: "openai",
+      apiKey: "fallback-lane-key",
+    },
+    transport: async (baseUrl, _apiFormat, payload, apiKey) => {
+      dialed.push({ baseUrl, apiKey, model: String((payload as Record<string, unknown>).model) });
+      transportCalls += 1;
+      clock = Math.min(clock + 10, 80);
+      return scripted[transportCalls - 1];
+    },
+    timeFn: () => clock,
+    log: (line) => { logs.push(line); },
+  }));
+  assert.equal(transportCalls, 3);
+  assert.equal(result.stop_reason, "model-stopped");
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.ok(dialed.every((call) => call.baseUrl === "http://fallback-lane.test/v1"
+    && call.apiKey === "fallback-lane-key"
+    && call.model === "fallback-m"), `unexpected dial: ${JSON.stringify(dialed)}`);
   assert.match(logs.join("\n"), /native_loop: verdict reserve 150s of 600s wall clock \(#1464\)/);
 });
 

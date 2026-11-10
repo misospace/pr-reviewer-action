@@ -64,6 +64,7 @@ import {
   tierReasoningEffort,
   tierRequestShape,
   tierResponseFormat,
+  type ResolvedTier,
 } from "../routing/tiers.js";
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
@@ -2667,6 +2668,15 @@ export interface HarnessDeps {
    * (the evidence-failover caller's remaining share of the loop wall-clock
    * envelope). Unset keeps the configured ceiling byte-for-byte. */
   wallClockSecCap?: number;
+  /** #1598 (review): the ALREADY-RESOLVED fallback lane the engine's verdict
+   * path dials (`profiles.fallback`, resolved before any route rebind). The
+   * fallback tier must dial the same lane its verdict came from: re-resolving
+   * from `env` here is unsafe because the auto route rebinds the base
+   * `AI_BASE_URL`/`AI_API_KEY`/`AI_API_FORMAT` keys to the primary override
+   * (src/engine/review.ts), and an inherited fallback lane would then read
+   * the primary-override endpoint/key/format. The production caller always
+   * binds this; direct callers (tests) without it keep the env resolution. */
+  fallbackLane?: Pick<ResolvedTier, "baseUrl" | "model" | "apiFormat" | "apiKey">;
 }
 
 /**
@@ -4588,14 +4598,21 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // binds from profiles.smart (src/engine/review.ts). #1598: the fallback tier
   // mirrors the #1507 primary behavior — it dials the RESOLVED fallback lane
   // (resolveTierProfiles().fallback), never the primary transport and never
-  // raw AI_* keys. An unusable api-format value fails closed here exactly
+  // raw AI_* keys. #1598 (review): the resolved lane is BOUND by the caller
+  // (deps.fallbackLane = profiles.fallback, resolved before any route rebind)
+  // instead of re-resolved from env here — the auto route rebinds the base
+  // AI_BASE_URL/AI_API_KEY/AI_API_FORMAT keys to the primary override
+  // (src/engine/review.ts), so a late env re-resolution would hand an
+  // inherited fallback lane the primary-override endpoint/key/format while
+  // the fallback verdict still came from the original lane. An unusable
+  // api-format value fails closed here exactly
   // like the engine's #1493 resolution — a run that reaches this harness has
   // already resolved the same profiles successfully, so the refusal can only
   // name what the engine would have refused first.
   const lane = tier === "smart"
     ? null
     : tier === "fallback"
-      ? resolveTierProfiles(env).fallback
+      ? (deps.fallbackLane ?? resolveTierProfiles(env).fallback)
       : resolveTierProfiles(env).primary;
   const prefix = tier === "smart" ? "SMART" : "AI";
   const baseUrl = ((lane ? lane.baseUrl : env[`${prefix}_BASE_URL`]) ?? "").trim();
