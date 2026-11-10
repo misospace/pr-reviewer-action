@@ -766,17 +766,24 @@ this automatically. For each PR in the configured repos, it finds maintainer
 maintainer PR issue comments that read as blocking ("merge blocker",
 "blocker", "before merge", "request changes" — head = the latest PR commit
 before the comment's timestamp), and keeps a finding only when the reviewer
-bot's own review at that exact head was an approval. That decision reads the
-bot's `ai-pr-reviewer:{...}` metadata marker (`review_result`) in preference
-to the review's raw `state`, since the bot dismisses its own stale reviews as
-new heads land — a `state: DISMISSED` review can still have recorded an
-approval in its marker at the time. Both approve-verdict marker classes count
-as an approval: `clean` (approve, no findings) and `findings` (approve with
-non-blocking findings only — under the strict verdict policy any blocking
-finding forces `request_changes`/`issues`, so `findings` can only ride an
-approve verdict; #1601's #1586 example was dropped by the old `clean`-only
-rule). `partial` is an abstention (coverage or required-checks gap) and
-`issues` a request_changes; neither is an approval. `defect.file`/`line_range`
+bot's own review at that exact head was an approval. That decision combines the
+bot's `ai-pr-reviewer:{...}` metadata marker (`review_result`) with the
+review's raw `state`, because they answer different questions: the marker
+records the review's *result* class, the raw `state` records the *native
+event*. The native event outranks the marker — an explicit `COMMENTED` or
+`CHANGES_REQUESTED` review never approved the head, whatever the marker says
+(an advisory/comment or blockers-only review publishes a native `COMMENTED`
+review that can carry `review_result: findings`). Both approve-verdict marker
+classes count as an approval when the native event agrees: `clean` (approve,
+no findings) and `findings` (approve with non-blocking findings only — under
+the strict verdict policy any blocking finding forces `request_changes`/`issues`,
+so `findings` can only ride an approve verdict; #1601's #1586 example was
+dropped by the old `clean`-only rule). `partial` is an abstention (coverage or
+required-checks gap) and `issues` a request_changes; neither is an approval.
+A dismissed review is the one case the native event cannot settle — the bot
+dismisses its own stale reviews as new heads land, which hides the original
+event — so the marker carries it, exactly as it always has.
+`defect.file`/`line_range`
 come from an inline review comment when one is attached to the review,
 otherwise from a changed-file path named in the finding text. GitHub reads
 only (`gh api` or `urllib` with a token from the environment); it never
