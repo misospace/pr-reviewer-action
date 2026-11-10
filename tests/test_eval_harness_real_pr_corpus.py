@@ -1365,6 +1365,67 @@ class TestRealPRCorpusFixtureRefs:
         with pytest.raises(ValueError, match="v1"):
             RealPRCorpus.from_file(_fixture_corpus_file(tmp_path, sha))
 
+    def test_deletion_only_fixture_ref_loads(self, tmp_path):
+        """A PR diff that only removes files has an empty head tree: the
+        loader must accept it (an empty tree commits with --allow-empty)
+        instead of crashing on an unhandled git failure."""
+        fixture = _fixture_doc()
+        fixture["files"] = []
+        fixture["diff"] = (
+            "diff --git a/a.py b/a.py\n"
+            "deleted file mode 100644\n"
+            "index 1111111..0000000\n"
+            "--- a/a.py\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-import os\n"
+            '-DEFAULT_TIMEOUT = os.getenv("TIMEOUT")\n'
+        )
+        sha = _write_fixture(tmp_path, "fixture.json", fixture)
+        corpus = RealPRCorpus.from_file(_fixture_corpus_file(tmp_path, sha))
+        assert corpus.vulnerable[0].semantic_fixture is not None
+
+    def test_deletion_bearing_fixture_ref_loads(self, tmp_path):
+        """A diff that deletes one file and modifies another is accepted: the
+        deleted side exists only in the base tree the reverse-apply recreates."""
+        fixture = _fixture_doc()
+        fixture["files"] = [{"path": "a.py", "content": 'import os\nDEFAULT_TIMEOUT = os.getenv("TIMEOUT")\n'}]
+        fixture["diff"] = (
+            "diff --git a/gone.py b/gone.py\n"
+            "deleted file mode 100644\n"
+            "index 1111111..0000000\n"
+            "--- a/gone.py\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-gone()\n"
+            "diff --git a/a.py b/a.py\n"
+            "index 2222222..3333333 100644\n"
+            "--- a/a.py\n"
+            "+++ b/a.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-import sys\n"
+            '-DEFAULT_TIMEOUT = os.getenv("TIMEOUT")\n'
+            "+import os\n"
+            '+DEFAULT_TIMEOUT = os.getenv("TIMEOUT")\n'
+        )
+        sha = _write_fixture(tmp_path, "fixture.json", fixture)
+        corpus = RealPRCorpus.from_file(_fixture_corpus_file(tmp_path, sha))
+        assert corpus.vulnerable[0].semantic_fixture is not None
+
+    def test_git_level_failure_inside_integrity_is_a_named_load_error(self, tmp_path, monkeypatch):
+        """A git-level crash inside the integrity check (subprocess error, not
+        ValueError) must surface as a corpus-load ValueError naming the
+        scenario, never as a raw harness traceback."""
+        import eval_harness
+
+        def explode(_fixture):
+            raise subprocess.CalledProcessError(128, "git commit")
+
+        monkeypatch.setattr(eval_harness, "validate_semantic_fixture_integrity", explode)
+        sha = _write_fixture(tmp_path, "fixture.json", _fixture_doc())
+        with pytest.raises(ValueError, match="v1"):
+            RealPRCorpus.from_file(_fixture_corpus_file(tmp_path, sha))
+
     def test_shipped_corpora_retain_a_grounded_fixture_each(self):
         """#1609: each shipped real-PR corpus retains at least one grounded
         historical fixture, so the documented --context-only command builds

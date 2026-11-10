@@ -471,7 +471,11 @@ class RealPRCorpus:
                 try:
                     fixture_data, fixture_path = _load_semantic_fixture(fixture_root, ref)
                     validate_semantic_fixture_integrity(fixture_data)
-                except (ValueError, OSError) as exc:
+                except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                    # SemanticCorpusError is a ValueError; SubprocessError
+                    # covers git-level failures inside the integrity check
+                    # so a corrupt payload is a named corpus-load error,
+                    # never a harness traceback.
                     raise ValueError(f"{scenario.id}: {exc}") from exc
                 scenario.semantic_fixture = (fixture_data, fixture_path)
         return cls(vulnerable=vulnerable, clean=clean)
@@ -1705,7 +1709,9 @@ def _materialize_semantic_fixture(
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(str(entry["content"]), encoding="utf-8")
     subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True, capture_output=True, env=env)
-    subprocess.run(["git", "-C", str(repo_path), "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-m", "materialize semantic fixture"], check=True, capture_output=True, env=env)
+    # --allow-empty: a deletion-only fixture (a PR diff that only removes
+    # files) materializes an empty head tree.
+    subprocess.run(["git", "-C", str(repo_path), "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "--allow-empty", "-m", "materialize semantic fixture"], check=True, capture_output=True, env=env)
     api_root = repo_path / ".semantic-fixture"
     api_root.mkdir()
     (api_root / "pr.json").write_text(

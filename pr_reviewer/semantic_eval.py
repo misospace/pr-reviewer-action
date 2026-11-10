@@ -837,7 +837,11 @@ def validate_semantic_fixture_integrity(fixture: dict[str, Any]) -> None:
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(content)
         subprocess.run([git, "-C", str(repo), "add", "--all"], check=True, capture_output=True, env=env)
-        subprocess.run([git, "-C", str(repo), "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "-q", "-m", "fixture-head"], check=True, capture_output=True, env=env)
+        # --allow-empty: a deletion-only fixture (a PR diff that only removes
+        # files) has an empty head tree, and git refuses to commit that unless
+        # told otherwise. The reverse-apply below still verifies the diff
+        # against it.
+        subprocess.run([git, "-C", str(repo), "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "fixture-head"], check=True, capture_output=True, env=env)
 
         result = subprocess.run(
             [git, "-C", str(repo), "apply", "--check", "--reverse"],
