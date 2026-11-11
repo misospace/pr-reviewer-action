@@ -3657,14 +3657,19 @@ export interface LockfileOnlyRefresh {
   material: number;
   /** Parsed package bumps that are plain patch/minor churn. */
   lowRisk: number;
-  /** False when the diff yielded no parseable package-version value inside
-   * a `node_modules` block (or the parse overflowed its bound) — the triage
-   * must fail closed to the full material review. */
+  /** False when the diff yielded no parseable package-version value or
+   * changed runtime constraint inside a `node_modules` block (or the parse
+   * overflowed its bound) — the triage must fail closed to the full
+   * material review. */
   parseable: boolean;
 }
 
 /** Bucketed removed/added version values per package block, first-seen
- * order (the `parseTagChanges` bucketing discipline). */
+ * order (the `parseTagChanges` bucketing discipline). Blocks are kept in
+ * insertion order and NOT deduplicated by header: two lockfiles in one PR
+ * (or one lockfile with repeated keys) can carry the same
+ * `"node_modules/<name>"` header, and merging their buckets could hide a
+ * material bump in the earlier file. */
 interface LockfileVersionBucket {
   old: string[];
   new: string[];
@@ -3682,21 +3687,25 @@ const LOCKFILE_PACKAGE_KEY_RE = /^"node_modules\/[^"]+"\s*:\s*\{/;
  * as an object/array open line. A changed line for one of these is a changed
  * runtime constraint or platform variant — material by rule (#1595
  * acceptance: a runtime-floor change still creates relevant obligations). */
-const LOCKFILE_RUNTIME_CONSTRAINT_OPEN_RE = /^"(?:engines|os|cpu|libc)"\s*:\s*[\[{]/;
+const LOCKFILE_RUNTIME_CONSTRAINT_KEY_RE = /^"(?:engines|os|cpu|libc)"\s*:\s*/;
 
-/** Any other JSON object key — closes the current package block (the
- * `packages`/`dependencies` section headers and the nested per-dependency
- * objects that carry version RANGES, not pinned versions). */
+/** Any other JSON object key. With brace-depth tracking this is a NESTED
+ * object inside the current package block (`"dependencies": {`,
+ * `"bin": {`) — deeper nesting, not a block close: npm emits `engines`
+ * AFTER `dependencies`/`bin` in many packages, so closing the block on the
+ * first nested key would drop a changed engines floor. */
 const LOCKFILE_OTHER_KEY_RE = /^"[^"]+"\s*:\s*\{/;
 
 /** A changed `"version": "x.y.z"` line inside a package block. */
 const LOCKFILE_VERSION_LINE_RE = /^"version"\s*:\s*"([^"]*)"/;
 
 /** A strictly pinned semver: `major.minor.patch` with an optional
- * prerelease/build suffix and nothing before or after. Any other value —
- * a range (`1.2.3 || >=3`), a tag, a URL, trailing junk — is NOT a pinned
- * version and is material by default (fail closed; #1595 review). */
-const PINNED_SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.\-]*)?$/;
+ * prerelease and an optional build suffix, nothing before or after. Any
+ * other value — a range (`1.2.3 || >=3`), a tag, a URL, trailing junk — is
+ * NOT a pinned version and is material by default (fail closed; #1595
+ * review). The prerelease is captured (group 4) so build metadata with a
+ * dash (`1.0.0+2024-01-01`) is not misread as a prerelease. */
+const PINNED_SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.\-]+))?(?:\+([0-9A-Za-z.\-]+))?$/;
 
 /** Bounds for the diff walk — a lockfile diff is machine-generated, so
  * anything beyond these is hostile noise and fails the parse closed. */
@@ -3714,7 +3723,7 @@ function isMaterialVersionPair(oldVersion: string, newVersion: string): boolean 
   const newCore = PINNED_SEMVER_RE.exec(newVersion);
   if (oldCore === null || newCore === null) return true;
   if (oldCore[1] !== newCore[1]) return true;
-  if (oldVersion.includes("-") || newVersion.includes("-")) return true;
+  if (oldCore[4] !== undefined || newCore[4] !== undefined) return true;
   if (oldCore[1] === "0" || newCore[1] === "0") return true;
   return false;
 }
@@ -3722,19 +3731,29 @@ function isMaterialVersionPair(oldVersion: string, newVersion: string): boolean 
 /** Parse the npm package-lock v2/v3 version-pair shape out of a unified
  * diff: paired removed/added `"version": "x.y.z"` lines inside
  * `"node_modules/<name>"` blocks, plus changed runtime-constraint fields
- * (`engines`/`os`/`cpu`/`libc`) inside a block. Pure, bounded, lexical.
- * Returns null when the diff yields no parseable package-version value at
- * all, when a changed version or constraint line appears OUTSIDE any
- * package block (a minimal-context diff can hide which package a major
- * bump or an engines-floor change belongs to — it is never silently
- * dropped), or when the parse overflows its bounds (caller fails closed to
- * material). Deliberately npm-only — every other lockfile shape fails
- * closed the same way. */
-function parseLockfileVersionBuckets(diffText: string): Map<string, LockfileVersionBucket> | null {
-  const buckets = new Map<string, LockfileVersionBucket>();
+ * (`engines`/`os`/`cpu`/`libc`) inside a block (or before one — the
+ * lockfile root `""` block). Pure, bounded, lexical. Returns null when the
+ * diff yields no parseable package-version or constraint change at all,
+ * when a changed version or constraint line appears OUTSIDE any package
+ * block (a minimal-context diff can hide which package a major bump or an
+ * engines-floor change belongs to — it is never silently dropped), or when
+ * the parse overflows its bounds (caller fails closed to material).
+ * Deliberately npm-only — every other lockfile shape fails closed the same
+ * way. */
+function parseLockfileVersionBuckets(diffText: string): LockfileVersionBucket[] | null {
+  const buckets: LockfileVersionBucket[] = [];
   let current: LockfileVersionBucket | null = null;
+  // Brace depth inside the current package block's object (1 = the block
+  // object itself). npm pretty-prints nested objects (`"dependencies"`,
+  // `"bin"`, `"engines"`) INSIDE a package block, so the block closes only
+  // when its own braces balance — never on a nested key. Diff hunks can
+  // omit unchanged braces; the next package-block header resets the state,
+  // and a residual depth only delays the close (never reopens a block).
+  let depth = 0;
+  // Inside an `engines`/`os`/`cpu`/`libc` object/array — including one in
+  // the root `""` block, whose header matches no package-block pattern.
   let inConstraint = false;
-  let sawVersionValue = false;
+  let sawParsedChange = false;
   let lines = 0;
   for (const line of diffText.split("\n")) {
     if (++lines > LOCKFILE_PARSE_MAX_LINES) return null;
@@ -3744,43 +3763,65 @@ function parseLockfileVersionBuckets(diffText: string): Map<string, LockfileVers
     const content = line.slice(sign === "" ? 0 : 1).trim();
     if (content === "") continue;
     if (LOCKFILE_PACKAGE_KEY_RE.test(content)) {
-      // A package block: bucket by its node_modules key (the untrusted name
-      // is the bucket identity only — it never leaves this parser).
-      if (buckets.size >= LOCKFILE_PARSE_MAX_PACKAGES) return null;
+      // A package block: bucket by first-seen order (the untrusted name
+      // never leaves this parser). Deliberately NOT deduplicated — two
+      // lockfiles can share the same header (see LockfileVersionBucket).
+      if (buckets.length >= LOCKFILE_PARSE_MAX_PACKAGES) return null;
       current = { old: [], new: [], constraintChanged: false };
-      buckets.set(content, current);
+      buckets.push(current);
+      depth = 1;
       inConstraint = false;
       continue;
     }
-    if (LOCKFILE_RUNTIME_CONSTRAINT_OPEN_RE.test(content)) {
-      // Checked BEFORE LOCKFILE_OTHER_KEY_RE, which would otherwise match
-      // the `"engines": {` object key and close the package block: a
-      // constraint object stays INSIDE its package block.
+    if (LOCKFILE_RUNTIME_CONSTRAINT_KEY_RE.test(content)) {
+      // Checked BEFORE LOCKFILE_OTHER_KEY_RE, which would otherwise treat
+      // `"engines": {` as a nested key: a constraint region stays inside
+      // its package block. A single-line value — an inline object/array
+      // that closes itself, or a scalar like `"os": "linux"` — closes on
+      // this line and never opens a region.
       if (sign !== "") {
         // A changed constraint line outside any package block is never
         // dropped — a minimal-context diff could hide whose engines floor
         // or platform variant moved. Fail the parse closed.
         if (current === null) return null;
         current.constraintChanged = true;
-        sawVersionValue = true;
+        sawParsedChange = true;
       }
-      inConstraint = current !== null;
-      continue;
-    }
-    if (LOCKFILE_OTHER_KEY_RE.test(content)) {
-      current = null;
-      inConstraint = false;
+      const constraintValue = content.slice((LOCKFILE_RUNTIME_CONSTRAINT_KEY_RE.exec(content) as RegExpExecArray)[0].length);
+      if (/^[\[{]/.test(constraintValue) && !/[}\]]\s*,?\s*$/.test(content)) {
+        inConstraint = true;
+        if (current !== null) depth += 1;
+      }
       continue;
     }
     if (inConstraint) {
       // Interior of a constraint object/array: an npm pretty-printed value
       // change (`"node": ">=18"`) is a changed runtime constraint even when
       // the opening line is context. A closing `}`/`]` bracket leaves it.
-      if (current !== null && sign !== "") {
-        current.constraintChanged = true;
-        sawVersionValue = true;
+      if (/^[}\]]/.test(content)) {
+        inConstraint = false;
+        if (current !== null) {
+          depth -= 1;
+          if (depth <= 0) current = null;
+        }
+        continue;
       }
-      if (/^[}\]]/.test(content)) inConstraint = false;
+      if (sign !== "") {
+        if (current === null) return null;
+        current.constraintChanged = true;
+        sawParsedChange = true;
+      }
+      continue;
+    }
+    if (/^[}\]]/.test(content)) {
+      if (current !== null) {
+        depth -= 1;
+        if (depth <= 0) current = null;
+      }
+      continue;
+    }
+    if (LOCKFILE_OTHER_KEY_RE.test(content)) {
+      if (current !== null) depth += 1;
       continue;
     }
     const version = LOCKFILE_VERSION_LINE_RE.exec(content);
@@ -3791,12 +3832,12 @@ function parseLockfileVersionBuckets(diffText: string): Map<string, LockfileVers
       // unparseable → full material review).
       if (current === null) return null;
       current[sign === "-" ? "old" : "new"].push(version[1] as string);
-      sawVersionValue = true;
+      sawParsedChange = true;
     }
   }
   // A diff with no parsed package-version value and no changed constraint
   // is not a parseable lockfile shape.
-  if (!sawVersionValue) return null;
+  if (!sawParsedChange) return null;
   return buckets;
 }
 
@@ -3813,7 +3854,7 @@ export function evaluateLockfileOnlyRefresh(fullDiffText: string): LockfileOnlyR
   if (buckets === null) return { material: 0, lowRisk: 0, parseable: false };
   let material = 0;
   let lowRisk = 0;
-  for (const { old, new: added, constraintChanged } of buckets.values()) {
+  for (const { old, new: added, constraintChanged } of buckets) {
     const paired = Math.min(old.length, added.length);
     for (let index = 0; index < paired; index += 1) {
       if (isMaterialVersionPair(old[index] as string, added[index] as string)) material += 1;
@@ -3827,8 +3868,9 @@ export function evaluateLockfileOnlyRefresh(fullDiffText: string): LockfileOnlyR
     // a runtime-floor change still creates relevant obligations).
     if (constraintChanged) material += 1;
   }
-  // Non-null means the parser saw at least one version value inside a
-  // package block — the shape parsed, so the triage verdict is trusted.
+  // Non-null means the parser saw at least one parsed package-version value
+  // or changed runtime constraint inside a package block — the shape
+  // parsed, so the triage verdict is trusted.
   return { material, lowRisk, parseable: true };
 }
 

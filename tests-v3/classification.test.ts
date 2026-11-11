@@ -2618,20 +2618,91 @@ test("#1595 review: range-like/malformed version values fail closed; changed run
   bump(constraintBump("ms", "node", ">=14", ">=20"), { material: 1, lowRisk: 0, parseable: true });
   // A changed platform variant (os/cpu/libc) is material the same way.
   bump(constraintBump("@esbuild/linux-x64", "cpu", "x64", "arm64"), { material: 1, lowRisk: 0, parseable: true });
-  // A changed constraint line BEFORE any package block header (the lockfile
-  // root `""` block, whose key matches no package-block pattern) fails the
-  // parse closed — a minimal-context diff can hide whose engines floor
-  // moved. A constraint change with NO version bump at all is not even a
-  // version bump: it classifies renovate_digest_only and never triages.
+  // npm's REAL field order: `dependencies` (and `bin`) precede `engines`
+  // inside the block, and the engines change lands in a later hunk whose
+  // opening line is context. The block must NOT close on the nested
+  // `"dependencies": {` key — the floor change is material, never dropped.
   bump(
-    `-      "engines": {\n+      "engines": {\n` + lockfileBump("ms", "2.1.2", "2.1.3"),
+    `      "node_modules/pg": {\n` +
+      `-      "version": "8.11.3",\n` +
+      `+      "version": "8.11.5",\n` +
+      `       "license": "MIT",\n` +
+      `       "dependencies": {\n` +
+      `         "pg-types": "^2.1.0"\n` +
+      `       },\n` +
+      `@@\n` +
+      `       "engines": {\n` +
+      `-        "node": ">=8.0.0"\n` +
+      `+        "node": ">=16.0.0"\n` +
+      `       },\n`,
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
+  // The SAME package header in two lockfiles of one PR must NOT merge
+  // buckets: the first file's MAJOR jump survives the second file's churn.
+  bump(
+    `diff --git a/a/package-lock.json b/a/package-lock.json\n` +
+      lockfileBump("ms", "2.1.2", "3.0.0") +
+      `diff --git a/b/package-lock.json b/b/package-lock.json\n` +
+      lockfileBump("ms", "2.1.2", "2.1.3"),
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
+  // Build metadata containing a dash is NOT a prerelease — build metadata
+  // is semver-insignificant, so this stays ordinary churn (and SCOPED).
+  const buildMetaDash = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
+      lockfileBump("ms", "1.0.0+2023-01-01", "1.0.0+2024-01-01"),
+  });
+  assert.equal(buildMetaDash.prKind, "dependency_upgrade");
+  assert.deepEqual(buildMetaDash.lockfileOnlyRefresh, { material: 0, lowRisk: 1, parseable: true });
+  assert.deepEqual(buildMetaDash.mustCheck, LOCKFILE_REFRESH_LOW_RISK_CHECKS);
+
+  // An inline single-line engines object closes itself: the constraint is
+  // material AND the following version lines still pair (no region leak).
+  bump(
+    `    "node_modules/ms": {\n` +
+      `-      "engines": { "node": ">=14" },\n` +
+      `+      "engines": { "node": ">=20" },\n` +
+      `-      "version": "2.1.2",\n` +
+      `+      "version": "2.1.3",\n` +
+      `      "license": "MIT"\n` +
+      `    },\n`,
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
+  // A changed scalar constraint value (`"os": "linux"`) is material too.
+  bump(
+    `    "node_modules/ms": {\n` +
+      `-      "os": "linux",\n` +
+      `+      "os": "darwin",\n` +
+      `      "version": "1.2.3",\n` +
+      `      "license": "MIT"\n` +
+      `    },\n`,
+    { material: 1, lowRisk: 0, parseable: true },
+  );
+
+  // A changed constraint line BEFORE any package block header (the lockfile
+  // root `""` block, whose header matches no package-block pattern) fails
+  // the parse closed — a minimal-context diff can hide whose engines floor
+  // moved. This holds even when the opening line is only context and the
+  // interior VALUE line is what changed. A constraint change with NO
+  // version bump at all is not even a version bump: it classifies
+  // renovate_digest_only and never triages.
+  bump(
+    `      "engines": {\n` +
+      `-        "node": ">=14"\n` +
+      `+        "node": ">=20"\n` +
+      lockfileBump("ms", "2.1.2", "2.1.3"),
     { material: 0, lowRisk: 0, parseable: false },
   );
-  // Constraint lines AFTER a package block header belong to that block —
-  // attributed, material, but still parseable.
+  // A changed constraint line with NO attributable block (here: after the
+  // last block closed — e.g. a minimal-context diff whose header is out of
+  // range) fails the parse closed, exactly like a version line.
   bump(
     lockfileBump("ms", "2.1.2", "2.1.3") + `-      "engines": {\n+      "engines": {\n`,
-    { material: 1, lowRisk: 1, parseable: true },
+    { material: 0, lowRisk: 0, parseable: false },
   );
   assert.equal(
     classifyPr({ prFiles: files("site/package-lock.json"), diffText: `-      "engines": {\n+      "engines": {\n` }).prKind,
