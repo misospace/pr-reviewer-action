@@ -18,13 +18,17 @@ model prose — model verdict text is recorded as an untrusted claim
 
 The metric invariant (#1602): ``trusted_complete_approval`` requires ALL
 of a marker with a usable ``head_sha``, ``review_result == "clean"``, no
-partial/unknown ``coverage``, ``required_checks`` not ``incomplete``, AND
-proven native evidence — a native APPROVED event by a configured bot
-login whose ``commit_id`` equals the row's head, or a head-bound
-attestation with ``conclusion == "approved"``. A model approve-prose
-claim plus ``review_result: partial`` is never trusted; a native APPROVED
-over partial/unknown coverage is ``partial_or_abstained``; with neither
-native approval nor attestation the row is ``unknown_missing_native``.
+partial/unknown ``coverage``, ``required_checks`` not ``incomplete``, a
+marker head that agrees with the row's head — every independently
+supplied head identity (the native review's ``commit_id``, the marker
+head) must match, a disagreement is unsafe telemetry
+(``partial_or_abstained``, recorded as ``head_conflict``) — AND proven
+native evidence — a native APPROVED event by a configured bot login
+whose ``commit_id`` equals the row's head, or a head-bound attestation
+with ``conclusion == "approved"``. A model approve-prose claim plus
+``review_result: partial`` is never trusted; a native APPROVED over
+partial/unknown coverage is ``partial_or_abstained``; with neither native
+approval nor attestation the row is ``unknown_missing_native``.
 
 The collection scope is explicit: an action-version scope keeps only the
 rows whose published version is in the requested set, and a row whose
@@ -60,9 +64,12 @@ from pr_reviewer.metadata import parse_metadata
 
 # The published body line format (``src/publish/publish.ts``, body build):
 # ``_Analysis engine: <engine> · pr-reviewer-action <version>_``. The
-# version token is captured up to the closing underscore/whitespace.
+# engine name is a model identifier and may itself contain underscores
+# (``meta/llama3.1_70b_instruct``), so it is consumed up to the ``·``
+# delimiter within the line; only the version token stops at whitespace
+# or the closing underscore.
 _ACTION_VERSION_RE = re.compile(
-    r"_Analysis engine:[^_\n]*·\s*pr-reviewer-action\s+([^\s_]+)_"
+    r"_Analysis engine:[^\n]*?·\s*pr-reviewer-action\s+([^\s_]+)_"
 )
 
 # The action-owned skip note (``src/run/action.ts`` step-summary and
@@ -124,7 +131,6 @@ _LINK_LIMIT = 300
 # never match a published version; the CLI reuses this bound to reject
 # such a token before the run starts.
 ACTION_VERSION_LIMIT = 32
-_VERSION_LIMIT = ACTION_VERSION_LIMIT
 
 
 def bound(value: Any, limit: int = _FIELD_LIMIT) -> str | None:
@@ -247,16 +253,19 @@ def classify_disposition(
     body: str,
     native_approved: bool,
     attestation_conclusion: str | None,
+    row_head: str = "",
 ) -> str:
     """The row's disposition, per the #1602 taxonomy and metric invariant.
 
-    Order matters and is total: no-marker first (the default heuristic —
-    nothing about a missing marker is ever upgraded), then the explicit
-    skip note, then the incomplete/unsafe-telemetry gate (``partial`` or
-    unknown coverage, incomplete required checks, an unbound marker
-    head), then the clean path that REQUIRES proven native or attestation
-    evidence, then completed findings, then a marker with no usable
-    ``review_result`` at all.
+    ``row_head`` is the head identity the normalized row binds to (the
+    native review's ``commit_id`` when it carries one). Order matters and
+    is total: no-marker first (the default heuristic — nothing about a
+    missing marker is ever upgraded), then the explicit skip note, then
+    the incomplete/unsafe-telemetry gate (``partial`` or unknown
+    coverage, incomplete required checks, an unbound marker head, a
+    marker head that contradicts the row's head), then the clean path
+    that REQUIRES proven native or attestation evidence, then completed
+    findings, then a marker with no usable ``review_result`` at all.
     """
     if marker is None:
         return DISPOSITION_UNKNOWN_NO_MARKER
@@ -271,9 +280,14 @@ def classify_disposition(
         or coverage in _UNTRUSTED_COVERAGE
         or required_checks == "incomplete"
         or not _usable_head(head)
+        or head.strip()[:_HEAD_LIMIT] != row_head
     ):
         # Incomplete/unsafe telemetry: even a native APPROVED or a model
         # approve-prose claim over this state is never a trusted approval.
+        # A marker head that disagrees with the row's head is unsafe the
+        # same way an unbound one is: the marker's claims were made about
+        # a head this row cannot prove, so no native event or attestation
+        # can make this row a trusted approval of either head.
         return DISPOSITION_PARTIAL_OR_ABSTAINED
     if review_result == "clean":
         attested_approved = isinstance(attestation_conclusion, str) and (
@@ -313,12 +327,29 @@ def _normalize_attempt(
     state = attempt.get("state")
     marker_head = marker.get("head_sha") if isinstance(marker, dict) else None
 
-    if source == "native_review" and isinstance(commit_id, str) and commit_id.strip():
+    commit_bound = (
+        source == "native_review" and isinstance(commit_id, str) and _usable_head(commit_id)
+    )
+    marker_bound = isinstance(marker_head, str) and _usable_head(marker_head)
+
+    if commit_bound:
         head_sha = commit_id.strip()[:_HEAD_LIMIT]
-    elif isinstance(marker_head, str) and _usable_head(marker_head):
+    elif marker_bound:
         head_sha = marker_head.strip()[:_HEAD_LIMIT]
     else:
         head_sha = ""
+
+    # A native review carries two independent head identities: the forge-
+    # bound ``commit_id`` and the head its body's marker claims. Both
+    # bound and disagreeing is a contradiction (a marker for one head
+    # riding a review bound to another); the row records it, and the
+    # disposition gate refuses to trust the marker's claims for either
+    # head.
+    head_conflict = bool(
+        commit_bound
+        and marker_bound
+        and commit_id.strip()[:_HEAD_LIMIT] != marker_head.strip()[:_HEAD_LIMIT]
+    )
 
     native_approved = _head_has_native_approval(head_sha, bot_reviews)
 
@@ -343,7 +374,7 @@ def _normalize_attempt(
     attestation_reason = attempt.get("attestation_reason_code")
 
     disposition = classify_disposition(
-        marker, body, native_approved, attestation_conclusion
+        marker, body, native_approved, attestation_conclusion, head_sha
     )
 
     row: dict[str, Any] = {
@@ -370,6 +401,7 @@ def _normalize_attempt(
             bound(attestation_reason, _FIELD_LIMIT) if attestation_reason else None
         ),
         "disposition": disposition,
+        "head_conflict": head_conflict,
         "superseded_head": bool(
             _usable_head(pr_head_sha)
             and _usable_head(head_sha)

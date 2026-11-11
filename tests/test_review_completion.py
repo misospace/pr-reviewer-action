@@ -77,6 +77,27 @@ def test_parse_action_version_absent_is_unknown():
     assert rc.parse_action_version("") == "unknown"
     # An engine line without a version token stays unknown, never a guess.
     assert rc.parse_action_version("_Analysis engine: claude-code_") == "unknown"
+    assert rc.parse_action_version("_Analysis engine: llama3.1_70b_instruct_") == "unknown"
+
+
+def test_parse_action_version_engine_name_with_underscores():
+    """Model identifiers may contain underscores; they must not void the version."""
+    body = (
+        "_Analysis engine: litellm/llama3.1_70b_instruct · "
+        "pr-reviewer-action v3.8.0-dev+972ab8a_\n\nprose"
+    )
+    assert rc.parse_action_version(body) == "v3.8.0-dev+972ab8a"
+
+
+def test_row_version_and_scope_survive_underscored_engine_name():
+    body = _marker(version="v3.5.0").replace("claude-code", "meta/llama3.1_70b_instruct")
+    rows = rc.collect_rows(
+        REPO, [_pull(1, HEAD, comments=[_comment(1, HEAD, body=body)])], [BOT]
+    )
+    assert rows[0]["action_version"] == "v3.5.0"
+    kept, excluded = rc.filter_by_action_version(rows, ["3.5.0"])
+    assert len(kept) == 1
+    assert excluded == {}
 
 
 def test_body_indicates_skip_only_from_the_action_note():
@@ -205,11 +226,44 @@ def test_unbound_head_sentinels_never_bind_a_marker():
         assert row["disposition"] == "partial_or_abstained"
 
 
+def test_conflicting_marker_head_never_trusted():
+    """Two supplied head identities that disagree are unsafe telemetry.
+
+    A native APPROVED bound to ``OTHER_HEAD`` whose body carries a clean
+    marker for ``HEAD`` proves nothing about either head: the row is
+    ``partial_or_abstained`` with the conflict recorded, never a
+    trusted_complete_approval.
+    """
+    review = _review(1, OTHER_HEAD, "APPROVED", body=_marker(head_sha=HEAD))
+    rows = rc.collect_rows(REPO, [_pull(1, OTHER_HEAD, reviews=[review])], [BOT])
+    assert rows[0]["head_sha"] == OTHER_HEAD
+    assert rows[0]["disposition"] == "partial_or_abstained"
+    assert rows[0]["head_conflict"] is True
+    # The native event is still recorded for the reader; only trust falls.
+    assert rows[0]["native_event"] == "APPROVED"
+    assert all(row["disposition"] != "trusted_complete_approval" for row in rows)
+
+
+def test_conflicting_marker_head_defeats_attestation_too():
+    """The disagreement outranks every evidence path, attestation included."""
+    review = _review(1, OTHER_HEAD, "APPROVED", body=_marker(head_sha=HEAD))
+    rows = rc.collect_rows(
+        REPO,
+        [_pull(1, OTHER_HEAD, reviews=[review])],
+        [BOT],
+        [{"conclusion": "approved", "reason_code": "native_gate", "head_sha": OTHER_HEAD}],
+    )
+    assert rows[0]["attestation_conclusion"] == "approved"
+    assert rows[0]["disposition"] == "partial_or_abstained"
+    assert rows[0]["head_conflict"] is True
+
+
 def test_clean_marker_with_bound_native_approval_is_trusted():
     rows = rc.collect_rows(REPO, [_pull(1, HEAD, reviews=[_review(1, HEAD, "APPROVED")])], [BOT])
     assert rows[0]["disposition"] == "trusted_complete_approval"
     assert rows[0]["native_event"] == "APPROVED"
     assert rows[0]["native_event_bound"] is True
+    assert rows[0]["head_conflict"] is False
 
 
 def test_clean_marker_without_native_or_attestation_is_unknown_missing_native():
