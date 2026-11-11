@@ -186,6 +186,15 @@ def _usable_head(sha: Any) -> bool:
     return text not in _UNBOUND_HEAD
 
 
+def _heads_differ(sha_a: str, sha_b: str) -> bool:
+    """True when two supplied head identities are not the same head.
+
+    Exact comparison after stripping and the row's bound truncation: a
+    case or over-length difference is not agreement and fails closed.
+    """
+    return sha_a.strip()[:_HEAD_LIMIT] != sha_b.strip()[:_HEAD_LIMIT]
+
+
 def _head_has_native_approval(head_sha: str, bot_reviews: list[dict[str, Any]]) -> bool:
     """True when a bot native review APPROVED exactly this head.
 
@@ -222,7 +231,7 @@ def _review_marker_conflict(review: dict[str, Any], commit_id: str) -> bool:
     return bool(
         isinstance(marker_head, str)
         and _usable_head(marker_head)
-        and marker_head.strip()[:_HEAD_LIMIT] != commit_id.strip()[:_HEAD_LIMIT]
+        and _heads_differ(marker_head, commit_id)
     )
 
 
@@ -303,7 +312,7 @@ def classify_disposition(
         or coverage in _UNTRUSTED_COVERAGE
         or required_checks == "incomplete"
         or not _usable_head(head)
-        or head.strip()[:_HEAD_LIMIT] != row_head
+        or _heads_differ(head, row_head)
     ):
         # Incomplete/unsafe telemetry: even a native APPROVED or a model
         # approve-prose claim over this state is never a trusted approval.
@@ -371,7 +380,7 @@ def _normalize_attempt(
     head_conflict = bool(
         commit_bound
         and marker_bound
-        and commit_id.strip()[:_HEAD_LIMIT] != marker_head.strip()[:_HEAD_LIMIT]
+        and _heads_differ(commit_id, marker_head)
     )
 
     native_approved = _head_has_native_approval(head_sha, bot_reviews)
