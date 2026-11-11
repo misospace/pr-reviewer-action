@@ -2085,14 +2085,23 @@ export interface TracedLedgerEntry {
   kind: string;
 }
 
+/** #1600: how many distinct standards provenance refs a scope decision will
+ * consider per requirement — bounded so a hostile ledger cannot grow the
+ * out-of-scope reason or the ref-match loop without limit. */
+const MAX_STANDARDS_REFS = 8;
+
 /** Read `ledger.requirements` from an untrusted value (the parsed
  * `requirement-ledger.json`, or `null` when it never ran) without assuming
  * either serialization's field casing beyond `id`/`text`/`kind`.
- * Returns every acceptance/normative entry with its provenance sources. */
-function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sources: string[] | null }[] {
+ * Returns every acceptance/normative entry with its provenance sources, plus
+ * (#1600) the lowercased `ref` of each `standards`-sourced provenance entry —
+ * the trusted boundary-defining document(s) the requirement was extracted
+ * from, used to keep a standards row in scope when its own source file is
+ * among the changed paths. */
+function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sources: string[] | null; standardsRefs: string[] }[] {
   const raw = (ledger as { requirements?: unknown } | null | undefined)?.requirements;
   if (!Array.isArray(raw)) return [];
-  const out: { entry: TracedLedgerEntry; sources: string[] | null }[] = [];
+  const out: { entry: TracedLedgerEntry; sources: string[] | null; standardsRefs: string[] }[] = [];
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
     const record = item as Record<string, unknown>;
@@ -2103,7 +2112,18 @@ function ledgerTraceCandidates(ledger: unknown): { entry: TracedLedgerEntry; sou
     const sources = Array.isArray(provenance) && provenance.length > 0
       ? provenance.map((p) => (p && typeof p === "object" ? String((p as { source?: unknown }).source ?? "") : "")).filter((s) => s !== "")
       : null;
-    out.push({ entry: { id, text, kind }, sources });
+    const standardsRefs: string[] = [];
+    if (Array.isArray(provenance)) {
+      for (const p of provenance) {
+        if (standardsRefs.length >= MAX_STANDARDS_REFS) break;
+        if (!p || typeof p !== "object") continue;
+        const rec = p as { source?: unknown; ref?: unknown };
+        if (rec.source !== "standards" || typeof rec.ref !== "string" || rec.ref === "") continue;
+        const ref = rec.ref.toLowerCase();
+        if (!standardsRefs.includes(ref)) standardsRefs.push(ref);
+      }
+    }
+    out.push({ entry: { id, text, kind }, sources, standardsRefs });
   }
   return out;
 }
@@ -2569,6 +2589,70 @@ function subjectTouched(text: string, changed: string): boolean {
   return strongTerms.some((term) => termWordMatch(term, changed));
 }
 
+// ── #1600: standards scope needs a connection to an affected boundary ────
+
+/** #1600: extensions whose files are prose documents. A prose-document path
+ * is decided by extension alone — never by directory — so nothing about the
+ * file's location can exempt or condemn it: `AGENTS.md` at the repo root and
+ * `docs/architecture/code-map.md` are the same class, and both stay subject
+ * to the boundary-connection rule below (a trusted policy edit is kept in
+ * scope by the standards-source signal, not by its extension). The class
+ * only decides whether a lexical match needs boundary corroboration; it is
+ * never a blanket exemption of Markdown or docs directories. */
+const PROSE_DOCUMENT_EXTENSIONS: ReadonlySet<string> = new Set([
+  ".md", ".markdown", ".mdx", ".rst", ".adoc", ".asciidoc", ".txt",
+]);
+
+/** True when the path names a prose document: its final path segment carries
+ * one of the prose extensions above (case-insensitive; production callers
+ * pass lowercased paths, tests and future callers may not). A file with no
+ * extension (`README`, `Makefile`) is NOT a prose document — the
+ * implementation-surface class below keeps such changes boundary-connected. */
+function isProseDocumentPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  const dot = lower.lastIndexOf(".");
+  const slash = lower.lastIndexOf("/");
+  if (dot <= slash) return false; // no extension in the final segment
+  return PROSE_DOCUMENT_EXTENSIONS.has(lower.slice(dot));
+}
+
+/** #1600: an implementation-surface path — a changed file that can itself
+ * carry or gate behavior: source, scripts, executable examples, workflows,
+ * infrastructure/config, lockfiles. Defined independently of any requirement
+ * text (never a model-authored or repo-specific rule) as the complement of
+ * two narrow scaffolding classes: prose documents ({@link
+ * isProseDocumentPath}) and test files (`isTestPath`, the same classifier
+ * the trace validator applies to cited test locations). A diff whose ONLY
+ * changed paths are prose documents and test files cannot reach a security
+ * boundary by itself, so for a standards-sourced requirement it no longer
+ * turns quoted boundary vocabulary into a trace demand; every other path
+ * class (YAML workflows and configs included — never blanket-exempted)
+ * keeps the lexical signal at full strength. Repos that treat a runbook,
+ * policy doc, or test file as boundary-owning declare it via the base-ref
+ * owner map, which is checked first. */
+function implementationSurfaceTouched(paths: readonly string[]): boolean {
+  return paths.some((path) => !isProseDocumentPath(path) && !isTestPath(path));
+}
+
+/** #1600: true when one of the requirement's own standards provenance refs —
+ * the trusted boundary-defining document it was extracted from — is among the
+ * changed paths (by full path or by final segment, case-insensitively; the
+ * ledger records the standards file's basename). Editing the standard's own
+ * source is the trusted security-policy change class: the requirement stays
+ * in scope regardless of the `.md` extension, because the boundary's
+ * defining text is exactly what the diff rewrites. Final-segment matching is
+ * deliberately over-inclusive (a same-named file anywhere counts): the
+ * fail-open direction here is in-scope, never out. */
+function standardsSourceTouched(standardsRefs: readonly string[], paths: readonly string[]): boolean {
+  for (const ref of standardsRefs) {
+    for (const path of paths) {
+      const lower = path.toLowerCase();
+      if (lower === ref || lower.split("/").pop() === ref) return true;
+    }
+  }
+  return false;
+}
+
 export interface RequirementTraceScope {
   inScope: TracedLedgerEntry[];
   outOfScope: { entry: TracedLedgerEntry; reason: string }[];
@@ -2588,7 +2672,31 @@ export interface RequirementTraceScope {
  * bigram in ordinary prose ("only through", "never appear") is no scope
  * evidence. #958 adds explicit `ownership` (from repository
  * config) so a change to a boundary's own file scopes its requirement in
- * even when the diff repeats none of its prose. */
+ * even when the diff repeats none of its prose.
+ *
+ * #1600 narrows the remaining dimension for pure standards-sourced
+ * requirements (every provenance source is `standards`): there, a lexical
+ * subject match alone is no longer trace-required — the change must also
+ * reach an affected boundary, evidenced by any of (a) a declared owner path
+ * among the changed files (base-ref-trusted `.github/pr-reviewer-owners.yml`
+ * globs), (b) the requirement's own standards source document among the
+ * changed files (a trusted security-policy edit — extension irrelevant), or
+ * (c) an implementation-surface file among the changed files (anything that
+ * is not a prose document and not a test file — executable examples, scripts,
+ * workflows and configs stay in scope; a docs-prose/test-only diff quoting
+ * `untrusted content`, `credentials`, or `fence` cannot activate a security
+ * standard it cannot reach). Prose-document and test classes are decided by
+ * extension and path shape only — Markdown/YAML/docs directories are never
+ * blanket-exempted: a `.md` security-policy or boundary-owner change stays
+ * in scope through (a)/(b). Linked-issue requirements and entries without
+ * provenance are untouched (always in scope — fail closed), and so is a
+ * mixed-provenance requirement (any non-standards source keeps the old
+ * rule). The narrowing also needs changed-path evidence: when `paths` is
+ * missing or empty the lexical match keeps its full weight (fail closed).
+ * Proof validation, blocker classification, and the approval/attestation
+ * gates are unchanged; the out-of-scope reason records which boundary
+ * signals the change missed, so the `not_applicable` row is explainable from
+ * the artifact alone. */
 export function requirementTraceScope(
   ledger: unknown,
   changed?: string,
@@ -2598,14 +2706,32 @@ export function requirementTraceScope(
   const paths = context.paths ?? [];
   const compiledOwnership = ownership.length > 0 && paths.length > 0 ? compileOwnership(ownership) : [];
   const scope: RequirementTraceScope = { inScope: [], outOfScope: [] };
-  for (const { entry, sources } of ledgerTraceCandidates(ledger)) {
+  for (const { entry, sources, standardsRefs } of ledgerTraceCandidates(ledger)) {
     const owned = compiledOwnership.length > 0 && ownershipTouched(compiledOwnership, entry.text, paths);
-    if (changed === undefined || sources === null || sources.includes("linked_issues") || subjectTouched(entry.text, changed) || owned) {
+    let touched = changed !== undefined && subjectTouched(entry.text, changed);
+    // #1600: for a pure standards-sourced requirement, corroborate the lexical
+    // match with a connection to an affected boundary (see the doc comment).
+    // Only the lexical signal is narrowed; declared owners, linked issues,
+    // unknown provenance and mixed provenance keep their existing weight.
+    const standardsOnly = sources !== null && sources.length > 0 && sources.every((source) => source === "standards");
+    let boundaryNarrowed = false;
+    if (
+      touched && !owned && standardsOnly
+      && paths.length > 0
+      && !standardsSourceTouched(standardsRefs, paths)
+      && !implementationSurfaceTouched(paths)
+    ) {
+      touched = false;
+      boundaryNarrowed = true;
+    }
+    if (changed === undefined || sources === null || sources.includes("linked_issues") || touched || owned) {
       scope.inScope.push(entry);
     } else {
       scope.outOfScope.push({
         entry,
-        reason: `out of scope: from ${[...new Set(sources)].join("/")}, and neither its subject terms nor any declared owner path appear in the changed files or lines`,
+        reason: boundaryNarrowed
+          ? `out of scope: from ${[...new Set(sources)].join("/")}; its subject terms appear only as quoted vocabulary in a prose-document/test-only change with no affected-boundary connection (no declared owner path, no edit to its standards source (${standardsRefs.length > 0 ? [...new Set(standardsRefs)].join("/").slice(0, 96) : "unknown"}), and no implementation-surface file among the changed paths)`
+          : `out of scope: from ${[...new Set(sources)].join("/")}, and neither its subject terms nor any declared owner path appear in the changed files or lines`,
       });
     }
   }
