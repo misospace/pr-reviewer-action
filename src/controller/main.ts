@@ -1010,18 +1010,26 @@ export function createModelCredentialVault(options: {
  * Selection is deliberately narrow, and fail-closed at every step:
  * - the vault keeps priority: env-defined material (an operator's static
  *   token) is served unchanged; the mint is ONLY the `unknown_reference`
- *   fallback, so an expired or scope-refused entry is never papered over;
+ *   fallback, so an expired, revoked, or scope-refused entry is never
+ *   papered over;
  * - only the `github` platform's `forge_publish` purpose and only a
  *   reference the instance config actually declares for a forge
  *   integration are ever minted — every other refusal passes through
  *   untouched (model material in particular);
- * - an empty installation identity refuses without reaching the mint;
- * - a mint failure (or an empty mint) refuses the WHOLE credential set
- *   with a fixed, bounded, credential-free reason — never an
- *   unauthenticated, stale, or echoed-error degradation. */
+ * - the mint is SCOPED to the run's repository: the worker boundary never
+ *   receives the installation's full grant;
+ * - a missing installation or repository identity refuses without
+ *   reaching the mint;
+ * - a mint failure (or mint output that fails the vault's own material
+ *   discipline) refuses the WHOLE credential set with a fixed, bounded,
+ *   credential-free reason — never an unauthenticated, stale, or
+ *   echoed-error degradation. */
 export function createGitHubPublishMintingBroker(
   base: CredentialBroker,
-  mint: (installationId: string) => Promise<{
+  mint: (
+    installationId: string,
+    repoFullName: string,
+  ) => Promise<{
     readonly value: string;
     readonly expiresAtMs: number;
   }>,
@@ -1040,12 +1048,16 @@ export function createGitHubPublishMintingBroker(
       ) {
         return result;
       }
-      if (request.installationId === "") {
-        return refusalFromMint("the run carries no installation identity to mint a GitHub installation token against");
+      if (request.installationId === "" || request.repoFullName === "") {
+        // Both identity dimensions are required: the installation to mint
+        // against and the repository to scope the grant to.
+        return refusalFromMint(
+          "the per-job GitHub installation-token mint cannot run: the plan carries no installation or repository identity to scope the mint to",
+        );
       }
       let minted: { readonly value: string; readonly expiresAtMs: number };
       try {
-        minted = await mint(request.installationId);
+        minted = await mint(request.installationId, request.repoFullName);
       } catch {
         // The mint's own reason is bounded and credential-free by its
         // contract, but the broker refusal stays a FIXED string: the
@@ -1053,7 +1065,17 @@ export function createGitHubPublishMintingBroker(
         // detail toward the executor boundary.
         return refusalFromMint("the per-job GitHub installation-token mint failed");
       }
-      if (minted.value === "" || !Number.isFinite(minted.expiresAtMs)) {
+      // The vault's material discipline applied to mint output too
+      // (vault.ts `isValidSecretMaterial`): no empty, line-bearing, or
+      // nonsensical-expiry value crosses the handoff — defense in depth
+      // beside the authenticator's own liveness rules, not instead them.
+      if (
+        minted.value === ""
+        || minted.value.includes("\n")
+        || minted.value.includes("\r")
+        || !Number.isFinite(minted.expiresAtMs)
+        || minted.expiresAtMs < 0
+      ) {
         return refusalFromMint("the per-job GitHub installation-token mint returned no usable material");
       }
       return { ok: true, material: Object.freeze({ value: minted.value, expiresAtMs: minted.expiresAtMs }) };
@@ -1070,11 +1092,16 @@ export function createGitHubPublishMintingBroker(
   };
 }
 
-function refusalFromMint(detail: string): ResolveResult {
+/** A mint-path refusal: the closed `unknown_reference` code (the mint
+ * holds no reference either — it is an authority), with a FIXED reason
+ * naming the mint's own diagnosis rather than asserting the reference is
+ * "not held", which would misread a transient mint failure as missing
+ * operator configuration. */
+function refusalFromMint(reason: string): ResolveResult {
   return Object.freeze({
     ok: false as const,
     code: "unknown_reference" as const,
-    reason: `the credential reference is not held by this broker and ${detail}`,
+    reason,
   });
 }
 

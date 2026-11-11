@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -51,6 +51,8 @@ import {
   createWorkerCredentialBinding,
   type ControllerMainHandle,
 } from "../src/controller/main.js";
+import { composeForgeCapability } from "../src/controller/forge-capability.js";
+import type { FetchLike } from "../src/platform/http.js";
 
 const HEAD = "aa11bb22cc33dd44ee55ff667788990001122334";
 const BASE = "dd44ee55ff66aa77bb88cc99001122334455667788";
@@ -1415,13 +1417,13 @@ forges:
 /** A github binding (forge credential `forge-cred`) over the minting broker:
  * the vault holds the model material and — when `vaultForgeMaterial` is
  * given — the env-defined static forge material. `mintCalls` records every
- * installation id the mint is asked for. */
+ * (installation id, repository) pair the mint is asked for. */
 function githubMintBindingFixture(options: {
   readonly vaultForgeMaterial?: string;
-  readonly mint: (installationId: string) => Promise<{
-    readonly value: string;
-    readonly expiresAtMs: number;
-  }>;
+  readonly mint: (
+    installationId: string,
+    repoFullName: string,
+  ) => Promise<{ readonly value: string; readonly expiresAtMs: number }>;
   readonly mintCalls: string[];
 }) {
   const instance = parseInstanceConfigText(GITHUB_INSTANCE_CONFIG, validateContract(V3_CONTRACT));
@@ -1435,9 +1437,9 @@ function githubMintBindingFixture(options: {
       platform: "github",
       modelCredentialMaterial: material,
     }),
-    async (installationId) => {
-      options.mintCalls.push(installationId);
-      return options.mint(installationId);
+    async (installationId, repoFullName) => {
+      options.mintCalls.push(`${installationId}/${repoFullName}`);
+      return options.mint(installationId, repoFullName);
     },
     instance.forges.map((entry) => entry.credential),
   );
@@ -1473,14 +1475,17 @@ test("an App-based GitHub run's forge-publish entry resolves from the per-job in
     { name: "forge-publish", reference: "forge-cred" },
     { name: "model", reference: "model-cred" },
   ]);
+  // LATE: planning minted nothing.
+  assert.deepEqual(mintCalls, []);
   const resolved = await binding.resolver.resolve({ runId: "run-gh-mint-1" } as ExecutionRequest);
   assert.equal(resolved.ok, true);
   if (resolved.ok) {
     assert.deepEqual(resolved.credentials.map((entry) => entry.name), ["forge-publish", "model"]);
     assert.equal(resolved.credentials[0]?.value, "ghs_minted_installation_token_material");
   }
-  // The mint runs LATE (at resolution, once) and for THIS run's installation.
-  assert.deepEqual(mintCalls, ["4242"]);
+  // The mint runs at resolution (once), for THIS run's installation, and
+  // its grant is SCOPED to THIS run's repository.
+  assert.deepEqual(mintCalls, ["4242/owner/repo"]);
 });
 
 test("env-defined static forge material keeps priority; the mint is not reached (#1624)", async () => {
@@ -1528,8 +1533,8 @@ test("a failing mint refuses the WHOLE credential set with a fixed reason that e
       platform: "github",
       modelCredentialMaterial: new Map([["model-cred", "sk-test-model-material"]]),
     }),
-    async (installationId) => {
-      mintCalls.push(installationId);
+    async (installationId, repoFullName) => {
+      mintCalls.push(`${installationId}/${repoFullName}`);
       throw new Error("GitHub App authentication failed: private-token-leak at https://example.invalid");
     },
     instance.forges.map((entry) => entry.credential),
@@ -1552,8 +1557,9 @@ test("a failing mint refuses the WHOLE credential set with a fixed reason that e
     assert.ok(!resolved.reason.includes("private-token-leak"), resolved.reason);
     assert.ok(!resolved.reason.includes("example.invalid"), resolved.reason);
   }
-  // The mint was attempted exactly once for this run's installation.
-  assert.deepEqual(mintCalls, ["4242"]);
+  // The mint was attempted exactly once for this run's installation,
+  // scoped to its repository.
+  assert.deepEqual(mintCalls, ["4242/owner/repo"]);
   // The refusal diagnostic carries only the closed code and the entry name.
   assert.equal(refusals.length, 1);
   assert.ok(!refusals[0]?.includes("private-token-leak"), refusals[0] ?? "");
@@ -1561,8 +1567,8 @@ test("a failing mint refuses the WHOLE credential set with a fixed reason that e
 
 test("the minting broker serves exactly github publish-purpose material for declared references (#1624)", async () => {
   const mintCalls: string[] = [];
-  const mint = async (installationId: string) => {
-    mintCalls.push(installationId);
+  const mint = async (installationId: string, repoFullName: string) => {
+    mintCalls.push(`${installationId}/${repoFullName}`);
     return { value: "ghs_minted_installation_token_material", expiresAtMs: 1_800_000_000_000 };
   };
   const base = {
@@ -1592,15 +1598,15 @@ test("the minting broker serves exactly github publish-purpose material for decl
     assert.equal(served.material.expiresAtMs, 1_800_000_000_000);
   }
   // Every other shape keeps the base refusal, mint untouched.
-  assert.deepEqual(mintCalls, ["4242"]);
+  assert.deepEqual(mintCalls, ["4242/owner/repo"]);
   for (const request of [
-    { purpose: "model" as const, platform: "github" as const, installationId: "4242" },
-    { purpose: "forge_publish" as const, platform: "forgejo" as const, installationId: "4242" },
-    { purpose: "forge_publish" as const, platform: "github" as const, installationId: "" },
+    { purpose: "model" as const, platform: "github" as const, installationId: "4242", repoFullName: "owner/repo" },
+    { purpose: "forge_publish" as const, platform: "forgejo" as const, installationId: "4242", repoFullName: "owner/repo" },
+    { purpose: "forge_publish" as const, platform: "github" as const, installationId: "", repoFullName: "owner/repo" },
+    { purpose: "forge_publish" as const, platform: "github" as const, installationId: "4242", repoFullName: "" },
   ]) {
     const refused = await broker.resolve("forge-cred", {
       ...request,
-      repoFullName: "owner/repo",
       profileName: "",
     });
     assert.equal(refused.ok, false);
@@ -1616,7 +1622,45 @@ test("the minting broker serves exactly github publish-purpose material for decl
     profileName: "",
   });
   assert.equal(undeclared.ok, false);
-  assert.deepEqual(mintCalls, ["4242"]);
+  assert.deepEqual(mintCalls, ["4242/owner/repo"]);
+});
+
+test("a vault refusal that is NOT missing material passes through, never minted over (#1624)", async () => {
+  for (const code of ["expired", "revoked", "scope_mismatch", "invalid_request"] as const) {
+    const mintCalls: string[] = [];
+    const base = {
+      async resolve() {
+        return { ok: false as const, code, reason: `held but refused: ${code}` };
+      },
+      revoke() {
+        return false;
+      },
+      describe() {
+        return [];
+      },
+    };
+    const broker = createGitHubPublishMintingBroker(
+      base,
+      async (installationId, repoFullName) => {
+        mintCalls.push(`${installationId}/${repoFullName}`);
+        return { value: "ghs_minted_installation_token_material", expiresAtMs: 1_800_000_000_000 };
+      },
+      ["forge-cred"],
+    );
+    const refused = await broker.resolve("forge-cred", {
+      purpose: "forge_publish",
+      platform: "github",
+      installationId: "4242",
+      repoFullName: "owner/repo",
+      profileName: "",
+    });
+    // An entry the broker HOLDS but refuses (expired, revoked, mis-bound)
+    // is never papered over with a fresh mint: the closed code passes
+    // through and the mint is not reached.
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.code, code);
+    assert.deepEqual(mintCalls, []);
+  }
 });
 
 test("a mint that yields no usable material fails closed (#1624)", async () => {
@@ -1634,6 +1678,11 @@ test("a mint that yields no usable material fails closed (#1624)", async () => {
   for (const broken of [
     { value: "", expiresAtMs: 1_800_000_000_000 },
     { value: "ghs_minted_installation_token_material", expiresAtMs: Number.NaN },
+    // The vault's own material discipline applies to mint output too:
+    // line-bearing values and nonsensical expiries never cross the handoff.
+    { value: "ghs_minted\ninstallation_token_material", expiresAtMs: 1_800_000_000_000 },
+    { value: "ghs_minted_installation_token_material", expiresAtMs: -1 },
+    { value: "ghs_minted_installation_token_material", expiresAtMs: Number.POSITIVE_INFINITY },
   ]) {
     const broker = createGitHubPublishMintingBroker(base, async () => broken, ["forge-cred"]);
     const refused = await broker.resolve("forge-cred", {
@@ -1646,4 +1695,45 @@ test("a mint that yields no usable material fails closed (#1624)", async () => {
     assert.equal(refused.ok, false);
     if (!refused.ok) assert.equal(refused.code, "unknown_reference");
   }
+});
+
+test("the composed GitHub mint is repository-scoped and speaks epoch-ms expiry (#1624)", async () => {
+  // Pins the two conversion rules the fake-mint binding tests cannot see:
+  // GitHub's `expires_at` (epoch SECONDS on the wire) becomes the #735
+  // SecretMaterial `expiresAtMs`, and the mint request carries the run's
+  // repository scope — never the installation's full grant.
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const expiresAtSeconds = Math.floor(Date.now() / 1000) + 3600;
+  const bodies: string[] = [];
+  const urls: string[] = [];
+  const fetchImpl: FetchLike = async (input, init) => {
+    urls.push(String(input));
+    bodies.push(typeof init?.body === "string" ? init.body : "");
+    return new Response(
+      JSON.stringify({
+        token: "ghs_scoped_installation_token",
+        expires_at: new Date(expiresAtSeconds * 1000).toISOString(),
+      }),
+      { status: 201 },
+    );
+  };
+  const composed = composeForgeCapability({
+    platform: "github",
+    endpoint: "https://api.github.com",
+    workspaceCacheRoot: "/tmp/ctl-mint-test-cache",
+    githubAppId: "123456",
+    githubAppPrivateKeyPem: privateKeyPem,
+    fetchImpl,
+  });
+  assert.equal(composed.mintInstallationToken !== undefined, true);
+  const minted = await composed.mintInstallationToken!("4242", "owner/repo");
+  assert.equal(minted.value, "ghs_scoped_installation_token");
+  assert.equal(minted.expiresAtMs, expiresAtSeconds * 1000);
+  // The wire mint targets the installation-token endpoint with the
+  // repository-scope body (GitHub's scoped mint contract takes repo names).
+  assert.equal(urls.length, 1);
+  assert.match(urls[0] ?? "", /\/app\/installations\/4242\/access_tokens$/);
+  const scope = JSON.parse(bodies[0] ?? "{}") as { repositories?: unknown };
+  assert.deepEqual(scope.repositories, ["repo"]);
 });

@@ -162,12 +162,22 @@ export interface ComposedForge {
   /** Mint (or reuse) the per-job GitHub installation token as #735
    * worker `forge-publish` material (#1624). GitHub composition only:
    * the Forgejo token is static env-seeded material and needs no mint.
+   *
+   * The mint is SCOPED to the run's repository — never the installation's
+   * full grant. The worker's engine performs the review's forge READS of
+   * exactly that repository, so the token handed across the worker
+   * boundary carries exactly that grant (`GitHubAppAuthenticator`'s own
+   * guidance, `src/ingress/github-app-auth.ts`).
+   *
    * The mint runs LATE — at the worker credential resolution the
-   * executor performs, never at plan time — and its result is held
-   * only in memory between mint and handoff. A rejection carries the
+   * executor performs, never at plan time — and its result is held only
+   * in memory between mint and handoff. A rejection carries the
    * authenticator's bounded, credential-free reason; the caller fails
    * closed and never degrades to an unauthenticated or stale token. */
-  readonly mintInstallationToken?: (installationId: string) => Promise<{
+  readonly mintInstallationToken?: (
+    installationId: string,
+    repoFullName: string,
+  ) => Promise<{
     readonly value: string;
     readonly expiresAtMs: number;
   }>;
@@ -432,8 +442,13 @@ function composeGitHub(input: ForgeCompositionInput): ComposedForge {
         ? Promise.resolve({ ok: false as const, error: "no reconcile installation is configured" })
         : lister.listOpenPullRequests(repo),
     pollInstallationId: fixedInstallationId,
-    mintInstallationToken: async (installationId: string) => {
-      const result = await authenticator.installationToken(installationId);
+    mintInstallationToken: async (installationId: string, repoFullName: string) => {
+      // Scope the mint to the run's repository: the worker boundary must
+      // never see the installation's full grant. A malformed identity
+      // refuses inside the authenticator before the URL is built.
+      const result = await authenticator.installationToken(installationId, {
+        repositories: [repoFullName],
+      });
       if (!result.ok) {
         // The authenticator's reason is its own bounded, credential-free
         // classification — safe to propagate as an error message (same
