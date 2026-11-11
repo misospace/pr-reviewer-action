@@ -2312,6 +2312,9 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         ...(meta.required_evidence_attempts !== undefined ? { required_evidence_attempts: meta.required_evidence_attempts } : {}),
         ...(meta.required_evidence_credits !== undefined ? { required_evidence_credits: meta.required_evidence_credits } : {}),
         ...(meta.required_evidence_released !== undefined ? { required_evidence_released: meta.required_evidence_released } : {}),
+        // #1595 (review): the scoped plan's first claim, mirrored from the raw
+        // meta when it carries it (absent for every tail-only/full-set run).
+        ...(meta.required_evidence_lead_claim !== undefined ? { required_evidence_lead_claim: meta.required_evidence_lead_claim } : {}),
       },
       usage: {
         tool_calls_issued: result.planned_request_count ?? 0,
@@ -2925,6 +2928,10 @@ export interface RunNativeLoopInput {
    * call must overlap; dependency-evidence rows carry their obligation id
    * and gate on the call's own URL/query shape. */
   requiredEvidence?: ReadonlyArray<RequiredEvidenceRow>;
+  /** #1595 (review): the scoped plan's first claim — the obligation window is
+   * enforced from the loop's first request, not only the reserved tail; see
+   * `DriveToolLoopOptions.requiredEvidenceLeadClaim`. */
+  requiredEvidenceLeadClaim?: boolean;
   allowedGhApiRepos: Set<string>;
   allowedHosts: string[];
   workspaceRoot: string;
@@ -3466,6 +3473,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       budgets,
       ...(input.reserveForRequiredEvidence !== undefined ? { reserveForRequiredEvidence: input.reserveForRequiredEvidence } : {}),
       ...(input.requiredEvidence !== undefined ? { requiredEvidence: input.requiredEvidence } : {}),
+      // #1595 (review): the scoped plan's first claim — see
+      // DriveToolLoopOptions.requiredEvidenceLeadClaim.
+      ...(input.requiredEvidenceLeadClaim === true ? { requiredEvidenceLeadClaim: true } : {}),
       maxTokens: input.maxTokensPerTurn,
       temperature: planningTemp,
       stream,
@@ -3558,6 +3568,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     required_evidence_attempts: outcome.requiredEvidenceAttempts,
     required_evidence_credits: outcome.requiredEvidenceCredits,
     required_evidence_released: outcome.requiredEvidenceReleased,
+    // #1595 (review): the scoped plan's first claim — the obligation window
+    // was enforced from the loop's first request, not only the reserved tail.
+    ...(input.requiredEvidenceLeadClaim === true ? { required_evidence_lead_claim: true } : {}),
     // #1199: per-round latency/usage records (persisted into tool_loop_telemetry
     // and consumed/nulled with the rest of this meta by buildToolLoopTelemetry).
     round_telemetry: roundTelemetry,
@@ -4182,6 +4195,12 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
                 ? 0
                 : Math.min(input.reserveForRequiredEvidence ?? 0, outcome.requestsRemaining),
               ...(input.requiredEvidence !== undefined ? { requiredEvidence: input.requiredEvidence } : {}),
+              // #1595 (review): the lead claim rides the seam while the
+              // window is still up — once released, the reserve is 0 and the
+              // flag is inert, so it stays off for clean telemetry.
+              ...(input.requiredEvidenceLeadClaim === true && !outcome.requiredEvidenceReleased
+                ? { requiredEvidenceLeadClaim: true }
+                : {}),
               requiredEvidenceCredits: outcome.requiredEvidenceCredits,
               // #1396 (review): the RUN-WIDE evidence-attempt count threads
               // across the seam so the continuation's telemetry reports the
@@ -4800,6 +4819,12 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
       )
     : { reserve: 0, obligations: [] as readonly DependencyEvidenceObligation[] };
   const dependencyReserve = dependencyPlan.reserve;
+  // #1595 (review): a SCOPED plan (tracked obligations a strict subset of the
+  // canonical trio) claims its obligation FIRST — the window is enforced from
+  // the loop's first request, not only the reserved tail.
+  const dependencyLeadClaim =
+    dependencyReserve > 0 &&
+    dependencyPlan.obligations.length < DEPENDENCY_EVIDENCE_OBLIGATIONS.length;
   // The obligations the reserved dependency tail can pay for: the plan's
   // distinct set under the #1379 prefix discipline (reserve 1 tracks only
   // the first, 2+ up to the set's size). Obligations beyond the tracked
@@ -4920,6 +4945,7 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
 maxRequests: maxRequests.budget,
 reserveForRequiredEvidence,
 requiredEvidence,
+...(dependencyLeadClaim ? { requiredEvidenceLeadClaim: true } : {}),
 turnTimeout,
     maxTokensPerTurn: pyInt(env.TOOL_MAX_TOKENS_PER_TURN || "400", "TOOL_MAX_TOKENS_PER_TURN"),
     result,

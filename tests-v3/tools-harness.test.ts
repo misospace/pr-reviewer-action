@@ -3591,11 +3591,50 @@ test("#1595: runToolHarness wires the scoped lockfile-only reserve (spare + one 
   // exactly one tracked obligation — not the canonical three.
   assert.equal(telemetry.budget?.required_evidence_requests_hint, 2);
   assert.equal(telemetry.budget?.required_evidence_required, 1);
-  assert.equal(telemetry.budget?.required_evidence_refusals, 0);
+  // #1595 (review): the lead claim enforces the window from the FIRST
+  // request, so the scripted optional read_file is refused mid-budget —
+  // spending nothing (6-request budget, nothing executed).
+  assert.equal(telemetry.budget?.required_evidence_refusals, 1);
   assert.equal(telemetry.budget?.required_evidence_attempts, 0);
   assert.equal(telemetry.budget?.required_evidence_released, false);
   assert.deepEqual(telemetry.budget?.required_evidence_credits, []);
+  // #1595 (review): the SCOPED plan claims its obligation first — the loop
+  // ran with the lead-claim flag on.
+  assert.equal(telemetry.budget?.required_evidence_lead_claim, true);
   assert.ok(logs.some((l) => l.includes("dependency-evidence reserve: 2 tool request(s), 1 obligation(s)")));
+});
+
+test("#1595 (review): a FULL-set must_check keeps tail-only behavior — no lead-claim telemetry", async () => {
+  // The full-trio plan never sets the lead claim: the obligation window
+  // stays a reserved-tail mechanism, byte-identically. The persisted
+  // telemetry must NOT carry the lead-claim key.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_update",
+    version: 1,
+    must_check: [
+      "establish upstream provenance for the updated image: publisher and canonical source repository",
+      "inspect the exact old→new upstream release delta for the updated image",
+      "check upstream security advisories for the updated image version range, or report the advisory check as not performed",
+    ],
+  }));
+  let n = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_MAX_REQUESTS: "6" },
+    transport: async (_baseUrl: string, _apiFormat: string, _payload: Record<string, unknown>) => scripted[n++],
+    log: () => {},
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetry.budget?.required_evidence_lead_claim, undefined);
 });
 
 test("#1379: runToolHarness wires the classification-driven dependency-evidence reserve into the loop", async () => {

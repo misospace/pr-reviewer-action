@@ -275,6 +275,29 @@ const RESERVE_REFUSAL_NOTE =
   "missing evidence as unknown / needs verification.";
 
 /**
+ * #1595 (review): the lead-claim variants of the two reserve notes above.
+ * When the dependency-evidence plan is SCOPED (tracked obligations a strict
+ * subset of the canonical trio), the obligation window is enforced from the
+ * loop's FIRST request — not only the reserved tail — so the mandatory
+ * evidence gets its bounded first claim on the existing budget ahead of
+ * optional archaeology. These variants speak mid-budget (the tail is not yet
+ * scarce), so the tail-worded "Only N requests remain" / "reserved tail"
+ * texts would be false: the turn note names what is still owed, and the
+ * refusal says the budget's first claim owes it. The mixed-window clause is
+ * appended by the selection pass exactly as for the tail-scarce notes. */
+const RESERVE_LEAD_CLAIM_TURN_NOTE =
+  "[loop budget] Required dependency evidence comes first: {outstanding} is still owed, " +
+  "reached through web_fetch (plus web_search when that tool is offered to you). " +
+  "Until it is claimed, optional and local-diff calls are refused, not executed.";
+
+const RESERVE_LEAD_CLAIM_REFUSAL_NOTE =
+  "Reserved dependency-evidence budget: this call was not executed and spent " +
+  "none of the remaining requests. The budget's first claim still owes " +
+  "{outstanding}, reached with web_fetch (plus web_search when that tool is " +
+  "offered to you). Make one of those calls, or finish now and report the " +
+  "missing evidence as unknown / needs verification.";
+
+/**
  * #1379: the tool calls that are the CHANNEL for the required upstream
  * dependency evidence. These are the only tools that can reach an arbitrary
  * upstream (provenance, release delta, advisories): the local read/git tools
@@ -1313,6 +1336,19 @@ export interface DriveToolLoopOptions {
    * keeps the reserve as the threshold (the main-loop and unit-test shape).
    */
   requiredEvidenceAttemptsCap?: number;
+  /**
+   * #1595 (review) first claim: when the dependency-evidence plan is SCOPED
+   * (the tracked obligations a strict subset of the canonical trio), the
+   * obligation window is enforced from the loop's FIRST request — not only
+   * the reserved tail — so the mandatory evidence gets its bounded first
+   * claim on the existing budget ahead of nice-to-have upstream archaeology.
+   * The gating stays bounded by the existing no-lockout attempts cap
+   * (reserve = tracked + 1 spare) and the model's ability to end with a
+   * text-only verdict. Full-set plans never set it and keep the tail-only
+   * behavior byte-for-byte; unset (every non-lead-claim caller) is
+   * byte-identical to the pre-#1595-review loop.
+   */
+  requiredEvidenceLeadClaim?: boolean;
 }
 
 /**
@@ -1640,10 +1676,14 @@ export async function driveToolLoop(
       // Same OR condition as the enforced window below: scarce ROUNDS open
       // the reservation too, so the note fires the moment either half of
       // the reservation is what is left.
+      // #1595 (review): lead-claim gating — a SCOPED dependency-evidence plan
+      // (flag set by the harness) keeps the window open from the FIRST
+      // request until the rows discharge or the attempts cap releases them.
+      const leadClaimGating = reserve > 0 && options.requiredEvidenceLeadClaim === true && hasActiveRow();
       const inObligationWindow =
         reserve > 0
         && hasActiveRow()
-        && (requestsLeft <= reserve || roundsLeft <= reserve);
+        && (options.requiredEvidenceLeadClaim === true || requestsLeft <= reserve || roundsLeft <= reserve);
       if (outcome.rounds === 0) {
         if (reserve > 0 && hasActiveRow()) {
           // #1506: the priority note names the section the outstanding rows
@@ -1679,11 +1719,19 @@ export async function driveToolLoop(
             : "";
         const note = inObligationWindow
           ? shapeNoteActive
-            ? formatNote(requestsLeft <= reserve ? RESERVE_WINDOW_TURN_NOTE : RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
-                requestsLeft,
-                roundsLeft,
-                outstanding: formatOutstandingObligations(outstandingShapeObligations()),
-              }) + mixedClause
+            ? // #1595 (review): with the lead claim active but the tail NOT
+              // yet scarce, the "Only {requestsLeft} tool request(s) remain"
+              // wording would be false mid-budget — emit the lead-claim note
+              // instead; the tail-scarce selection stays byte-identical.
+              (leadClaimGating && requestsLeft > reserve && roundsLeft > reserve
+                ? formatNote(RESERVE_LEAD_CLAIM_TURN_NOTE, {
+                    outstanding: formatOutstandingObligations(outstandingShapeObligations()),
+                  })
+                : formatNote(requestsLeft <= reserve ? RESERVE_WINDOW_TURN_NOTE : RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
+                    requestsLeft,
+                    roundsLeft,
+                    outstanding: formatOutstandingObligations(outstandingShapeObligations()),
+                  })) + mixedClause
             : traceNoteActive
               ? formatNote(requestsLeft <= reserve ? TRACE_RESERVE_WINDOW_TURN_NOTE : TRACE_RESERVE_WINDOW_ROUNDS_TURN_NOTE, {
                   requestsLeft,
@@ -1898,8 +1946,23 @@ export async function driveToolLoop(
             targets.push({ row, slot: null });
           }
         }
-        const inWindow = budgets.maxToolCalls - callsExecuted <= reserve
+        // #1595 (review): the lead claim opens the window from the loop's
+        // FIRST request for SCOPED dependency-evidence plans — mandatory
+        // evidence is claimed before optional calls can spend the budget.
+        // `countsTowardAttemptsCap` semantics then count every executed
+        // evidence call of a lead-claim run (intended: the cap — reserve =
+        // tracked + 1 spare — still bounds the gating's patience and
+        // releases it, and the model can always end with a text-only
+        // verdict).
+        const inWindow = options.requiredEvidenceLeadClaim === true
+          || budgets.maxToolCalls - callsExecuted <= reserve
           || budgets.maxRounds - (outcome.rounds - 1) <= reserve;
+        // #1595 (review): lead-claim gating while the tail is NOT yet scarce
+        // — the refusal must not speak of "the reserved tail" it has not
+        // reached; compute once for the note selection below.
+        const leadClaimTailNotScarce = options.requiredEvidenceLeadClaim === true
+          && budgets.maxToolCalls - callsExecuted > reserve
+          && budgets.maxRounds - (outcome.rounds - 1) > reserve;
         // #1396 (review blocker): an evidence call ADMITTED while the window
         // is actually gating (in-window) is what spends the reserved tail's
         // no-lockout patience; a call executed before the window opened
@@ -1915,7 +1978,9 @@ export async function driveToolLoop(
               // Trace Plan section, the review-owned prose rows in the
               // Required Review Evidence section.
               error: anyActiveShapeRow()
-                ? formatNote(RESERVE_REFUSAL_NOTE, {
+                ? // #1595 (review): mid-budget lead-claim refusals name the
+                  // budget's first claim, never the reserved tail.
+                  formatNote(leadClaimTailNotScarce ? RESERVE_LEAD_CLAIM_REFUSAL_NOTE : RESERVE_REFUSAL_NOTE, {
                     outstanding: formatOutstandingObligations(outstandingShapeObligations()),
                   }) + (anyActiveTraceRow() ? TRACE_WINDOW_CLAUSE : anyActiveProseRow() ? MIXED_WINDOW_CLAUSE : "")
                 : anyActiveTraceRow()
