@@ -2339,6 +2339,13 @@ export interface PRClassification {
    * deliberately discounted. Empty lists when path handling did not fire.
    * Never contains unbounded attacker-controlled text. */
   pathHandlingProvenance: PathHandlingProvenance;
+  /** #1595: bounded lockfile-only triage provenance, non-null only when the
+   * PR classified `dependency_upgrade` AND every changed file is a lockfile.
+   * Counts parsed package version pairs by materiality (see
+   * {@link LockfileOnlyRefresh}); `parseable: false` fails closed. Never
+   * contains untrusted text. Persisted additively as `lockfile_only_refresh`
+   * by `classificationToArtifact` only when non-null. */
+  lockfileOnlyRefresh: LockfileOnlyRefresh | null;
   /** #871: true when the PR's non-test source footprint is substantial — a
    * new non-test source module, or non-test source lines changed over
    * SUBSTANTIAL_SOURCE_LINE_THRESHOLD. role-selection forces the correctness
@@ -2390,7 +2397,7 @@ function evaluateSubstantialCodeChange(files: readonly ChangedFile[]): boolean {
  * dataclass; canonical JSON serialization keeps the artifact bytes
  * v2-identical. */
 export function classificationToArtifact(classification: PRClassification): Record<string, unknown> {
-  return {
+  const artifact: Record<string, unknown> = {
     pr_kind: classification.prKind,
     risk_flags: classification.riskFlags,
     risk_flags_with_files: classification.riskFlagsWithFiles,
@@ -2406,6 +2413,17 @@ export function classificationToArtifact(classification: PRClassification): Reco
       discounted: classification.pathHandlingProvenance.discounted,
     },
   };
+  // #1595: persisted additively only when the lockfile-only triage ran (a
+  // lockfile-only dependency refresh); key order stays deterministic (the
+  // appended key is last). Counts are numbers — no untrusted text.
+  if (classification.lockfileOnlyRefresh !== null) {
+    artifact["lockfile_only_refresh"] = {
+      material: classification.lockfileOnlyRefresh.material,
+      low_risk: classification.lockfileOnlyRefresh.lowRisk,
+      parseable: classification.lockfileOnlyRefresh.parseable,
+    };
+  }
+  return artifact;
 }
 
 // ---------------------------------------------------------------------------
@@ -3624,6 +3642,149 @@ function detectRiskFlags(
 }
 
 // ---------------------------------------------------------------------------
+// Lockfile-only refresh triage (#1595)
+// ---------------------------------------------------------------------------
+
+/** #1595: bounded provenance for the lockfile-only dependency-refresh
+ * triage. Counts only — no parsed package name or version string is
+ * retained (untrusted diff content is data, never artifact prose). */
+export interface LockfileOnlyRefresh {
+  /** Parsed package bumps that are NOT ordinary transitive churn: a
+   * missing side (added/removed package or unpaired version), a
+   * semver-major jump, a prerelease, or an unstable `0.` version. */
+  material: number;
+  /** Parsed package bumps that are plain patch/minor churn. */
+  lowRisk: number;
+  /** False when the diff yielded no parseable package-version value inside
+   * a `node_modules` block (or the parse overflowed its bound) — the triage
+   * must fail closed to the full material review. */
+  parseable: boolean;
+}
+
+/** Bucketed removed/added version values per package block, first-seen
+ * order (the `parseTagChanges` bucketing discipline). */
+interface LockfileVersionBucket {
+  old: string[];
+  new: string[];
+}
+
+/** A package block header in an npm package-lock v2/v3 diff: the
+ * `"node_modules/<name>"` key. */
+const LOCKFILE_PACKAGE_KEY_RE = /^"node_modules\/[^"]+"\s*:\s*\{/;
+
+/** Any other JSON object key — closes the current package block (the
+ * `packages`/`dependencies` section headers and the nested per-dependency
+ * objects that carry version RANGES, not pinned versions). */
+const LOCKFILE_OTHER_KEY_RE = /^"[^"]+"\s*:\s*\{/;
+
+/** A changed `"version": "x.y.z"` line inside a package block. */
+const LOCKFILE_VERSION_LINE_RE = /^"version"\s*:\s*"([^"]*)"/;
+
+/** The semver core (major.minor.patch) a version string must start with;
+ * anything else (a range, a git URL, empty) is material by default. */
+const SEMVER_CORE_RE = /^(\d+)\.(\d+)\.(\d+)/;
+
+/** Bounds for the diff walk — a lockfile diff is machine-generated, so
+ * anything beyond these is hostile noise and fails the parse closed. */
+const LOCKFILE_PARSE_MAX_PACKAGES = 1000;
+const LOCKFILE_PARSE_MAX_LINES = 100000;
+
+/** Materiality of one parsed old→new version pair — the closed,
+ * deterministic rule from #1595: missing or unparsable side, a semver-major
+ * difference, a prerelease, or an unstable `0.` version is material;
+ * everything else is ordinary patch/minor transitive churn. */
+function isMaterialVersionPair(oldVersion: string, newVersion: string): boolean {
+  const oldCore = SEMVER_CORE_RE.exec(oldVersion);
+  const newCore = SEMVER_CORE_RE.exec(newVersion);
+  if (oldCore === null || newCore === null) return true;
+  if (oldCore[1] !== newCore[1]) return true;
+  if (oldVersion.includes("-") || newVersion.includes("-")) return true;
+  if (oldVersion.startsWith("0.") || newVersion.startsWith("0.")) return true;
+  return false;
+}
+
+/** Parse the npm package-lock v2/v3 version-pair shape out of a unified
+ * diff: paired removed/added `"version": "x.y.z"` lines inside
+ * `"node_modules/<name>"` blocks. Pure, bounded, lexical. Returns null
+ * when the diff yields no parseable package-version value at all, when a
+ * changed version line appears OUTSIDE any package block (a
+ * minimal-context diff can hide which package a major bump belongs to —
+ * it is never silently dropped), or when the parse overflows its bounds
+ * (caller fails closed to material). Deliberately npm-only — every other
+ * lockfile shape fails closed the same way. */
+function parseLockfileVersionBuckets(diffText: string): Map<string, LockfileVersionBucket> | null {
+  const buckets = new Map<string, LockfileVersionBucket>();
+  let current: LockfileVersionBucket | null = null;
+  let sawVersionValue = false;
+  let lines = 0;
+  for (const line of diffText.split("\n")) {
+    if (++lines > LOCKFILE_PARSE_MAX_LINES) return null;
+    const sign = line.startsWith("-") && !line.startsWith("---")
+      ? "-"
+      : line.startsWith("+") && !line.startsWith("+++") ? "+" : "";
+    const content = line.slice(sign === "" ? 0 : 1).trim();
+    if (content === "") continue;
+    if (LOCKFILE_PACKAGE_KEY_RE.test(content)) {
+      // A package block: bucket by its node_modules key (the untrusted name
+      // is the bucket identity only — it never leaves this parser).
+      if (buckets.size >= LOCKFILE_PARSE_MAX_PACKAGES) return null;
+      current = { old: [], new: [] };
+      buckets.set(content, current);
+      continue;
+    }
+    if (LOCKFILE_OTHER_KEY_RE.test(content)) {
+      current = null;
+      continue;
+    }
+    const version = LOCKFILE_VERSION_LINE_RE.exec(content);
+    if (version !== null && sign !== "") {
+      // #1595 review: a changed version line outside any package block is
+      // never dropped — the minimal-context diff that hides its package
+      // could hide a MAJOR bump. Fail the parse closed (same as
+      // unparseable → full material review).
+      if (current === null) return null;
+      current[sign === "-" ? "old" : "new"].push(version[1] as string);
+      sawVersionValue = true;
+    }
+  }
+  // A diff with no package block at all is not a parseable lockfile shape.
+  if (!sawVersionValue) return null;
+  return buckets;
+}
+
+/** #1595: the deterministic lockfile-only triage for a `dependency_upgrade`
+ * PR whose every changed file is a lockfile (npm package-lock v2/v3). Walks
+ * the full diff, pairs removed→added version values per package block by
+ * first-seen order, and counts material vs low-risk bumps. A diff that
+ * yields no parseable package-version values fails CLOSED (material), never
+ * opens the scoped review. Pure and bounded; returns counts only. */
+export function evaluateLockfileOnlyRefresh(fullDiffText: string): LockfileOnlyRefresh {
+  const buckets = parseLockfileVersionBuckets(fullDiffText);
+  if (buckets === null) return { material: 0, lowRisk: 0, parseable: false };
+  let material = 0;
+  let lowRisk = 0;
+  for (const { old, new: added } of buckets.values()) {
+    const paired = Math.min(old.length, added.length);
+    for (let index = 0; index < paired; index += 1) {
+      if (isMaterialVersionPair(old[index] as string, added[index] as string)) material += 1;
+      else lowRisk += 1;
+    }
+    // An unpaired version (a package added or removed by this diff, or an
+    // orphaned side of a block) has a missing side — material by rule.
+    material += old.length + added.length - 2 * paired;
+  }
+  // Non-null means the parser saw at least one version value inside a
+  // package block — the shape parsed, so the triage verdict is trusted.
+  return { material, lowRisk, parseable: true };
+}
+
+/** #1595: the scoped must_check applies ONLY when the triage positively
+ * proved an all-low-risk, parseable lockfile-only refresh. */
+function isLowRiskLockfileOnlyRefresh(triage: LockfileOnlyRefresh | null): boolean {
+  return triage !== null && triage.parseable && triage.material === 0;
+}
+
+// ---------------------------------------------------------------------------
 // Checklist derivation
 // ---------------------------------------------------------------------------
 
@@ -3709,6 +3870,25 @@ const KIND_CHECKS: Readonly<Record<string, readonly string[]>> = {
   ],
 };
 
+// #1595: the scoped must_check for a lockfile-only dependency refresh whose
+// parsed diff shows ONLY ordinary transitive churn (no material bump): the
+// two local checks stay exactly as the dependency_upgrade texts and the
+// three per-dependency upstream-evidence rows collapse into ONE aggregate
+// advisory row, shaped like the DEPENDENCY_EVIDENCE_CHECKS advisory row but
+// scoped to this PR. The text still maps onto the security_advisory
+// obligation via dependencyObligationForCheckText (it matches /security
+// advisories/), and it deliberately does NOT match the provenance or
+// release-delta vocabularies — the "no per-package provenance or
+// release-delta research" scope sentence lives in the scoped prompt
+// fragment, not in the must_check rows. Static trusted text only — no
+// parsed package names or versions ever flow into these rows.
+const LOCKFILE_REFRESH_LOW_RISK_CHECKS: readonly string[] = [
+  "check for breaking API changes in updated dependencies",
+  "run full test suite after upgrade",
+  "check upstream security advisories for the packages changed in this lockfile-only refresh, " +
+    "or report the advisory check as not performed",
+];
+
 /** Checklist items per linked-issue risk flag. */
 const FLAG_CHECKS: Readonly<Record<string, readonly string[]>> = {
   linked_security_issue: ["explicitly address the linked security issue"],
@@ -3755,6 +3935,10 @@ function buildMustCheck(
   prKind: string,
   riskFlags: readonly string[],
   riskFlagsWithFiles: Readonly<Record<string, string[]>>,
+  // #1595: the lockfile-only triage, consumed only for the dependency_upgrade
+  // kind row (ignored for flag rows — a fired security-sensitive flag still
+  // adds its own checklist item on top).
+  lockfileOnlyRefresh: LockfileOnlyRefresh | null = null,
 ): string[] {
   const checks: string[] = [];
   const seen = new Set<string>();
@@ -3762,7 +3946,11 @@ function buildMustCheck(
     if (CONTENT_ONLY_SUPPRESSED_CHECK_FLAGS.has(key) && (riskFlagsWithFiles[key] ?? []).length === 0) {
       continue;
     }
-    for (const check of [...(KIND_CHECKS[key] ?? []), ...(FLAG_CHECKS[key] ?? [])]) {
+    const kindChecks =
+      key === "dependency_upgrade" && isLowRiskLockfileOnlyRefresh(lockfileOnlyRefresh)
+        ? LOCKFILE_REFRESH_LOW_RISK_CHECKS
+        : KIND_CHECKS[key] ?? [];
+    for (const check of [...kindChecks, ...(FLAG_CHECKS[key] ?? [])]) {
       if (!seen.has(check)) {
         seen.add(check);
         checks.push(check);
@@ -3912,8 +4100,15 @@ export function classifyPr(input: ClassifyInput): PRClassification {
 
   const metadata = classifyPrMetadata(prAuthor, headBranch, prTitle);
   const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText, authoritativeChangedFiles, metadata);
+  // #1595: bounded lockfile-only triage — only for a dependency_upgrade PR
+  // whose every changed file is a lockfile, over the complete diff (the same
+  // completeness surface the digest rules use).
+  const lockfileOnlyRefresh =
+    prKind === "dependency_upgrade" && allFilesAreLockfiles(prFiles.map((file) => file.filename))
+      ? evaluateLockfileOnlyRefresh(fullDiffText ?? diffText)
+      : null;
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, fullDiffText ?? diffText, linkedIssues, prKind, metadata);
-  const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles);
+  const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles, lockfileOnlyRefresh);
 
   // Build changed files summary (just filenames, truncated).
   const fileNames = prFiles.map((file) => file.filename);
@@ -3941,6 +4136,7 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     linkedMetadataUncertain: uncertainty.uncertain,
     linkedMetadataUncertainty: uncertainty.reasons,
     pathHandlingProvenance,
+    lockfileOnlyRefresh,
     substantialCodeChange,
   };
 }

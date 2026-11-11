@@ -209,6 +209,32 @@ export const DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE =
   "security advisories (or record the check as not performed) BEFORE spending " +
   "tool calls on optional archaeology, claim falsification, history greps, or " +
   "redundant local-diff confirmation.";
+
+/** #1595: the priority note names exactly the obligations the classification
+ * still tracks. When that set is the FULL canonical trio the emitted text is
+ * the existing static note byte-for-byte (tests pin it); a STRICT SUBSET —
+ * the #1595 lockfile-only advisory reservation — gets a note naming only
+ * what is owed: steering that run at the full provenance → release-delta →
+ * advisories trio would burn the reserved tail on obligations the scoped
+ * must_check scoped away, leaving the one tracked obligation ungathered and
+ * the review partial (#1579's symptom). Trusted driver text, deterministic
+ * from the tracked set, never model-chosen. */
+export function dependencyEvidencePriorityTurnNote(tracked: readonly DependencyEvidenceObligation[]): string {
+  const distinct = DEPENDENCY_EVIDENCE_OBLIGATIONS.filter((obligation) => tracked.includes(obligation));
+  // Full trio → the pinned static note. An EMPTY tracked set is unreachable
+  // at the call site (the note only fires when a shape row is active, so at
+  // least one obligation is outstanding) and conservatively keeps the
+  // full-set note — the stronger steering, never a weaker one.
+  if (distinct.length === 0) return DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE;
+  if (distinct.length === DEPENDENCY_EVIDENCE_OBLIGATIONS.length) return DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE;
+  return (
+    "[loop budget] Required dependency evidence comes first: check " +
+    formatOutstandingObligations(distinct) +
+    " (or record the check as not performed) BEFORE spending tool calls on " +
+    "optional archaeology, claim falsification, history greps, or redundant " +
+    "local-diff confirmation."
+  );
+}
 // #1379 review blocker 5728634290: the window note names the obligations
 // still OUTSTANDING ({outstanding}), not the full fixed trio — a model that
 // already covered provenance is redirected at what it still owes.
@@ -1626,7 +1652,9 @@ export async function driveToolLoop(
           // not by the Required Review Evidence section, so the note must
           // point at the right one.
           const priorityNote = anyActiveShapeRow()
-            ? DEPENDENCY_EVIDENCE_PRIORITY_TURN_NOTE
+            ? // #1595: names exactly the tracked obligations (byte-for-byte
+              // the static note when that set is the full trio).
+              dependencyEvidencePriorityTurnNote(outstandingShapeObligations())
             : anyActiveTraceRow()
               ? TRACE_EVIDENCE_PRIORITY_TURN_NOTE
               : REQUIRED_EVIDENCE_PRIORITY_TURN_NOTE;

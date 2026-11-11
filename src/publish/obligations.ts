@@ -75,7 +75,7 @@ export const REVIEW_OBLIGATIONS_SCHEMA = "review-obligations/v1";
  * The bound is met by SHORTENING the rows' text, never by dropping a row:
  * the document carries the COMPLETE set of qualifying blocking rows, and the
  * effective per-row text cap is disclosed in the document. 24 KiB holds the
- * realistic worst case's complete row set: a run holds at most 42 qualifying
+ * realistic worst case's complete row set: a run holds at most 43 qualifying
  * blocking rows (see `REVIEW_OBLIGATIONS_MAX_ROWS`), so even the widest
  * rows — a 64-codepoint id and a 300-codepoint text of four-byte codepoints
  * — fit once the text cap gives way to the budget. The published body never
@@ -90,11 +90,12 @@ export const REVIEW_OBLIGATIONS_MAX_BYTES = 24_576;
  * byte budget gives way on the rows' TEXT, never on the row LIST. The COUNT
  * still needs a publication bound, and it never binds for a real run: the
  * run's blocking rows come from two deterministic sources — the classifier's
- * `must_check` checklist (at most 37 distinct static items: `KIND_CHECKS`,
- * `FLAG_CHECKS` and the shared `*_EVIDENCE_CHECKS` tables in
+ * `must_check` checklist (at most 38 distinct static items: `KIND_CHECKS`,
+ * `FLAG_CHECKS`, the shared `*_EVIDENCE_CHECKS` tables and the #1595 scoped
+ * `LOCKFILE_REFRESH_LOW_RISK_CHECKS` table in
  * `src/classification/classify.ts`) and the trusted base's guidance asks (at
  * most 5, `MAX_APPROVAL_PREREQUISITES` in
- * `src/enforcement/review-obligations.ts`) — so a run holds at most 42
+ * `src/enforcement/review-obligations.ts`) — so a run holds at most 43
  * qualifying rows, and 64 leaves headroom over that derivation.
  *
  * The bound exists so the published shape has a FIXED upper limit. When it
