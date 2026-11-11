@@ -2569,6 +2569,94 @@ test("#1595 AC2: any material bump or an unparseable lockfile diff keeps the FUL
   );
 });
 
+test("#1595 review: range-like/malformed version values fail closed; changed runtime constraints are material", () => {
+  const fullSet = [
+    "check for breaking API changes in updated dependencies",
+    "run full test suite after upgrade",
+    ...DEPENDENCY_EVIDENCE_CHECKS,
+  ];
+  const bump = (diffText: string, provenance: { material: number; lowRisk: number; parseable: boolean }): void => {
+    const result = classifyPr({
+      prFiles: files("site/package-lock.json"),
+      diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + diffText,
+    });
+    assert.equal(result.prKind, "dependency_upgrade");
+    assert.deepEqual(result.mustCheck, fullSet);
+    assert.deepEqual(result.lockfileOnlyRefresh, provenance);
+  };
+  // A range-like value whose PREFIX parses as pinned semver: the old parser
+  // accepted it as ordinary churn — a range could allow a major jump.
+  bump(lockfileBump("semver", "6.3.1", "6.3.1 || >=7.0.0"), { material: 1, lowRisk: 0, parseable: true });
+  bump(lockfileBump("ms", "2.1.2", "^2.1.3"), { material: 1, lowRisk: 0, parseable: true });
+  // Malformed / non-pinned values (trailing junk, a tag, truncated core).
+  bump(lockfileBump("ms", "2.1.2", "2.1.3.4"), { material: 1, lowRisk: 0, parseable: true });
+  bump(lockfileBump("ms", "latest", "2.1.2"), { material: 1, lowRisk: 0, parseable: true });
+  bump(lockfileBump("ms", "2.1", "2.1.2"), { material: 1, lowRisk: 0, parseable: true });
+  // Build-metadata-only difference stays ordinary churn — and therefore the
+  // SCOPED must_check (low risk), not the full set.
+  const buildMeta = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
+      lockfileBump("ms", "2.1.2+build.1", "2.1.2+build.5"),
+  });
+  assert.equal(buildMeta.prKind, "dependency_upgrade");
+  assert.deepEqual(buildMeta.lockfileOnlyRefresh, { material: 0, lowRisk: 1, parseable: true });
+  assert.deepEqual(buildMeta.mustCheck, LOCKFILE_REFRESH_LOW_RISK_CHECKS);
+
+  // A changed engines floor inside a package block is material even with a
+  // same-major, strictly pinned version pair (#1595 acceptance: a
+  // runtime-floor change still creates relevant obligations).
+  const constraintBump = (name: string, field: string, oldValue: string, newValue: string): string =>
+    `    "node_modules/${name}": {\n` +
+    `      "version": "1.2.3",\n` +
+    `      "engines": {\n` +
+    `-        "${field}": "${oldValue}"\n` +
+    `+        "${field}": "${newValue}"\n` +
+    `      },\n` +
+    `      "license": "MIT"\n` +
+    `    },\n`;
+  bump(constraintBump("ms", "node", ">=14", ">=20"), { material: 1, lowRisk: 0, parseable: true });
+  // A changed platform variant (os/cpu/libc) is material the same way.
+  bump(constraintBump("@esbuild/linux-x64", "cpu", "x64", "arm64"), { material: 1, lowRisk: 0, parseable: true });
+  // A changed constraint line BEFORE any package block header (the lockfile
+  // root `""` block, whose key matches no package-block pattern) fails the
+  // parse closed — a minimal-context diff can hide whose engines floor
+  // moved. A constraint change with NO version bump at all is not even a
+  // version bump: it classifies renovate_digest_only and never triages.
+  bump(
+    `-      "engines": {\n+      "engines": {\n` + lockfileBump("ms", "2.1.2", "2.1.3"),
+    { material: 0, lowRisk: 0, parseable: false },
+  );
+  // Constraint lines AFTER a package block header belong to that block —
+  // attributed, material, but still parseable.
+  bump(
+    lockfileBump("ms", "2.1.2", "2.1.3") + `-      "engines": {\n+      "engines": {\n`,
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+  assert.equal(
+    classifyPr({ prFiles: files("site/package-lock.json"), diffText: `-      "engines": {\n+      "engines": {\n` }).prKind,
+    "renovate_digest_only",
+  );
+
+  // Context-only (unchanged) constraint lines do NOT materialize a bump.
+  const contextEngines =
+    `    "node_modules/ms": {\n` +
+    `      "engines": {\n` +
+    `        "node": ">=14"\n` +
+    `      },\n` +
+    `-      "version": "1.2.3",\n` +
+    `+      "version": "1.2.4",\n` +
+    `      "license": "MIT"\n` +
+    `    },\n`;
+  const scoped = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + contextEngines,
+  });
+  assert.equal(scoped.prKind, "dependency_upgrade");
+  assert.deepEqual(scoped.lockfileOnlyRefresh, { material: 0, lowRisk: 1, parseable: true });
+  assert.deepEqual(scoped.mustCheck, LOCKFILE_REFRESH_LOW_RISK_CHECKS);
+});
+
 test("#1595: the triage is null unless the PR is a dependency_upgrade of lockfiles only", () => {
   // Mixed PR (code + a lockfile): dependency_upgrade kind, but the triage
   // never runs — the full must_check stays.
