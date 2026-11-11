@@ -2618,6 +2618,70 @@ test("#1595 review: range-like/malformed version values fail closed; changed run
   bump(constraintBump("ms", "node", ">=14", ">=20"), { material: 1, lowRisk: 0, parseable: true });
   // A changed platform variant (os/cpu/libc) is material the same way.
   bump(constraintBump("@esbuild/linux-x64", "cpu", "x64", "arm64"), { material: 1, lowRisk: 0, parseable: true });
+  // Hash/URL churn riding along with a bump stays ordinary churn (SCOPED):
+  // every real npm bump rewrites "integrity" and sometimes "resolved".
+  const hashChurn = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" +
+      `    "node_modules/ms": {\n` +
+      `-      "version": "2.1.2",\n` +
+      `+      "version": "2.1.3",\n` +
+      `-      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.2.tgz",\n` +
+      `+      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",\n` +
+      `-      "integrity": "sha512-aaa",\n` +
+      `+      "integrity": "sha512-bbb",\n` +
+      `      "license": "MIT"\n` +
+      `    },\n`,
+  });
+  assert.equal(hashChurn.prKind, "dependency_upgrade");
+  assert.deepEqual(hashChurn.lockfileOnlyRefresh, { material: 0, lowRisk: 1, parseable: true });
+  assert.deepEqual(hashChurn.mustCheck, LOCKFILE_REFRESH_LOW_RISK_CHECKS);
+
+  // A changed DIRECT dependency range in the root `packages[""]` block is
+  // material — the app's own dependency graph moved even though every
+  // parsed version pair is same-major (maintainer review on #1618).
+  const directRange =
+    `    "": {\n` +
+    `      "name": "site",\n` +
+    `-      "dependencies": {\n` +
+    `+      "dependencies": {\n` +
+    `-        "typescript": "^5.4.0"\n` +
+    `+        "typescript": "^5.9.0"\n` +
+    `      },\n` +
+    lockfileBump("ms", "2.1.2", "2.1.3");
+  const direct = classifyPr({
+    prFiles: files("site/package-lock.json"),
+    diffText: "diff --git a/site/package-lock.json b/site/package-lock.json\n" + directRange,
+  });
+  assert.equal(direct.prKind, "dependency_upgrade");
+  assert.deepEqual(direct.lockfileOnlyRefresh, { material: 1, lowRisk: 1, parseable: true });
+  assert.deepEqual(direct.mustCheck, fullSet);
+
+  // A changed peerDependencies/dependencies relation entry inside a
+  // package block is material the same way — a relation change must not
+  // ride along under the scoped review.
+  bump(
+    `    "node_modules/pg": {\n` +
+      `-      "version": "8.11.3",\n` +
+      `+      "version": "8.11.5",\n` +
+      `       "license": "MIT",\n` +
+      `-      "peerDependencies": {\n` +
+      `+      "peerDependencies": {\n` +
+      `-        "pg-int8": "1.0.1"\n` +
+      `+        "pg-int8": "1.0.2"\n` +
+      `      },\n` +
+      `    },\n`,
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
+  // A changed field outside any package block (root lockfile metadata, e.g.
+  // a lockfileVersion regeneration) fails the parse closed even when a
+  // benign bump also parsed.
+  bump(
+    `-  "lockfileVersion": 2,\n+  "lockfileVersion": 3,\n` + lockfileBump("ms", "2.1.2", "2.1.3"),
+    { material: 0, lowRisk: 0, parseable: false },
+  );
+
   // npm's REAL field order: `dependencies` (and `bin`) precede `engines`
   // inside the block, and the engines change lands in a later hunk whose
   // opening line is context. The block must NOT close on the nested
