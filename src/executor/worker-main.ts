@@ -32,8 +32,9 @@
  * `ExecutionRequest` onto the engine's `ReviewRequest` (the same mapping
  * shape `engine/cli.ts` builds from its request file), runs the real
  * review engine inside the acquired workspace, and reports the terminal
- * outcome through the result-file protocol. It never talks to a forge and
- * never executes anything the envelope names beyond driving the engine.
+ * outcome through the result-file protocol. It never talks to a forge
+ * itself — the engine it drives performs the review's forge reads from the
+ * #735-projected ambient credential (#1484) — and it never publishes.
  *
  * Status/failure mapping (agreed with the local executor's classification
  * in `src/executor/local.ts`):
@@ -349,6 +350,31 @@ export async function workerMain(
     engineInputs["ai-api-key"] = modelCredentialMaterial;
   }
 
+  // The forge-read ambient (#1484): the engine performs the review's forge
+  // READS (admission-stage env validation, the authentication and
+  // permission preflights, PR context), so the executor-projected
+  // publish-purpose material moves into the engine's ambient environment.
+  // The material's only channel is the #735 projection (purpose
+  // `forge-publish`, the derived `PR_REVIEWER_CREDENTIAL_FORGE_PUBLISH`
+  // variable) — never the envelope — and like the model credential above it
+  // is placed only into the engine request object, never a log line,
+  // stderr, diagnostics, or the result file. The keys are exactly the ones
+  // the engine's admission resolves (`admissionStageEnv` reads
+  // `GITHUB_TOKEN || GH_TOKEN` for github and `FORGEJO_TOKEN` for forgejo;
+  // `forgejoTokenFromEnv` agrees), and the worker still never publishes —
+  // publication stays controller-side. Absent material leaves the ambient
+  // object empty (never an empty-string token).
+  const ambient: Record<string, string | undefined> = {};
+  const forgePublishMaterial = env[executionCredentialEnvName("forge-publish")] ?? "";
+  if (forgePublishMaterial !== "") {
+    if (request.platform === "forgejo") {
+      ambient.FORGEJO_TOKEN = forgePublishMaterial;
+    } else {
+      ambient.GH_TOKEN = forgePublishMaterial;
+      ambient.GITHUB_TOKEN = forgePublishMaterial;
+    }
+  }
+
   const engineRequest: ReviewRequest = {
     signal: controller.signal,
     repository: request.repoFullName,
@@ -371,9 +397,11 @@ export async function workerMain(
     // base ref (`baseRef` above).
     inputs: engineInputs,
     // The worker environment is the executor's generic allowlist, never
-    // forge context; downstream adapters resolve what they can from the
-    // platform and repository identity in the envelope.
-    ambient: {},
+    // forge context — EXCEPT the #735-projected forge-read material above:
+    // downstream adapters resolve what they can from the platform and
+    // repository identity in the envelope, and the preflights authenticate
+    // from exactly this ambient object (nothing else leaks in).
+    ambient,
     triggerReason: request.kind,
     forceRereview: false,
   };

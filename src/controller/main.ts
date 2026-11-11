@@ -480,7 +480,13 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
   }
 
   // ── credential material (#735): every reference the config names must
-  //    have env-defined material, fail closed at startup.
+  //    have env-defined material, fail closed at startup. Forge
+  //    integration references (#1484) are collected opportunistically —
+  //    an operator that provides the material enables the worker's
+  //    publish-purpose forge reads; one that does not keeps starting, and
+  //    the worker credential plan's forge reference fails closed at
+  //    resolution (`unknown_reference`) instead of refusing the whole
+  //    controller at startup.
   const modelCredentialMaterial = new Map<string, string>();
   const requiredRefs = new Set<string>();
   for (const profile of instance.modelProfiles) requiredRefs.add(profile.credential);
@@ -494,6 +500,13 @@ function resolveStartup(argv: readonly string[], env: NodeJS.ProcessEnv): Startu
       );
     }
     modelCredentialMaterial.set(reference, material);
+  }
+  for (const forge of instance.forges) {
+    if (modelCredentialMaterial.has(forge.credential)) continue;
+    const material = env[credentialEnvName(forge.credential)];
+    if (typeof material === "string" && material !== "") {
+      modelCredentialMaterial.set(forge.credential, material);
+    }
   }
 
   // ── the execution profile resolution (fail closed here, not at the
@@ -725,6 +738,11 @@ export interface CredentialPlanJob {
   readonly platform: "github" | "forgejo";
   readonly installationId: string;
   readonly fork: boolean;
+  /** The serving forge integration's identity (#1440), when the job names
+   * one: the plan's `forge-publish` reference must come from the SAME
+   * integration whose endpoint the envelope resolves, never a same-kind
+   * guess. Absent (or empty) for jobs minted without an identity. */
+  readonly forgeIntegration?: string;
 }
 
 /** The two ends of one #735 credential path, built from one plan registry so
@@ -737,6 +755,45 @@ export interface WorkerCredentialBinding {
   /** The #734 executor seam: the LATE, all-or-nothing resolution of exactly
    * the plan `credentialRefs` built for this run id. */
   readonly resolver: WorkerCredentialResolver;
+}
+
+/** The serving forge's opaque publish-purpose credential reference for one
+ * job: the instance integration the job's own forge identity names, or —
+ * for an integration-name-less job — the single same-kind entry.
+ * Selection mirrors the daemon's endpoint resolution exactly (a NAMED
+ * integration resolves by name and refuses an unresolvable or ambiguous
+ * name; a name-less job resolves the single same-kind entry, and an
+ * AMBIGUOUS kind — several integrations share it — is unresolvable state
+ * that refuses rather than guessing). No serving integration means the
+ * operator configured no forge credential for this job: the plan carries
+ * no `forge-publish` entry and the worker's forge reads fail closed at
+ * authentication, exactly the pre-existing posture. */
+function servingForgePublishCredentialRef(
+  instance: InstanceConfig,
+  platform: "github" | "forgejo",
+  forgeIntegration: string,
+): string {
+  if (forgeIntegration !== "") {
+    const named = instance.forges.filter((entry) => entry.name === forgeIntegration);
+    if (named.length === 0) {
+      throw new RangeError(
+        `job names unresolvable forge integration '${forgeIntegration}': no instance forge integration has that name`,
+      );
+    }
+    if (named.length > 1) {
+      throw new RangeError(
+        `job names forge integration '${forgeIntegration}' which ${named.length} instance forge integrations share: the worker's publish-purpose credential cannot be selected without guessing`,
+      );
+    }
+    return named[0]!.credential;
+  }
+  const sameKind = instance.forges.filter((entry) => entry.kind === platform);
+  if (sameKind.length > 1) {
+    throw new RangeError(
+      `${sameKind.length} instance forge integrations share kind '${platform}': the worker's publish-purpose credential cannot be selected without guessing`,
+    );
+  }
+  return sameKind[0]?.credential ?? "";
 }
 
 /** Compose the #735 plan builder and its late resolver as one unit.
@@ -780,11 +837,25 @@ export function createWorkerCredentialBinding(deps: {
       evidenceProfileName: deps.defaultEvidenceProfile,
       modelCredentialRef: modelProfile.credential,
       evidenceCredentialRef: "",
-      // The workspace is produced controller-side (#732) and publication
-      // happens controller-side (the durable publisher): the worker draws
-      // on NO forge credential in this composition.
+      // The workspace is produced controller-side (#732), so the worker
+      // needs no clone material. But the worker's engine performs the
+      // review's forge READS (admission-stage env validation, the
+      // authentication and permission preflights, PR context), so a
+      // NON-FORK run draws on exactly one forge credential: the serving
+      // forge's publish-purpose reference (#1484). Publication itself
+      // stays controller-side (the durable publisher); the worker never
+      // publishes.
+      //
+      // FORK runs draw on NO forge material (docs/fork-review.md): the
+      // instance-wide credential never crosses the fork trust boundary —
+      // a fork worker's forge reads fail closed at authentication, the
+      // exact pre-#1484 posture for forks.
       forgeCloneCredentialRef: "",
-      forgePublishCredentialRef: "",
+      forgePublishCredentialRef: job.fork ? "" : servingForgePublishCredentialRef(
+        deps.instance,
+        job.platform,
+        job.forgeIntegration ?? "",
+      ),
       resultChannel: false,
       allowForkEvidence: false,
     });
@@ -831,7 +902,9 @@ export function createWorkerCredentialBinding(deps: {
 }
 
 /** Seed the #735 vault with the model-profile credentials the environment
- * provides (#738: `PR_REVIEWER_CREDENTIAL_<REF>`, proven present at startup).
+ * provides (#738: `PR_REVIEWER_CREDENTIAL_<REF>`, proven present at startup),
+ * plus the forge integrations' publish-purpose material (#1484) so the
+ * worker's `forge-publish` plan reference resolves.
  *
  * Bindings are as tight as the operator's declaration allows: each entry is
  * bound to the instance's platform, to its own purpose, and — when the
@@ -858,8 +931,10 @@ export function createModelCredentialVault(options: {
     profilesByReference.set(profile.credential, [...names, profile.name]);
   }
   const entries: VaultEntry[] = [];
+  const seeded = new Set<string>();
   for (const [reference, profileNames] of profilesByReference) {
     const soleProfile = profileNames.length === 1 ? (profileNames[0] ?? "") : "";
+    seeded.add(reference);
     entries.push({
       reference,
       scope: {
@@ -876,6 +951,34 @@ export function createModelCredentialVault(options: {
         value: options.modelCredentialMaterial.get(reference) ?? "",
         expiresAtMs: 0,
       },
+    });
+  }
+  // The forge integrations' publish-purpose material (#1484): the worker's
+  // engine performs the review's forge reads, so its plan's `forge-publish`
+  // reference must resolve. Bound exactly like the model entries: the
+  // instance's one platform, installation/repository/profile unscoped (the
+  // env-seeded material is instance-wide), purpose exact. A reference an
+  // operator shares between a model profile and a forge stays a MODEL entry
+  // (one reference holds exactly one scope; the shared shape cannot serve
+  // both purposes), and a forge reference with no material in the map is
+  // not seeded at all — its plan reference then fails closed at resolution
+  // (`unknown_reference`), never degrades.
+  for (const forge of options.instance.forges) {
+    if (seeded.has(forge.credential)) continue;
+    const material = options.modelCredentialMaterial.get(forge.credential) ?? "";
+    if (material === "") continue;
+    seeded.add(forge.credential);
+    entries.push({
+      reference: forge.credential,
+      scope: {
+        platform: options.platform,
+        installationId: "",
+        repoFullName: "",
+        profileName: "",
+        purpose: "forge_publish",
+        unscopedDimensions: ["installationId", "repoFullName", "profileName"],
+      },
+      material: { value: material, expiresAtMs: 0 },
     });
   }
   return new InMemorySecretVault(entries);

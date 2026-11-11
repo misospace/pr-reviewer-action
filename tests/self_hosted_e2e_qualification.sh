@@ -55,6 +55,35 @@ set -euo pipefail
 #  16. A missed webhook: the reconciler discovers the pull request and
 #      reviews it exactly once.
 #
+# Engine parity and eval-qualification scenarios (#1484), over one
+# dedicated parity pull request and a harness-owned stub model server:
+# the stub is a loopback Node service the harness starts before the
+# parity scenarios and kills in cleanup(), shaped like the disposable
+# Forgejo — harness-provisioned test infrastructure, not a remote
+# dependency. It answers OpenAI-format chat-completions requests with a
+# FIXED verdict, streamed (SSE frames) or not, so model-output
+# nondeterminism is removed and artifact parity is assertable:
+#  17. Route A, the self-hosted local executor: a parity instance
+#      config (model profile pointed at the stub) drives a webhook
+#      controller that reviews the parity head; the published artifact
+#      is read back from the durable state (cp_publications.result_payload).
+#  18. Route B, the Action adapter: the same engine build reviews the
+#      same head directly against the disposable Forgejo through the
+#      engine CLI's request file (the Action runtime's stage env).
+#  19. Route C, the OCI worker image: the built worker image reviews the
+#      same head from Route A's rewritten execution envelope over a
+#      fresh exact-head clone (credentials ride the environment only).
+#  20. Route D, the Kubernetes executor: NOT drivable in this harness
+#      (it needs a live kube API server and service-account credential
+#      material) — the function prints the documented limitation and
+#      skips, per docs/self-hosted-qualification.md.
+#  21. The three produced artifacts normalize to the policy-stable
+#      field set and must be byte-identical; run-specific fields
+#      (ids, timestamps, durations, usage/token accounting, run-dir and
+#      workspace paths, comment ids) are the approved nondeterminism.
+#  22. The deterministic eval suites re-run against the same engine
+#      build (offline; no model, no network).
+#
 # Rules (docs/self-hosted-qualification.md): every forge read and write
 # the review pipeline performs travels through the configured forge
 # capability inside the controller. The harness itself never calls a
@@ -67,7 +96,9 @@ set -euo pipefail
 # that call is instance setup on a container the harness owns, the same
 # pattern as tests/forgejo_e2e_smoke.sh. Credentials (model key, App private key,
 # forge token, admin token, webhook secret) ride only in the process
-# environment or in curl config files, never in argv, URLs, or log lines.
+# environment or in curl config files, or in the harness's own temp-dir
+# files a tool reads back (engine request files), never in argv, URLs, or
+# log lines.
 # A GitHub App installation token minted by the controller follows the
 # same rule: the harness reads it from a repository secret set by the
 # operator, and the controller owns its lifecycle
@@ -183,10 +214,11 @@ POSTGRES_PORT="${SELF_HOSTED_POSTGRES_PORT-31543}"
 WEBHOOK_PORT="${SELF_HOSTED_FORGEJO_WEBHOOK_PORT-31810}"
 FORGEJO_ADMIN_PORT="${SELF_HOSTED_FORGEJO_ADMIN_PORT-31910}"
 GITHUB_ADMIN_PORT="${SELF_HOSTED_GITHUB_ADMIN_PORT-31911}"
+STUB_MODEL_PORT="${SELF_HOSTED_STUB_MODEL_PORT-31920}"
 REVIEW_TIMEOUT_SEC="${SELF_HOSTED_REVIEW_TIMEOUT_SEC-900}"
 safe_value SELF_HOSTED_FORGEJO_IMAGE "$FORGEJO_IMAGE"
 safe_value SELF_HOSTED_POSTGRES_IMAGE "$POSTGRES_IMAGE"
-for port_var in FORGEJO_PORT POSTGRES_PORT WEBHOOK_PORT FORGEJO_ADMIN_PORT GITHUB_ADMIN_PORT; do
+for port_var in FORGEJO_PORT POSTGRES_PORT WEBHOOK_PORT FORGEJO_ADMIN_PORT GITHUB_ADMIN_PORT STUB_MODEL_PORT; do
   case "${!port_var}" in
     ''|*[!0-9]*)
       echo "SELF_HOSTED_* port setting $port_var must be numeric, got '${!port_var}'" >&2
@@ -245,6 +277,7 @@ CONTROL_PLANE_URL="postgresql://${PG_USER}:${PG_PASSWORD}@127.0.0.1:${POSTGRES_P
 # reads or writes of the review pipeline (docs/self-hosted-qualification.md).
 FORGEJO_API_URL="http://127.0.0.1:${FORGEJO_PORT}"
 CONTROLLER_PIDS=()
+STUB_MODEL_PID=""
 
 # shellcheck disable=SC2329  # invoked indirectly by the EXIT trap below
 cleanup() {
@@ -254,6 +287,9 @@ cleanup() {
       kill "$pid" >/dev/null 2>&1 || true
     fi
   done
+  if [[ -n "$STUB_MODEL_PID" ]]; then
+    kill "$STUB_MODEL_PID" >/dev/null 2>&1 || true
+  fi
   docker rm -f "$PG_NAME" "$FORGEJO_NAME" >/dev/null 2>&1 || true
   rm -rf "$TMP"
 }
@@ -339,6 +375,14 @@ if [[ -z "$FORGEJO_TOKEN" || "$FORGEJO_TOKEN" == "null" ]]; then
 fi
 export FORGEJO_TOKEN
 export PR_REVIEWER_CREDENTIAL_MODEL="$AI_API_KEY"
+# The forge integration's #735 credential material (#1484): the instance
+# configs name `credential: forgejo`, and the controller collects this
+# env-defined material opportunistically so the worker credential plan's
+# `forge-publish` reference resolves (the worker's engine performs the
+# review's forge reads). The GitHub instance config's `credential: github`
+# resolves the same way, from `PR_REVIEWER_CREDENTIAL_GITHUB`, when the
+# operator provides it.
+export PR_REVIEWER_CREDENTIAL_FORGEJO="$FORGEJO_TOKEN"
 
 fapi_json() {
   local method="$1" path="$2" body="$3"
@@ -447,6 +491,52 @@ $(write_model_section)
 adoption:
   mode: allowlist
   allowlist: ["$SELF_HOSTED_GITHUB_REPOSITORY"]
+  discovered-default: adopt
+CFGEOF
+
+# ── engine parity instance config (#1484) ──
+# Same shape as instance-forgejo.yaml, but the model profile points at
+# the harness-owned stub model server instead of the operator's model
+# endpoint. The stub URL keeps the path-less base form: the transport
+# joins `/chat/completions` onto the base (`resolveEndpointChannel`,
+# src/transport/http.ts), so `http://127.0.0.1:<port>/v1` becomes
+# `http://127.0.0.1:<port>/v1/chat/completions`, which the stub answers.
+write_stub_model_section() {
+  cat <<MODEEOF
+model-profiles:
+  - name: primary
+    endpoint: "http://127.0.0.1:${STUB_MODEL_PORT}/v1"
+    api-format: openai
+    credential: model
+    model: "$AI_MODEL"
+default-model-profile: primary
+executor-profiles:
+  - name: local
+    kind: local
+    local:
+      command: "$NODE_BIN"
+      args: ["$ROOT_DIR/dist/index.js", "worker"]
+default-executor-profile: local
+evidence-profiles:
+  - name: qualification
+    providers-file: "$TMP/evidence-providers.yml"
+default-evidence-profile: qualification
+MODEEOF
+}
+
+cat > "$TMP/instance-parity.yaml" <<CFGEOF
+version: 1
+forges:
+  - name: qualification-forgejo
+    kind: forgejo
+    endpoint: "$FORGEJO_API_URL"
+    credential: forgejo
+$(write_stub_model_section)
+# Same as the Forgejo config: without discovered-default: adopt the
+# allowlisted repository holds at eligible and never enqueues.
+adoption:
+  mode: allowlist
+  allowlist: ["reviewer/sample"]
   discovered-default: adopt
 CFGEOF
 
@@ -850,6 +940,124 @@ scenario_worker_pids() {
   pgrep -f "$root/runs/.*request\.json" 2>/dev/null || true
 }
 
+# ── stub model server (#1484) ──
+# A harness-owned loopback service, started before the parity scenarios
+# and killed by cleanup(). It answers OpenAI-format POSTs whose path
+# ends in /chat/completions with a FIXED verdict JSON — streamed as SSE
+# `data:` frames (delta.content, a finish_reason frame, a usage frame,
+# then `data: [DONE]`, the framing src/transport/sse.ts reassembles)
+# when the request carries stream:true, plain JSON otherwise. Request
+# bodies are swallowed, never logged, and no credential is read or
+# checked: the stub removes model-output nondeterminism, it does not
+# model authentication.
+start_stub_model() {
+  cat > "$TMP/stub-model.mjs" <<'STUBEOF'
+import http from "node:http";
+const VERDICT = JSON.stringify({
+  verdict: "approve",
+  review_markdown: "## Engine parity review\n\nStub model verdict for the parity fixture: no findings on the reviewed diff.\n",
+  findings: [],
+  requirement_coverage: null,
+  smart_review_requested: false,
+  smart_review_reason: null,
+  review_triage_decision: "unknown",
+  review_triage_reason: null,
+  review_triage_targets: [],
+});
+const frame = (body) => `data: ${JSON.stringify(body)}\n\n`;
+const server = http.createServer((req, res) => {
+  if (req.method === "GET" && req.url === "/healthz") {
+    res.setHeader("Content-Type", "text/plain");
+    res.end("ok");
+    return;
+  }
+  if (req.method !== "POST" || !req.url.endsWith("/chat/completions")) {
+    res.statusCode = 404;
+    res.end();
+    return;
+  }
+  const chunks = [];
+  req.on("data", (chunk) => chunks.push(chunk));
+  req.on("end", () => {
+    let stream = false;
+    try {
+      stream = JSON.parse(Buffer.concat(chunks).toString("utf8")).stream === true;
+    } catch {
+      stream = false;
+    }
+    res.setHeader("Content-Type", stream ? "text/event-stream" : "application/json");
+    if (stream) {
+      res.write(frame({
+        id: "parity", object: "chat.completion.chunk", model: "stub-model",
+        choices: [{ index: 0, delta: { content: VERDICT }, finish_reason: null }],
+      }));
+      res.write(frame({
+        id: "parity", object: "chat.completion.chunk", model: "stub-model",
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      }));
+      res.write(frame({
+        id: "parity", object: "chat.completion.chunk", model: "stub-model",
+        choices: [],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }));
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
+    res.end(JSON.stringify({
+      id: "parity", object: "chat.completion", model: "stub-model",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: VERDICT },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }));
+  });
+});
+server.listen(Number(process.env.STUB_MODEL_PORT), "127.0.0.1");
+STUBEOF
+  STUB_MODEL_PORT="$STUB_MODEL_PORT" "$NODE_BIN" "$TMP/stub-model.mjs" \
+    >"$TMP/stub-model.log" 2>&1 &
+  STUB_MODEL_PID="$!"
+  local ready=0
+  for _ in {1..30}; do
+    if curl -fsS "http://127.0.0.1:${STUB_MODEL_PORT}/healthz" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$ready" != 1 ]]; then
+    echo "the stub model server did not become ready on 127.0.0.1:${STUB_MODEL_PORT}" >&2
+    tail -n 30 "$TMP/stub-model.log" >&2 || true
+    return 1
+  fi
+}
+
+# The policy-stable field set the three parity artifacts normalize to
+# (the fields src/enforcement/artifact.ts always writes from the parsed
+# verdict). EXCLUDED as approved nondeterminism — everything embedding
+# run-specific data: run/job ids and publication identity (comment ids),
+# observed-at timestamps and resource timings, usage/token accounting,
+# and the run-dir and workspace paths that leak through diagnostics
+# surfaces; the artifact's own deterministic enforcement state
+# (verdict_source, completeness fields) is excluded too because it is
+# compared through the engine build, not per route.
+normalize_parity_artifact() {
+  jq -S '{
+    verdict: .verdict,
+    review_markdown: .review_markdown,
+    smart_review_requested: .smart_review_requested,
+    smart_review_reason: .smart_review_reason,
+    review_triage_decision: .review_triage_decision,
+    review_triage_reason: .review_triage_reason,
+    review_triage_targets: .review_triage_targets,
+    findings: .findings,
+    requirement_coverage: .requirement_coverage
+  }' "$1"
+}
+
 
 # ── scenario 1: normal Forgejo review through the webhook intake ──
 # One forge kind per controller process ("the controller serves one
@@ -965,32 +1173,50 @@ echo "PASS: self-hosted Forgejo normal review qualified end-to-end through the c
 # GitHub App forge capability (webhook intake is not reachable from
 # outside on a disposable host); everything the pipeline then reads or
 # writes of GitHub state goes through that capability.
-unset PR_REVIEWER_WEBHOOK_PORT PR_REVIEWER_WEBHOOK_SECRET
-export PR_REVIEWER_RECONCILE_INTERVAL_MS=10000
-export PR_REVIEWER_RECONCILE_REPOS="$SELF_HOSTED_GITHUB_REPOSITORY"
-start_controller "$TMP/instance-github.yaml" "$TMP/github-controller.log" \
-  "$GITHUB_ADMIN_PORT" "$GITHUB_ADMIN_TOKEN" "$TMP/github"
-GITHUB_CONTROLLER_PID="${CONTROLLER_PIDS[-1]}"
-wait_controller_ready "$GITHUB_ADMIN_PORT" github "$TMP/github-controller.log" "$GITHUB_CONTROLLER_PID"
+#
+# The review run's worker draws its forge-read material (#1484) from the
+# instance config's `credential: github` reference, resolved from the
+# environment (`PR_REVIEWER_CREDENTIAL_GITHUB`). An App-based deployment
+# whose operator does not provide that material has no env-defined forge
+# credential: the worker's publish-purpose resolution fails closed
+# (`unknown_reference`) and the review can never publish. Wiring the
+# controller's per-job installation-token mint into the worker projection
+# is a follow-up (#1484-split). Until then the scenario skips with that
+# reason rather than burning its timeout on a guaranteed-fail wait, and
+# it runs whenever the operator provides the material.
+scenario_github_normal_review() {
+  unset PR_REVIEWER_WEBHOOK_PORT PR_REVIEWER_WEBHOOK_SECRET
+  export PR_REVIEWER_RECONCILE_INTERVAL_MS=10000
+  export PR_REVIEWER_RECONCILE_REPOS="$SELF_HOSTED_GITHUB_REPOSITORY"
+  start_controller "$TMP/instance-github.yaml" "$TMP/github-controller.log" \
+    "$GITHUB_ADMIN_PORT" "$GITHUB_ADMIN_TOKEN" "$TMP/github"
+  GITHUB_CONTROLLER_PID="${CONTROLLER_PIDS[-1]}"
+  wait_controller_ready "$GITHUB_ADMIN_PORT" github "$TMP/github-controller.log" "$GITHUB_CONTROLLER_PID"
 
-if ! wait_published "p.destination LIKE 'github:${SELF_HOSTED_GITHUB_REPOSITORY}#%'" \
-  "GitHub normal review" "$TMP/github-controller.log"; then
-  exit 1
-fi
-case "$PUBLICATION_ID" in
-  github-comment:*) ;;
-  *)
-    echo "GitHub publication id did not carry the forge-confirmed comment identity: $PUBLICATION_ID" >&2
+  if ! wait_published "p.destination LIKE 'github:${SELF_HOSTED_GITHUB_REPOSITORY}#%'" \
+    "GitHub normal review" "$TMP/github-controller.log"; then
     exit 1
-    ;;
-esac
-if [[ "$RESULT_HEAD_SHA" != "$RUN_HEAD_SHA" ]]; then
-  echo "GitHub publication did not carry the discovered head as the result head" >&2
-  exit 1
+  fi
+  case "$PUBLICATION_ID" in
+    github-comment:*) ;;
+    *)
+      echo "GitHub publication id did not carry the forge-confirmed comment identity: $PUBLICATION_ID" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$RESULT_HEAD_SHA" != "$RUN_HEAD_SHA" ]]; then
+    echo "GitHub publication did not carry the discovered head as the result head" >&2
+    exit 1
+  fi
+  assert_usage_counted "$RUN_ID"
+  assert_admin_reports_publication "$GITHUB_ADMIN_PORT" "$GITHUB_ADMIN_TOKEN" "$TMP/admin-github.cfg" "$RUN_ID"
+  echo "PASS: self-hosted GitHub normal review qualified end-to-end with no per-repository workflow (repo ${SELF_HOSTED_GITHUB_REPOSITORY}, publication ${PUBLICATION_ID})"
+}
+if [[ -z "${PR_REVIEWER_CREDENTIAL_GITHUB:-}" ]]; then
+  echo "SKIP: GitHub normal review is not drivable without the forge credential material (set PR_REVIEWER_CREDENTIAL_GITHUB; an App-only deployment's worker forge reads fail closed until the installation-token projection lands, #1484-split); see docs/self-hosted-qualification.md known limits"
+else
+  scenario_github_normal_review
 fi
-assert_usage_counted "$RUN_ID"
-assert_admin_reports_publication "$GITHUB_ADMIN_PORT" "$GITHUB_ADMIN_TOKEN" "$TMP/admin-github.cfg" "$RUN_ID"
-echo "PASS: self-hosted GitHub normal review qualified end-to-end with no per-repository workflow (repo ${SELF_HOSTED_GITHUB_REPOSITORY}, publication ${PUBLICATION_ID})"
 
 # ══ failure/restart/supersession/idempotency scenarios (#1483) ══
 #
@@ -1817,5 +2043,320 @@ scenario_model_primary_failure_and_fallback
 
 echo "RUN: missed webhook discovered by reconciliation without duplicate work"
 scenario_missed_webhook_reconciliation_reviews_once
+
+# ══ engine parity and eval-qualification scenarios (#1484) ══
+#
+# One dedicated parity pull request, one head, and the harness-owned
+# stub model server: every route reviews the SAME fixture head with the
+# SAME engine build (dist/index.js), so the three produced artifacts
+# must agree byte-for-byte once normalized to the policy-stable field
+# set. The parity controller is its own daemon (own roots, own admin
+# port) over the same disposable Forgejo and control-plane database;
+# the stub is killed by cleanup().
+
+# ── scenario 17: route A — the self-hosted local executor ──
+scenario_engine_parity_route_a_self_hosted_executor() {
+  local label="engine parity route A (self-hosted local executor)"
+  local created
+  local pr_number pr_id head_sha
+  created="$(open_scenario_pr "scn-parity" "Engine parity scenario")"
+  IFS='|' read -r pr_number pr_id head_sha <<<"$created"
+  case "$pr_number" in '' | null | *[!0-9]*)
+    echo "$label scenario: PR creation returned no numeric number" >&2
+    return 1
+    ;;
+  esac
+  case "$head_sha" in '' | null | *[!A-Fa-f0-9]*)
+    echo "$label scenario: PR creation returned no hexadecimal head sha" >&2
+    return 1
+    ;;
+  esac
+  # Globals for the later parity routes: all three review THIS head.
+  PARITY_PR_NUMBER="$pr_number"
+  PARITY_PR_ID="$pr_id"
+  PARITY_HEAD_SHA="$head_sha"
+  PARITY_DEST="forgejo:${SCENARIO_REPO}#${PARITY_PR_NUMBER}"
+  build_pr_webhook "opened" "scn-parity" "$PARITY_PR_NUMBER" "$PARITY_PR_ID" "$PARITY_HEAD_SHA" \
+    "Engine parity scenario" "$TMP/parity-webhook.json"
+  post_webhook "$TMP/parity-webhook.json" "pr_opened"
+  if ! wait_published "p.destination = '${PARITY_DEST}'" "$label" "$TMP/forgejo-parity.log"; then
+    return 1
+  fi
+  case "$PUBLICATION_ID" in
+    forgejo-comment:*) ;;
+    *)
+      echo "$label scenario: publication id did not carry the forge-confirmed comment identity: $PUBLICATION_ID" >&2
+      return 1
+      ;;
+  esac
+  if [[ "$RESULT_HEAD_SHA" != "$PARITY_HEAD_SHA" || "$RUN_HEAD_SHA" != "$PARITY_HEAD_SHA" ]]; then
+    echo "$label scenario published head ${RESULT_HEAD_SHA} instead of the parity head ${PARITY_HEAD_SHA}" >&2
+    return 1
+  fi
+  # Route A's artifact is the durable published payload itself.
+  PARITY_PAYLOAD_A="$(pg_query "SELECT p.result_payload FROM cp_publications p WHERE p.destination = '${PARITY_DEST}' AND p.publication_state = 'published' ORDER BY p.attempt DESC LIMIT 1")"
+  if [[ -z "$PARITY_PAYLOAD_A" ]]; then
+    echo "$label scenario: the published record carries no result payload" >&2
+    return 1
+  fi
+  printf '%s' "$PARITY_PAYLOAD_A" > "$TMP/parity-payload-a.json"
+  normalize_parity_artifact "$TMP/parity-payload-a.json" > "$TMP/parity-artifact-a.json"
+  assert_usage_counted "$RUN_ID"
+  echo "PASS: engine parity route A reviewed the parity head through the self-hosted controller and local executor (repo ${SCENARIO_REPO}, PR ${PARITY_PR_NUMBER}, head ${PARITY_HEAD_SHA}, publication ${PUBLICATION_ID})"
+}
+
+# ── scenario 18: route B — the Action adapter ──
+# The same engine build driven the way the Action entry drives it: the
+# engine CLI's request file carries the contract inputs (AI inputs
+# pointed at the stub) and the ambient runner context (PLATFORM via
+# FORGEJO_API_URL/FORGEJO_TOKEN, REPO, PR_NUMBER — the recipe
+# tests/forgejo_e2e_smoke.sh drives), against the disposable Forgejo.
+scenario_engine_parity_route_b_action_adapter() {
+  local label="engine parity route B (Action adapter)"
+  local work="$TMP/parity-action-work"
+  git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$work"
+  (
+    cd "$work"
+    git fetch -q origin "pull/${PARITY_PR_NUMBER}/head:pr-${PARITY_PR_NUMBER}"
+    git checkout -q "pr-${PARITY_PR_NUMBER}"
+  )
+  mkdir -p "$TMP/parity-action-run"
+  # The request file is built by node reading the settings from its
+  # environment: the forge token never enters an argument or a URL.
+  FORGEJO_TOKEN="$FORGEJO_TOKEN" PARITY_PR_NUMBER="$PARITY_PR_NUMBER" \
+    PARITY_HEAD_SHA="$PARITY_HEAD_SHA" STUB_MODEL_PORT="$STUB_MODEL_PORT" \
+    AI_MODEL="$AI_MODEL" FORGEJO_API_URL="$FORGEJO_API_URL" \
+    PARITY_ACTION_RUN_DIR="$TMP/parity-action-run" \
+    "$NODE_BIN" -e '
+const fs = require("fs");
+const env = process.env;
+const request = {
+  repository: "reviewer/sample",
+  prNumber: env.PARITY_PR_NUMBER,
+  workspace: ".",
+  runDir: env.PARITY_ACTION_RUN_DIR,
+  outputsSink: "/dev/null",
+  stepSummaryPath: "",
+  platform: "forgejo",
+  forgejoApiUrl: env.FORGEJO_API_URL,
+  headSha: env.PARITY_HEAD_SHA,
+  inputs: {
+    "ai-base-url": "http://127.0.0.1:" + env.STUB_MODEL_PORT + "/v1",
+    "ai-model": env.AI_MODEL,
+  },
+  event: { name: "pull_request", action: "synchronize" },
+  eventHeadSha: env.PARITY_HEAD_SHA,
+  ambient: {
+    PLATFORM: "forgejo",
+    FORGEJO_API_URL: env.FORGEJO_API_URL,
+    FORGEJO_TOKEN: env.FORGEJO_TOKEN,
+    GH_TOKEN: env.FORGEJO_TOKEN,
+    REPO: "reviewer/sample",
+    PR_NUMBER: env.PARITY_PR_NUMBER,
+    COMMENT_MARKER: "<!-- ai-pr-reviewer -->",
+    SKIP_IF_DIFF_UNCHANGED: "true",
+    FORCE_REVIEW: "false",
+    PUBLISH_MODE: "comment",
+  },
+};
+fs.writeFileSync(process.argv[1], JSON.stringify(request, null, 2));
+' "$TMP/parity-engine-request.json"
+  local status
+  set +e
+  (
+    cd "$work"
+    "$NODE_BIN" "$ROOT_DIR/dist/index.js" engine --request "$TMP/parity-engine-request.json"
+  ) >"$TMP/parity-action.log" 2>&1
+  status=$?
+  set -e
+  if [[ "$status" != 0 ]]; then
+    echo "$label scenario: the engine run failed (exit $status); last log lines:" >&2
+    tail -n 30 "$TMP/parity-action.log" >&2 || true
+    return 1
+  fi
+  if [[ ! -f "$TMP/parity-action-run/ai-output.json" ]]; then
+    echo "$label scenario: the engine run left no ai-output.json in the run directory" >&2
+    tail -n 30 "$TMP/parity-action.log" >&2 || true
+    return 1
+  fi
+  normalize_parity_artifact "$TMP/parity-action-run/ai-output.json" > "$TMP/parity-artifact-b.json"
+  echo "PASS: engine parity route B reviewed the parity head through the Action adapter against the disposable Forgejo (repo ${SCENARIO_REPO}, PR ${PARITY_PR_NUMBER}, head ${PARITY_HEAD_SHA})"
+}
+
+# ── scenario 19: route C — the OCI worker image ──
+# The built worker image reruns ONE execution from Route A's
+# controller-written envelope, rewritten to container-visible paths
+# (run dir mounted at /run, workspace at /ws) so
+# `validateExecutionRequest` still holds (the envelope paths stay
+# lexically inside runDir). The workspace is a fresh clone checked out
+# at the parity head; git reaches only the disposable loopback instance
+# and carries no credential material (the repo is the harness's own
+# disposable one); the model credential rides the environment only.
+scenario_engine_parity_route_c_oci_worker_image() {
+  local label="engine parity route C (OCI worker image)"
+  local req
+  # The envelope of the attempt that PUBLISHED (route A's durable run id),
+  # not the lexicographically first one: a retried route A job would leave
+  # several envelopes and only the published attempt's is the parity run.
+  req=""
+  for candidate in "$TMP/forgejo-parity/runs"/*/*/request.json; do
+    if [[ -f "$candidate" ]] &&
+      jq -e --arg runId "$RUN_ID" '.runId == $runId' "$candidate" >/dev/null 2>&1; then
+      req="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$req" || ! -f "$req" ]]; then
+    echo "$label scenario: no execution envelope of the published run ${RUN_ID} found under $TMP/forgejo-parity/runs" >&2
+    return 1
+  fi
+  # The built worker target (deploy/images/Dockerfile): the same
+  # dist/index.js bundle the local executor runs, packaged per the #733
+  # worker-image contract. Idempotent to rebuild.
+  if ! docker build -f "$ROOT_DIR/deploy/images/Dockerfile" \
+    --target worker -t pr-reviewer-worker-parity "$ROOT_DIR" \
+    >"$TMP/parity-worker-build.log" 2>&1; then
+    echo "$label scenario: the worker image build failed; last log lines:" >&2
+    tail -n 30 "$TMP/parity-worker-build.log" >&2 || true
+    return 1
+  fi
+  local ws="$TMP/parity-worker-ws" run="$TMP/parity-worker-run"
+  git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$ws"
+  (
+    cd "$ws"
+    git checkout -q "$PARITY_HEAD_SHA"
+  )
+  mkdir -p "$run"
+  jq --arg rd "/run" --arg ws "/ws" '
+    .runDir = $rd
+    | .requestPath = ($rd + "/" + (.requestPath | split("/") | last))
+    | .resultPath = ($rd + "/" + (.resultPath | split("/") | last))
+    | .workspace.rootPath = $ws' "$req" > "$run/request.json"
+  # The image runs as uid 1000; the mounted run dir must accept its
+  # result and artifact writes.
+  chmod 0777 "$run"
+  local status
+  set +e
+  # The worker's #735-projected forge-read material (#1484) rides the
+  # environment only: the assignment prefix, never argv or a URL.
+  PR_REVIEWER_CREDENTIAL_FORGE_PUBLISH="$FORGEJO_TOKEN" \
+    docker run --rm --network host \
+    -v "$run":/run -v "$ws":/ws \
+    -e PR_REVIEWER_CREDENTIAL_MODEL \
+    -e PR_REVIEWER_CREDENTIAL_FORGE_PUBLISH \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0='*' \
+    pr-reviewer-worker-parity /run/request.json >"$TMP/parity-worker.log" 2>&1
+  status=$?
+  set -e
+  if [[ "$status" != 0 ]]; then
+    echo "$label scenario: the worker image run failed (exit $status); last log lines:" >&2
+    tail -n 30 "$TMP/parity-worker.log" >&2 || true
+    return 1
+  fi
+  if ! jq -e --arg sha "$PARITY_HEAD_SHA" '.status == "completed" and .resultHeadSha == $sha' \
+    "$run/result.json" >/dev/null; then
+    echo "$label scenario: the worker result did not complete at the parity head" >&2
+    cat "$run/result.json" >&2 || true
+    return 1
+  fi
+  if [[ ! -f "$run/ai-output.json" ]]; then
+    echo "$label scenario: the worker left no ai-output.json in the mounted run directory" >&2
+    return 1
+  fi
+  normalize_parity_artifact "$run/ai-output.json" > "$TMP/parity-artifact-c.json"
+  echo "PASS: engine parity route C reviewed the parity head in the OCI worker image from the rewritten execution envelope (repo ${SCENARIO_REPO}, PR ${PARITY_PR_NUMBER}, head ${PARITY_HEAD_SHA})"
+}
+
+# ── scenario 20: route D — the Kubernetes executor ──
+scenario_engine_parity_route_d_kubernetes_executor() {
+  # NOT drivable in this harness, and the harness refuses to fabricate
+  # coverage: the Kubernetes executor (src/executor/kubernetes.ts) needs
+  # a live kube API server and service-account credential material the
+  # disposable stack cannot provide. Labeled per #739's "clearly label
+  # externally untestable behavior" rule.
+  echo "SKIP: engine parity route D (Kubernetes executor) is not drivable in this harness (needs a live kube API server and service-account credential material); see docs/self-hosted-qualification.md known limits"
+}
+
+# ── scenario 21: the three artifacts agree byte-for-byte ──
+scenario_engine_parity_artifacts_byte_identical() {
+  local label="engine parity artifact comparison"
+  local family
+  for family in a b c; do
+    if [[ ! -s "$TMP/parity-artifact-$family.json" ]]; then
+      echo "$label scenario: normalized artifact $family is missing or empty" >&2
+      return 1
+    fi
+  done
+  if ! cmp -s "$TMP/parity-artifact-a.json" "$TMP/parity-artifact-b.json" ||
+    ! cmp -s "$TMP/parity-artifact-a.json" "$TMP/parity-artifact-c.json"; then
+    echo "$label scenario: the three routes produced different policy-stable artifacts" >&2
+    diff -u "$TMP/parity-artifact-a.json" "$TMP/parity-artifact-b.json" >&2 || true
+    diff -u "$TMP/parity-artifact-a.json" "$TMP/parity-artifact-c.json" >&2 || true
+    return 1
+  fi
+  echo "PASS: engine parity held byte-for-byte across the Action adapter and the self-hosted local and worker-image routes (repo ${SCENARIO_REPO}, PR ${PARITY_PR_NUMBER}, head ${PARITY_HEAD_SHA})"
+}
+
+# ── scenario 22: the deterministic eval suites against the engine build ──
+scenario_eval_suites_rerun_against_engine_build() {
+  local label="eval suites against the engine build"
+  if [[ ! -f "$ROOT_DIR/dist/index.js" ]]; then
+    echo "$label scenario: dist/index.js is missing" >&2
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "SKIP: the eval-suite scenario needs python3 on PATH (the dispatched runner provides it); see docs/self-hosted-qualification.md known limits"
+    return 0
+  fi
+  mkdir -p "$TMP/semantic-eval-report"
+  if ! (
+    cd "$ROOT_DIR"
+    python3 scripts/run_semantic_eval_ci.py \
+      --corpus evals/corpus-historical-dogfood.json \
+      --output "$TMP/semantic-eval-report/report.json"
+  ) >"$TMP/semantic-eval.log" 2>&1; then
+    echo "$label scenario: the deterministic eval gate failed; last log lines:" >&2
+    tail -n 30 "$TMP/semantic-eval.log" >&2 || true
+    return 1
+  fi
+  echo "PASS: the deterministic eval suites re-ran against the self-hosted engine build (report $TMP/semantic-eval-report/report.json)"
+}
+
+# ── engine parity runner (#1484) ──
+# The stub's loopback port must not collide with any other loopback
+# service this harness binds: all derive from the validated numeric
+# settings above, so the collision check is a fail-fast, not a guess.
+for used_port in "$FORGEJO_PORT" "$POSTGRES_PORT" "$WEBHOOK_PORT" \
+  "$FORGEJO_ADMIN_PORT" "$GITHUB_ADMIN_PORT" \
+  "$SCENARIO_ADMIN_BASE" "$((SCENARIO_ADMIN_BASE + 1))" \
+  "$((SCENARIO_ADMIN_BASE + 2))" "$((SCENARIO_ADMIN_BASE + 3))"; do
+  if [[ "$STUB_MODEL_PORT" == "$used_port" ]]; then
+    echo "SELF_HOSTED_STUB_MODEL_PORT (${STUB_MODEL_PORT}) collides with another loopback service port this harness binds" >&2
+    exit 1
+  fi
+done
+start_stub_model
+start_webhook_controller "forgejo-parity" "$TMP/instance-parity.yaml" \
+  "$((SCENARIO_ADMIN_BASE + 3))" "$SCENARIO_ADMIN_TOKEN"
+
+echo "RUN: engine parity route A — the self-hosted local executor reviews the parity pull request"
+scenario_engine_parity_route_a_self_hosted_executor
+
+echo "RUN: engine parity route B — the Action adapter reviews the same parity head"
+scenario_engine_parity_route_b_action_adapter
+
+echo "RUN: engine parity route C — the OCI worker image reviews the same parity head"
+scenario_engine_parity_route_c_oci_worker_image
+
+echo "RUN: engine parity route D — the Kubernetes executor"
+scenario_engine_parity_route_d_kubernetes_executor
+
+echo "RUN: engine parity — the three produced artifacts agree byte-for-byte"
+scenario_engine_parity_artifacts_byte_identical
+
+echo "RUN: the deterministic eval suites re-run against the same engine build"
+scenario_eval_suites_rerun_against_engine_build
 
 exit 0

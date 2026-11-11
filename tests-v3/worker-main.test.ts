@@ -322,6 +322,64 @@ test("absent or empty projected credential material leaves no ai-api-key input (
   }
 });
 
+// ── forge-read ambient credential (#1484) ───────────────────────────────
+
+test("the projected forge-publish material rides the engine ambient under the platform-correct keys and nothing else (#735/#1484)", async () => {
+  const secret = "gh-test-forge-read-material";
+  const cases: readonly {
+    readonly platform: "github" | "forgejo";
+    readonly expected: Record<string, string>;
+  }[] = [
+    { platform: "github", expected: { GH_TOKEN: secret, GITHUB_TOKEN: secret } },
+    { platform: "forgejo", expected: { FORGEJO_TOKEN: secret } },
+  ];
+  for (const testCase of cases) {
+    const fixture = makeRequest({ platform: testCase.platform });
+    try {
+      const { run, deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+      writeFileSync(path.join(fixture.request.runDir, "ai-output.json"), "{}", "utf8");
+      const exit = await workerMain(
+        [fixture.request.requestPath],
+        { [executionCredentialEnvName("forge-publish")]: secret },
+        deps,
+      );
+      assert.equal(exit, 0);
+      assert.equal(run.requests.length, 1);
+      // Exactly the platform-correct admission-resolvable keys — the
+      // ambient object carries nothing else.
+      assert.deepEqual({ ...run.requests[0]?.ambient }, testCase.expected);
+      // The engine inputs stay credential-free for forge material: it
+      // travels the ambient environment, never the inputs object.
+      assert.equal(Object.prototype.hasOwnProperty.call(run.requests[0]?.inputs ?? {}, "ai-api-key"), false);
+      // The material never reaches the result file (diagnostics tail
+      // included): the ambient object is in-process only.
+      const resultText = readFileSync(fixture.request.resultPath, "utf8");
+      assert.equal(resultText.includes(secret), false);
+    } finally {
+      cleanup(fixture);
+    }
+  }
+});
+
+test("absent forge-publish material leaves the engine ambient empty (#735/#1484)", async () => {
+  for (const envCase of [
+    {} as NodeJS.ProcessEnv,
+    { [executionCredentialEnvName("forge-publish")]: "" } as NodeJS.ProcessEnv,
+  ]) {
+    for (const platform of ["github", "forgejo"] as const) {
+      const fixture = makeRequest({ platform });
+      try {
+        const { run, deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+        writeFileSync(path.join(fixture.request.runDir, "ai-output.json"), "{}", "utf8");
+        assert.equal(await workerMain([fixture.request.requestPath], envCase, deps), 0);
+        assert.deepEqual({ ...run.requests[0]?.ambient }, {});
+      } finally {
+        cleanup(fixture);
+      }
+    }
+  }
+});
+
 // ── fail-closed envelope handling ───────────────────────────────────────
 
 test("a missing envelope path exits non-zero without writing a result", async () => {

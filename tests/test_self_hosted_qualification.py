@@ -131,6 +131,8 @@ INSTANCE_CONFIG_TARGETS = (
     "$TMP/instance-github.yaml",
     "$TMP/instance-dead-model.yaml",
     "$TMP/instance-reconcile.yaml",
+    # #1484 added the engine-parity scenario config.
+    "$TMP/instance-parity.yaml",
 )
 
 
@@ -471,6 +473,8 @@ RUNBOOK_SCENARIOS = (
     "A publication that fails, followed by a retry with no second model call",
     "Usage and cost accounting that counts one review across retries and restarts",
     "A primary model failure that falls back to the fallback model",
+    "Engine parity across the Action adapter and the self-hosted executors",
+    "The deterministic eval suites re-run against the self-hosted engine build",
     "A fork pull request and a private repository, with the secret boundary intact",
     "A publication that replaces the managed review of the same head",
 )
