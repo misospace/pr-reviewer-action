@@ -22,11 +22,15 @@ partial/unknown ``coverage``, ``required_checks`` not ``incomplete``, a
 marker head that agrees with the row's head — every independently
 supplied head identity (the native review's ``commit_id``, the marker
 head) must match, a disagreement is unsafe telemetry
-(``partial_or_abstained``, recorded as ``head_conflict``) — AND proven
-native evidence — a native APPROVED event by a configured bot login
-whose ``commit_id`` equals the row's head and whose own marker binds no
-different head, or a head-bound attestation with ``conclusion ==
-"approved"``. A model approve-prose claim plus
+(``partial_or_abstained``, recorded as ``head_conflict``) — AND
+attempt-correlated evidence: the row's OWN native review event APPROVED,
+by a configured bot login, whose ``commit_id`` equals the row's head and
+whose own marker binds no different head — an APPROVED from a different
+review attempt at the same head proves only that attempt, never this
+row — or an attestation with ``conclusion == "approved"`` correlated to
+the attempt: review-id-bound and head-consistent, or head-bound only
+when that head has exactly one collected attempt, so the head binding
+is unambiguous. A model approve-prose claim plus
 ``review_result: partial`` is never trusted; a native APPROVED over
 partial/unknown coverage is ``partial_or_abstained``; with neither native
 approval nor attestation the row is ``unknown_missing_native``.
@@ -195,27 +199,60 @@ def _heads_differ(sha_a: str, sha_b: str) -> bool:
     return sha_a.strip()[:_HEAD_LIMIT] != sha_b.strip()[:_HEAD_LIMIT]
 
 
-def _head_has_native_approval(head_sha: str, bot_reviews: list[dict[str, Any]]) -> bool:
-    """True when a bot native review APPROVED exactly this head.
+def _self_native_approval(attempt: dict[str, Any], head_sha: str) -> bool:
+    """True when the attempt's OWN review event APPROVED the row's head.
 
-    ``bot_reviews`` holds the PR's native review records authored by the
-    configured bot logins. Proven native evidence requires a non-null
-    ``commit_id`` string-equal to the row's head — a bot APPROVED bound to
-    a different head is not evidence for this row. A review whose own body
-    marker binds a head that disagrees with its ``commit_id`` contradicts
-    itself, so it is not evidence for any head either.
+    Evidence is per attempt, not per head: a row's trusted approval may
+    rest only on what this attempt itself published — an APPROVED state
+    with a non-null ``commit_id`` string-equal to the row's head, and no
+    self-marker conflict. A bot APPROVED from a *different* review
+    attempt at the same head proves only that attempt; borrowing it
+    would upgrade a COMMENTED row (or any other attempt) to a trusted
+    approval it never earned. The gate's conditions are unchanged — only
+    its scope is the attempt's own record. A comment publishes no native
+    event, so it is never its own native evidence.
     """
+    if attempt.get("source") != "native_review":
+        return False
     if not _usable_head(head_sha):
         return False
-    for review in bot_reviews:
-        if review.get("state") != "APPROVED":
-            continue
-        commit_id = review.get("commit_id")
-        if isinstance(commit_id, str) and commit_id and commit_id == head_sha:
-            if _review_marker_conflict(review, commit_id):
-                continue
-            return True
-    return False
+    if attempt.get("state") != "APPROVED":
+        return False
+    commit_id = attempt.get("commit_id")
+    if not isinstance(commit_id, str) or not commit_id or commit_id != head_sha:
+        return False
+    return not _review_marker_conflict({"body": attempt.get("body")}, commit_id)
+
+
+def _matching_attestation(
+    attempt: dict[str, Any],
+    head_text: str,
+    attested_heads: dict[str, dict[str, Any]],
+    attested_reviews: dict[int, dict[str, Any]],
+    head_attempts: dict[str, int],
+) -> dict[str, Any] | None:
+    """The attestation record correlated to this attempt, or ``None``.
+
+    Correlation rules (#1602 human review): a record bound with
+    ``review_id`` is evidence only for the native review row with that
+    id, and only when its head agrees with the row's head; a head-only
+    record is evidence only when the head has exactly one collected
+    attempt, so the head binding identifies that attempt unambiguously.
+    An attestation is never borrowed across attempts that share a head.
+    """
+    review_id = attempt.get("review_id")
+    if isinstance(review_id, int) and not isinstance(review_id, bool):
+        record = attested_reviews.get(review_id)
+        if record is not None and head_text:
+            record_head = record.get("head_sha")
+            if isinstance(record_head, str) and not _heads_differ(record_head, head_text):
+                return record
+        # A review-bound record naming another head certifies nothing to
+        # this row; only an independently unambiguous head-only record
+        # can still apply.
+    if head_text and head_attempts.get(head_text, 0) == 1:
+        return attested_heads.get(head_text)
+    return None
 
 
 def _review_marker_conflict(review: dict[str, Any], commit_id: str) -> bool:
@@ -340,7 +377,6 @@ def _normalize_attempt(
     pr_number: int,
     pr_head_sha: str,
     attempt: dict[str, Any],
-    bot_reviews: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """One normalized row from one bot-authored review/comment record.
 
@@ -383,12 +419,12 @@ def _normalize_attempt(
         and _heads_differ(commit_id, marker_head)
     )
 
-    native_approved = _head_has_native_approval(head_sha, bot_reviews)
+    native_approved = _self_native_approval(attempt, head_sha)
 
-    # Native event attribution. A native review row reports its own event;
-    # a comment row reports the head's proven bot APPROVED when one
-    # exists (the same evidence the disposition consumes) and nothing
-    # otherwise — comment prose is never an event.
+    # Native event attribution. Only a native review row publishes an
+    # event, and it reports its own: another attempt's APPROVED at the
+    # same head is that attempt's event, never this row's, and comment
+    # prose is never an event at all (#1602 human review).
     if source == "native_review":
         state_text = state if isinstance(state, str) else ""
         event = state_text.upper() if state_text.upper() in NATIVE_EVENTS else None
@@ -399,8 +435,8 @@ def _normalize_attempt(
             and commit_id == head_sha
         )
     else:
-        event = "APPROVED" if native_approved else None
-        event_bound = event == "APPROVED"
+        event = None
+        event_bound = False
 
     attestation_conclusion = attempt.get("attestation_conclusion")
     attestation_reason = attempt.get("attestation_reason_code")
@@ -510,19 +546,31 @@ def collect_rows(
     configured bot login become rows; everyone else's reviews and comments
     are other people's signals, not this collector's attempts.
 
-    Attestation records (``{"conclusion", "reason_code", "head_sha"}``)
-    are attached per head as additional trusted evidence only; they never
-    override a row's own marker fields.
+    Attestation records are correlated to a specific attempt, never
+    borrowed across attempts that share a head (#1602 human review):
+    ``{"conclusion", "reason_code", "head_sha", "review_id"?}`` — a
+    record carrying ``review_id`` is evidence only for the native review
+    row with that id at a consistent head; a head-only record is
+    evidence only when that head has exactly one collected attempt, so
+    the head binding identifies it unambiguously. Attestations are
+    additional trusted evidence only; they never override a row's own
+    marker fields.
     """
     bots_lower = {login.strip().lower() for login in bot_logins if isinstance(login, str) and login.strip()}
 
-    attested: dict[str, dict[str, Any]] = {}
+    attested_heads: dict[str, dict[str, Any]] = {}
+    attested_reviews: dict[int, dict[str, Any]] = {}
     for record in attestations or []:
         if not isinstance(record, dict):
             continue
         head = record.get("head_sha")
-        if isinstance(head, str) and _usable_head(head):
-            attested[head.strip()] = record
+        if not (isinstance(head, str) and _usable_head(head)):
+            continue
+        attestation_review_id = record.get("review_id")
+        if isinstance(attestation_review_id, int) and not isinstance(attestation_review_id, bool):
+            attested_reviews[attestation_review_id] = record
+        else:
+            attested_heads[head.strip()] = record
 
     rows: list[dict[str, Any]] = []
     record_ids: dict[tuple, int | None] = {}
@@ -579,17 +627,29 @@ def collect_rows(
             )
 
         attempts.sort(key=_attempt_sort_key)
+        # Resolve each attempt's head first and count attempts per head,
+        # so a head-only attestation is only attached when exactly one
+        # attempt shares that head and the binding is unambiguous.
+        resolved: list[tuple[dict[str, Any], str]] = []
+        head_attempt_counts: dict[str, int] = {}
         for attempt in attempts:
             head = attempt.get("commit_id")
             if attempt["source"] == "comment":
                 marker_probe = parse_metadata(attempt.get("body") or "")
                 probe_head = marker_probe.get("head_sha") if isinstance(marker_probe, dict) else None
                 head = probe_head if isinstance(probe_head, str) and _usable_head(probe_head) else ""
-            attestation = attested.get(head) if isinstance(head, str) else None
+            head_text = head.strip()[:_HEAD_LIMIT] if isinstance(head, str) else ""
+            resolved.append((attempt, head_text))
+            if head_text:
+                head_attempt_counts[head_text] = head_attempt_counts.get(head_text, 0) + 1
+        for attempt, head_text in resolved:
+            attestation = _matching_attestation(
+                attempt, head_text, attested_heads, attested_reviews, head_attempt_counts
+            )
             if attestation is not None:
                 attempt["attestation_conclusion"] = attestation.get("conclusion")
                 attempt["attestation_reason_code"] = attestation.get("reason_code")
-            row = _normalize_attempt(repo, number, pr_head, attempt, bot_reviews)
+            row = _normalize_attempt(repo, number, pr_head, attempt)
             record_ids[_row_record_key(row)] = attempt.get("record_id")
             rows.append(row)
 

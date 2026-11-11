@@ -367,6 +367,98 @@ def test_non_approved_attestation_never_trusts():
     assert rows[0]["disposition"] == "unknown_missing_native"
 
 
+def test_same_head_approval_is_not_evidence_for_a_commented_sibling():
+    """A per-attempt metric needs per-attempt proof (#1602 human review).
+
+    The reviewer's regression shape: review #1 at HEAD is APPROVED over
+    a partial marker, review #2 at HEAD is COMMENTED with a clean marker.
+    Row #2 must not borrow row #1's head-level approval — same-head
+    evidence is not per-attempt proof.
+    """
+    partial = _marker(review_result="partial", coverage="partial")
+    review_1 = _review(1, HEAD, "APPROVED", partial)
+    review_2 = _review(2, HEAD, "COMMENTED")  # default body: clean marker at HEAD
+    rows = rc.collect_rows(REPO, [_pull(1, HEAD, reviews=[review_1, review_2])], [BOT])
+    by_id = {row["review_id"]: row for row in rows}
+    assert by_id[1]["disposition"] == "partial_or_abstained"
+    assert by_id[2]["disposition"] == "unknown_missing_native"
+    assert by_id[2]["native_event"] == "COMMENTED"
+    assert all(row["disposition"] != "trusted_complete_approval" for row in rows)
+
+
+def test_clean_comment_does_not_borrow_a_sibling_approval():
+    """A comment publishes no native event, so it has no native evidence.
+
+    A self-consistent APPROVED review at the same head is that review's
+    outcome; the comment row stays unknown_missing_native and reports no
+    APPROVED event, while the review row keeps its own trusted approval.
+    """
+    review = _review(1, HEAD, "APPROVED")
+    comment = _comment(2, HEAD)
+    rows = rc.collect_rows(REPO, [_pull(1, HEAD, reviews=[review], comments=[comment])], [BOT])
+    by_source = {row["source"]: row for row in rows}
+    assert by_source["native_review"]["disposition"] == "trusted_complete_approval"
+    assert by_source["comment"]["disposition"] == "unknown_missing_native"
+    assert by_source["comment"]["native_event"] is None
+    assert by_source["comment"]["native_event_bound"] is False
+
+
+def test_head_only_attestation_never_trusts_two_attempts_at_one_head():
+    """Distinct earlier/later clean comments share one head-bound attestation.
+
+    The attestation names a head, not an attempt, so with two collected
+    attempts at that head it proves neither: both rows stay
+    unknown_missing_native instead of both claiming one approval.
+    """
+    earlier = _comment(11, HEAD, created_at="2026-11-01T00:00:00Z")
+    later = _comment(12, HEAD, created_at="2026-11-02T00:00:00Z")
+    attestations = [{"conclusion": "approved", "reason_code": "native_gate", "head_sha": HEAD}]
+    rows = rc.collect_rows(REPO, [_pull(1, HEAD, comments=[earlier, later])], [BOT], attestations)
+    assert len(rows) == 2
+    assert all(row["disposition"] == "unknown_missing_native" for row in rows)
+    assert all(row["attestation_conclusion"] is None for row in rows)
+
+
+def test_head_only_attestation_still_trusts_a_single_attempt_at_its_head():
+    """Exactly one attempt at the head keeps the head binding unambiguous."""
+    other = _comment(11, OTHER_HEAD)  # an attempt at another head changes nothing
+    comment = _comment(12, HEAD)
+    attestations = [{"conclusion": "approved", "reason_code": "native_gate", "head_sha": HEAD}]
+    rows = rc.collect_rows(REPO, [_pull(1, HEAD, comments=[other, comment])], [BOT], attestations)
+    by_link = {row["raw_link"]: row for row in rows}
+    assert by_link[comment["html_url"]]["disposition"] == "trusted_complete_approval"
+    assert by_link[other["html_url"]]["disposition"] == "unknown_missing_native"
+
+
+def test_review_id_bound_attestation_trusts_only_that_row():
+    """``review_id`` correlation: only the named native review row uses it."""
+    review = _review(7, HEAD, "COMMENTED")  # clean marker, no approval event
+    comment = _comment(2, HEAD)
+    attestations = [
+        {"conclusion": "approved", "reason_code": "native_gate", "head_sha": HEAD, "review_id": 7}
+    ]
+    rows = rc.collect_rows(REPO, [_pull(1, HEAD, reviews=[review], comments=[comment])], [BOT],
+                           attestations)
+    by_id = {(row["source"], row["review_id"]): row for row in rows}
+    trusted = by_id[("native_review", 7)]
+    assert trusted["disposition"] == "trusted_complete_approval"
+    assert trusted["attestation_conclusion"] == "approved"
+    assert by_id[("comment", None)]["disposition"] == "unknown_missing_native"
+    assert by_id[("comment", None)]["attestation_conclusion"] is None
+
+
+def test_review_id_bound_attestation_on_another_head_is_not_evidence():
+    """A review-bound record whose head disagrees certifies nothing."""
+    review = _review(7, HEAD, "COMMENTED")
+    attestations = [
+        {"conclusion": "approved", "reason_code": "native_gate", "head_sha": OTHER_HEAD,
+         "review_id": 7}
+    ]
+    rows = rc.collect_rows(REPO, [_pull(1, HEAD, reviews=[review])], [BOT], attestations)
+    assert rows[0]["disposition"] == "unknown_missing_native"
+    assert rows[0]["attestation_conclusion"] is None
+
+
 def test_findings_and_issues_are_complete_findings():
     for result in ("findings", "issues"):
         body = _marker(review_result=result)

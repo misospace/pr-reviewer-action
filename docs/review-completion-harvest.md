@@ -50,7 +50,7 @@ Flags:
 | `--per-page` | Page size (default 100). |
 | `--out PATH` | JSON report path (default: stdout only). |
 | `--from-json PATH` | Offline mode: replay a fixture of the same records the forge calls would return; bypasses all network. |
-| `--attestations PATH` | Optional JSON array of trusted-review attestation records `{"conclusion","reason_code","head_sha"}`, attached per head as additional trusted evidence only. |
+| `--attestations PATH` | Optional JSON array of trusted-review attestation records `{"conclusion","reason_code","head_sha","review_id"?}`. A record with `review_id` is evidence only for that native review row (at a consistent head); a head-only record is evidence only when exactly one collected attempt binds that head, so the binding is unambiguous. Never borrowed across attempts sharing a head; additional trusted evidence only. |
 | `--adjudications PATH` | Optional JSON array of human-label records `{"pr": N, "head_sha": "...", "label": "confirmed_blocker"\|"missed_blocker"\|"false_blocker"}`; the only input of the `correctness` rollup. |
 
 Forge reads go exclusively through `pr_reviewer.forge.ForgeClient`
@@ -98,10 +98,15 @@ field, read defensively: the marker schema the action ships today
 (`docs/telemetry.md`) defines no verdict key, so on organic data this is
 always null — it is recorded, **never trusted**, if a future schema adds
 one), `native_event`
-(APPROVED/CHANGES_REQUESTED/COMMENTED/DISMISSED or null),
+(APPROVED/CHANGES_REQUESTED/COMMENTED/DISMISSED or null — only a native
+review row reports an event, and it reports its own: another attempt's
+event at the same head is never this row's, and a comment row never
+reports `APPROVED`),
 `native_event_bound` (native `commit_id` equals the row head and is
 non-null), `attestation_conclusion`/`attestation_reason_code` (when an
-attestation record matches the row head), `disposition`, `head_conflict`
+attestation record is correlated with this attempt — by `review_id`, or
+by head when exactly one collected attempt binds that head),
+`disposition`, `head_conflict`
 (the native review's `commit_id` and its marker's `head_sha` are both
 bound and disagree — the row's two supplied head identities contradict
 each other), `superseded_head`
@@ -151,7 +156,7 @@ Per-row, mutually exclusive:
 | `partial_or_abstained` | Incomplete/unsafe telemetry: `review_result: partial`, `coverage` partial/unknown, `required_checks: incomplete`, an unbound marker head, or a marker head that contradicts the row's head (`head_conflict`) — **even with a native APPROVED or a model approve-prose claim**. |
 | `failed_or_unavailable` | Marker present but no usable `review_result`. |
 | `unknown_no_marker` | No parseable marker (the default heuristic — a missing signal is never upgraded). |
-| `unknown_missing_native` | Marker complete and `review_result: clean`, but neither a proven native approval nor a head-bound approval attestation exists. |
+| `unknown_missing_native` | Marker complete and `review_result: clean`, but no approval evidence correlated with this attempt exists (its own proven native APPROVED, or a correlated approval attestation). |
 
 ### Metric invariant
 
@@ -168,10 +173,15 @@ Per-row, mutually exclusive:
 3. `review_result == "clean"`;
 4. no `coverage` of `partial`/`unknown`;
 5. `required_checks` not `incomplete`;
-6. proven native evidence — a native APPROVED event by a configured bot
-   login with non-null `commit_id` equal to the row's head and whose own
-   marker binds no different head — **or** a head-bound attestation with
-   `conclusion == "approved"`.
+6. evidence correlated with the specific published attempt: either the
+   row's OWN native review event — APPROVED by a configured bot login,
+   non-null `commit_id` equal to the row's head, own marker binding no
+   different head — **or** an attestation record with
+   `conclusion == "approved"` bound to this attempt (`review_id`, or a
+   head-only record where the head has exactly one collected attempt).
+   A bot APPROVED from a different review at the same head proves only
+   that attempt, never this row; rows are per (head, review attempt), so
+   same-head evidence is not per-attempt proof.
 
 Consequently: a model approve-prose claim plus `review_result: partial`
 is never trusted; a native APPROVED over partial/unknown coverage is
