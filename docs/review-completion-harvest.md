@@ -50,7 +50,7 @@ Flags:
 | `--per-page` | Page size (default 100). |
 | `--out PATH` | JSON report path (default: stdout only). |
 | `--from-json PATH` | Offline mode: replay a fixture of the same records the forge calls would return; bypasses all network. |
-| `--attestations PATH` | Optional JSON array of trusted-review attestation records `{"conclusion","reason_code","head_sha","review_id"?}`. A record with `review_id` is evidence only for that native review row (at a consistent head); a head-only record is evidence only when exactly one collected attempt binds that head, so the binding is unambiguous. A record whose `review_id` is present but not an integer is poisoned and certifies nothing — it never silently becomes head-scoped evidence. Never borrowed across attempts sharing a head; additional trusted evidence only. |
+| `--attestations PATH` | Optional JSON array of trusted-review attestation records `{"conclusion","reason_code","head_sha","review_id"?}`. A record with `review_id` is evidence only for that native review row (at a consistent head); a head-only record is evidence only when exactly one collected attempt binds that head, so the binding is unambiguous. A `null` `review_id` reads as absent; a record whose `review_id` is present with any non-integer value is poisoned and certifies nothing — it never silently becomes head-scoped evidence. Never borrowed across attempts sharing a head; additional trusted evidence only. |
 | `--adjudications PATH` | Optional JSON array of human-label records `{"pr": N, "head_sha": "...", "label": "confirmed_blocker"\|"missed_blocker"\|"false_blocker"}`; the only input of the `correctness` rollup. |
 
 Forge reads go exclusively through `pr_reviewer.forge.ForgeClient`

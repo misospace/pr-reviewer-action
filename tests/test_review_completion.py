@@ -482,6 +482,19 @@ def test_attestation_head_bound_matches_the_rows_head_normalization():
               "head_sha": f" {HEAD} "}
     rows = rc.collect_rows(REPO, [_pull(1, HEAD, comments=[comment])], [BOT], [padded])
     assert rows[0]["disposition"] == "trusted_complete_approval"
+    # Both identities over the head bound: each row head is truncated at
+    # ``_HEAD_LIMIT``, so the pool key must normalize the same way — a
+    # record whose head matches the row only after that truncation binds
+    # exactly as the review-bound branch's ``_heads_differ`` agrees.
+    wide = "a" * (rc._HEAD_LIMIT + 6)
+    body = _marker(head_sha=wide)
+    wide_comment = _comment(13, HEAD, body=body)
+    rows = rc.collect_rows(
+        REPO, [_pull(1, HEAD, comments=[wide_comment])], [BOT],
+        [{"conclusion": "approved", "reason_code": "native_gate", "head_sha": wide}],
+    )
+    assert rows[0]["head_sha"] == "a" * rc._HEAD_LIMIT
+    assert rows[0]["disposition"] == "trusted_complete_approval"
 
 
 def test_review_id_bound_attestation_on_another_head_is_not_evidence():
