@@ -21,6 +21,8 @@ export type { AdminFailureCategory, AdminMcpOutcome, AdminMetricDefinition, Admi
 export { AdminMetricsRegistry } from "./metrics.js";
 export type { AdminDispatchInput, AdminRouteContext, AdminRouteResponse } from "./routes.js";
 export { ADMIN_ROUTE_TABLE, dispatchAdminRoute } from "./routes.js";
+export type { AdminDashboardOptions, DashboardResponse } from "./dashboard.js";
+export { DASHBOARD_HTML, DASHBOARD_JS, serveDashboard } from "./dashboard.js";
 export type { AdminHost, AdminHostOptions, AdminMcpOptions } from "./server.js";
 export { createAdminHost, DEFAULT_ADMIN_BODY_BYTES } from "./server.js";
 export type {

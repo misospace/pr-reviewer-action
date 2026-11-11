@@ -38,6 +38,10 @@ export interface AdminRouteContext {
   /** Clock used to stamp audit events; defaults to `Date.now`. */
   readonly nowMs?: () => number;
 }
+/** The dispatcher's route table (#737). The optional #742 dashboard shell
+ * serves `GET /dashboard` and `GET /dashboard/app.js` OUTSIDE this table and
+ * outside the `/admin/` namespace, so the every-route-here-is-authenticated
+ * rule stays intact (see `src/admin/dashboard.ts`). */
 export const ADMIN_ROUTE_TABLE = Object.freeze([
   "GET /healthz", "GET /readyz", "GET /metrics", "GET /admin/status", "GET /admin/runs", "GET /admin/runs/{runId}", "POST /admin/runs/{runId}/cancel", "POST /admin/rereview", "GET /admin/diagnostics",
 ]);
