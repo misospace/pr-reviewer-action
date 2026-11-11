@@ -532,14 +532,117 @@ def _row_record_key(row: dict[str, Any]) -> tuple:
             row["raw_link"])
 
 
+def _resolve_pull_attempts(
+    pull: dict[str, Any],
+    bots_lower: set[str],
+    head_attempt_counts: dict[str, int],
+    seen_attempt_records: set[tuple],
+) -> tuple[int, str, list[tuple[dict[str, Any], str]]] | None:
+    """Resolve one pull's bot attempts to their heads and count them.
+
+    Returns ``(number, pr_head, resolved)`` or ``None`` for a malformed
+    pull. Per-head counting mutates the collection-scoped
+    ``head_attempt_counts``/``seen_attempt_records`` bookkeeping so a
+    head-only attestation can never certify unrelated attempts that
+    merely sit in different pulls or repositories.
+    """
+    if not isinstance(pull, dict):
+        return None
+    number = pull.get("number")
+    if not isinstance(number, int) or isinstance(number, bool):
+        return None
+    pr_head = pull.get("head_sha")
+    pr_head = pr_head.strip()[:_HEAD_LIMIT] if isinstance(pr_head, str) else ""
+
+    reviews = [r for r in (pull.get("reviews") or []) if isinstance(r, dict)]
+    bot_reviews = [r for r in reviews if _login_of(r) in bots_lower]
+    comments = [c for c in (pull.get("comments") or []) if isinstance(c, dict)]
+
+    attempts: list[dict[str, Any]] = []
+    for review in bot_reviews:
+        login = _login_of(review)
+        if login not in bots_lower:
+            continue
+        review_id = review.get("id")
+        attempts.append(
+            {
+                "source": "native_review",
+                "review_id": review_id if isinstance(review_id, int) and not isinstance(review_id, bool) else None,
+                "record_id": review_id if isinstance(review_id, int) and not isinstance(review_id, bool) else None,
+                "login": login,
+                "body": review.get("body") if isinstance(review.get("body"), str) else "",
+                "created_at": review.get("submitted_at") if isinstance(review.get("submitted_at"), str) else "",
+                "html_url": review.get("html_url"),
+                "state": review.get("state"),
+                "commit_id": review.get("commit_id") if isinstance(review.get("commit_id"), str) else None,
+            }
+        )
+    for comment in comments:
+        login = _login_of(comment)
+        if login not in bots_lower:
+            continue
+        comment_id = comment.get("id")
+        record_id = comment_id if isinstance(comment_id, int) and not isinstance(comment_id, bool) else None
+        attempts.append(
+            {
+                "source": "comment",
+                "review_id": None,
+                "record_id": record_id,
+                "login": login,
+                "body": comment.get("body") if isinstance(comment.get("body"), str) else "",
+                "created_at": comment.get("created_at") if isinstance(comment.get("created_at"), str) else "",
+                "html_url": comment.get("html_url"),
+                "state": None,
+                "commit_id": None,
+            }
+        )
+
+    attempts.sort(key=_attempt_sort_key)
+    # Resolve each attempt's head first and count attempts per head
+    # across the whole collection, so a head-only attestation is only
+    # attached when exactly one attempt shares that head and the
+    # binding is unambiguous.
+    resolved: list[tuple[dict[str, Any], str]] = []
+    for attempt in attempts:
+        head = attempt.get("commit_id")
+        if attempt["source"] == "comment":
+            marker_probe = parse_metadata(attempt.get("body") or "")
+            probe_head = marker_probe.get("head_sha") if isinstance(marker_probe, dict) else None
+            head = probe_head if isinstance(probe_head, str) and _usable_head(probe_head) else ""
+        head_text = head.strip()[:_HEAD_LIMIT] if isinstance(head, str) else ""
+        resolved.append((attempt, head_text))
+        if head_text:
+            # A replayed duplicate of the same record is one attempt,
+            # matching the row dedupe below: it must not inflate the
+            # count and void an otherwise valid head-only attestation.
+            record_id = attempt.get("record_id")
+            if record_id is not None:
+                replay_key = (attempt["source"], record_id, head_text)
+                if replay_key in seen_attempt_records:
+                    continue
+                seen_attempt_records.add(replay_key)
+            head_attempt_counts[head_text] = head_attempt_counts.get(head_text, 0) + 1
+    return number, pr_head, resolved
+
+
 def collect_rows(
     repo: str,
     pulls: Iterable[dict[str, Any]],
     bot_logins: Iterable[str],
     attestations: Iterable[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Normalized rows for every eligible (head, review attempt) in ``pulls``.
+    """Normalized rows for one repository; see :func:`collect_rows_multi`."""
+    return collect_rows_multi([(repo, pulls)], bot_logins, attestations)
 
+
+def collect_rows_multi(
+    pulls_by_repo: Iterable[tuple[str, Iterable[dict[str, Any]]]],
+    bot_logins: Iterable[str],
+    attestations: Iterable[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Normalized rows for every eligible (head, review attempt) in ``pulls_by_repo``.
+
+    ``pulls_by_repo`` yields one ``(repo, pulls)`` pair per repository:
     ``pulls`` yields one record per PR: ``number``, ``head_sha`` (the PR
     head at collection time), ``reviews`` (native review records) and
     ``comments`` (issue-comment records). Only records authored by a
@@ -553,23 +656,24 @@ def collect_rows(
     row with that id at a consistent head; a record whose ``review_id``
     is present but malformed certifies nothing; a head-only record is
     evidence only when that head has exactly one collected attempt in
-    the whole collection, across every pull (replayed duplicates of one
-    record count once), so the head binding identifies it unambiguously
-    and one record can never certify unrelated attempts in two pulls.
-    Attestations are additional trusted evidence only; they never
-    override a row's own marker fields.
+    the whole collection, across every pull in every repository
+    (replayed duplicates of one record count once), so the head binding
+    identifies it unambiguously and one record can never certify
+    unrelated attempts in two pulls or two repositories. Attestations
+    are additional trusted evidence only; they never override a row's
+    own marker fields.
     """
     bots_lower = {login.strip().lower() for login in bot_logins if isinstance(login, str) and login.strip()}
 
     attested_heads: dict[str, dict[str, Any]] = {}
     attested_reviews: dict[int, dict[str, Any]] = {}
-    # Attempt/head bookkeeping spans the whole collection, not one pull:
-    # a head-only attestation must certify at most one collected attempt
-    # across every pull in the collection (one call per repository), so
+    # Attempt/head bookkeeping spans the whole collection, not one pull
+    # or one repository: a head-only attestation must certify at most
+    # one collected attempt across every pull in every repository, so
     # per-head counts and replay dedupe are collection-scoped too.
     head_attempt_counts: dict[str, int] = {}
     seen_attempt_records: set[tuple] = set()
-    resolved_pulls: list[tuple[int, str, list[tuple[dict[str, Any], str]]]] = []
+    resolved_pulls: list[tuple[str, int, str, list[tuple[dict[str, Any], str]]]] = []
     for record in attestations or []:
         if not isinstance(record, dict):
             continue
@@ -593,89 +697,20 @@ def collect_rows(
 
     rows: list[dict[str, Any]] = []
     record_ids: dict[tuple, int | None] = {}
-    for pull in pulls:
-        if not isinstance(pull, dict):
-            continue
-        number = pull.get("number")
-        if not isinstance(number, int) or isinstance(number, bool):
-            continue
-        pr_head = pull.get("head_sha")
-        pr_head = pr_head.strip()[:_HEAD_LIMIT] if isinstance(pr_head, str) else ""
-
-        reviews = [r for r in (pull.get("reviews") or []) if isinstance(r, dict)]
-        bot_reviews = [r for r in reviews if _login_of(r) in bots_lower]
-        comments = [c for c in (pull.get("comments") or []) if isinstance(c, dict)]
-
-        attempts: list[dict[str, Any]] = []
-        for review in bot_reviews:
-            login = _login_of(review)
-            if login not in bots_lower:
-                continue
-            review_id = review.get("id")
-            attempts.append(
-                {
-                    "source": "native_review",
-                    "review_id": review_id if isinstance(review_id, int) and not isinstance(review_id, bool) else None,
-                    "record_id": review_id if isinstance(review_id, int) and not isinstance(review_id, bool) else None,
-                    "login": login,
-                    "body": review.get("body") if isinstance(review.get("body"), str) else "",
-                    "created_at": review.get("submitted_at") if isinstance(review.get("submitted_at"), str) else "",
-                    "html_url": review.get("html_url"),
-                    "state": review.get("state"),
-                    "commit_id": review.get("commit_id") if isinstance(review.get("commit_id"), str) else None,
-                }
+    for repo, pulls in pulls_by_repo:
+        for pull in pulls:
+            resolved_pull = _resolve_pull_attempts(
+                pull, bots_lower, head_attempt_counts, seen_attempt_records
             )
-        for comment in comments:
-            login = _login_of(comment)
-            if login not in bots_lower:
+            if resolved_pull is None:
                 continue
-            comment_id = comment.get("id")
-            record_id = comment_id if isinstance(comment_id, int) and not isinstance(comment_id, bool) else None
-            attempts.append(
-                {
-                    "source": "comment",
-                    "review_id": None,
-                    "record_id": record_id,
-                    "login": login,
-                    "body": comment.get("body") if isinstance(comment.get("body"), str) else "",
-                    "created_at": comment.get("created_at") if isinstance(comment.get("created_at"), str) else "",
-                    "html_url": comment.get("html_url"),
-                    "state": None,
-                    "commit_id": None,
-                }
-            )
+            number, pr_head, resolved = resolved_pull
+            # Defer matching until every pull's attempts are counted: matching
+            # must see the collection-wide per-head counts, not the prefix
+            # collected so far.
+            resolved_pulls.append((repo, number, pr_head, resolved))
 
-        attempts.sort(key=_attempt_sort_key)
-        # Resolve each attempt's head first and count attempts per head
-        # across the whole collection, so a head-only attestation is only
-        # attached when exactly one attempt shares that head and the
-        # binding is unambiguous.
-        resolved: list[tuple[dict[str, Any], str]] = []
-        for attempt in attempts:
-            head = attempt.get("commit_id")
-            if attempt["source"] == "comment":
-                marker_probe = parse_metadata(attempt.get("body") or "")
-                probe_head = marker_probe.get("head_sha") if isinstance(marker_probe, dict) else None
-                head = probe_head if isinstance(probe_head, str) and _usable_head(probe_head) else ""
-            head_text = head.strip()[:_HEAD_LIMIT] if isinstance(head, str) else ""
-            resolved.append((attempt, head_text))
-            if head_text:
-                # A replayed duplicate of the same record is one attempt,
-                # matching the row dedupe below: it must not inflate the
-                # count and void an otherwise valid head-only attestation.
-                record_id = attempt.get("record_id")
-                if record_id is not None:
-                    replay_key = (attempt["source"], record_id, head_text)
-                    if replay_key in seen_attempt_records:
-                        continue
-                    seen_attempt_records.add(replay_key)
-                head_attempt_counts[head_text] = head_attempt_counts.get(head_text, 0) + 1
-        # Defer matching until every pull's attempts are counted: matching
-        # must see the collection-wide per-head counts, not the prefix
-        # collected so far.
-        resolved_pulls.append((number, pr_head, resolved))
-
-    for number, pr_head, resolved in resolved_pulls:
+    for repo, number, pr_head, resolved in resolved_pulls:
         for attempt, head_text in resolved:
             attestation = _matching_attestation(
                 attempt, head_text, attested_heads, attested_reviews, head_attempt_counts

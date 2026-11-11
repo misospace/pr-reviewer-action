@@ -440,6 +440,49 @@ def test_head_only_attestation_never_trusts_attempts_across_pulls():
     assert all(row["attestation_conclusion"] is None for row in rows)
 
 
+def test_head_only_attestation_never_trusts_attempts_across_repositories():
+    """Two repositories sharing a head cannot both claim one attestation.
+
+    Head-uniqueness counting spans the whole harvest, not one repository:
+    with one attempt at the head in each of two repos the head binding is
+    ambiguous, so the record certifies neither attempt. Calling the
+    collector once per repository resets the counter and lets each repo
+    independently see ``count == 1`` and trust both rows from one record.
+    """
+    first = _comment(11, HEAD)
+    second = _comment(12, HEAD)
+    attestations = [{"conclusion": "approved", "reason_code": "native_gate", "head_sha": HEAD}]
+    rows = rc.collect_rows_multi(
+        [
+            (REPO, [_pull(1, HEAD, comments=[first])]),
+            ("misospace/other-repo", [_pull(1, HEAD, comments=[second])]),
+        ],
+        [BOT],
+        attestations,
+    )
+    assert len(rows) == 2
+    assert all(row["disposition"] == "unknown_missing_native" for row in rows)
+    assert all(row["attestation_conclusion"] is None for row in rows)
+
+
+def test_head_only_attestation_still_trusts_one_attempt_across_repositories():
+    """A head seen once in the whole multi-repo collection stays unambiguous."""
+    comment = _comment(11, HEAD)
+    other = _comment(12, OTHER_HEAD)
+    attestations = [{"conclusion": "approved", "reason_code": "native_gate", "head_sha": HEAD}]
+    rows = rc.collect_rows_multi(
+        [
+            (REPO, [_pull(1, HEAD, comments=[comment])]),
+            ("misospace/other-repo", [_pull(1, OTHER_HEAD, comments=[other])]),
+        ],
+        [BOT],
+        attestations,
+    )
+    by_link = {row["raw_link"]: row for row in rows}
+    assert by_link[comment["html_url"]]["disposition"] == "trusted_complete_approval"
+    assert by_link[other["html_url"]]["disposition"] == "unknown_missing_native"
+
+
 def test_head_only_attestation_still_trusts_a_single_attempt_at_its_head():
     """Exactly one attempt at the head keeps the head binding unambiguous."""
     other = _comment(11, OTHER_HEAD)  # an attempt at another head changes nothing

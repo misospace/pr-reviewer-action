@@ -63,6 +63,7 @@ from pr_reviewer.review_completion import (  # noqa: E402
     ACTION_VERSION_LIMIT,
     build_report,
     collect_rows,
+    collect_rows_multi,
     filter_by_action_version,
 )
 
@@ -430,9 +431,10 @@ def collect(
         rows: list[dict[str, Any]] = []
         names: list[str] = []
         truncated = False
-        for full_name, pulls in repos:
-            rows.extend(collect_rows(full_name, pulls, args.bot_login, attestations))
-            names.append(full_name)
+        rows.extend(
+            collect_rows_multi(repos, args.bot_login, attestations)
+        )
+        names.extend(full_name for full_name, _pulls in repos)
         return rows, names, truncated, attestations, adjudications
 
     if not args.repo:
@@ -453,6 +455,7 @@ def collect(
     rows = []
     names = []
     truncated = False
+    repo_pulls: list[tuple[str, list[dict[str, Any]]]] = []
     for repo in args.repo:
         pulls, pulls_truncated = fetch_repo_pulls(
             client,
@@ -471,8 +474,12 @@ def collect(
             )
             truncated = truncated or detail_truncated
             hydrated.append(record)
-        rows.extend(collect_rows(repo, hydrated, args.bot_login, attestations))
+        repo_pulls.append((repo, hydrated))
         names.append(repo)
+    # One collection pass across every repository: head-only attestation
+    # uniqueness must not reset between repositories, or one record could
+    # certify unrelated attempts sharing a head in different repos.
+    rows.extend(collect_rows_multi(repo_pulls, args.bot_login, attestations))
     return rows, names, truncated, attestations, adjudications
 
 
