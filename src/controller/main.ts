@@ -785,6 +785,15 @@ function servingForgePublishCredentialRef(
         `job names forge integration '${forgeIntegration}' which ${named.length} instance forge integrations share: the worker's publish-purpose credential cannot be selected without guessing`,
       );
     }
+    // A named integration whose kind does not match the serving platform
+    // is a corrupted or misrouted identity: the daemon's own endpoint
+    // resolution refuses it, so the credential reference must not be
+    // selected from it either — fail closed on uncertain state.
+    if (named[0]!.kind !== platform) {
+      throw new RangeError(
+        `job names forge integration '${forgeIntegration}' of kind '${named[0]!.kind}' but the job's platform is '${platform}': the identity does not match the job's platform`,
+      );
+    }
     return named[0]!.credential;
   }
   const sameKind = instance.forges.filter((entry) => entry.kind === platform);

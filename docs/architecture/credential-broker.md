@@ -53,6 +53,27 @@ supplies the piece they all defer to:
 | worker environment | the resolved `WorkerSecretSet` (short-lived, run-scoped) | controller-only credentials (App private key, global admin tokens, database credentials, controller signing keys, unrelated model credentials) |
 | logs and artifacts | reference names, fixed refusal reasons | secret values (the redactor enforces this for the values the broker itself issued) |
 
+## The serving forge's publish-purpose credential (#1484)
+
+A worker performs the review's forge reads, so its plan carries the
+serving forge integration's `forge-publish` reference: the integration the
+job's own forge identity names, or the single same-kind entry. An
+ambiguous name, an unresolvable name, or a named integration of another
+kind refuses instead of guessing. The reference is opaque and
+instance-wide — one serving forge per controller, never a
+repository-selected credential — and a fork job's plan never carries it:
+the instance-wide credential does not cross the fork trust boundary
+(`docs/fork-review.md`), so a fork worker draws on no forge material and
+its forge reads fail closed at authentication.
+
+The material reaches the worker only through the #735 projection: the
+vault seeds it from the operator's environment at resolution time, the
+executor projects it into the worker's environment as
+`PR_REVIEWER_CREDENTIAL_FORGE_PUBLISH`, and the worker maps it into the
+engine's ambient under the platform-correct key (`FORGEJO_TOKEN`, or
+`GH_TOKEN` and `GITHUB_TOKEN`). It never appears in argv, in a URL, in a
+log line, or in the execution envelope.
+
 ## Security invariants
 
 - **Late resolution.** Plans are built from references early (safe to

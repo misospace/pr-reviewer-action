@@ -512,6 +512,116 @@ def test_the_runbook_lists_the_complete_scenario_set() -> None:
     )
 
 
+# ── the engine-parity routes (#1484) ──
+# The parity family drives one head through four routes and compares the
+# four artifacts byte-for-byte. The Kubernetes route (D) is NOT a skip:
+# it drives the real executor over a harness-owned cluster double. The
+# gate fails when the route regresses to a skip, when the driver is
+# gone, or when the comparison drops a family — a parity route that
+# stops being compared is a silent narrowing of the qualification.
+PARITY_ARTIFACT_FAMILIES = ("a", "b", "c", "d")
+
+# The route that produces each family, by scenario name. Every declared
+# family must have a route that writes it, and every route must write
+# the family the comparison reads.
+PARITY_ROUTE_ARTIFACTS = {
+    "scenario_engine_parity_route_a_self_hosted_executor": "a",
+    "scenario_engine_parity_route_b_action_adapter": "b",
+    "scenario_engine_parity_route_c_oci_worker_image": "c",
+    "scenario_engine_parity_route_d_kubernetes_executor": "d",
+}
+
+# The compiled driver the harness runs, and the source it is compiled
+# from. Both must exist: a driver that rots away takes the route with
+# it, and the route would fail at run time instead of at review time.
+KUBERNETES_ROUTE_DRIVER = "tests/harness/kubernetes-route.ts"
+KUBERNETES_ROUTE_COMPILED = ".test-build/tests/harness/kubernetes-route.js"
+
+# The scenario bodies the gate reads, by name. The harness's functions
+# are top level and close with a brace in column zero.
+_SCENARIO_BODY_RE = r"(?ms)^{name}\(\) \{{\n(.*?)\n\}}"
+
+# The declared artifact families of the parity comparison.
+_PARITY_FAMILY_ARRAY_RE = re.compile(
+    r"(?ms)^PARITY_ARTIFACT_FAMILIES=\((.*?)\)$"
+)
+
+
+def _scenario_body(script: str, name: str) -> str:
+    match = re.search(_SCENARIO_BODY_RE.format(name=name), script)
+    assert match, f"the harness declares no {name} scenario"
+    return match.group(1)
+
+
+def test_the_kubernetes_parity_route_drives_the_real_executor() -> None:
+    script = _harness_script()
+    body = _scenario_body(script, "scenario_engine_parity_route_d_kubernetes_executor")
+    assert KUBERNETES_ROUTE_DRIVER in script, (
+        f"the harness must name the driver it compiles: {KUBERNETES_ROUTE_DRIVER}"
+    )
+    assert (ROOT / KUBERNETES_ROUTE_DRIVER).is_file(), (
+        f"the driver source is gone: {KUBERNETES_ROUTE_DRIVER}"
+    )
+    assert KUBERNETES_ROUTE_COMPILED in script, (
+        f"the harness must run the compiled driver: {KUBERNETES_ROUTE_COMPILED}"
+    )
+    assert "ensure_test_build" in body, (
+        "the route must compile the driver before it runs it"
+    )
+    assert "SKIP" not in body, (
+        "the Kubernetes parity route must not be a skip: the real executor "
+        "runs over the harness's cluster double"
+    )
+
+
+def test_the_parity_artifact_comparison_covers_every_route() -> None:
+    script = _harness_script()
+    match = _PARITY_FAMILY_ARRAY_RE.search(script)
+    assert match, "the harness must declare the parity artifact families"
+    families = tuple(
+        entry
+        for line in match.group(1).splitlines()
+        for entry in line.split("#", 1)[0].split()
+    )
+    assert families == PARITY_ARTIFACT_FAMILIES, (
+        "the parity comparison must cover every route's artifact: "
+        + ", ".join(families)
+    )
+    body = _scenario_body(script, "scenario_engine_parity_artifacts_byte_identical")
+    assert "PARITY_ARTIFACT_FAMILIES" in body, (
+        "the comparison must read the declared families"
+    )
+
+
+def test_every_parity_route_produces_its_artifact_family() -> None:
+    script = _harness_script()
+    for scenario, family in PARITY_ROUTE_ARTIFACTS.items():
+        body = _scenario_body(script, scenario)
+        assert f"parity-artifact-{family}.json" in body, (
+            f"{scenario} must produce the artifact family the comparison "
+            f"reads: parity-artifact-{family}.json"
+        )
+
+
+def test_the_runbook_states_the_kubernetes_route_scope() -> None:
+    # The route proves the executor's own path and nothing about a
+    # cluster; the runbook must say both, so a reader never mistakes
+    # the route for a cluster qualification.
+    text = re.sub(r"\s+", " ", RUNBOOK.read_text(encoding="utf-8"))
+    for phrase in (
+        "no scheduler",
+        "no admission control",
+        "no network policy",
+        "no kubelet",
+        "no real secret store",
+        "host networking",
+    ):
+        assert phrase in text, f"the runbook must state that route D has {phrase}"
+    assert "manifest, credential, envelope and result-collection path" in text, (
+        "the runbook must state what the Kubernetes route proves"
+    )
+
+
 # ── the v3 qualification suites the harness re-runs (#1484) ──
 # The harness re-runs the repository's own v3 qualification suites
 # against the engine build the self-hosted workers run. Each declared

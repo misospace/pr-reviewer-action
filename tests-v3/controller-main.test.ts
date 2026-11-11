@@ -1359,3 +1359,50 @@ test("a job naming an unresolvable forge integration refuses at plan build (#148
     RangeError,
   );
 });
+
+test("a job naming a forge integration of ANOTHER kind refuses at plan build (#1484)", async () => {
+  // The instance serves forgejo; the job names the github integration.
+  // The daemon's own endpoint resolution refuses that identity, so the
+  // publish-purpose credential must not be selected from it either.
+  const config = `${MIN_INSTANCE_CONFIG}
+forges:
+  - name: forgejo-a
+    kind: forgejo
+    endpoint: http://127.0.0.1:9
+    credential: forge-cred-forgejo
+  - name: github-a
+    kind: github
+    endpoint: https://api.github.com
+    credential: forge-cred-github
+`;
+  const instance = parseInstanceConfigText(config, validateContract(V3_CONTRACT));
+  const broker = createModelCredentialVault({
+    instance,
+    platform: "forgejo",
+    modelCredentialMaterial: new Map([
+      ["model-cred", "sk-test-model-material"],
+      ["forge-cred-forgejo", "fj-test-forge-material"],
+      ["forge-cred-github", "gh-test-forge-material"],
+    ]),
+  });
+  const binding = createWorkerCredentialBinding({
+    instance,
+    defaultModelProfile: instance.defaultModelProfile,
+    defaultEvidenceProfile: instance.defaultEvidenceProfile!,
+    broker,
+  });
+  await assert.rejects(
+    binding.credentialRefs(
+      {
+        jobId: "job-named-other-kind",
+        repoFullName: "owner/repo",
+        platform: "forgejo",
+        installationId: "7",
+        fork: false,
+        forgeIntegration: "github-a",
+      },
+      "run-named-other-kind-1",
+    ),
+    RangeError,
+  );
+});

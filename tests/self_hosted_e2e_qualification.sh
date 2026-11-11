@@ -67,17 +67,20 @@ set -euo pipefail
 #      config (model profile pointed at the stub) drives a webhook
 #      controller that reviews the parity head; the published artifact
 #      is read back from the durable state (cp_publications.result_payload).
-#  18. Route B, the Action adapter: the same engine build reviews the
-#      same head directly against the disposable Forgejo through the
-#      engine CLI's request file (the Action runtime's stage env).
+#  18. Route B, the Action adapter: the shipped JavaScript action entry
+#      (node dist/index.js, the very entry action.yml runs) reviews the
+#      same head the way the runner drives it: the contract inputs as
+#      INPUT_* environment variables, the received pull_request payload
+#      as GITHUB_EVENT_PATH, and the ambient runner context.
 #  19. Route C, the OCI worker image: the built worker image reviews the
 #      same head from Route A's rewritten execution envelope over a
 #      fresh exact-head clone (credentials ride the environment only).
-#  20. Route D, the Kubernetes executor: NOT drivable in this harness
-#      (it needs a live kube API server and service-account credential
-#      material) — the function prints the documented limitation and
-#      skips, per docs/self-hosted-qualification.md.
-#  21. The three produced artifacts normalize to the policy-stable
+#  20. Route D, the Kubernetes executor: the real executor
+#      (src/executor/kubernetes.ts) reviews the same head over the same
+#      worker image, with the cluster side bound to a harness-owned
+#      double (the executor's own API and credential-store seams, driven
+#      by tests/harness/kubernetes-route.ts) — no cluster, no scheduler.
+#  21. The four produced artifacts normalize to the policy-stable
 #      field set and must be byte-identical; run-specific fields
 #      (ids, timestamps, durations, usage/token accounting, run-dir and
 #      workspace paths, comment ids) are the approved nondeterminism.
@@ -2120,80 +2123,107 @@ scenario_engine_parity_route_a_self_hosted_executor() {
 }
 
 # ── scenario 18: route B — the Action adapter ──
-# The same engine build driven the way the Action entry drives it: the
-# engine CLI's request file carries the contract inputs (AI inputs
-# pointed at the stub) and the ambient runner context (PLATFORM via
-# FORGEJO_API_URL/FORGEJO_TOKEN, REPO, PR_NUMBER — the recipe
-# tests/forgejo_e2e_smoke.sh drives), against the disposable Forgejo.
+# The shipped JavaScript action entry (`node dist/index.js`, the very
+# entry action.yml runs) reviews the parity head the way the runner
+# drives it: the contract inputs as INPUT_* environment variables, the
+# received pull_request payload as GITHUB_EVENT_PATH, and the ambient
+# runner context (PLATFORM, FORGEJO_API_URL/FORGEJO_TOKEN, REPO,
+# PR_NUMBER). The engine CLI (`engine --request`) is NOT the Action
+# adapter — it skips the input, event and publish boundary — so a route
+# driven by it proved the engine, never the adapter.
 scenario_engine_parity_route_b_action_adapter() {
   local label="engine parity route B (Action adapter)"
   local work="$TMP/parity-action-work"
+  local temp="$TMP/parity-action-temp"
   git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$work"
   (
     cd "$work"
     git fetch -q origin "pull/${PARITY_PR_NUMBER}/head:pr-${PARITY_PR_NUMBER}"
     git checkout -q "pr-${PARITY_PR_NUMBER}"
   )
-  mkdir -p "$TMP/parity-action-run"
-  # The request file is built by node reading the settings from its
-  # environment: the forge token never enters an argument or a URL.
-  FORGEJO_TOKEN="$FORGEJO_TOKEN" PARITY_PR_NUMBER="$PARITY_PR_NUMBER" \
-    PARITY_HEAD_SHA="$PARITY_HEAD_SHA" STUB_MODEL_PORT="$STUB_MODEL_PORT" \
-    AI_MODEL="$AI_MODEL" FORGEJO_API_URL="$FORGEJO_API_URL" \
-    PARITY_ACTION_RUN_DIR="$TMP/parity-action-run" \
-    "$NODE_BIN" -e '
-const fs = require("fs");
-const env = process.env;
-const request = {
-  repository: "reviewer/sample",
-  prNumber: env.PARITY_PR_NUMBER,
-  workspace: ".",
-  runDir: env.PARITY_ACTION_RUN_DIR,
-  outputsSink: "/dev/null",
-  stepSummaryPath: "",
-  platform: "forgejo",
-  forgejoApiUrl: env.FORGEJO_API_URL,
-  headSha: env.PARITY_HEAD_SHA,
-  inputs: {
-    "ai-base-url": "http://127.0.0.1:" + env.STUB_MODEL_PORT + "/v1",
-    "ai-model": env.AI_MODEL,
-  },
-  event: { name: "pull_request", action: "synchronize" },
-  eventHeadSha: env.PARITY_HEAD_SHA,
-  ambient: {
-    PLATFORM: "forgejo",
-    FORGEJO_API_URL: env.FORGEJO_API_URL,
-    FORGEJO_TOKEN: env.FORGEJO_TOKEN,
-    GH_TOKEN: env.FORGEJO_TOKEN,
-    REPO: "reviewer/sample",
-    PR_NUMBER: env.PARITY_PR_NUMBER,
-    COMMENT_MARKER: "<!-- ai-pr-reviewer -->",
-    SKIP_IF_DIFF_UNCHANGED: "true",
-    FORCE_REVIEW: "false",
-    PUBLISH_MODE: "comment",
-  },
-};
-fs.writeFileSync(process.argv[1], JSON.stringify(request, null, 2));
-' "$TMP/parity-engine-request.json"
+  mkdir -p "$temp"
+  # The action creates its own run directory under RUNNER_TEMP. The
+  # directory is emptied first, so exactly one run directory can be
+  # there after the run and the artifact below is unambiguous.
+  rm -rf "$temp"/v3-review-run-*
+  # The event the runner hands the action is the pull_request payload
+  # route A's webhook carried: the same PR, the same head. It is read
+  # from the file the harness already wrote, never rebuilt here.
+  if [[ ! -f "$TMP/parity-webhook.json" ]]; then
+    echo "$label scenario: the parity webhook payload is missing" >&2
+    return 1
+  fi
   local status
   set +e
   (
     cd "$work"
-    "$NODE_BIN" "$ROOT_DIR/dist/index.js" engine --request "$TMP/parity-engine-request.json"
+    # The forge token and the operator's model key ride the environment
+    # only: never an argument, never a URL. Every other credential the
+    # operator brought is scrubbed — this route talks to the
+    # harness-owned stub model server and the disposable Forgejo, nothing
+    # else.
+    #
+    # FORCE_REVIEW is the precheck's force gate: route A already reviewed
+    # this head, so the diff-unchanged skip would leave this route with
+    # no review and no artifact to compare. The gate overrides only that
+    # skip — it is outside the fingerprint config sweep, so the reviewed
+    # diff and therefore the artifact are unchanged.
+    env -u AI_API_KEY -u AI_BASE_URL -u PR_REVIEWER_CREDENTIAL_MODEL \
+      -u PR_REVIEWER_CREDENTIAL_GITHUB -u PR_REVIEWER_CREDENTIAL_FORGEJO \
+      -u PR_REVIEWER_GITHUB_APP_ID -u PR_REVIEWER_GITHUB_APP_PRIVATE_KEY \
+      -u PR_REVIEWER_GITHUB_APP_INSTALLATION_ID -u GH_TOKEN -u GITHUB_TOKEN \
+      "INPUT_AI-BASE-URL=http://127.0.0.1:${STUB_MODEL_PORT}/v1" \
+      "INPUT_AI-MODEL=${AI_MODEL}" \
+      "GITHUB_EVENT_NAME=pull_request" \
+      "GITHUB_EVENT_PATH=${TMP}/parity-webhook.json" \
+      "GITHUB_REPOSITORY=reviewer/sample" \
+      "GITHUB_WORKSPACE=${work}" \
+      "RUNNER_TEMP=${temp}" \
+      "GITHUB_OUTPUT=${TMP}/parity-action-output.txt" \
+      "GITHUB_STEP_SUMMARY=${TMP}/parity-action-summary.md" \
+      "PR_NUMBER=${PARITY_PR_NUMBER}" \
+      "PLATFORM=forgejo" \
+      "FORGEJO_API_URL=${FORGEJO_API_URL}" \
+      "FORGEJO_TOKEN=${FORGEJO_TOKEN}" \
+      "COMMENT_MARKER=<!-- ai-pr-reviewer -->" \
+      "FORCE_REVIEW=true" \
+      "$NODE_BIN" "$ROOT_DIR/dist/index.js"
   ) >"$TMP/parity-action.log" 2>&1
   status=$?
   set -e
   if [[ "$status" != 0 ]]; then
-    echo "$label scenario: the engine run failed (exit $status); last log lines:" >&2
+    echo "$label scenario: the action run failed (exit $status); last log lines:" >&2
     tail -n 30 "$TMP/parity-action.log" >&2 || true
     return 1
   fi
-  if [[ ! -f "$TMP/parity-action-run/ai-output.json" ]]; then
-    echo "$label scenario: the engine run left no ai-output.json in the run directory" >&2
+  # The Action adapter decides whether a run reviews at all: the
+  # diff-unchanged skip (route A already reviewed this head) would
+  # leave no artifact, so the route asserts the review happened rather
+  # than comparing a missing artifact.
+  if [[ ! -f "$TMP/parity-action-output.txt" ]]; then
+    echo "$label scenario: the action run wrote no step outputs" >&2
     tail -n 30 "$TMP/parity-action.log" >&2 || true
     return 1
   fi
-  normalize_parity_artifact "$TMP/parity-action-run/ai-output.json" > "$TMP/parity-artifact-b.json"
+  if ! grep -q "^should-review=true$" "$TMP/parity-action-output.txt"; then
+    echo "$label scenario: the action run did not review (should-review is not true); last log lines:" >&2
+    tail -n 30 "$TMP/parity-action.log" >&2 || true
+    return 1
+  fi
+  local run_dir=""
+  local candidate
+  for candidate in "$temp"/v3-review-run-*; do
+    if [[ -d "$candidate" ]]; then
+      run_dir="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$run_dir" || ! -f "$run_dir/ai-output.json" ]]; then
+    echo "$label scenario: the action run left no ai-output.json in its run directory" >&2
+    tail -n 30 "$TMP/parity-action.log" >&2 || true
+    return 1
+  fi
+  normalize_parity_artifact "$run_dir/ai-output.json" > "$TMP/parity-artifact-b.json"
   echo "PASS: engine parity route B reviewed the parity head through the Action adapter against the disposable Forgejo (repo ${SCENARIO_REPO}, PR ${PARITY_PR_NUMBER}, head ${PARITY_HEAD_SHA})"
 }
 
@@ -2253,6 +2283,13 @@ scenario_engine_parity_route_c_oci_worker_image() {
   set +e
   # The worker's #735-projected forge-read material (#1484) rides the
   # environment only: the assignment prefix, never argv or a URL.
+  #
+  # The container argv carries the image's "worker" SUBCOMMAND before the
+  # envelope path: the image's ENTRYPOINT is `node /app/dist/index.js`
+  # and its CMD is `worker`, so docker REPLACES the CMD with whatever
+  # arguments follow the image — an argv of just the envelope path would
+  # run `node /app/dist/index.js /run/request.json`, which the bundle
+  # refuses as an unknown command.
   PR_REVIEWER_CREDENTIAL_FORGE_PUBLISH="$FORGEJO_TOKEN" \
     docker run --rm --network host \
     -v "$run":/run -v "$ws":/ws \
@@ -2261,7 +2298,7 @@ scenario_engine_parity_route_c_oci_worker_image() {
     -e GIT_CONFIG_COUNT=1 \
     -e GIT_CONFIG_KEY_0=safe.directory \
     -e GIT_CONFIG_VALUE_0='*' \
-    pr-reviewer-worker-parity /run/request.json >"$TMP/parity-worker.log" 2>&1
+    pr-reviewer-worker-parity worker /run/request.json >"$TMP/parity-worker.log" 2>&1
   status=$?
   set -e
   if [[ "$status" != 0 ]]; then
@@ -2284,33 +2321,202 @@ scenario_engine_parity_route_c_oci_worker_image() {
 }
 
 # ── scenario 20: route D — the Kubernetes executor ──
+# The REAL Kubernetes executor (src/executor/kubernetes.ts) reviews the
+# same parity head over the same worker image. The harness has no
+# Kubernetes cluster, so the CLUSTER side is a harness-owned double: the
+# executor's own API seam and credential-store seam, bound in-process to
+# a docker launcher by the driver the harness compiles from
+# tests/harness/kubernetes-route.ts. The executor's manifest building,
+# envelope write, credential projection, job polling and result
+# collection therefore run unmodified — the route drives the shipped
+# executor, never a stand-in for it.
+#
+# The volume mapping names ONE claim, mounted at the SAME absolute path
+# on both sides, because the envelope carries the controller's own
+# coordinates: every request, result and workspace path of this route
+# therefore lives under that one root (the parity root), and the run
+# directory and the fresh exact-head clone are its children.
 scenario_engine_parity_route_d_kubernetes_executor() {
-  # NOT drivable in this harness, and the harness refuses to fabricate
-  # coverage: the Kubernetes executor (src/executor/kubernetes.ts) needs
-  # a live kube API server and service-account credential material the
-  # disposable stack cannot provide. Labeled per #739's "clearly label
-  # externally untestable behavior" rule.
-  echo "SKIP: engine parity route D (Kubernetes executor) is not drivable in this harness (needs a live kube API server and service-account credential material); see docs/self-hosted-qualification.md known limits"
+  local label="engine parity route D (Kubernetes executor)"
+  local root="$TMP/parity"
+  local run="$root/k8s-runs/$RUN_ID"
+  local ws="$root/k8s-workspace"
+  local config="$TMP/parity-kubernetes-config.json"
+  local req
+  # The driver is compiled from the same source tree that produced the
+  # engine build, so the executor under test is the shipped executor.
+  ensure_test_build "$label" || return 1
+  case "$RUN_ID" in
+    '' | *[!A-Za-z0-9._:-]*)
+      echo "$label scenario: the published run id has an unusable shape for a run directory: '$RUN_ID'" >&2
+      return 1
+      ;;
+  esac
+  # The envelope of the attempt that PUBLISHED (route A's durable run id),
+  # exactly like route C reads it.
+  req=""
+  for candidate in "$TMP/forgejo-parity/runs"/*/*/request.json; do
+    if [[ -f "$candidate" ]] &&
+      jq -e --arg runId "$RUN_ID" '.runId == $runId' "$candidate" >/dev/null 2>&1; then
+      req="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$req" || ! -f "$req" ]]; then
+    echo "$label scenario: no execution envelope of the published run ${RUN_ID} found under $TMP/forgejo-parity/runs" >&2
+    return 1
+  fi
+  mkdir -p "$root" "$run"
+  # The workspace is a fresh exact-head clone: the route reviews the same
+  # head the other routes reviewed, over its own checkout.
+  git clone -q "$FORGEJO_API_URL/reviewer/sample.git" "$ws"
+  (
+    cd "$ws"
+    git checkout -q "$PARITY_HEAD_SHA"
+  )
+  # The envelope is rewritten to the coordinates the claim's shared path
+  # makes visible to both sides (the run directory under the claim root),
+  # and gets a fresh deadline: the Kubernetes executor refuses a request
+  # without one.
+  jq --arg run "$run" --arg ws "$ws" '
+    .runDir = $run
+    | .requestPath = ($run + "/request.json")
+    | .resultPath = ($run + "/result.json")
+    | .workspace.rootPath = $ws
+    | .deadlineAtMs = (now * 1000 + 600000 | floor)
+  ' "$req" > "$run/execution-request.json"
+  # The executor's operator spec: the image route C already built, the
+  # worker argv prefix the image's entrypoint expects, and the single
+  # volume mapping the shared claim is mounted through.
+  #
+  # The credential material travels in the file only (0600, outside the
+  # claim root): the model credential is a placeholder — the stub model
+  # server does not authenticate, so the operator's real key must not
+  # reach the container — and the forge-read material is the harness's
+  # own disposable token. The token is read from the environment by the
+  # jq program, never from an argument, and the file is created under a
+  # restrictive umask so the material is never briefly world-readable.
+  (
+    umask 077
+    FORGEJO_TOKEN="$FORGEJO_TOKEN" jq -n \
+      --arg image "pr-reviewer-worker-parity" \
+      --arg namespace "pr-reviewer-qualification" \
+      --arg serviceAccount "pr-reviewer-worker" \
+      --argjson ttl 600 \
+      --arg root "$root" \
+      --arg claim "pr-reviewer-parity" \
+      --arg modelMaterial "parity-stub-model-key" '
+      {
+        image: $image,
+        args: ["worker"],
+        namespace: $namespace,
+        serviceAccount: $serviceAccount,
+        ttlSecondsAfterFinished: $ttl,
+        resources: {
+          requests: { cpu: "100m", memory: "256Mi" },
+          limits: { cpu: "1", memory: "1Gi" }
+        },
+        volumes: [{ claim: $claim, controllerRoot: $root }],
+        credentialMaterial: {
+          model: $modelMaterial,
+          "forge-publish": env.FORGEJO_TOKEN
+        }
+      }' > "$config"
+  )
+  chmod 0600 "$config"
+  # The worker runs as the executor's pinned uid, so the shared paths it
+  # writes to must accept it: the run directory takes its result and its
+  # artifact, the clone takes the worker's git writes.
+  chmod 0777 "$run"
+  chmod -R a+rwX "$ws"
+  local status
+  set +e
+  "$NODE_BIN" "$ROOT_DIR/.test-build/tests/harness/kubernetes-route.js" \
+    --request "$run/execution-request.json" \
+    --config "$config" \
+    >"$TMP/parity-kubernetes.json" 2>"$TMP/parity-kubernetes.log"
+  status=$?
+  set -e
+  if [[ "$status" != 0 ]]; then
+    echo "$label scenario: the Kubernetes executor route failed (exit $status); last log lines:" >&2
+    tail -n 30 "$TMP/parity-kubernetes.log" >&2 || true
+    cat "$TMP/parity-kubernetes.json" >&2 || true
+    return 1
+  fi
+  if ! jq -e --arg sha "$PARITY_HEAD_SHA" '.status == "completed" and .resultHeadSha == $sha' \
+    "$TMP/parity-kubernetes.json" >/dev/null; then
+    echo "$label scenario: the Kubernetes executor did not complete at the parity head" >&2
+    cat "$TMP/parity-kubernetes.json" >&2 || true
+    return 1
+  fi
+  local artifact
+  artifact="$(jq -r '.artifactPath' "$TMP/parity-kubernetes.json")"
+  if [[ -z "$artifact" || ! -s "$artifact" ]]; then
+    echo "$label scenario: the Kubernetes executor left no review artifact" >&2
+    return 1
+  fi
+  if [[ ! -r "$artifact" ]]; then
+    echo "$label scenario: the review artifact is not readable by the harness user: ${artifact}" >&2
+    return 1
+  fi
+  # The double reports whether it had to stand in for the shared claim's
+  # permission model: the controller writes the envelope 0600 as its own
+  # uid and the worker writes the result 0600 as the pod's uid, so a
+  # claim both sides can read had to be stood in for. The route says so
+  # in words, so a run never hides the emulation it relied on.
+  local relaxed
+  relaxed="$(jq -r '.sharedClaimRelaxed // false' "$TMP/parity-kubernetes.json")"
+  normalize_parity_artifact "$artifact" > "$TMP/parity-artifact-d.json"
+  if [[ "$relaxed" == "true" ]]; then
+    echo "PASS: engine parity route D reviewed the parity head through the Kubernetes executor over the cluster double (repo ${SCENARIO_REPO}, PR ${PARITY_PR_NUMBER}, head ${PARITY_HEAD_SHA}); the executor path only — the double stood in for the shared claim's permission model, which the shipped chart cannot provide today (issue #1631)"
+  else
+    echo "PASS: engine parity route D reviewed the parity head through the Kubernetes executor over the cluster double (repo ${SCENARIO_REPO}, PR ${PARITY_PR_NUMBER}, head ${PARITY_HEAD_SHA}); the shared claim's own permission model applied"
+  fi
 }
 
-# ── scenario 21: the three artifacts agree byte-for-byte ──
+# The parity routes, by artifact family: every one of them reviews the
+# same head, and every one of them must produce a normalized artifact
+# the comparison reads. The repository gate
+# (tests/test_self_hosted_qualification.py) keeps this list complete: a
+# route that stops being compared is a silent narrowing of the
+# qualification.
+PARITY_ARTIFACT_FAMILIES=(a b c d)
+
+# ── scenario 21: the four artifacts agree byte-for-byte ──
 scenario_engine_parity_artifacts_byte_identical() {
   local label="engine parity artifact comparison"
   local family
-  for family in a b c; do
+  for family in "${PARITY_ARTIFACT_FAMILIES[@]}"; do
     if [[ ! -s "$TMP/parity-artifact-$family.json" ]]; then
       echo "$label scenario: normalized artifact $family is missing or empty" >&2
       return 1
     fi
+    # The normalized artifact must CARRY the policy-stable fields: a
+    # missing field normalizes to null, so four identically empty
+    # artifacts would compare equal and report a parity that never
+    # happened.
+    if ! jq -e '
+      (.verdict | type == "string" and length > 0)
+      and (.review_markdown | type == "string" and length > 0)
+      and (.findings | type == "array")
+      and (.smart_review_requested | type == "boolean")
+      and (.review_triage_decision | type == "string" and length > 0)
+    ' "$TMP/parity-artifact-$family.json" >/dev/null; then
+      echo "$label scenario: the normalized artifact $family does not carry the policy-stable fields" >&2
+      cat "$TMP/parity-artifact-$family.json" >&2 || true
+      return 1
+    fi
   done
-  if ! cmp -s "$TMP/parity-artifact-a.json" "$TMP/parity-artifact-b.json" ||
-    ! cmp -s "$TMP/parity-artifact-a.json" "$TMP/parity-artifact-c.json"; then
-    echo "$label scenario: the three routes produced different policy-stable artifacts" >&2
-    diff -u "$TMP/parity-artifact-a.json" "$TMP/parity-artifact-b.json" >&2 || true
-    diff -u "$TMP/parity-artifact-a.json" "$TMP/parity-artifact-c.json" >&2 || true
-    return 1
-  fi
-  echo "PASS: engine parity held byte-for-byte across the Action adapter and the self-hosted local and worker-image routes (repo ${SCENARIO_REPO}, PR ${PARITY_PR_NUMBER}, head ${PARITY_HEAD_SHA})"
+  for family in "${PARITY_ARTIFACT_FAMILIES[@]:1}"; do
+    if ! cmp -s "$TMP/parity-artifact-${PARITY_ARTIFACT_FAMILIES[0]}.json" \
+      "$TMP/parity-artifact-$family.json"; then
+      echo "$label scenario: the routes produced different policy-stable artifacts" >&2
+      diff -u "$TMP/parity-artifact-${PARITY_ARTIFACT_FAMILIES[0]}.json" \
+        "$TMP/parity-artifact-$family.json" >&2 || true
+      return 1
+    fi
+  done
+  echo "PASS: engine parity held byte-for-byte across the Action adapter and the self-hosted local, worker-image and Kubernetes-executor routes (repo ${SCENARIO_REPO}, PR ${PARITY_PR_NUMBER}, head ${PARITY_HEAD_SHA})"
 }
 
 # ── scenario 22: the deterministic eval suites against the engine build ──
@@ -2652,7 +2858,7 @@ scenario_engine_parity_route_c_oci_worker_image
 echo "RUN: engine parity route D — the Kubernetes executor"
 scenario_engine_parity_route_d_kubernetes_executor
 
-echo "RUN: engine parity — the three produced artifacts agree byte-for-byte"
+echo "RUN: engine parity — the four produced artifacts agree byte-for-byte"
 scenario_engine_parity_artifacts_byte_identical
 
 echo "RUN: the deterministic eval suites re-run from the tree that produced the engine build"

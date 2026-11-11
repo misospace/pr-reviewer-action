@@ -19,9 +19,9 @@ restarts, a primary model failure, and a missed webhook found by
 reconciliation. The engine parity and eval-qualification scenario
 family landed with #1484: a harness-owned stub model server, one parity
 pull request reviewed through the Action adapter and the self-hosted
-local and OCI worker-image routes with byte-identical published
-artifacts, a documented skip for the Kubernetes-executor route, and a
-re-run of the deterministic eval suite against the same engine build.
+local, OCI worker-image and Kubernetes-executor routes with
+byte-identical artifacts, and a re-run of the deterministic
+eval suite against the same engine build.
 The same family re-runs the v3 parity suites, the v3 security suites,
 and the broader eval corpus for that build (see
 [Qualification suites against the engine build](#qualification-suites-against-the-engine-build)).
@@ -106,14 +106,52 @@ a remote forge. The gate checks the CI job for the same.
 ## Engine parity and approved nondeterminism
 
 The engine-parity family (#1484) drives one dedicated parity pull
-request — one fixture, one head — through three routes that all run the
-same `dist/index.js` engine build: the Action adapter (the engine CLI
-driven with the Action runtime's stage env), the self-hosted local
-executor (a webhook controller over a parity instance config), and the
-OCI worker image (the built worker target rerunning the
-controller-written execution envelope over a fresh exact-head clone).
-A fourth route, the Kubernetes executor, is skipped with a printed
-reason (see Known limits).
+request — one fixture, one head — through four routes that all run the
+same `dist/index.js` engine build: the Action adapter (the shipped
+JavaScript action entry, driven with the runner's stage environment),
+the self-hosted local executor (a webhook controller over a parity
+instance config), the OCI worker image (the built worker target
+rerunning the controller-written execution envelope over a fresh
+exact-head clone), and the Kubernetes executor (the real executor, over
+the same worker image).
+
+The fourth route has no cluster behind it. The harness binds the
+executor's own injected seams — the Job API and the per-run credential
+store — to a harness-owned double
+(`tests/harness/kubernetes-route.ts`) that launches the manifest's
+container with docker. The executor's manifest building, envelope write,
+credential projection, job polling and result collection are the shipped
+code, so the route exercises the executor's real path rather than a
+re-implementation of it.
+
+What route D proves: the Kubernetes executor's own manifest, credential,
+envelope and result-collection path runs end to end over the same worker
+image and the same head, and produces the same artifact as the other
+three routes.
+
+What route D does not prove: there is no scheduler, no admission
+control, no network policy, no kubelet and no real secret store behind
+it, and the harness's loopback endpoints (the stub model server and the
+disposable Forgejo) are reached over host networking. The double also
+enforces none of the pod's own hardening — the container's read-only root
+filesystem, its dropped capabilities, its seccomp profile, its resource
+limits and its namespace are the cluster's business, not the double's. A
+cluster-side defect — a policy that admits the wrong pod, a secret store
+that keeps material past its deadline, a scheduler that places the
+worker where the model endpoint is unreachable — is outside what this
+harness can show. The deployment runbook covers the operator-side
+requirements.
+
+The double also stands in for the shared claim's permission model: the
+controller writes the execution envelope `0600` as its own uid and the
+worker writes the result `0600` as the pod's uid, so the double relaxes
+those two files around the launch (the envelope becomes readable for the
+worker's uid, the result file is pre-created writable so the controller
+can read it back). The shipped chart does not give the controller
+(`runAsUser` 1000) and the worker pod (uid 65532, pinned by the
+executor) a claim they can both read, so that relaxation is a stand-in,
+not a property the deployment has today — see issue #1631. The route
+reports whether it relied on the relaxation, so a run never hides it.
 
 A harness-owned stub model server makes the parity assertable: it is a
 loopback Node service the harness starts before the parity scenarios
@@ -125,7 +163,7 @@ the routes is the routes themselves. The stub removes model-output
 nondeterminism; it never reads or records a credential (a caller may
 send one in an Authorization header; the stub ignores it).
 
-The three produced artifacts are normalized to the policy-stable field
+The four produced artifacts are normalized to the policy-stable field
 set (the fields the persisted review artifact always carries from the
 parsed verdict: `verdict`, `review_markdown`, `smart_review_requested`,
 `smart_review_reason`, `review_triage_decision`, `review_triage_reason`,
@@ -302,13 +340,13 @@ installation token for each repository. See
   closed model endpoint exhausts the bounded attempts with no counted
   spend and nothing published) and labels the fallback leg per #739's
   "clearly label externally untestable behavior" rule.
-- The Kubernetes-executor route of the engine-parity family (#1484) is
-  not drivable in this harness and is skipped with a printed reason: the
-  Kubernetes executor (`src/executor/kubernetes.ts`) needs a live kube
-  API server and service-account credential material that the disposable
-  stack cannot provide. The other three routes (the Action adapter and
-  the self-hosted local and OCI worker-image routes) are driven, and
-  their artifacts are compared byte-for-byte.
+- The Kubernetes-executor route of the engine-parity family (#1484) runs
+  the real executor against a harness-owned cluster double, not against a
+  cluster: there is no scheduler, no admission control, no network
+  policy, no kubelet and no real secret store behind it, and the
+  harness's loopback endpoints are reached over host networking. The
+  route proves the executor's own manifest, credential, envelope and
+  result-collection path, never a cluster's behavior.
 - The eval-suite and eval-corpus scenarios of the engine-parity family
   need `python3` on the PATH (the semantic gate and the eval harness are
   Python). When `python3` is absent the scenario prints a
