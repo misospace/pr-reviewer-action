@@ -62,7 +62,6 @@ from pr_reviewer.forge import ForgeClient, ForgeError, default_forge  # noqa: E4
 from pr_reviewer.review_completion import (  # noqa: E402
     ACTION_VERSION_LIMIT,
     build_report,
-    collect_rows,
     collect_rows_multi,
     filter_by_action_version,
 )
