@@ -8,15 +8,25 @@ review a pull request, and publish the review.
 
 The harness script is `tests/self_hosted_e2e_qualification.sh`. Its
 first scenario family, the two normal-review paths on GitHub and
-Forgejo, landed with #1482. The remaining scenario families land one
-at a time (#1483, #1484, #1485).
+Forgejo, landed with #1482. The failure, restart, supersession and
+idempotency scenario family landed with #1483: a duplicate webhook, a
+webhook burst that settles into one paid newest-head review, queued and
+running supersession, a stale-result refusal, a worker crash and
+requeue, a controller crash with a running worker and with queued
+settle-window work, a cancelled review, a publication retry with no
+second model call, single-counted usage across those retries and
+restarts, a primary model failure, and a missed webhook found by
+reconciliation. The remaining scenario families land one at a time
+(#1484, #1485).
 
 A dispatched CI run executes the harness and reports its pass/fail.
 The job still fails closed when the script is absent, so a green run
 can never mean a qualification that did not run. The
 `make self-hosted-qualification` target builds the v3 runtime bundle
 when it is missing and then runs the harness. No qualification has run
-yet: only a dispatched run makes one happen.
+yet: only a dispatched run makes one happen. A run now spends roughly
+one model call per scenario on the disposable Forgejo instance (a
+cancelled, superseded-in-queue, or failed-model scenario spends none).
 
 The qualification program is issue #739. This page covers the harness and
 its run steps only. The deployment of the controller and the worker is
@@ -167,3 +177,23 @@ installation token for each repository. See
   through the GitHub App capability. The webhook intake itself is
   qualified by the Forgejo scenario, whose delivery the controller's own
   HMAC verification accepts.
+- The worker-timeout scenario is not drivable in this composition and the
+  harness skips it with a printed reason instead of fabricating coverage:
+  webhook-minted jobs carry no execution deadline (`buildReviewJob`
+  leaves `deadlineAtMs` 0) and the controller composition exposes no
+  queue-timing settings, so neither the worker's whole-process deadline
+  backstop nor the queue's lease-expiry path (a 30-minute lease by
+  default) can be driven inside the scenario budget. The deadline and
+  lease-expiry semantics are qualified at the composition level by
+  `tests-v3/controller-daemon.test.ts` and
+  `tests-v3/queue-recovery-settle.test.ts`.
+- The model-fallback leg of the primary-failure scenario is not drivable
+  in this composition and is likewise skipped with a printed reason: the
+  execution envelope carries ONE model selection (the endpoint, wire
+  model id, and wire format of the operator's default model profile —
+  #1496), and the worker's engine inputs map no `ai-fallback-*`
+  coordinates, so an availability fallback to a second model cannot be
+  exercised end-to-end. The scenario drives the primary-failure leg (a
+  closed model endpoint exhausts the bounded attempts with no counted
+  spend and nothing published) and labels the fallback leg per #739's
+  "clearly label externally untestable behavior" rule.

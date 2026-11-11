@@ -21,6 +21,40 @@ set -euo pipefail
 #      App material, published with the exact-head guard and confirmed
 #      from the durable state and the admin API.
 #
+# Failure/restart/supersession/idempotency scenarios (#1483), each a
+# discrete function over the same disposable stack:
+#   3. A duplicate webhook produces exactly one review.
+#   4. A webhook burst settles into one paid review of the newest head.
+#   5. A new head while the old review waits in the queue: the old
+#      generation is superseded with no spend, the newest head is paid
+#      once.
+#   6. A new head while the old review runs: the old worker is cancelled
+#      by identity with no spend, the newest head is paid once.
+#   7. A stale result tries to publish: the exact-head gate refuses it
+#      and the newest head publishes.
+#   8. A worker that times out: NOT drivable in this composition (jobs
+#      are minted without a deadline and the lease default is 30 minutes)
+#      — the function prints the documented limitation and skips, per
+#      docs/self-hosted-qualification.md.
+#   9. A worker crash: the attempt fails, the queue requeues, and the
+#      retry's spend is the only spend counted.
+#  10. A controller crash while a worker runs: the restarted daemon
+#      adopts the orphaned worker and publishes its result without a
+#      second model call.
+#  11. An operator restart with queued settle-window work: the queued
+#      generation survives the crash and dispatches exactly once.
+#  12. A cancelled review: the graceful stop cancels the run; nothing is
+#      published and no spend is counted.
+#  13. A publication that fails (forge unreadable at publish time), then
+#      retries from the durable record with no second model call.
+#  14. Usage and cost accounting stays single-counted across the
+#      retries and restarts the earlier scenarios produced.
+#  15. A primary model failure: every attempt fails with no spend
+#      counted. The fallback leg is NOT drivable (the execution envelope
+#      carries a single model selection) — documented, not fabricated.
+#  16. A missed webhook: the reconciler discovers the pull request and
+#      reviews it exactly once.
+#
 # Rules (docs/self-hosted-qualification.md): every forge read and write
 # the review pipeline performs travels through the configured forge
 # capability inside the controller. The harness itself never calls a
@@ -468,15 +502,52 @@ wait_controller_ready() {
 # The published row is the durable ReviewResult: cp_publications carries
 # the forge-confirmed publication id, the result head, and the canonical
 # result payload; cp_runs mirrors the run lifecycle.
+#
+# PER-SCENARIO SCOPING (#1483): the harness shares one PostgreSQL across
+# every scenario controller, so a global "any terminal run fails the
+# wait" check would trip on another scenario's expected terminal state
+# (a superseded head, a stale-refused result, a crashed attempt). The
+# terminal check therefore only sees runs of jobs that belong to THIS
+# scenario's destination — jobs with a publication row for it, plus jobs
+# the durable queue snapshot names for its repository and PR number —
+# and the caller names the terminal states its own scenario EXPECTS
+# (`expected_terminal`, an extended regex over `state|failure_reason`
+# rows). Anything else fails the wait fast instead of burning the
+# scenario timeout.
 wait_published() {
-  local dest_clause="$1" label="$2" log="$3" deadline=$((SECONDS + REVIEW_TIMEOUT_SEC))
-  local row bad
+  local dest_clause="$1" label="$2" log="$3" expected_terminal="${4:-^$}" deadline=$((SECONDS + REVIEW_TIMEOUT_SEC))
+  local row bad line
+  # The queue snapshot is one jsonb row of JobRecords; a record's job
+  # carries the repository and PR number the destination names. The
+  # clause embeds the destination as its single quoted literal
+  # (`p.destination = 'forgejo:owner/name#7'`).
+  local dest repo pr_number
+  dest="$(printf '%s' "$dest_clause" | sed -n "s/^[^']*'\([^']*\)'.*/\1/p")"
+  repo="${dest#*:}"
+  repo="${repo%%#*}"
+  pr_number="${dest##*#}"
+  case "$repo" in
+    */*) ;;   # owner/name: usable for the snapshot scope
+    *) repo="" ;;
+  esac
+  case "$pr_number" in ''|*[!0-9]*) pr_number="" ;; esac
   while true; do
-    bad="$(pg_query "SELECT state || '|' || COALESCE(failure_reason,'') || '|' || run_id FROM cp_runs WHERE state IN ('failed','cancelled','superseded') LIMIT 1")"
-    if [[ -n "$bad" ]]; then
-      echo "$label scenario ended in a terminal non-completed run state: $bad" >&2
-      tail -n 30 "$log" >&2 || true
-      return 1
+    if [[ -n "$repo" && -n "$pr_number" ]]; then
+      bad="$(pg_query "SELECT r.state || '|' || COALESCE(r.failure_reason,'') || '|' || r.run_id FROM cp_runs r WHERE r.state IN ('failed','cancelled','superseded') AND r.job_id IN (
+        SELECT p.job_id FROM cp_publications p WHERE $dest_clause
+        UNION
+        SELECT rec->>'jobId' FROM cp_queue_snapshot, jsonb_array_elements(snapshot->'records') rec
+        WHERE (rec->'job'->>'repoFullName') = '$repo' AND (rec->'job'->>'prNumber') = '$pr_number'
+      ) ORDER BY r.run_id")"
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        if [[ "$line" =~ $expected_terminal ]]; then
+          continue
+        fi
+        echo "$label scenario ended in an unexpected terminal run state: $line" >&2
+        tail -n 30 "$log" >&2 || true
+        return 1
+      done <<<"$bad"
     fi
     row="$(pg_query "SELECT r.state || '|' || p.publication_state || '|' || p.publication_id || '|' || p.result_head_sha || '|' || r.head_sha || '|' || r.run_id || '|' || (length(p.result_payload) > 0) FROM cp_publications p JOIN cp_runs r ON r.job_id = p.job_id WHERE $dest_clause ORDER BY r.attempt DESC LIMIT 1")"
     if [[ -n "$row" ]]; then
@@ -494,29 +565,291 @@ wait_published() {
   done
 }
 
+# PER-SCENARIO SCOPING (#1483): the usage assertion takes the run id it
+# asserts against explicitly — the published run wait_published resolved —
+# instead of an implicit global, so a scenario always proves the spend of
+# ITS published run and never of a later scenario's.
 assert_usage_counted() {
-  local used
-  used="$(pg_query "SELECT count(*) FROM cp_usage WHERE run_id = '$RUN_ID'")"
+  local run_id="$1" used
+  case "$run_id" in
+    ''|*[!A-Za-z0-9._-]*)
+      echo "unexpected durable run id shape: '$run_id'" >&2
+      return 1
+      ;;
+  esac
+  used="$(pg_query "SELECT count(*) FROM cp_usage WHERE run_id = '$run_id'")"
   case "$used" in
     '' | 0)
-      echo "durable usage recorded no model spend for run $RUN_ID" >&2
+      echo "durable usage recorded no model spend for run $run_id" >&2
       return 1
       ;;
   esac
 }
 
 assert_admin_reports_publication() {
-  local port="$1" token="$2" cfg="$3"
-  case "$RUN_ID" in
+  local port="$1" token="$2" cfg="$3" run_id="$4"
+  case "$run_id" in
     ''|*[!A-Za-z0-9._-]*)
       echo "unexpected durable run id shape" >&2
       return 1
       ;;
   esac
   printf 'header = "Authorization: Bearer %s"\n' "$token" > "$cfg"
-  curl -fsS -K "$cfg" "http://127.0.0.1:${port}/admin/runs/${RUN_ID}" |
+  curl -fsS -K "$cfg" "http://127.0.0.1:${port}/admin/runs/${run_id}" |
     jq -e '.state == "completed" and .publication.state == "published" and .publication.attempt >= 1' >/dev/null
 }
+
+# ── scenario helpers (#1483) ──
+# The failure/restart/supersession/idempotency scenarios reuse one
+# disposable Forgejo instance and one control-plane database, so every
+# helper reads durable state scoped to the values the scenario controls
+# (a destination string, a head sha, a PR number) and never a global
+# "anything terminal anywhere" predicate.
+
+# Durable-state readers. Each returns rows of `a|b|c` for the caller to
+# assert on; an empty string means "no rows yet". Every reader that
+# interpolates a destination clause aliases cp_publications as `p`, the
+# way the clause itself is written.
+published_count_for() {
+  pg_query "SELECT count(*) FROM cp_publications p WHERE ($1) AND p.publication_state = 'published'"
+}
+publication_rows_for() {
+  pg_query "SELECT count(*) FROM cp_publications p WHERE ($1)"
+}
+publication_row_for_head() {
+  # $1 destination equality clause, $2 result head sha
+  pg_query "SELECT p.publication_state || '|' || p.last_error || '|' || (length(p.result_payload) > 0) FROM cp_publications p WHERE ($1) AND p.result_head_sha = '$2'"
+}
+runs_for_head() {
+  pg_query "SELECT state || '|' || attempt || '|' || run_id || '|' || COALESCE(failure_reason,'') FROM cp_runs WHERE head_sha = '$1' ORDER BY attempt"
+}
+usage_summary_for_run() {
+  # rows|requests|tokens|cost_micros for one run's usage rows
+  pg_query "SELECT count(*) || '|' || COALESCE(sum(request_count),0) || '|' || COALESCE(sum(input_tokens + cache_read_tokens + cache_write_tokens + output_tokens),0) || '|' || COALESCE(sum(cost_micros),0) FROM cp_usage WHERE run_id = '$1'"
+}
+usage_rows_for_destination() {
+  # per-run usage summary for every run of the destination's jobs:
+  # run_id|rows|tokens|cost_micros
+  pg_query "SELECT u.run_id || '|' || count(*) || '|' || COALESCE(sum(u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens),0) || '|' || COALESCE(sum(u.cost_micros),0) FROM cp_usage u WHERE u.run_id IN (SELECT run_id FROM cp_runs WHERE job_id IN (SELECT p.job_id FROM cp_publications p WHERE ($1))) GROUP BY u.run_id ORDER BY u.run_id"
+}
+orphan_usage_count() {
+  pg_query "SELECT count(*) FROM cp_usage u WHERE NOT EXISTS (SELECT 1 FROM cp_runs r WHERE r.run_id = u.run_id)"
+}
+queue_records_for_pr() {
+  # The durable queue snapshot (cp_queue_snapshot, one jsonb row) holds
+  # every JobRecord the controllers committed; the scenario filters the
+  # records of its repository and PR number. Output: one
+  # jobId|state|supersededByJobId row per record.
+  pg_query "SELECT rec->>'jobId' || '|' || (rec->>'state') || '|' || COALESCE(rec->>'supersededByJobId','') FROM cp_queue_snapshot, jsonb_array_elements(snapshot->'records') rec WHERE (rec->'job'->>'repoFullName') = '$1' AND (rec->'job'->>'prNumber') = '$2' ORDER BY 1"
+}
+
+wait_run_state() {
+  # $1 head sha, $2 expected run state, $3 label — poll the durable run
+  # mirror until a run of this head reports the state.
+  local sha="$1" want="$2" label="$3" deadline=$((SECONDS + REVIEW_TIMEOUT_SEC)) got
+  while true; do
+    got="$(pg_query "SELECT state FROM cp_runs WHERE head_sha = '$sha' ORDER BY created_at_ms DESC LIMIT 1")"
+    if [[ "$got" == "$want" ]]; then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "$label: no run of head ${sha} reached state '$want' within ${REVIEW_TIMEOUT_SEC}s (last: '${got}')" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+wait_queue_record_state() {
+  # $1 repo, $2 PR number, $3 expected queue-record state, $4 label,
+  # $5 optional deadline in seconds (default 60) — poll the durable
+  # queue snapshot until a record of this PR reports the state (the
+  # snapshot write is asynchronous behind the accepted webhook response,
+  # so the poll proves durability, not intent).
+  local repo="$1" pr="$2" want="$3" label="$4" deadline=$((SECONDS + ${5:-60})) got
+  while true; do
+    got="$(pg_query "SELECT count(*) FROM cp_queue_snapshot, jsonb_array_elements(snapshot->'records') rec WHERE (rec->'job'->>'repoFullName') = '$repo' AND (rec->'job'->>'prNumber') = '$pr' AND (rec->>'state') = '$want'")"
+    if [[ "$got" != 0 && -n "$got" ]]; then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "$label: no queue record of ${repo}#${pr} reached state '$want' within 60s" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# Forge side (test setup on the harness's own disposable instance).
+branch_head_sha() {
+  # $1 repository (owner/name), $2 branch — the branch's commit sha
+  fapi_get "/api/v1/repos/$1/branches/$2" | jq -r '.commit.id'
+}
+push_fixture_commit() {
+  # $1 branch, $2 base64 content, $3 message — one content commit on the
+  # branch; echoes the new branch head sha.
+  local branch="$1" content="$2" message="$3" file_sha new_head
+  file_sha="$(fapi_get "/api/v1/repos/reviewer/sample/contents/fixture.txt?ref=$branch" | jq -r '.sha')"
+  fapi_json PUT /api/v1/repos/reviewer/sample/contents/fixture.txt \
+    "{\"branch\":\"$branch\",\"message\":\"$message\",\"content\":\"$content\",\"sha\":\"$file_sha\"}" >/dev/null
+  new_head="$(branch_head_sha reviewer/sample "$branch")"
+  case "$new_head" in
+    '' | null | *[!A-Fa-f0-9]*)
+      echo "content push returned no hexadecimal head sha" >&2
+      return 1
+      ;;
+  esac
+  printf '%s' "$new_head"
+}
+open_scenario_pr() {
+  # $1 branch name, $2 title — branch off main, change the fixture so the
+  # PR carries a diff, open the PR. Echoes `<number>|<prId>|<head sha>`.
+  local branch="$1" title="$2" created head_sha file_sha
+  fapi_json POST /api/v1/repos/reviewer/sample/branches \
+    "{\"old_branch_name\":\"main\",\"new_branch_name\":\"$branch\"}" >/dev/null
+  # The contents API requires the file's current sha on the branch for an
+  # update (fixture.txt exists on main, so the branch inherited it).
+  file_sha="$(fapi_get "/api/v1/repos/reviewer/sample/contents/fixture.txt?ref=$branch" | jq -r '.sha')"
+  fapi_json PUT /api/v1/repos/reviewer/sample/contents/fixture.txt \
+    "{\"branch\":\"$branch\",\"message\":\"$branch scenario fixture\",\"content\":\"c2NlbmFyaW8tZml4dHVyZQo=\",\"sha\":\"$file_sha\"}" >/dev/null
+  head_sha="$(branch_head_sha reviewer/sample "$branch")"
+  created="$(fapi_json POST /api/v1/repos/reviewer/sample/pulls \
+    "{\"base\":\"main\",\"head\":\"$branch\",\"title\":\"$title\",\"body\":\"qualification scenario\"}")"
+  local number pr_id
+  number="$(printf '%s' "$created" | jq -r '.number')"
+  pr_id="$(printf '%s' "$created" | jq -r '.id')"
+  case "$number" in '' | null | *[!0-9]*)
+    echo "scenario PR creation returned no numeric number" >&2
+    return 1
+    ;;
+  esac
+  case "$pr_id" in '' | null | *[!0-9]*)
+    echo "scenario PR creation returned no numeric id" >&2
+    return 1
+    ;;
+  esac
+  printf '%s|%s|%s' "$number" "$pr_id" "$head_sha"
+}
+
+# Forgejo webhook delivery (the same signed intake scenario 1 drives).
+build_pr_webhook() {
+  # $1 action ("opened"|"synchronized"), $2 branch, $3 PR number,
+  # $4 PR id, $5 head sha, $6 title, $7 output file. Mirrors the payload
+  # shape scenario 1 posts (the reviewer/sample disposable repository).
+  jq -n \
+    --arg action "$1" \
+    --arg repo "reviewer/sample" \
+    --argjson number "$3" \
+    --argjson prId "$4" \
+    --arg sha "$5" \
+    --arg baseSha "$BASE_SHA" \
+    --arg branch "$2" \
+    --arg title "$6" \
+    --arg html "$FORGEJO_API_URL/reviewer/sample/pulls/$3" \
+    --arg clone "$FORGEJO_API_URL/reviewer/sample.git" \
+    '{
+      action: $action,
+      number: $number,
+      title: $title,
+      body: "qualification scenario",
+      draft: false,
+      merged: false,
+      merged_at: null,
+      head_sha: $sha,
+      base_sha: $baseSha,
+      head: { label: ("reviewer:" + $branch), ref: $branch, sha: $sha, repo: { full_name: $repo } },
+      base: { label: "reviewer:main", ref: "main", sha: $baseSha, repo: { full_name: $repo } },
+      pull_request: {
+        id: $prId,
+        number: $number,
+        title: $title,
+        body: "qualification scenario",
+        draft: false,
+        merged: false,
+        merged_at: null,
+        head: { label: ("reviewer:" + $branch), ref: $branch, sha: $sha, repo: { full_name: $repo } },
+        base: { label: "reviewer:main", ref: "main", sha: $baseSha, repo: { full_name: $repo } },
+        user: { login: "reviewer" }
+      },
+      repository: {
+        id: 1,
+        name: "sample",
+        full_name: $repo,
+        private: false,
+        fork: false,
+        html_url: $html,
+        clone_url: $clone,
+        owner: { login: "reviewer" }
+      },
+      sender: { login: "reviewer" },
+      user: { login: "reviewer" }
+    }' > "$7"
+}
+post_webhook() {
+  # $1 payload file, $2 expected canonical kind — sign the body with the
+  # webhook secret (environment, never argv) and deliver it; asserts the
+  # intake's accepted answer.
+  local payload="$1" want_kind="$2" signature status response
+  response="$TMP/webhook-response-$$.json"
+  signature="$(WEBHOOK_SECRET="$WEBHOOK_SECRET" "$NODE_BIN" -e '
+const fs = require("fs");
+const crypto = require("crypto");
+console.log(crypto.createHmac("sha256", process.env.WEBHOOK_SECRET).update(fs.readFileSync(process.argv[1])).digest("hex"));
+' "$payload")"
+  status="$(curl -sS -o "$response" -w '%{http_code}' \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -H "X-Gitea-Event: pull_request" \
+    -H "X-Gitea-Signature: $signature" \
+    --data-binary "@$payload" \
+    "http://127.0.0.1:${WEBHOOK_PORT}/")"
+  if [[ "$status" != 202 ]]; then
+    echo "webhook intake refused the signed delivery (HTTP $status)" >&2
+    cat "$response" >&2 || true
+    return 1
+  fi
+  jq -e --arg kind "$want_kind" '.status == "accepted" and .kind == $kind' "$response" >/dev/null
+}
+
+# Controller lifecycle for the per-scenario daemons.
+start_webhook_controller() {
+  # $1 label, $2 instance config, $3 admin port, $4 admin token — the
+  # webhook-intake env is bound for THIS start only, so a later
+  # reconciler-only controller (which binds no webhook) never inherits it.
+  local label="$1" config="$2" port="$3" token="$4"
+  export PR_REVIEWER_WEBHOOK_PORT="$WEBHOOK_PORT"
+  export PR_REVIEWER_WEBHOOK_SECRET="$WEBHOOK_SECRET"
+  start_controller "$config" "$TMP/$label.log" "$port" "$token" "$TMP/$label"
+  wait_controller_ready "$port" "$label" "$TMP/$label.log" "${CONTROLLER_PIDS[-1]}"
+}
+stop_controller_gracefully() {
+  # $1 pid, $2 label — SIGTERM (the daemon's graceful stop: drain, cancel
+  # the remainder, flush) and wait for the exit; SIGKILL only as the
+  # last resort so a scenario that needs crash semantics kills explicitly.
+  local pid="$1" label="$2" i
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  for i in {1..30}; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "$label controller did not exit on SIGTERM; sending SIGKILL" >&2
+  kill -KILL "$pid" 2>/dev/null || true
+  sleep 1
+}
+scenario_worker_pids() {
+  # The worker processes of ONE controller: the local executor spawns
+  # `node <root>/dist/index.js worker <root>/runs/<job>/<attempt>/request.json`,
+  # so the run root scopes the match to this controller's children. The
+  # disposable mktemp path stays inside the harness's safe charset.
+  local root="$1"
+  pgrep -f "$root/runs/.*request\.json" 2>/dev/null || true
+}
+
 
 # ── scenario 1: normal Forgejo review through the webhook intake ──
 # One forge kind per controller process ("the controller serves one
@@ -623,8 +956,8 @@ if [[ "$RESULT_HEAD_SHA" != "$HEAD_SHA" || "$RUN_HEAD_SHA" != "$HEAD_SHA" ]]; th
 fi
 fapi_get "/api/v1/repos/reviewer/sample/issues/comments/${FORGEJO_COMMENT_ID}" |
   jq -e --argjson commentId "$FORGEJO_COMMENT_ID" '.id == $commentId and (.body | length > 0)' >/dev/null
-assert_usage_counted
-assert_admin_reports_publication "$FORGEJO_ADMIN_PORT" "$FORGEJO_ADMIN_TOKEN" "$TMP/admin-forgejo.cfg"
+assert_usage_counted "$RUN_ID"
+assert_admin_reports_publication "$FORGEJO_ADMIN_PORT" "$FORGEJO_ADMIN_TOKEN" "$TMP/admin-forgejo.cfg" "$RUN_ID"
 echo "PASS: self-hosted Forgejo normal review qualified end-to-end through the canonical job and engine boundary (repo reviewer/sample, PR ${PR_NUMBER}, head ${HEAD_SHA}, publication ${PUBLICATION_ID})"
 
 # ── scenario 2: normal GitHub review with no per-repository workflow ──
@@ -655,8 +988,834 @@ if [[ "$RESULT_HEAD_SHA" != "$RUN_HEAD_SHA" ]]; then
   echo "GitHub publication did not carry the discovered head as the result head" >&2
   exit 1
 fi
-assert_usage_counted
-assert_admin_reports_publication "$GITHUB_ADMIN_PORT" "$GITHUB_ADMIN_TOKEN" "$TMP/admin-github.cfg"
+assert_usage_counted "$RUN_ID"
+assert_admin_reports_publication "$GITHUB_ADMIN_PORT" "$GITHUB_ADMIN_TOKEN" "$TMP/admin-github.cfg" "$RUN_ID"
 echo "PASS: self-hosted GitHub normal review qualified end-to-end with no per-repository workflow (repo ${SELF_HOSTED_GITHUB_REPOSITORY}, publication ${PUBLICATION_ID})"
+
+# ══ failure/restart/supersession/idempotency scenarios (#1483) ══
+#
+# Scenario 1's Forgejo webhook controller stays up for the webhook-driven
+# supersession and idempotency scenarios; the restart, cancellation, dead
+# model, and reconciliation scenarios run their own daemons over the same
+# disposable Forgejo instance and control-plane database. Scenario admin
+# ports derive from the validated GITHUB_ADMIN_PORT (no new settings
+# surface), and every daemon gets its own roots under the harness's temp
+# directory so a restart re-derives the exact run layout the crashed
+# daemon left behind.
+SCENARIO_ADMIN_BASE=$((GITHUB_ADMIN_PORT + 10))
+SCENARIO_ADMIN_TOKEN="$("$NODE_BIN" -e 'console.log(require("crypto").randomBytes(16).toString("hex"))')"
+SCENARIO_REPO="reviewer/sample"
+# The destinations the retry/restart scenarios produced, for the
+# accounting scenario's cross-scenario assertions.
+CRASH_DEST=""
+RESTART_RUN_DEST=""
+RESTART_QUEUED_DEST=""
+
+scenario_duplicate_webhook_produces_exactly_one_review() {
+  local label="duplicate webhook"
+  local dest="forgejo:${SCENARIO_REPO}#${PR_NUMBER}"
+  local dest_clause="p.destination = '${dest}'"
+  local runs pubs usage_runs
+  # Redeliver the EXACT signed body scenario 1 posted: the identity hash
+  # over the same head mints the same generation, so the durable
+  # generation claim must answer "duplicate" — no second mint, no second
+  # run, no second publication, no second spend.
+  post_webhook "$TMP/webhook.json" "pr_opened"
+  # A wrongly minted duplicate would dispatch its own run within the
+  # settle window (2s) plus one tick; 30s also lets a fast second review
+  # surface a second publication. One run, one publication, one spend.
+  sleep 30
+  runs="$(pg_query "SELECT count(*) FROM cp_runs WHERE head_sha = '$HEAD_SHA'")"
+  pubs="$(published_count_for "$dest_clause")"
+  usage_runs="$(usage_rows_for_destination "$dest_clause" | /usr/bin/grep -c . || true)"
+  if [[ "$runs" != 1 || "$pubs" != 1 ]]; then
+    echo "$label scenario produced extra durable work: runs=${runs} published=${pubs}" >&2
+    return 1
+  fi
+  if [[ "$usage_runs" != 1 ]]; then
+    echo "$label scenario counted model spend for more than one run: ${usage_runs}" >&2
+    return 1
+  fi
+  assert_usage_counted "$RUN_ID"
+  echo "PASS: duplicate webhook produced exactly one review (repo ${SCENARIO_REPO}, PR ${PR_NUMBER}, one run, one publication, one counted spend)"
+}
+
+scenario_webhook_burst_settles_to_one_paid_newest_head_review() {
+  local label="webhook burst settle"
+  local branch="scn-burst"
+  local created first_head head
+  local pr_number pr_id dest dest_clause
+  created="$(open_scenario_pr "$branch" "Webhook burst scenario")"
+  IFS='|' read -r pr_number pr_id first_head <<<"$created"
+  # first_head is the pull request's own opening head — the burst's
+  # synchronizations supersede any review of it, so it is asserted below
+  # to hold no run.
+  # Push three more heads, then deliver all three synchronizations
+  # back-to-back: every delivery lands inside the queue's settle window
+  # (2s default), so the burst must coalesce into ONE paid review of the
+  # newest head — the superseded queued generations hold no worker and
+  # no model budget.
+  local commits=() i
+  # Distinct content per commit: a content PUT Forgejo would see as an
+  # empty diff is refused, and each burst head needs its own sha.
+  local burst_contents=("YnVyc3QtaGVhZC0xCg==" "YnVyc3QtaGVhZC0yCg==" "YnVyc3QtaGVhZC0zCg==")
+  for i in 1 2 3; do
+    head="$(push_fixture_commit "$branch" "${burst_contents[$((i - 1))]}" "burst head ${i}")"
+    commits+=("$head")
+  done
+  local burst_payloads=()
+  for i in 1 2 3; do
+    build_pr_webhook "synchronized" "$branch" "$pr_number" "$pr_id" "${commits[$((i - 1))]}" \
+      "Webhook burst scenario" "$TMP/burst-${i}.json"
+    burst_payloads+=("$TMP/burst-${i}.json")
+  done
+  for i in 1 2 3; do
+    post_webhook "${burst_payloads[$((i - 1))]}" "synchronize"
+  done
+  dest="forgejo:${SCENARIO_REPO}#${pr_number}"
+  dest_clause="p.destination = '${dest}'"
+  if ! wait_published "$dest_clause" "$label" "$TMP/forgejo-controller.log"; then
+    return 1
+  fi
+  if [[ "$RESULT_HEAD_SHA" != "${commits[2]}" || "$RUN_HEAD_SHA" != "${commits[2]}" ]]; then
+    echo "$label scenario published head ${RESULT_HEAD_SHA} instead of the newest burst head ${commits[2]}" >&2
+    return 1
+  fi
+  local pubs runs usage_rows superseded_count completed_count
+  pubs="$(published_count_for "$dest_clause")"
+  runs="$(pg_query "SELECT count(*) FROM cp_runs WHERE head_sha IN ('$first_head','${commits[0]}','${commits[1]}','${commits[2]}')")"
+  usage_rows="$(usage_rows_for_destination "$dest_clause" | /usr/bin/grep -c . || true)"
+  superseded_count="$(queue_records_for_pr "$SCENARIO_REPO" "$pr_number" | /usr/bin/grep -c '|superseded|' || true)"
+  completed_count="$(queue_records_for_pr "$SCENARIO_REPO" "$pr_number" | /usr/bin/grep -c '|completed|' || true)"
+  if [[ "$pubs" != 1 || "$runs" != 1 || "$usage_rows" != 1 ]]; then
+    echo "$label scenario did not settle into one paid newest-head review: published=${pubs} runs=${runs} usage-bearing=${usage_rows}" >&2
+    return 1
+  fi
+  if [[ "$superseded_count" != 2 || "$completed_count" != 1 ]]; then
+    echo "$label scenario durable queue records disagree with the burst: superseded=${superseded_count} completed=${completed_count}" >&2
+    return 1
+  fi
+  assert_usage_counted "$RUN_ID"
+  echo "PASS: webhook burst settled into one paid review of the newest head (repo ${SCENARIO_REPO}, PR ${pr_number}, opening head ${first_head} unpaid, newest head ${commits[2]} paid once)"
+}
+
+scenario_new_head_while_old_review_queued_supersedes_without_spend() {
+  local label="new head while old review queued"
+  local branch="scn-queued"
+  local created head_a head_b
+  local pr_number pr_id dest dest_clause
+  created="$(open_scenario_pr "$branch" "Queued supersession scenario")"
+  IFS='|' read -r pr_number pr_id head_a <<<"$created"
+  push_fixture_commit "$branch" "cXVldWVkLWhlYWQtYgo=" "queued supersession head b" >/dev/null
+  head_b="$(branch_head_sha "$SCENARIO_REPO" "$branch")"
+  build_pr_webhook "opened" "$branch" "$pr_number" "$pr_id" "$head_a" \
+    "Queued supersession scenario" "$TMP/queued-a.json"
+  build_pr_webhook "synchronized" "$branch" "$pr_number" "$pr_id" "$head_b" \
+    "Queued supersession scenario" "$TMP/queued-b.json"
+  # Both deliveries land inside the settle window: generation A is
+  # superseded while queued (it never dispatches, so it never holds a
+  # worker or a model budget), generation B reviews the newest head.
+  post_webhook "$TMP/queued-a.json" "pr_opened"
+  post_webhook "$TMP/queued-b.json" "synchronize"
+  dest="forgejo:${SCENARIO_REPO}#${pr_number}"
+  dest_clause="p.destination = '${dest}'"
+  if ! wait_published "$dest_clause" "$label" "$TMP/forgejo-controller.log"; then
+    return 1
+  fi
+  local pubs runs_a superseded_record completed_job
+  pubs="$(published_count_for "$dest_clause")"
+  runs_a="$(pg_query "SELECT count(*) FROM cp_runs WHERE head_sha = '$head_a'")"
+  superseded_record="$(queue_records_for_pr "$SCENARIO_REPO" "$pr_number" | /usr/bin/grep '|superseded|' | head -1)"
+  completed_job="$(queue_records_for_pr "$SCENARIO_REPO" "$pr_number" | /usr/bin/grep '|completed|' | cut -d'|' -f1)"
+  if [[ "$pubs" != 1 || "$RESULT_HEAD_SHA" != "$head_b" ]]; then
+    echo "$label scenario did not publish exactly the newest head: published=${pubs} head=${RESULT_HEAD_SHA}" >&2
+    return 1
+  fi
+  if [[ "$runs_a" != 0 ]]; then
+    echo "$label scenario dispatched the superseded queued generation (${runs_a} runs for the old head)" >&2
+    return 1
+  fi
+  if [[ ! "$superseded_record" =~ \|superseded\| ]]; then
+    echo "$label scenario left no superseded queue record for the old head: ${superseded_record:-none}" >&2
+    return 1
+  fi
+  if [[ "${superseded_record##*|}" != "$completed_job" ]]; then
+    echo "$label scenario superseded record does not name the superseding jobId: ${superseded_record} vs completed ${completed_job}" >&2
+    return 1
+  fi
+  assert_usage_counted "$RUN_ID"
+  echo "PASS: new head while the old review queued superseded the old generation with no spend (repo ${SCENARIO_REPO}, PR ${pr_number}, old head superseded, newest head paid once)"
+}
+
+scenario_new_head_while_old_review_running_supersedes_without_spend() {
+  local label="new head while old review running"
+  local branch="scn-running"
+  local created head_a head_b worker_pid
+  local pr_number pr_id dest dest_clause
+  created="$(open_scenario_pr "$branch" "Running supersession scenario")"
+  IFS='|' read -r pr_number pr_id head_a <<<"$created"
+  build_pr_webhook "opened" "$branch" "$pr_number" "$pr_id" "$head_a" \
+    "Running supersession scenario" "$TMP/running-a.json"
+  post_webhook "$TMP/running-a.json" "pr_opened"
+  if ! wait_run_state "$head_a" "running" "$label"; then
+    return 1
+  fi
+  # Freeze the old worker mid-review so the supersession's cancellation
+  # is deterministic: the review cannot complete inside the race window.
+  worker_pid="$(scenario_worker_pids "$TMP/forgejo" | head -1)"
+  if [[ -z "$worker_pid" ]]; then
+    echo "$label scenario found no worker process to freeze for the running review" >&2
+    return 1
+  fi
+  kill -STOP "$worker_pid"
+  push_fixture_commit "$branch" "cnVubmluZy1oZWFkLWIK" "running supersession head b" >/dev/null
+  head_b="$(branch_head_sha "$SCENARIO_REPO" "$branch")"
+  build_pr_webhook "synchronized" "$branch" "$pr_number" "$pr_id" "$head_b" \
+    "Running supersession scenario" "$TMP/running-b.json"
+  post_webhook "$TMP/running-b.json" "synchronize"
+  dest="forgejo:${SCENARIO_REPO}#${pr_number}"
+  dest_clause="p.destination = '${dest}'"
+  if ! wait_published "$dest_clause" "$label" "$TMP/forgejo-controller.log" \
+    '^superseded\||^cancelled\|'; then
+    return 1
+  fi
+  local pubs state_a usage_a usage_a_rows
+  pubs="$(published_count_for "$dest_clause")"
+  state_a="$(pg_query "SELECT state || '|' || COALESCE(superseded_by_job_id,'') || '|' || COALESCE(failure_reason,'') FROM cp_runs WHERE head_sha = '$head_a' ORDER BY attempt DESC LIMIT 1")"
+  usage_a="$(usage_summary_for_run "$(pg_query "SELECT run_id FROM cp_runs WHERE head_sha = '$head_a' LIMIT 1")")"
+  usage_a_rows="${usage_a%%|*}"
+  if [[ "$pubs" != 1 || "$RESULT_HEAD_SHA" != "$head_b" ]]; then
+    echo "$label scenario did not publish exactly the newest head: published=${pubs} head=${RESULT_HEAD_SHA}" >&2
+    return 1
+  fi
+  case "$state_a" in
+    superseded\|* | cancelled\|*) ;;
+    *)
+      echo "$label scenario left the old run non-terminal or completed: $state_a" >&2
+      return 1
+      ;;
+  esac
+  if [[ "$usage_a_rows" != 0 ]]; then
+    echo "$label scenario counted model spend for the cancelled old run: ${usage_a}" >&2
+    return 1
+  fi
+  assert_usage_counted "$RUN_ID"
+  echo "PASS: new head while the old review running cancelled the old worker by identity with no spend (repo ${SCENARIO_REPO}, PR ${pr_number}, old head terminal, newest head paid once)"
+}
+
+scenario_stale_result_publication_is_refused_and_newest_head_publishes() {
+  local label="stale result publication"
+  local branch="scn-stale"
+  local created head_a head_b
+  local pr_number pr_id dest dest_clause
+  created="$(open_scenario_pr "$branch" "Stale result scenario")"
+  IFS='|' read -r pr_number pr_id head_a <<<"$created"
+  build_pr_webhook "opened" "$branch" "$pr_number" "$pr_id" "$head_a" \
+    "Stale result scenario" "$TMP/stale-a.json"
+  # Deliver the review request for head A, then move the branch head on
+  # the forge WITHOUT delivering a webhook: no new generation is minted,
+  # so generation A still runs to completion — and its publication then
+  # faces a forge head that is no longer its result head. The exact-head
+  # gate must refuse the stale result terminally.
+  post_webhook "$TMP/stale-a.json" "pr_opened"
+  # Head B is pushed only once A's review is verifiably dispatched and
+  # running: moving the forge head before dispatch would let A's
+  # generation be refused before any paid model call, proving a
+  # pre-dispatch skip instead of the intended stale-result publication
+  # refusal with persisted spend.
+  if ! wait_run_state "$head_a" "running" "$label"; then
+    return 1
+  fi
+  push_fixture_commit "$branch" "c3RhbGUtaGVhZC1iCg==" "stale scenario head b" >/dev/null
+  head_b="$(branch_head_sha "$SCENARIO_REPO" "$branch")"
+  dest="forgejo:${SCENARIO_REPO}#${pr_number}"
+  dest_clause="p.destination = '${dest}'"
+  # Deliver head B only after A's stale refusal: poll for the durable
+  # refusal first (the publication row closes as failed/stale-head), so
+  # the ordering is deterministic.
+  local stale_row="" deadline=$((SECONDS + REVIEW_TIMEOUT_SEC))
+  while true; do
+    stale_row="$(publication_row_for_head "$dest_clause" "$head_a")"
+    if [[ "$stale_row" == failed\|stale-head\|* ]]; then
+      break
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "$label scenario: head A's publication was never refused as stale (row: '${stale_row:-none}')" >&2
+      tail -n 30 "$TMP/forgejo-controller.log" >&2 || true
+      return 1
+    fi
+    sleep 2
+  done
+  build_pr_webhook "synchronized" "$branch" "$pr_number" "$pr_id" "$head_b" \
+    "Stale result scenario" "$TMP/stale-b.json"
+  post_webhook "$TMP/stale-b.json" "synchronize"
+  if ! wait_published "$dest_clause" "$label" "$TMP/forgejo-controller.log" \
+    '^failed\|stale-head'; then
+    return 1
+  fi
+  local pubs usage_a usage_a_rows
+  pubs="$(published_count_for "$dest_clause")"
+  usage_a="$(usage_summary_for_run "$(pg_query "SELECT run_id FROM cp_runs WHERE head_sha = '$head_a' LIMIT 1")")"
+  usage_a_rows="${usage_a%%|*}"
+  if [[ "$pubs" != 1 || "$RESULT_HEAD_SHA" != "$head_b" ]]; then
+    echo "$label scenario did not publish exactly the newest head: published=${pubs} head=${RESULT_HEAD_SHA}" >&2
+    return 1
+  fi
+  if [[ "$usage_a_rows" == 0 ]]; then
+    echo "$label scenario: the stale run completed a real model call but no spend was persisted" >&2
+    return 1
+  fi
+  assert_usage_counted "$RUN_ID"
+  echo "PASS: stale result publication refused by the exact-head gate and newest head published (repo ${SCENARIO_REPO}, PR ${pr_number}, stale head refused, newest head paid once)"
+}
+
+scenario_worker_timeout() {
+  # NOT drivable in this composition, and the harness refuses to
+  # fabricate coverage (docs/self-hosted-qualification.md): webhook-minted
+  # jobs carry no execution deadline (`buildReviewJob` leaves
+  # `deadlineAtMs` 0), the controller composition exposes no queue-timing
+  # settings (the settle window, lease TTL and retry backoff are daemon
+  # defaults — the lease default is 30 minutes), so neither the worker's
+  # whole-process deadline backstop nor the queue's lease-expiry path can
+  # be driven inside the scenario budget. The queue-level deadline and
+  # lease-expiry semantics are qualified at the composition level by
+  # tests-v3/controller-daemon.test.ts and
+  # tests-v3/queue-recovery-settle.test.ts.
+  echo "SKIP: worker timeout scenario is not drivable in this composition (no job deadline is minted and the lease default is 30 minutes); see docs/self-hosted-qualification.md known limits"
+}
+
+scenario_worker_crash_requeues_without_duplicate_spend() {
+  local label="worker crash requeue"
+  local branch="scn-crash"
+  local created head_a worker_pid
+  local pr_number pr_id dest dest_clause
+  created="$(open_scenario_pr "$branch" "Worker crash scenario")"
+  IFS='|' read -r pr_number pr_id head_a <<<"$created"
+  build_pr_webhook "opened" "$branch" "$pr_number" "$pr_id" "$head_a" \
+    "Worker crash scenario" "$TMP/crash.json"
+  post_webhook "$TMP/crash.json" "pr_opened"
+  if ! wait_run_state "$head_a" "running" "$label"; then
+    return 1
+  fi
+  # Kill the worker mid-review: the executor reports the crashed child,
+  # the queue requeues the record (bounded retry backoff), and the
+  # second attempt runs the review to publication.
+  worker_pid="$(scenario_worker_pids "$TMP/forgejo" | head -1)"
+  if [[ -z "$worker_pid" ]]; then
+    echo "$label scenario found no worker process to crash" >&2
+    return 1
+  fi
+  kill -KILL "$worker_pid"
+  dest="forgejo:${SCENARIO_REPO}#${pr_number}"
+  dest_clause="p.destination = '${dest}'"
+  # The first attempt's run settles failed (worker_crash) by design.
+  if ! wait_published "$dest_clause" "$label" "$TMP/forgejo-controller.log" \
+    '^failed\|worker_crash'; then
+    return 1
+  fi
+  local run_rows failed_row usage_first usage_rows
+  run_rows="$(runs_for_head "$head_a")"
+  if [[ "$(printf '%s\n' "$run_rows" | /usr/bin/grep -c .)" != 2 ]]; then
+    echo "$label scenario expected a failed attempt and a retried attempt, got: ${run_rows}" >&2
+    return 1
+  fi
+  failed_row="$(printf '%s\n' "$run_rows" | head -1)"
+  case "$failed_row" in
+    failed\|1\|*worker_crash*) ;;
+    *)
+      echo "$label scenario first attempt did not fail as a worker crash: $failed_row" >&2
+      return 1
+      ;;
+  esac
+  # The crashed attempt left no result and must carry no spend; the
+  # requeued attempt is the only counted run.
+  usage_first="$(usage_summary_for_run "$(printf '%s\n' "$failed_row" | cut -d'|' -f3)")"
+  if [[ "$usage_first" != 0\|0\|0\|0 ]]; then
+    echo "$label scenario counted model spend for the crashed attempt: ${usage_first}" >&2
+    return 1
+  fi
+  usage_rows="$(usage_rows_for_destination "$dest_clause" | /usr/bin/grep -c . || true)"
+  if [[ "$usage_rows" != 1 ]]; then
+    echo "$label scenario counted spend for more than the retried run: ${usage_rows}" >&2
+    return 1
+  fi
+  assert_usage_counted "$RUN_ID"
+  echo "PASS: worker crash requeued the record without duplicate spend (repo ${SCENARIO_REPO}, PR ${pr_number}, attempt 1 failed worker_crash, attempt 2 published once)"
+  CRASH_DEST="$dest"
+}
+
+scenario_controller_restart_with_running_worker_resumes_without_rerun() {
+  local label="controller restart with running worker"
+  local branch="scn-restart"
+  local created head_a controller_pid
+  local pr_number pr_id dest dest_clause
+  created="$(open_scenario_pr "$branch" "Controller restart scenario")"
+  IFS='|' read -r pr_number pr_id head_a <<<"$created"
+  build_pr_webhook "opened" "$branch" "$pr_number" "$pr_id" "$head_a" \
+    "Controller restart scenario" "$TMP/restart.json"
+  post_webhook "$TMP/restart.json" "pr_opened"
+  if ! wait_run_state "$head_a" "running" "$label"; then
+    return 1
+  fi
+  # The Forgejo webhook controller from scenario 1 (the GitHub daemon is
+  # also running and must not be touched) — kill the CONTROLLER only:
+  # the worker is orphaned and keeps running.
+  controller_pid="$FORGEJO_CONTROLLER_PID"
+  kill -KILL "$controller_pid"
+  sleep 2
+  # The restarted daemon reconciles the recovered worker BEFORE recover():
+  # the executor reports it alive, the daemon adopts it (never
+  # redispatches), and its settled result routes into the publish path.
+  start_webhook_controller "forgejo-scenario" "$TMP/instance-forgejo.yaml" \
+    "$SCENARIO_ADMIN_BASE" "$SCENARIO_ADMIN_TOKEN"
+  FORGEJO_SCENARIO_PID="${CONTROLLER_PIDS[-1]}"
+  dest="forgejo:${SCENARIO_REPO}#${pr_number}"
+  dest_clause="p.destination = '${dest}'"
+  if ! wait_published "$dest_clause" "$label" "$TMP/forgejo-scenario.log"; then
+    return 1
+  fi
+  local run_count usage_rows
+  run_count="$(pg_query "SELECT count(*) FROM cp_runs WHERE head_sha = '$head_a'")"
+  usage_rows="$(usage_rows_for_destination "$dest_clause" | /usr/bin/grep -c . || true)"
+  if [[ "$run_count" != 1 ]]; then
+    echo "$label scenario reran the review across the restart: ${run_count} runs for head ${head_a}" >&2
+    return 1
+  fi
+  if [[ "$usage_rows" != 1 ]]; then
+    echo "$label scenario counted spend for more than the adopted run: ${usage_rows}" >&2
+    return 1
+  fi
+  assert_usage_counted "$RUN_ID"
+  echo "PASS: controller restart with a running worker adopted the orphaned worker and published without a second model call (repo ${SCENARIO_REPO}, PR ${pr_number}, one run, one counted spend)"
+  RESTART_RUN_DEST="$dest"
+}
+
+scenario_operator_restart_with_queued_settle_window_work() {
+  local label="operator restart with queued settle-window work"
+  local branch="scn-restart-queued"
+  local created head_a controller_pid
+  local pr_number pr_id dest dest_clause
+  created="$(open_scenario_pr "$branch" "Restart with queued work scenario")"
+  IFS='|' read -r pr_number pr_id head_a <<<"$created"
+  build_pr_webhook "opened" "$branch" "$pr_number" "$pr_id" "$head_a" \
+    "Restart with queued work scenario" "$TMP/restart-queued.json"
+  post_webhook "$TMP/restart-queued.json" "pr_opened"
+  # The accepted response proves the generation was claimed; wait until
+  # the queued record is DURABLE in the control-plane snapshot, then kill
+  # the operator inside the settle window (the record cannot have
+  # dispatched: the window is 2s and no run exists yet).
+  if ! wait_queue_record_state "$SCENARIO_REPO" "$pr_number" "queued" "$label"; then
+    return 1
+  fi
+  controller_pid="$FORGEJO_SCENARIO_PID"
+  kill -KILL "$controller_pid"
+  local queued_records
+  queued_records="$(queue_records_for_pr "$SCENARIO_REPO" "$pr_number")"
+  if [[ ! "$queued_records" =~ \|queued\| ]]; then
+    echo "$label scenario: the killed operator left no queued record behind: ${queued_records:-none}" >&2
+    return 1
+  fi
+  start_webhook_controller "forgejo-scenario" "$TMP/instance-forgejo.yaml" \
+    "$SCENARIO_ADMIN_BASE" "$SCENARIO_ADMIN_TOKEN"
+  FORGEJO_SCENARIO_PID="${CONTROLLER_PIDS[-1]}"
+  dest="forgejo:${SCENARIO_REPO}#${pr_number}"
+  dest_clause="p.destination = '${dest}'"
+  if ! wait_published "$dest_clause" "$label" "$TMP/forgejo-scenario.log"; then
+    return 1
+  fi
+  local run_count pubs usage_rows
+  run_count="$(pg_query "SELECT count(*) FROM cp_runs WHERE head_sha = '$head_a'")"
+  pubs="$(published_count_for "$dest_clause")"
+  usage_rows="$(usage_rows_for_destination "$dest_clause" | /usr/bin/grep -c . || true)"
+  if [[ "$run_count" != 1 || "$pubs" != 1 || "$usage_rows" != 1 ]]; then
+    echo "$label scenario did not resume the queued generation exactly once: runs=${run_count} published=${pubs} usage-bearing=${usage_rows}" >&2
+    return 1
+  fi
+  assert_usage_counted "$RUN_ID"
+  echo "PASS: operator restart with queued settle-window work resumed without duplicate work (repo ${SCENARIO_REPO}, PR ${pr_number}, one run, one publication, one counted spend)"
+  RESTART_QUEUED_DEST="$dest"
+}
+
+scenario_cancellation_cancels_the_review_without_publication() {
+  local label="cancelled review"
+  local branch="scn-cancel"
+  local created head_a controller_pid worker_pid run_id
+  local pr_number pr_id dest dest_clause
+  created="$(open_scenario_pr "$branch" "Cancellation scenario")"
+  IFS='|' read -r pr_number pr_id head_a <<<"$created"
+  build_pr_webhook "opened" "$branch" "$pr_number" "$pr_id" "$head_a" \
+    "Cancellation scenario" "$TMP/cancel.json"
+  post_webhook "$TMP/cancel.json" "pr_opened"
+  if ! wait_run_state "$head_a" "running" "$label"; then
+    return 1
+  fi
+  # Freeze the worker so the review cannot complete inside the drain
+  # window: the graceful stop must drain, then cancel the remainder by
+  # identity, retiring the record with no publication and no spend.
+  worker_pid="$(scenario_worker_pids "$TMP/forgejo-scenario" | head -1)"
+  if [[ -z "$worker_pid" ]]; then
+    echo "$label scenario found no worker process to freeze" >&2
+    return 1
+  fi
+  kill -STOP "$worker_pid"
+  controller_pid="$FORGEJO_SCENARIO_PID"
+  kill -TERM "$controller_pid"
+  local i dead=0
+  for i in {1..60}; do
+    if ! kill -0 "$controller_pid" 2>/dev/null; then
+      dead=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$dead" != 1 ]]; then
+    echo "$label scenario: the controller did not exit after SIGTERM within 60s" >&2
+    kill -KILL "$controller_pid" 2>/dev/null || true
+    return 1
+  fi
+  run_id="$(pg_query "SELECT run_id FROM cp_runs WHERE head_sha = '$head_a' ORDER BY attempt DESC LIMIT 1")"
+  local deadline=$((SECONDS + 60)) state=""
+  while true; do
+    state="$(pg_query "SELECT state || '|' || COALESCE(failure_reason,'') FROM cp_runs WHERE run_id = '$run_id'")"
+    case "$state" in
+      cancelled\|*) break ;;
+    esac
+    if (( SECONDS >= deadline )); then
+      echo "$label scenario: the run did not settle cancelled after the graceful stop (last: '${state}')" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  dest="forgejo:${SCENARIO_REPO}#${pr_number}"
+  dest_clause="p.destination = '${dest}'"
+  local pubs usage
+  pubs="$(publication_rows_for "$dest_clause")"
+  usage="$(usage_summary_for_run "$run_id")"
+  if [[ "$pubs" != 0 ]]; then
+    echo "$label scenario published a cancelled review (${pubs} publication rows)" >&2
+    return 1
+  fi
+  if [[ "$usage" != 0\|0\|0\|0 ]]; then
+    echo "$label scenario counted model spend for a cancelled run: ${usage}" >&2
+    return 1
+  fi
+  echo "PASS: cancelled review settled cancelled with no publication and no counted spend (repo ${SCENARIO_REPO}, PR ${pr_number}, run ${run_id})"
+}
+
+scenario_publication_retry_without_model_rerun() {
+  local label="publication retry without model rerun"
+  local branch="scn-publish-retry"
+  local created head_a
+  local pr_number pr_id dest dest_clause
+  # The cancellation scenario terminated the previous daemon; this
+  # scenario starts its own (same roots, fresh process) to drive the
+  # intake.
+  start_webhook_controller "forgejo-scenario" "$TMP/instance-forgejo.yaml" \
+    "$SCENARIO_ADMIN_BASE" "$SCENARIO_ADMIN_TOKEN"
+  FORGEJO_SCENARIO_PID="${CONTROLLER_PIDS[-1]}"
+  created="$(open_scenario_pr "$branch" "Publication retry scenario")"
+  IFS='|' read -r pr_number pr_id head_a <<<"$created"
+  build_pr_webhook "opened" "$branch" "$pr_number" "$pr_id" "$head_a" \
+    "Publication retry scenario" "$TMP/pub-retry.json"
+  post_webhook "$TMP/pub-retry.json" "pr_opened"
+  if ! wait_run_state "$head_a" "running" "$label"; then
+    return 1
+  fi
+  # The worker needs no forge credential (all forge I/O is
+  # controller-side), so stopping the disposable instance mid-review
+  # leaves the model call untouched — and makes the publication's
+  # freshness read fail (retry-later), which is the durable-record retry
+  # path the scenario drives.
+  POSTGRES_PASSWORD="$PG_PASSWORD" docker stop "$FORGEJO_NAME" >/dev/null
+  dest="forgejo:${SCENARIO_REPO}#${pr_number}"
+  local pending_row="" deadline=$((SECONDS + REVIEW_TIMEOUT_SEC))
+  while true; do
+    pending_row="$(pg_query "SELECT publication_state || '|' || (length(result_payload) > 0) FROM cp_publications WHERE destination = '${dest}'")"
+    if [[ "$pending_row" == pending\|true ]]; then
+      break
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "$label scenario: the publication never held its durable pending payload (row: '${pending_row:-none}')" >&2
+      POSTGRES_PASSWORD="$PG_PASSWORD" docker start "$FORGEJO_NAME" >/dev/null || true
+      return 1
+    fi
+    sleep 2
+  done
+  local run_id usage_before usage_after
+  run_id="$(pg_query "SELECT run_id FROM cp_runs WHERE head_sha = '$head_a' ORDER BY attempt DESC LIMIT 1")"
+  usage_before="$(usage_summary_for_run "$run_id")"
+  POSTGRES_PASSWORD="$PG_PASSWORD" docker start "$FORGEJO_NAME" >/dev/null
+  dest_clause="p.destination = '${dest}'"
+  if ! wait_published "$dest_clause" "$label" "$TMP/forgejo-scenario.log"; then
+    return 1
+  fi
+  usage_after="$(usage_summary_for_run "$run_id")"
+  local run_count attempts
+  run_count="$(pg_query "SELECT count(*) FROM cp_runs WHERE head_sha = '$head_a'")"
+  attempts="$(pg_query "SELECT attempt FROM cp_publications WHERE destination = '${dest}'")"
+  if [[ "$run_count" != 1 ]]; then
+    echo "$label scenario reran the model across the publication retry: ${run_count} runs" >&2
+    return 1
+  fi
+  if [[ "$usage_before" != "$usage_after" ]]; then
+    echo "$label scenario changed the durable usage across the retry: before='${usage_before}' after='${usage_after}'" >&2
+    return 1
+  fi
+  if [[ "$usage_before" == 0\|* ]]; then
+    echo "$label scenario recorded no spend for the published review" >&2
+    return 1
+  fi
+  case "$attempts" in
+    '' | 0 | 1)
+      echo "$label scenario recorded no retry attempt on the publication record (attempt=${attempts})" >&2
+      return 1
+      ;;
+  esac
+  assert_usage_counted "$RUN_ID"
+  echo "PASS: failed publication retried from the durable record with no model rerun (repo ${SCENARIO_REPO}, PR ${pr_number}, publication attempt ${attempts}, usage stable at ${usage_after})"
+}
+
+scenario_usage_accounting_single_counted_across_retries_and_restarts() {
+  local label="usage accounting across retries and restarts"
+  local crash_rows restart_rows queued_rows orphans read_again
+  if [[ -z "$CRASH_DEST" || -z "$RESTART_RUN_DEST" || -z "$RESTART_QUEUED_DEST" ]]; then
+    echo "$label scenario is missing its prerequisite destinations (crash='${CRASH_DEST}' restart='${RESTART_RUN_DEST}' queued='${RESTART_QUEUED_DEST}')" >&2
+    return 1
+  fi
+  # Across a retry (worker crash -> requeue): exactly ONE run of the
+  # crash destination's job carries spend — the retried one.
+  crash_rows="$(usage_rows_for_destination "p.destination = '${CRASH_DEST}'")"
+  if [[ "$(printf '%s\n' "$crash_rows" | /usr/bin/grep -c .)" != 1 ]]; then
+    echo "$label scenario: the retried job carries spend for more than one run: ${crash_rows}" >&2
+    return 1
+  fi
+  # Across restarts (running worker and queued settle-window work):
+  # exactly one counted run per destination.
+  restart_rows="$(usage_rows_for_destination "p.destination = '${RESTART_RUN_DEST}'")"
+  queued_rows="$(usage_rows_for_destination "p.destination = '${RESTART_QUEUED_DEST}'")"
+  if [[ "$(printf '%s\n' "$restart_rows" | /usr/bin/grep -c .)" != 1 || "$(printf '%s\n' "$queued_rows" | /usr/bin/grep -c .)" != 1 ]]; then
+    echo "$label scenario: a restarted job carries spend for more than one run: restart='${restart_rows}' queued='${queued_rows}'" >&2
+    return 1
+  fi
+  # The durable usage records are replay-idempotent: a re-read after a
+  # beat must return identical aggregates (no replay re-inserted rows).
+  sleep 2
+  read_again="$(usage_rows_for_destination "p.destination = '${CRASH_DEST}'")"
+  if [[ "$read_again" != "$crash_rows" ]]; then
+    echo "$label scenario: usage aggregates moved between reads: before='${crash_rows}' after='${read_again}'" >&2
+    return 1
+  fi
+  # No usage row may exist without the run record it belongs to.
+  orphans="$(orphan_usage_count)"
+  if [[ "$orphans" != 0 ]]; then
+    echo "$label scenario: ${orphans} usage rows carry no run record" >&2
+    return 1
+  fi
+  echo "PASS: usage and cost accounting stayed single-counted across retries and restarts (crash ${CRASH_DEST}, restart ${RESTART_RUN_DEST}, queued-restart ${RESTART_QUEUED_DEST}, no orphan usage rows)"
+}
+
+scenario_model_primary_failure_and_fallback() {
+  local label="model primary failure"
+  local branch="scn-dead-model"
+  local created head_a
+  local pr_number pr_id dest dest_clause
+  created="$(open_scenario_pr "$branch" "Dead model scenario")"
+  IFS='|' read -r pr_number pr_id head_a <<<"$created"
+  build_pr_webhook "opened" "$branch" "$pr_number" "$pr_id" "$head_a" \
+    "Dead model scenario" "$TMP/dead-model.json"
+  # The dead-model daemon (below) serves this PR through an instance
+  # config whose only model profile points at a closed loopback port:
+  # every model call fails, the bounded attempts exhaust, and the job
+  # retires failed — with NO spend counted (usage is never fabricated).
+  stop_controller_gracefully "$FORGEJO_SCENARIO_PID" "forgejo-scenario"
+  cat > "$TMP/instance-dead-model.yaml" <<CFGEOF
+version: 1
+forges:
+  - name: qualification-forgejo
+    kind: forgejo
+    endpoint: "$FORGEJO_API_URL"
+    credential: forgejo
+model-profiles:
+  - name: primary
+    endpoint: "http://127.0.0.1:9"
+    api-format: openai
+    credential: model
+    model: "$AI_MODEL"
+default-model-profile: primary
+executor-profiles:
+  - name: local
+    kind: local
+    local:
+      command: "$NODE_BIN"
+      args: ["$ROOT_DIR/dist/index.js", "worker"]
+default-executor-profile: local
+evidence-profiles:
+  - name: qualification
+    providers-file: "$TMP/evidence-providers.yml"
+default-evidence-profile: qualification
+adoption:
+  mode: allowlist
+  allowlist: ["$SCENARIO_REPO"]
+  discovered-default: adopt
+CFGEOF
+  start_webhook_controller "forgejo-dead-model" "$TMP/instance-dead-model.yaml" \
+    "$((SCENARIO_ADMIN_BASE + 1))" "$SCENARIO_ADMIN_TOKEN"
+  post_webhook "$TMP/dead-model.json" "pr_opened"
+  if ! wait_queue_record_state "$SCENARIO_REPO" "$pr_number" "failed" "$label" 600; then
+    return 1
+  fi
+  dest="forgejo:${SCENARIO_REPO}#${pr_number}"
+  dest_clause="p.destination = '${dest}'"
+  local bad_runs usage pubs
+  bad_runs="$(pg_query "SELECT count(*) FROM cp_runs WHERE head_sha = '$head_a' AND state != 'failed'")"
+  usage="$(usage_rows_for_destination "$dest_clause" | /usr/bin/grep -c . || true)"
+  pubs="$(publication_rows_for "$dest_clause")"
+  if [[ "$bad_runs" != 0 ]]; then
+    echo "$label scenario left non-failed runs behind: ${bad_runs}" >&2
+    return 1
+  fi
+  if [[ "$usage" != 0 ]]; then
+    echo "$label scenario counted model spend for failed reviews: ${usage} usage rows" >&2
+    return 1
+  fi
+  if [[ "$pubs" != 0 ]]; then
+    echo "$label scenario published a review without a model: ${pubs} publication rows" >&2
+    return 1
+  fi
+  local dead_model_pid="${CONTROLLER_PIDS[-1]}"
+  stop_controller_gracefully "$dead_model_pid" "forgejo-dead-model"
+  # The FALLBACK leg is not drivable and the harness refuses to fabricate
+  # it: the execution envelope carries ONE model selection (baseUrl, wire
+  # model id, wire format — #1496), and the worker's engine inputs map no
+  # `ai-fallback-*` coordinates, so an availability fallback to a second
+  # model cannot be exercised end-to-end here. Labeled per #739's
+  # "clearly label externally untestable behavior" rule.
+  echo "SKIP: model fallback leg is not drivable in this composition (the execution envelope carries a single model selection); see docs/self-hosted-qualification.md known limits"
+  echo "PASS: primary model failure exhausted the bounded attempts with no spend counted and nothing published (repo ${SCENARIO_REPO}, PR ${pr_number})"
+}
+
+scenario_missed_webhook_reconciliation_reviews_once() {
+  local label="missed webhook via reconciliation"
+  local repo="reviewer/reconcile-sample"
+  local created head_sha feature_sha
+  local pr_number pr_id dest dest_clause
+  # A pull request whose webhook was NEVER delivered: the reconciler is
+  # the only discoverer. A dedicated repository keeps the poll scoped
+  # away from the webhook-reviewed pull requests of the earlier
+  # scenarios.
+  fapi_json POST /api/v1/user/repos "{\"name\":\"reconcile-sample\",\"auto_init\":true,\"default_branch\":\"main\"}" >/dev/null
+  fapi_json POST "/api/v1/repos/$repo/contents/fixture.txt" \
+    '{"branch":"main","message":"add fixture","content":"b25lCg=="}' >/dev/null
+  fapi_json POST "/api/v1/repos/$repo/branches" \
+    '{"old_branch_name":"main","new_branch_name":"feature"}' >/dev/null
+  # The contents API update of an EXISTING file requires its current sha
+  # on the target branch (same contract push_fixture_commit honours); the
+  # feature branch inherited fixture.txt from main.
+  feature_sha="$(fapi_get "/api/v1/repos/$repo/contents/fixture.txt?ref=feature" | jq -r '.sha')"
+  fapi_json PUT "/api/v1/repos/$repo/contents/fixture.txt" \
+    "{\"branch\":\"feature\",\"message\":\"reconcile scenario fixture\",\"content\":\"cmVjb25jaWxlLXNjZW5hcmlvCg==\",\"sha\":\"$feature_sha\"}" >/dev/null
+  head_sha="$(branch_head_sha "$repo" "feature")"
+  created="$(fapi_json POST "/api/v1/repos/$repo/pulls" \
+    '{"base":"main","head":"feature","title":"Reconciliation scenario PR","body":"missed webhook scenario"}')"
+  pr_number="$(printf '%s' "$created" | jq -r '.number')"
+  pr_id="$(printf '%s' "$created" | jq -r '.id')"
+  case "$pr_number" in '' | null | *[!0-9]*)
+    echo "reconciliation scenario PR creation returned no numeric number" >&2
+    return 1
+    ;;
+  esac
+  cat > "$TMP/instance-reconcile.yaml" <<CFGEOF
+version: 1
+forges:
+  - name: qualification-forgejo
+    kind: forgejo
+    endpoint: "$FORGEJO_API_URL"
+    credential: forgejo
+$(write_model_section)
+adoption:
+  mode: allowlist
+  allowlist: ["$repo"]
+  discovered-default: adopt
+CFGEOF
+  # A reconciler-only daemon: no webhook intake is bound (the missed
+  # webhook is the premise), the poll discovers the pull request itself.
+  unset PR_REVIEWER_WEBHOOK_PORT PR_REVIEWER_WEBHOOK_SECRET
+  export PR_REVIEWER_RECONCILE_INTERVAL_MS=1000
+  export PR_REVIEWER_RECONCILE_REPOS="$repo"
+  start_controller "$TMP/instance-reconcile.yaml" "$TMP/reconcile.log" \
+    "$((SCENARIO_ADMIN_BASE + 2))" "$SCENARIO_ADMIN_TOKEN" "$TMP/reconcile"
+  wait_controller_ready "$((SCENARIO_ADMIN_BASE + 2))" "reconcile" "$TMP/reconcile.log" "${CONTROLLER_PIDS[-1]}"
+  dest="forgejo:${repo}#${pr_number}"
+  dest_clause="p.destination = '${dest}'"
+  if ! wait_published "$dest_clause" "$label" "$TMP/reconcile.log"; then
+    return 1
+  fi
+  local runs pubs usage_runs
+  runs="$(pg_query "SELECT count(*) FROM cp_runs WHERE head_sha = '$head_sha'")"
+  pubs="$(published_count_for "$dest_clause")"
+  usage_runs="$(usage_rows_for_destination "$dest_clause" | /usr/bin/grep -c . || true)"
+  if [[ "$runs" != 1 || "$pubs" != 1 || "$usage_runs" != 1 ]]; then
+    echo "$label scenario did not review the missed pull request exactly once: runs=${runs} published=${pubs} usage-bearing=${usage_runs}" >&2
+    return 1
+  fi
+  # Subsequent passes must not duplicate the work: the reconciler keeps
+  # polling, and the durable generation claim answers duplicate.
+  sleep 4
+  runs="$(pg_query "SELECT count(*) FROM cp_runs WHERE head_sha = '$head_sha'")"
+  usage_runs="$(usage_rows_for_destination "$dest_clause" | /usr/bin/grep -c . || true)"
+  if [[ "$runs" != 1 || "$usage_runs" != 1 ]]; then
+    echo "$label scenario duplicated work on a later reconciliation pass: runs=${runs} usage-bearing=${usage_runs}" >&2
+    return 1
+  fi
+  assert_usage_counted "$RUN_ID"
+  unset PR_REVIEWER_RECONCILE_INTERVAL_MS PR_REVIEWER_RECONCILE_REPOS
+  echo "PASS: missed webhook discovered by reconciliation reviewed exactly once (repo ${repo}, PR ${pr_number}, head ${head_sha}, no duplicate work on later passes)"
+}
+
+# ── scenario runner ──
+# Scenario 1's Forgejo webhook controller is still serving; the
+# webhook-driven scenarios reuse it, and each daemon-owned scenario
+# stops it before binding the intake port itself.
+echo "RUN: duplicate webhook produces exactly one review"
+scenario_duplicate_webhook_produces_exactly_one_review
+
+echo "RUN: webhook burst settles into one paid newest-head review"
+scenario_webhook_burst_settles_to_one_paid_newest_head_review
+
+echo "RUN: new head while the old review waits in the queue"
+scenario_new_head_while_old_review_queued_supersedes_without_spend
+
+echo "RUN: new head while the old review runs"
+scenario_new_head_while_old_review_running_supersedes_without_spend
+
+echo "RUN: stale result attempts publication"
+scenario_stale_result_publication_is_refused_and_newest_head_publishes
+
+echo "RUN: worker timeout"
+scenario_worker_timeout
+
+echo "RUN: worker crash requeues without a duplicate counted model call"
+scenario_worker_crash_requeues_without_duplicate_spend
+
+echo "RUN: controller restart while a worker runs resumes without duplicate work"
+scenario_controller_restart_with_running_worker_resumes_without_rerun
+
+echo "RUN: operator restart with queued settle-window work"
+scenario_operator_restart_with_queued_settle_window_work
+
+echo "RUN: cancelled review"
+scenario_cancellation_cancels_the_review_without_publication
+
+echo "RUN: failed publication followed by a retry with no second model call"
+scenario_publication_retry_without_model_rerun
+
+echo "RUN: usage and cost accounting single-counted across retries and restarts"
+scenario_usage_accounting_single_counted_across_retries_and_restarts
+
+echo "RUN: primary model failure and fallback"
+scenario_model_primary_failure_and_fallback
+
+echo "RUN: missed webhook discovered by reconciliation without duplicate work"
+scenario_missed_webhook_reconciliation_reviews_once
 
 exit 0

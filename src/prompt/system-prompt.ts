@@ -20,7 +20,7 @@
 import { BUNDLED_PROMPT_ASSETS, rawFragment, type PromptAssets } from "./assets.js";
 import { DEPENDENCY_EVIDENCE_KINDS } from "../classification/classify.js";
 import { MAX_DISTRIBUTED_HINTS, MAX_GROUPS_PER_RULE, MAX_GROUP_NAME_CHARS } from "../enforcement/requirement-trace.js";
-import { bashCapture, bashLowerCapture, bashReadCapture, bashReplaceFirst, jqRawPrKind, type PromptWorkspace } from "./bash.js";
+import { bashCapture, bashLowerCapture, bashReadCapture, bashReplaceFirst, jqLockfileOnlyLowRisk, jqRawPrKind, type PromptWorkspace } from "./bash.js";
 
 /** Workspace artifacts the fragment gates read, written by earlier phases. */
 export const PROMPT_PRESENCE_FILES = {
@@ -155,10 +155,20 @@ export function applySystemPromptFragments(
     // Single source of truth with the tool-harness reserve gate: the same
     // exported classification family (src/classification/classify.ts).
     const depEvidence = DEPENDENCY_EVIDENCE_KINDS.has(kind);
+    // #1595: the lockfile-only scoped triage — a dependency_upgrade whose
+    // classification artifact carries `lockfile_only_refresh` with
+    // `parseable = true` and `material = 0` (the deterministic parser
+    // verdict; `low_risk` is a numeric count, the zero-material invariant
+    // is the gate) swaps the dependency-evidence fragment for the scoped
+    // advisory-only variant, so the prompt steers exactly the obligations
+    // the artifact's must_check still names. Same artifact-driven,
+    // deterministic gate as every other fragment; an absent/malformed
+    // triage keeps the full-set fragment (fail closed).
+    const lockfileScoped = depEvidence && jqLockfileOnlyLowRisk(bytes === null ? "" : bytes.toString("utf8"));
     sub("VERSION_BUMP_GUIDANCE", infra ? guidance(assets, "version_bump") : "");
     sub("IMAGE_DIGEST_GUIDANCE", digest ? guidance(assets, "image_digest") : "");
     sub("RELEASE_NOTES_GUIDANCE", infra || digest ? guidance(assets, "release_notes") : "");
-    sub("DEPENDENCY_EVIDENCE_GUIDANCE", depEvidence ? guidance(assets, "dependency_evidence") : "");
+    sub("DEPENDENCY_EVIDENCE_GUIDANCE", depEvidence ? guidance(assets, lockfileScoped ? "dependency_evidence_lockfile_scoped" : "dependency_evidence") : "");
     // #1337: dependency-upgrade coverage accounting. Gated on the
     // deterministic section being present (kind-shaped AND dependency
     // changes detected), so the instructions never reference a section the

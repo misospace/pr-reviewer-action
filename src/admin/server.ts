@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AdminAuthenticator } from "./auth.js";
 import { readBoundedBody } from "./http-body.js";
+import { serveDashboard, type AdminDashboardOptions, type DashboardResponse } from "./dashboard.js";
 import { AdminMetricsRegistry, type AdminMetricsOptions } from "./metrics.js";
 import { dispatchAdminRoute } from "./routes.js";
 import type { ControllerAdminDeps } from "./types.js";
@@ -33,6 +34,15 @@ export interface AdminHostOptions extends AdminMetricsOptions {
   readonly nowMs?: () => number;
   readonly requestId?: () => string;
   readonly mcp?: AdminMcpOptions;
+  /** Optional #742 static dashboard shell on the SAME listener. When
+   * present, `GET /dashboard` and `GET /dashboard/app.js` are served from
+   * compile-time constants; when absent the `/dashboard` paths answer the
+   * fixed 404 like any unknown path — the surface is not part of that
+   * deployment, never open. The paths stay OUTSIDE the `/admin/`
+   * namespace, so the every-admin-route-is-authenticated rule is untouched,
+   * and the shell itself carries zero dynamic data: every data route stays
+   * bearer-protected. */
+  readonly dashboard?: AdminDashboardOptions;
 }
 export interface AdminHost { readonly handler: (request: IncomingMessage, response: ServerResponse) => void; readonly registry: AdminMetricsRegistry; readonly authenticator: AdminAuthenticator; readonly mcp: McpHost | null }
 const BODY_TOO_LARGE = '{"error":"body too large"}';
@@ -84,6 +94,23 @@ export function createAdminHost(options: AdminHostOptions): AdminHost {
       if (mcp !== null && url.pathname === "/mcp") {
         mcp.handler(request, response);
         return;
+      }
+      // The optional #742 dashboard shell mounts on the SAME listener,
+      // OUTSIDE the `/admin/` namespace: it serves compile-time constants
+      // only (zero dynamic data, no request echo) and every data route the
+      // shell fetches stays bearer-protected under `/admin/*`. When not
+      // configured, `/dashboard` falls through to the fixed 404 like any
+      // unknown path — the surface is not part of that deployment, never
+      // open.
+      if (options.dashboard !== undefined && method === "GET") {
+        const dashboard: DashboardResponse | null = serveDashboard(url.pathname);
+        if (dashboard !== null) {
+          response.statusCode = dashboard.status;
+          for (const [name, value] of Object.entries(dashboard.headers)) response.setHeader(name, value);
+          response.setHeader("content-type", dashboard.contentType);
+          response.end(dashboard.body);
+          return;
+        }
       }
       let body: unknown;
       if (method === "POST") {

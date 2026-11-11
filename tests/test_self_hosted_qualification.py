@@ -124,19 +124,24 @@ def _reaches_a_local_forge(path: Path, number: int) -> bool:
 # The disposable instance-config heredocs of the harness, by target path.
 # The adoption guard below must cover every one of them, so a newly added
 # scenario config cannot silently reintroduce an adoption block that never
-# enables its allowlist.
+# enables its allowlist. #1483 added the dead-model and reconciler-only
+# scenario configs.
 INSTANCE_CONFIG_TARGETS = (
     "$TMP/instance-forgejo.yaml",
     "$TMP/instance-github.yaml",
+    "$TMP/instance-dead-model.yaml",
+    "$TMP/instance-reconcile.yaml",
 )
 
 
 def _instance_config_heredocs(script: str) -> dict[str, str]:
-    """Map every instance-config heredoc target to its raw body."""
+    """Map every instance-config heredoc target to its raw body. A
+    scenario writes its config inside its own function, so the heredoc
+    marker may be indented (#1483)."""
     return {
         target: body
         for target, body in re.findall(
-            r'(?m)^cat > "(\$TMP/instance-[a-z]+\.yaml)" <<CFGEOF\n(.*?)\nCFGEOF$',
+            r'(?m)^[ \t]*cat > "(\$TMP/instance-[\w-]+\.yaml)" <<CFGEOF\n(.*?)\n[ \t]*CFGEOF$',
             script,
             re.DOTALL,
         )

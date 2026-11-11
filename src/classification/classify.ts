@@ -2339,6 +2339,13 @@ export interface PRClassification {
    * deliberately discounted. Empty lists when path handling did not fire.
    * Never contains unbounded attacker-controlled text. */
   pathHandlingProvenance: PathHandlingProvenance;
+  /** #1595: bounded lockfile-only triage provenance, non-null only when the
+   * PR classified `dependency_upgrade` AND every changed file is a lockfile.
+   * Counts parsed package version pairs by materiality (see
+   * {@link LockfileOnlyRefresh}); `parseable: false` fails closed. Never
+   * contains untrusted text. Persisted additively as `lockfile_only_refresh`
+   * by `classificationToArtifact` only when non-null. */
+  lockfileOnlyRefresh: LockfileOnlyRefresh | null;
   /** #871: true when the PR's non-test source footprint is substantial — a
    * new non-test source module, or non-test source lines changed over
    * SUBSTANTIAL_SOURCE_LINE_THRESHOLD. role-selection forces the correctness
@@ -2390,7 +2397,7 @@ function evaluateSubstantialCodeChange(files: readonly ChangedFile[]): boolean {
  * dataclass; canonical JSON serialization keeps the artifact bytes
  * v2-identical. */
 export function classificationToArtifact(classification: PRClassification): Record<string, unknown> {
-  return {
+  const artifact: Record<string, unknown> = {
     pr_kind: classification.prKind,
     risk_flags: classification.riskFlags,
     risk_flags_with_files: classification.riskFlagsWithFiles,
@@ -2406,6 +2413,17 @@ export function classificationToArtifact(classification: PRClassification): Reco
       discounted: classification.pathHandlingProvenance.discounted,
     },
   };
+  // #1595: persisted additively only when the lockfile-only triage ran (a
+  // lockfile-only dependency refresh); key order stays deterministic (the
+  // appended key is last). Counts are numbers — no untrusted text.
+  if (classification.lockfileOnlyRefresh !== null) {
+    artifact["lockfile_only_refresh"] = {
+      material: classification.lockfileOnlyRefresh.material,
+      low_risk: classification.lockfileOnlyRefresh.lowRisk,
+      parseable: classification.lockfileOnlyRefresh.parseable,
+    };
+  }
+  return artifact;
 }
 
 // ---------------------------------------------------------------------------
@@ -3624,6 +3642,300 @@ function detectRiskFlags(
 }
 
 // ---------------------------------------------------------------------------
+// Lockfile-only refresh triage (#1595)
+// ---------------------------------------------------------------------------
+
+/** #1595: bounded provenance for the lockfile-only dependency-refresh
+ * triage. Counts only — no parsed package name or version string is
+ * retained (untrusted diff content is data, never artifact prose). */
+export interface LockfileOnlyRefresh {
+  /** Parsed package bumps that are NOT ordinary transitive churn: a
+   * missing side (added/removed package or unpaired version), a value
+   * that is not a strictly pinned semver (a range, a tag, trailing
+   * junk), a semver-major jump, a prerelease, an unstable `0.` version,
+   * a changed runtime constraint (`engines`/`os`/`cpu`/`libc`), or a
+   * changed dependency-relation/other field (direct ranges, peer/optional
+   * maps, bin paths, install scripts, license). */
+  material: number;
+  /** Parsed package bumps that are plain patch/minor churn. */
+  lowRisk: number;
+  /** False when the diff yielded no parseable package-version value or
+   * changed runtime constraint inside a package block (the root-project
+   * `""` block included), when a changed line failed the parse closed
+   * outside any block, or the parse overflowed its bound — the triage must
+   * fail closed to the full material review. */
+  parseable: boolean;
+}
+
+/** Bucketed removed/added version values per package block, first-seen
+ * order (the `parseTagChanges` bucketing discipline). Blocks are kept in
+ * insertion order and NOT deduplicated by header: two lockfiles in one PR
+ * (or one lockfile with repeated keys) can carry the same
+ * `"node_modules/<name>"` header, and merging their buckets could hide a
+ * material bump in the earlier file. */
+interface LockfileVersionBucket {
+  old: string[];
+  new: string[];
+  /** The block carries a changed runtime-constraint field
+   * (`engines`/`os`/`cpu`/`libc`) — material regardless of the version
+   * pair. */
+  constraintChanged: boolean;
+  /** The block carries a changed field that is neither a paired version
+   * nor ordinary hash/URL churn — a dependency/peer/optional relation
+   * change, bin path, install script, license, or unrecognized key.
+   * Material by rule (fail closed). */
+  relationChanged: boolean;
+}
+
+/** A package block header in an npm package-lock v2/v3 diff: the
+ * `"node_modules/<name>"` key, or the root-project entry `""` (whose
+ * `dependencies`/`devDependencies` maps carry the DIRECT dependency
+ * ranges — a changed direct range is material, never ignored). */
+const LOCKFILE_PACKAGE_KEY_RE = /^(?:"node_modules\/[^"]+"|"")\s*:\s*\{/;
+
+/** The npm runtime-constraint fields inside a package block, pretty-printed
+ * as an object/array open line. A changed line for one of these is a changed
+ * runtime constraint or platform variant — material by rule (#1595
+ * acceptance: a runtime-floor change still creates relevant obligations). */
+const LOCKFILE_RUNTIME_CONSTRAINT_KEY_RE = /^"(?:engines|os|cpu|libc)"\s*:\s*/;
+
+/** Any other JSON object key. With brace-depth tracking this is a NESTED
+ * object inside the current package block (`"dependencies": {`,
+ * `"bin": {`) — deeper nesting, not a block close: npm emits `engines`
+ * AFTER `dependencies`/`bin` in many packages, so closing the block on the
+ * first nested key would drop a changed engines floor. */
+const LOCKFILE_OTHER_KEY_RE = /^"[^"]+"\s*:\s*\{/;
+
+/** Changed keys inside a package block that are the ordinary churn riding
+ * along with EVERY version bump — the tarball hash and the registry URL.
+ * Any OTHER changed value line inside a block (a dependency/peer/optional
+ * relation map entry, bin paths, install scripts, license, the dev/optional
+ * placement flags, or an unrecognized future field) is material — fail
+ * closed (#1595 review: relation changes must not ride along under the
+ * scoped review). Known limitation, accepted and documented: a "resolved"
+ * host switch with an unchanged version rides along as churn. Structural
+ * header lines (package keys, nested map openers) are shape, not values —
+ * a real added/removed/renamed entry always carries changed version or
+ * relation value lines that the rules below catch. */
+const LOCKFILE_IGNORED_CHANGED_KEYS = /^(?:"integrity"|"resolved")\s*:\s*/;
+
+/** A changed `"version": "x.y.z"` line inside a package block. */
+const LOCKFILE_VERSION_LINE_RE = /^"version"\s*:\s*"([^"]*)"/;
+
+/** A strictly pinned semver: `major.minor.patch` with an optional
+ * prerelease and an optional build suffix, nothing before or after. Any
+ * other value — a range (`1.2.3 || >=3`), a tag, a URL, trailing junk — is
+ * NOT a pinned version and is material by default (fail closed; #1595
+ * review). The prerelease is captured (group 4) so build metadata with a
+ * dash (`1.0.0+2024-01-01`) is not misread as a prerelease. */
+const PINNED_SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.\-]+))?(?:\+([0-9A-Za-z.\-]+))?$/;
+
+/** Bounds for the diff walk — a lockfile diff is machine-generated, so
+ * anything beyond these is hostile noise and fails the parse closed. */
+const LOCKFILE_PARSE_MAX_PACKAGES = 1000;
+const LOCKFILE_PARSE_MAX_LINES = 100000;
+
+/** Materiality of one parsed old→new version pair — the closed,
+ * deterministic rule from #1595: a missing or unparsable side, a value that
+ * is not a strictly pinned semver (fail closed — a range-like or malformed
+ * value could hide a major jump), a semver-major difference, a prerelease,
+ * or an unstable `0.` version is material; everything else is ordinary
+ * patch/minor transitive churn. */
+function isMaterialVersionPair(oldVersion: string, newVersion: string): boolean {
+  const oldCore = PINNED_SEMVER_RE.exec(oldVersion);
+  const newCore = PINNED_SEMVER_RE.exec(newVersion);
+  if (oldCore === null || newCore === null) return true;
+  if (oldCore[1] !== newCore[1]) return true;
+  if (oldCore[4] !== undefined || newCore[4] !== undefined) return true;
+  if (oldCore[1] === "0" || newCore[1] === "0") return true;
+  return false;
+}
+
+/** Parse the npm package-lock v2/v3 version-pair shape out of a unified
+ * diff: paired removed/added `"version": "x.y.z"` lines inside
+ * `"node_modules/<name>"` blocks (and the root-project `""` block), plus
+ * changed runtime-constraint fields (`engines`/`os`/`cpu`/`libc`). Pure,
+ * bounded, lexical. Returns null when the diff yields no parseable change
+ * at all, when a changed version/constraint/other line appears OUTSIDE any
+ * package block (a minimal-context diff can hide which package a major
+ * bump, an engines-floor change, or a relation change belongs to — it is
+ * never silently dropped), or when the parse overflows its bounds (caller
+ * fails closed to material). Any changed field inside a block other than a
+ * paired version, a constraint, or hash/URL churn is material (a
+ * dependency-relation change must not ride along under the scoped review).
+ * Deliberately npm-only — every other lockfile shape fails closed the same
+ * way. */
+function parseLockfileVersionBuckets(diffText: string): LockfileVersionBucket[] | null {
+  const buckets: LockfileVersionBucket[] = [];
+  let current: LockfileVersionBucket | null = null;
+  // Brace depth inside the current package block's object (1 = the block
+  // object itself). npm pretty-prints nested objects (`"dependencies"`,
+  // `"bin"`, `"engines"`) INSIDE a package block, so the block closes only
+  // when its own braces balance — never on a nested key. Diff hunks can
+  // omit unchanged braces; the next package-block header resets the state,
+  // and a residual depth only delays the close (never reopens a block).
+  let depth = 0;
+  // Inside an `engines`/`os`/`cpu`/`libc` object/array.
+  let inConstraint = false;
+  let sawParsedChange = false;
+  let lines = 0;
+  for (const line of diffText.split("\n")) {
+    if (++lines > LOCKFILE_PARSE_MAX_LINES) return null;
+    const sign = line.startsWith("-") && !line.startsWith("---")
+      ? "-"
+      : line.startsWith("+") && !line.startsWith("+++") ? "+" : "";
+    const content = line.slice(sign === "" ? 0 : 1).trim();
+    if (content === "") continue;
+    if (LOCKFILE_PACKAGE_KEY_RE.test(content)) {
+      // A package block: bucket by first-seen order (the untrusted name
+      // never leaves this parser). Deliberately NOT deduplicated — two
+      // lockfiles can share the same header (see LockfileVersionBucket).
+      if (buckets.length >= LOCKFILE_PARSE_MAX_PACKAGES) return null;
+      current = { old: [], new: [], constraintChanged: false, relationChanged: false };
+      buckets.push(current);
+      depth = 1;
+      inConstraint = false;
+      continue;
+    }
+    if (LOCKFILE_RUNTIME_CONSTRAINT_KEY_RE.test(content)) {
+      // Checked BEFORE LOCKFILE_OTHER_KEY_RE, which would otherwise treat
+      // `"engines": {` as a nested key: a constraint region stays inside
+      // its package block. A single-line value — an inline object/array
+      // that closes itself, or a scalar like `"os": "linux"` — closes on
+      // this line and never opens a region.
+      if (sign !== "") {
+        // A changed constraint line outside any package block is never
+        // dropped — a minimal-context diff could hide whose engines floor
+        // or platform variant moved. Fail the parse closed.
+        if (current === null) return null;
+        current.constraintChanged = true;
+        sawParsedChange = true;
+      }
+      const constraintValue = content.slice((LOCKFILE_RUNTIME_CONSTRAINT_KEY_RE.exec(content) as RegExpExecArray)[0].length);
+      if (/^[\[{]/.test(constraintValue) && !/[}\]]\s*,?\s*$/.test(content)) {
+        inConstraint = true;
+        if (current !== null) depth += 1;
+      }
+      continue;
+    }
+    if (inConstraint) {
+      // Interior of a constraint object/array: an npm pretty-printed value
+      // change (`"node": ">=18"`) is a changed runtime constraint even when
+      // the opening line is context. A closing `}`/`]` bracket leaves it.
+      if (/^[}\]]/.test(content)) {
+        inConstraint = false;
+        if (current !== null) {
+          depth -= 1;
+          if (depth <= 0) current = null;
+        }
+        continue;
+      }
+      if (sign !== "") {
+        if (current === null) return null;
+        current.constraintChanged = true;
+        sawParsedChange = true;
+      }
+      continue;
+    }
+    if (/^[}\]]/.test(content)) {
+      if (current !== null) {
+        depth -= 1;
+        if (depth <= 0) current = null;
+      }
+      continue;
+    }
+    if (LOCKFILE_OTHER_KEY_RE.test(content)) {
+      if (sign !== "" && current !== null) {
+        // A changed map opener (`"dependencies": {`) means a nested object
+        // — usually a relation map — was added, removed, or retitled.
+        // Ordinary churn never rewrites these openers; a relation map
+        // appearing or vanishing must not ride along under the scoped
+        // review (#1595 review: changed object-valued fields).
+        current.relationChanged = true;
+        sawParsedChange = true;
+      }
+      // An inline single-line object (`"bin": { "ms": "bin/ms.js" }`)
+      // opens and closes on this line — no depth change.
+      if (current !== null && !/}\s*,?\s*$/.test(content)) depth += 1;
+      continue;
+    }
+    const version = LOCKFILE_VERSION_LINE_RE.exec(content);
+    if (version !== null && sign !== "") {
+      // #1595 review: a changed version line outside any package block is
+      // never dropped — the minimal-context diff that hides its package
+      // could hide a MAJOR bump. Fail the parse closed (same as
+      // unparseable → full material review).
+      if (current === null) return null;
+      current[sign === "-" ? "old" : "new"].push(version[1] as string);
+      sawParsedChange = true;
+      continue;
+    }
+    // #1595 maintainer review: any OTHER changed VALUE line is material or
+    // fails closed — never silently ignored. Hash/URL churn
+    // (`"integrity"`, `"resolved"`) rides along with every bump and stays
+    // churn; a changed relation-map entry (dependency/peer/optional ranges
+    // — including the DIRECT ranges in the root `""` block), bin path,
+    // install script, license, dev/optional flag, or unrecognized field
+    // inside a block is material. Outside any block the parse fails closed
+    // (a minimal-context diff could hide what moved). Structural header
+    // lines (block keys, map openers) carry no value of their own — a real
+    // added/removed/renamed entry always carries changed value lines that
+    // the rules above catch.
+    if (sign === "" || LOCKFILE_IGNORED_CHANGED_KEYS.test(content)) continue;
+    if (current === null) return null;
+    current.relationChanged = true;
+    sawParsedChange = true;
+  }
+  // A diff with no parsed package-version value and no changed constraint
+  // is not a parseable lockfile shape.
+  if (!sawParsedChange) return null;
+  return buckets;
+}
+
+/** #1595: the deterministic lockfile-only triage for a `dependency_upgrade`
+ * PR whose every changed file is a lockfile (npm package-lock v2/v3). Walks
+ * the full diff, pairs removed→added version values per package block by
+ * first-seen order, and counts material vs low-risk bumps. A diff that
+ * yields no parseable change fails CLOSED (material), never opens the
+ * scoped review. A changed runtime constraint (`engines`/`os`/`cpu`/
+ * `libc`) or a changed dependency-relation/other field in a block is
+ * material regardless of its version pair. Pure and bounded; returns
+ * counts only. */
+export function evaluateLockfileOnlyRefresh(fullDiffText: string): LockfileOnlyRefresh {
+  const buckets = parseLockfileVersionBuckets(fullDiffText);
+  if (buckets === null) return { material: 0, lowRisk: 0, parseable: false };
+  let material = 0;
+  let lowRisk = 0;
+  for (const { old, new: added, constraintChanged, relationChanged } of buckets) {
+    const paired = Math.min(old.length, added.length);
+    for (let index = 0; index < paired; index += 1) {
+      if (isMaterialVersionPair(old[index] as string, added[index] as string)) material += 1;
+      else lowRisk += 1;
+    }
+    // An unpaired version (a package added or removed by this diff, or an
+    // orphaned side of a block) has a missing side — material by rule.
+    material += old.length + added.length - 2 * paired;
+    // A changed runtime constraint or platform variant is a runtime-risk
+    // change even when the version pair is same-major (#1595 acceptance:
+    // a runtime-floor change still creates relevant obligations). The same
+    // for a changed dependency-relation/other field (direct ranges,
+    // peer/optional maps, bin paths, install scripts) — it must not ride
+    // along under the scoped review.
+    if (constraintChanged || relationChanged) material += 1;
+  }
+  // Non-null means the parser saw at least one parsed package-version value
+  // or changed runtime constraint inside a package block — the shape
+  // parsed, so the triage verdict is trusted.
+  return { material, lowRisk, parseable: true };
+}
+
+/** #1595: the scoped must_check applies ONLY when the triage positively
+ * proved an all-low-risk, parseable lockfile-only refresh. */
+function isLowRiskLockfileOnlyRefresh(triage: LockfileOnlyRefresh | null): boolean {
+  return triage !== null && triage.parseable && triage.material === 0;
+}
+
+// ---------------------------------------------------------------------------
 // Checklist derivation
 // ---------------------------------------------------------------------------
 
@@ -3709,6 +4021,25 @@ const KIND_CHECKS: Readonly<Record<string, readonly string[]>> = {
   ],
 };
 
+// #1595: the scoped must_check for a lockfile-only dependency refresh whose
+// parsed diff shows ONLY ordinary transitive churn (no material bump): the
+// two local checks stay exactly as the dependency_upgrade texts and the
+// three per-dependency upstream-evidence rows collapse into ONE aggregate
+// advisory row, shaped like the DEPENDENCY_EVIDENCE_CHECKS advisory row but
+// scoped to this PR. The text still maps onto the security_advisory
+// obligation via dependencyObligationForCheckText (it matches /security
+// advisories/), and it deliberately does NOT match the provenance or
+// release-delta vocabularies — the "no per-package provenance or
+// release-delta research" scope sentence lives in the scoped prompt
+// fragment, not in the must_check rows. Static trusted text only — no
+// parsed package names or versions ever flow into these rows.
+const LOCKFILE_REFRESH_LOW_RISK_CHECKS: readonly string[] = [
+  "check for breaking API changes in updated dependencies",
+  "run full test suite after upgrade",
+  "check upstream security advisories for the packages changed in this lockfile-only refresh, " +
+    "or report the advisory check as not performed",
+];
+
 /** Checklist items per linked-issue risk flag. */
 const FLAG_CHECKS: Readonly<Record<string, readonly string[]>> = {
   linked_security_issue: ["explicitly address the linked security issue"],
@@ -3755,6 +4086,10 @@ function buildMustCheck(
   prKind: string,
   riskFlags: readonly string[],
   riskFlagsWithFiles: Readonly<Record<string, string[]>>,
+  // #1595: the lockfile-only triage, consumed only for the dependency_upgrade
+  // kind row (ignored for flag rows — a fired security-sensitive flag still
+  // adds its own checklist item on top).
+  lockfileOnlyRefresh: LockfileOnlyRefresh | null = null,
 ): string[] {
   const checks: string[] = [];
   const seen = new Set<string>();
@@ -3762,7 +4097,11 @@ function buildMustCheck(
     if (CONTENT_ONLY_SUPPRESSED_CHECK_FLAGS.has(key) && (riskFlagsWithFiles[key] ?? []).length === 0) {
       continue;
     }
-    for (const check of [...(KIND_CHECKS[key] ?? []), ...(FLAG_CHECKS[key] ?? [])]) {
+    const kindChecks =
+      key === "dependency_upgrade" && isLowRiskLockfileOnlyRefresh(lockfileOnlyRefresh)
+        ? LOCKFILE_REFRESH_LOW_RISK_CHECKS
+        : KIND_CHECKS[key] ?? [];
+    for (const check of [...kindChecks, ...(FLAG_CHECKS[key] ?? [])]) {
       if (!seen.has(check)) {
         seen.add(check);
         checks.push(check);
@@ -3912,8 +4251,15 @@ export function classifyPr(input: ClassifyInput): PRClassification {
 
   const metadata = classifyPrMetadata(prAuthor, headBranch, prTitle);
   const prKind = classifyPrKind(prFiles, diffText, fullDiffText ?? diffText, authoritativeChangedFiles, metadata);
+  // #1595: bounded lockfile-only triage — only for a dependency_upgrade PR
+  // whose every changed file is a lockfile, over the complete diff (the same
+  // completeness surface the digest rules use).
+  const lockfileOnlyRefresh =
+    prKind === "dependency_upgrade" && allFilesAreLockfiles(prFiles.map((file) => file.filename))
+      ? evaluateLockfileOnlyRefresh(fullDiffText ?? diffText)
+      : null;
   const { flags, flagsWithFiles } = detectRiskFlags(prFiles, diffText, fullDiffText ?? diffText, linkedIssues, prKind, metadata);
-  const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles);
+  const mustCheck = buildMustCheck(prKind, flags, flagsWithFiles, lockfileOnlyRefresh);
 
   // Build changed files summary (just filenames, truncated).
   const fileNames = prFiles.map((file) => file.filename);
@@ -3941,6 +4287,7 @@ export function classifyPr(input: ClassifyInput): PRClassification {
     linkedMetadataUncertain: uncertainty.uncertain,
     linkedMetadataUncertainty: uncertainty.reasons,
     pathHandlingProvenance,
+    lockfileOnlyRefresh,
     substantialCodeChange,
   };
 }
