@@ -447,6 +447,43 @@ def test_review_id_bound_attestation_trusts_only_that_row():
     assert by_id[("comment", None)]["attestation_conclusion"] is None
 
 
+def test_malformed_review_id_record_certifies_nothing():
+    """A present-but-malformed review binding is poisoned, not demoted.
+
+    A record the operator meant as review-scoped must never silently
+    become head-scoped evidence for a single-attempt row.
+    """
+    comment = _comment(2, HEAD)
+    for bad_id in ("7", True, 7.5, ["7"]):
+        rows = rc.collect_rows(
+            REPO, [_pull(1, HEAD, comments=[comment])], [BOT],
+            [{"conclusion": "approved", "reason_code": "native_gate", "head_sha": HEAD,
+              "review_id": bad_id}],
+        )
+        assert rows[0]["disposition"] == "unknown_missing_native", bad_id
+        assert rows[0]["attestation_conclusion"] is None, bad_id
+
+
+def test_replayed_duplicate_record_does_not_void_head_only_attestation():
+    """A fixture that replays one record twice is still one attempt."""
+    comment = _comment(12, HEAD)
+    attestations = [{"conclusion": "approved", "reason_code": "native_gate", "head_sha": HEAD}]
+    rows = rc.collect_rows(
+        REPO, [_pull(1, HEAD, comments=[comment, dict(comment)])], [BOT], attestations
+    )
+    assert len(rows) == 1  # dedupe keeps the replay idempotent
+    assert rows[0]["disposition"] == "trusted_complete_approval"
+
+
+def test_attestation_head_bound_matches_the_rows_head_normalization():
+    """The head-only pool keys heads exactly as row heads are normalized."""
+    comment = _comment(12, HEAD)
+    padded = {"conclusion": "approved", "reason_code": "native_gate",
+              "head_sha": f" {HEAD} "}
+    rows = rc.collect_rows(REPO, [_pull(1, HEAD, comments=[comment])], [BOT], [padded])
+    assert rows[0]["disposition"] == "trusted_complete_approval"
+
+
 def test_review_id_bound_attestation_on_another_head_is_not_evidence():
     """A review-bound record whose head disagrees certifies nothing."""
     review = _review(7, HEAD, "COMMENTED")

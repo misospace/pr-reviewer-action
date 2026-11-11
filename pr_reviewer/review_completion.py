@@ -550,11 +550,12 @@ def collect_rows(
     borrowed across attempts that share a head (#1602 human review):
     ``{"conclusion", "reason_code", "head_sha", "review_id"?}`` — a
     record carrying ``review_id`` is evidence only for the native review
-    row with that id at a consistent head; a head-only record is
-    evidence only when that head has exactly one collected attempt, so
-    the head binding identifies it unambiguously. Attestations are
-    additional trusted evidence only; they never override a row's own
-    marker fields.
+    row with that id at a consistent head; a record whose ``review_id``
+    is present but malformed certifies nothing; a head-only record is
+    evidence only when that head has exactly one collected attempt
+    (replayed duplicates of one record count once), so the head binding
+    identifies it unambiguously. Attestations are additional trusted
+    evidence only; they never override a row's own marker fields.
     """
     bots_lower = {login.strip().lower() for login in bot_logins if isinstance(login, str) and login.strip()}
 
@@ -567,10 +568,19 @@ def collect_rows(
         if not (isinstance(head, str) and _usable_head(head)):
             continue
         attestation_review_id = record.get("review_id")
+        if attestation_review_id is not None and not (
+            isinstance(attestation_review_id, int) and not isinstance(attestation_review_id, bool)
+        ):
+            # A present-but-malformed review binding is a poisoned record:
+            # it was meant to be review-scoped, so it certifies nothing
+            # rather than being demoted to head-scoped evidence.
+            continue
         if isinstance(attestation_review_id, int) and not isinstance(attestation_review_id, bool):
             attested_reviews[attestation_review_id] = record
         else:
-            attested_heads[head.strip()] = record
+            # Same normalization as the row head and _heads_differ:
+            # bounded to _HEAD_LIMIT after stripping.
+            attested_heads[head.strip()[:_HEAD_LIMIT]] = record
 
     rows: list[dict[str, Any]] = []
     record_ids: dict[tuple, int | None] = {}
@@ -632,6 +642,7 @@ def collect_rows(
         # attempt shares that head and the binding is unambiguous.
         resolved: list[tuple[dict[str, Any], str]] = []
         head_attempt_counts: dict[str, int] = {}
+        seen_attempt_records: set[tuple] = set()
         for attempt in attempts:
             head = attempt.get("commit_id")
             if attempt["source"] == "comment":
@@ -641,6 +652,15 @@ def collect_rows(
             head_text = head.strip()[:_HEAD_LIMIT] if isinstance(head, str) else ""
             resolved.append((attempt, head_text))
             if head_text:
+                # A replayed duplicate of the same record is one attempt,
+                # matching the row dedupe below: it must not inflate the
+                # count and void an otherwise valid head-only attestation.
+                record_id = attempt.get("record_id")
+                if record_id is not None:
+                    replay_key = (attempt["source"], record_id, head_text)
+                    if replay_key in seen_attempt_records:
+                        continue
+                    seen_attempt_records.add(replay_key)
                 head_attempt_counts[head_text] = head_attempt_counts.get(head_text, 0) + 1
         for attempt, head_text in resolved:
             attestation = _matching_attestation(
