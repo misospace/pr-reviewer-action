@@ -18,6 +18,7 @@ import type { StageEnv } from "../src/run/env.js";
 import { prioritizeDiff } from "../src/corpus/diff-priority.js";
 import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../src/corpus/assemble.js";
 import { markerReviewResult, renderPartialCoverageNotice } from "../src/publish/publish.js";
+import { toolBudgetRoute } from "../src/tools/budget.js";
 import { publishInputFromEnv } from "../src/run/entrypoints.js";
 import { resolvePartialCoverage, toolBudgetTelemetryOf } from "../src/engine/review.js";
 import type { PartialCoverage } from "../src/tools/coverage.js";
@@ -870,6 +871,210 @@ test("#1464 review: an exploratory round starting above the reserve gets a bound
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
   const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
   assert.equal((telemetry.budget as Record<string, unknown>).verdict_reserve_sec, 30);
+});
+
+test("#1598 review: the failover wall-clock cap narrows the fallback loop's envelope, reserve included", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // TOOL_LOOP_WALL_CLOCK_SEC 600 would put the exploration boundary at
+  // anchor+570, but the failover caller caps the envelope at the remaining
+  // 100s: the effective wall clock is 100 → reserve 30 → boundary anchor+70.
+  // The clock advances 10s per read and saturates at 80 — the exact #1464
+  // 100s shape — so the loop must stop at the reserve INSIDE the capped
+  // envelope instead of running to the 600s ceiling. The fallback tier's
+  // own lane keys (AI_FALLBACK_*) prove the capped loop is the failover one.
+  let clock = 0;
+  const timeouts: number[] = [];
+  let transportCalls = 0;
+  const logs: string[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "fallback",
+      TOOL_LOOP_WALL_CLOCK_SEC: "600",
+      AI_FALLBACK_BASE_URL: "http://model.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_FALLBACK_API_KEY: "fallback-k",
+      AI_FALLBACK_API_FORMAT: "openai",
+    },
+    wallClockSecCap: 100,
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, timeout) => {
+      timeouts.push(timeout);
+      return scripted[transportCalls++];
+    },
+    timeFn: () => {
+      clock = Math.min(clock + 10, 80);
+      return clock;
+    },
+    log: (line) => { logs.push(line); },
+  }));
+  assert.deepEqual(timeouts, [30, 30]);
+  assert.equal(result.stop_reason, STOP_WALL_CLOCK_RESERVE);
+  assert.equal(result.rounds, 1);
+  assert.equal(result.tier, "fallback");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.match(logs.join("\n"), /native_loop: verdict reserve 30s of 100s wall clock \(#1464\)/);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.fallback.json"), "utf8")) as Record<string, unknown>;
+  const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
+  assert.equal((telemetry.budget as Record<string, unknown>).verdict_reserve_sec, 30);
+});
+
+test("#1598 review: an unset wall-clock cap keeps the configured envelope byte-for-byte", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  // With no cap the fallback tier's envelope is the configured 600s: the
+  // clock saturating at 80 is far from the anchor+570 boundary, so the loop
+  // runs past round 1 (unlike the capped run above) and its verdict turn
+  // is granted the whole-deadline remaining, never a reserve clamp.
+  let clock = 0;
+  let transportCalls = 0;
+  const logs: string[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("fallback investigation complete"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "fallback",
+      TOOL_LOOP_WALL_CLOCK_SEC: "600",
+      AI_FALLBACK_BASE_URL: "http://model.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_FALLBACK_API_KEY: "fallback-k",
+      AI_FALLBACK_API_FORMAT: "openai",
+    },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey, _timeout) => {
+      transportCalls += 1;
+      clock = Math.min(clock + 10, 80);
+      return scripted[transportCalls - 1];
+    },
+    timeFn: () => clock,
+    log: (line) => { logs.push(line); },
+  }));
+  assert.equal(transportCalls, 3);
+  assert.equal(result.stop_reason, "model-stopped");
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.match(logs.join("\n"), /native_loop: verdict reserve 150s of 600s wall clock \(#1464\)/);
+});
+
+test("#1598 review: the fallback tier dials the BOUND resolved lane, never a re-resolution of the route-rebound env", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // The engine rebinds the base AI_* keys to the primary override on the
+  // auto route (src/engine/review.ts) AFTER resolving the tier profiles, so
+  // an env re-resolution inside the harness would hand an inherited fallback
+  // lane the primary-override endpoint and credential. The bound lane is the
+  // one the fallback verdict came from — the loop must dial exactly it.
+  const dialed: Array<{ baseUrl: string; apiKey: string; model: string; apiFormat: string; effort: unknown }> = [];
+  let transportCalls = 0;
+  const logs: string[] = [];
+  let clock = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("fallback investigation complete"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: {
+      ...withPrompt.env,
+      TOOL_HARNESS_TIER: "fallback",
+      TOOL_LOOP_WALL_CLOCK_SEC: "600",
+      // Post-rebind base keys: the primary-override lane's values. No
+      // AI_FALLBACK_* URL/key — the fallback lane inherits the base, which
+      // is exactly why re-resolution here would diverge. The rebound effort
+      // is the primary lane's; the bound lane's own effort must win.
+      AI_BASE_URL: "http://primary-override.test/v1",
+      AI_API_KEY: "primary-override-key",
+      AI_REASONING_EFFORT: "low",
+    },
+    fallbackLane: {
+      baseUrl: "http://fallback-lane.test/v1",
+      model: "fallback-m",
+      apiFormat: "openai",
+      apiKey: "fallback-lane-key",
+      reasoningEffort: "high",
+    },
+    transport: async (baseUrl, apiFormat, payload, apiKey) => {
+      dialed.push({
+        baseUrl,
+        apiKey,
+        model: String((payload as Record<string, unknown>).model),
+        apiFormat,
+        effort: (payload as Record<string, unknown>).reasoning_effort,
+      });
+      transportCalls += 1;
+      clock = Math.min(clock + 10, 80);
+      return scripted[transportCalls - 1];
+    },
+    timeFn: () => clock,
+    log: (line) => { logs.push(line); },
+  }));
+  assert.equal(transportCalls, 3);
+  assert.equal(result.stop_reason, "model-stopped");
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  assert.ok(dialed.every((call) => call.baseUrl === "http://fallback-lane.test/v1"
+    && call.apiKey === "fallback-lane-key"
+    && call.model === "fallback-m"
+    && call.apiFormat === "openai"
+    && call.effort === "high"), `unexpected dial: ${JSON.stringify(dialed)}`);
+  assert.match(logs.join("\n"), /native_loop: verdict reserve 150s of 600s wall clock \(#1464\)/);
+});
+
+test("#1598 review (info): a loop that stops before its wall-clock ceiling records measured elapsed_sec, not the ceiling", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Uncapped loop: the 600s ceiling (reserve 150, exploration boundary
+  // anchor+450) never binds — the model stops making tool calls after one
+  // round. The clock advances 1s per read so the artifact's
+  // tool_loop_telemetry.usage.elapsed_sec must be the MEASURED loop delta,
+  // not the configured TOOL_LOOP_WALL_CLOCK_SEC. Read map follows the
+  // #1464 tests: anchor 1, loop start 2, then per round: exceeded,
+  // reserve, model-wait clamp, executor entry, executor remaining; the
+  // common-exit elapsed close-out reads right after the loop's final
+  // between-rounds pair.
+  let clock = 0;
+  let transportCalls = 0;
+  const reads: number[] = [];
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("investigation complete, no more tools"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_LOOP_WALL_CLOCK_SEC: "600" },
+    transport: async (_baseUrl, _apiFormat, _payload, _apiKey) => scripted[transportCalls++],
+    timeFn: () => {
+      clock += 1;
+      reads.push(clock);
+      return clock;
+    },
+  }));
+  assert.equal(transportCalls, 3, "one exploratory round, the no-tool-call stop turn, then the closing verdict");
+  assert.equal(result.stop_reason, "model-stopped", "the loop finished on its own, not on the clock");
+  assert.equal(result.rounds, 2, "the tool round plus the no-tool-call stop turn");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.equal(result.native_loop_verdict_status, "accepted");
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = artifact.tool_loop_telemetry as Record<string, unknown>;
+  const elapsed = Number((telemetry.usage as Record<string, unknown>).elapsed_sec);
+  assert.ok(Number.isFinite(elapsed) && elapsed >= 0);
+  assert.equal((telemetry.budget as Record<string, unknown>).wall_clock_sec, 600, "the ceiling itself is still reported in the budget block");
+  assert.ok(elapsed < 600, `elapsed must be the measured loop delta, not the configured ceiling, got ${elapsed}`);
+  // Pin the read map: read 2 is the loop start, the loop's final read is the
+  // elapsed close-out; elapsed equals exactly that measured delta.
+  assert.equal(reads[1], 2, "the loop start is the second budget-clock read");
+  const loopEndRead = reads[10]!;
+  assert.equal(elapsed, loopEndRead - 2, "elapsed_sec is final-minus-start on the fake clock");
+  assert.equal(elapsed, 9);
 });
 
 test("#1464 review: #1459 shape — the last allowed round cannot push the remaining below the reserve and the verdict gets the full slice", async () => {
@@ -2230,6 +2435,22 @@ test("#922: a declared window scales the loop's context limits per tier", () => 
   // The smart tier reads its own window, then the global one.
   assert.equal(loopContextLimits({ SMART_MODEL_CONTEXT_TOKENS: "400000", PRIMARY_MODEL_CONTEXT_TOKENS: "32768" }, "smart").maxConversationTokens, 100000);
   assert.equal(loopContextLimits({ MODEL_CONTEXT_TOKENS: "400000" }, "smart").maxConversationTokens, 100000);
+});
+
+test("#1598 review: the fallback tier's context limits read the FALLBACK window, not the primary one", () => {
+  // A smaller fallback window is enforced even when the primary declares a
+  // larger one — the fallback loop dials the fallback model.
+  assert.deepEqual(
+    loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000", FALLBACK_MODEL_CONTEXT_TOKENS: "262144" }, "fallback"),
+    { maxConversationTokens: 65536, corpusMaxBytes: 117964, maxResponseBytes: 15728 },
+  );
+  assert.equal(loopContextLimits({ FALLBACK_MODEL_CONTEXT_TOKENS: "1000000" }, "fallback").maxConversationTokens, 250000);
+  // Unset falls to the global key, then the v3.1 constants — and a primary
+  // window alone must NOT size the fallback tier.
+  assert.equal(loopContextLimits({ MODEL_CONTEXT_TOKENS: "400000" }, "fallback").maxConversationTokens, 100000);
+  assert.deepEqual(loopContextLimits({ PRIMARY_MODEL_CONTEXT_TOKENS: "1000000" }, "fallback"), { maxConversationTokens: 24000, corpusMaxBytes: 50000, maxResponseBytes: 12000 });
+  // The LOOP LIMITS still resolve on the primary profile's keys.
+  assert.deepEqual(resolveLoopLimits({ TOOL_MAX_ROUNDS: "2", TOOL_LOOP_WALL_CLOCK_SEC: "120" }, "fallback"), [2, 120, true]);
 });
 
 test("#922: explicit byte inputs override the window-derived limits", () => {
@@ -4147,4 +4368,116 @@ test("#1466: the production transport adapter attaches the probe to BOTH respons
   } finally {
     await server.close();
   }
+});
+
+// ── #1598: the fallback evidence-failover tier ──────────────────────────────
+
+test("#1598: TOOL_HARNESS_TIER=fallback runs the native loop on the RESOLVED fallback lane", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  const scripted = [openAiCall("c1", "read_file", '{"path":"src.ts"}'), openAiText("fallback evidence gathered"), validVerdict()];
+  const seen: Array<{ baseUrl: string; apiKey: string; payload: Record<string, unknown> }> = [];
+  let transportCalls = 0;
+  const { result } = await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "fallback",
+      REPO: "o/r",
+      // Primary lane values that must NOT be used by the fallback loop.
+      AI_BASE_URL: "http://primary.test/v1",
+      AI_MODEL: "primary-m",
+      AI_API_KEY: "primary-key",
+      AI_FALLBACK_BASE_URL: "http://fallback.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_FALLBACK_API_KEY: "fallback-key",
+      AI_STREAM: "false",
+    },
+    transport: async (baseUrl, _format, payload, apiKey) => {
+      seen.push({ baseUrl, apiKey, payload: payload as Record<string, unknown> });
+      return scripted[transportCalls++];
+    },
+  }));
+  assert.equal(result.tier, "fallback");
+  assert.equal(result.native_loop_verdict_produced, true);
+  assert.ok(seen.length >= 3, `expected the loop turns + verdict, got ${seen.length}`);
+  for (const call of seen) {
+    assert.equal(call.baseUrl, "http://fallback.test/v1", "the fallback loop must dial the fallback lane's endpoint");
+    assert.equal(call.apiKey, "fallback-key", "the fallback loop must use the fallback lane's credential");
+    assert.equal(call.payload.model, "fallback-m", "the fallback loop must send the fallback lane's model");
+  }
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.fallback.json"), "utf8"));
+  assert.equal(artifact.tier, "fallback");
+  assert.equal(artifact.stop_reason, "model-stopped");
+  assert.ok((artifact.executed_request_count ?? 0) >= 1);
+  assert.ok(fs.existsSync(path.join(root, "ai-response.fallback.json")));
+  assert.ok(!fs.existsSync(path.join(root, "tool-harness.json")), "the fallback tier must not write into the primary slot");
+});
+
+test("#1598: the fallback loop streams and reasons on the fallback lane's own settings", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  const payloads: Array<Record<string, unknown>> = [];
+  let transportCalls = 0;
+  const scripted = [openAiCall("c1", "read_file", '{"path":"review-corpus.fallback.truncated.md"}'), openAiText("fallback evidence gathered"), validVerdict()];
+  await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "fallback",
+      REPO: "o/r",
+      AI_FALLBACK_BASE_URL: "http://fallback.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_STREAM: "false",
+      AI_FALLBACK_STREAM: "true",
+      AI_FALLBACK_REASONING_EFFORT: "low",
+    },
+    transport: async (_baseUrl, _format, payload) => {
+      payloads.push(payload as Record<string, unknown>);
+      return scripted[transportCalls++];
+    },
+  }));
+  assert.ok(payloads.length >= 2);
+  for (const payload of payloads) {
+    assert.equal(payload.stream, true, "ai-fallback-stream=true must reach the fallback loop's requests");
+    assert.equal(payload.reasoning_effort, "low", "the fallback lane's effort override must reach the loop");
+  }
+});
+
+test("#1598: an empty ai-fallback-stream inherits the base stream setting", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.fallback.truncated.md"), "# PR Diff\n+ change\n");
+  const payloads: Array<Record<string, unknown>> = [];
+  let transportCalls = 0;
+  const scripted = [openAiCall("c1", "read_file", '{"path":"review-corpus.fallback.truncated.md"}'), openAiText("fallback evidence gathered"), validVerdict()];
+  await runToolHarness(deps({
+    env: {
+      TOOL_HARNESS_TIER: "fallback",
+      REPO: "o/r",
+      AI_FALLBACK_BASE_URL: "http://fallback.test/v1",
+      AI_FALLBACK_MODEL: "fallback-m",
+      AI_STREAM: "false",
+      AI_FALLBACK_STREAM: "",
+    },
+    transport: async (_baseUrl, _format, payload) => {
+      payloads.push(payload as Record<string, unknown>);
+      return scripted[transportCalls++];
+    },
+  }));
+  assert.ok(payloads.length >= 2);
+  for (const payload of payloads) {
+    assert.equal(payload.stream, false, "an empty ai-fallback-stream inherits the base ai-stream");
+    assert.equal(payload.reasoning_effort, undefined, "an unconfigured fallback effort sends nothing");
+  }
+});
+
+test("#1598: the fallback tier maps to the primary loop-limit profile and budget route", () => {
+  assert.equal(loopLimitsProfile("fallback"), "primary");
+  assert.equal(toolBudgetRoute("fallback", {}), "primary");
+  assert.equal(resolveLoopLimits({ TOOL_MAX_ROUNDS: "2" } as Record<string, string | undefined>, "fallback")[0], 2);
+});
+
+test("#1598: an unknown tool harness tier still fails closed", async () => {
+  const { deps } = workspace();
+  await assert.rejects(
+    runToolHarness(deps({ env: { TOOL_HARNESS_TIER: "quantum" } })),
+    /invalid tool harness tier/,
+  );
 });

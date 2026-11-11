@@ -547,6 +547,50 @@ def test_fixture_integrity_rejects_tampered_head() -> None:
         validate_semantic_fixture_integrity(fixture)
 
 
+def test_fixture_integrity_accepts_deletion_only_diff() -> None:
+    """A PR diff that only removes files has an empty head tree: the integrity
+    check must still verify it (reverse-apply recreates the deleted side,
+    re-apply restores the empty tree) instead of crashing on the commit."""
+    fixture = {
+        "files": [],
+        "diff": (
+            "diff --git a/gone.txt b/gone.txt\n"
+            "deleted file mode 100644\n"
+            "index 1111111..0000000\n"
+            "--- a/gone.txt\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-gone\n"
+        ),
+    }
+    validate_semantic_fixture_integrity(fixture)
+
+
+def test_fixture_integrity_accepts_deletion_bearing_diff() -> None:
+    """A diff that deletes one file and modifies another is verified against
+    the head tree of the surviving file alone."""
+    fixture = {
+        "files": [{"path": "src/app.py", "content": "fixed()\n"}],
+        "diff": (
+            "diff --git a/gone.txt b/gone.txt\n"
+            "deleted file mode 100644\n"
+            "index 1111111..0000000\n"
+            "--- a/gone.txt\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-gone\n"
+            "diff --git a/src/app.py b/src/app.py\n"
+            "index 2222222..3333333 100644\n"
+            "--- a/src/app.py\n"
+            "+++ b/src/app.py\n"
+            "@@ -1 +1 @@\n"
+            "-buggy()\n"
+            "+fixed()\n"
+        ),
+    }
+    validate_semantic_fixture_integrity(fixture)
+
+
 def test_fixture_integrity_memoizes_verified_content_but_not_tampered_content(monkeypatch: pytest.MonkeyPatch) -> None:
     """#1078: the git-based integrity verdict is memoized per fixture content
     (identical content never re-spawns git within a process), but the memo is
