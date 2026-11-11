@@ -1218,6 +1218,14 @@ scenario_stale_result_publication_is_refused_and_newest_head_publishes() {
   # faces a forge head that is no longer its result head. The exact-head
   # gate must refuse the stale result terminally.
   post_webhook "$TMP/stale-a.json" "pr_opened"
+  # Head B is pushed only once A's review is verifiably dispatched and
+  # running: moving the forge head before dispatch would let A's
+  # generation be refused before any paid model call, proving a
+  # pre-dispatch skip instead of the intended stale-result publication
+  # refusal with persisted spend.
+  if ! wait_run_state "$head_a" "running" "$label"; then
+    return 1
+  fi
   push_fixture_commit "$branch" "c3RhbGUtaGVhZC1iCg==" "stale scenario head b" >/dev/null
   head_b="$(branch_head_sha "$SCENARIO_REPO" "$branch")"
   dest="forgejo:${SCENARIO_REPO}#${pr_number}"
@@ -1689,7 +1697,7 @@ CFGEOF
 scenario_missed_webhook_reconciliation_reviews_once() {
   local label="missed webhook via reconciliation"
   local repo="reviewer/reconcile-sample"
-  local created head_sha
+  local created head_sha feature_sha
   local pr_number pr_id dest dest_clause
   # A pull request whose webhook was NEVER delivered: the reconciler is
   # the only discoverer. A dedicated repository keeps the poll scoped
@@ -1700,8 +1708,12 @@ scenario_missed_webhook_reconciliation_reviews_once() {
     '{"branch":"main","message":"add fixture","content":"b25lCg=="}' >/dev/null
   fapi_json POST "/api/v1/repos/$repo/branches" \
     '{"old_branch_name":"main","new_branch_name":"feature"}' >/dev/null
+  # The contents API update of an EXISTING file requires its current sha
+  # on the target branch (same contract push_fixture_commit honours); the
+  # feature branch inherited fixture.txt from main.
+  feature_sha="$(fapi_get "/api/v1/repos/$repo/contents/fixture.txt?ref=feature" | jq -r '.sha')"
   fapi_json PUT "/api/v1/repos/$repo/contents/fixture.txt" \
-    '{"branch":"feature","message":"reconcile scenario fixture","content":"cmVjb25jaWxlLXNjZW5hcmlvCg=="}' >/dev/null
+    "{\"branch\":\"feature\",\"message\":\"reconcile scenario fixture\",\"content\":\"cmVjb25jaWxlLXNjZW5hcmlvCg==\",\"sha\":\"$feature_sha\"}" >/dev/null
   head_sha="$(branch_head_sha "$repo" "feature")"
   created="$(fapi_json POST "/api/v1/repos/$repo/pulls" \
     '{"base":"main","head":"feature","title":"Reconciliation scenario PR","body":"missed webhook scenario"}')"
