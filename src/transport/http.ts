@@ -791,7 +791,7 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
     // the entry check and here.
     if (input.signal) {
       cancelListener = (): void => {
-        settle(() => reject(cancelledFailure()));
+        settle(() => reject(withObservation(cancelledFailure())));
         request.destroy();
       };
       input.signal.addEventListener("abort", cancelListener, { once: true });

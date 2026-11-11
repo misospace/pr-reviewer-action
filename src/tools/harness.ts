@@ -3268,18 +3268,25 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     let streamClassification: StreamedAttemptClassification | null = null;
     let streamFailureElapsedSec: number | null = null;
     let cancelledExc: unknown = null;
+    let transportFailed = false;
     const attemptStartMs = performance.now();
     try {
       response = await deps.transport(input.baseUrl, input.apiFormat, payload, input.apiKey, timeout, wireRetryCap, attemptBudgetSec);
-      streamClassification = streamed ? classifyUnusableStreamedBody(response, input.apiFormat) : null;
-      if (streamClassification !== null) streamFailureElapsedSec = (performance.now() - attemptStartMs) / 1000;
       turn?.reportTiming?.(readTransportTiming(response));
     } catch (exc) {
       turn?.reportTiming?.(null);
       if (!streamed) throw exc;
+      transportFailed = true;
       streamClassification = classifyThrownStreamedAttempt(exc);
       streamFailureElapsedSec = (performance.now() - attemptStartMs) / 1000;
       if (streamClassification.reason === "cancelled") cancelledExc = exc;
+    }
+    // #1628: the body-side classification runs OUTSIDE the wire try/catch — a
+    // classifier defect must surface as what it is, never be swallowed into a
+    // misattributed "unknown" wire failure that then spends the recovery.
+    if (!transportFailed && streamed) {
+      streamClassification = classifyUnusableStreamedBody(response, input.apiFormat);
+      if (streamClassification !== null) streamFailureElapsedSec = (performance.now() - attemptStartMs) / 1000;
     }
     if (streamClassification !== null) {
       const classification = streamClassification;
@@ -3321,7 +3328,17 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         turn?.reportStreamFailure?.(recordFor(null));
         throw new Error("non-streamed fallback payload carries no messages");
       }
-      let retryTimeout = remainingCheck(effectiveDeadline, explorationClamped);
+      let retryTimeout: number;
+      try {
+        retryTimeout = remainingCheck(effectiveDeadline, explorationClamped);
+      } catch (exc) {
+        // The run boundary expired between the discard and the recovery: no
+        // retry is fired, and the discarded attempt still gets its record (a
+        // null retry time) — the round must not collapse back to the bare
+        // fallback boolean this issue exists to eliminate.
+        turn?.reportStreamFailure?.(recordFor(null));
+        throw exc;
+      }
       // #1628: for a PROVEN terminal failure (an error status, a closed SSE
       // connection, a malformed/truncated terminal body) the pair of attempts
       // stays bounded by ONE turn timeout — the recovery may not restart a

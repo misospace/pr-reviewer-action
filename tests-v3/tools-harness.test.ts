@@ -11,7 +11,8 @@ import { renderSpecialistLeadsSection } from "../src/specialists/index.js";
 import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import { redactPrTextDeep } from "../src/context/redact.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
-import { reassembleSse } from "../src/transport/sse.js";
+import { reassembleSse, readSseReassemblyQuality } from "../src/transport/sse.js";
+import { classifyUnusableStreamedBody } from "../src/tools/stream-attempt.js";
 import { TransportFailure } from "../src/transport/http.js";
 import { attachTransportTiming, readTransportTiming } from "../src/transport/timing.js";
 import { harnessTransportAdapter, normalizedToOpenAiChat } from "../src/run/stages.js";
@@ -4405,6 +4406,45 @@ test("#1466: the production transport adapter attaches the probe to BOTH respons
     const plainProbe = readTransportTiming(plain);
     assert.ok(plainProbe !== null, "the non-streamed body carries the probe");
     assert.equal(plainProbe!.wireCalls, 1);
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1628: the reassembly-quality probe survives the harness adapter's streamed projection", async () => {
+  // #252 discipline: the seam itself is the boundary — the quality probe is
+  // attached by `reassembleSse`, but the caller receives the NEW projected
+  // object, so only a test through `harnessTransportAdapter` proves the
+  // re-attach. Without it every malformed-empty stream would silently
+  // degrade to `empty_completion`.
+  const malformedBody = 'data: {"id":"x","choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{"\n\n';
+  const healthyBody = [
+    'data: {"id":"1","choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"read_file","arguments":"{}"}}]}}]}',
+    'data: {"id":"1","choices":[{"finish_reason":"tool_calls"}]}',
+    "data: [DONE]",
+    "",
+  ].join("\n");
+  let reply = malformedBody;
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/event-stream");
+    res.end(reply);
+  });
+  try {
+    const adapter = harnessTransportAdapter({} as StageEnv);
+    const malformed = await adapter(server.url, "openai", { model: "m", stream: true, messages: [] }, "k", 10);
+    const quality = readSseReassemblyQuality(malformed);
+    assert.ok(quality !== null, "the projected streamed body carries the quality probe");
+    assert.ok((quality?.malformedFrames ?? 0) >= 1, "the unparseable frame was counted");
+    assert.equal(quality?.sawTermination, false, "a torn stream never terminated");
+    // End-to-end through the seam's own classifier: malformed, not empty.
+    assert.equal(classifyUnusableStreamedBody(malformed, "openai")?.reason, "sse_malformed");
+    reply = healthyBody;
+    const healthy = await adapter(server.url, "openai", { model: "m", stream: true, messages: [] }, "k", 10);
+    const healthyQuality = readSseReassemblyQuality(healthy);
+    assert.ok(healthyQuality !== null && healthyQuality.sawTermination, "a terminated stream reports termination");
+    assert.equal(healthyQuality?.malformedFrames, 0);
+    assert.equal(classifyUnusableStreamedBody(healthy, "openai"), null, "a tools stream is never discarded");
   } finally {
     await server.close();
   }
