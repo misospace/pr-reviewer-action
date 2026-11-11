@@ -100,7 +100,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { chmod, lstat, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import {
   EXECUTION_CREDENTIAL_NAME_RE,
   executionCredentialEnvName,
@@ -126,7 +127,12 @@ import {
   type WorkerCredentialResolver,
 } from "./types.js";
 import { boundedFailureMessage, readWorkerResultFile } from "./result-file.js";
-import { ensureContained, writeFileNoFollow } from "./paths.js";
+import {
+  ensureContained,
+  SHARED_CLAIM_DIR_MODE,
+  SHARED_CLAIM_FILE_MODE,
+  writeFileNoFollow,
+} from "./paths.js";
 
 /** The worker container's fixed name. */
 export const WORKER_CONTAINER_NAME = "worker";
@@ -440,6 +446,75 @@ function podPathCoveredByVolumes(
   );
 }
 
+/** The longest volume-mapping `controllerRoot` that covers `path`, or
+ * null when no mapping does (the same coverage rule
+ * `podPathCoveredByVolumes` refuses on — longest root wins). */
+function coveringControllerRoot(
+  path: string,
+  volumes: readonly { controllerRoot: string }[],
+): string | null {
+  const covered = volumes
+    .filter((mapping) => path === mapping.controllerRoot || path.startsWith(`${mapping.controllerRoot}/`))
+    .sort((a, b) => b.controllerRoot.length - a.controllerRoot.length);
+  return covered[0]?.controllerRoot ?? null;
+}
+
+/** Make the run directory and every directory component strictly below
+ * the covering claim mapping's `controllerRoot` group-accessible
+ * (`dirMode`, #1631): the controller created these components under its
+ * own umask, so an explicit `chmod` is what makes the group traversal —
+ * and the run directory's group-writability (the worker creates the
+ * result file and engine artifacts inside it) — deterministic regardless
+ * of umask. The claim root itself is never chmod-ed (its group access is
+ * the kubelet's fsGroup application to own), and a covering root of `/`
+ * (a pathological mapping) narrows the walk to `runDir` alone — never
+ * system directories.
+ *
+ * The same no-follow discipline as the containment proofs applies: every
+ * component is `lstat`-ed FIRST and a symbolic link or a non-directory
+ * REFUSES the launch (never chmod-ed through), and a run directory no
+ * mapping covers is a refusal too — a directory outside the shared claim
+ * must not be restyled to a failure that only looks like a permissions
+ * bug. Returns the refusal problem description, or "" when every
+ * component is now group-accessible. */
+async function shareRunDirectoryGroup(
+  runDir: string,
+  volumes: readonly { controllerRoot: string }[],
+  dirMode: number,
+): Promise<string> {
+  const root = coveringControllerRoot(runDir, volumes);
+  if (root === null) {
+    return `${runDir} is not covered by any configured volume mapping, so its components cannot be made group-accessible for the shared claim`;
+  }
+  const chain: string[] = [runDir];
+  let current = runDir;
+  while (current !== root && root !== "/") {
+    const parent = dirname(current);
+    if (parent === current || !(parent === root || parent.startsWith(`${root}/`))) break;
+    chain.push(parent);
+    current = parent;
+  }
+  for (const component of chain) {
+    let info;
+    try {
+      info = await lstat(component);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return `${component} could not be inspected for the shared-claim group exchange (${code ?? "unknown"})`;
+    }
+    if (info.isSymbolicLink()) {
+      return `${component} is a symbolic link`;
+    }
+    if (!info.isDirectory()) {
+      return `${component} is not a directory`;
+    }
+  }
+  for (const component of chain) {
+    await chmod(component, dirMode);
+  }
+  return "";
+}
+
 /** One env var: a literal value (the two coordination coordinates) or a
  * projected secret reference (a credential REFERENCE, never material). */
 export type KubernetesContainerEnv =
@@ -495,6 +570,12 @@ export interface KubernetesJobManifest {
       readonly runAsNonRoot: true;
       readonly runAsUser: number;
       readonly runAsGroup: number;
+      /** The shared-claim group (#1631): the kubelet applies this group
+       * (and the setgid bit) to every mapped claim volume at mount, so
+       * files/dirs created on the shared claim inherit the group both
+       * sides of the envelope/result exchange share. */
+      readonly fsGroup: number;
+      readonly fsGroupChangePolicy: "OnRootMismatch";
       readonly seccompProfile: { readonly type: "RuntimeDefault" };
     };
     readonly containers: readonly [{
@@ -619,6 +700,12 @@ export function buildReviewJobManifest(
         runAsNonRoot: true,
         runAsUser: WORKER_RUN_AS_ID,
         runAsGroup: WORKER_RUN_AS_ID,
+        // The kubelet applies group 65532 (and the setgid bit) to every
+        // mapped claim at mount, so files/dirs created on the shared
+        // claim inherit the group both sides share — the ownership model
+        // the envelope/result exchange depends on (#1631).
+        fsGroup: WORKER_RUN_AS_ID,
+        fsGroupChangePolicy: "OnRootMismatch",
         seccompProfile: { type: "RuntimeDefault" },
       },
       containers: [{
@@ -900,23 +987,35 @@ export class KubernetesExecutor implements Executor {
       // disk first (same discipline as the local executor — lexical
       // containment does not survive a planted symlink).
       await mkdir(validated.runDir, { recursive: true });
-      const requestProof = await ensureContained(validated.runDir, validated.requestPath);
-      const resultProof = await ensureContained(validated.runDir, validated.resultPath);
-      const refusal = !requestProof.contained
-        ? requestProof
-        : !resultProof.contained
-          ? resultProof
-          : null;
-      if (refusal !== null) {
+      const requestProof = await ensureContained(validated.runDir, validated.requestPath, { dirMode: SHARED_CLAIM_DIR_MODE });
+      const resultProof = await ensureContained(validated.runDir, validated.resultPath, { dirMode: SHARED_CLAIM_DIR_MODE });
+      // The shared-claim group walk runs AFTER the containment proofs (its
+      // own lstat guards refuse what they see, and nothing is chmod-ed
+      // through a symlink): a refusal here is the same fail-closed launch
+      // refusal as a failed proof.
+      const groupProblem = await shareRunDirectoryGroup(validated.runDir, this.spec.volumes, SHARED_CLAIM_DIR_MODE);
+      const refusalProblem = groupProblem !== ""
+        ? groupProblem
+        : !requestProof.contained
+          ? requestProof.problem
+          : !resultProof.contained
+            ? resultProof.problem
+            : "";
+      if (refusalProblem !== "") {
         signal.removeEventListener("abort", onAbort);
         this.runs.delete(validated.runId);
         return refusedHandle(this.refusalResult(
           run,
           "launch_refused",
-          `the execution was refused before launch: ${refusal.problem}`,
+          `the execution was refused before launch: ${refusalProblem}`,
         ));
       }
-      await writeFileNoFollow(validated.requestPath, JSON.stringify(validated, null, 2));
+      // The envelope is the validated request plus exactly one
+      // deliberate executor-added field — the shared-claim group id —
+      // because the worker can only learn the exchange's ownership model
+      // from the envelope.
+      const envelope: ExecutionRequest = { ...validated, sharedGroupId: WORKER_RUN_AS_ID };
+      await writeFileNoFollow(validated.requestPath, JSON.stringify(envelope, null, 2), { mode: SHARED_CLAIM_FILE_MODE });
 
       // The #735 → Kubernetes composition: LATE resolution of the run's
       // opaque references into material, projected into ONE ephemeral

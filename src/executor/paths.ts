@@ -40,8 +40,18 @@
  */
 
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
+
+/** Cross-uid shared-claim exchange modes (#1631): when the run directory
+ * crosses a uid boundary (the Kubernetes executor's controller pod vs.
+ * worker pod), both sides share group 65532 via `fsGroup` and the claim
+ * volume's setgid propagation keeps every created file/dir in that
+ * group. The remaining gap is MODE BITS, so exchanged FILES are
+ * group-readable (`0o640`) and shared-claim DIRECTORIES are setgid +
+ * group-rwx (`0o2770`). The single-uid defaults stay `0o600`/`0o700`. */
+export const SHARED_CLAIM_FILE_MODE = 0o640;
+export const SHARED_CLAIM_DIR_MODE = 0o2770;
 
 /** `O_NOFOLLOW` is not defined on every platform; where it is missing the
  * no-follow guarantee degrades to the platform default (the read stays
@@ -169,7 +179,10 @@ export async function proveContained(baseDir: string, target: string): Promise<C
 
 /** Ensure `path` is a real directory: create it when missing, refuse it
  * when it exists as a symlink or as a non-directory. */
-async function ensureDirectory(path: string): Promise<{ ok: true } | { ok: false; problem: string }> {
+async function ensureDirectory(
+  path: string,
+  dirMode: number,
+): Promise<{ ok: true } | { ok: false; problem: string }> {
   let info;
   try {
     info = await lstat(path);
@@ -179,7 +192,12 @@ async function ensureDirectory(path: string): Promise<{ ok: true } | { ok: false
       return { ok: false, problem: `${path} could not be inspected (${code ?? "unknown"})` };
     }
     try {
-      await mkdir(path, { mode: 0o700 });
+      await mkdir(path, { mode: dirMode });
+      // The `mkdir` mode is umask-filtered; the explicit chmod is not, so
+      // the freshly-created directory's mode (including a setgid bit) is
+      // deterministic regardless of the process umask. A directory that
+      // already existed is never chmod-ed: it is not ours to restyle.
+      await chmod(path, dirMode);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "EEXIST") {
@@ -211,8 +229,17 @@ async function ensureDirectory(path: string): Promise<{ ok: true } | { ok: false
  * parent must be lexically inside the base directory (the request
  * contract proves that; this helper re-proves it), and the final proof
  * is the same one `proveContained` performs.
+ *
+ * `opts.dirMode` (default `0o700`) is the mode freshly-created missing
+ * parent components get; it is applied with an explicit `chmod` too, so
+ * the mode (including a setgid bit) defeats the process umask.
  */
-export async function ensureContained(baseDir: string, target: string): Promise<ContainmentProof> {
+export async function ensureContained(
+  baseDir: string,
+  target: string,
+  opts: { readonly dirMode?: number } = {},
+): Promise<ContainmentProof> {
+  const dirMode = opts.dirMode ?? 0o700;
   const parent = dirname(target);
   const relativeParent = relative(baseDir, parent);
   if (relativeParent !== "" && (relativeParent.startsWith("..") || isAbsolute(relativeParent))) {
@@ -222,7 +249,7 @@ export async function ensureContained(baseDir: string, target: string): Promise<
   for (const segment of relativeParent.split(sep)) {
     if (segment === "" || segment === ".") continue;
     current = join(current, segment);
-    const created = await ensureDirectory(current);
+    const created = await ensureDirectory(current, dirMode);
     if (!created.ok) return notContained(created.problem);
   }
   return proveContained(baseDir, target);
@@ -230,15 +257,26 @@ export async function ensureContained(baseDir: string, target: string): Promise<
 
 /** Write `data` to `path` with NO-FOLLOW semantics: a symlinked path is
  * refused (never followed). Opens with
- * `O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW`, mode 0o600. Throws on any
- * failure (the caller treats a throw as fail-closed). */
-export async function writeFileNoFollow(path: string, data: string): Promise<void> {
+ * `O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW`, mode `opts.mode` (default
+ * `0o600`). The mode is applied with `fchmod` on the already-open
+ * descriptor right after the open — an `open` mode is umask-filtered,
+ * a `fchmod` is not — so the final mode is deterministic regardless of
+ * the process umask, and it applies to the same inode the no-follow
+ * open proved (no path re-resolution). Throws on any failure (the
+ * caller treats a throw as fail-closed). */
+export async function writeFileNoFollow(
+  path: string,
+  data: string,
+  opts: { readonly mode?: number } = {},
+): Promise<void> {
+  const mode = opts.mode ?? 0o600;
   const handle = await open(
     path,
     constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | NOFOLLOW_FLAG,
-    0o600,
+    mode,
   );
   try {
+    await handle.chmod(mode);
     await handle.writeFile(data, "utf8");
   } finally {
     await handle.close();

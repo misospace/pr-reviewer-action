@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -530,6 +530,73 @@ test("an engine that reports no verified head settles a worker_error, never a co
     });
     assert.equal(result.resultHeadSha, "");
     assert.match(result.failureMessage, /resultHeadSha/);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+// ── shared-claim result-file modes (#1631) ──────────────────────────────
+
+test("a request carrying sharedGroupId writes a group-readable result file (0o640) regardless of umask", async () => {
+  if (process.platform === "win32") return; // mode bits are POSIX-only
+  const fixture = makeRequest({ sharedGroupId: 65532 });
+  const oldUmask = process.umask(0o077);
+  try {
+    const { deps } = fakeRunner(async (_request, dependencies) => {
+      writeFileSync(path.join(dependencies.runDir, "ai-output.json"), "{}", "utf8");
+      return { reviewedHeadSha: HEAD };
+    });
+    const exit = await workerMain([fixture.request.requestPath], {}, deps);
+    assert.equal(exit, 0);
+    assertConformingResult(fixture.request, { status: "completed", resultHeadSha: HEAD });
+    // The explicit fchmod defeats the 0o077 umask: the result is
+    // group-readable so the controller's uid can read it across the
+    // shared claim.
+    assert.equal(statSync(fixture.request.resultPath).mode & 0o7777, 0o640);
+  } finally {
+    process.umask(oldUmask);
+    cleanup(fixture);
+  }
+});
+
+test("a request without sharedGroupId keeps the single-uid result mode (0o600)", async () => {
+  if (process.platform === "win32") return; // mode bits are POSIX-only
+  const fixture = makeRequest();
+  const oldUmask = process.umask(0o077);
+  try {
+    const { deps } = fakeRunner(async (_request, dependencies) => {
+      writeFileSync(path.join(dependencies.runDir, "ai-output.json"), "{}", "utf8");
+      return { reviewedHeadSha: HEAD };
+    });
+    const exit = await workerMain([fixture.request.requestPath], {}, deps);
+    assert.equal(exit, 0);
+    assertConformingResult(fixture.request, { status: "completed", resultHeadSha: HEAD });
+    assert.equal(statSync(fixture.request.resultPath).mode & 0o7777, 0o600);
+  } finally {
+    process.umask(oldUmask);
+    cleanup(fixture);
+  }
+});
+
+test("a request carrying sharedGroupId makes the engine's publication artifact group-readable too", async () => {
+  if (process.platform === "win32") return; // mode bits are POSIX-only
+  const fixture = makeRequest({ sharedGroupId: 65532 });
+  try {
+    const { deps } = fakeRunner(async (_request, dependencies) => {
+      // The engine's own writes are umask-dependent: this one lands
+      // owner-only, the worst case a hardened worker umask can produce.
+      const artifact = path.join(dependencies.runDir, "ai-output.json");
+      writeFileSync(artifact, "{}", { mode: 0o600 });
+      chmodSync(artifact, 0o600);
+      return { reviewedHeadSha: HEAD };
+    });
+    const exit = await workerMain([fixture.request.requestPath], {}, deps);
+    assert.equal(exit, 0);
+    assertConformingResult(fixture.request, { status: "completed", resultHeadSha: HEAD });
+    // The worker chmods the artifact to the shared-claim file mode before
+    // naming it in the completed result: the controller's uid — not in the
+    // creating process's umask — can actually read it back.
+    assert.equal(statSync(path.join(fixture.request.runDir, "ai-output.json")).mode & 0o7777, 0o640);
   } finally {
     cleanup(fixture);
   }
