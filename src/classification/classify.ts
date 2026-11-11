@@ -3845,6 +3845,15 @@ function parseLockfileVersionBuckets(diffText: string): LockfileVersionBucket[] 
       continue;
     }
     if (LOCKFILE_OTHER_KEY_RE.test(content)) {
+      if (sign !== "" && current !== null) {
+        // A changed map opener (`"dependencies": {`) means a nested object
+        // — usually a relation map — was added, removed, or retitled.
+        // Ordinary churn never rewrites these openers; a relation map
+        // appearing or vanishing must not ride along under the scoped
+        // review (#1595 review: changed object-valued fields).
+        current.relationChanged = true;
+        sawParsedChange = true;
+      }
       // An inline single-line object (`"bin": { "ms": "bin/ms.js" }`)
       // opens and closes on this line — no depth change.
       if (current !== null && !/}\s*,?\s*$/.test(content)) depth += 1;

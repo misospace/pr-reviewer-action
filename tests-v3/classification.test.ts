@@ -2687,6 +2687,20 @@ test("#1595 review: range-like/malformed version values fail closed; changed run
     { material: 1, lowRisk: 1, parseable: true },
   );
 
+  // A relation map being emptied or removed changes its opener line —
+  // ordinary churn never rewrites map openers, so this is material.
+  bump(
+    `    "node_modules/pg": {\n` +
+      `-      "version": "8.11.3",\n` +
+      `+      "version": "8.11.4",\n` +
+      `       "license": "MIT",\n` +
+      `-      "peerDependencies": {\n` +
+      `-        "pg-int8": "1.0.1"\n` +
+      `-      },\n` +
+      `    },\n`,
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
   // The v2 legacy mirror ("dependencies" top-level section) is not a
   // package block: its changed version lines fail the parse closed —
   // lockfileVersion 2 keeps the FULL review (documented in the PR body).
