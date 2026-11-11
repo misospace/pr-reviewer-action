@@ -24,8 +24,9 @@ supplied head identity (the native review's ``commit_id``, the marker
 head) must match, a disagreement is unsafe telemetry
 (``partial_or_abstained``, recorded as ``head_conflict``) — AND proven
 native evidence — a native APPROVED event by a configured bot login
-whose ``commit_id`` equals the row's head, or a head-bound attestation
-with ``conclusion == "approved"``. A model approve-prose claim plus
+whose ``commit_id`` equals the row's head and whose own marker binds no
+different head, or a head-bound attestation with ``conclusion ==
+"approved"``. A model approve-prose claim plus
 ``review_result: partial`` is never trusted; a native APPROVED over
 partial/unknown coverage is ``partial_or_abstained``; with neither native
 approval nor attestation the row is ``unknown_missing_native``.
@@ -191,7 +192,9 @@ def _head_has_native_approval(head_sha: str, bot_reviews: list[dict[str, Any]]) 
     ``bot_reviews`` holds the PR's native review records authored by the
     configured bot logins. Proven native evidence requires a non-null
     ``commit_id`` string-equal to the row's head — a bot APPROVED bound to
-    a different head is not evidence for this row.
+    a different head is not evidence for this row. A review whose own body
+    marker binds a head that disagrees with its ``commit_id`` contradicts
+    itself, so it is not evidence for any head either.
     """
     if not _usable_head(head_sha):
         return False
@@ -200,8 +203,27 @@ def _head_has_native_approval(head_sha: str, bot_reviews: list[dict[str, Any]]) 
             continue
         commit_id = review.get("commit_id")
         if isinstance(commit_id, str) and commit_id and commit_id == head_sha:
+            if _review_marker_conflict(review, commit_id):
+                continue
             return True
     return False
+
+
+def _review_marker_conflict(review: dict[str, Any], commit_id: str) -> bool:
+    """True when a review record's own marker head contradicts its commit_id.
+
+    Both identities independently supplied, both bound, and unequal: the
+    record's claims belong to a head its forge binding does not, so the
+    record cannot prove anything about either head.
+    """
+    body = review.get("body")
+    marker = parse_metadata(body) if isinstance(body, str) else None
+    marker_head = marker.get("head_sha") if isinstance(marker, dict) else None
+    return bool(
+        isinstance(marker_head, str)
+        and _usable_head(marker_head)
+        and marker_head.strip()[:_HEAD_LIMIT] != commit_id.strip()[:_HEAD_LIMIT]
+    )
 
 
 def _marker_str(marker: dict[str, Any], key: str) -> str:
@@ -253,12 +275,13 @@ def classify_disposition(
     body: str,
     native_approved: bool,
     attestation_conclusion: str | None,
-    row_head: str = "",
+    row_head: str,
 ) -> str:
     """The row's disposition, per the #1602 taxonomy and metric invariant.
 
     ``row_head`` is the head identity the normalized row binds to (the
-    native review's ``commit_id`` when it carries one). Order matters and
+    native review's ``commit_id`` when it carries one) and is required:
+    the head-agreement gate is meaningless without it. Order matters and
     is total: no-marker first (the default heuristic — nothing about a
     missing marker is ever upgraded), then the explicit skip note, then
     the incomplete/unsafe-telemetry gate (``partial`` or unknown

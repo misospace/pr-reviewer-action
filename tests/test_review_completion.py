@@ -89,6 +89,19 @@ def test_parse_action_version_engine_name_with_underscores():
     assert rc.parse_action_version(body) == "v3.8.0-dev+972ab8a"
 
 
+def test_parse_action_version_first_engine_line_wins():
+    """The publisher emits one engine line before model content.
+
+    Parsing takes the first match, so an engine-line example quoted in
+    body content after the real line cannot relabel the row.
+    """
+    body = (
+        "_Analysis engine: claude-code · pr-reviewer-action v3.5.0_\n\n"
+        "example: _Analysis engine: demo · pr-reviewer-action v0.0.1_"
+    )
+    assert rc.parse_action_version(body) == "v3.5.0"
+
+
 def test_row_version_and_scope_survive_underscored_engine_name():
     body = _marker(version="v3.5.0").replace("claude-code", "meta/llama3.1_70b_instruct")
     rows = rc.collect_rows(
@@ -256,6 +269,52 @@ def test_conflicting_marker_head_defeats_attestation_too():
     assert rows[0]["attestation_conclusion"] == "approved"
     assert rows[0]["disposition"] == "partial_or_abstained"
     assert rows[0]["head_conflict"] is True
+
+
+def test_conflicting_head_demotes_findings_rows_too():
+    """The gate runs for every review state, not only approvals."""
+    body = _marker(head_sha=OTHER_HEAD, review_result="findings")
+    row = rc.collect_rows(
+        REPO, [_pull(1, HEAD, reviews=[_review(1, HEAD, "CHANGES_REQUESTED", body)])], [BOT]
+    )[0]
+    assert row["disposition"] == "partial_or_abstained"
+    assert row["head_conflict"] is True
+
+
+def test_case_variant_marker_head_conflicts_fail_closed():
+    """Head agreement is exact: a case variant is not agreement."""
+    body = _marker(head_sha=HEAD.upper())
+    row = rc.collect_rows(
+        REPO, [_pull(1, HEAD, reviews=[_review(1, HEAD, "APPROVED", body)])], [BOT]
+    )[0]
+    assert row["disposition"] == "partial_or_abstained"
+    assert row["head_conflict"] is True
+
+
+def test_self_contradicting_approval_is_not_evidence_for_a_sibling_comment():
+    """A contradictory review cannot vouch for another artifact's head.
+
+    The APPROVED is bound to HEAD but its own marker claims OTHER_HEAD,
+    so it proves nothing about HEAD and the clean comment row at HEAD
+    stays unknown_missing_native.
+    """
+    review = _review(1, HEAD, "APPROVED", body=_marker(head_sha=OTHER_HEAD))
+    comment = _comment(2, HEAD)
+    rows = rc.collect_rows(REPO, [_pull(1, HEAD, reviews=[review], comments=[comment])], [BOT])
+    by_source = {row["source"]: row for row in rows}
+    assert by_source["native_review"]["disposition"] == "partial_or_abstained"
+    assert by_source["native_review"]["head_conflict"] is True
+    assert by_source["comment"]["disposition"] == "unknown_missing_native"
+    assert by_source["comment"]["native_event"] is None
+
+
+def test_unusable_commit_id_falls_back_to_the_marker_head():
+    """An unbound commit_id supplies no identity, so nothing conflicts."""
+    review = _review(1, HEAD, "APPROVED")
+    review["commit_id"] = "unknown"
+    row = rc.collect_rows(REPO, [_pull(1, HEAD, reviews=[review])], [BOT])[0]
+    assert row["head_sha"] == HEAD
+    assert row["head_conflict"] is False
 
 
 def test_clean_marker_with_bound_native_approval_is_trusted():

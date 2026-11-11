@@ -160,25 +160,31 @@ Per-row, mutually exclusive:
 1. a parseable marker with `head_sha` neither empty nor `"unknown"`;
 2. every independently supplied head identity agrees: when the native
    review carries a bound `commit_id` and the marker carries a bound
-   `head_sha`, they must be equal — a disagreement (`head_conflict`) is
-   unsafe telemetry, and a clean marker for one head riding a review
-   bound to another head proves nothing about either head;
+   `head_sha`, they must be equal (compared exactly — a case or width
+   difference is not agreement and fails closed) — a disagreement
+   (`head_conflict`) is unsafe telemetry, and a clean marker for one
+   head riding a review bound to another head proves nothing about
+   either head;
 3. `review_result == "clean"`;
 4. no `coverage` of `partial`/`unknown`;
 5. `required_checks` not `incomplete`;
 6. proven native evidence — a native APPROVED event by a configured bot
-   login with non-null `commit_id` equal to the row's head — **or** a
-   head-bound attestation with `conclusion == "approved"`.
+   login with non-null `commit_id` equal to the row's head and whose own
+   marker binds no different head — **or** a head-bound attestation with
+   `conclusion == "approved"`.
 
 Consequently: a model approve-prose claim plus `review_result: partial`
 is never trusted; a native APPROVED over partial/unknown coverage is
-`partial_or_abstained`; a native APPROVED on one head carrying a marker
-bound to a different head is `partial_or_abstained` with
-`head_conflict: true` — the disagreement outranks every evidence path,
-attestation included; comment prose alone (no native event, no
-attestation) is `unknown_missing_native`; and a missing marker is
-`unknown_no_marker` no matter what workflow context suggests. There is no
-workflow-success short circuit and no comment-prose short circuit.
+`partial_or_abstained`; a marker riding a review bound to a different
+head is `partial_or_abstained` with `head_conflict: true` — the
+disagreement outranks every evidence path (attestation included) and
+applies to every `review_result`, so a findings marker on a
+contradictory head is not `complete_findings` either, and a
+self-contradicting APPROVED is not evidence for a sibling comment row;
+comment prose alone (no native event, no attestation) is
+`unknown_missing_native`; and a missing marker is `unknown_no_marker` no
+matter what workflow context suggests. There is no workflow-success
+short circuit and no comment-prose short circuit.
 
 ### Attempts that publish nothing
 
