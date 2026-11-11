@@ -12,6 +12,7 @@ import { KNOWN_SECRET_REDACTED, redactText } from "../src/context/redact.js";
 import { redactPrTextDeep } from "../src/context/redact.js";
 import { parseVerdictResponse } from "../src/model/verdict.js";
 import { reassembleSse } from "../src/transport/sse.js";
+import { TransportFailure } from "../src/transport/http.js";
 import { attachTransportTiming, readTransportTiming } from "../src/transport/timing.js";
 import { harnessTransportAdapter, normalizedToOpenAiChat } from "../src/run/stages.js";
 import type { StageEnv } from "../src/run/env.js";
@@ -4519,4 +4520,174 @@ test("#1598: an unknown tool harness tier still fails closed", async () => {
     runToolHarness(deps({ env: { TOOL_HARNESS_TIER: "quantum" } })),
     /invalid tool harness tier/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// #1628: streamed native-loop failure recovery is attributable and bounded
+// per attempt.
+// ---------------------------------------------------------------------------
+
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("#1628: a pair of fallback rounds reports their own reasons and times, not two booleans", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  // Round 1 discards like the #12074 lead: an HTTP 524 whose bytes arrived
+  // late (the wire observation rides the failure). Round 2 discards a 200
+  // body carrying a provider error object — a different reason, a different
+  // time. Each must say so on its own record.
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    log: (line) => { logs.push(line); },
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(60);
+        throw attachTransportTiming(
+          new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524, body: "gateway timed out" }),
+          { firstEventSec: 0.05, firstContentSec: null, totalSec: 0.06 },
+        );
+      }
+      if (turn === 1) { await sleepMs(40); return openAiCall("c1", "read_file", '{"path":"src.ts"}'); }
+      if (turn === 2) return { error: { type: "server_error", message: "the wire broke here" } };
+      if (turn === 3) { await sleepMs(30); return openAiText("evidence gathered"); }
+      return validVerdict();
+    },
+  }));
+  assert.equal(result.native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const rounds = artifact.tool_loop_telemetry.rounds;
+  assert.equal(rounds.length, 2);
+  const first = rounds[0].stream_failure;
+  const second = rounds[1].stream_failure;
+  assert.equal(rounds[0].streamed_fallback, true);
+  assert.equal(rounds[1].streamed_fallback, true);
+  // Each discarded attempt reports its OWN reason, status, and times.
+  assert.equal(first.reason, "http_status");
+  assert.equal(first.status, 524);
+  assert.ok(first.elapsed_sec >= 0.05 && first.elapsed_sec < 2, `elapsed must be the attempt's own time, got ${first.elapsed_sec}`);
+  assert.equal(first.first_event_sec, 0.05);
+  assert.equal(first.first_content_sec, null);
+  assert.ok(first.retry_elapsed_sec !== null && first.retry_elapsed_sec >= 0.03, "the recovery's own time rides the record");
+  assert.equal(first.route, "primary");
+  assert.equal(second.reason, "provider_error_object");
+  assert.equal(second.status, null);
+  assert.notEqual(second.reason, first.reason, "two fallback rounds are no longer the same boolean");
+  assert.ok(second.elapsed_sec < first.elapsed_sec, "each record keeps its own (distinct) time");
+  assert.ok(second.retry_elapsed_sec !== null);
+  // Content-free: neither the 524 body nor the error object's message can
+  // ride the round telemetry.
+  const roundsJson = JSON.stringify(rounds);
+  assert.ok(!roundsJson.includes("gateway timed out"));
+  assert.ok(!roundsJson.includes("the wire broke here"));
+  // The concise logs carry the same facts.
+  assert.ok(logs.some((l) => l.includes("streamed turn unusable (reason=http_status status=524")), `missing the discarded-attempt line: ${logs.join("\n")}`);
+  assert.ok(logs.some((l) => l.includes("fallback non-streamed recovered")), "the recovery gets its own line");
+  assert.ok(logs.some((l) => l.includes("streamed attempt discarded reason=provider_error_object")), "the round heartbeat names the reason");
+});
+
+test("#1628: a proven terminal failure bounds the non-streamed retry to the turn's remaining budget", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const timeouts: number[] = [];
+  let n = 0;
+  await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true", TOOL_TURN_TIMEOUT_SEC: "2" },
+    transport: async (_baseUrl, _apiFormat, payload, _apiKey, timeoutSec) => {
+      timeouts.push(timeoutSec);
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(1100);
+        throw new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524 });
+      }
+      if (turn === 1) return openAiText("done");
+      return validVerdict();
+    },
+  }));
+  // The streamed attempt spent ~1.1s of the 2s turn timeout; the 524 is a
+  // PROVEN terminal class, so the recovery may not restart a full turn wait:
+  // its timeout is the pair budget (2 - 1.1 → floored at 1), not 2.
+  assert.equal(timeouts[0], 2);
+  assert.equal(timeouts[1], 1);
+});
+
+test("#1628: an ambiguous timeout keeps the configured deadline for the retry", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const timeouts: number[] = [];
+  let n = 0;
+  await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true", TOOL_TURN_TIMEOUT_SEC: "2" },
+    transport: async (_baseUrl, _apiFormat, payload, _apiKey, timeoutSec) => {
+      timeouts.push(timeoutSec);
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(1100);
+        throw new TransportFailure("request_timeout", "model request timed out");
+      }
+      if (turn === 1) return openAiText("done");
+      return validVerdict();
+    },
+  }));
+  // The idle case is NOT assumed guilty: the configured turn timeout stays
+  // the retry's authority (the run deadline still clamps it above).
+  assert.equal(timeouts[0], 2);
+  assert.equal(timeouts[1], 2);
+});
+
+test("#1628: a cancelled streamed attempt reports its record and is never retried", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  let n = 0;
+  const streams: unknown[] = [];
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    log: (line) => { logs.push(line); },
+    transport: async (_baseUrl, _apiFormat, payload) => {
+      streams.push(payload.stream);
+      const turn = n++;
+      if (turn === 0) throw new TransportFailure("cancelled", "model request cancelled");
+      return validVerdict();
+    },
+  }));
+  assert.equal(result.stop_reason, "request-error");
+  // No non-streamed recovery was ever dialed for the cancelled loop turn.
+  assert.ok(streams.every((s) => s === true), `cancelled attempt must not retry non-streamed: ${JSON.stringify(streams)}`);
+  assert.ok(logs.some((l) => l.includes("streamed turn cancelled") && l.includes("not retried")));
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const round = artifact.tool_loop_telemetry.rounds[0];
+  assert.equal(round.streamed_fallback, false, "no recovery fired, so no fallback is claimed");
+  assert.equal(round.stream_failure.reason, "cancelled");
+  assert.equal(round.stream_failure.retry_elapsed_sec, null);
+});
+
+test("#1628: a streamed empty completion is discarded and the recovery's failure is attributed", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  let n = 0;
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true" },
+    log: (line) => { logs.push(line); },
+    transport: async () => {
+      const turn = n++;
+      if (turn === 0) return { choices: [{ message: { content: "" }, finish_reason: "stop" }] };
+      throw new TransportFailure("network", "model request failed (ECONNRESET)");
+    },
+  }));
+  assert.equal(result.stop_reason, "request-error");
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const round = artifact.tool_loop_telemetry.rounds[0];
+  assert.equal(round.streamed_fallback, true);
+  assert.equal(round.stream_failure.reason, "empty_completion");
+  assert.ok(round.stream_failure.retry_elapsed_sec !== null, "the failed retry's own elapsed rides the record");
+  assert.ok(logs.some((l) => l.includes("fallback non-streamed FAILED") && l.includes("retry_reason=connection_closed")));
+  // Null provider usage on the stopped turn — a discarded turn fabricates
+  // nothing.
+  assert.equal(round.prompt_tokens, null);
+  assert.equal(round.ttft_sec, null);
 });
