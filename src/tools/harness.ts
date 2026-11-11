@@ -62,7 +62,9 @@ import {
   normalizeReasoningEffort,
   resolveTierProfiles,
   tierReasoningEffort,
+  tierRequestShape,
   tierResponseFormat,
+  type ResolvedTier,
 } from "../routing/tiers.js";
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
@@ -106,7 +108,7 @@ import {
   type PartialCoverage,
 } from "./coverage.js";
 import { McpToolset, parseServerSpecs, splitNamespaced, resolveMcpToolName } from "./mcp.js";
-import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../corpus/assemble.js";
+import { CORPUS_DIFF_SECTION_ARTIFACT, CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT, CORPUS_DIFF_SECTION_SMART_ARTIFACT } from "../corpus/assemble.js";
 import { buildTrackedIndex, executeToolRequest, type ToolContext, type TrackedIndex } from "./executors.js";
 
 import { runProcess } from "../runtime/subprocess.js";
@@ -267,15 +269,32 @@ function envIntIsSet(env: EnvLike, name: string): boolean {
  * escalation smart tier) follows that tier's window and loop limits, as
  * toolBudgetRoute already does for the request budget. #1253: the tier is the
  * only signal — the unreachable REVIEW_CONTEXT_PROFILE=smart ambient override
- * has been removed. */
+ * has been removed. #1598: the fallback tier (#1585 evidence failover) maps
+ * its LOOP LIMITS to the primary profile — same TOOL_MAX_ROUNDS /
+ * TOOL_LOOP_WALL_CLOCK_SEC / TOOL_* keys, no fallback-specific loop env.
+ * The context window is NOT part of that mapping: a loop-limit key names a
+ * policy knob, while the window is a property of the model the tier's lane
+ * dials, so `loopContextLimits` reads the tier's own key below. */
 export function loopLimitsProfile(tier: string): "primary" | "smart" {
-  return tier === "smart" ? "smart" : "primary";
+  if (tier === "smart") return "smart";
+  if (tier === "fallback") return "primary";
+  return "primary";
 }
 
 /** #922: the tier's declared context window in tokens (the tier input, which
- * already inherits model-context-tokens), or null when none is declared. */
+ * already inherits model-context-tokens), or null when none is declared.
+ * #1598 (review): the fallback tier reads its OWN lane's window
+ * (FALLBACK_MODEL_CONTEXT_TOKENS — the same key `resolveTierBudgets` applies
+ * to the fallback corpus budget). The fallback loop dials the fallback model,
+ * so a smaller fallback window must be enforced on the loop's conversation
+ * compaction and byte budgets, never the primary model's window. */
 export function declaredWindowTokens(env: EnvLike, tier: string): number | null {
-  const raw = ((tier === "smart" ? env.SMART_MODEL_CONTEXT_TOKENS : env.PRIMARY_MODEL_CONTEXT_TOKENS) || env.MODEL_CONTEXT_TOKENS || "").trim();
+  const tierKey = tier === "smart"
+    ? "SMART_MODEL_CONTEXT_TOKENS"
+    : tier === "fallback"
+      ? "FALLBACK_MODEL_CONTEXT_TOKENS"
+      : "PRIMARY_MODEL_CONTEXT_TOKENS";
+  const raw = ((env[tierKey]) || env.MODEL_CONTEXT_TOKENS || "").trim();
   return /^[0-9]+$/.test(raw) && Number(raw) > 0 ? Number(raw) : null;
 }
 
@@ -341,6 +360,11 @@ export function resolveLoopLimits(env: EnvLike, tier: string): [number, number, 
     roundsExplicit = roundsExplicit || envIntIsSet(env, "SMART_TOOL_MAX_ROUNDS");
     maxRounds = envIntBounded(env, "SMART_TOOL_MAX_ROUNDS", maxRounds, 1, 6);
     wallClock = envIntBounded(env, "SMART_TOOL_LOOP_WALL_CLOCK_SEC", wallClock, 10, 900);
+  }
+  // #1598: the fallback tier has no loop-limit keys of its own — it uses the
+  // exact primary keys above (explicit branch, not an implicit fall-through).
+  if (tier === "fallback") {
+    return [maxRounds, wallClock, roundsExplicit];
   }
   return [maxRounds, wallClock, roundsExplicit];
 }
@@ -2153,7 +2177,10 @@ export type HarnessResult = Record<string, unknown> & {
   /** #1597: the distinct execution partitions written by every loop path
    * (issued / attempted-executed / ok-subset / refused / deduplicated),
    * under issued = executed + refused + deduplicated and
-   * successful <= executed. */
+   * successful <= executed. The #1598 fallback-evidence failover trigger
+   * gates spend on `executed_request_count` — the settled attempted-executor
+   * population (successful OR failed), never the ok-only
+   * `successful_request_count`. */
   planned_request_count?: number;
   executed_request_count?: number;
   successful_request_count?: number;
@@ -2648,8 +2675,22 @@ export interface HarnessDeps {
   /** #1210: the run's configured forge read capability, threaded to the
    * native loop's gh_api/repo_contents executors (mirrors
    * `PlatformAdapter.ghApi`). Absent keeps the pre-#1210
-   * "platform transport not configured" behavior byte for byte. */
+   * "platform transport not configured" behavior byte-for-byte. */
   ghApi?: (endpoint: string, opts?: { timeoutMs: number }) => Promise<{ data?: unknown; error?: string }>;
+  /** #1598 (review): remaining wall-clock seconds the native loop may spend
+   * (the evidence-failover caller's remaining share of the loop wall-clock
+   * envelope). Unset keeps the configured ceiling byte-for-byte. */
+  wallClockSecCap?: number;
+  /** #1598 (review): the ALREADY-RESOLVED fallback lane the engine's verdict
+   * path dials (`profiles.fallback`, resolved before any route rebind). The
+   * fallback tier must dial the same lane its verdict came from: re-resolving
+   * from `env` here is unsafe because the auto route rebinds the base
+   * `AI_BASE_URL`/`AI_API_KEY`/`AI_API_FORMAT` keys to the primary override
+   * (src/engine/review.ts), and an inherited fallback lane would then read
+   * the primary-override endpoint/key/format — and, through the same rebind,
+   * the primary lane's reasoning effort. The production caller always binds
+   * this; direct callers (tests) without it keep the env resolution. */
+  fallbackLane?: Pick<ResolvedTier, "baseUrl" | "model" | "apiFormat" | "apiKey" | "reasoningEffort">;
 }
 
 /**
@@ -2814,9 +2855,16 @@ export interface RunNativeLoopInput {
   result: HarnessResult;
   tier: string;
   deps: HarnessDeps;
-  /** #1145: bounded evidence-repair continuation probe over the verdict the
-   * in-conversation verdict turn produced. Optional; unset preserves the
-   * pre-#1145 flow byte-for-byte. */
+  /** #1598 (review): remaining wall-clock seconds this loop may spend, passed
+   * by the evidence-failover caller so the second investigation draws from
+   * the same loop wall-clock envelope as the primary exchange instead of
+   * starting a second full budget. A cap NARROWS the configured
+   * `tool-loop-wall-clock-sec` (never extends it); unset keeps the
+   * configured ceiling byte-for-byte. */
+  wallClockSecCap?: number;
+  /** #1145: bounded evidence-repair continuation probe over the verdict
+   * the in-conversation verdict turn produced. Optional; unset preserves
+   * the pre-#1145 flow byte-for-byte. */
   traceGapProbe?: TraceGapProbe;
 }
 
@@ -2845,9 +2893,22 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
 
   const limitsProfile = loopLimitsProfile(input.tier);
   const [maxRounds, wallClock, roundsExplicit] = resolveLoopLimits(env, limitsProfile);
+  // #1598 (review): the failover loop draws from the same loop wall-clock
+  // envelope the primary exchange was configured with — the caller may pass
+  // the REMAINING share as a cap (never an extension). The verdict reserve
+  // derives from the effective wall clock, so the reserved closing-verdict
+  // slice survives the cap too.
+  const wallClockSecCap = input.wallClockSecCap;
+  const effectiveWallClock =
+    typeof wallClockSecCap === "number" && Number.isFinite(wallClockSecCap)
+      ? Math.max(0, Math.min(wallClock, wallClockSecCap))
+      : wallClock;
   const budgets = {
-    ...adaptiveLoopBudgets(maxRounds, input.maxRequests, wallClock, roundsExplicit),
-    maxConversationTokens: loopContextLimits(env, limitsProfile).maxConversationTokens,
+    ...adaptiveLoopBudgets(maxRounds, input.maxRequests, effectiveWallClock, roundsExplicit),
+    // The context window follows the TIER (the model the lane dials), not
+    // the loop-limit profile — #1598 (review): the fallback tier enforces
+    // its own FALLBACK_MODEL_CONTEXT_TOKENS window.
+    maxConversationTokens: loopContextLimits(env, input.tier).maxConversationTokens,
   };
   const traceRepairExtraRequests =
     input.tier === "primary" && input.traceGapProbe !== undefined
@@ -2859,12 +2920,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // `tool-loop-wall-clock-sec` ceiling. The deadline is a guaranteed number
   // (resolveLoopLimits clamps the wall-clock bounds), and every downstream
   // consumer (per-turn clamps, refusal results, verdict/acceptance/repair
-  // gating) treats it as one.
-  const deadline = timeFn() + wallClock;
+  // gating) treats it as one. #1598 (review): the ceiling is the EFFECTIVE
+  // wall clock — the configured budget narrowed by the failover caller's
+  // remaining-share cap.
+  const deadline = timeFn() + effectiveWallClock;
   // #1464: hold a deterministic slice of the wall clock for the closing
   // in-conversation verdict turn so the exploratory rounds cannot spend the
   // whole budget and leave the verdict to fail the pre-request deadline check.
-  const verdictReserveSec = verdictWallClockReserveSec(wallClock);
+  const verdictReserveSec = verdictWallClockReserveSec(effectiveWallClock);
   // #1464 (review): the reserve must actually be RESERVED, not only gated
   // between rounds. A round allowed to start with remaining just above the
   // reserve would otherwise clamp its model wait and tool execution against
@@ -2875,7 +2938,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // closing verdict turn keeps the whole-run deadline.
   const explorationDeadline = deadline - verdictReserveSec;
   log(
-    `  native_loop: verdict reserve ${verdictReserveSec}s of ${wallClock}s wall clock (#1464); ` +
+    `  native_loop: verdict reserve ${verdictReserveSec}s of ${effectiveWallClock}s wall clock (#1464); ` +
       "exploratory model waits and tool execution clamp to the reserve boundary",
   );
   // #1094 review round 3: the loop's NON-verdict response surfaces (tool-call
@@ -2951,7 +3014,16 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
 
   // Stream loop turns by default (mirrors AI_STREAM for the review call) so
   // long thinking-model turns don't 524 behind a short-idle proxy (#204).
-  const stream = (env.AI_STREAM ?? "true").trim().toLowerCase() === "true";
+  // #1598: the fallback tier streams on the FALLBACK lane's own setting —
+  // the same inheritance resolveTierProfiles applies (an unset/empty
+  // ai-fallback-stream inherits the base, including its unset-means-"true"
+  // default), never the raw AI_STREAM the primary reads.
+  const fallbackStreamRaw = env.AI_FALLBACK_STREAM ?? "";
+  const baseStreamRaw = env.AI_STREAM === undefined ? "true" : env.AI_STREAM;
+  const streamRaw = input.tier === "fallback"
+    ? (fallbackStreamRaw === "" ? baseStreamRaw : fallbackStreamRaw)
+    : (env.AI_STREAM ?? "true");
+  const stream = streamRaw.trim().toLowerCase() === "true";
 
   // Mirror the bash review path's token-field choice (AI_TOKENS_PARAM).
   const tokensParam =
@@ -2964,17 +3036,35 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // that (re-validated here, so no bound value can skip the shape check);
   // otherwise resolve the tier's own lane input (ai-primary-/
   // ai-smart-reasoning-effort) with the base as fallback. "" keeps every
-  // request byte-identical to a build without the feature.
+  // request byte-identical to a build without the feature. #1598: the
+  // fallback tier resolves the fallback lane's effort
+  // (ai-fallback-reasoning-effort, base-inherited) — no SMART_REASONING_EFFORT
+  // binding exists for it. #1598 (review): a BOUND fallback lane carries its
+  // own resolved effort and it wins — the auto route rebinds the base
+  // AI_REASONING_EFFORT key to the primary lane's effort (src/engine/
+  // review.ts), so a late env resolution would put the primary lane's effort
+  // on the fallback loop's wire while the fallback verdict came from the
+  // original lane, exactly the divergence the bound endpoint/key/format fix
+  // removes.
+  const effortTier = input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary";
+  // A BOUND fallback lane is authoritative including "" — its resolved effort
+  // is already normalized, and an effort-less fallback lane must omit the
+  // field, never inherit the route-rebound base key's value.
+  const boundLaneEffort = input.tier === "fallback" && input.deps.fallbackLane !== undefined
+    ? input.deps.fallbackLane.reasoningEffort
+    : null;
   const boundEffort = input.tier === "smart" ? (env.SMART_REASONING_EFFORT ?? "").trim() : "";
-  const tierEffort = () => tierReasoningEffort(input.tier === "smart" ? "smart" : "primary", env);
-  const reasoningEffort = boundEffort === "" ? tierEffort() : normalizeReasoningEffort(boundEffort) ?? tierEffort();
+  const tierEffort = () => tierReasoningEffort(effortTier, env);
+  const reasoningEffort = boundLaneEffort !== null
+    ? boundLaneEffort
+    : boundEffort === "" ? tierEffort() : normalizeReasoningEffort(boundEffort) ?? tierEffort();
   // #998 (#1049 review): the opt-in is per-lane, because a smart route may
   // target a different Anthropic-compatible backend than the primary one.
   // An effort held back by the missing assertion is announced once here, not
   // silently dropped on every loop round.
-  const anthropicEffort = laneAnthropicEffortSupported(input.tier === "smart" ? "smart" : "primary", env);
+  const anthropicEffort = laneAnthropicEffortSupported(effortTier, env);
   if (input.apiFormat === "anthropic" && reasoningEffort !== "" && !anthropicEffort) {
-    log(`WARNING: ${anthropicEffortInactiveWarning(input.tier === "smart" ? "smart" : "primary", reasoningEffort, " (native tool loop)")}`);
+    log(`WARNING: ${anthropicEffortInactiveWarning(effortTier, reasoningEffort, " (native tool loop)")}`);
   }
 
   // Token/cost telemetry across the whole loop.
@@ -3328,9 +3418,16 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // coverage accounting, and the synthesized-fallback metadata all reflect the
   // deadline rather than a generic provider error. The underlying error text
   // stays on `loop_error`.
-  if (outcome.stopReason === STOP_REQUEST_ERROR && timeFn() >= deadline) {
+  // #1598: the per-attempt timeout is trunc(remaining) (remainingCheck), so a
+  // deadline-derived abort can land up to just-under-1s BEFORE the absolute
+  // deadline; attribute it to the wall clock anyway. The misattribution it
+  // avoids is fail-closed: a wall-clock stop suppresses the #1598 evidence
+  // failover (never restart spend on an expired budget), a wrongly-suppressed
+  // genuine failure 0.9s before the deadline only costs the failover, never
+  // spend.
+  if (outcome.stopReason === STOP_REQUEST_ERROR && timeFn() >= deadline - 1) {
     outcome.stopReason = STOP_WALL_CLOCK;
-  } else if (outcome.stopReason === STOP_REQUEST_ERROR && timeFn() >= explorationDeadline) {
+  } else if (outcome.stopReason === STOP_REQUEST_ERROR && timeFn() >= explorationDeadline - 1) {
     // #1464 (review): an exploration slice exhausted through the transport
     // seam is the reserve stop semantics — exploration ended at the
     // boundary, and the closing verdict runs in-conversation with the
@@ -3415,7 +3512,11 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     const changedFiles = loadChangedFilePaths(deps.readText);
     const removedFiles = loadRemovedFilePaths(deps.readText);
     const diffSectionName =
-      input.tier === "smart" ? CORPUS_DIFF_SECTION_SMART_ARTIFACT : CORPUS_DIFF_SECTION_ARTIFACT;
+      input.tier === "smart"
+        ? CORPUS_DIFF_SECTION_SMART_ARTIFACT
+        : input.tier === "fallback"
+          ? CORPUS_DIFF_SECTION_FALLBACK_ARTIFACT
+          : CORPUS_DIFF_SECTION_ARTIFACT;
     const corpusCovered = corpusDiffCoveredFiles(
       deps.readText(diffSectionName) ?? "",
       deps.readText("pr.diff"),
@@ -3491,6 +3592,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     input.result.native_loop_degraded = outcome.stopReason;
     input.result.rounds = outcome.rounds;
     input.result.stop_reason = outcome.stopReason;
+    // #1598: a degraded run dispatched no call at all (the model issued
+    // none), so the spend counter is zero — recorded explicitly so the
+    // fallback-evidence failover trigger can read ONE counter instead of
+    // inferring the count from the degraded flag. #1597 settled
+    // `executed_request_count` to the attempted-executor population
+    // (successful OR failed), which is exactly the spend signal; a future
+    // degraded path that ran calls would report them here.
+    input.result.executed_request_count = outcome.executed.length;
     if (outcome.error) input.result.native_loop_error = maskKnownSecrets(outcome.error, harnessSecrets);
     input.result.native_loop_usage = usageWithCacheRatio(usageAcc);
     input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
@@ -3534,13 +3643,19 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     // verdict was produced.
     const runVerdictTurn = async (): Promise<unknown> => {
       try {
-        const corpusName = input.tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
+        const corpusName = input.tier === "smart"
+          ? "review-corpus.smart.truncated.md"
+          : input.tier === "fallback"
+            ? "review-corpus.fallback.truncated.md"
+            : "review-corpus.truncated.md";
         let verdictCorpus = deps.readText(corpusName) ?? "";
         if (!verdictCorpus) return null;
         // #965: the initial pass is always the primary profile; the smart
         // profile belongs to the escalation tier. #1253: the tier decides —
         // the unreachable REVIEW_CONTEXT_PROFILE=smart override is gone.
-        const shape = (input.tier === "smart" ? env.SMART_REQUEST_SHAPE : env.PRIMARY_REQUEST_SHAPE) ?? "default";
+        // #1598: the fallback tier's request shape is fixed to "default"
+        // (tierRequestShape has no fallback override).
+        const shape = tierRequestShape(input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary", env);
         verdictCorpus = replaceHarnessFindingsSection(verdictCorpus, verdictHarnessFindingsBody(outcome));
         // #372/#398: drop the byte-duplicate sections the planning context
         // already carries (section-exact and conservative).
@@ -3570,20 +3685,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // the wire ONLY as `json_schema` under the lane's own structured-
         // output opt-in — every other combination stays prompt-only and is
         // announced here, never silently held back.
-        const resolvedFormat = tierResponseFormat(
-          input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary",
-          env,
-        );
+        const resolvedFormat = tierResponseFormat(effortTier, env);
         const responseFormat = resolvedFormat === "off" ? null : resolvedFormat;
-        const anthropicStructuredOutput = laneAnthropicStructuredOutputSupported(
-          input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary",
-          env,
-        );
+        const anthropicStructuredOutput = laneAnthropicStructuredOutputSupported(effortTier, env);
         if (input.apiFormat === "anthropic" && responseFormat !== null) {
           if (responseFormat === "json_schema" && !anthropicStructuredOutput) {
-            log(`WARNING: ${anthropicStructuredOutputInactiveWarning(input.tier === "smart" ? "smart" : "primary", " (native tool loop)")}`);
+            log(`WARNING: ${anthropicStructuredOutputInactiveWarning(effortTier, " (native tool loop)")}`);
           } else if (responseFormat === "json_object") {
-            log(`WARNING: ${anthropicJsonObjectsPromptOnlyWarning(input.tier === "smart" ? "smart" : "primary", "json_object", " (native tool loop)")}`);
+            log(`WARNING: ${anthropicJsonObjectsPromptOnlyWarning(effortTier, "json_object", " (native tool loop)")}`);
           }
         }
         const verdictPayload = conversation.toRequestPayload(input.apiFormat, input.model, {
@@ -4420,7 +4529,7 @@ export function writeOutputs(summary: HarnessResult, markdown: string, deps: Har
   const telemetry = buildToolLoopTelemetry(summary);
   if (telemetry !== null) summary.tool_loop_telemetry = telemetry;
   const tier = deps.env.TOOL_HARNESS_TIER || "primary";
-  const stem = tier === "smart" ? "tool-harness.smart" : "tool-harness";
+  const stem = tier === "smart" ? "tool-harness.smart" : tier === "fallback" ? "tool-harness.fallback" : "tool-harness";
   deps.writeArtifact(`${stem}.json`, redactedJson(summary) + "\n");
   deps.writeArtifact(`${stem}.md`, redactText(markdown));
 }
@@ -4463,14 +4572,20 @@ export interface RunToolHarnessOutcome {
 export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessOutcome> {
   const env = deps.env;
   const tier = env.TOOL_HARNESS_TIER || "primary";
-  if (tier !== "primary" && tier !== "smart") {
+  // #1598: "fallback" is the evidence-failover tier (#1585) — it runs the
+  // same native loop on the resolved fallback lane before a fallback verdict
+  // is accepted. An unknown tier still fails closed.
+  if (tier !== "primary" && tier !== "smart" && tier !== "fallback") {
     throw new Error("invalid tool harness tier");
   }
   // #1255: the legacy TOOL_PLANNING_* env aliases (kept as a #540 fallback)
   // are gone — the v3 contract declares those inputs removed, so the runtime
   // no longer honors them behind the contract's back.
   // #922: corpus and per-result bytes follow the declared window when set.
-  const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, loopLimitsProfile(tier));
+  // #1598 (review): the window follows the TIER — the fallback tier enforces
+  // its own FALLBACK_MODEL_CONTEXT_TOKENS-derived byte budgets (the loop
+  // LIMITS below still resolve on the primary profile's keys).
+  const { maxResponseBytes, corpusMaxBytes } = loopContextLimits(env, tier);
   const turnTimeoutRaw = env.TOOL_TURN_TIMEOUT_SEC || "60";
   const turnTimeout = pyInt(turnTimeoutRaw, "TOOL_TURN_TIMEOUT_SEC");
   // #810: the default budget scales with the PR (changed files/lines +
@@ -4511,11 +4626,15 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
     };
   }
 
-  const corpusName = tier === "smart" ? "review-corpus.smart.truncated.md" : "review-corpus.truncated.md";
-  if (tier === "smart") result.tier = tier;
+  const corpusName = tier === "smart"
+    ? "review-corpus.smart.truncated.md"
+    : tier === "fallback"
+      ? "review-corpus.fallback.truncated.md"
+      : "review-corpus.truncated.md";
+  if (tier !== "primary") result.tier = tier;
   if (!deps.exists(corpusName)) {
     result.planning_error = `Missing ${corpusName}`;
-    if (tier === "smart") result.stop_reason = "request-error";
+    if (tier !== "primary") result.stop_reason = "request-error";
     writeOutputs(result, "Tool harness skipped: no review corpus.", deps);
     return { result, exitCode: 0 };
   }
@@ -4535,12 +4654,25 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // the shared resolver is idempotent on the engine's route-bound AI_* copies
   // (the lane keys still win), so every routing mode resolves the same lane
   // here. The smart tier keeps reading the SMART_* keys, which the escalation
-  // binds from profiles.smart (src/engine/review.ts). An unusable api-format
-  // value fails closed here exactly like the engine's #1493 resolution — a run
-  // that reaches this harness has already resolved the same profiles
-  // successfully, so the refusal can only name what the engine would have
-  // refused first.
-  const lane = tier === "smart" ? null : resolveTierProfiles(env).primary;
+  // binds from profiles.smart (src/engine/review.ts). #1598: the fallback tier
+  // mirrors the #1507 primary behavior — it dials the RESOLVED fallback lane
+  // (resolveTierProfiles().fallback), never the primary transport and never
+  // raw AI_* keys. #1598 (review): the resolved lane is BOUND by the caller
+  // (deps.fallbackLane = profiles.fallback, resolved before any route rebind)
+  // instead of re-resolved from env here — the auto route rebinds the base
+  // AI_BASE_URL/AI_API_KEY/AI_API_FORMAT keys to the primary override
+  // (src/engine/review.ts), so a late env re-resolution would hand an
+  // inherited fallback lane the primary-override endpoint/key/format while
+  // the fallback verdict still came from the original lane. An unusable
+  // api-format value fails closed here exactly
+  // like the engine's #1493 resolution — a run that reaches this harness has
+  // already resolved the same profiles successfully, so the refusal can only
+  // name what the engine would have refused first.
+  const lane = tier === "smart"
+    ? null
+    : tier === "fallback"
+      ? (deps.fallbackLane ?? resolveTierProfiles(env).fallback)
+      : resolveTierProfiles(env).primary;
   const prefix = tier === "smart" ? "SMART" : "AI";
   const baseUrl = ((lane ? lane.baseUrl : env[`${prefix}_BASE_URL`]) ?? "").trim();
   const apiFormat = lane ? lane.apiFormat : normalizeApiFormat(env[`${prefix}_API_FORMAT`]);
@@ -4548,9 +4680,12 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   const apiKey = ((lane ? lane.apiKey : env[`${prefix}_API_KEY`]) ?? "").trim();
 
   if (!repo || !baseUrl || !model) {
-    result.error = "Missing REPO, AI_BASE_URL, or AI_MODEL";
-    if (tier === "smart") result.stop_reason = "request-error";
-    writeOutputs(result, "Tool harness could not run: missing REPO, AI_BASE_URL, or AI_MODEL.", deps);
+    // The message names the tier's own lane: a fallback-tier refusal is about
+    // the resolved fallback profile, not the base AI_* keys.
+    const missingLane = tier === "fallback" ? "fallback model base URL, or fallback model" : "AI_BASE_URL, or AI_MODEL";
+    result.error = `Missing REPO, ${missingLane}`;
+    if (tier !== "primary") result.stop_reason = "request-error";
+    writeOutputs(result, `Tool harness could not run: missing REPO, ${missingLane}.`, deps);
     return { result, exitCode: 0 };
   }
 
@@ -4703,6 +4838,7 @@ turnTimeout,
     result,
     tier,
     deps,
+    ...(deps.wallClockSecCap !== undefined ? { wallClockSecCap: deps.wallClockSecCap } : {}),
     ...(deps.traceGapProbe !== undefined ? { traceGapProbe: deps.traceGapProbe } : {}),
   });
   if (!handled) {
