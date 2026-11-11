@@ -2163,9 +2163,13 @@ scenario_engine_parity_route_b_action_adapter() {
     # harness-owned stub model server and the disposable Forgejo, nothing
     # else.
     #
-    # FORCE_REVIEW is the precheck's force gate: route A already reviewed
-    # this head, so the diff-unchanged skip would leave this route with
-    # no review and no artifact to compare. The gate overrides only that
+    # force-review is the Action adapter's own force input (the same
+    # `with: force-review:` surface a workflow sets), bound through the
+    # contract's INPUT_* channel like every other input here — never as
+    # a raw ambient variable, which is the v2 compatibility name and
+    # not what this route qualifies. Route A already reviewed this
+    # head, so the diff-unchanged skip would leave this route with no
+    # review and no artifact to compare. The gate overrides only that
     # skip — it is outside the fingerprint config sweep, so the reviewed
     # diff and therefore the artifact are unchanged.
     env -u AI_API_KEY -u AI_BASE_URL -u PR_REVIEWER_CREDENTIAL_MODEL \
@@ -2186,7 +2190,7 @@ scenario_engine_parity_route_b_action_adapter() {
       "FORGEJO_API_URL=${FORGEJO_API_URL}" \
       "FORGEJO_TOKEN=${FORGEJO_TOKEN}" \
       "COMMENT_MARKER=<!-- ai-pr-reviewer -->" \
-      "FORCE_REVIEW=true" \
+      "INPUT_FORCE-REVIEW=true" \
       "$NODE_BIN" "$ROOT_DIR/dist/index.js"
   ) >"$TMP/parity-action.log" 2>&1
   status=$?

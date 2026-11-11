@@ -603,6 +603,26 @@ def test_every_parity_route_produces_its_artifact_family() -> None:
         )
 
 
+def test_the_action_adapter_route_binds_force_through_the_contract_channel() -> None:
+    # Route B proves the Action adapter's input boundary, so its force
+    # gate rides the contract's INPUT_* binding like every other input
+    # the route sets. The raw FORCE_REVIEW assignment is the contract's
+    # v2 compatibility alias: it reaches the same gate, but qualifying
+    # the alias instead of the adapter's current input surface would
+    # narrow the qualification to a surface the runner no longer uses.
+    body = _scenario_body(
+        _harness_script(), "scenario_engine_parity_route_b_action_adapter"
+    )
+    assert '"INPUT_FORCE-REVIEW=true"' in body, (
+        "route B must set the action's force-review input as the "
+        'INPUT_FORCE-REVIEW contract binding'
+    )
+    assert not re.search(r'"FORCE_REVIEW=', body), (
+        "route B must not force through the raw FORCE_REVIEW ambient "
+        "alias; the route qualifies the contract input channel"
+    )
+
+
 def test_the_runbook_states_the_kubernetes_route_scope() -> None:
     # The route proves the executor's own path and nothing about a
     # cluster; the runbook must say both, so a reader never mistakes
