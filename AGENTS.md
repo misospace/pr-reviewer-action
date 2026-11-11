@@ -120,6 +120,7 @@ Name only paths you are confident about. An issue that names files the diff does
 - [`docs/architecture/executor-admission-guardrails.md`](docs/architecture/executor-admission-guardrails.md) — #1423 admission guardrails: scope hooks, enforced invariants, rolling-upgrade rationale, Helm deferred to #738
 - [`docs/architecture/controller-daemon.md`](docs/architecture/controller-daemon.md) — #1348 controller daemon/runtime: the production composition of the operator libraries (`src/controller/`)
 - [`docs/architecture/operator-onboarding-diagnostics.md`](docs/architecture/operator-onboarding-diagnostics.md) — #1028 operator onboarding: preflight/doctor surface decision (server-side `/admin/preflight` + thin CLI client) and the epic's decomposition into shippable children
+- [`docs/architecture/operations-dashboard.md`](docs/architecture/operations-dashboard.md) — #742 optional operations dashboard: static shell on the admin listener, CSP fence, off-by-default env wiring
 - [`docs/architecture/source-evidence-provenance.md`](docs/architecture/source-evidence-provenance.md) — #1015 source-evidence provenance: committed vs sanitized representations, exact-revision authority, safe span verification
 - [`docs/architecture/syntax-aware-context.md`](docs/architecture/syntax-aware-context.md) — #764 optional syntax-aware context stage: provider seam, budgets, provenance, measured recall/noise
 - [`docs/fork-review.md`](docs/fork-review.md) — fork PR privilege separation, threat model, `FORK_*` configuration

@@ -409,6 +409,153 @@ test("an admin bind outside the closed allowlist: exit 2 (a hostname never rebin
   }
 });
 
+test("an invalid PR_REVIEWER_ADMIN_DASHBOARD value: exit 2 (a typo is refused, not silently disabled)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-dash-typo-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, FORGEJO_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.FORGEJO_TOKEN = "forgejo-token";
+  env.PR_REVIEWER_ADMIN_PORT = "8081";
+  env.PR_REVIEWER_ADMIN_TOKEN = "admin-token";
+  env.PR_REVIEWER_ADMIN_DASHBOARD = "ture";
+  try {
+    const stderr = captureStderr();
+    stderr.attach();
+    try {
+      const code = await controllerMain([], env);
+      assert.equal(code, 2);
+      assert.match(stderr.lines().join(""), /PR_REVIEWER_ADMIN_DASHBOARD/);
+    } finally {
+      stderr.detach();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  }
+});
+
+// ── the env → createAdminHost wiring for the #742 dashboard flag ──────────
+
+/** Boot a minimal composition with the admin listener on an ephemeral port
+ * (the "minimal composition" harness) and resolve the handle once onReady
+ * fired — by then the admin listener is bound. Teardown (graceful stop, then
+ * the scratch dirs) is registered on `t` in one callback, stop FIRST. */
+async function bootWithAdmin(env: NodeJS.ProcessEnv, t: { after: (fn: () => Promise<void>) => void }, dir: string): Promise<{ readonly handle: ControllerMainHandle; readonly adminPort: number }> {
+  const handleBox: { handle: ControllerMainHandle | null } = { handle: null };
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new FakeExecution() },
+    forge: {
+      mirrorFor: async () => ({}) as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      publish: async () => ({ publicationId: "github-comment:1" }),
+    },
+    followUpAdapter: followUpAdapter(),
+    followUpBotLogin: async () => "reviewer-bot",
+    followUpAnswer: async () => "an answer",
+    onReady: (ready) => {
+      handleBox.handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handleBox.handle !== null) await handleBox.handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handleBox.handle !== null);
+  return { handle: handleBox.handle!, adminPort: Number(env.PR_REVIEWER_ADMIN_PORT) };
+}
+
+test("PR_REVIEWER_ADMIN_DASHBOARD=true serves the dashboard shell on the admin listener", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-dash-on-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  const adminPort = await freePort();
+  env.PR_REVIEWER_ADMIN_PORT = String(adminPort);
+  env.PR_REVIEWER_ADMIN_TOKEN = "admin-token";
+  env.PR_REVIEWER_ADMIN_DASHBOARD = "true";
+  await bootWithAdmin(env, t, dir);
+  const shell = await fetch(`http://127.0.0.1:${adminPort}/dashboard`);
+  assert.equal(shell.status, 200);
+  assert.match(shell.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+  assert.equal(shell.headers.get("x-frame-options"), "DENY");
+  // The shell is unauthenticated, the data routes are not.
+  assert.equal((await fetch(`http://127.0.0.1:${adminPort}/admin/status`)).status, 401);
+});
+
+test("with the dashboard flag unset, /dashboard stays a fixed 404 on a running controller", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-dash-unset-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  const adminPort = await freePort();
+  env.PR_REVIEWER_ADMIN_PORT = String(adminPort);
+  env.PR_REVIEWER_ADMIN_TOKEN = "admin-token";
+  await bootWithAdmin(env, t, dir);
+  const shell = await fetch(`http://127.0.0.1:${adminPort}/dashboard`);
+  assert.equal(shell.status, 404);
+  assert.match(await shell.text(), /not found/);
+});
+
+test("PR_REVIEWER_ADMIN_DASHBOARD=false boots with the dashboard off (explicit off is not a refusal)", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ctl-dash-off-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  const adminPort = await freePort();
+  env.PR_REVIEWER_ADMIN_PORT = String(adminPort);
+  env.PR_REVIEWER_ADMIN_TOKEN = "admin-token";
+  env.PR_REVIEWER_ADMIN_DASHBOARD = "false";
+  await bootWithAdmin(env, t, dir);
+  const shell = await fetch(`http://127.0.0.1:${adminPort}/dashboard`);
+  assert.equal(shell.status, 404);
+  assert.match(await shell.text(), /not found/);
+});
+
+test("the dashboard flag without an admin listener boots and serves nothing", async (t) => {
+  // The flag means nothing without the listener: the composition boots, no
+  // admin surface exists, and the lexical check does not refuse the ON value.
+  const dir = mkdtempSync(join(tmpdir(), "ctl-dash-noadmin-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n";
+  env.PR_REVIEWER_ADMIN_DASHBOARD = "true";
+  const handleBox: { handle: ControllerMainHandle | null } = { handle: null };
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new FakeExecution() },
+    forge: {
+      mirrorFor: async () => ({}) as MirrorCache,
+      currentHeadSha: async () => HEAD,
+      publish: async () => ({ publicationId: "github-comment:1" }),
+    },
+    followUpAdapter: followUpAdapter(),
+    followUpBotLogin: async () => "reviewer-bot",
+    followUpAnswer: async () => "an answer",
+    onReady: (ready) => {
+      handleBox.handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handleBox.handle !== null) await handleBox.handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handleBox.handle !== null);
+  assert.notEqual(handleBox.handle, null);
+});
+
 // ── the real in-cluster KubernetesApi against a local API fake ───────────
 
 interface KubeFake {
