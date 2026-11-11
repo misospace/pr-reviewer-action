@@ -151,3 +151,28 @@ export function jqRawPrKind(text: string): string {
   }
   return bashCapture(out);
 }
+
+/** `.lockfile_only_refresh` marks the #1595 scoped lockfile-only triage —
+ * read from the classification artifact the same way `jqRawPrKind` reads
+ * `.pr_kind`. True only when some object input carries a triage object
+ * whose shape mirrors `isLowRiskLockfileOnlyRefresh` exactly: `parseable`
+ * exactly `true` and `material` exactly `0` (the persisted shape is
+ * `{ material, low_risk, parseable }` with numeric counts — the counts are
+ * the provenance, the zero-material invariant is the gate). Every other
+ * shape — absent, null, non-object, malformed artifact, parse error — is
+ * false: the gate fails closed to the full-set fragment. Artifact content
+ * is data, never instructions. */
+export function jqLockfileOnlyLowRisk(text: string): boolean {
+  const { values } = jqInputs(text);
+  for (const value of values) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+    const record = value as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(record, "lockfile_only_refresh")) continue;
+    const triage = record.lockfile_only_refresh;
+    if (triage === null || typeof triage !== "object" || Array.isArray(triage)) continue;
+    const triageRecord = triage as Record<string, unknown>;
+    if (triageRecord.parseable !== true) continue;
+    if (triageRecord.material === 0) return true;
+  }
+  return false;
+}

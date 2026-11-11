@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, verdictWallClockReserveSec, dependencyEvidenceReserveFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
+import { LoopContextError, loopContextLimits, redactedJson, writeOutputs, runToolHarness, buildToolLoopTelemetry, replaceHarnessFindingsSection, verdictHarnessFindingsBody, normalizeToolRequest, resolveLoopLimits, loopLimitsProfile, buildPlanningContext, accumulateUsage, usageWithCacheRatio, reusableVerdictEnvelope, produceNativeVerdict, verdictWallClockReserveSec, dependencyEvidenceReserveFromClassification, dependencyEvidencePlanFromClassification, PLANNING_NOTES, type HarnessDeps, type HarnessResult } from "../src/tools/harness.js";
 import { OPENAI_VERDICT_JSON_SCHEMA } from "../src/model/request.js";
 import { STOP_WALL_CLOCK_RESERVE } from "../src/tools/loop.js";
 import type { LoopOutcome } from "../src/tools/loop.js";
@@ -3480,6 +3480,161 @@ test("#1379: dependency-evidence families reserve a budget tail; other kinds res
   assert.equal(dependencyEvidenceReserveFromClassification(() => "not json", 24), 0);
   assert.equal(dependencyEvidenceReserveFromClassification(() => null, 24), 0);
   assert.equal(dependencyEvidenceReserveFromClassification(() => '["image_update"]', 24), 0);
+});
+
+test("#1595: the reserve and tracked obligations derive from the artifact's must_check rows", () => {
+  // The #1595 scoped lockfile-only artifact: the must_check names exactly
+  // ONE obligation (the aggregate advisory row) — the reserve is the tracked
+  // set plus ONE spare no-lockout attempt (a zero-slack tail would let a
+  // single non-crediting evidence attempt void the advisory credit path).
+  const advisoryOnly = JSON.stringify({
+    pr_kind: "dependency_upgrade",
+    version: 1,
+    must_check: [
+      "check for breaking API changes in updated dependencies",
+      "run full test suite after upgrade",
+      "check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed",
+    ],
+  });
+  assert.deepEqual(dependencyEvidencePlanFromClassification(() => advisoryOnly, 24), {
+    reserve: 2,
+    obligations: ["security_advisory"],
+  });
+  // Budget rails keep: the minimum budget still reserves its sole request
+  // (the spare is clamped away by the tail); a degenerate budget resolves 0.
+  assert.equal(dependencyEvidenceReserveFromClassification(() => advisoryOnly, 1), 1);
+  assert.equal(dependencyEvidenceReserveFromClassification(() => advisoryOnly, 0), 0);
+  // A partially-scoped must_check tracks exactly the distinct obligations it
+  // still names, in canonical order — with the same one-spare-attempt slack
+  // (2 tracked + 1 spare).
+  const partial = JSON.stringify({
+    pr_kind: "dependency_upgrade",
+    must_check: [
+      "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed",
+      "establish upstream provenance for the updated dependency: publisher and canonical source repository",
+    ],
+  });
+  assert.deepEqual(dependencyEvidencePlanFromClassification(() => partial, 24), {
+    reserve: 3,
+    obligations: ["provenance", "security_advisory"],
+  });
+  // Full-set must_check: byte-identical to the pre-#1595 behavior
+  // (reserve 4 = DEPENDENCY_EVIDENCE_RESERVE, all three tracked).
+  const full = JSON.stringify({
+    pr_kind: "image_update",
+    version: 1,
+    must_check: [
+      "establish upstream provenance for the updated image: publisher and canonical source repository",
+      "inspect the exact old→new upstream release delta for the updated image",
+      "check upstream security advisories for the updated image version range, or report the advisory check as not performed",
+    ],
+  });
+  assert.equal(dependencyEvidenceReserveFromClassification(() => full, 24), 4);
+  assert.deepEqual(dependencyEvidencePlanFromClassification(() => full, 24).obligations, [
+    "provenance",
+    "release_delta",
+    "security_advisory",
+  ]);
+  // Absent must_check (the hand-written #1379 fixture shape) keeps the
+  // full-set default.
+  const minimal = JSON.stringify({ pr_kind: "image_update", version: 1 });
+  assert.equal(dependencyEvidenceReserveFromClassification(() => minimal, 24), 4);
+  // Unusable must_check shapes fail closed to the full set.
+  for (const bad of [null, 42, [], ["run full test suite after upgrade"], ["verify x", 7]]) {
+    const body = JSON.stringify({ pr_kind: "dependency_upgrade", must_check: bad });
+    assert.equal(dependencyEvidenceReserveFromClassification(() => body, 24), 4, JSON.stringify(bad));
+  }
+});
+
+test("#1595: runToolHarness wires the scoped lockfile-only reserve (spare + one obligation)", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "dependency_upgrade",
+    version: 1,
+    must_check: [
+      "check for breaking API changes in updated dependencies",
+      "run full test suite after upgrade",
+      "check upstream security advisories for the packages changed in this lockfile-only refresh, or report the advisory check as not performed",
+    ],
+  }));
+  const payloads: Array<Record<string, unknown>> = [];
+  let n = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("advisories reported as not performed"),
+    validVerdict(),
+  ];
+  const logs: string[] = [];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_MAX_REQUESTS: "6" },
+    transport: async (_baseUrl: string, _apiFormat: string, payload: Record<string, unknown>) => {
+      payloads.push(payload);
+      return scripted[n++];
+    },
+    log: (line: string) => logs.push(line),
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  // The first request carries the SCOPED priority note: it names exactly the
+  // tracked obligation (security advisories) and steers at neither
+  // provenance nor the release delta — the full-trio note would burn the
+  // reserved tail on obligations the scoped must_check scoped away (#1579's
+  // unresolved-evidence partial-review symptom).
+  const firstTexts = ((payloads[0]!.messages ?? []) as Array<{ content: unknown }>)
+    .map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.ok(firstTexts.includes("dependency evidence comes first: check upstream security advisories (or record the check as not performed)"));
+  assert.ok(!firstTexts.includes("establish upstream provenance, inspect the exact old-to-new upstream release delta"));
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  // Reserve 2 (the tracked obligation plus its spare no-lockout attempt),
+  // exactly one tracked obligation — not the canonical three.
+  assert.equal(telemetry.budget?.required_evidence_requests_hint, 2);
+  assert.equal(telemetry.budget?.required_evidence_required, 1);
+  // #1595 (review): the lead claim enforces the window from the FIRST
+  // request, so the scripted optional read_file is refused mid-budget —
+  // spending nothing (6-request budget, nothing executed).
+  assert.equal(telemetry.budget?.required_evidence_refusals, 1);
+  assert.equal(telemetry.budget?.required_evidence_attempts, 0);
+  assert.equal(telemetry.budget?.required_evidence_released, false);
+  assert.deepEqual(telemetry.budget?.required_evidence_credits, []);
+  // #1595 (review): the SCOPED plan claims its obligation first — the loop
+  // ran with the lead-claim flag on.
+  assert.equal(telemetry.budget?.required_evidence_lead_claim, true);
+  assert.ok(logs.some((l) => l.includes("dependency-evidence reserve: 2 tool request(s), 1 obligation(s)")));
+});
+
+test("#1595 (review): a FULL-set must_check keeps tail-only behavior — no lead-claim telemetry", async () => {
+  // The full-trio plan never sets the lead claim: the obligation window
+  // stays a reserved-tail mechanism, byte-identically. The persisted
+  // telemetry must NOT carry the lead-claim key.
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  fs.writeFileSync(path.join(root, "src.ts"), "export const x = 1;\n");
+  fs.writeFileSync(path.join(root, "classification.json"), JSON.stringify({
+    pr_kind: "image_update",
+    version: 1,
+    must_check: [
+      "establish upstream provenance for the updated image: publisher and canonical source repository",
+      "inspect the exact old→new upstream release delta for the updated image",
+      "check upstream security advisories for the updated image version range, or report the advisory check as not performed",
+    ],
+  }));
+  let n = 0;
+  const scripted = [
+    openAiCall("c1", "read_file", '{"path":"src.ts"}'),
+    openAiText("evidence gathered"),
+    validVerdict(),
+  ];
+  const { result } = await runToolHarness(deps({
+    env: { ...withPrompt.env, TOOL_MAX_REQUESTS: "6" },
+    transport: async (_baseUrl: string, _apiFormat: string, _payload: Record<string, unknown>) => scripted[n++],
+    log: () => {},
+  }));
+  assert.equal((result as unknown as HarnessResult).native_loop_verdict_produced, true);
+  const artifact = JSON.parse(fs.readFileSync(path.join(root, "tool-harness.json"), "utf8"));
+  const telemetry = (artifact.tool_loop_telemetry ?? {}) as { budget?: Record<string, unknown> };
+  assert.equal(telemetry.budget?.required_evidence_lead_claim, undefined);
 });
 
 test("#1379: runToolHarness wires the classification-driven dependency-evidence reserve into the loop", async () => {

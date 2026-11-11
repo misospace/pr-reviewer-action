@@ -574,3 +574,62 @@ test("#1379: the dependency-evidence fragment carries the tool-budget ordering r
     assert.equal(state.systemPrompt.includes("never publish a clean approval based only on local-diff facts"), true);
   });
 });
+
+test("#1595: the lockfile-only scoped triage swaps in the advisory-only fragment", () => {
+  const scoped = "dependency_evidence_lockfile_scoped";
+  // A dependency_upgrade artifact carrying the real persisted triage shape
+  // (`classificationToArtifact`'s `{ material, low_risk, parseable }` with
+  // numeric counts) picks the SCOPED fragment when the parseable diff shows
+  // zero material bumps: the required evidence is the advisory check alone,
+  // and the scope sentence names what the triage scoped away.
+  withWorkspace({
+    "classification.json": JSON.stringify({
+      pr_kind: "dependency_upgrade",
+      lockfile_only_refresh: { material: 0, low_risk: 3, parseable: true },
+    }),
+  }, (dir) => {
+    const ws = workspaceAt(dir);
+    const state = applySystemPromptFragments(resolveSystemPrompt({}, ws), { reviewVerbosity: "normal" }, ws);
+    assert.equal(state.systemPrompt.includes(BUNDLED_PROMPT_ASSETS.fragments[scoped]!.trimEnd()), true);
+    assert.equal(state.systemPrompt.includes(BUNDLED_PROMPT_ASSETS.fragments.dependency_evidence!.trimEnd()), false);
+    assert.equal(state.systemPrompt.includes("not require per-package provenance or release-delta research"), true);
+  });
+  // Every other artifact shape keeps the full-set fragment — fail closed:
+  // no triage, a material bump, an unparseable parse, a malformed key, or a
+  // boolean `low_risk` that never exists in the persisted shape.
+  const fullSetCases = [
+    { pr_kind: "dependency_upgrade" },
+    { pr_kind: "dependency_upgrade", lockfile_only_refresh: { material: 1, low_risk: 1, parseable: true } },
+    { pr_kind: "dependency_upgrade", lockfile_only_refresh: { material: 0, low_risk: 0, parseable: false } },
+    { pr_kind: "dependency_upgrade", lockfile_only_refresh: null },
+    { pr_kind: "dependency_upgrade", lockfile_only_refresh: { low_risk: true } },
+    { pr_kind: "dependency_upgrade", lockfile_only_refresh: { material: 0, low_risk: 3, parseable: "yes" } },
+    { pr_kind: "image_update" },
+  ];
+  for (const artifact of fullSetCases) {
+    withWorkspace({ "classification.json": JSON.stringify(artifact) }, (dir) => {
+      const ws = workspaceAt(dir);
+      const state = applySystemPromptFragments(resolveSystemPrompt({}, ws), { reviewVerbosity: "normal" }, ws);
+      const expectEvidence = artifact.pr_kind === "dependency_upgrade" || artifact.pr_kind === "image_update";
+      assert.equal(
+        state.systemPrompt.includes(BUNDLED_PROMPT_ASSETS.fragments.dependency_evidence!.trimEnd()),
+        expectEvidence,
+        JSON.stringify(artifact),
+      );
+      assert.equal(state.systemPrompt.includes(BUNDLED_PROMPT_ASSETS.fragments[scoped]!.trimEnd()), false, JSON.stringify(artifact));
+    });
+  }
+  // A replace-mode operator prompt strips the placeholder entirely — the
+  // scoped fragment never rides a custom prompt.
+  withWorkspace({
+    "classification.json": JSON.stringify({
+      pr_kind: "dependency_upgrade",
+      lockfile_only_refresh: { material: 0, low_risk: 3, parseable: true },
+    }),
+  }, (dir) => {
+    const ws = workspaceAt(dir);
+    const replaced = resolveSystemPrompt({ systemPrompt: "Operator prompt." }, ws);
+    const state = applySystemPromptFragments(replaced, { reviewVerbosity: "normal" }, ws);
+    assert.equal(state.systemPrompt.includes(BUNDLED_PROMPT_ASSETS.fragments[scoped]!.trimEnd()), false);
+  });
+});

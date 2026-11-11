@@ -87,6 +87,7 @@ STOP_REQUEST_ERROR,
   sanitizeFinishReasonToken,
   sanitizedFinishReason,
   summarizeTransportProbes,
+  type DependencyEvidenceObligation,
   type AcceptedAttemptTiming,
   type LoopOutcome,
   type NativeLoopRoundTelemetry,
@@ -2311,6 +2312,9 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         ...(meta.required_evidence_attempts !== undefined ? { required_evidence_attempts: meta.required_evidence_attempts } : {}),
         ...(meta.required_evidence_credits !== undefined ? { required_evidence_credits: meta.required_evidence_credits } : {}),
         ...(meta.required_evidence_released !== undefined ? { required_evidence_released: meta.required_evidence_released } : {}),
+        // #1595 (review): the scoped plan's first claim, mirrored from the raw
+        // meta when it carries it (absent for every tail-only/full-set run).
+        ...(meta.required_evidence_lead_claim !== undefined ? { required_evidence_lead_claim: meta.required_evidence_lead_claim } : {}),
       },
       usage: {
         tool_calls_issued: result.planned_request_count ?? 0,
@@ -2786,42 +2790,122 @@ export type TraceGapProbe = (
 ) => TraceGapContinuation | null | Promise<TraceGapContinuation | null>;
 
 /**
+ * #1595: the DISTINCT dependency-evidence obligations the classification
+ * artifact's `must_check` rows still name, projected into canonical
+ * DEPENDENCY_EVIDENCE_OBLIGATIONS order — or null when the artifact carries
+ * no usable must_check array (the #1379 hand-written minimal artifacts
+ * (`{ pr_kind, version }`) keep the full-set default that way). A usable
+ * array with no mapping row (an exotic artifact) also fails closed to the
+ * full set, preserving the pre-#1595 behavior. Lexical, total, never
+ * throws; artifact content is data.
+ */
+function distinctObligationsFromMustCheck(value: unknown): DependencyEvidenceObligation[] | null {
+  if (!Array.isArray(value)) return null;
+  const seen: DependencyEvidenceObligation[] = [];
+  for (const row of value) {
+    if (typeof row !== "string") return null;
+    const obligation = dependencyObligationForCheckText(row);
+    if (obligation !== null && !seen.includes(obligation)) seen.push(obligation);
+  }
+  if (seen.length === 0) return null;
+  return DEPENDENCY_EVIDENCE_OBLIGATIONS.filter((obligation) => seen.includes(obligation));
+}
+
+/** The resolved #1379/#1595 dependency-evidence reservation: the reserved
+ * request tail and the obligations it tracks. */
+export interface DependencyEvidencePlan {
+  reserve: number;
+  /** The DISTINCT obligations the artifact's must_check rows still name, in
+   * canonical order — or the full set for full-set and unusable-must_check
+   * artifacts. The caller applies the #1379 prefix discipline
+   * (`slice(0, min(length, reserve))`) so a budget-clamped tail still
+   * tracks only what it can pay for. */
+  obligations: readonly DependencyEvidenceObligation[];
+}
+
+const FULL_DEPENDENCY_EVIDENCE_PLAN = (maxRequests: number): DependencyEvidencePlan => ({
+  reserve: Math.min(DEPENDENCY_EVIDENCE_RESERVE, Math.max(1, maxRequests - 1)),
+  obligations: DEPENDENCY_EVIDENCE_OBLIGATIONS,
+});
+
+/**
  * #1379: the dependency-evidence budget reserve the native loop should run
  * with, resolved from the workspace's classification artifact. When the PR
- * classified into a dependency-evidence family the loop reserves
- * DEPENDENCY_EVIDENCE_RESERVE of its request budget for the required
- * upstream evidence (deterministic driver notes prioritize it and enforce
- * the window in driveToolLoop). Budgets of two or more keep one unreserved
- * head request; the minimum valid budget of one reserves its SOLE request —
- * the unattempted-evidence exhaustion this reserve exists to prevent must be
+ * classified into a dependency-evidence family the loop reserves part of its
+ * request budget for the required upstream evidence (deterministic driver
+ * notes prioritize it and enforce the window in driveToolLoop). The
+ * minimum valid budget of one reserves its SOLE request — the
+ * unattempted-evidence exhaustion this reserve exists to prevent must be
  * unreachable for every supported budget, and a one-request run's only
  * request is exactly the tail to protect. Anything else — absent/unparsable
  * artifact, a non-dependency kind, or a degenerate non-positive budget
  * (nothing to reserve) — resolves to 0 so non-dependency PRs keep the exact
  * legacy loop behavior. Tolerant by construction: classification is advisory
  * context here, never a gate.
+ *
+ * #1595: the reservation is scoped to the obligations the artifact's
+ * `must_check` rows actually name (counted DISTINCT via
+ * dependencyObligationForCheckText): a #1595 lockfile-only low-risk
+ * dependency refresh carries one aggregate advisory row, so it tracks
+ * exactly security_advisory and reserves the tracked set plus one spare
+ * no-lockout attempt (clamped to the budget tail) — never a zero-slack
+ * tail that a single failed evidence attempt could void. An artifact whose
+ * must_check names the full set (or is absent/unusable — hand-written
+ * artifacts keep the kind-only default) keeps the pre-#1595 full-set
+ * reservation byte-identically.
+ */
+export function dependencyEvidencePlanFromClassification(
+  readClassification: () => string | null,
+  maxRequests: number,
+): DependencyEvidencePlan {
+  const body = readClassification();
+  if (body === null) return { reserve: 0, obligations: [] };
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { reserve: 0, obligations: [] };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { reserve: 0, obligations: [] };
+  }
+  const kind = (parsed as Record<string, unknown>).pr_kind;
+  if (typeof kind !== "string" || !DEPENDENCY_EVIDENCE_KINDS.has(kind)) return { reserve: 0, obligations: [] };
+  if (maxRequests < 1) return { reserve: 0, obligations: [] };
+  // Floor of 1 (via FULL_DEPENDENCY_EVIDENCE_PLAN's Math.max): a
+  // one-request budget reserves its sole request (the whole budget is the
+  // tail), so no supported budget ever resolves the reserve to 0 while the
+  // PR carries the dependency-evidence obligation.
+  const obligations = distinctObligationsFromMustCheck((parsed as Record<string, unknown>).must_check);
+  if (obligations === null || obligations.length === DEPENDENCY_EVIDENCE_OBLIGATIONS.length) {
+    return FULL_DEPENDENCY_EVIDENCE_PLAN(maxRequests);
+  }
+  // Scoped artifact: reserve the owed obligations, still clamped to the
+  // budget tail — but with ONE SPARE ATTEMPT beyond the tracked set
+  // (`obligations.length + 1`). With reserve == tracked == 1 the loop's
+  // no-lockout attempts cap (== reserve) would deactivate the shape row
+  // after a single non-crediting evidence attempt (a refused host, a failed
+  // fetch), permanently voiding the advisory credit path. The full-set plan
+  // already has that spare (4 reserved vs 3 tracked), so it stays exactly
+  // as today; the scoped plan gets the same slack.
+  return {
+    reserve: Math.min(
+      DEPENDENCY_EVIDENCE_RESERVE,
+      Math.max(1, maxRequests - 1),
+      obligations.length + 1,
+    ),
+    obligations,
+  };
+}
+
+/**
+ * #1379: the reserve alone (the #1595 plan's request tail).
  */
 export function dependencyEvidenceReserveFromClassification(
   readClassification: () => string | null,
   maxRequests: number,
 ): number {
-  const body = readClassification();
-  if (body === null) return 0;
-  let kind: unknown = null;
-  try {
-    const parsed: unknown = JSON.parse(body);
-    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-      kind = (parsed as Record<string, unknown>).pr_kind;
-    }
-  } catch {
-    return 0;
-  }
-  if (typeof kind !== "string" || !DEPENDENCY_EVIDENCE_KINDS.has(kind)) return 0;
-  if (maxRequests < 1) return 0;
-  // Floor of 1: a one-request budget reserves its sole request (the whole
-  // budget is the tail), so no supported budget ever resolves the reserve
-  // to 0 while the PR carries the dependency-evidence obligation.
-  return Math.min(DEPENDENCY_EVIDENCE_RESERVE, Math.max(1, maxRequests - 1));
+  return dependencyEvidencePlanFromClassification(readClassification, maxRequests).reserve;
 }
 
 export interface RunNativeLoopInput {
@@ -2844,6 +2928,10 @@ export interface RunNativeLoopInput {
    * call must overlap; dependency-evidence rows carry their obligation id
    * and gate on the call's own URL/query shape. */
   requiredEvidence?: ReadonlyArray<RequiredEvidenceRow>;
+  /** #1595 (review): the scoped plan's first claim — the obligation window is
+   * enforced from the loop's first request, not only the reserved tail; see
+   * `DriveToolLoopOptions.requiredEvidenceLeadClaim`. */
+  requiredEvidenceLeadClaim?: boolean;
   allowedGhApiRepos: Set<string>;
   allowedHosts: string[];
   workspaceRoot: string;
@@ -3385,6 +3473,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
       budgets,
       ...(input.reserveForRequiredEvidence !== undefined ? { reserveForRequiredEvidence: input.reserveForRequiredEvidence } : {}),
       ...(input.requiredEvidence !== undefined ? { requiredEvidence: input.requiredEvidence } : {}),
+      // #1595 (review): the scoped plan's first claim — see
+      // DriveToolLoopOptions.requiredEvidenceLeadClaim.
+      ...(input.requiredEvidenceLeadClaim === true ? { requiredEvidenceLeadClaim: true } : {}),
       maxTokens: input.maxTokensPerTurn,
       temperature: planningTemp,
       stream,
@@ -3477,6 +3568,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     required_evidence_attempts: outcome.requiredEvidenceAttempts,
     required_evidence_credits: outcome.requiredEvidenceCredits,
     required_evidence_released: outcome.requiredEvidenceReleased,
+    // #1595 (review): the scoped plan's first claim — the obligation window
+    // was enforced from the loop's first request, not only the reserved tail.
+    ...(input.requiredEvidenceLeadClaim === true ? { required_evidence_lead_claim: true } : {}),
     // #1199: per-round latency/usage records (persisted into tool_loop_telemetry
     // and consumed/nulled with the rest of this meta by buildToolLoopTelemetry).
     round_telemetry: roundTelemetry,
@@ -4101,6 +4195,12 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
                 ? 0
                 : Math.min(input.reserveForRequiredEvidence ?? 0, outcome.requestsRemaining),
               ...(input.requiredEvidence !== undefined ? { requiredEvidence: input.requiredEvidence } : {}),
+              // #1595 (review): the lead claim rides the seam while the
+              // window is still up — once released, the reserve is 0 and the
+              // flag is inert, so it stays off for clean telemetry.
+              ...(input.requiredEvidenceLeadClaim === true && !outcome.requiredEvidenceReleased
+                ? { requiredEvidenceLeadClaim: true }
+                : {}),
               requiredEvidenceCredits: outcome.requiredEvidenceCredits,
               // #1396 (review): the RUN-WIDE evidence-attempt count threads
               // across the seam so the continuation's telemetry reports the
@@ -4708,17 +4808,29 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
   // reserved tail, no refusals), exactly like it removes the must_check rows
   // the shape rows can stand in for; the opt-out cannot half-enable the
   // unified window.
-  const dependencyReserve = mustCheckObligationsEnabled(deps.env.VALIDATE_REQUIRED_CHECKS)
-    ? dependencyEvidenceReserveFromClassification(
+  // #1595: the reserve AND the tracked obligations both derive from the
+  // classification artifact's must_check rows — a scoped artifact (the
+  // #1595 lockfile-only refresh) reserves and tracks exactly the one
+  // obligation it still names.
+  const dependencyPlan = mustCheckObligationsEnabled(deps.env.VALIDATE_REQUIRED_CHECKS)
+    ? dependencyEvidencePlanFromClassification(
         () => deps.readText("classification.json"),
         maxRequests.budget,
       )
-    : 0;
-  // The canonical prefix the reserved dependency tail can pay for
-  // (#1379): reserve 1 requires provenance, 2 adds the release delta, 3+
-  // all three. Obligations beyond the prefix gate nothing.
+    : { reserve: 0, obligations: [] as readonly DependencyEvidenceObligation[] };
+  const dependencyReserve = dependencyPlan.reserve;
+  // #1595 (review): a SCOPED plan (tracked obligations a strict subset of the
+  // canonical trio) claims its obligation FIRST — the window is enforced from
+  // the loop's first request, not only the reserved tail.
+  const dependencyLeadClaim =
+    dependencyReserve > 0 &&
+    dependencyPlan.obligations.length < DEPENDENCY_EVIDENCE_OBLIGATIONS.length;
+  // The obligations the reserved dependency tail can pay for: the plan's
+  // distinct set under the #1379 prefix discipline (reserve 1 tracks only
+  // the first, 2+ up to the set's size). Obligations beyond the tracked
+  // set gate nothing.
   const trackedDependencyObligations = dependencyReserve > 0
-    ? DEPENDENCY_EVIDENCE_OBLIGATIONS.slice(0, Math.min(DEPENDENCY_EVIDENCE_OBLIGATIONS.length, dependencyReserve))
+    ? dependencyPlan.obligations.slice(0, Math.min(dependencyPlan.obligations.length, dependencyReserve))
     : [];
   const requiredEvidence: RequiredEvidenceRow[] = [];
   try {
@@ -4833,6 +4945,7 @@ export async function runToolHarness(deps: HarnessDeps): Promise<RunToolHarnessO
 maxRequests: maxRequests.budget,
 reserveForRequiredEvidence,
 requiredEvidence,
+...(dependencyLeadClaim ? { requiredEvidenceLeadClaim: true } : {}),
 turnTimeout,
     maxTokensPerTurn: pyInt(env.TOOL_MAX_TOKENS_PER_TURN || "400", "TOOL_MAX_TOKENS_PER_TURN"),
     result,

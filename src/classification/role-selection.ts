@@ -205,6 +205,9 @@ export function classificationFromArtifact(raw: unknown): PRClassification | nul
     // #749 provenance is a diagnostic, not a selection input: the persisted
     // artifact's provenance is not consumed here.
     pathHandlingProvenance: { fired: false, signals: [], discounted: [] },
+    // #1595 lockfile-only triage is likewise a diagnostic — the harness reads
+    // it straight off the persisted artifact, never through this seam.
+    lockfileOnlyRefresh: null,
     // #871: not part of the persisted artifact (see the PRClassification
     // field doc) — the specialists gate overrides this on the rebuilt
     // classification from the SUBSTANTIAL_CODE_CHANGE env var instead of
