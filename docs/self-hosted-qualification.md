@@ -21,7 +21,10 @@ family landed with #1484: a harness-owned stub model server, one parity
 pull request reviewed through the Action adapter and the self-hosted
 local and OCI worker-image routes with byte-identical published
 artifacts, a documented skip for the Kubernetes-executor route, and a
-re-run of the deterministic eval suites against the same engine build.
+re-run of the deterministic eval suite against the same engine build.
+The same family re-runs the v3 parity suites, the v3 security suites,
+and the broader eval corpus for that build (see
+[Qualification suites against the engine build](#qualification-suites-against-the-engine-build)).
 The remaining scenario families land one at a time (#1485).
 
 A dispatched CI run executes the harness and reports its pass/fail.
@@ -63,7 +66,13 @@ The harness must prove these paths. Each path is one scenario.
   executors: one pull request, one head, byte-identical policy-stable
   artifacts (#1484).
 - The deterministic eval suites re-run against the self-hosted engine
-  build (#1484).
+  build's source tree (#1484).
+- The v3 parity suites re-run against the self-hosted engine build's
+  source tree (#1484).
+- The v3 security suites re-run against the self-hosted engine build's
+  source tree (#1484).
+- The broader eval corpus re-runs against the self-hosted engine build
+  (#1484).
 - A fork pull request and a private repository, with the secret boundary
   intact.
 - A publication that replaces the managed review of the same head.
@@ -128,6 +137,53 @@ timestamps and resource timings, usage and token accounting, and the
 run-dir and workspace paths that leak through diagnostics surfaces.
 Everything else must match byte-for-byte.
 
+## Qualification suites against the engine build
+
+The qualification proves that the engine build the self-hosted workers
+run is the qualified engine the repository's own suites certify. The
+harness re-runs those suites for that build, offline: no model call, no
+network, no remote service, and no credential in the environment of the
+child processes. The node suites run against the compiled runtime of the
+very source tree that produced `dist/index.js`; the bundle-level suites
+(the bundle contract, the gate entry points) and the eval-corpus replay
+drive `dist/index.js` itself. Nothing in the qualification runs against
+a different build.
+
+- The **semantic** suite (`scripts/run_semantic_eval_ci.py` over
+  `evals/corpus-historical-dogfood.json`) scores the deterministic
+  regression corpus and runs the production-boundary dataflow groups
+  against the compiled runtime.
+- The **parity** suites (`action-yml`, `bundle`, `entrypoints`,
+  `gate-workloads`, `golden-replay`, `platform`) assert the contract
+  parity of the shipped artifact: the built bundle embeds the canonical
+  contract and runs without the source tree, the generated action
+  manifest matches the contract, the recorded golden decisions replay
+  identically, the platform seam behaves the same on every forge, and
+  the bundle's gate entry points run.
+- The **security** suites (`credentials-result-channel`,
+  `credentials-vault`, `credentials-worker-set`,
+  `executor-kubernetes-credential-store`, `fence`, `findings-safe-path`,
+  `ingress-github-app-signature`, `ingress-signature`, `instance-config`,
+  `mcp-host`, `mcp-jsonrpc`, `mcp-tools`, `publish-body-bound`,
+  `publish-comment-post`, `redact`, `safe-fetch`, `sanitize`,
+  `secret-shape`, `tools-executors`, `worker-main`) assert the
+  adversarial boundaries of the shipped engine: the sanitizer, the
+  secret redaction and its shapes, the adaptive fence, the safe fetch,
+  the path safety, the tool allowlists, the credential broker, the
+  worker's credential projection, the Kubernetes credential store, the
+  read-only MCP surface, the published body bounds, and the ingress
+  signatures.
+- The **eval corpus** replay drives the built bundle over the retained
+  real-PR fixtures: the review context must be assembled from the
+  fixture, with the defect file still in the diff, and the model call
+  never happens.
+
+The repository gate `tests/test_self_hosted_qualification.py` keeps the
+declared suite lists honest: a renamed suite file, or a new
+adversarial-boundary suite whose file name carries one of the gate's
+vocabulary tokens, fails the gate instead of silently narrowing the
+qualification.
+
 ## Run the harness locally
 
 1. Install Docker and start the Docker daemon.
@@ -164,7 +220,9 @@ missing. The build needs Node and the packages in `package-lock.json`.
 The workflow runs only on a manual dispatch. It never runs on a push or a
 pull request. The job is not part of the aggregate gate, so it never blocks
 a merge. The checkout pins the default branch, so a credential never
-reaches unreviewed branch code.
+reaches unreviewed branch code. The dispatched run therefore always
+qualifies the harness as it stands on the default branch: a pull
+request's own harness is qualified after it lands there.
 
 The job reads the model credential from the repository secret
 `SELF_HOSTED_AI_API_KEY`. The job reads the GitHub App material from the
@@ -251,10 +309,17 @@ installation token for each repository. See
   stack cannot provide. The other three routes (the Action adapter and
   the self-hosted local and OCI worker-image routes) are driven, and
   their artifacts are compared byte-for-byte.
-- The eval-suite scenario of the engine-parity family needs `python3` on
-  the PATH to re-run the deterministic offline semantic gate. When
-  `python3` is absent the scenario prints a skip-with-reason line
-  instead of failing; the dispatched runner provides `python3`.
+- The eval-suite and eval-corpus scenarios of the engine-parity family
+  need `python3` on the PATH (the semantic gate and the eval harness are
+  Python). When `python3` is absent the scenario prints a
+  skip-with-reason line instead of failing; the dispatched runner
+  provides `python3`.
+- The eval-corpus scenario re-runs the retained real-PR fixtures only
+  (#1609): an eval entry without a retained fixture needs a live clone of
+  its forge repository, which this harness never does, so the scenario
+  covers the fixture-pinned entries and says so. The corpora that need a
+  model call are not replayed either: the context-only mode stops before
+  the model call.
 - The GitHub review scenario's worker leg (#1484) needs the forge
   integration's credential material in the environment
   (`PR_REVIEWER_CREDENTIAL_GITHUB`): the review run's worker projects its

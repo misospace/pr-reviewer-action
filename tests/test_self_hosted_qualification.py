@@ -15,10 +15,14 @@ The harness script (tests/self_hosted_e2e_qualification.sh) landed with
   never claiming a qualification that did not run;
 - every disposable instance config adopts its allowlist
   (`discovered-default: adopt`), so the scenarios can actually enqueue a
-  review.
+  review;
+- the v3 qualification suites the harness re-runs against the engine
+  build stay declared, keep their files, and cover every
+  adversarial-boundary suite the vocabulary names.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -474,7 +478,10 @@ RUNBOOK_SCENARIOS = (
     "Usage and cost accounting that counts one review across retries and restarts",
     "A primary model failure that falls back to the fallback model",
     "Engine parity across the Action adapter and the self-hosted executors",
-    "The deterministic eval suites re-run against the self-hosted engine build",
+    "The deterministic eval suites re-run against the self-hosted engine build's source tree",
+    "The v3 parity suites re-run against the self-hosted engine build's source tree",
+    "The v3 security suites re-run against the self-hosted engine build's source tree",
+    "The broader eval corpus re-runs against the self-hosted engine build",
     "A fork pull request and a private repository, with the secret boundary intact",
     "A publication that replaces the managed review of the same head",
 )
@@ -502,6 +509,144 @@ def test_the_runbook_lists_the_complete_scenario_set() -> None:
     assert not missing, (
         "the runbook must list the complete qualification scenario set:\n"
         + "\n".join(f"  missing: {scenario}" for scenario in missing)
+    )
+
+
+# ── the v3 qualification suites the harness re-runs (#1484) ──
+# The harness re-runs the repository's own v3 qualification suites
+# against the engine build the self-hosted workers run. Each declared
+# name is a compiled test file under .test-build/tests-v3/; its source
+# of truth is tests-v3/<name>.test.ts.
+_SUITE_ARRAY_RE = re.compile(
+    r"(?m)^(QUALIFICATION_[A-Z_]+_SUITES)=\(\n(.*?)^\)$", re.DOTALL
+)
+
+# A test file whose name carries one of these tokens is an adversarial
+# boundary suite. The harness must re-run it against the engine build,
+# so a new boundary suite cannot widen the qualification silently: the
+# gate fails until the harness declares it. The token list is a
+# heuristic, not a taxonomy: a boundary suite whose file name carries
+# none of these tokens stays outside the gate's reach.
+_SECURITY_VOCABULARY = (
+    "body-bound",
+    "comment-post",
+    "credential",
+    "executors",
+    "fence",
+    "mcp",
+    "redact",
+    "safe-fetch",
+    "safe-path",
+    "sanitize",
+    "secret",
+    "signature",
+    "traversal",
+)
+
+# The eval corpora the harness replays offline (#1609): each must carry
+# a retained real-PR fixture, and each must still exist under the path
+# the harness names.
+_EVAL_CORPUS_ARRAY_RE = re.compile(
+    r"(?m)^EVAL_CORPUS_FILES=\(\n(.*?)^\)$", re.DOTALL
+)
+
+
+def _harness_script() -> str:
+    harness = ROOT / HARNESS_PATH
+    if not harness.exists():
+        pytest.skip(f"{HARNESS_PATH} lands #1482")
+    return harness.read_text(encoding="utf-8")
+
+
+def _declared_suites(script: str) -> dict[str, list[str]]:
+    """The harness's declared qualification suite lists, by array name.
+
+    A line the parser does not understand is a gate failure, not a
+    silently dropped suite: bash would keep the element, so the parser
+    must either read it or fail."""
+    declared: dict[str, list[str]] = {}
+    for name, body in _SUITE_ARRAY_RE.findall(script):
+        names: list[str] = []
+        for line in body.splitlines():
+            entry = line.split("#", 1)[0].strip()
+            if not entry:
+                continue
+            match = re.fullmatch(r"[a-z0-9][a-z0-9-]*", entry)
+            assert match, f"{name} declares an unreadable suite name: {line!r}"
+            names.append(entry)
+        declared[name] = names
+    return declared
+
+
+def test_the_harness_declares_the_v3_qualification_suites() -> None:
+    declared = _declared_suites(_harness_script())
+    assert set(declared) == {
+        "QUALIFICATION_PARITY_SUITES",
+        "QUALIFICATION_SECURITY_SUITES",
+    }, declared
+    for array, names in declared.items():
+        assert names, f"{array} must declare at least one suite"
+        for name in names:
+            assert (ROOT / "tests-v3" / f"{name}.test.ts").is_file(), (
+                f"{array} declares {name}, but tests-v3/{name}.test.ts is gone: "
+                "the harness would silently skip a suite"
+            )
+
+
+def test_the_security_suite_list_covers_every_adversarial_boundary_suite() -> None:
+    declared = _declared_suites(_harness_script())
+    security = set(declared.get("QUALIFICATION_SECURITY_SUITES", []))
+    boundary = {
+        path.name[: -len(".test.ts")]
+        for path in (ROOT / "tests-v3").glob("*.test.ts")
+        if any(token in path.name for token in _SECURITY_VOCABULARY)
+    }
+    missing = sorted(boundary - security)
+    assert not missing, (
+        "the harness must re-run every adversarial-boundary suite against the "
+        "engine build:\n" + "\n".join(f"  missing: {name}" for name in missing)
+    )
+
+
+def test_the_harness_replays_the_shipped_eval_corpora() -> None:
+    script = _harness_script()
+    match = _EVAL_CORPUS_ARRAY_RE.search(script)
+    assert match, "the harness must declare the eval corpora it replays"
+    corpora = [
+        line.split("#", 1)[0].strip()
+        for line in match.group(1).splitlines()
+        if line.split("#", 1)[0].strip()
+    ]
+    assert corpora, "the harness must name at least one eval corpus"
+    for corpus in corpora:
+        path = ROOT / corpus
+        assert path.is_file(), f"the harness replays a corpus that is gone: {corpus}"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        block = data.get("real_pr_corpus") or {}
+        entries = [
+            entry
+            for entry in [*(block.get("vulnerable") or []), *(block.get("clean") or [])]
+            if isinstance(entry, dict) and entry.get("fixture")
+        ]
+        assert entries, (
+            f"{corpus} carries no retained real-PR fixture: the harness replays "
+            "the fixture-pinned entries offline, so the corpus must keep one"
+        )
+
+
+def test_the_runbook_documents_every_declared_qualification_suite() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert "## Qualification suites against the engine build" in text, text
+    declared = _declared_suites(_harness_script())
+    missing = sorted(
+        name
+        for names in declared.values()
+        for name in names
+        if f"`{name}`" not in text
+    )
+    assert not missing, (
+        "the runbook must name every qualification suite the harness runs:\n"
+        + "\n".join(f"  missing: {name}" for name in missing)
     )
 
 

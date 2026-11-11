@@ -81,8 +81,22 @@ set -euo pipefail
 #      field set and must be byte-identical; run-specific fields
 #      (ids, timestamps, durations, usage/token accounting, run-dir and
 #      workspace paths, comment ids) are the approved nondeterminism.
-#  22. The deterministic eval suites re-run against the same engine
-#      build (offline; no model, no network).
+#  22. The deterministic eval suites re-run from the tree that
+#      produced the engine build (the offline semantic gate; no
+#      model, no network).
+#  23. The v3 parity suites re-run from the tree that produced the
+#      engine build, and the bundle-level suites drive dist/index.js
+#      itself: the built bundle's contract and entrypoint parity, the
+#      recorded golden decisions, the platform seam, and the generated
+#      action manifest.
+#  24. The v3 security suites re-run from the tree that produced the
+#      engine build: the sanitizer, the redaction and secret shapes, the
+#      adaptive fence, the safe fetch, the path safety, the tool
+#      allowlists, the credential broker, the MCP read-only surface, and
+#      the ingress signature.
+#  25. The broader eval corpus re-runs against the engine build: the
+#      retained real-PR fixtures replay offline through the built
+#      bundle (review context only, no model call).
 #
 # Rules (docs/self-hosted-qualification.md): every forge read and write
 # the review pipeline performs travels through the configured forge
@@ -2321,9 +2335,294 @@ scenario_eval_suites_rerun_against_engine_build() {
     tail -n 30 "$TMP/semantic-eval.log" >&2 || true
     return 1
   fi
-  echo "PASS: the deterministic eval suites re-ran against the self-hosted engine build (report $TMP/semantic-eval-report/report.json)"
+  echo "PASS: the deterministic eval suites re-ran from the tree that produced the self-hosted engine build (report $TMP/semantic-eval-report/report.json)"
 }
 
+# ── the v3 qualification suites re-run against the engine build ──
+# The suites below are the repository's own v3 qualification suites,
+# re-run from the SAME source tree that produced the engine build the
+# self-hosted workers run (dist/index.js). The bundle-level suites
+# (bundle, gate-workloads) and the eval-corpus replay drive
+# dist/index.js itself; the other node suites run against the compiled
+# runtime.
+
+# Each name is a compiled test file under .test-build/tests-v3/; the
+# source of truth is tests-v3/<name>.test.ts. The repository gate
+# (tests/test_self_hosted_qualification.py) fails when a declared suite
+# file is renamed or removed, and when a new adversarial-boundary suite
+# whose file name carries one of its vocabulary tokens appears that the
+# list does not cover, so the list cannot rot silently.
+QUALIFICATION_PARITY_SUITES=(
+  action-yml
+  bundle
+  entrypoints
+  gate-workloads
+  golden-replay
+  platform
+)
+
+QUALIFICATION_SECURITY_SUITES=(
+  credentials-result-channel
+  credentials-vault
+  credentials-worker-set
+  executor-kubernetes-credential-store
+  fence
+  findings-safe-path
+  ingress-github-app-signature
+  ingress-signature
+  instance-config
+  mcp-host
+  mcp-jsonrpc
+  mcp-tools
+  publish-body-bound
+  publish-comment-post
+  redact
+  safe-fetch
+  sanitize
+  secret-shape
+  tools-executors
+  worker-main
+)
+
+# The shipped eval corpora that carry a retained real-PR fixture
+# (#1609). The scenario replays those fixtures offline through the
+# built bundle, and every named corpus must contribute: a corpus that
+# loses its fixture fails the qualification instead of narrowing it.
+EVAL_CORPUS_FILES=(
+  evals/corpus-human-findings.json
+  evals/corpus-real-prs.json
+)
+
+# The compiled v3 test build is produced once per harness run: the
+# first caller compiles it and the later ones reuse it (nothing in the
+# harness changes the source tree between them).
+TEST_BUILD_READY=0
+
+# Compiles the v3 test build and fails loudly when the toolchain is
+# missing: a qualification that cannot run its suites must never
+# report a pass.
+ensure_test_build() {
+  local label="$1"
+  if [[ "$TEST_BUILD_READY" == 1 ]]; then
+    return 0
+  fi
+  local tsc="$ROOT_DIR/node_modules/typescript/bin/tsc"
+  if [[ ! -f "$tsc" ]]; then
+    echo "$label scenario: the TypeScript compiler is missing (node_modules/typescript); run 'npm ci' before the harness (docs/self-hosted-qualification.md)" >&2
+    return 1
+  fi
+  if ! (cd "$ROOT_DIR" && "$NODE_BIN" "$tsc" -p tsconfig.test.json) \
+    >"$TMP/test-build.log" 2>&1; then
+    echo "$label scenario: the v3 test build failed to compile; last log lines:" >&2
+    tail -n 30 "$TMP/test-build.log" >&2 || true
+    return 1
+  fi
+  TEST_BUILD_READY=1
+}
+
+# Runs a command with the harness's credentials scrubbed out of its
+# environment. The qualification suites and the eval replay must never
+# reach a live model endpoint or a live forge, and no credential may
+# travel into a child process that has no business holding one: the
+# suites are offline, and the replay drives the engine against the eval
+# harness's own closed loopback port with a dummy key.
+run_without_credentials() {
+  env -u AI_API_KEY -u AI_BASE_URL -u AI_MODEL \
+    -u PR_REVIEWER_CREDENTIAL_MODEL -u PR_REVIEWER_CREDENTIAL_FORGEJO \
+    -u PR_REVIEWER_CREDENTIAL_GITHUB -u FORGEJO_TOKEN \
+    -u PR_REVIEWER_GITHUB_APP_ID -u PR_REVIEWER_GITHUB_APP_PRIVATE_KEY \
+    -u PR_REVIEWER_GITHUB_APP_INSTALLATION_ID \
+    "$@"
+}
+
+# Runs one declared suite list against the engine build. The first
+# failing suite fails the scenario, with its log tail.
+run_qualification_suites() {
+  local label="$1"
+  local log="$2"
+  shift 2
+  local name compiled
+  local files=()
+  for name in "$@"; do
+    compiled="$ROOT_DIR/.test-build/tests-v3/${name}.test.js"
+    if [[ ! -f "$compiled" ]]; then
+      echo "$label scenario: the compiled suite ${name}.test.js is missing" >&2
+      return 1
+    fi
+    files+=("$compiled")
+  done
+  local status
+  set +e
+  (cd "$ROOT_DIR" && run_without_credentials "$NODE_BIN" --test "${files[@]}") \
+    >"$log" 2>&1
+  status=$?
+  set -e
+  if [[ "$status" != 0 ]]; then
+    echo "$label scenario: a qualification suite failed; last log lines:" >&2
+    tail -n 40 "$log" >&2 || true
+    return 1
+  fi
+}
+
+# ── scenario 23: the v3 parity suites against the engine build ──
+scenario_v3_parity_suites_rerun_against_engine_build() {
+  local label="v3 parity suites against the engine build"
+  if [[ ! -f "$ROOT_DIR/dist/index.js" ]]; then
+    echo "$label scenario: dist/index.js is missing" >&2
+    return 1
+  fi
+  ensure_test_build "$label" || return 1
+  run_qualification_suites "$label" "$TMP/parity-suites.log" \
+    "${QUALIFICATION_PARITY_SUITES[@]}" || return 1
+  echo "PASS: the v3 parity suites re-ran from the tree that produced the self-hosted engine build (${#QUALIFICATION_PARITY_SUITES[@]} suites; the bundle suites drive dist/index.js itself; log $TMP/parity-suites.log)"
+}
+
+# ── scenario 24: the v3 security suites against the engine build ──
+scenario_v3_security_suites_rerun_against_engine_build() {
+  local label="v3 security suites against the engine build"
+  if [[ ! -f "$ROOT_DIR/dist/index.js" ]]; then
+    echo "$label scenario: dist/index.js is missing" >&2
+    return 1
+  fi
+  ensure_test_build "$label" || return 1
+  run_qualification_suites "$label" "$TMP/security-suites.log" \
+    "${QUALIFICATION_SECURITY_SUITES[@]}" || return 1
+  echo "PASS: the v3 security suites re-ran from the tree that produced the self-hosted engine build (${#QUALIFICATION_SECURITY_SUITES[@]} suites; log $TMP/security-suites.log)"
+}
+
+# ── scenario 25: the broader eval corpus against the engine build ──
+# The shipped eval corpora carry a retained real-PR fixture each
+# (#1609): the fixture replays offline through the built bundle, with
+# the review context assembled and the model call stopped before it
+# happens. An entry WITHOUT a retained fixture needs a live forge
+# clone, which this harness never does, so the scenario covers the
+# retained-fixture entries and says so.
+scenario_eval_corpus_replay_against_engine_build() {
+  local label="eval corpus replay against the engine build"
+  if [[ ! -f "$ROOT_DIR/dist/index.js" ]]; then
+    echo "$label scenario: dist/index.js is missing" >&2
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "SKIP: the eval-corpus scenario needs python3 on PATH (the dispatched runner provides it); see docs/self-hosted-qualification.md known limits"
+    return 0
+  fi
+  local corpus_dir="$TMP/eval-corpus"
+  mkdir -p "$corpus_dir"
+  # Build the fixture-only corpus. The retained fixture travels with
+  # it: the corpus loader resolves a fixture ref under the corpus
+  # file's own directory and verifies its sha256.
+  if ! (
+    cd "$ROOT_DIR"
+    EVAL_CORPUS_DIR="$corpus_dir" \
+      EVAL_CORPUS_LIST="$(printf '%s\n' "${EVAL_CORPUS_FILES[@]}")" \
+      "$NODE_BIN" -e '
+const fs = require("fs");
+const path = require("path");
+const dir = process.env.EVAL_CORPUS_DIR;
+const corpora = (process.env.EVAL_CORPUS_LIST || "").split("\n").filter(Boolean);
+let kept = 0;
+for (const name of corpora) {
+  const data = JSON.parse(fs.readFileSync(name, "utf8"));
+  const block = data.real_pr_corpus || {};
+  const pinned = (list) => (list || []).filter(
+    (entry) => entry && typeof entry === "object" && entry.fixture
+  );
+  const vulnerable = pinned(block.vulnerable);
+  const clean = pinned(block.clean);
+  const entries = [...vulnerable, ...clean];
+  if (!entries.length) {
+    console.error(name + " carries no retained fixture");
+    process.exit(1);
+  }
+  const target = path.join(
+    dir, path.basename(name).replace(/\.json$/, "") + "-fixtures.json"
+  );
+  fs.writeFileSync(target, JSON.stringify({
+    real_pr_corpus: { vulnerable, clean },
+    metadata: { note: "retained-fixture subset of " + name },
+  }, null, 2));
+  for (const entry of entries) {
+    const reference = entry.fixture.path;
+    const root = path.resolve(path.dirname(name));
+    const source = path.resolve(root, reference);
+    if (source !== root && !source.startsWith(root + path.sep)) {
+      console.error(name + " pins a fixture outside its corpus directory: " + reference);
+      process.exit(1);
+    }
+    const destination = path.join(dir, reference);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(source, destination);
+  }
+  kept += entries.length;
+}
+if (!kept) {
+  console.error("no shipped eval corpus carries a retained fixture");
+  process.exit(1);
+}
+'
+  ) >"$TMP/eval-corpus-build.log" 2>&1; then
+    echo "$label scenario: the retained-fixture corpus could not be built; last log lines:" >&2
+    tail -n 30 "$TMP/eval-corpus-build.log" >&2 || true
+    return 1
+  fi
+  local corpus report status replayed=0
+  for corpus in "$corpus_dir"/*-fixtures.json; do
+    report="${corpus%.json}-report.json"
+    set +e
+    (
+      cd "$ROOT_DIR"
+      # The operator's credentials never reach the replay: the
+      # environment is scrubbed, and the eval harness drives the engine
+      # against its own closed loopback port with a dummy key.
+      run_without_credentials python3 scripts/eval_harness.py \
+        --corpus "$corpus" --context-only --output "$report"
+    ) >"${corpus%.json}.log" 2>&1
+    status=$?
+    set -e
+    if [[ "$status" != 0 ]]; then
+      echo "$label scenario: the eval corpus replay failed for $corpus; last log lines:" >&2
+      tail -n 30 "${corpus%.json}.log" >&2 || true
+      return 1
+    fi
+    # The replay must have assembled the review context from the
+    # retained fixture, with the defect file still in the diff.
+    if ! (
+      cd "$ROOT_DIR"
+      EVAL_REPORT="$report" "$NODE_BIN" -e '
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.env.EVAL_REPORT, "utf8"));
+const rows = report.per_scenario || [];
+if (!rows.length) {
+  console.error("the replay report carries no scenario row");
+  process.exit(1);
+}
+for (const row of rows) {
+  if (row.fixture !== true || row.context_built !== true) {
+    console.error(
+      "the retained fixture did not reach the review context: " + JSON.stringify(row)
+    );
+    process.exit(1);
+  }
+  if (row.kind === "vulnerable" && row.defect_file_in_diff !== true) {
+    console.error("the retained fixture lost its defect file: " + JSON.stringify(row));
+    process.exit(1);
+  }
+}
+'
+    ) >"${corpus%.json}-check.log" 2>&1; then
+      echo "$label scenario: the eval corpus replay did not assemble the review context; last log lines:" >&2
+      tail -n 30 "${corpus%.json}-check.log" >&2 || true
+      return 1
+    fi
+    replayed=$((replayed + 1))
+  done
+  if [[ "$replayed" != "${#EVAL_CORPUS_FILES[@]}" ]]; then
+    echo "$label scenario: ${#EVAL_CORPUS_FILES[@]} corpora were declared, but $replayed replayed" >&2
+    return 1
+  fi
+  echo "PASS: the broader eval corpus re-ran against the self-hosted engine build (${replayed} retained-fixture corpora replayed offline through the built bundle)"
+}
 # ── engine parity runner (#1484) ──
 # The stub's loopback port must not collide with any other loopback
 # service this harness binds: all derive from the validated numeric
@@ -2356,7 +2655,16 @@ scenario_engine_parity_route_d_kubernetes_executor
 echo "RUN: engine parity — the three produced artifacts agree byte-for-byte"
 scenario_engine_parity_artifacts_byte_identical
 
-echo "RUN: the deterministic eval suites re-run against the same engine build"
+echo "RUN: the deterministic eval suites re-run from the tree that produced the engine build"
 scenario_eval_suites_rerun_against_engine_build
+
+echo "RUN: the v3 parity suites re-run against the same engine build"
+scenario_v3_parity_suites_rerun_against_engine_build
+
+echo "RUN: the v3 security suites re-run against the same engine build"
+scenario_v3_security_suites_rerun_against_engine_build
+
+echo "RUN: the broader eval corpus re-runs against the same engine build"
+scenario_eval_corpus_replay_against_engine_build
 
 exit 0
