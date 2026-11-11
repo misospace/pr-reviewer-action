@@ -529,9 +529,10 @@ fi
 # configs name `credential: forgejo`, and the controller collects this
 # env-defined material opportunistically so the worker credential plan's
 # `forge-publish` reference resolves (the worker's engine performs the
-# review's forge reads). The GitHub instance config's `credential: github`
-# resolves the same way, from `PR_REVIEWER_CREDENTIAL_GITHUB`, when the
-# operator provides it.
+# review's forge reads). For the GitHub instance config's `credential:
+# github`, env material (`PR_REVIEWER_CREDENTIAL_GITHUB`) is the static
+# override; an App-based deployment with no env material mints the
+# installation token per job (#1624).
 export PR_REVIEWER_CREDENTIAL_FORGEJO="$FORGEJO_TOKEN"
 
 # A second, read-only token the harness itself reads forge state with
@@ -1628,16 +1629,10 @@ fi
 # outside on a disposable host); everything the pipeline then reads or
 # writes of GitHub state goes through that capability.
 #
-# The review run's worker draws its forge-read material (#1484) from the
-# instance config's `credential: github` reference, resolved from the
-# environment (`PR_REVIEWER_CREDENTIAL_GITHUB`). An App-based deployment
-# whose operator does not provide that material has no env-defined forge
-# credential: the worker's publish-purpose resolution fails closed
-# (`unknown_reference`) and the review can never publish. Wiring the
-# controller's per-job installation-token mint into the worker projection
-# is a follow-up (#1484-split). Until then the scenario skips with that
-# reason rather than burning its timeout on a guaranteed-fail wait, and
-# it runs whenever the operator provides the material.
+# The review run's worker draws its forge-read material through the #735
+# projection. An App-based serving (the default here) gets the controller's
+# per-job installation-token mint (#1624). `PR_REVIEWER_CREDENTIAL_GITHUB`,
+# when the operator sets it, stays the static override served from the vault.
 scenario_github_normal_review() {
   unset PR_REVIEWER_WEBHOOK_PORT PR_REVIEWER_WEBHOOK_SECRET
   export PR_REVIEWER_RECONCILE_INTERVAL_MS=10000
@@ -1668,8 +1663,6 @@ scenario_github_normal_review() {
 }
 if [[ "$PARITY_ONLY" == "1" ]]; then
   echo "SKIP: the operator scenario family (scenarios 1 to 16) is not part of the 'parity' family; the engine-parity family (17 to 25) runs credential-free"
-elif [[ -z "${PR_REVIEWER_CREDENTIAL_GITHUB:-}" ]]; then
-  echo "SKIP: GitHub normal review is not drivable without the forge credential material (set PR_REVIEWER_CREDENTIAL_GITHUB; an App-only deployment's worker forge reads fail closed until the installation-token projection lands, #1484-split); see docs/self-hosted-qualification.md known limits"
 else
   scenario_github_normal_review
 fi

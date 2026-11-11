@@ -78,6 +78,7 @@ import {
   resolveWorkerCredentials,
   type CredentialBroker,
   type CredentialRef,
+  type ResolveResult,
   type VaultEntry,
   type WorkerCredentialPlan,
 } from "../credentials/index.js";
@@ -993,6 +994,90 @@ export function createModelCredentialVault(options: {
   return new InMemorySecretVault(entries);
 }
 
+/** #1624: wrap the #735 broker so a GitHub App deployment's worker
+ * `forge-publish` reference resolves from the controller's per-job
+ * installation-token mint.
+ *
+ * The GitHub serving credential is minted per job by the App capability
+ * (`tokenFor(job.installationId)`), so — unlike the env-seeded Forgejo
+ * token — there is no startup snapshot for the vault to hold. This seam
+ * rides the LATE, all-or-nothing `resolveWorkerCredentials` path exactly:
+ * the mint happens only when the executor resolves THIS run's plan, the
+ * minted material is never stored (not in the vault, not in durable
+ * state, not in the envelope), and a fork run — whose plan carries no
+ * `forge-publish` entry at all — never reaches this code.
+ *
+ * Selection is deliberately narrow, and fail-closed at every step:
+ * - the vault keeps priority: env-defined material (an operator's static
+ *   token) is served unchanged; the mint is ONLY the `unknown_reference`
+ *   fallback, so an expired or scope-refused entry is never papered over;
+ * - only the `github` platform's `forge_publish` purpose and only a
+ *   reference the instance config actually declares for a forge
+ *   integration are ever minted — every other refusal passes through
+ *   untouched (model material in particular);
+ * - an empty installation identity refuses without reaching the mint;
+ * - a mint failure (or an empty mint) refuses the WHOLE credential set
+ *   with a fixed, bounded, credential-free reason — never an
+ *   unauthenticated, stale, or echoed-error degradation. */
+export function createGitHubPublishMintingBroker(
+  base: CredentialBroker,
+  mint: (installationId: string) => Promise<{
+    readonly value: string;
+    readonly expiresAtMs: number;
+  }>,
+  declaredReferences: readonly string[],
+): CredentialBroker {
+  const mintable = new Set(declaredReferences);
+  return {
+    async resolve(reference, request) {
+      const result = await base.resolve(reference, request);
+      if (result.ok) return result;
+      if (
+        result.code !== "unknown_reference"
+        || request.platform !== "github"
+        || request.purpose !== "forge_publish"
+        || !mintable.has(reference)
+      ) {
+        return result;
+      }
+      if (request.installationId === "") {
+        return refusalFromMint("the run carries no installation identity to mint a GitHub installation token against");
+      }
+      let minted: { readonly value: string; readonly expiresAtMs: number };
+      try {
+        minted = await mint(request.installationId);
+      } catch {
+        // The mint's own reason is bounded and credential-free by its
+        // contract, but the broker refusal stays a FIXED string: the
+        // closed-vocabulary reason must never echo mint or transport
+        // detail toward the executor boundary.
+        return refusalFromMint("the per-job GitHub installation-token mint failed");
+      }
+      if (minted.value === "" || !Number.isFinite(minted.expiresAtMs)) {
+        return refusalFromMint("the per-job GitHub installation-token mint returned no usable material");
+      }
+      return { ok: true, material: Object.freeze({ value: minted.value, expiresAtMs: minted.expiresAtMs }) };
+    },
+    // The minted material is never held, so there is nothing here to
+    // revoke beyond the vault's own entries, and `describe` reports only
+    // what the base broker holds (the mint serves no stored reference).
+    revoke(reference) {
+      return base.revoke(reference);
+    },
+    describe() {
+      return base.describe();
+    },
+  };
+}
+
+function refusalFromMint(detail: string): ResolveResult {
+  return Object.freeze({
+    ok: false as const,
+    code: "unknown_reference" as const,
+    reason: `the credential reference is not held by this broker and ${detail}`,
+  });
+}
+
 /** Compose and run the controller. Resolves with the process exit code
  * after the graceful stop completes. */
 export async function controllerMain(
@@ -1038,27 +1123,10 @@ export async function controllerMain(
     ? undefined
     : new PostgresQueueSnapshotStore(pool!);
 
-  // ── #735 credentials: one vault seeded from the env-provided model
-  //    material, and one plan registry behind the two seams (the daemon
-  //    plans opaque references through `credentialRefs`; the Kubernetes
-  //    executor resolves THAT plan late, through `resolver`). The follow-up
-  //    answer lane reads the same startup map directly — it is controller-
-  //    side, not a worker handoff. `resolveStartup` already refused a missing
-  //    evidence default, so the assertion below is proven by startup.
-  const credentialBroker = createModelCredentialVault({
-    instance: startup.instance,
-    platform: startup.platform,
-    modelCredentialMaterial: startup.modelCredentialMaterial,
-  });
-  const credentialBinding = createWorkerCredentialBinding({
-    instance: startup.instance,
-    defaultModelProfile: startup.instance.defaultModelProfile,
-    defaultEvidenceProfile: startup.instance.defaultEvidenceProfile!,
-    broker: credentialBroker,
-    onRefusal: diagnostic,
-  });
-
   // ── the forge capability for the ONE platform (or the injected fake).
+  // Composed BEFORE the credentials below: a GitHub composition's per-job
+  // installation-token mint is one source of the worker credential path
+  // (#1624).
   let forge: ControllerForgeCapability;
   let composedForge: ComposedForge | null = null;
   if (deps.forge !== undefined) {
@@ -1087,6 +1155,39 @@ export async function controllerMain(
       return 1;
     }
   }
+
+  // ── #735 credentials: one vault seeded from the env-provided model
+  //    material, and one plan registry behind the two seams (the daemon
+  //    plans opaque references through `credentialRefs`; the Kubernetes
+  //    executor resolves THAT plan late, through `resolver`). The follow-up
+  //    answer lane reads the same startup map directly — it is controller-
+  //    side, not a worker handoff. `resolveStartup` already refused a missing
+  //    evidence default, so the assertion below is proven by startup.
+  const credentialVault = createModelCredentialVault({
+    instance: startup.instance,
+    platform: startup.platform,
+    modelCredentialMaterial: startup.modelCredentialMaterial,
+  });
+  // A real GitHub composition serves the worker's `forge-publish` reads
+  // through its per-job installation-token mint (#1624): the vault is
+  // wrapped so a declared reference with no env material resolves from
+  // the mint at LATE resolution. Every other composition (Forgejo, an
+  // injected test fake) keeps the plain vault.
+  const mintInstallationToken = composedForge?.mintInstallationToken;
+  const credentialBroker = mintInstallationToken === undefined
+    ? credentialVault
+    : createGitHubPublishMintingBroker(
+        credentialVault,
+        mintInstallationToken,
+        startup.instance.forges.map((entry) => entry.credential),
+      );
+  const credentialBinding = createWorkerCredentialBinding({
+    instance: startup.instance,
+    defaultModelProfile: startup.instance.defaultModelProfile,
+    defaultEvidenceProfile: startup.instance.defaultEvidenceProfile!,
+    broker: credentialBroker,
+    onRefusal: diagnostic,
+  });
 
   // ── executor bindings: `local` is the real #733 executor; `kubernetes`
   //    binds the REAL in-cluster API, constructed EAGERLY so a controller

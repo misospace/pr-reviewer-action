@@ -46,6 +46,7 @@ import { computeGitHubWebhookSignature } from "../src/ingress/github-app-signatu
 import type { FollowUpForgeAdapter } from "../src/ingress/followup-host.js";
 import {
   controllerMain,
+  createGitHubPublishMintingBroker,
   createModelCredentialVault,
   createWorkerCredentialBinding,
   type ControllerMainHandle,
@@ -1407,4 +1408,242 @@ forges:
     ),
     RangeError,
   );
+});
+
+// ── #1624: the per-job GitHub installation-token mint serves forge-publish ──
+
+/** A github binding (forge credential `forge-cred`) over the minting broker:
+ * the vault holds the model material and — when `vaultForgeMaterial` is
+ * given — the env-defined static forge material. `mintCalls` records every
+ * installation id the mint is asked for. */
+function githubMintBindingFixture(options: {
+  readonly vaultForgeMaterial?: string;
+  readonly mint: (installationId: string) => Promise<{
+    readonly value: string;
+    readonly expiresAtMs: number;
+  }>;
+  readonly mintCalls: string[];
+}) {
+  const instance = parseInstanceConfigText(GITHUB_INSTANCE_CONFIG, validateContract(V3_CONTRACT));
+  const material = new Map<string, string>([["model-cred", "sk-test-model-material"]]);
+  if (options.vaultForgeMaterial !== undefined) {
+    material.set("forge-cred", options.vaultForgeMaterial);
+  }
+  const broker = createGitHubPublishMintingBroker(
+    createModelCredentialVault({
+      instance,
+      platform: "github",
+      modelCredentialMaterial: material,
+    }),
+    async (installationId) => {
+      options.mintCalls.push(installationId);
+      return options.mint(installationId);
+    },
+    instance.forges.map((entry) => entry.credential),
+  );
+  return createWorkerCredentialBinding({
+    instance,
+    defaultModelProfile: instance.defaultModelProfile,
+    defaultEvidenceProfile: instance.defaultEvidenceProfile!,
+    broker,
+  });
+}
+
+const GITHUB_PLAN_JOB = {
+  jobId: "job-gh",
+  repoFullName: "owner/repo",
+  platform: "github" as const,
+  installationId: "4242",
+  fork: false,
+};
+
+test("an App-based GitHub run's forge-publish entry resolves from the per-job installation-token mint (#1624)", async () => {
+  const mintCalls: string[] = [];
+  const binding = githubMintBindingFixture({
+    mintCalls,
+    mint: async () => ({
+      value: "ghs_minted_installation_token_material",
+      expiresAtMs: 1_800_000_000_000,
+    }),
+  });
+  // The plan still carries only the opaque reference (#735): the mint is
+  // material, and material never rides the durable request.
+  const refs = await binding.credentialRefs(GITHUB_PLAN_JOB, "run-gh-mint-1");
+  assert.deepEqual(refs, [
+    { name: "forge-publish", reference: "forge-cred" },
+    { name: "model", reference: "model-cred" },
+  ]);
+  const resolved = await binding.resolver.resolve({ runId: "run-gh-mint-1" } as ExecutionRequest);
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) {
+    assert.deepEqual(resolved.credentials.map((entry) => entry.name), ["forge-publish", "model"]);
+    assert.equal(resolved.credentials[0]?.value, "ghs_minted_installation_token_material");
+  }
+  // The mint runs LATE (at resolution, once) and for THIS run's installation.
+  assert.deepEqual(mintCalls, ["4242"]);
+});
+
+test("env-defined static forge material keeps priority; the mint is not reached (#1624)", async () => {
+  const mintCalls: string[] = [];
+  const binding = githubMintBindingFixture({
+    vaultForgeMaterial: "ghp_static_operator_token",
+    mintCalls,
+    mint: async () => ({ value: "ghs_minted_installation_token_material", expiresAtMs: 1_800_000_000_000 }),
+  });
+  await binding.credentialRefs(GITHUB_PLAN_JOB, "run-gh-static-1");
+  const resolved = await binding.resolver.resolve({ runId: "run-gh-static-1" } as ExecutionRequest);
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) {
+    assert.equal(resolved.credentials[0]?.value, "ghp_static_operator_token");
+  }
+  assert.deepEqual(mintCalls, []);
+});
+
+test("a FORK run never reaches the installation-token mint (#1624, fork trust boundary)", async () => {
+  const mintCalls: string[] = [];
+  const binding = githubMintBindingFixture({
+    mintCalls,
+    mint: async () => ({ value: "ghs_minted_installation_token_material", expiresAtMs: 1_800_000_000_000 }),
+  });
+  const refs = await binding.credentialRefs(
+    { ...GITHUB_PLAN_JOB, jobId: "job-fork-gh", fork: true },
+    "run-gh-fork-1",
+  );
+  // No forge entry structurally (pre-existing posture), so the mint is
+  // never asked and the instance's serving identity never crosses the fork
+  // trust boundary.
+  assert.deepEqual(refs.map((ref) => ref.name), ["model"]);
+  const resolved = await binding.resolver.resolve({ runId: "run-gh-fork-1" } as ExecutionRequest);
+  assert.equal(resolved.ok, true);
+  assert.deepEqual(mintCalls, []);
+});
+
+test("a failing mint refuses the WHOLE credential set with a fixed reason that echoes nothing (#1624)", async () => {
+  const mintCalls: string[] = [];
+  const refusals: string[] = [];
+  const instance = parseInstanceConfigText(GITHUB_INSTANCE_CONFIG, validateContract(V3_CONTRACT));
+  const broker = createGitHubPublishMintingBroker(
+    createModelCredentialVault({
+      instance,
+      platform: "github",
+      modelCredentialMaterial: new Map([["model-cred", "sk-test-model-material"]]),
+    }),
+    async (installationId) => {
+      mintCalls.push(installationId);
+      throw new Error("GitHub App authentication failed: private-token-leak at https://example.invalid");
+    },
+    instance.forges.map((entry) => entry.credential),
+  );
+  const binding = createWorkerCredentialBinding({
+    instance,
+    defaultModelProfile: instance.defaultModelProfile,
+    defaultEvidenceProfile: instance.defaultEvidenceProfile!,
+    broker,
+    onRefusal: (message) => refusals.push(message),
+  });
+  await binding.credentialRefs(GITHUB_PLAN_JOB, "run-gh-mintfail-1");
+  const resolved = await binding.resolver.resolve({ runId: "run-gh-mintfail-1" } as ExecutionRequest);
+  // Fail closed, all-or-nothing: the run gets NOTHING — not even the
+  // model credential — and never degrades to an unauthenticated worker.
+  assert.equal(resolved.ok, false);
+  if (!resolved.ok) {
+    assert.equal(resolved.code, "unknown_reference");
+    assert.match(resolved.reason, /installation-token mint failed/);
+    assert.ok(!resolved.reason.includes("private-token-leak"), resolved.reason);
+    assert.ok(!resolved.reason.includes("example.invalid"), resolved.reason);
+  }
+  // The mint was attempted exactly once for this run's installation.
+  assert.deepEqual(mintCalls, ["4242"]);
+  // The refusal diagnostic carries only the closed code and the entry name.
+  assert.equal(refusals.length, 1);
+  assert.ok(!refusals[0]?.includes("private-token-leak"), refusals[0] ?? "");
+});
+
+test("the minting broker serves exactly github publish-purpose material for declared references (#1624)", async () => {
+  const mintCalls: string[] = [];
+  const mint = async (installationId: string) => {
+    mintCalls.push(installationId);
+    return { value: "ghs_minted_installation_token_material", expiresAtMs: 1_800_000_000_000 };
+  };
+  const base = {
+    async resolve() {
+      return { ok: false as const, code: "unknown_reference" as const, reason: "not held" };
+    },
+    revoke() {
+      return false;
+    },
+    describe() {
+      return ["model-cred"];
+    },
+  };
+  const broker = createGitHubPublishMintingBroker(base, mint, ["forge-cred"]);
+  // The minted material keeps the mint's own expiry (the #735 contract is
+  // epoch-ms; an installation token is short-lived and never "no expiry").
+  const served = await broker.resolve("forge-cred", {
+    purpose: "forge_publish",
+    platform: "github",
+    installationId: "4242",
+    repoFullName: "owner/repo",
+    profileName: "",
+  });
+  assert.equal(served.ok, true);
+  if (served.ok) {
+    assert.equal(served.material.value, "ghs_minted_installation_token_material");
+    assert.equal(served.material.expiresAtMs, 1_800_000_000_000);
+  }
+  // Every other shape keeps the base refusal, mint untouched.
+  assert.deepEqual(mintCalls, ["4242"]);
+  for (const request of [
+    { purpose: "model" as const, platform: "github" as const, installationId: "4242" },
+    { purpose: "forge_publish" as const, platform: "forgejo" as const, installationId: "4242" },
+    { purpose: "forge_publish" as const, platform: "github" as const, installationId: "" },
+  ]) {
+    const refused = await broker.resolve("forge-cred", {
+      ...request,
+      repoFullName: "owner/repo",
+      profileName: "",
+    });
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.code, "unknown_reference");
+  }
+  // A reference the instance config never declared is never minted: the
+  // mint serves the operator's declared forge credentials and nothing else.
+  const undeclared = await broker.resolve("other-cred", {
+    purpose: "forge_publish",
+    platform: "github",
+    installationId: "4242",
+    repoFullName: "owner/repo",
+    profileName: "",
+  });
+  assert.equal(undeclared.ok, false);
+  assert.deepEqual(mintCalls, ["4242"]);
+});
+
+test("a mint that yields no usable material fails closed (#1624)", async () => {
+  const base = {
+    async resolve() {
+      return { ok: false as const, code: "unknown_reference" as const, reason: "not held" };
+    },
+    revoke() {
+      return false;
+    },
+    describe() {
+      return [];
+    },
+  };
+  for (const broken of [
+    { value: "", expiresAtMs: 1_800_000_000_000 },
+    { value: "ghs_minted_installation_token_material", expiresAtMs: Number.NaN },
+  ]) {
+    const broker = createGitHubPublishMintingBroker(base, async () => broken, ["forge-cred"]);
+    const refused = await broker.resolve("forge-cred", {
+      purpose: "forge_publish",
+      platform: "github",
+      installationId: "4242",
+      repoFullName: "owner/repo",
+      profileName: "",
+    });
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.code, "unknown_reference");
+  }
 });
