@@ -54,6 +54,13 @@ const DEFAULT_AI_MAX_TOKENS = AI_MAX_TOKENS_DEFAULT;
 /** #922: usable-token ceiling for a declared tier window (v2: 166,666). */
 export const TIER_USABLE_TOKENS_CAP = 400000;
 
+/** #1256: the fallback tier's corpus cap — the historical 120000-byte
+ * re-truncation bound is named policy: the fallback never gets a larger
+ * corpus than this, even when a declared fallback window derives more.
+ * #1598: the assembled fallback corpus (the evidence-failover slot) obeys
+ * the same cap. */
+export const FALLBACK_CORPUS_RETRUNCATION_MAX_BYTES = 120000;
+
 function positiveIntOrEmpty(value: string | undefined): string | null | undefined {
   if (value === undefined || value === "") {
     return undefined; // unset

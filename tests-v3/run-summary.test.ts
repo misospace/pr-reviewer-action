@@ -133,9 +133,20 @@ test("the smart tools row renders only for a native-loop run with a smart harnes
     const escalated = join(dir, "escalated.md");
     writeStepSummary(escalated, baseInput({
       env: { TOOL_MODE: "native_loop" } as StageEnv,
-      smartHarness: { rounds: 2, tool_calls: [{}] },
+      // #1597: the smart row carries the distinct partitions like the
+      // primary row: executed (attempted), successful, and issued.
+      smartHarness: {
+        rounds: 2,
+        planned_request_count: 3,
+        executed_request_count: 2,
+        successful_request_count: 1,
+        tool_calls: [{ status: "ok" }, { status: "error" }],
+      },
     }));
-    assert.ok(readFileSync(escalated, "utf8").includes("| Smart tools | 1 issued; rounds: 2;"), "the smart row renders under the native loop");
+    assert.ok(
+      readFileSync(escalated, "utf8").includes("| Smart tools | 2 executed (1 successful); issued: 3; rounds: 2;"),
+      "the smart row renders under the native loop with the #1597 partitions",
+    );
   } finally {
     cleanup();
   }

@@ -19,6 +19,8 @@ function outcome(overrides: Partial<LoopOutcome> = {}): LoopOutcome {
     executed: [],
     rounds: 3,
     toolCallsIssued: 8,
+    toolCallsRefused: 0,
+    toolCallsDeduplicated: 0,
     stopReason: STOP_BUDGET,
     finalText: "",
     degraded: false,

@@ -722,6 +722,70 @@ live. The harness therefore:
   `HUMAN_REVIEWS_CONTEXT` = `false`). They are fetched as of today and can
   contain the later human finding itself.
 
+### Retained fixtures on real-PR entries (#1609)
+
+The real-PR corpora pin long-merged PRs. Every merged PR has `state: closed`,
+and the #1301 fail-closed admission gate refuses a run whose PR state is not
+provably open. A live replay of a historical entry is therefore refused before
+any context assembly. That is the gate working as designed, not a harness
+fault.
+
+An entry can opt out of the live path by pinning a retained fixture:
+
+```json
+{"id": "...", "head_sha": "...", "fixture": {"path": "fixture.json", "sha256": "..."}}
+```
+
+`path` resolves under the corpus directory and `sha256` pins the file, same
+ref shape as the #712 benchmark fixtures. The harness loads the fixture when
+it loads the corpus, so a bad ref fails immediately: `path` must stay inside
+the corpus directory and the `sha256` must match. The payload is
+integrity-checked at load too (`validate_semantic_fixture_integrity`
+reverse-applies the `diff` against the `files` tree), so a fixture whose diff
+and files disagree fails at load instead of silently mis-scoring the row.
+A fixture needs these keys:
+
+- `files`: a list of `{path, content}` objects, the PR-head tree contents.
+- `diff`: the exact PR diff (applied to the fixture tree at materialization).
+- `pr_json`: the PR identity object the offline adapter serves.
+- `pr_files`: the changed-file list (`files.json`).
+
+At run time the
+entry takes the #712 semantic-fixture path: the harness materializes the
+exact authored diff into a fresh local git repository and serves the PR
+identity offline (`state: open`, `draft: false` — but a fixture that states
+its own `state`/`draft` keeps it, so a fixture that says `closed` is still
+refused by the gate), so admission passes and the
+run never reaches a forge. This does not weaken the #1301 gate: production
+runs still fail closed, and a fixture is an eval-only seam driven by
+`SEMANTIC_FIXTURE_MODE`/`SEMANTIC_FIXTURE_DIR` (see "Semantic-fixture
+directory placement" below).
+
+An entry with a fixture keeps its `head_sha`/`base_sha` pins: they document
+the real PR the fixture retains. Nothing verifies that a fixture really is
+that PR's snapshot, and the pins do not participate in the run: the run's
+`commit_sha` is the materialized fixture commit, not the historical head.
+Entries without a fixture keep the
+live clone path and stay subject to the gate.
+
+The shipped corpora each retain one grounded fixture:
+
+- `evals/corpus-real-prs.json` pins `pr-reviewer-action-99-135` to
+  `real-pr-fixtures/pr-99.json`. The fixture carries the full real diff of
+  PR #99 and the real PR-head contents of both changed files.
+- `evals/corpus-human-findings.json` pins
+  `misospace/pr-reviewer-action#233@25854c65` to
+  `real-pr-fixtures/pr-233.json`. The fixture carries the real PR-head
+  content of the defect file (`pr_reviewer/sse_reassembler.py`) and the real
+  diff for that one file. The full PR touched 13 files; the diff keeps only
+  the defect file.
+
+Each fixture's `provenance` field states exactly what it retains. Run the
+documented `--context-only` command to measure it: the fixture row reports
+`context_built: true` with the defect evidence in the assembled corpus, and
+each row without a fixture reports `context_built: false` because the gate
+refuses the merged PR.
+
 ### Semantic-fixture directory placement
 
 Offline runs that serve the PR identity through the semantic-fixture seam
@@ -743,11 +807,11 @@ field is missing or malformed still fails closed, but now reports the distinct
 `pr-draft-unknown` reason. This distinction keeps a deleted fixture/API outage
 from masquerading as PR state while preserving fail-closed admission.
 
-The harness's own semantic-corpus entries are unaffected: their fixture
-repository is freshly materialized per entry (`_materialize_semantic_fixture`:
-fresh temp dir, `git init`, corpus files committed, the untracked
-`.semantic-fixture/` written afterwards) and is never reset, so the clean
-never runs inside it.
+The harness's own fixture materialization is unaffected by all of this:
+semantic-corpus entries and fixture-backed real-PR entries (#1609) alike are
+freshly materialized per entry (`_materialize_semantic_fixture`: fresh temp
+dir, `git init`, corpus files committed, the untracked `.semantic-fixture/`
+written afterwards) and are never reset, so the clean never runs inside it.
 
 ### Human-findings corpus
 
@@ -766,19 +830,51 @@ this automatically. For each PR in the configured repos, it finds maintainer
 maintainer PR issue comments that read as blocking ("merge blocker",
 "blocker", "before merge", "request changes" — head = the latest PR commit
 before the comment's timestamp), and keeps a finding only when the reviewer
-bot's own review at that exact head was an approval. That decision reads the
-bot's `ai-pr-reviewer:{...}` metadata marker (`review_result: "clean"`) in
-preference to the review's raw `state`, since the bot dismisses its own
-stale reviews as new heads land — a `state: DISMISSED` review can still have
-recorded an approval in its marker at the time. `defect.file`/`line_range`
+bot's own review at that exact head was an approval. That decision combines the
+bot's `ai-pr-reviewer:{...}` metadata marker (`review_result`) with the
+review's raw `state`, because they answer different questions: the marker
+records the review's *result* class, the raw `state` records the *native
+event*. The native event outranks the marker — an explicit `COMMENTED` or
+`CHANGES_REQUESTED` review never approved the head, whatever the marker says
+(an advisory/comment or blockers-only review publishes a native `COMMENTED`
+review that can carry `review_result: findings`). Both approve-verdict marker
+classes count as an approval when the native event agrees: `clean` (approve,
+no findings) and `findings` (approve with non-blocking findings only — under
+the strict verdict policy any blocking finding forces `request_changes`/`issues`,
+so `findings` can only ride an approve verdict; #1601's #1586 example was
+dropped by the old `clean`-only rule). `partial` is an abstention (coverage or
+required-checks gap) and `issues` a request_changes; neither is an approval.
+A dismissed review is the one case the native event cannot settle — the bot
+dismisses its own stale reviews as new heads land, which hides the original
+event — so the marker carries it, exactly as it always has. When the bot
+re-reviews the same head, the later publication is the one that counts: a
+later native comment (a coverage abstention, a scope-withheld review) leaves
+the earlier approval unable to qualify the finding.
+`defect.file`/`line_range`
 come from an inline review comment when one is attached to the review,
 otherwise from a changed-file path named in the finding text. GitHub reads
-only (`gh api` or `urllib` with a token from the environment); it never
-writes to GitHub. Repos, maintainer logins and bot logins are inputs, never
+only, and every read goes through the configured forge capability
+(`pr_reviewer.forge`): the script never shells out to a forge CLI and never
+hand-rolls a request, and it never writes to GitHub. Repos, maintainer logins
+and bot logins are inputs, never
 hardcoded. A weekly workflow
 (`.github/workflows/harvest-human-findings.yaml`, plus `workflow_dispatch`)
 runs it and opens or updates a single PR with new entries for human
 curation; it never pushes to `main`.
+
+**Curated entries** (#1601): findings the harvester correctly or necessarily
+misses are added by hand in the same entry shape, with two extra `source`
+fields. `miss_class` keeps the quality classes separate: `missed_blocker`
+(native approve verdict missed the defect), `partial_abstention_miss`
+(production review at the head was a `partial` abstention — not an approval —
+and still missed the defect), and `false_positive` (reserved for clean-side
+material). `provenance` names the human review, its exact-head timestamps,
+the production bot review's own marker facts, and why the entry was curated
+instead of harvested. `production_bot_at_head` is honest about non-approval
+states (`PARTIAL` records a `review_result: partial` marker). Each failure
+mechanism is paired with a `clean`-list negative control (a fixed head of the
+same PR, or a truly clean head exercising the same mechanism) so flagging
+every similar file cannot pass as detection.
 
 ```bash
 export GITHUB_TOKEN=...
@@ -798,13 +894,27 @@ model" (fix context assembly) and "the evidence was there but missed" (fix focus
 ordering or reasoning), and to verify context changes before spending
 inference.
 
+Since #1301, admission runs before context assembly and fails closed on a PR
+whose state is not provably open. Every historical real-PR entry pins a merged
+(closed) PR, so a live replay is refused and its row reports
+`context_built: false`. Entries that pin a retained fixture (#1609, see
+"Retained fixtures on real-PR entries" above) take the #712 semantic-fixture
+path instead: the harness materializes the fixture offline, admission sees a
+provably open PR, and the row builds full context with zero inference. The
+per-row report carries `"fixture": true` for those entries (the key is absent
+for live rows, which are refused by the gate for merged PRs), so a mixed
+report states which rows ran offline and which were refused.
+
 ```bash
-export GITHUB_TOKEN=...
+export GITHUB_TOKEN=...   # only consulted for entries without a fixture
 python scripts/eval_harness.py --corpus evals/corpus-human-findings.json \
     --context-only --output eval-report/context-human.json
 ```
 
 ### Baseline (2026-09-27)
+
+This baseline predates the #1301 admission gate: at that date every entry
+still replayed live through the forge, and merged PRs were not refused.
 
 - **Production reviewer at the pinned heads** (from its own published
   reviews, no replay): of 75 mined findings, it caught 1, partly caught 10 and

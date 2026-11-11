@@ -547,7 +547,7 @@ export function formatReviewStepOutputs(
 
 /** One {tier, tool, status} tool-call record (the compact output surface). */
 export interface ToolCallRecord {
-  tier: "primary" | "smart";
+  tier: "primary" | "smart" | "fallback";
   tool: string;
   status: string;
 }
@@ -555,14 +555,17 @@ export interface ToolCallRecord {
 /**
  * Build the compact tool-trace output from the harness telemetry: which
  * read-only tools ran, without copying model-controlled arguments into
- * action outputs. Primary calls come first, then smart-tier calls.
+ * action outputs. Primary calls come first, then the escalated tier's calls
+ * (#1598: smart by default, or the fallback tier's when its evidence
+ * failover authored the authoritative artifact).
  */
 export function buildToolCallsOutput(
   primaryHarness: unknown,
-  smartHarness: unknown,
+  escalatedHarness: unknown,
+  escalatedTier: "smart" | "fallback" = "smart",
 ): string {
   const records: ToolCallRecord[] = [];
-  const collect = (harness: unknown, tier: "primary" | "smart"): void => {
+  const collect = (harness: unknown, tier: "primary" | "smart" | "fallback"): void => {
     const calls = (harness as { tool_calls?: unknown } | null)?.tool_calls;
     if (!Array.isArray(calls)) return;
     for (const call of calls) {
@@ -572,7 +575,7 @@ export function buildToolCallsOutput(
     }
   };
   collect(primaryHarness, "primary");
-  collect(smartHarness, "smart");
+  collect(escalatedHarness, escalatedTier);
   return JSON.stringify(records);
 }
 
@@ -592,7 +595,11 @@ export interface HarnessSummaryTelemetry {
   successfulToolCalls?: number;
   rounds?: number;
   stopReason?: string;
-  /** Smart-tier extras (rendered only for the smart harness row). */
+  /** Smart-tier extras (rendered only for the smart harness row).
+   * #1597: `issuedToolCalls` is everything the model asked for
+   * (executed + refused + deduplicated), distinct from
+   * `executedRequestCount` (attempted executions) and
+   * `successfulToolCalls` (the ok subset). */
   issuedToolCalls?: number;
   requests?: number;
   verdictStatus?: string;
@@ -627,6 +634,9 @@ export interface StepSummaryTelemetry {
   requirementCoverage?: { total: number; unknown: number };
   primaryTools: HarnessSummaryTelemetry;
   smartTools?: HarnessSummaryTelemetry;
+  /** #1598: the fallback tier's evidence-failover harness (rendered only when
+   * the fallback artifact exists). */
+  fallbackTools?: HarnessSummaryTelemetry;
   nativeVerdict?: {
     status: string;
     transport?: string;
@@ -693,7 +703,15 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
   if (telemetry.smartTools) {
     const smart = telemetry.smartTools;
     rows.push(
-      `| Smart tools | ${smart.issuedToolCalls ?? 0} issued; rounds: ${smart.rounds ?? 0}; requests: ${smart.requests ?? 0}; stop: ${smart.stopReason ?? "unknown"}; verdict: ${smart.verdictStatus ?? "corpus"}; fallback: ${smart.fallback ?? "unknown"} |`,
+      `| Smart tools | ${smart.executedRequestCount ?? 0} executed (${smart.successfulToolCalls ?? 0} successful); issued: ${smart.issuedToolCalls ?? 0}; rounds: ${smart.rounds ?? 0}; requests: ${smart.requests ?? 0}; stop: ${smart.stopReason ?? "unknown"}; verdict: ${smart.verdictStatus ?? "corpus"}; fallback: ${smart.fallback ?? "unknown"} |`,
+    );
+  }
+  // #1598: present only when the fallback evidence harness ran and wrote its
+  // artifact, so an untriggered fallback keeps the summary byte-identical.
+  if (telemetry.fallbackTools) {
+    const fallback = telemetry.fallbackTools;
+    rows.push(
+      `| Fallback tools | ${fallback.issuedToolCalls ?? 0} issued; rounds: ${fallback.rounds ?? 0}; requests: ${fallback.requests ?? 0}; stop: ${fallback.stopReason ?? "unknown"}; verdict: ${fallback.verdictStatus ?? "corpus"} |`,
     );
   }
   if (telemetry.nativeVerdict) {
@@ -775,7 +793,7 @@ export function renderStepSummary(telemetry: StepSummaryTelemetry): string {
     rows.push(`| Independent confidence | ${value} (advisory only) |`);
   }
   const budgetRows: string[] = [];
-  for (const harness of [telemetry.primaryTools, telemetry.smartTools]) {
+  for (const harness of [telemetry.primaryTools, telemetry.smartTools, telemetry.fallbackTools]) {
     const budget = harness?.budget;
     if (!budget) continue;
     budgetRows.push(

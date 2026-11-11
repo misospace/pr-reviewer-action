@@ -149,7 +149,11 @@
         },
         "confidence": "high",
         "evidence": "`gh pr diff 99` shows the introduction of `check-runs?status=pending`; F's body: \"`wait_for_ci.sh` was querying the Checks API with `status=pending`, but GitHub's Checks API uses `queued`, `in_progress`, and `completed`... repos that primarily use GitHub Checks would have their in-progress check runs invisible to the polling logic, causing premature timeouts.\"",
-        "source_file_lines": "scripts/wait_for_ci.sh, check-runs polling query added by #99 (`status=pending` filter)"
+        "source_file_lines": "scripts/wait_for_ci.sh, check-runs polling query added by #99 (`status=pending` filter)",
+        "fixture": {
+          "path": "real-pr-fixtures/pr-99.json",
+          "sha256": "635f83cd08e925889d35a894968fd76ffaaf81a2850d93bcd5d94a43997a4b32"
+        }
       },
       {
         "id": "pr-reviewer-action-15-143",
