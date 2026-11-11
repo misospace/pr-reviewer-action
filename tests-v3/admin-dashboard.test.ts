@@ -254,6 +254,15 @@ test("execution fence: hostile API data is inserted verbatim as text and only vi
   const responses: Record<string, { readonly ok: boolean; readonly status: number; readonly body: string }> = {
     "/admin/rereview": { ok: false, status: 409, body: JSON.stringify({ error: MARKERS[5] }) },
   };
+  /** Deterministic settle: the sandboxed chains are pure microtasks (the
+   * fetch stub resolves without I/O and the script schedules no timers), so
+   * setImmediate turns advance them without fixed wall-clock timeouts. */
+  async function untilSettled(pred: () => boolean, what: string): Promise<void> {
+    for (let turns = 0; !pred(); turns++) {
+      assert.ok(turns < 1000, `promise chains never settled: ${what}`);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
   const sandbox = vm.createContext({
     document,
     confirm: () => true,
@@ -282,12 +291,16 @@ test("execution fence: hostile API data is inserted verbatim as text and only vi
   // during loadRunDetail and require one of them to fetch the cancel path.
   const buttonsBeforeDetail = (listeners["button:click"] ?? []).length;
   vm.runInContext(`loadRunDetail(${JSON.stringify(MARKERS[2])}); undefined`, sandbox);
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await untilSettled(() => (listeners["button:click"] ?? []).length > buttonsBeforeDetail, "run-detail cancel button registration");
   const detailButtons = (listeners["button:click"] ?? []).slice(buttonsBeforeDetail);
   assert.ok(detailButtons.length >= 1, "the non-terminal run detail must register its cancel button");
   for (const handler of detailButtons) await handler();
-  // Let the kicked-off promise chains settle.
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Let the kicked-off promise chains settle: every marker render path and
+  // the cancel call must have landed.
+  await untilSettled(
+    () => fetchedPaths.some((path) => path.endsWith("/cancel")) && MARKERS.every((marker) => textData.some((text) => text.includes(marker))),
+    "cancel call and every marker render",
+  );
   assert.ok(fetchedPaths.some((path) => path.endsWith("/cancel")), "the cancel button must call the cancel API");
   // Fence assertion 1: every hostile string reached the DOM VERBATIM as text
   // data through createTextNode — escaped-out (rendered), not interpreted.
