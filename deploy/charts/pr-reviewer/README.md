@@ -96,3 +96,12 @@ probes (`/healthz`, `/readyz`) and Prometheus scrapes (`/metrics`) work.
 The surface stays guarded: health and metrics are content-free, the
 `/admin/*` API requires the bearer token (refused at startup without
 one), and the NetworkPolicy bounds which sources may reach the port.
+
+The #742 operations dashboard (`GET /dashboard` on the admin listener)
+stays off by default: `controller.admin.dashboard: false` leaves
+`PR_REVIEWER_ADMIN_DASHBOARD` unset, and `true` renders
+`PR_REVIEWER_ADMIN_DASHBOARD=true`. The knob requires
+`controller.admin.enabled` (the render fails otherwise, because the flag
+means nothing without the listener). The shell holds no data and needs
+no token; every value it shows comes from the bearer-protected
+`/admin/*` API. See `docs/architecture/operations-dashboard.md`.

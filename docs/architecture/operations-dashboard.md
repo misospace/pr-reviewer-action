@@ -118,10 +118,16 @@ with its own backend.
 
 ## Deployment notes
 
-The shipped Helm chart does not yet expose `PR_REVIEWER_ADMIN_DASHBOARD`
-(a chart knob is a follow-up), so the flag is set through the
-controller's environment for now. Because the shell itself is served
-unauthenticated, network-level access control is the operator's remaining
-control for who can REACH the shell: the admin bind address
-(`PR_REVIEWER_ADMIN_BIND`, loopback by default) and network policy. All
-data stays bearer-protected regardless.
+The shipped Helm chart exposes the flag as `controller.admin.dashboard`
+(`deploy/charts/pr-reviewer`). The default is `false`, and the chart
+then leaves `PR_REVIEWER_ADMIN_DASHBOARD` unset, which is the controller's
+OFF state. Setting it to `true` renders
+`PR_REVIEWER_ADMIN_DASHBOARD=true`, one of the accepted ON spellings. The
+knob requires `controller.admin.enabled`, because the flag means nothing
+without the admin listener: with the listener disabled the chart fails
+the render instead of silently dropping the setting. Operators outside
+the chart still set the environment variable directly. Because the shell
+itself is served unauthenticated, network-level access control is the
+operator's remaining control for who can REACH the shell: the admin bind
+address (`PR_REVIEWER_ADMIN_BIND`, loopback by default) and network
+policy. All data stays bearer-protected regardless.

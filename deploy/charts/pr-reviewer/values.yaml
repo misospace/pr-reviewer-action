@@ -59,6 +59,13 @@ controller:
     existingSecret:
       name: ""
       key: "token"
+    # The #742 operations dashboard (PR_REVIEWER_ADMIN_DASHBOARD). Off by
+    # default: the variable stays absent, which is the controller's OFF
+    # state (/dashboard answers the fixed 404). true renders
+    # PR_REVIEWER_ADMIN_DASHBOARD=true. The shell is unauthenticated and
+    # holds no data; who can REACH it stays the admin bind address' and
+    # the NetworkPolicy's call. Requires admin.enabled.
+    dashboard: false
 
   # Missed-webhook reconciliation (PR_REVIEWER_RECONCILE_INTERVAL_MS/_REPOS).
   # With `forgeAuth.platform: github` the reconciliation poll also needs
