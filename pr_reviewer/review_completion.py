@@ -552,15 +552,24 @@ def collect_rows(
     record carrying ``review_id`` is evidence only for the native review
     row with that id at a consistent head; a record whose ``review_id``
     is present but malformed certifies nothing; a head-only record is
-    evidence only when that head has exactly one collected attempt
-    (replayed duplicates of one record count once), so the head binding
-    identifies it unambiguously. Attestations are additional trusted
-    evidence only; they never override a row's own marker fields.
+    evidence only when that head has exactly one collected attempt in
+    the whole collection, across every pull (replayed duplicates of one
+    record count once), so the head binding identifies it unambiguously
+    and one record can never certify unrelated attempts in two pulls.
+    Attestations are additional trusted evidence only; they never
+    override a row's own marker fields.
     """
     bots_lower = {login.strip().lower() for login in bot_logins if isinstance(login, str) and login.strip()}
 
     attested_heads: dict[str, dict[str, Any]] = {}
     attested_reviews: dict[int, dict[str, Any]] = {}
+    # Attempt/head bookkeeping spans the whole collection, not one pull:
+    # a head-only attestation must certify at most one collected attempt
+    # across every pull in the collection (one call per repository), so
+    # per-head counts and replay dedupe are collection-scoped too.
+    head_attempt_counts: dict[str, int] = {}
+    seen_attempt_records: set[tuple] = set()
+    resolved_pulls: list[tuple[int, str, list[tuple[dict[str, Any], str]]]] = []
     for record in attestations or []:
         if not isinstance(record, dict):
             continue
@@ -637,12 +646,11 @@ def collect_rows(
             )
 
         attempts.sort(key=_attempt_sort_key)
-        # Resolve each attempt's head first and count attempts per head,
-        # so a head-only attestation is only attached when exactly one
-        # attempt shares that head and the binding is unambiguous.
+        # Resolve each attempt's head first and count attempts per head
+        # across the whole collection, so a head-only attestation is only
+        # attached when exactly one attempt shares that head and the
+        # binding is unambiguous.
         resolved: list[tuple[dict[str, Any], str]] = []
-        head_attempt_counts: dict[str, int] = {}
-        seen_attempt_records: set[tuple] = set()
         for attempt in attempts:
             head = attempt.get("commit_id")
             if attempt["source"] == "comment":
@@ -662,6 +670,12 @@ def collect_rows(
                         continue
                     seen_attempt_records.add(replay_key)
                 head_attempt_counts[head_text] = head_attempt_counts.get(head_text, 0) + 1
+        # Defer matching until every pull's attempts are counted: matching
+        # must see the collection-wide per-head counts, not the prefix
+        # collected so far.
+        resolved_pulls.append((number, pr_head, resolved))
+
+    for number, pr_head, resolved in resolved_pulls:
         for attempt, head_text in resolved:
             attestation = _matching_attestation(
                 attempt, head_text, attested_heads, attested_reviews, head_attempt_counts

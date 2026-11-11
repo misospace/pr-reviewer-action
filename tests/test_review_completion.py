@@ -419,6 +419,27 @@ def test_head_only_attestation_never_trusts_two_attempts_at_one_head():
     assert all(row["attestation_conclusion"] is None for row in rows)
 
 
+def test_head_only_attestation_never_trusts_attempts_across_pulls():
+    """Two pulls sharing a head cannot both claim one head-only attestation.
+
+    Head-uniqueness counting spans the whole collection, not one pull:
+    with one attempt at the head in each of two PRs the head binding is
+    ambiguous, so the record certifies neither attempt. A per-pull
+    counter would let each pull independently see ``count == 1`` and
+    trust both rows from one record.
+    """
+    first = _comment(11, HEAD)
+    second = _comment(12, HEAD)
+    attestations = [{"conclusion": "approved", "reason_code": "native_gate", "head_sha": HEAD}]
+    rows = rc.collect_rows(
+        REPO, [_pull(1, HEAD, comments=[first]), _pull(2, HEAD, comments=[second])], [BOT],
+        attestations,
+    )
+    assert len(rows) == 2
+    assert all(row["disposition"] == "unknown_missing_native" for row in rows)
+    assert all(row["attestation_conclusion"] is None for row in rows)
+
+
 def test_head_only_attestation_still_trusts_a_single_attempt_at_its_head():
     """Exactly one attempt at the head keeps the head binding unambiguous."""
     other = _comment(11, OTHER_HEAD)  # an attempt at another head changes nothing
