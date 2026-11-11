@@ -3660,9 +3660,10 @@ export interface LockfileOnlyRefresh {
   /** Parsed package bumps that are plain patch/minor churn. */
   lowRisk: number;
   /** False when the diff yielded no parseable package-version value or
-   * changed runtime constraint inside a `node_modules` block (or the parse
-   * overflowed its bound) — the triage must fail closed to the full
-   * material review. */
+   * changed runtime constraint inside a package block (the root-project
+   * `""` block included), when a changed line failed the parse closed
+   * outside any block, or the parse overflowed its bound — the triage must
+   * fail closed to the full material review. */
   parseable: boolean;
 }
 
@@ -3707,10 +3708,15 @@ const LOCKFILE_OTHER_KEY_RE = /^"[^"]+"\s*:\s*\{/;
 
 /** Changed keys inside a package block that are the ordinary churn riding
  * along with EVERY version bump — the tarball hash and the registry URL.
- * Any OTHER changed key inside a block (a dependency/peer/optional relation
- * map entry, bin paths, install scripts, license, or an unrecognized
- * future field) is material — fail closed (#1595 review: relation changes
- * must not ride along under the scoped review). */
+ * Any OTHER changed value line inside a block (a dependency/peer/optional
+ * relation map entry, bin paths, install scripts, license, the dev/optional
+ * placement flags, or an unrecognized future field) is material — fail
+ * closed (#1595 review: relation changes must not ride along under the
+ * scoped review). Known limitation, accepted and documented: a "resolved"
+ * host switch with an unchanged version rides along as churn. Structural
+ * header lines (package keys, nested map openers) are shape, not values —
+ * a real added/removed/renamed entry always carries changed version or
+ * relation value lines that the rules below catch. */
 const LOCKFILE_IGNORED_CHANGED_KEYS = /^(?:"integrity"|"resolved")\s*:\s*/;
 
 /** A changed `"version": "x.y.z"` line inside a package block. */
@@ -3855,14 +3861,17 @@ function parseLockfileVersionBuckets(diffText: string): LockfileVersionBucket[] 
       sawParsedChange = true;
       continue;
     }
-    // #1595 maintainer review: any OTHER changed line is material or fails
-    // closed — never silently ignored. Hash/URL churn (`"integrity"`,
-    // `"resolved"`) rides along with every bump and stays churn; a changed
-    // relation-map entry (dependency/peer/optional ranges — including the
-    // DIRECT ranges in the root `""` block), bin path, install script,
-    // license, or unrecognized field inside a block is material. Outside
-    // any block the parse fails closed (a minimal-context diff could hide
-    // what moved).
+    // #1595 maintainer review: any OTHER changed VALUE line is material or
+    // fails closed — never silently ignored. Hash/URL churn
+    // (`"integrity"`, `"resolved"`) rides along with every bump and stays
+    // churn; a changed relation-map entry (dependency/peer/optional ranges
+    // — including the DIRECT ranges in the root `""` block), bin path,
+    // install script, license, dev/optional flag, or unrecognized field
+    // inside a block is material. Outside any block the parse fails closed
+    // (a minimal-context diff could hide what moved). Structural header
+    // lines (block keys, map openers) carry no value of their own — a real
+    // added/removed/renamed entry always carries changed value lines that
+    // the rules above catch.
     if (sign === "" || LOCKFILE_IGNORED_CHANGED_KEYS.test(content)) continue;
     if (current === null) return null;
     current.relationChanged = true;
@@ -3878,10 +3887,11 @@ function parseLockfileVersionBuckets(diffText: string): LockfileVersionBucket[] 
  * PR whose every changed file is a lockfile (npm package-lock v2/v3). Walks
  * the full diff, pairs removed→added version values per package block by
  * first-seen order, and counts material vs low-risk bumps. A diff that
- * yields no parseable package-version values fails CLOSED (material), never
- * opens the scoped review. A changed runtime constraint (`engines`/`os`/
- * `cpu`/`libc`) in a block is material regardless of its version pair.
- * Pure and bounded; returns counts only. */
+ * yields no parseable change fails CLOSED (material), never opens the
+ * scoped review. A changed runtime constraint (`engines`/`os`/`cpu`/
+ * `libc`) or a changed dependency-relation/other field in a block is
+ * material regardless of its version pair. Pure and bounded; returns
+ * counts only. */
 export function evaluateLockfileOnlyRefresh(fullDiffText: string): LockfileOnlyRefresh {
   const buckets = parseLockfileVersionBuckets(fullDiffText);
   if (buckets === null) return { material: 0, lowRisk: 0, parseable: false };

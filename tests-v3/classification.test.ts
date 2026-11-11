@@ -2674,6 +2674,33 @@ test("#1595 review: range-like/malformed version values fail closed; changed run
     { material: 1, lowRisk: 1, parseable: true },
   );
 
+  // A changed dev/optional placement flag inside a package block is a
+  // dependency-graph change — material, not churn.
+  bump(
+    `    "node_modules/ms": {\n` +
+      `-      "version": "2.1.2",\n` +
+      `+      "version": "2.1.3",\n` +
+      `-      "dev": true,\n` +
+      `+      "dev": false,\n` +
+      `      "license": "MIT"\n` +
+      `    },\n`,
+    { material: 1, lowRisk: 1, parseable: true },
+  );
+
+  // The v2 legacy mirror ("dependencies" top-level section) is not a
+  // package block: its changed version lines fail the parse closed —
+  // lockfileVersion 2 keeps the FULL review (documented in the PR body).
+  bump(
+    lockfileBump("ms", "2.1.2", "2.1.3") +
+      `  "dependencies": {\n` +
+      `-    "ms": {\n` +
+      `+    "ms": {\n` +
+      `-      "version": "2.1.2",\n` +
+      `+      "version": "2.1.3",\n` +
+      `    },\n`,
+    { material: 0, lowRisk: 0, parseable: false },
+  );
+
   // A changed field outside any package block (root lockfile metadata, e.g.
   // a lockfileVersion regeneration) fails the parse closed even when a
   // benign bump also parsed.
