@@ -254,13 +254,17 @@ call). `src/enforcement/required-check-ci.ts` reconciles it into both the
 - **producer obeys the consumer without losing decision evidence**: the gate
   emits at most 50 rows and a 16,384-character (UTF-16 code unit) JSON value,
   truncates names/conclusions to the parser's 200-unit field bound (never
-  splitting a surrogate pair), and drops invalid states. Every
-  test-execution row is retained; only non-test context rows may be trimmed
-  (failed rows first). If the complete test-row set cannot fit, the gate
-  emits NO evidence line at all — an artifact missing a skipped, pending, or
-  otherwise incomplete test leg could otherwise look falsely complete and
-  discharge a full-suite ask. A final strict-parser round-trip means an
-  oversized or malformed artifact is never emitted.
+  splitting a surrogate pair), and drops invalid states. Classifying and
+  retaining rows uses the COMPLETE source name, never the truncated copy:
+  if bounding would change a check's decision identity (test-execution
+  classification, proved scope, or exhaustive identity), the gate emits NO
+  evidence line rather than let a truncated skipped test row read as
+  disposable context. Every test-execution row is retained; only non-test
+  context rows may be trimmed (failed rows first). If the complete test-row
+  set cannot fit, the gate also emits NO evidence line — an artifact missing
+  a skipped, pending, or otherwise incomplete test leg could otherwise look
+  falsely complete and discharge a full-suite ask. A final strict-parser
+  round-trip means an oversized or malformed artifact is never emitted.
 - **publish re-folds agree with the review**: the engine persists its
   RECONCILED fold to the run dir (`required-check-coverage.json`,
   version-tagged); the standalone `publish` CLI reads it back (strictly, and

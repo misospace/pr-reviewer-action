@@ -224,6 +224,21 @@ function checkCoversRequestedScope(
   return provided.length === 0 && FULL_TEST_SUITE_RE.test(normalizedTestScopeText(name));
 }
 
+/**
+ * Canonical decision identity of a check NAME: whether it denotes test
+ * execution at all, the narrow test scopes it proves, and whether it carries
+ * an explicit exhaustive (`suite`/`full`/`all`) identity. The evidence
+ * producer compares this before and after field truncation, so a truncated
+ * name can never silently lose a test suffix, a scope, or a disqualifier and
+ * change what the enforcement pass is allowed to conclude from it.
+ */
+export function ciCheckIdentity(name: string): string {
+  const testExecution = isTestExecutionCheckName(name);
+  const scopes = testScopesIn(name);
+  const exhaustive = testExecution && asksForFullTestSuite(name);
+  return `${testExecution ? "test" : "other"}|${scopes.join(",")}|${exhaustive ? "exhaustive" : "plain"}`;
+}
+
 export type CiDischargeReason =
   | "no-ci-evidence"
   | "head-mismatch"

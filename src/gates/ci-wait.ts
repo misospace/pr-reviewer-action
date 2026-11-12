@@ -3,6 +3,7 @@ import {
   MAX_EVIDENCE_CHECKS,
   MAX_EVIDENCE_FIELD_LENGTH,
   MAX_EVIDENCE_RAW_JSON_CHARS,
+  ciCheckIdentity,
   isTestExecutionCheckName,
   parseHeadBoundCiEvidence,
 } from "../enforcement/required-check-ci.js";
@@ -165,6 +166,14 @@ interface EvidenceRow {
   conclusion?: string;
 }
 
+/** One source check plus its ORIGINAL-name classification. Retention and
+ * trimming decisions use this classification only: a bounded (truncated)
+ * name is emission data, never proof of what the check actually was. */
+interface EvidenceEntry {
+  row: EvidenceRow;
+  testExecution: boolean;
+}
+
 /** #1594: the head-bound check-evidence gate output — the compact-JSON
  * artifact the enforcement pass reconciles required-check completion against
  * (src/enforcement/required-check-ci.ts). Written ONLY on a finalized wait
@@ -176,33 +185,46 @@ interface EvidenceRow {
  *
  * The producer obeys the consumer's limits without ever dropping decision
  * evidence. Test-execution rows (the ones the consumer can discharge or
- * contradict from) are retained in full; non-test rows are context and may
- * be trimmed to fit 50 rows / 16,384 characters. If the complete test-row
- * set itself cannot fit, NO evidence line is emitted: an artifact missing a
- * skipped/pending test leg could otherwise look falsely complete and
- * discharge a full-suite ask. When trimming non-test rows, failed rows are
- * kept first. The final strict parser round-trip is a self-check: if it ever
- * refuses the line, emit nothing rather than an unusable artifact. The line
- * is NOT in the `ciGateOutputs` action-output whitelist, so it never reaches
- * published action outputs. */
+ * contradict from) are classified by their ORIGINAL names and retained in
+ * full; non-test rows are context and may be trimmed to fit 50 rows /
+ * 16,384 characters. If bounding a name would change its decision identity
+ * (test classification, proved scope, or exhaustive identity), or the
+ * complete test-row set cannot fit, NO evidence line is emitted: an artifact
+ * missing a skipped/pending test leg could otherwise look falsely complete
+ * and discharge a full-suite ask. When trimming non-test rows, failed rows
+ * are kept first. The final strict parser round-trip is a self-check: if it
+ * ever refuses the line, emit nothing rather than an unusable artifact. The
+ * line is NOT in the `ciGateOutputs` action-output whitelist, so it never
+ * reaches published action outputs. */
 export function renderCiEvidenceOutput(sha: string, finalState: string, checks: readonly ExternalCheck[]): string {
   try {
     if (!/^[0-9a-f]{7,64}$/i.test(sha)) return "";
     if (finalState !== "success" && finalState !== "failure" && finalState !== "none") return "";
-    const rows: EvidenceRow[] = [];
+    const entries: EvidenceEntry[] = [];
     for (const check of checks) {
       if (typeof check.name !== "string") continue;
       if (check.state !== "pending" && check.state !== "success" && check.state !== "failure") continue;
       const name = boundedEvidenceField(check.name);
       if (name === "") continue;
+      // Bounding may truncate a test suffix/scope or collapse a disqualifier
+      // away. Classification is only sound on the complete source name, and
+      // the consumer can only see the bounded one, so any identity drift
+      // makes the whole artifact unsafe: emit no evidence.
+      if (ciCheckIdentity(check.name) !== ciCheckIdentity(name)) return "";
       const conclusion = typeof check.conclusion === "string" ? boundedEvidenceField(check.conclusion) : "";
-      rows.push({
-        name,
-        state: check.state,
-        ...(conclusion === "" ? {} : { conclusion }),
+      entries.push({
+        // Original-name classification is the retention decision; the bounded
+        // name is never allowed to downgrade a test row into disposable context.
+        testExecution: isTestExecutionCheckName(check.name),
+        row: {
+          name,
+          state: check.state,
+          ...(conclusion === "" ? {} : { conclusion }),
+        },
       });
     }
-    if (rows.length === 0) return "";
+    if (entries.length === 0) return "";
+    const rows = entries.map((entry) => entry.row);
     const serialize = (candidate: readonly EvidenceRow[]): string =>
       jqCompact({ version: 1, head_sha: sha, final_state: finalState, checks: candidate });
     const emit = (json: string): string => {
@@ -220,19 +242,19 @@ export function renderCiEvidenceOutput(sha: string, finalState: string, checks: 
     // execution rows are the decision evidence: retain every one or emit
     // nothing at all. A failure-first order keeps red rows visible when
     // non-test context is trimmed.
-    const byFailureFirst = (list: readonly EvidenceRow[]): EvidenceRow[] => [
-      ...list.filter((row) => row.state === "failure"),
-      ...list.filter((row) => row.state !== "failure"),
+    const byFailureFirst = (list: readonly EvidenceEntry[]): EvidenceEntry[] => [
+      ...list.filter((entry) => entry.row.state === "failure"),
+      ...list.filter((entry) => entry.row.state !== "failure"),
     ];
-    const testRows = byFailureFirst(rows.filter((row) => isTestExecutionCheckName(row.name)));
-    if (testRows.length > MAX_EVIDENCE_CHECKS) return "";
-    const otherRows = byFailureFirst(rows.filter((row) => !isTestExecutionCheckName(row.name)));
-    let retained = [...testRows];
+    const testEntries = byFailureFirst(entries.filter((entry) => entry.testExecution));
+    if (testEntries.length > MAX_EVIDENCE_CHECKS) return "";
+    const otherEntries = byFailureFirst(entries.filter((entry) => !entry.testExecution));
+    let retained = testEntries.map((entry) => entry.row);
     let json = serialize(retained);
     if (json.length > MAX_EVIDENCE_RAW_JSON_CHARS) return "";
-    for (const row of otherRows) {
+    for (const entry of otherEntries) {
       if (retained.length >= MAX_EVIDENCE_CHECKS) break;
-      const next = [...retained, row];
+      const next = [...retained, entry.row];
       const nextJson = serialize(next);
       if (nextJson.length > MAX_EVIDENCE_RAW_JSON_CHARS) break;
       retained = next;

@@ -863,6 +863,65 @@ test("renderCiEvidenceOutput: bounded, single-line, parser-round-trippable artif
   assert.equal(parsedOverflow!.checks[0]!.name, "Unit Tests", "red rows lead the truncated list");
 });
 
+test("renderCiEvidenceOutput: truncated names are never decision evidence", () => {
+  // 50 green test rows (incl. an explicit exhaustive identity) followed by a
+  // 51st SKIPPED test row with an overlong name. Its bounded copy is plain
+  // "x"s and no longer test-named, so classifying the copy as disposable
+  // context would emit 50 green rows and falsely discharge a full-suite ask.
+  const overlongSkippedTail = [
+    { name: "test suite", state: "success" as const, conclusion: "success" },
+    ...Array.from({ length: 49 }, (_, i) => ({
+      name: `test-${i}`,
+      state: "success" as const,
+      conclusion: "success",
+    })),
+    { name: "x".repeat(201) + " Unit Tests", state: "success" as const, conclusion: "skipped" },
+  ];
+  const tailLine = renderCiEvidenceOutput(SHA, "success", overlongSkippedTail);
+  assert.equal(tailLine, "", "an overlong skipped test row invalidates the whole artifact");
+  const tailDischarge = ciDischargeForCheckText(
+    "run full test suite after upgrade",
+    parseHeadBoundCiEvidence(tailLine.replace(/^ci_checks_evidence=/, "")),
+    SHA,
+  );
+  assert.equal(tailDischarge.outcome, "unresolved");
+  assert.equal(tailDischarge.reason, "no-ci-evidence");
+
+  // Truncation drops a proved scope from a still-test-named row: the copy
+  // would look like a generic test run, so the artifact must not be emitted.
+  const lostScope = renderCiEvidenceOutput(SHA, "success", [
+    { name: "test " + "x".repeat(190) + " integration", state: "success", conclusion: "success" },
+  ]);
+  assert.equal(lostScope, "", "a truncated row that loses its test scope is not evidence");
+
+  // Truncation drops the disqualifier: the copy would read as test execution
+  // even though the source name was `test coverage`.
+  const lostDisqualifier = renderCiEvidenceOutput(SHA, "success", [
+    { name: "test " + "x".repeat(190) + " coverage", state: "success", conclusion: "success" },
+  ]);
+  assert.equal(lostDisqualifier, "", "a truncated row that loses a disqualifier is not evidence");
+
+  // Identity-preserving truncation is safe: the row is still a generic test
+  // execution with the same (empty) scope set.
+  const benignLong = renderCiEvidenceOutput(SHA, "success", [
+    { name: "test " + "x".repeat(300), state: "success", conclusion: "success" },
+  ]);
+  const parsedBenign = parseHeadBoundCiEvidence(benignLong.replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(parsedBenign, null);
+  assert.equal(parsedBenign!.checks[0]!.name, "test " + "x".repeat(195));
+  assert.equal(ciDischargeForCheckText("run the tests", parsedBenign, SHA).outcome, "satisfied");
+
+  // Positive control: ordinary, untruncated test names still discharge.
+  const normal = renderCiEvidenceOutput(SHA, "success", [
+    { name: "test suite", state: "success", conclusion: "success" },
+    { name: "integration-tests", state: "success", conclusion: "success" },
+  ]);
+  const parsedNormal = parseHeadBoundCiEvidence(normal.replace(/^ci_checks_evidence=/, ""));
+  assert.notEqual(parsedNormal, null);
+  assert.equal(ciDischargeForCheckText("run full test suite after upgrade", parsedNormal, SHA).outcome, "satisfied");
+  assert.equal(ciDischargeForCheckText("run integration tests", parsedNormal, SHA).outcome, "satisfied");
+});
+
 test("renderCiEvidenceOutput: UTF-16 field bound and serialized budget always parse strictly", () => {
   // The parser counts UTF-16 units (an emoji is 2); truncation by code point
   // alone could emit a 200-code-point/400-unit field and invalidate the
