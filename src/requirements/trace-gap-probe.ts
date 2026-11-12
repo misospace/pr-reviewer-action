@@ -46,6 +46,7 @@ import {
   ledgerRequirementsById,
   missingTraceRequirementIds,
   validateRequirementTrace,
+  type ChangedFileLines,
   type RequirementOwnership,
   type TraceGapContinuationSummary,
 } from "../enforcement/requirement-trace.js";
@@ -62,6 +63,9 @@ export interface TraceGapProbeContext {
   changed?: string | undefined;
   ownership?: readonly RequirementOwnership[] | undefined;
   paths?: readonly string[] | undefined;
+  /** #1600: changed lines attributed per file, so the probe's validation uses
+   * the same file-attributed scope evidence as the publication path. */
+  fileLines?: readonly ChangedFileLines[] | undefined;
   prBody?: string | null | undefined;
   ciState?: string | null | undefined;
 }
@@ -198,6 +202,7 @@ export function computeTraceGapContinuation(
   const trace = validateRequirementTrace(coverage, context.ledger, context.workspace, context.changed, {
     ownership: context.ownership,
     paths: context.paths,
+    fileLines: context.fileLines,
     prBody: context.prBody,
     ciState: context.ciState,
   });
