@@ -159,6 +159,20 @@ test("#1594 discharge: the check must prove the requested test scope", () => {
     { name: "Unit Tests", state: "success", conclusion: "skipped" },
   ]);
   assert.equal(ciDischargeForCheckText("run integration tests", integrationAndSkippedUnit, HEAD).outcome, "satisfied");
+
+  // finalState folds the WHOLE wait, not the ask's scope: a failure caused by
+  // an unrelated check does not block an in-scope green test run, while an
+  // in-scope red leg still wins (failure-first)
+  const unrelatedWaitFailure = evidence("failure", [
+    { name: "lint", state: "failure", conclusion: "failure" },
+    { name: "integration-tests", state: "success", conclusion: "success" },
+  ]);
+  assert.equal(ciDischargeForCheckText("run integration tests", unrelatedWaitFailure, HEAD).outcome, "satisfied");
+  const inScopeWaitFailure = evidence("failure", [
+    { name: "lint", state: "failure", conclusion: "failure" },
+    { name: "integration-tests", state: "failure", conclusion: "failure" },
+  ]);
+  assert.equal(ciDischargeForCheckText("run integration tests", inScopeWaitFailure, HEAD).outcome, "contradicted");
 });
 
 test("#1594 discharge: exact-head green test check discharges; stale head does not", () => {
