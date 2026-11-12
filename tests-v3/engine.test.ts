@@ -445,11 +445,15 @@ test("#1448 review: the derivation is fed the complete diff, not the prioritized
     req.inputs = {
       ...req.inputs,
       "derived-obligations": "true",
-      // The smallest primary window the tool loop admits (~22.4k tokens)
-      // floors maxDiff at ~7.4 KB, so the ~8.7 KB diff cannot fit the
-      // prioritized slice whole and the generated-rank sentinel chunk is
-      // dropped from it entirely.
+      // Corpus budgets derive independently of the loop fit (AI_MAX_TOKENS +
+      // 2,000 headroom): this window floors maxDiff at ~7.4 KB, so the
+      // ~8.7 KB diff cannot fit the prioritized slice whole and the
+      // generated-rank sentinel chunk is dropped from it entirely. The small
+      // explicit per-turn completion keeps the loop's own preflight (which
+      // also reserves framing and the advertised tool schemas, #1635)
+      // satisfiable at this window.
       "primary-model-context-tokens": "22500",
+      "tool-max-tokens-per-turn": "400",
     };
     const result = await runReviewEngine(req, engineDeps(f.root, f.runDir, { adapter }));
     // #1449: the derivation is a review target AND an enforcement input —

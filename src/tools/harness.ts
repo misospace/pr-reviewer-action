@@ -329,6 +329,16 @@ export class LoopContextError extends Error {}
 
 /** Tokens kept free for prompt framing beside the per-turn completion. */
 const LOOP_FRAMING_TOKENS = 2000;
+/** #1635 review: tokens kept free for the advertised tool schemas. They ride
+ * in the request's `tools` field and are NOT part of `approxTokens()`, so the
+ * fit calculation must reserve them explicitly or a small declared window can
+ * be over-subscribed (a 32,768 window with a 4,096-token completion left only
+ * 2,096 tokens outside the conversation, under the measured ~2.2k schema
+ * cost). Sized to the documented ceiling of the full advertised set (base +
+ * web_search, under 10 KB ≈ 2.3k approximate tokens). Read-only MCP tools add
+ * their own schemas beyond this reserve — an operator opt-in that sizing the
+ * window for is already documented as operator-owned. */
+export const LOOP_TOOL_SCHEMA_TOKENS = 2300;
 /** Smallest conversation a declared window must leave room for. */
 const LOOP_MIN_CONVERSATION_TOKENS = 4000;
 /** #1635: default conversation-compaction watermark, as a fraction of the
@@ -345,8 +355,9 @@ const LOOP_CONVERSATION_WATERMARK_CEILING = 250000;
 
 /** #922: native-loop context limits. Without a declared window they are the
  * v3.1 constants. With one, the window first reserves the per-turn completion
- * (tool-max-tokens-per-turn) plus framing, then the conversation budget is
- * ~75% of the window (#1635; 24k..250k, never above what's left), the
+ * (tool-max-tokens-per-turn) plus framing plus the advertised tool schemas
+ * (#1635 review), then the conversation budget is ~75% of the window
+ * (#1635; 24k..250k, never above what's left), the
  * first-turn corpus ~60% of that budget and each result ~8%, at ~3 bytes/
  * token. Explicit byte inputs win. A window too small for the per-turn
  * completion and a minimal conversation is refused, like a too-small corpus
@@ -386,15 +397,15 @@ export function loopContextLimits(env: EnvLike, tier: string): LoopContextLimits
     };
   }
   const perTurn = pyInt(env.TOOL_MAX_TOKENS_PER_TURN || "400", "TOOL_MAX_TOKENS_PER_TURN");
-  const available = window - perTurn - LOOP_FRAMING_TOKENS;
+  const available = window - perTurn - LOOP_FRAMING_TOKENS - LOOP_TOOL_SCHEMA_TOKENS;
   if (available < LOOP_MIN_CONVERSATION_TOKENS) {
     throw new LoopContextError(
-      `Model context ${window} cannot fit TOOL_MAX_TOKENS_PER_TURN=${perTurn} plus ${LOOP_FRAMING_TOKENS} tokens of framing and a ${LOOP_MIN_CONVERSATION_TOKENS}-token tool-loop conversation`,
+      `Model context ${window} cannot fit TOOL_MAX_TOKENS_PER_TURN=${perTurn} plus ${LOOP_FRAMING_TOKENS} tokens of framing, ${LOOP_TOOL_SCHEMA_TOKENS} tokens of advertised tool schemas, and a ${LOOP_MIN_CONVERSATION_TOKENS}-token tool-loop conversation`,
     );
   }
   if (override !== null && override > available) {
     throw new LoopContextError(
-      `TOOL_MAX_CONVERSATION_TOKENS=${override} does not fit model context ${window}: TOOL_MAX_TOKENS_PER_TURN=${perTurn} plus ${LOOP_FRAMING_TOKENS} tokens of framing leave ${available}`,
+      `TOOL_MAX_CONVERSATION_TOKENS=${override} does not fit model context ${window}: TOOL_MAX_TOKENS_PER_TURN=${perTurn} plus ${LOOP_FRAMING_TOKENS} tokens of framing and ${LOOP_TOOL_SCHEMA_TOKENS} tokens of advertised tool schemas leave ${available}`,
     );
   }
   const maxConversationTokens = override

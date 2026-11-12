@@ -168,23 +168,27 @@ scale with it:
 | Each tool result | 12 KB | ~2% of the window, up to 64 KB | `tool-max-response-bytes` |
 
 These ranges are normal values, not minimums: for a small window, reserving
-the per-turn completion takes priority and can push all three below the
-undeclared defaults (32k window with a 16k completion: 14,384 tokens /
-25,891 bytes / 3,452 bytes).
+the per-turn completion, framing and the advertised tool schemas takes
+priority and can push all three below the undeclared defaults (32k window
+with a 16k completion: 12,084 tokens / 21,751 bytes / 2,900 bytes).
 
 A declared window first reserves `tool-max-tokens-per-turn` plus 2,000
-tokens of framing, so the conversation and each turn's completion always fit;
-the first-turn corpus stays within ~60% of the conversation budget and each
-result within ~8%. A window too small for the per-turn completion plus a
-4,000-token conversation is refused at startup. For a 1M-token model that is
-250k tokens / 450 KB / 60 KB; for 262k it is 196k tokens / 118 KB / 16 KB.
+tokens of framing plus 2,300 tokens for the advertised tool schemas, so the
+conversation, each turn's completion and the `tools` field always fit; the
+first-turn corpus stays within ~60% of the conversation budget and each
+result within ~8%. A window too small for the per-turn completion, framing,
+schemas and a 4,000-token conversation is refused at startup. For a
+1M-token model that is 250k tokens / 450 KB / 60 KB; for 262k it is 196k
+tokens / 118 KB / 16 KB.
 The conversation budget is measured against `approxTokens()`, which counts
 the system prompt and every message and tool result — the schemas are not
-part of that count. They ride in the request's `tools` field, and the
-non-conversation remainder covers them: at a 131,072-token window the ~98.3k
-watermark leaves ~32.7k tokens outside the conversation, and the full
-advertised schema set is under 10 KB (~2.3k approximate tokens), well inside
-what the completion and framing reserves already left.
+part of that count. They ride in the request's `tools` field, so the fit
+calculation reserves them explicitly: the full advertised schema set is
+under 10 KB (~2.3k approximate tokens), and 2,300 tokens come out of the
+window before the conversation budget is derived. A regression test pins
+that the advertised set still fits the reserve. Read-only MCP tools add
+their own schemas beyond it — an operator opt-in for which a small window
+needs a lower `tool-max-conversation-tokens`.
 `tool-max-conversation-tokens` overrides the derived watermark directly; it
 must be positive and must fit the declared window after those reserves, or
 the run is refused rather than silently capped.
