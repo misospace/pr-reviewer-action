@@ -56,8 +56,9 @@ import { runEvidenceProvidersPhase } from "../evidence/index.js";
 import { runToolHarness, type HarnessDeps, type HarnessTransport, type TraceGapProbe } from "../tools/harness.js";
 import { GOVERNOR_PRIORITY_AUTHORITATIVE, GOVERNOR_PRIORITY_RECOVERY, GovernorCancelledError, inferenceEndpointKey, sharedRunInferenceGovernor } from "../model/governor.js";
 import { runChatRequest } from "../transport/transport.js";
-import { describeTransportFailure } from "../transport/http.js";
+import { describedTransportFailure, TransportFailure } from "../transport/http.js";
 import { extraHeadersForEnv } from "../transport/headers.js";
+import { attachSseReassemblyQuality, readSseReassemblyQuality } from "../transport/sse.js";
 import { attachTransportTiming, type TransportTiming } from "../transport/timing.js";
 import type { NormalizedModelResponse, TransportWirePayload } from "../model/types.js";
 import type { TierBudgets } from "../corpus/budgets.js";
@@ -765,7 +766,9 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     ).catch((cause: unknown) => {
       // #1515: the harness transport contract throws plain Errors (the loop
       // degrades on them, never crashes); a queued cancel becomes one too.
-      if (cause instanceof GovernorCancelledError) throw new Error(cause.message);
+      // #1628: a queued cancel carries the typed `cancelled` kind so the
+      // loop's per-attempt classifier says "cancelled" instead of "unknown".
+      if (cause instanceof GovernorCancelledError) throw new TransportFailure("cancelled", cause.message);
       throw cause;
     });
     // #846: carry the HTTP status and a redacted body excerpt (plus the
@@ -774,12 +777,22 @@ export function harnessTransportAdapter(env: StageEnv, signal?: AbortSignal): Ha
     // unconditionally, on top of `redactText`'s heuristics. #1037: the
     // configured extra-header VALUES join that list — a provider error body
     // can quote them back, and they routinely carry proxy tokens.
-    if (outcome.status === "failure") throw new Error(describeTransportFailure(outcome.failure, { secrets: [apiKey, ...(extra ? Object.values(extra) : [])] }));
+    // #1628: `describedTransportFailure` keeps the same message AND carries
+    // the structured kind/status/wire-observation, so the native loop's
+    // per-attempt classifier can say what the discarded attempt was (524?
+    // timeout? closed connection?) without any body ever leaving the seam.
+    if (outcome.status === "failure") throw describedTransportFailure(outcome.failure, { secrets: [apiKey, ...(extra ? Object.values(extra) : [])] });
     // A streamed turn's `raw` is the reassembled NormalizedModelResponse, not
     // provider JSON. The loop's tool-call extraction and usage accounting
     // read the OpenAI chat shape (as v2's reassembler produced), so project
     // it; a non-streamed turn's raw provider JSON passes through untouched.
-    const body = (payload as Record<string, unknown>).stream === true ? normalizedToOpenAiChat(outcome.response) : outcome.raw;
+    let body = (payload as Record<string, unknown>).stream === true ? normalizedToOpenAiChat(outcome.response) : outcome.raw;
+    // #1628: the reassembly-quality probe rides the body too, on the same
+    // reasoning as the timing probe below — the streamed projection is a NEW
+    // object, and a malformed-vs-empty verdict made upstream without the
+    // probe would be a guess.
+    const quality = readSseReassemblyQuality(outcome.response);
+    if (quality !== null) body = attachSseReassemblyQuality(body, quality);
     // #1466: the transport probe rides the body the caller receives, on BOTH
     // paths. The streamed projection is a NEW object, so the probe the
     // transport attached to the reassembled response would be lost here —
