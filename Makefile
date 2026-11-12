@@ -30,14 +30,15 @@ self-hosted-qualification:
 		echo "dist/index.js missing; building the v3 runtime bundle"; \
 		npm ci --no-audit --no-fund && npm run build; \
 	fi; \
-	SELF_HOSTED_QUALIFICATION=true bash tests/self_hosted_e2e_qualification.sh
+	SELF_HOSTED_QUALIFICATION=true SELF_HOSTED_QUALIFICATION_FAMILY=all \
+		bash tests/self_hosted_e2e_qualification.sh
 
 # Runs the engine-parity family (#1484) only: the four routes over one
 # head compared byte for byte, plus the offline eval-suite re-runs. It
-# needs Docker and nothing else — the harness-owned stub model server
-# answers every model call and the disposable instance is the harness's
-# own, so no operator credential is involved. That makes the family
-# runnable against any ref, a pull-request head included.
+# needs no operator credential. The harness-owned stub model server
+# answers every model call, and the disposable instance is the harness's
+# own, so the family can qualify any ref, a pull-request head included.
+# The harness also needs Docker, Node, curl, jq and git.
 .PHONY: self-hosted-qualification-parity
 
 self-hosted-qualification-parity:

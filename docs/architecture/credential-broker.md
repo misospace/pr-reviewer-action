@@ -77,16 +77,23 @@ log line, or in the execution envelope.
 ## Environment-seeded material is a startup snapshot
 
 Every entry the vault seeds from the operator's environment
-(`PR_REVIEWER_CREDENTIAL_<REF>`) carries `expiresAtMs: 0` — no expiry.
-That is not a missing check: the material is a snapshot of the process
-environment, not a token the vault can mint or refresh. A Kubernetes
-Secret-backed environment variable does not mutate in a running process,
-so rotating the operator's material takes effect only when the controller
-is rolled out or restarted; until then the running controller keeps
-handing out the material it read at startup. The expiry check still
-bounds reuse within that process, and a reference the environment does
-not carry fails closed at resolution (`unknown_reference`) rather than
-degrading.
+(`PR_REVIEWER_CREDENTIAL_<REF>`) carries `expiresAtMs: 0`. That is not a
+missing check. The material is a snapshot of the process environment, not a
+token the vault can mint or refresh, so its lifetime belongs to the source
+and the vault's expiry check does not apply to it. A Kubernetes
+Secret-backed environment variable does not mutate in a running process, so
+rotating the operator's material takes effect only when the controller is
+rolled out or restarted. Until then the running controller keeps handing
+out the material it read at startup.
+
+A reference the environment does not carry fails closed, and the two
+purposes fail in different ways. A model profile's reference refuses
+controller startup (`StartupRefusal`), because every review needs a model
+credential. A forge integration's reference is collected
+opportunistically, so the controller starts without it and the worker's
+publish-purpose plan reference fails closed at resolution
+(`unknown_reference`). Neither path degrades into an unauthenticated
+review.
 
 ## Security invariants
 

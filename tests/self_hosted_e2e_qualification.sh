@@ -2482,7 +2482,7 @@ scenario_engine_parity_route_d_kubernetes_executor() {
       --argjson ttl 600 \
       --arg root "$root" \
       --arg claim "pr-reviewer-parity" \
-      --arg modelMaterial "parity-stub-model-key" '
+      --arg modelMaterial "parity-stub-model-material" '
       {
         image: $image,
         args: ["worker"],

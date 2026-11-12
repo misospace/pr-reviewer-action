@@ -253,6 +253,14 @@ the script is absent, so a green run never means a qualification that
 did not run. Its run steps are in
 [Self-hosted qualification](self-hosted-qualification.md).
 
+The `self-hosted-qualification-parity` job of
+`.github/workflows/self-hosted-qualification-parity.yaml` runs the
+engine-parity family of the same harness. Its model calls reach a
+harness-owned stub model server and its forge is the disposable instance
+the harness starts, so the job holds no secret. An operator can
+therefore dispatch it against any ref, a branch that carries an open pull
+request included. It never gates a merge either.
+
 The `.github/workflows/self-hosted-images.yaml` job builds and pushes the
 controller and worker images to GHCR on a manual dispatch from `main`
 ([Published GHCR images](#published-ghcr-images-1584-canary) above); it

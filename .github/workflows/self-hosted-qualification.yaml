@@ -12,13 +12,12 @@ name: Self-hosted qualification
 # The checkout pins the default branch. The dispatched branch can hold
 # unreviewed code, and this job hands that code a credential.
 #
-# The `self-hosted-qualification-parity` job (#1484) is the exception
-# that proves the rule: the engine-parity family needs no credential
-# (its model calls reach a harness-owned stub model server and its forge
-# is the disposable instance the harness starts), so that job holds no
-# secret, checks out the dispatched ref's head, and can qualify a
-# pull-request head without handing unreviewed branch code anything
-# sensitive.
+# GitHub takes the workflow file from the dispatched ref, so this file
+# binds a secret and must only ever be dispatched from the default
+# branch. The engine-parity family (#1484) needs no credential and lives
+# in its own workflow file
+# (self-hosted-qualification-parity.yaml), which can therefore be
+# dispatched against any ref.
 #
 # The harness landed with #1482. The job still fails closed when the
 # harness script is absent: it never reports a qualification that did not
@@ -90,13 +89,14 @@ jobs:
           fi
 
       # The harness reads every forge credential and every model setting
-      # from the environment. The credential rides only in the header of
-      # the forge capability, never in an argument and never in a URL. The run
+      # from the environment. The credential rides only in the header of the
+      # forge capability, never in an argument and never in a URL. The run
       # is the final step: its exit status reports the qualification
       # pass/fail.
       - name: Run the self-hosted qualification harness
         env:
           SELF_HOSTED_QUALIFICATION: "true"
+          SELF_HOSTED_QUALIFICATION_FAMILY: "all"
           AI_BASE_URL: ${{ inputs.ai-base-url }}
           AI_MODEL: ${{ inputs.ai-model }}
           AI_API_KEY: ${{ secrets.SELF_HOSTED_AI_API_KEY }}
@@ -105,66 +105,4 @@ jobs:
           PR_REVIEWER_GITHUB_APP_PRIVATE_KEY: ${{ secrets.SELF_HOSTED_GITHUB_APP_PRIVATE_KEY }}
           PR_REVIEWER_GITHUB_APP_INSTALLATION_ID: ${{ vars.SELF_HOSTED_GITHUB_APP_INSTALLATION_ID }}
           SELF_HOSTED_GITHUB_REPOSITORY: ${{ vars.SELF_HOSTED_GITHUB_REPOSITORY }}
-        run: bash tests/self_hosted_e2e_qualification.sh
-
-  # The engine-parity family (#1484) needs no credential at all: its
-  # model calls reach a harness-owned stub model server and its forge is
-  # the disposable instance the harness starts. So it can qualify the
-  # ref it is dispatched on — a pull-request head included — without
-  # handing unreviewed branch code a model key or App material.
-  #
-  # This job therefore holds no secret and reads no repository secret:
-  # it checks out the dispatched ref's head (github.sha) and runs the
-  # parity family only. The credentialed job above keeps its own
-  # default-branch checkout, so unreviewed code never sees the
-  # credential.
-  #
-  # Dispatch it from the ref to qualify and pick the
-  # `self-hosted-qualification-parity` job. The dispatch form still
-  # asks for the model settings the credentialed job needs; this job
-  # ignores them.
-  self-hosted-qualification-parity:
-    runs-on: ubuntu-latest
-    # The harness starts containers. It must not hold a runner for hours.
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # The dispatched ref's head: this job qualifies the ref it
-          # was dispatched on, not the default branch.
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '26'
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      # The harness drives the built v3 runtime bundle. dist/ is not
-      # committed, so the job builds it before the harness runs.
-      - name: Build the v3 runtime bundle
-        run: |
-          npm ci
-          npm run build
-
-      # The guard stays: a missing harness must fail loudly, so a green
-      # run can never mean a qualification that did not run.
-      - name: Require the harness script
-        run: |
-          set -euo pipefail
-          if [[ ! -f tests/self_hosted_e2e_qualification.sh ]]; then
-            echo "::error::The self-hosted qualification harness (tests/self_hosted_e2e_qualification.sh) is absent from this checkout. The job fails instead of reporting a qualification that did not run."
-            exit 1
-          fi
-
-      # The run is the final step: its exit status reports the
-      # qualification pass/fail. No credential is bound to this step,
-      # and the harness's parity family reads none.
-      - name: Run the engine-parity qualification
-        env:
-          SELF_HOSTED_QUALIFICATION: "true"
-          SELF_HOSTED_QUALIFICATION_FAMILY: "parity"
         run: bash tests/self_hosted_e2e_qualification.sh

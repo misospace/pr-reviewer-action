@@ -11,10 +11,20 @@ The harness script (tests/self_hosted_e2e_qualification.sh) landed with
 - the workflow and the harness script route every forge read and write
   through the configured forge capability, never through a forge CLI or
   a raw HTTP client that reaches a remote forge;
-- the credential-free parity job (#1484) is a job of its own, holds no
-  secret, checks out the dispatched ref's head and drives the parity
-  family only, while the harness's `parity` family reads no operator
-  credential at all;
+- the credential-free parity qualification (#1484) is a workflow file of
+  its own (.github/workflows/self-hosted-qualification-parity.yaml): it
+  holds no secret and no repository variable, checks out the dispatched
+  ref's head and drives the parity family only. The credentialed
+  qualification keeps its own file
+  (.github/workflows/self-hosted-qualification.yaml), its
+  default-branch checkout and its `all` family. The two files never
+  merge: GitHub takes the workflow file from the dispatched ref and a
+  dispatch runs every job of that file, so a file that binds a secret
+  must never carry a job meant to qualify an unreviewed ref;
+- the harness's `parity` family reads no operator credential at all:
+  every operator-only setting is expanded inside the operator arm or
+  inside a function only the operator arm calls, and every operator
+  scenario stays inside that arm;
 - the docs describe the harness as landed and point at the runbook,
   never claiming a qualification that did not run;
 - every disposable instance config adopts its allowlist
@@ -40,6 +50,7 @@ from test_forge_cli import (
 
 ROOT = Path(__file__).resolve().parent.parent
 QUALIFICATION_WORKFLOW = ROOT / ".github" / "workflows" / "self-hosted-qualification.yaml"
+PARITY_WORKFLOW = ROOT / ".github" / "workflows" / "self-hosted-qualification-parity.yaml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yaml"
 MAKEFILE = ROOT / "Makefile"
 RUNBOOK = ROOT / "docs" / "self-hosted-qualification.md"
@@ -51,6 +62,14 @@ TARGET_NAME = "self-hosted-qualification"
 # The credential-free parity family (#1484). The workflow job and the make
 # target that drive it carry the same name; the harness's scenario-family
 # selector and its two accepted values sit next to them.
+#
+# The parity job lives in a workflow file of its own (PARITY_WORKFLOW).
+# GitHub takes the workflow file from the ref that was dispatched, and a
+# workflow_dispatch run has no job selection: it runs every job of that
+# file. A file that binds a secret must therefore never be dispatched
+# from an unreviewed ref, so the job that qualifies an unreviewed ref
+# must never share a file with a secret binding. The credentialed
+# qualification keeps QUALIFICATION_WORKFLOW to itself.
 PARITY_NAME = "self-hosted-qualification-parity"
 FAMILY_SETTING = "SELF_HOSTED_QUALIFICATION_FAMILY"
 FAMILY_ALL = "all"
@@ -91,21 +110,29 @@ def _workflow(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def _workflow_text(path: Path) -> str:
+    """The raw text of a workflow file.
+
+    A gate that reads the whole file sees what the parser drops: a
+    comment, a second job, a workflow-level block."""
+    return path.read_text(encoding="utf-8")
+
+
 def _triggers(workflow: dict) -> dict:
     # YAML 1.1 reads the `on:` key as the boolean True.
     return workflow.get(True) or workflow.get("on") or {}
 
 
-def _steps() -> list[dict]:
-    return _workflow(QUALIFICATION_WORKFLOW)["jobs"][TARGET_NAME]["steps"]
+def _steps(path: Path = QUALIFICATION_WORKFLOW) -> list[dict]:
+    return _workflow(path)["jobs"][TARGET_NAME]["steps"]
 
 
-def _job(name: str) -> dict:
-    return _workflow(QUALIFICATION_WORKFLOW)["jobs"][name]
+def _job(name: str, path: Path = QUALIFICATION_WORKFLOW) -> dict:
+    return _workflow(path)["jobs"][name]
 
 
-def _job_steps(name: str) -> list[dict]:
-    return _job(name)["steps"]
+def _job_steps(name: str, path: Path = QUALIFICATION_WORKFLOW) -> list[dict]:
+    return _job(name, path)["steps"]
 
 
 def _mapping_value(node, key: str):
@@ -116,13 +143,13 @@ def _mapping_value(node, key: str):
     raise AssertionError(f"the workflow declares no {key} block")
 
 
-def _job_source(name: str) -> str:
+def _job_source(name: str, path: Path = QUALIFICATION_WORKFLOW) -> str:
     """The raw YAML text of one job, sliced out of the parsed node graph.
 
     The slice keeps the job's comments and its exact text, so a gate can
     read what the job says, not only what the parser made of it.
     """
-    text = QUALIFICATION_WORKFLOW.read_text(encoding="utf-8")
+    text = _workflow_text(path)
     root = yaml.compose(text)
     node = _mapping_value(_mapping_value(root, "jobs"), name)
     return text[node.start_mark.index : node.end_mark.index]
@@ -329,6 +356,162 @@ def _make_recipe(text: str, target: str) -> list[str]:
             recipe.append(candidate)
         return recipe
     return []
+
+
+# ── the harness's function and expansion structure (#1484) ──
+# The harness defines its functions as `name() {` in column zero and
+# closes them with a `}` in column zero. A function body is therefore
+# readable structurally, and so is the set of places a function is
+# called from.
+_FUNCTION_DEF_RE = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*)\(\) \{$")
+
+# A variable expansion: `$VAR`, `${VAR}` and the defaulted forms
+# `${VAR:-default}` and `${VAR-default}`. A defaulted expansion is safe
+# under `set -u`: an unset variable expands to the default instead of
+# aborting the run. A bare expansion is not.
+_EXPANSION_RE = re.compile(
+    r"\$\{(?P<braced>[A-Z_][A-Z0-9_]*)(?P<default>:-|-)?[^}]*\}"
+    r"|\$(?P<bare>[A-Z_][A-Z0-9_]*)"
+)
+
+# The operator-only settings: the model endpoint, the model credential,
+# the GitHub App material, the GitHub test repository and the forge
+# credential material. `AI_MODEL` is deliberately absent: the parity
+# path names a stub model id of its own, so the parity family reads it.
+OPERATOR_ONLY_VARIABLES = (
+    "AI_BASE_URL",
+    "AI_API_KEY",
+    "PR_REVIEWER_GITHUB_APP_ID",
+    "PR_REVIEWER_GITHUB_APP_PRIVATE_KEY",
+    "PR_REVIEWER_GITHUB_APP_INSTALLATION_ID",
+    "SELF_HOSTED_GITHUB_REPOSITORY",
+    "PR_REVIEWER_CREDENTIAL_GITHUB",
+)
+
+# The RUN line that announces a scenario.
+_RUN_ANNOUNCEMENT_RE = re.compile(r'^\s*echo "RUN: ')
+
+
+def _function_bodies(script: str) -> dict[str, tuple[int, int]]:
+    """The line span of every function body, by function name.
+
+    The span covers the definition line and the closing brace."""
+    lines = script.splitlines()
+    bodies: dict[str, tuple[int, int]] = {}
+    name: str | None = None
+    start = 0
+    for index, line in enumerate(lines):
+        if name is None:
+            match = _FUNCTION_DEF_RE.match(line)
+            if match:
+                name = match.group("name")
+                start = index
+            continue
+        if line == "}":
+            bodies[name] = (start, index)
+            name = None
+    return bodies
+
+
+def _enclosing_function(
+    bodies: dict[str, tuple[int, int]], index: int
+) -> str | None:
+    """The function whose body holds the line, if any."""
+    for name, (start, end) in bodies.items():
+        if start <= index <= end:
+            return name
+    return None
+
+
+def _function_call_sites(script: str, name: str) -> list[int]:
+    """The line indices of every call of the named function.
+
+    The definition line is not a call, and a `#`-prefixed line is prose:
+    it cannot call anything."""
+    pattern = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
+    sites: list[int] = []
+    for index, line in enumerate(script.splitlines()):
+        if line.strip().startswith("#"):
+            continue
+        definition = _FUNCTION_DEF_RE.match(line)
+        if definition and definition.group("name") == name:
+            continue
+        if pattern.search(line):
+            sites.append(index)
+    return sites
+
+
+def _operator_only_functions(
+    script: str, operator: list[tuple[int, int]]
+) -> set[str]:
+    """The functions the operator family alone can reach.
+
+    A function is operator-only when every call of it either sits inside
+    an operator arm or sits inside another operator-only function. The
+    relation is transitive: the harness's operator scenarios call helpers
+    that call further helpers, and the whole chain runs only in the
+    operator family. A function nobody calls is operator-only too: dead
+    code cannot reach the parity family."""
+    bodies = _function_bodies(script)
+    candidates = set(bodies)
+    changed = True
+    while changed:
+        changed = False
+        for name in sorted(candidates):
+            for site in _function_call_sites(script, name):
+                if _within(operator, site):
+                    continue
+                enclosing = _enclosing_function(bodies, site)
+                if enclosing is None or enclosing not in candidates:
+                    candidates.discard(name)
+                    changed = True
+                    break
+    return candidates
+
+
+def _expansions(line: str) -> list[tuple[str, bool]]:
+    """The variable expansions of one line, as (name, defaulted).
+
+    A `#`-prefixed line is prose: bash never expands a variable in a
+    comment, so the line carries no expansion at all."""
+    if line.strip().startswith("#"):
+        return []
+    found: list[tuple[str, bool]] = []
+    for match in _EXPANSION_RE.finditer(line):
+        name = match.group("braced") or match.group("bare")
+        found.append((name, bool(match.group("default"))))
+    return found
+
+
+# The operator scenarios (1 to 16) the harness invokes. The parity
+# family invokes the engine-parity and the eval-suite scenarios; those
+# are not operator scenarios and read no operator setting.
+OPERATOR_SCENARIOS = (
+    "scenario_github_normal_review",
+    "scenario_duplicate_webhook_produces_exactly_one_review",
+    "scenario_webhook_burst_settles_to_one_paid_newest_head_review",
+    "scenario_new_head_while_old_review_queued_supersedes_without_spend",
+    "scenario_new_head_while_old_review_running_supersedes_without_spend",
+    "scenario_stale_result_publication_is_refused_and_newest_head_publishes",
+    "scenario_worker_timeout",
+    "scenario_worker_crash_requeues_without_duplicate_spend",
+    "scenario_controller_restart_with_running_worker_resumes_without_rerun",
+    "scenario_operator_restart_with_queued_settle_window_work",
+    "scenario_cancellation_cancels_the_review_without_publication",
+    "scenario_publication_retry_without_model_rerun",
+    "scenario_usage_accounting_single_counted_across_retries_and_restarts",
+    "scenario_model_primary_failure_and_fallback",
+    "scenario_missed_webhook_reconciliation_reviews_once",
+)
+
+
+def _announcement_line(lines: list[str], site: int) -> int | None:
+    """The index of the RUN line that announces the scenario called at the
+    given line, if any."""
+    for index in range(site - 1, max(site - 4, -1), -1):
+        if _RUN_ANNOUNCEMENT_RE.match(lines[index]):
+            return index
+    return None
 
 
 def test_the_qualification_workflow_runs_on_a_manual_dispatch_only() -> None:
@@ -1000,49 +1183,63 @@ def test_the_daemon_doc_does_not_reserve_the_harness() -> None:
 # reach the harness-owned stub model server and its forge is the
 # disposable instance the harness starts. That is what lets it qualify
 # any ref, a pull-request head included, without handing unreviewed
-# branch code a model key or App material. The gates below pin both
-# halves of that claim: the workflow job holds no secret and checks out
-# the dispatched ref's head, and the harness's `parity` family reads no
-# operator setting.
+# branch code a model key or App material.
+#
+# The gates below pin both halves of that claim. The workflow half: the
+# parity job is a workflow file of its own, holds no secret and no
+# repository variable, checks out the dispatched ref's head and drives
+# the parity family only. The harness half: the `parity` family reads no
+# operator setting, and the operator scenarios stay inside the operator
+# arm.
+#
+# The two halves stand apart on purpose. GitHub takes the workflow file
+# from the ref that was dispatched, and a workflow_dispatch run has no
+# job selection: it runs every job of that file. A file that binds a
+# secret must therefore never be dispatched from an unreviewed ref, and
+# a job meant to qualify an unreviewed ref must never share such a
+# file.
 
 
-def test_the_qualification_workflow_declares_the_parity_job() -> None:
-    """The parity run must be a job of its own, not a mode of the
-    credentialed job: the credentialed job pins the default branch."""
-    jobs = _workflow(QUALIFICATION_WORKFLOW)["jobs"]
+def test_the_parity_workflow_declares_the_parity_job() -> None:
+    """The parity run must be a job of its own file, not a job of the
+    credentialed workflow: a dispatch runs every job of the dispatched
+    file."""
+    jobs = _workflow(PARITY_WORKFLOW)["jobs"]
     assert PARITY_NAME in jobs, sorted(jobs)
     assert PARITY_NAME != TARGET_NAME, (
         "the parity job must not be the credentialed job: that job holds a "
         "credential and checks out the default branch"
     )
-    assert TARGET_NAME in jobs, sorted(jobs)
+    assert TARGET_NAME in _workflow(QUALIFICATION_WORKFLOW)["jobs"], (
+        "the credentialed workflow must keep its own job"
+    )
 
 
-def test_the_parity_job_holds_no_secret() -> None:
-    """A credential in the parity job would reach the ref it checks out."""
-    raw = _job_source(PARITY_NAME)
-    assert "secrets." not in raw, (
-        "the parity job must hold no secret: the parity family reads no "
-        "operator credential"
+def test_the_parity_workflow_holds_no_secret_or_variable() -> None:
+    """A credential or a repository variable in the parity workflow would
+    reach the ref it checks out.
+
+    The check reads the whole file and matches the `secrets` and `vars`
+    tokens on word boundaries, so the bracket syntax
+    (`${{ secrets['X'] }}`) and the whole-context dump
+    (`${{ toJSON(secrets) }}`) fail the gate too."""
+    text = _workflow_text(PARITY_WORKFLOW)
+    assert not re.search(r"\bsecrets\b", text), (
+        "the parity workflow must hold no secret: the parity family reads "
+        "no operator credential"
     )
-    assert "vars." not in raw, (
-        "the parity job must bind no repository variable either: it needs "
-        "no operator setting at all"
+    assert not re.search(r"\bvars\b", text), (
+        "the parity workflow must bind no repository variable either: it "
+        "needs no operator setting at all"
     )
-    job_env = yaml.safe_dump(_job(PARITY_NAME).get("env") or {})
-    assert "secrets." not in job_env, (
-        "the parity job must not bind a secret at job level"
+    workflow = _workflow(PARITY_WORKFLOW)
+    assert not workflow.get("env"), (
+        "the parity workflow must declare no workflow-level env block: "
+        "every binding in it would reach the checked-out ref"
     )
-    assert "vars." not in job_env, (
-        "the parity job must not bind a repository variable at job level"
-    )
-    for step in _job_steps(PARITY_NAME):
-        dumped = yaml.safe_dump(step)
-        assert "secrets." not in dumped, (
-            f"the step {step.get('name')!r} must hold no secret"
-        )
-        assert "vars." not in dumped, (
-            f"the step {step.get('name')!r} must bind no repository variable"
+    for job_name, job in workflow["jobs"].items():
+        assert not job.get("env"), (
+            f"the job {job_name!r} must declare no job-level env block"
         )
 
 
@@ -1051,23 +1248,32 @@ def test_the_parity_job_checks_out_the_dispatched_ref() -> None:
     request's head can be qualified without a credential."""
     checkouts = [
         step
-        for step in _job_steps(PARITY_NAME)
+        for step in _job_steps(PARITY_NAME, PARITY_WORKFLOW)
         if str(step.get("uses", "")).startswith("actions/checkout@")
     ]
     assert len(checkouts) == 1, checkouts
     with_block = checkouts[0].get("with") or {}
     assert with_block.get("ref") == "${{ github.sha }}", with_block
     assert with_block.get("persist-credentials") is False, with_block
-    assert "github.event.repository.default_branch" not in _job_source(PARITY_NAME), (
+    assert "github.event.repository.default_branch" not in _job_source(
+        PARITY_NAME, PARITY_WORKFLOW
+    ), (
         "the parity job must qualify the dispatched ref, not the default "
         "branch: that is the credentialed job's boundary"
+    )
+    assert "github.event.repository.default_branch" not in _workflow_text(
+        PARITY_WORKFLOW
+    ), (
+        "the parity workflow must not reach the default branch at all: a "
+        "workflow-level binding would qualify the default branch, not the "
+        "dispatched ref"
     )
 
 
 def test_the_parity_job_drives_the_parity_family_once() -> None:
     """The parity job runs the harness exactly once, unconditionally, as
     its final step, and it asks for the parity family."""
-    steps = _job_steps(PARITY_NAME)
+    steps = _job_steps(PARITY_NAME, PARITY_WORKFLOW)
     harness_steps = [
         step for step in steps if f"bash {HARNESS_PATH}" in str(step.get("run", ""))
     ]
@@ -1091,10 +1297,13 @@ def test_the_two_qualification_jobs_qualify_different_refs() -> None:
     job qualifies the dispatched ref. The two jobs are not
     interchangeable."""
     refs = {}
-    for name in (TARGET_NAME, PARITY_NAME):
+    for name, path in (
+        (TARGET_NAME, QUALIFICATION_WORKFLOW),
+        (PARITY_NAME, PARITY_WORKFLOW),
+    ):
         checkout = next(
             step
-            for step in _job_steps(name)
+            for step in _job_steps(name, path)
             if str(step.get("uses", "")).startswith("actions/checkout@")
         )
         refs[name] = str((checkout.get("with") or {}).get("ref"))
@@ -1104,6 +1313,96 @@ def test_the_two_qualification_jobs_qualify_different_refs() -> None:
         "the credentialed job pins the default branch and the parity job "
         "qualifies the dispatched ref: they must not collapse into one"
     )
+
+
+def test_the_two_qualification_workflows_stay_separate() -> None:
+    """The credentialed workflow must not carry the parity job, and the
+    parity workflow must not carry the credentialed job.
+
+    A dispatch runs every job of the dispatched file, so a file that
+    binds a secret and a job meant to qualify an unreviewed ref must
+    never share a file."""
+    credentialed = set(_workflow(QUALIFICATION_WORKFLOW)["jobs"])
+    parity = set(_workflow(PARITY_WORKFLOW)["jobs"])
+    assert PARITY_NAME not in credentialed, sorted(credentialed)
+    assert TARGET_NAME not in parity, sorted(parity)
+    assert len(parity) == 1, (
+        "the parity workflow must declare exactly one job: every job of the "
+        "dispatched file runs, so a second job would qualify an unreviewed "
+        "ref under rules nobody reviewed"
+    )
+
+
+def test_the_operator_qualification_cannot_silently_narrow() -> None:
+    """The credentialed qualification must keep running the whole `all`
+    family: a narrowed operator run would report a qualification that
+    never happened."""
+    env: dict[str, str] = {}
+    for step in _steps():
+        env.update(step.get("env") or {})
+    assert env.get(FAMILY_SETTING) == FAMILY_ALL, (
+        f"the credentialed job must ask for the {FAMILY_ALL} family"
+    )
+    recipe = "\n".join(
+        _make_recipe(MAKEFILE.read_text(encoding="utf-8"), TARGET_NAME)
+    )
+    assert f"{FAMILY_SETTING}={FAMILY_ALL}" in recipe, recipe
+
+
+def test_the_parity_family_expands_no_operator_credential() -> None:
+    """An operator-only setting expanded outside the operator arm aborts
+    the parity run under `set -u`, and expands the operator's own
+    material where the parity family must carry none.
+
+    A non-defaulted expansion is therefore allowed only inside an
+    operator arm, or inside a function that only the operator arm
+    reaches. A defaulted expansion (`${VAR:-}`) is safe: it expands to
+    the default instead of aborting the run."""
+    script = _harness_script()
+    operator = _operator_spans(script)
+    assert operator, "the harness must gate the operator settings"
+    bodies = _function_bodies(script)
+    operator_only = _operator_only_functions(script, operator)
+    offenders: list[str] = []
+    for index, line in enumerate(script.splitlines()):
+        for name, defaulted in _expansions(line):
+            if name not in OPERATOR_ONLY_VARIABLES or defaulted:
+                continue
+            if _within(operator, index):
+                continue
+            enclosing = _enclosing_function(bodies, index)
+            if enclosing is not None and enclosing in operator_only:
+                continue
+            offenders.append(f"{index + 1}: {line.strip()}")
+    assert not offenders, (
+        "the parity family must expand no operator-only setting outside the "
+        "operator arm:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_operator_scenarios_stay_inside_the_operator_arm() -> None:
+    """Every operator scenario must run only in the operator family: the
+    parity family would otherwise drive a scenario that reads the
+    operator's model endpoint."""
+    script = _harness_script()
+    operator = _operator_spans(script)
+    assert operator, "the harness must gate the operator scenarios"
+    lines = script.splitlines()
+    for scenario in OPERATOR_SCENARIOS:
+        sites = _function_call_sites(script, scenario)
+        assert sites, f"the harness must invoke {scenario}"
+        for site in sites:
+            assert _within(operator, site), (
+                f"{scenario} must run inside the operator-family arm: the "
+                "parity family reads no operator credential"
+            )
+            announcement = _announcement_line(lines, site)
+            if announcement is None:
+                continue
+            assert _within(operator, announcement), (
+                f"the RUN line that announces {scenario} must sit inside the "
+                "operator-family arm"
+            )
 
 
 def test_the_harness_selects_the_qualification_family() -> None:
@@ -1289,4 +1588,31 @@ def test_the_runbook_documents_the_credential_free_parity_family() -> None:
     assert "no parity run" in text.lower(), (
         "the runbook must state that no parity run has happened yet"
     )
+
+
+def test_the_runbook_documents_the_two_file_split() -> None:
+    """The runbook must state why the credential-free parity run lives in
+    a workflow file of its own, how to dispatch it, and which tools the
+    family needs."""
+    text = RUNBOOK.read_text(encoding="utf-8")
+    parts = text.split("## The credential-free parity family", 1)
+    assert len(parts) == 2, "the parity-family section must stay in the runbook"
+    # The prose wraps across lines, so the match runs on whitespace-
+    # normalized text.
+    section = re.sub(r"\s+", " ", parts[1].split("##", 1)[0])
+    for phrase in (
+        "self-hosted-qualification-parity.yaml",
+        "self-hosted-qualification.yaml",
+        "GitHub dispatches only a workflow file that exists on the default branch",
+        "runs every job of that file",
+        "no operator credential",
+        "dispatched from the default branch",
+    ):
+        assert phrase in section, (
+            f"the parity section must state {phrase!r}"
+        )
+    for tool in ("Docker", "Node", "curl", "jq", "git", "python3"):
+        assert re.search(rf"\b{re.escape(tool)}\b", section), (
+            f"the parity section must name the {tool} the family needs"
+        )
 

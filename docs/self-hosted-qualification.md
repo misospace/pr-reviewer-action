@@ -36,14 +36,15 @@ yet: only a dispatched run makes one happen. A run now spends roughly
 one model call per scenario on the disposable Forgejo instance (a
 cancelled, superseded-in-queue, or failed-model scenario spends none).
 
-The engine-parity family also runs on its own. The
-`SELF_HOSTED_QUALIFICATION_FAMILY` setting selects the scenario family:
-`all` (the default) runs every scenario the harness owns, `parity` runs
-only the engine-parity family. The parity family reads no operator
-credential, so the workflow's `self-hosted-qualification-parity` job
-runs it with no secret and checks out the ref it was dispatched on. The
-qualification stays an operator-dispatched run: the credential-free job
-is dispatched like the credentialed one.
+The engine-parity family also runs on its own, from a workflow file of
+its own. The `SELF_HOSTED_QUALIFICATION_FAMILY` setting selects the
+scenario family: `all` (the default) runs every scenario the harness
+owns, `parity` runs only the engine-parity family. The parity family
+reads no operator credential, so the `self-hosted-qualification-parity`
+job of the `self-hosted-qualification-parity.yaml` workflow runs it with
+no secret and checks out the ref it was dispatched on. The qualification
+stays an operator-dispatched run: the credential-free workflow is
+dispatched like the credentialed one.
 
 The qualification program is issue #739. This page covers the harness and
 its run steps only. The deployment of the controller and the worker is
@@ -246,6 +247,17 @@ model key nor the GitHub App material. That is what lets it qualify
 any ref, a pull-request head included: no credential reaches the
 unreviewed branch code.
 
+The two families live in two workflow files on purpose. GitHub takes
+the workflow file from the ref that was dispatched, and a
+`workflow_dispatch` run has no job selection: it runs every job of that
+file. A workflow file that binds a secret must therefore never be
+dispatched from an unreviewed ref, and a job meant to qualify an
+unreviewed ref must never share such a file. The credential-free parity
+job therefore has a workflow file of its own
+(`.github/workflows/self-hosted-qualification-parity.yaml`), and the
+credentialed qualification keeps
+(`.github/workflows/self-hosted-qualification.yaml`).
+
 Run it locally:
 
 ```bash
@@ -254,20 +266,31 @@ make self-hosted-qualification-parity
 
 The target builds the v3 runtime bundle when `dist/index.js` is missing,
 then runs the harness with `SELF_HOSTED_QUALIFICATION=true` and
-`SELF_HOSTED_QUALIFICATION_FAMILY=parity`. It needs Docker and nothing
-else.
+`SELF_HOSTED_QUALIFICATION_FAMILY=parity`. The family needs no operator
+credential. It needs the harness's own tools: Docker, Node, `curl` and
+`jq` (the harness preflight), `git` (routes B, C and D clone the exact
+head), and `python3` for the eval-suite scenarios, which skip with a
+printed reason when `python3` is absent.
 
-Run it in CI: dispatch the `self-hosted-qualification` workflow, choose
-the `self-hosted-qualification-parity` job, and pick the ref to
-qualify. The job checks out the dispatched ref's head, holds no secret,
-and runs the parity family only. The dispatch form still asks for the
-model settings the credentialed job needs; the parity job ignores them.
+Run it in CI: dispatch the `Self-hosted qualification (engine parity)`
+workflow (`.github/workflows/self-hosted-qualification-parity.yaml`)
+from the ref to qualify. The job holds no secret and binds no
+repository variable, it checks out the dispatched ref's head, and it
+runs the parity family only.
+
+GitHub dispatches only a workflow file that exists on the default
+branch, so the parity workflow becomes dispatchable once it lands
+there. Before that lands, an operator runs the same family locally
+with `make self-hosted-qualification-parity` on a host with Docker.
 
 The two jobs are not interchangeable. The credentialed
 `self-hosted-qualification` job still pins the default branch, still
 reads the operator's model credential and the GitHub App material, and
 still runs the `all` family. The parity job qualifies the ref it was
-dispatched on; the credentialed job qualifies the default branch.
+dispatched on; the credentialed job qualifies the default branch. The
+credentialed workflow itself is dispatched from the default branch, and
+must stay so: it binds a secret, and GitHub takes the workflow file
+from the dispatched ref.
 
 ## Run the harness locally
 
@@ -322,9 +345,12 @@ App installation id from the repository variables
 `SELF_HOSTED_GITHUB_REPOSITORY` and
 `SELF_HOSTED_GITHUB_APP_INSTALLATION_ID`.
 
-The same workflow declares the credential-free
-`self-hosted-qualification-parity` job. It holds no secret, checks out
-the dispatched ref's head, and runs the parity family only. See
+The credential-free parity qualification lives in a workflow file of its
+own (`.github/workflows/self-hosted-qualification-parity.yaml`): a
+dispatch runs every job of the dispatched file, so the file that binds
+a secret must never carry a job meant to qualify an unreviewed ref. Its
+`self-hosted-qualification-parity` job holds no secret, checks out the
+dispatched ref's head, and runs the parity family only. See
 [The credential-free parity family](#the-credential-free-parity-family).
 
 ## Settings the harness reads
@@ -366,7 +392,9 @@ installation token for each repository. See
 
 - The credential-free parity job qualifies a chosen ref, but no parity
   run has happened yet: the Docker-backed harness has never run in CI.
-  The qualification remains an operator-dispatched run.
+  The qualification remains an operator-dispatched run. The parity
+  workflow becomes dispatchable once it lands on the default branch;
+  until then the family runs locally.
 - The execution envelope carries the forge platform, its API base URL, and
   the operator's model settings (#1496 landed): the AI base URL, the wire
   model id, and the wire format ride the envelope, and the model
