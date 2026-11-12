@@ -12,6 +12,13 @@ name: Self-hosted qualification
 # The checkout pins the default branch. The dispatched branch can hold
 # unreviewed code, and this job hands that code a credential.
 #
+# GitHub takes the workflow file from the dispatched ref, so this file
+# binds a secret and must only ever be dispatched from the default
+# branch. The engine-parity family (#1484) needs no credential and lives
+# in its own workflow file
+# (self-hosted-qualification-parity.yaml), which can therefore be
+# dispatched against any ref.
+#
 # The harness landed with #1482. The job still fails closed when the
 # harness script is absent: it never reports a qualification that did not
 # run. A green run must mean the harness executed and every scenario
@@ -89,6 +96,7 @@ jobs:
       - name: Run the self-hosted qualification harness
         env:
           SELF_HOSTED_QUALIFICATION: "true"
+          SELF_HOSTED_QUALIFICATION_FAMILY: "all"
           AI_BASE_URL: ${{ inputs.ai-base-url }}
           AI_MODEL: ${{ inputs.ai-model }}
           AI_API_KEY: ${{ secrets.SELF_HOSTED_AI_API_KEY }}

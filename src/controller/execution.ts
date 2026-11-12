@@ -201,6 +201,13 @@ export function createControllerRequestBuilder(deps: RequestBuilderDeps): Contro
       const requestPath = join(runDir, EXECUTION_REQUEST_FILENAME);
       const resultPath = join(runDir, EXECUTION_RESULT_FILENAME);
       const mirror = await deps.mirrorFor(job);
+      // The mirror must be materialized before the workspace extraction:
+      // createReviewWorkspace verifies the head commit in the mirror
+      // (`git cat-file` against the mirror path) but never runs the
+      // acquisition itself, so an unscheduled ensure leaves the first
+      // dispatch of every job failing on a spawn into a path that does
+      // not exist (#1484 parity qualification, route A).
+      await mirror.ensureMirror();
       const handle = await createWorkspace(mirror, {
         headSha: job.headSha,
         baseSha: job.baseSha,

@@ -66,6 +66,12 @@ const allowlist = new Map<string, string>([
   ["pr_number", "the review-bundle/v1 JSON key, not the pr-number input"],
   ["diff_fingerprint", "the review-bundle/v1 JSON key, not the diff-fingerprint output"],
   ["skip_reason", "the review-bundle/v1 JSON key, not the skip-reason output"],
+  // Persisted ai-output.json artifact field names (src/enforcement/artifact.ts),
+  // documented literally by the self-hosted qualification runbook's parity
+  // normalization list (#1484), distinct from the `review-triage-decision` /
+  // `review-triage-reason` action output ids.
+  ["review_triage_decision", "the ai-output.json artifact field, not the action output"],
+  ["review_triage_reason", "the ai-output.json artifact field, not the action output"],
 ]);
 
 const excludedDocs = new Set(["docs/v3-migration.md", "docs/v3-teardown-audit.md"]);

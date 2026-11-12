@@ -898,7 +898,7 @@ function reviewedRepoWithWorkflow(): { dir: string; head: string; } {
     "",
   ].join("\n"), "utf8");
   execFileSync("git", ["add", "-A"], { cwd: dir });
-  execFileSync("git", ["commit", "-q", "-m", "reviewed head"], { cwd: dir });
+  execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "reviewed head"], { cwd: dir });
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir }).toString("utf8").trim();
   return { dir, head };
 }
@@ -1076,7 +1076,7 @@ function reviewedRepoWithComposite(): { dir: string; head: string; } {
     "",
   ].join("\n"), "utf8");
   execFileSync("git", ["add", "-A"], { cwd: dir });
-  execFileSync("git", ["commit", "-q", "-m", "reviewed head"], { cwd: dir });
+  execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "reviewed head"], { cwd: dir });
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir }).toString("utf8").trim();
   return { dir, head };
 }

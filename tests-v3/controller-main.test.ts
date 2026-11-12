@@ -446,7 +446,7 @@ async function bootWithAdmin(env: NodeJS.ProcessEnv, t: { after: (fn: () => Prom
     controlPlane: new InMemoryControlPlaneStore(),
     executors: { local: () => new FakeExecution() },
     forge: {
-      mirrorFor: async () => ({}) as MirrorCache,
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
       publish: async () => ({ publicationId: "github-comment:1" }),
     },
@@ -535,7 +535,7 @@ test("the dashboard flag without an admin listener boots and serves nothing", as
     controlPlane: new InMemoryControlPlaneStore(),
     executors: { local: () => new FakeExecution() },
     forge: {
-      mirrorFor: async () => ({}) as MirrorCache,
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
       publish: async () => ({ publicationId: "github-comment:1" }),
     },
@@ -845,7 +845,7 @@ test("a minimal composition starts, serves the webhook intake, and stops gracefu
     controlPlane,
     executors: { local: () => fake },
     forge: {
-      mirrorFor: async () => ({}) as MirrorCache,
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
       publish: async (input) => {
         publishes.push({ job: input.job, resultPayload: input.resultPayload });
@@ -956,7 +956,7 @@ default-executor-profile: k8s`,
       controlPlane: new InMemoryControlPlaneStore(),
       executors: { local: () => new FakeExecution() },
       forge: {
-        mirrorFor: async () => ({}) as MirrorCache,
+        mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
         currentHeadSha: async () => HEAD,
         publish: async () => ({ publicationId: "x" }),
       },
@@ -1022,7 +1022,10 @@ function credentialCompositionFixture(runId: string, runRoot: string) {
   const broker = createModelCredentialVault({
     instance,
     platform: "github",
-    modelCredentialMaterial: new Map([["model-cred", "sk-test-model-material"]]),
+    modelCredentialMaterial: new Map([
+      ["model-cred", "sk-test-model-material"],
+      ["forge-cred", "gh-test-forge-material"],
+    ]),
   });
   const refusals: string[] = [];
   const binding = createWorkerCredentialBinding({
@@ -1048,7 +1051,10 @@ test("a credential-bearing Kubernetes run projects its Secret through the real s
     { jobId: "job-1", repoFullName: "owner/repo", platform: "github", installationId: "42", fork: false },
     runId,
   );
-  assert.deepEqual(refs.map((ref) => `${ref.name}=${ref.reference}`), ["model=model-cred"]);
+  assert.deepEqual(refs.map((ref) => `${ref.name}=${ref.reference}`), [
+    "forge-publish=forge-cred",
+    "model=model-cred",
+  ]);
   const request = validateExecutionRequest({
     jobId: "job-1",
     runId,
@@ -1128,6 +1134,10 @@ test("a credential-bearing Kubernetes run projects its Secret through the real s
     Buffer.from(secretBody.data?.["model"] ?? "", "base64").toString("utf8"),
     "sk-test-model-material",
   );
+  assert.equal(
+    Buffer.from(secretBody.data?.["forge-publish"] ?? "", "base64").toString("utf8"),
+    "gh-test-forge-material",
+  );
   // The Job's env projects exactly that Secret/key (#734 contract).
   const jobBody = JSON.parse(fake.bodies[jobIndex] ?? "{}") as {
     spec?: { template?: { spec?: { containers?: { env?: { name: string; valueFrom?: { secretKeyRef?: { name?: string; key?: string } } }[] }[] } } };
@@ -1136,7 +1146,10 @@ test("a credential-bearing Kubernetes run projects its Secret through the real s
   assert.deepEqual(
     env.filter((entry) => entry.name.startsWith("PR_REVIEWER_CREDENTIAL_"))
       .map((entry) => `${entry.name}=${entry.valueFrom?.secretKeyRef?.name}/${entry.valueFrom?.secretKeyRef?.key}`),
-    [`PR_REVIEWER_CREDENTIAL_MODEL=${secretName}/model`],
+    [
+      `PR_REVIEWER_CREDENTIAL_FORGE_PUBLISH=${secretName}/forge-publish`,
+      `PR_REVIEWER_CREDENTIAL_MODEL=${secretName}/model`,
+    ],
   );
 
   // Cancellation removes the worker AND its material.
@@ -1158,12 +1171,12 @@ test("an unknown correlation identity never receives credential material", async
       { jobId: "job-2", repoFullName: "owner/repo", platform: "github", installationId: "42", fork: false },
       "run-known",
     );
-    assert.equal(refs.length, 1);
+    assert.equal(refs.length, 2);
     const first = await binding.resolver.resolve({ runId: "run-known" } as ExecutionRequest);
     assert.equal(first.ok, true);
     if (first.ok) {
-      assert.deepEqual(first.credentials.map((entry) => entry.name), ["model"]);
-      assert.equal(first.credentials[0]?.value, "sk-test-model-material");
+      assert.deepEqual(first.credentials.map((entry) => entry.name), ["forge-publish", "model"]);
+      assert.equal(first.credentials[1]?.value, "sk-test-model-material");
     }
     // A resolution is single-use: a second ask for the same run is the closed
     // refusal, never a replay of material.
@@ -1177,4 +1190,221 @@ test("an unknown correlation identity never receives credential material", async
   } finally {
     rmSync(runRoot, { recursive: true, force: true });
   }
+});
+
+// ── #1484: the worker's forge-read credential (publish purpose) ─────────
+
+/** A binding over the forgejo instance fixture (forge credential
+ * `forge-cred`), with broker material for both purposes. */
+function forgejoCompositionFixture() {
+  const instance = parseInstanceConfigText(FORGEJO_INSTANCE_CONFIG, validateContract(V3_CONTRACT));
+  const broker = createModelCredentialVault({
+    instance,
+    platform: "forgejo",
+    modelCredentialMaterial: new Map([
+      ["model-cred", "sk-test-model-material"],
+      ["forge-cred", "fj-test-forge-material"],
+    ]),
+  });
+  return createWorkerCredentialBinding({
+    instance,
+    defaultModelProfile: instance.defaultModelProfile,
+    defaultEvidenceProfile: instance.defaultEvidenceProfile!,
+    broker,
+  });
+}
+
+test("a plan for a job whose platform matches a configured forge carries exactly the publish-purpose forge entry (#1484)", async () => {
+  const binding = forgejoCompositionFixture();
+  const refs = await binding.credentialRefs(
+    { jobId: "job-fj", repoFullName: "owner/repo", platform: "forgejo", installationId: "7", fork: false },
+    "run-fj-1",
+  );
+  // Exactly ONE forge-purpose entry (`forge-publish`; workspace acquisition
+  // is controller-side, so no `forge-clone` ever rides), plus the model one.
+  assert.deepEqual(refs.map((ref) => ref.name), ["forge-publish", "model"]);
+  assert.deepEqual(
+    refs.find((ref) => ref.name === "forge-publish"),
+    { name: "forge-publish", reference: "forge-cred" },
+  );
+  // The late resolution succeeds against the broker: the vault serves the
+  // publish-purpose material for the plan's platform, and the forge
+  // material is the ONLY value handed to the worker besides the model key.
+  const resolved = await binding.resolver.resolve({ runId: "run-fj-1" } as ExecutionRequest);
+  assert.equal(resolved.ok, true);
+  if (resolved.ok) {
+    assert.deepEqual(resolved.credentials.map((entry) => entry.name), ["forge-publish", "model"]);
+    assert.equal(resolved.credentials[0]?.value, "fj-test-forge-material");
+  }
+});
+
+test("a plan for a job whose platform has no matching forge carries no forge entry (#1484)", async () => {
+  const binding = forgejoCompositionFixture();
+  // The instance serves forgejo only: a github-platform job has no serving
+  // forge, so the plan carries the model entry alone (the pre-existing
+  // fail-closed posture — the worker's forge reads would refuse at
+  // authentication, never guess a credential).
+  const refs = await binding.credentialRefs(
+    { jobId: "job-gh", repoFullName: "owner/repo", platform: "github", installationId: "7", fork: false },
+    "run-gh-1",
+  );
+  assert.deepEqual(refs.map((ref) => ref.name), ["model"]);
+});
+
+test("a FORK job's plan never carries the forge entry (#1484, fork trust boundary)", async () => {
+  const binding = forgejoCompositionFixture();
+  // docs/fork-review.md: the instance-wide forge credential never crosses
+  // the fork trust boundary, even though a serving forge exists — the
+  // fork worker's forge reads fail closed at authentication, the exact
+  // pre-#1484 posture for forks.
+  const refs = await binding.credentialRefs(
+    { jobId: "job-fork", repoFullName: "owner/repo", platform: "forgejo", installationId: "7", fork: true },
+    "run-fork-1",
+  );
+  assert.deepEqual(refs.map((ref) => ref.name), ["model"]);
+});
+
+test("a plan for an ambiguous platform (several same-kind forges) refuses instead of guessing (#1484)", async () => {
+  const ambiguous = `${MIN_INSTANCE_CONFIG}
+forges:
+ - name: forgejo-a
+   kind: forgejo
+   endpoint: http://127.0.0.1:9
+   credential: forge-cred-a
+ - name: forgejo-b
+   kind: forgejo
+   endpoint: http://127.0.0.2:9
+   credential: forge-cred-b
+`;
+  const instance = parseInstanceConfigText(ambiguous, validateContract(V3_CONTRACT));
+  const broker = createModelCredentialVault({
+    instance,
+    platform: "forgejo",
+    modelCredentialMaterial: new Map([["model-cred", "sk-test-model-material"]]),
+  });
+  const binding = createWorkerCredentialBinding({
+    instance,
+    defaultModelProfile: instance.defaultModelProfile,
+    defaultEvidenceProfile: instance.defaultEvidenceProfile!,
+    broker,
+  });
+  await assert.rejects(
+    binding.credentialRefs(
+      { jobId: "job-amb", repoFullName: "owner/repo", platform: "forgejo", installationId: "7", fork: false },
+      "run-amb-1",
+    ),
+    RangeError,
+  );
+});
+
+test("a job naming its forge integration resolves THAT integration's credential, never a same-kind guess (#1484)", async () => {
+  const ambiguous = `${MIN_INSTANCE_CONFIG}
+forges:
+ - name: forgejo-a
+   kind: forgejo
+   endpoint: http://127.0.0.1:9
+   credential: forge-cred-a
+ - name: forgejo-b
+   kind: forgejo
+   endpoint: http://127.0.0.2:9
+   credential: forge-cred-b
+`;
+  const instance = parseInstanceConfigText(ambiguous, validateContract(V3_CONTRACT));
+  const broker = createModelCredentialVault({
+    instance,
+    platform: "forgejo",
+    modelCredentialMaterial: new Map([
+      ["model-cred", "sk-test-model-material"],
+      ["forge-cred-b", "fj-test-forge-b-material"],
+    ]),
+  });
+  const binding = createWorkerCredentialBinding({
+    instance,
+    defaultModelProfile: instance.defaultModelProfile,
+    defaultEvidenceProfile: instance.defaultEvidenceProfile!,
+    broker,
+  });
+  // The same-kind set is ambiguous, but the job names its integration, so
+  // the plan resolves by NAME — the same resolution the envelope's
+  // endpoint uses (daemon.ts resolveForgeApiUrl).
+  const refs = await binding.credentialRefs(
+    {
+      jobId: "job-named",
+      repoFullName: "owner/repo",
+      platform: "forgejo",
+      installationId: "7",
+      fork: false,
+      forgeIntegration: "forgejo-b",
+    },
+    "run-named-1",
+  );
+  assert.deepEqual(
+    refs.find((ref) => ref.name === "forge-publish"),
+    { name: "forge-publish", reference: "forge-cred-b" },
+  );
+});
+
+test("a job naming an unresolvable forge integration refuses at plan build (#1484)", async () => {
+  const binding = forgejoCompositionFixture();
+  await assert.rejects(
+    binding.credentialRefs(
+      {
+        jobId: "job-named-missing",
+        repoFullName: "owner/repo",
+        platform: "forgejo",
+        installationId: "7",
+        fork: false,
+        forgeIntegration: "no-such-forge",
+      },
+      "run-named-missing-1",
+    ),
+    RangeError,
+  );
+});
+
+test("a job naming a forge integration of ANOTHER kind refuses at plan build (#1484)", async () => {
+  // The instance serves forgejo; the job names the github integration.
+  // The daemon's own endpoint resolution refuses that identity, so the
+  // publish-purpose credential must not be selected from it either.
+  const config = `${MIN_INSTANCE_CONFIG}
+forges:
+  - name: forgejo-a
+    kind: forgejo
+    endpoint: http://127.0.0.1:9
+    credential: forge-cred-forgejo
+  - name: github-a
+    kind: github
+    endpoint: https://api.github.com
+    credential: forge-cred-github
+`;
+  const instance = parseInstanceConfigText(config, validateContract(V3_CONTRACT));
+  const broker = createModelCredentialVault({
+    instance,
+    platform: "forgejo",
+    modelCredentialMaterial: new Map([
+      ["model-cred", "sk-test-model-material"],
+      ["forge-cred-forgejo", "fj-test-forge-material"],
+      ["forge-cred-github", "gh-test-forge-material"],
+    ]),
+  });
+  const binding = createWorkerCredentialBinding({
+    instance,
+    defaultModelProfile: instance.defaultModelProfile,
+    defaultEvidenceProfile: instance.defaultEvidenceProfile!,
+    broker,
+  });
+  await assert.rejects(
+    binding.credentialRefs(
+      {
+        jobId: "job-named-other-kind",
+        repoFullName: "owner/repo",
+        platform: "forgejo",
+        installationId: "7",
+        fork: false,
+        forgeIntegration: "github-a",
+      },
+      "run-named-other-kind-1",
+    ),
+    RangeError,
+  );
 });

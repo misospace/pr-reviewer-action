@@ -53,6 +53,48 @@ supplies the piece they all defer to:
 | worker environment | the resolved `WorkerSecretSet` (short-lived, run-scoped) | controller-only credentials (App private key, global admin tokens, database credentials, controller signing keys, unrelated model credentials) |
 | logs and artifacts | reference names, fixed refusal reasons | secret values (the redactor enforces this for the values the broker itself issued) |
 
+## The serving forge's publish-purpose credential (#1484)
+
+A worker performs the review's forge reads, so its plan carries the
+serving forge integration's `forge-publish` reference: the integration the
+job's own forge identity names, or the single same-kind entry. An
+ambiguous name, an unresolvable name, or a named integration of another
+kind refuses instead of guessing. The reference is opaque and
+instance-wide — one serving forge per controller, never a
+repository-selected credential — and a fork job's plan never carries it:
+the instance-wide credential does not cross the fork trust boundary
+(`docs/fork-review.md`), so a fork worker draws on no forge material and
+its forge reads fail closed at authentication.
+
+The material reaches the worker only through the #735 projection: the
+vault seeds it from the operator's environment at resolution time, the
+executor projects it into the worker's environment as
+`PR_REVIEWER_CREDENTIAL_FORGE_PUBLISH`, and the worker maps it into the
+engine's ambient under the platform-correct key (`FORGEJO_TOKEN`, or
+`GH_TOKEN` and `GITHUB_TOKEN`). It never appears in argv, in a URL, in a
+log line, or in the execution envelope.
+
+## Environment-seeded material is a startup snapshot
+
+Every entry the vault seeds from the operator's environment
+(`PR_REVIEWER_CREDENTIAL_<REF>`) carries `expiresAtMs: 0`. That is not a
+missing check. The material is a snapshot of the process environment, not a
+token the vault can mint or refresh, so its lifetime belongs to the source
+and the vault's expiry check does not apply to it. A Kubernetes
+Secret-backed environment variable does not mutate in a running process, so
+rotating the operator's material takes effect only when the controller is
+rolled out or restarted. Until then the running controller keeps handing
+out the material it read at startup.
+
+A reference the environment does not carry fails closed, and the two
+purposes fail in different ways. A model profile's reference refuses
+controller startup (`StartupRefusal`), because every review needs a model
+credential. A forge integration's reference is collected
+opportunistically, so the controller starts without it and the worker's
+publish-purpose plan reference fails closed at resolution
+(`unknown_reference`). Neither path degrades into an unauthenticated
+review.
+
 ## Security invariants
 
 - **Late resolution.** Plans are built from references early (safe to

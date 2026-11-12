@@ -1123,11 +1123,19 @@ test("source reads bind to the committed tree, never the working tree (#1015 reg
   fs.mkdirSync(root);
   const cp = require("node:child_process") as typeof import("node:child_process");
   const runGit = (args: string[]): { status: number; out: string; err: string } => {
-    const r = cp.spawnSync("git", args, {
-      cwd: root,
-      env: { ...process.env, GIT_AUTHOR_NAME: "x", GIT_AUTHOR_EMAIL: "x@x", GIT_COMMITTER_NAME: "x", GIT_COMMITTER_EMAIL: "x@x" },
-      encoding: "buffer",
-    });
+    const r = cp.spawnSync(
+      "git",
+      // `-c commit.gpgsign=false`: the fixture commit is local and
+      // unsigned by contract — the operator's global signing setup (SSH
+      // signing through a hardware agent) must never reach into a
+      // fixture, and the agent's refusal must not fail the regression.
+      ["-c", "commit.gpgsign=false", ...args],
+      {
+        cwd: root,
+        env: { ...process.env, GIT_AUTHOR_NAME: "x", GIT_AUTHOR_EMAIL: "x@x", GIT_COMMITTER_NAME: "x", GIT_COMMITTER_EMAIL: "x@x" },
+        encoding: "buffer",
+      },
+    );
     return { status: r.status ?? 0, out: r.stdout?.toString("utf8") ?? "", err: r.stderr?.toString("utf8") ?? "" };
   };
   // Direct subprocess wrapper that bypasses the pgrep preflight (which

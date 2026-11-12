@@ -514,7 +514,11 @@ async function replayRunReview(c: GoldenCase): Promise<CaseScore> {
       writeFileSync(fullPath, content, "utf8");
     }
     execFileSync("git", ["add", "-A"], { cwd: sourceDir });
-    execFileSync("git", ["commit", "-q", "-m", "golden-replay-fixture"], { cwd: sourceDir });
+    // `-c commit.gpgsign=false`: the fixture commit is local and unsigned
+    // by contract — an operator's global signing setup (SSH commit
+    // signing through a hardware agent, say) must not reach into a test
+    // fixture, and the agent's refusal must not fail the replay.
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "golden-replay-fixture"], { cwd: sourceDir });
     const actualHeadSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir }).toString("utf8").trim();
     pr.head_sha = actualHeadSha;
     const result = await runReview({

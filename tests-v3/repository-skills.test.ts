@@ -10,7 +10,10 @@ import { TOOL_SCHEMAS, Conversation } from "../src/model/conversation.js";
 import { collectConfigLines, computeConfigHash } from "../src/precheck/fingerprint.js";
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  // `-c commit.gpgsign=false`: a test fixture commit is local and
+  // unsigned by contract — the operator's global signing setup (SSH
+  // signing through a hardware agent) must never reach into a fixture.
+  return execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
 }
 function fixture(): string {
   const root = mkdtempSync(join(tmpdir(), "repo-skills-"));

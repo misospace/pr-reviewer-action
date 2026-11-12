@@ -322,6 +322,159 @@ test("absent or empty projected credential material leaves no ai-api-key input (
   }
 });
 
+// ── forge-read ambient credential (#1484) ───────────────────────────────
+
+test("the projected forge-publish material rides the engine ambient under the platform-correct keys and nothing else (#735/#1484)", async () => {
+  const secret = "gh-test-forge-read-material";
+  const cases: readonly {
+    readonly platform: "github" | "forgejo";
+    readonly expected: Record<string, string>;
+  }[] = [
+    { platform: "github", expected: { GH_TOKEN: secret, GITHUB_TOKEN: secret } },
+    // The forgejo branch binds the unified GH_TOKEN ABI too: the engine's
+    // stage-env validation (`validateStageEnv`) requires GH_TOKEN for every
+    // non-tangled platform, and the Action adapter binds GH_TOKEN and
+    // FORGEJO_TOKEN from the same forge token.
+    { platform: "forgejo", expected: { FORGEJO_TOKEN: secret, GH_TOKEN: secret } },
+  ];
+  for (const testCase of cases) {
+    const fixture = makeRequest({ platform: testCase.platform });
+    try {
+      const { run, deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+      writeFileSync(path.join(fixture.request.runDir, "ai-output.json"), "{}", "utf8");
+      const exit = await workerMain(
+        [fixture.request.requestPath],
+        { [executionCredentialEnvName("forge-publish")]: secret },
+        deps,
+      );
+      assert.equal(exit, 0);
+      assert.equal(run.requests.length, 1);
+      // Exactly the platform-correct admission-resolvable keys — the
+      // ambient object carries nothing else.
+      assert.deepEqual({ ...run.requests[0]?.ambient }, testCase.expected);
+      // The engine inputs stay credential-free for forge material: it
+      // travels the ambient environment, never the inputs object.
+      assert.equal(Object.prototype.hasOwnProperty.call(run.requests[0]?.inputs ?? {}, "ai-api-key"), false);
+      // The material never reaches the result file (diagnostics tail
+      // included): the ambient object is in-process only.
+      const resultText = readFileSync(fixture.request.resultPath, "utf8");
+      assert.equal(resultText.includes(secret), false);
+    } finally {
+      cleanup(fixture);
+    }
+  }
+});
+
+test("absent forge-publish material leaves the engine ambient empty (#735/#1484)", async () => {
+  for (const envCase of [
+    {} as NodeJS.ProcessEnv,
+    { [executionCredentialEnvName("forge-publish")]: "" } as NodeJS.ProcessEnv,
+  ]) {
+    for (const platform of ["github", "forgejo"] as const) {
+      const fixture = makeRequest({ platform });
+      try {
+        const { run, deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+        writeFileSync(path.join(fixture.request.runDir, "ai-output.json"), "{}", "utf8");
+        assert.equal(await workerMain([fixture.request.requestPath], envCase, deps), 0);
+        assert.deepEqual({ ...run.requests[0]?.ambient }, {});
+      } finally {
+        cleanup(fixture);
+      }
+    }
+  }
+});
+
+// ── the worker's usage attestation (#736/#1484) ─────────────────────────
+
+test("a completed run attests the primary lane's provider-reported usage in the publication artifact", async () => {
+  const fixture = makeRequest();
+  try {
+    const { deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+    writeFileSync(path.join(fixture.request.runDir, "ai-output.json"), "{}", "utf8");
+    writeFileSync(
+      path.join(fixture.request.runDir, "ai-response.primary.json"),
+      JSON.stringify({ id: "r1", usage: { promptTokens: 11, completionTokens: 7, totalTokens: 18 } }),
+      "utf8",
+    );
+    const exit = await workerMain([fixture.request.requestPath], {}, deps);
+    assert.equal(exit, 0);
+    const artifact = JSON.parse(
+      readFileSync(path.join(fixture.request.runDir, "ai-output.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const usage = artifact["usage"] as Array<Record<string, unknown>>;
+    assert.equal(Array.isArray(usage), true);
+    assert.equal(usage.length, 1);
+    assert.deepEqual(
+      { ...usage[0] },
+      {
+        route: "fast",
+        role: "primary",
+        requestCount: 1,
+        inputTokens: 11,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        outputTokens: 7,
+        costMicros: 0,
+        costProvenance: "unknown",
+      },
+    );
+    // The controller derives its own durable usage ids (`runId:index`), so
+    // the attestation carries none: it can never collide or over-count on
+    // a publication replay.
+    assert.equal("usageId" in (usage[0] ?? {}), false);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
+test("no provider usage block leaves the artifact without a usage attestation (never fabricated)", async () => {
+  for (const envelope of [
+    "{}",
+    JSON.stringify({ usage: null }),
+    JSON.stringify({ usage: { promptTokens: "many" } }),
+    "not json",
+  ]) {
+    const fixture = makeRequest();
+    try {
+      const { deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+      writeFileSync(path.join(fixture.request.runDir, "ai-output.json"), "{}", "utf8");
+      writeFileSync(path.join(fixture.request.runDir, "ai-response.primary.json"), envelope, "utf8");
+      assert.equal(await workerMain([fixture.request.requestPath], {}, deps), 0);
+      const artifact = JSON.parse(
+        readFileSync(path.join(fixture.request.runDir, "ai-output.json"), "utf8"),
+      ) as Record<string, unknown>;
+      assert.equal("usage" in artifact, false);
+    } finally {
+      cleanup(fixture);
+    }
+  }
+});
+
+test("an engine-written usage key is never overwritten by the attestation", async () => {
+  const fixture = makeRequest();
+  try {
+    const { deps } = fakeRunner(async () => ({ reviewedHeadSha: HEAD }));
+    const engineUsage = [{ route: "engine", role: "judge", requestCount: 3, inputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 2, costMicros: 0, costProvenance: "unknown" }];
+    writeFileSync(
+      path.join(fixture.request.runDir, "ai-output.json"),
+      JSON.stringify({ usage: engineUsage }),
+      "utf8",
+    );
+    writeFileSync(
+      path.join(fixture.request.runDir, "ai-response.primary.json"),
+      JSON.stringify({ usage: { prompt_tokens: 11, completion_tokens: 7 } }),
+      "utf8",
+    );
+    assert.equal(await workerMain([fixture.request.requestPath], {}, deps), 0);
+    const artifact = JSON.parse(
+      readFileSync(path.join(fixture.request.runDir, "ai-output.json"), "utf8"),
+    ) as Record<string, unknown>;
+    assert.deepEqual(artifact["usage"], engineUsage);
+  } finally {
+    cleanup(fixture);
+  }
+});
+
 // ── fail-closed envelope handling ───────────────────────────────────────
 
 test("a missing envelope path exits non-zero without writing a result", async () => {

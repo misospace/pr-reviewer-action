@@ -291,7 +291,7 @@ async function start(overrides: {
     runsRoot: dirs.runsRoot,
     workspaceCacheRoot: dirs.workspaceCacheRoot,
     forge: {
-      mirrorFor: async () => ({}) as MirrorCache,
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => {
         const head = heads.shift();
         return head === undefined ? HEAD : head;
@@ -474,7 +474,7 @@ test("startup fails closed when durable state cannot be proven usable", async ()
       runsRoot: dirs.runsRoot,
       workspaceCacheRoot: dirs.workspaceCacheRoot,
       forge: {
-        mirrorFor: async () => ({}) as MirrorCache,
+        mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
         currentHeadSha: async () => HEAD,
         publish: async () => ({ publicationId: "x" }),
       },
@@ -2036,7 +2036,7 @@ test("a poll platform that disagrees with the intake platform fails closed", asy
           runsRoot: dirs.runsRoot,
           workspaceCacheRoot: dirs.workspaceCacheRoot,
           forge: {
-            mirrorFor: async () => ({}) as MirrorCache,
+            mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
             currentHeadSha: async () => HEAD,
             publish: async () => ({ publicationId: "x" }),
           },
@@ -2835,7 +2835,7 @@ test("reconcile binds exactly one pass, and poll names the platform it mints wit
     runsRoot: dirs.runsRoot,
     workspaceCacheRoot: dirs.workspaceCacheRoot,
     forge: {
-      mirrorFor: async () => ({}) as MirrorCache,
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
       publish: async () => ({ publicationId: "x" }),
     },

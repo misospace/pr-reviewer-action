@@ -32,8 +32,9 @@
  * `ExecutionRequest` onto the engine's `ReviewRequest` (the same mapping
  * shape `engine/cli.ts` builds from its request file), runs the real
  * review engine inside the acquired workspace, and reports the terminal
- * outcome through the result-file protocol. It never talks to a forge and
- * never executes anything the envelope names beyond driving the engine.
+ * outcome through the result-file protocol. It never talks to a forge
+ * itself — the engine it drives performs the review's forge reads from the
+ * #735-projected ambient credential (#1484) — and it never publishes.
  *
  * Status/failure mapping (agreed with the local executor's classification
  * in `src/executor/local.ts`):
@@ -104,6 +105,83 @@ export interface WorkerMainDeps {
  * (`src/controller/publication.ts` reads `ExecutionResult.resultArtifactPath`
  * and parses it as the review record the engine persisted there). */
 const ENGINE_ARTIFACT_NAME = "ai-output.json";
+
+/** The primary model response's masked envelope in the run directory (the
+ * runtime persists it through the same masking pipeline as the verdict
+ * artifact). Its numeric `usage` counters are the provider-reported token
+ * counts the usage attestation carries — the same surface the run summary
+ * reads. */
+const PRIMARY_RESPONSE_ARTIFACT_NAME = "ai-response.primary.json";
+
+/** The usage attestation (#736 cost provenance) the controller's
+ * publication layer reads from the review artifact (`usage` array). The
+ * controller path has no other usage writer — the model gateway is not
+ * composed into the runtime — so the worker attests the honest minimum:
+ * the primary lane's provider-reported token counts, request count 1,
+ * zero cost with `unknown` provenance (never a fabricated figure, never
+ * a fabricated cost). An unreadable artifact, an existing `usage` key
+ * (engine-owned), or an absent/invalid provider usage block leaves the
+ * artifact untouched — an artifact without usage records none, which the
+ * publication layer treats as "no spend recorded", never as an error. */
+async function attestPrimaryUsage(
+  runDir: string,
+  modelProfile: string,
+): Promise<void> {
+  const artifactPath = join(runDir, ENGINE_ARTIFACT_NAME);
+  const read = await readBoundedFileNoFollow(artifactPath, MAX_EXECUTION_RESULT_FILE_BYTES);
+  if (read.kind !== "ok") return;
+  let record: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(read.text);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    record = parsed as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  if (record["usage"] !== undefined) return;
+  const envelope = await readBoundedFileNoFollow(
+    join(runDir, PRIMARY_RESPONSE_ARTIFACT_NAME),
+    MAX_EXECUTION_RESULT_FILE_BYTES,
+  );
+  if (envelope.kind !== "ok") return;
+  let usageBlock: unknown;
+  try {
+    usageBlock = (JSON.parse(envelope.text) as Record<string, unknown>)["usage"];
+  } catch {
+    return;
+  }
+  if (usageBlock === null || typeof usageBlock !== "object" || Array.isArray(usageBlock)) return;
+  const usage = usageBlock as Record<string, unknown>;
+  // The persisted response envelope carries camelCase counters
+  // (`promptTokens`); some summary projections spell them snake_case.
+  // Accept both spellings — the values are the same provider-reported
+  // counters either way.
+  const promptTokens = usage["promptTokens"] ?? usage["prompt_tokens"];
+  const completionTokens = usage["completionTokens"] ?? usage["completion_tokens"];
+  const safeCount = (value: unknown): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  if (!safeCount(promptTokens) || !safeCount(completionTokens)) return;
+  const attestation = [
+    {
+      route: modelProfile,
+      role: "primary",
+      requestCount: 1,
+      inputTokens: promptTokens,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      outputTokens: completionTokens,
+      costMicros: 0,
+      costProvenance: "unknown",
+    },
+  ];
+  const updated = `${JSON.stringify({ ...record, usage: attestation }, null, 2)}\n`;
+  try {
+    await writeFileNoFollow(artifactPath, updated);
+  } catch {
+    // The artifact stays as the engine wrote it: an attestation that
+    // cannot be persisted is a no-spend record, never a failed review.
+  }
+}
 
 /** The engine's CI-evidence table location, mirroring the standalone
  * `run` orchestrator's default (`src/run/review.ts`). */
@@ -369,6 +447,38 @@ export async function workerMain(
     engineInputs["ai-api-key"] = modelCredentialMaterial;
   }
 
+  // The forge-read ambient (#1484): the engine performs the review's forge
+  // READS (admission-stage env validation, the authentication and
+  // permission preflights, PR context), so the executor-projected
+  // publish-purpose material moves into the engine's ambient environment.
+  // The material's only channel is the #735 projection (purpose
+  // `forge-publish`, the derived `PR_REVIEWER_CREDENTIAL_FORGE_PUBLISH`
+  // variable) — never the envelope — and like the model credential above it
+  // is placed only into the engine request object, never a log line,
+  // stderr, diagnostics, or the result file. The keys are exactly the ones
+  // the engine's admission resolves (`admissionStageEnv` reads
+  // `GITHUB_TOKEN || GH_TOKEN` for github and `FORGEJO_TOKEN` for forgejo;
+  // `forgejoTokenFromEnv` agrees), and the worker still never publishes —
+  // publication stays controller-side. Absent material leaves the ambient
+  // object empty (never an empty-string token).
+  const ambient: Record<string, string | undefined> = {};
+  const forgePublishMaterial = env[executionCredentialEnvName("forge-publish")] ?? "";
+  if (forgePublishMaterial !== "") {
+    if (request.platform === "forgejo") {
+      // The engine's token ABI is GH_TOKEN (the unified forge-read token,
+      // `validateStageEnv` requires it for every non-tangled platform); the
+      // forgejo admission additionally resolves FORGEJO_TOKEN
+      // (`admissionStageEnv` reads it for forgejo). Both get the projected
+      // material; the Action adapter agrees (actionStageEnv binds
+      // GH_TOKEN and FORGEJO_TOKEN from the same forge token).
+      ambient.FORGEJO_TOKEN = forgePublishMaterial;
+      ambient.GH_TOKEN = forgePublishMaterial;
+    } else {
+      ambient.GH_TOKEN = forgePublishMaterial;
+      ambient.GITHUB_TOKEN = forgePublishMaterial;
+    }
+  }
+
   const engineRequest: ReviewRequest = {
     signal: controller.signal,
     repository: request.repoFullName,
@@ -391,9 +501,11 @@ export async function workerMain(
     // base ref (`baseRef` above).
     inputs: engineInputs,
     // The worker environment is the executor's generic allowlist, never
-    // forge context; downstream adapters resolve what they can from the
-    // platform and repository identity in the envelope.
-    ambient: {},
+    // forge context — EXCEPT the #735-projected forge-read material above:
+    // downstream adapters resolve what they can from the platform and
+    // repository identity in the envelope, and the preflights authenticate
+    // from exactly this ambient object (nothing else leaks in).
+    ambient,
     triggerReason: request.kind,
     forceRereview: false,
   };
@@ -456,6 +568,7 @@ export async function workerMain(
               `the ${ENGINE_ARTIFACT_NAME} artifact could not be made group-readable for the shared claim`,
             );
           } else {
+            await attestPrimaryUsage(request.runDir, request.profiles.model);
             candidate = completedResult(context("the engine run completed"), outcome.reviewedHeadSha);
           }
         }

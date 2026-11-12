@@ -5,5 +5,5 @@
     "outDir": ".test-build",
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "tests-v3/**/*.ts"]
+  "include": ["src/**/*.ts", "tests-v3/**/*.ts", "tests/harness/**/*.ts"]
 }
