@@ -24,9 +24,12 @@
  * The authority model this encodes:
  * - The DETERMINISTIC disposition owns the recommendation. The model's
  *   prose is evidence about the review, never the verdict.
- * - A proven blocker outranks a coverage gap: `request_changes` means a
- *   blocking code defect was proven, and it is published as such even when
- *   the coverage is also incomplete.
+ * - A proven blocker outranks a coverage gap AND an uncertified approve:
+ *   `request_changes` means a blocking code defect was proven — by the final
+ *   verdict or by a still-open blocker/major finding a non-strict verdict
+ *   policy left under an approve — and it is published as such even when
+ *   the coverage is also incomplete. An open blocker can never coexist with
+ *   a certified approval or a COMMENT abstention.
  * - A coverage gap is an ABSTENTION, not an approval and not a defect
  *   claim: the disposition reads `incomplete`, the native event is a
  *   non-blocking COMMENT, and the published line says so in words (what the
@@ -52,7 +55,8 @@ export interface ReviewDisposition {
   statement: string;
   /** The native review event this disposition permits. */
   nativeEvent: "REQUEST_CHANGES" | "COMMENT" | "APPROVE";
-  /** True when a blocking code defect is proven (the deterministic verdict says so). */
+  /** True when a blocking code defect is proven — by the final verdict or by
+   * a still-open blocker/major finding. */
   blockerProven: boolean;
   /** True when required evidence / coverage is unresolved. */
   coverageIncomplete: boolean;
@@ -103,23 +107,24 @@ const INCOMPLETE_REASON_CLAUSES: Record<string, string> = {
 };
 
 /**
- * The incomplete wording. The defect clause states what the review actually
- * proved: under the strict policy an approve verdict means no blocker or
- * major finding is open, but a non-strict policy lets the model's own
- * approve stand with an open blocker — and the published line must never
- * claim a defect was NOT proven while the findings table lists one.
+ * The incomplete wording. A coverage gap is an abstention on a review whose
+ * proven-blocking findings already owned the disposition (an open
+ * blocker/major outranks the gap and yields `request_changes`), so the line
+ * states the abstention itself: no blocking defect was proven, and the
+ * approval was withheld. The reason detail used to live only in the
+ * recommendation line's wording; the coverage-gap notice repeats it for the
+ * strict policy, but a non-strict policy renders no notice — so the
+ * recommendation carries the reason itself and the reader is never left with
+ * an unexplained abstention.
  */
-function incompleteWording(input: { incompleteReason: string; blockingFindingOpen: boolean }): {
+function incompleteWording(input: { incompleteReason: string }): {
   recommendation: string;
   statement: string;
 } {
   const reason = INCOMPLETE_REASON_CLAUSES[input.incompleteReason] ?? INCOMPLETE_REASON_CLAUSES.execution!;
-  const defect = input.blockingFindingOpen
-    ? "a blocking finding is still open"
-    : "no blocking code defect proven";
-  const statement = `Incomplete — ${defect}; approval withheld (${reason})`;
+  const statement = `Incomplete — no blocking code defect proven; approval withheld (${reason})`;
   return {
-    recommendation: `🟡 **Automated recommendation: INCOMPLETE — ${defect}; approval withheld (${reason})**`,
+    recommendation: `🟡 **Automated recommendation: INCOMPLETE — no blocking code defect proven; approval withheld (${reason})**`,
     statement,
   };
 }
@@ -130,21 +135,25 @@ function incompleteWording(input: { incompleteReason: string; blockingFindingOpe
  * Kind precedence (fail-closed at every step):
  * 1. An invalid/missing verdict is `unavailable` — a failed run, never a
  *    clean review and never a blocking request.
- * 2. A `request_changes` verdict is `request_changes`: a proven blocking
- *    defect outranks a coverage gap, because the gap says nothing about
- *    whether the defect is real.
+ * 2. A proven blocking defect is `request_changes` — proven EITHER by the
+ *    final `request_changes` verdict OR by a still-open blocker/major
+ *    finding that a non-strict verdict policy left under an approve. The
+ *    defect outranks a coverage gap (the gap says nothing about whether the
+ *    defect is real) and it outranks an approve (an open blocker can never
+ *    publish as an approval or as a COMMENT abstention).
  * 3. An incomplete coverage state (`review_result === "partial"`) is
  *    `incomplete`: the review abstained, and an abstention is neither an
  *    approval nor a defect claim.
  * 4. Everything else is `approve`.
  *
- * The native event follows the disposition: a proven blocker publishes
- * REQUEST_CHANGES, a certified approve publishes APPROVE, and EVERY other
- * case (an incomplete coverage state, a withheld or uncertified approval, a
- * missing verdict, the blockers-only mode) publishes the non-blocking
- * COMMENT. The coverage state and the certification are OR-ed here so a
- * `partial` review result can never be reported as a clean approve even if a
- * caller passes the two fields inconsistently.
+ * The native event follows the disposition: a proven blocker (the verdict or
+ * an open blocker/major finding) publishes REQUEST_CHANGES, a certified
+ * approve publishes APPROVE, and EVERY other case (an incomplete coverage
+ * state, a withheld or uncertified approval, a missing verdict, the
+ * blockers-only mode) publishes the non-blocking COMMENT. The coverage state
+ * and the certification are OR-ed here so a `partial` review result can never
+ * be reported as a clean approve even if a caller passes the two fields
+ * inconsistently.
  *
  * The RECOMMENDATION follows the event on a verdict-bearing surface: an
  * approve whose approval was withheld publishes the advisory wording (it
@@ -169,13 +178,18 @@ export function computeReviewDisposition(input: {
   /** Why the coverage is incomplete ("none" | "execution" |
    * "requirement_trace" | "both"). */
   incompleteReason: string;
-  /** True when a blocker/major finding is still open. */
+  /** True when a blocker/major finding is still open. A proven blocking
+   * finding owns the disposition: it outranks an approve verdict, a
+   * certification, and a coverage gap, so an open blocker can never publish
+   * as an approval or as a COMMENT abstention. */
   blockingFindingOpen: boolean;
 }): ReviewDisposition {
   const coverageIncomplete = input.coverageIncomplete === true || input.reviewResult === "partial";
+  const blockerProven = input.validVerdict === true
+    && (input.verdict === "request_changes" || input.blockingFindingOpen === true);
   const kind: ReviewDispositionKind = !input.validVerdict
     ? "unavailable"
-    : input.verdict === "request_changes"
+    : blockerProven
       ? "request_changes"
       : coverageIncomplete
         ? "incomplete"
@@ -188,7 +202,7 @@ export function computeReviewDisposition(input: {
   const wording = kind === "request_changes"
     ? REQUEST_CHANGES_WORDING
     : kind === "incomplete"
-      ? incompleteWording({ incompleteReason: input.incompleteReason, blockingFindingOpen: input.blockingFindingOpen })
+      ? incompleteWording({ incompleteReason: input.incompleteReason })
       : kind === "approve" && input.verdictBearing && input.approvalCertified !== true
         ? ADVISORY_APPROVE_WORDING
         : kind === "approve"

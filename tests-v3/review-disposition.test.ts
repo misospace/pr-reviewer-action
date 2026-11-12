@@ -23,7 +23,8 @@ const HEAD = "a".repeat(40);
 
 class MockPublishApi implements PublishPlatformApi {
   readonly platform: "github" | "forgejo" = "github";
-  readonly nativeReviewSurface: NativeReviewSurface = { supported: true };
+  readonly nativeReviewSurface: NativeReviewSurface;
+  constructor(surface: NativeReviewSurface = { supported: true }) { this.nativeReviewSurface = surface; }
   head: string | null = HEAD;
   sticky: { marker: string; body: string }[] = [];
   submitted: Parameters<PublishPlatformApi["createReview"]>[0][] = [];
@@ -576,6 +577,74 @@ test("#1596: the blockers-only mode publishes the advisory recommendation too", 
   assert.ok(!body.includes(APPROVE_RECOMMENDATION), body);
 });
 
+test("#1596: an open blocker under a non-strict policy never certifies an approval", async () => {
+  // The published defect owns the publication even when the verdict policy
+  // left the model's own approve standing: the native event is
+  // REQUEST_CHANGES, the recommendation line says so, and the approving
+  // prose is reconciled — never a certified APPROVE, never a COMMENT.
+  const api = new MockPublishApi();
+  await publishReview(publishInput({
+    mode: "review_verdict",
+    verdictPolicy: "model",
+    verdict: "approve",
+    findings: [finding("major")],
+    reviewMarkdown: "## Review\n\nRecommendation: Approve\n",
+  }), api, { diffText: "" });
+
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+  const body = api.submitted[0]!.body;
+  assert.ok(body.includes(REQUEST_CHANGES_RECOMMENDATION), body);
+  assert.ok(!body.includes(APPROVE_RECOMMENDATION), body);
+  assert.ok(
+    body.includes(
+      "Recommendation: Request changes. (Model suggestion before validation, not authoritative: Approve.)",
+    ),
+    body,
+  );
+});
+
+test("#1596: a blocking disposition suppresses the advisory withholding notices", async () => {
+  // Scope-withheld approval AND an open blocker: the publication is a
+  // blocking REQUEST_CHANGES, so the "this review is advisory" notice must
+  // not contradict the blocking recommendation beside it.
+  const api = new MockPublishApi();
+  await publishReview(publishInput({
+    mode: "review_verdict",
+    verdictPolicy: "model",
+    verdict: "approve",
+    findings: [finding("blocker")],
+    isForkPr: true,
+    reviewMarkdown: "## Review\n\nBody.",
+  }), api, { diffText: "" });
+
+  assert.equal(api.submitted[0]!.event, "REQUEST_CHANGES");
+  const body = api.submitted[0]!.body;
+  assert.ok(body.includes(REQUEST_CHANGES_RECOMMENDATION), body);
+  assert.ok(!body.includes("Approval withheld by scope policy"), body);
+});
+
+test("#1596: a platform without a native surface states the blocking recommendation too", async () => {
+  // The #588 advisory platform notice is the disposition's word, not the
+  // verdict's: an open blocker under a non-strict approve reads as
+  // REQUEST CHANGES, never as an APPROVE above the findings.
+  const api = new MockPublishApi({ supported: false, reason: "no native review surface" });
+  await publishReview(publishInput({
+    mode: "review_verdict",
+    verdictPolicy: "model",
+    verdict: "approve",
+    findings: [finding("major")],
+    reviewMarkdown: "## Review\n\nBody.",
+  }), api, { diffText: "" });
+
+  assert.equal(api.submitted.length, 0, "no native review is created");
+  const body = api.sticky[0]!.body;
+  assert.ok(
+    body.includes("**Automated recommendation: REQUEST CHANGES** — advisory only"),
+    body,
+  );
+  assert.ok(!body.includes("**Automated recommendation: APPROVE** — advisory only"), body);
+});
+
 test("#1596: an advisory publication keeps the plain APPROVE recommendation", async () => {
   // A sticky comment carries no verdict-bearing native event, so there is
   // nothing for the recommendation to contradict: the review's own
@@ -679,15 +748,41 @@ test("#1596: the incomplete recommendation names the coverage reason", () => {
   }
 });
 
-test("#1596: the incomplete recommendation never claims a defect was not proven while a blocker is open", () => {
+test("#1596: an open blocking finding owns the disposition, never an approval or a COMMENT", () => {
   // A non-strict policy lets the model's own approve stand with an open
-  // blocker finding; the published line must not deny the blocker.
-  const incomplete = disposition({
+  // blocker finding; the disposition must still publish the proven defect:
+  // REQUEST_CHANGES, never a certified APPROVE and never a COMMENT
+  // abstention (the issue's distinction: code blocker -> REQUEST_CHANGES).
+  const blocking = disposition({
+    verdict: "approve", validVerdict: true, reviewResult: "clean", coverageIncomplete: false,
+    approvalCertified: true, blockingFindingOpen: true,
+  });
+  assert.equal(blocking.kind, "request_changes");
+  assert.equal(blocking.nativeEvent, "REQUEST_CHANGES");
+  assert.equal(blocking.blockerProven, true);
+  assert.equal(blocking.recommendation, REQUEST_CHANGES_RECOMMENDATION);
+  // The proven blocker also outranks a coverage gap (blocking > partial).
+  const gapAndBlocker = disposition({
     verdict: "approve", validVerdict: true, reviewResult: "partial", coverageIncomplete: true,
     approvalCertified: false, blockingFindingOpen: true,
   });
-  assert.ok(!incomplete.recommendation.includes("no blocking code defect proven"), incomplete.recommendation);
-  assert.ok(incomplete.recommendation.includes("a blocking finding is still open"), incomplete.recommendation);
+  assert.equal(gapAndBlocker.kind, "request_changes");
+  assert.equal(gapAndBlocker.nativeEvent, "REQUEST_CHANGES");
+  // An invalid verdict stays `unavailable`: a failed run is never turned into
+  // a blocking request by carried findings either.
+  const failed = disposition({
+    verdict: "", validVerdict: false, reviewResult: "clean", coverageIncomplete: false,
+    approvalCertified: false, blockingFindingOpen: true,
+  });
+  assert.equal(failed.kind, "unavailable");
+  assert.equal(failed.nativeEvent, "COMMENT");
+  // Without an open blocker the incomplete abstention states its own gap.
+  const incomplete = disposition({
+    verdict: "approve", validVerdict: true, reviewResult: "partial", coverageIncomplete: true,
+    approvalCertified: false, blockingFindingOpen: false,
+  });
+  assert.equal(incomplete.kind, "incomplete");
+  assert.ok(incomplete.recommendation.includes("no blocking code defect proven"), incomplete.recommendation);
 });
 
 test("#1596: a recommendation inside a fenced code block is still reconciled", () => {

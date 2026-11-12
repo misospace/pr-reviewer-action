@@ -2608,10 +2608,13 @@ export async function publishReview(
       // pre-existing one of every action-owned notice in this body, and the
       // action's own marker stays the authoritative one). The verdict itself
       // never changes: the recommendation is published as advisory text only.
+      // #1596: the advisory word is the DISPOSITION's, not the verdict's —
+      // an open blocker under a non-strict approve reads as REQUEST CHANGES
+      // here too, never as an APPROVE beside the blocking recommendation.
       const platformNotice = nativeSurface.supported
         ? ""
-        : validVerdict && (input.verdict === "request_changes" || canApprove)
-          ? `\n> **Automated recommendation: ${input.verdict === "request_changes" ? "REQUEST CHANGES" : "APPROVE"}** — advisory only: ${surfaceReason}. The review is published as a managed top-level review record; no native approval, blocking request, or inline comment was submitted.\n`
+        : validVerdict && (disposition.kind === "request_changes" || canApprove)
+          ? `\n> **Automated recommendation: ${disposition.kind === "request_changes" ? "REQUEST CHANGES" : "APPROVE"}** — advisory only: ${surfaceReason}. The review is published as a managed top-level review record; no native approval, blocking request, or inline comment was submitted.\n`
           : `\n> **Native review verdicts are unavailable on this platform**: ${surfaceReason}. The review is published as a managed top-level review record; no native approval, blocking request, or inline comment was submitted.\n`;
       // #1554: the withholding notices below used to be appended to the
       // finished body; they are now decided BEFORE the build and ride it as
@@ -2621,6 +2624,14 @@ export async function publishReview(
       // branches stay mutually exclusive exactly as the appends were, and
       // each branch passes the same string literal the append used, so a
       // fitting body keeps today's bytes exactly.
+      // #1596: when a proven blocker owns the disposition, this publication
+      // IS a blocking request (native event REQUEST_CHANGES, recommendation
+      // REQUEST CHANGES) — the advisory-withholding wordings below ("this
+      // review is advisory rather than a clean approval", "a clean review
+      // is published as an advisory record") would contradict it beside it.
+      // The withholding reason still rides the step messages (unchanged);
+      // only the published advisory notice is suppressed.
+      const blockingPublication = disposition.kind === "request_changes";
       let withheldNotice = "";
       if (!validVerdict) {
         // #1161: a missing or invalid verdict is a failed run, not a clean
@@ -2645,7 +2656,9 @@ export async function publishReview(
         const advisory = reviewResult === "clean"
           ? "this clean review is advisory"
           : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
-        withheldNotice = `\n> **Approval withheld by scope policy**: ${scope} and native approvals for fork pull requests are disabled (\`approve-forks: ${input.approveForks}\`), so ${advisory}.\n`;
+        if (!blockingPublication) {
+          withheldNotice = `\n> **Approval withheld by scope policy**: ${scope} and native approvals for fork pull requests are disabled (\`approve-forks: ${input.approveForks}\`), so ${advisory}.\n`;
+        }
         messages.push(
           `Withholding native approval for #${input.prNumber} (cross-repository PR, approve_forks=${input.approveForks}, is_fork=${guardrails.isForkPr ?? "unknown"})`,
         );
@@ -2665,7 +2678,9 @@ export async function publishReview(
         const advisory = reviewResult === "clean"
           ? "this clean review is advisory"
           : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
-        withheldNotice = `\n> **Approval withheld by derived-obligation state**: ${gap}, so ${advisory}.\n`;
+        if (!blockingPublication) {
+          withheldNotice = `\n> **Approval withheld by derived-obligation state**: ${gap}, so ${advisory}.\n`;
+        }
         messages.push(
           `Withholding native approval for #${input.prNumber} (derived obligation state: ${state})`,
         );
@@ -2686,14 +2701,18 @@ export async function publishReview(
         const advisory = reviewResult === "clean"
           ? "this clean review is advisory"
           : "this review is advisory rather than a clean approval — the findings and coverage notes above are informational";
-        withheldNotice = `\n> **Approval withheld by required-evidence state**: ${gap}, so ${advisory}.\n`;
+        if (!blockingPublication) {
+          withheldNotice = `\n> **Approval withheld by required-evidence state**: ${gap}, so ${advisory}.\n`;
+        }
         messages.push(
           `Withholding native approval for #${input.prNumber} (required-evidence state: ${state})`,
         );
       } else if (input.mode === "review_verdict" && input.verdict === "approve" && input.degradedGateBypass === true) {
         // #1447: degraded review state is an abstention, never a trusted
         // native approval, even if the surviving coverage fields look clean.
-        withheldNotice = "\n> **Approval withheld by degraded review state**: this run bypassed a normal review gate, so it needs review; no native approval is certified.\n";
+        if (!blockingPublication) {
+          withheldNotice = "\n> **Approval withheld by degraded review state**: this run bypassed a normal review gate, so it needs review; no native approval is certified.\n";
+        }
         messages.push(
           `Withholding native approval for #${input.prNumber} (degraded review state)`,
         );
@@ -2710,12 +2729,14 @@ export async function publishReview(
             : input.coverageUnknown
               ? "this review's tool-loop coverage could not be verified (the run directory or its coverage artifact was unavailable to confirm it)"
               : "required-check coverage or the tool-loop investigation did not finish";
-        withheldNotice = `\n> **Approval withheld by incomplete review coverage**: ${gap}. This run needs review; no native approval is certified.\n`;
+        if (!blockingPublication) {
+          withheldNotice = `\n> **Approval withheld by incomplete review coverage**: ${gap}. This run needs review; no native approval is certified.\n`;
+        }
         messages.push(
           `Withholding native approval for #${input.prNumber} (incomplete review coverage; reason=${incompleteReason})`,
         );
       }
-      if (input.mode === "review_blockers" && input.verdict === "approve") {
+      if (input.mode === "review_blockers" && input.verdict === "approve" && !blockingPublication) {
         // #1161: the mode is blockers-only — a review without blockers is
         // published as an advisory comment and never as an approval. (A
         // missing/invalid verdict is covered by the "No review verdict"
@@ -2811,7 +2832,10 @@ export async function publishReview(
           confidenceBlock: confidenceBlock || undefined,
           tailBlock: strict ? withheldNotice : withheldNotice + renderFindingsSummary(input.findings, input.upstreamLinkMode),
         });
-        if (canApprove) {
+        // #1596: the messages follow the EVENT the disposition chose, not
+        // `canApprove`: an open blocker under a non-strict approve submits a
+        // blocking review even when approval eligibility itself held.
+        if (event === "APPROVE") {
           messages.push(`Submitting native approval for #${input.prNumber}`);
         } else if (event === "REQUEST_CHANGES") {
           messages.push(`Submitting blocking findings for #${input.prNumber}`);

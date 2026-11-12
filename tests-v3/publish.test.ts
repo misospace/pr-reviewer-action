@@ -1366,7 +1366,10 @@ test("#1249: non-strict body-only fallback appends the bounded findings summary"
   assert.equal(result.status, "published");
   assert.equal(api.submitted.length, 2, "the rejected commit-bound batch falls back body-only");
   const rejected = api.submitted[0]!;
-  assert.equal(rejected.event, "APPROVE");
+  // #1596: the run carries an open major finding, so the disposition is
+  // REQUEST_CHANGES even though the non-strict verdict stayed "approve" —
+  // an open blocker/major never certifies an approval.
+  assert.equal(rejected.event, "REQUEST_CHANGES");
   assert.equal(rejected.commit_id, HEAD);
   assert.equal(rejected.comments?.length, 1, "the rejected batch carried the inline finding");
   const plain = api.submitted[1]!;
