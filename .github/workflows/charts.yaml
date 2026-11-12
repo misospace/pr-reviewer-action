@@ -50,6 +50,32 @@ jobs:
           grep -q "type: RuntimeDefault" /var/tmp/render-controller-only.yaml
           grep -q "automountServiceAccountToken: false" /var/tmp/render-controller-only.yaml
           grep -q "kind: NetworkPolicy" /var/tmp/render-controller-only.yaml
+          # #1621: the operations dashboard stays OFF by default — the flag
+          # is genuinely absent, never emitted as an empty value.
+          if grep -q "PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-controller-only.yaml; then
+            echo "PR_REVIEWER_ADMIN_DASHBOARD must stay unset with default values" >&2
+            exit 1
+          fi
+
+      - name: Render (dashboard knob #1621)
+        run: |
+          set -euo pipefail
+          helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.dashboard=true \
+            > /var/tmp/render-dashboard-on.yaml
+          # The knob renders the exact ON spelling the controller accepts.
+          grep -A1 -- "- name: PR_REVIEWER_ADMIN_DASHBOARD" /var/tmp/render-dashboard-on.yaml \
+            | grep -q 'value: "true"'
+          # Fail closed: the knob without the admin listener refuses the
+          # render instead of silently dropping the setting.
+          if helm template pr-reviewer deploy/charts/pr-reviewer \
+            -f deploy/charts/pr-reviewer/examples/values-controller-only.yaml \
+            --set controller.admin.enabled=false \
+            --set controller.admin.dashboard=true >/dev/null 2>&1; then
+            echo "controller.admin.dashboard without controller.admin.enabled must refuse the render" >&2
+            exit 1
+          fi
 
       - name: Render (kubernetes-executor example)
         run: |
