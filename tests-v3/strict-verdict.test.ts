@@ -527,7 +527,7 @@ test("#954: trace-only incompleteness renders trace-appropriate prose and preser
   const api = new MockPublishApi();
   await publishReview(publishInput({ requiredChecks: "incomplete", incompleteReason: "requirement_trace" }), api, { diffText: "" });
   const body = api.sticky[0]!.body;
-  assert.ok(body.includes("🟡 **Automated recommendation: APPROVAL WITHHELD — requirement trace incomplete**"));
+  assert.ok(body.includes("🟡 **Automated recommendation: INCOMPLETE — no blocking code defect proven; approval withheld (requirement trace incomplete)**"));
   assert.ok(body.includes("**Requirement traceability gap**"));
   assert.ok(body.includes('"review_result":"partial"'));
   assert.ok(!body.includes("did not resolve every required check"));
@@ -549,7 +549,7 @@ test("#954: execution plus trace incompleteness gets combined prose", async () =
   const api = new MockPublishApi();
   await publishReview(publishInput({ requiredChecks: "incomplete", incompleteReason: "both" }), api, { diffText: "" });
   const body = api.sticky[0]!.body;
-  assert.ok(body.includes("🟡 **Automated recommendation: APPROVAL WITHHELD — review coverage incomplete**"));
+  assert.ok(body.includes("🟡 **Automated recommendation: INCOMPLETE — no blocking code defect proven; approval withheld (review coverage and requirement trace incomplete)**"));
   assert.ok(body.includes("**Partial coverage and requirement traceability gap**"));
   assert.ok(body.includes("required-check coverage is incomplete, and one or more in-scope requirements could not be verified"));
 
@@ -568,7 +568,7 @@ test("#954: execution and legacy incomplete publish callers keep the generic cov
     await publishReview(publishInput(overrides), api, { diffText: "" });
     const body = api.sticky[0]!.body;
     assert.ok(body.includes("did not resolve every required check"));
-    assert.ok(body.includes("🟡 **Automated recommendation: INCOMPLETE — not an approval**"));
+    assert.ok(body.includes("🟡 **Automated recommendation: INCOMPLETE — no blocking code defect proven; approval withheld (review coverage incomplete)**"));
     assert.ok(!body.includes("Requirement traceability gap"));
   }
 });

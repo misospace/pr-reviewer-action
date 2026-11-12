@@ -290,6 +290,15 @@ export interface ExecutionRequest {
   /** Path the worker writes the structured result JSON to. This file —
    * never stdout — is the result protocol. */
   readonly resultPath: string;
+  /** The group id BOTH sides of the file exchange share when the run
+   * directory crosses a uid boundary (the Kubernetes executor's shared
+   * claim: controller pod vs. worker pod). When present the worker and
+   * the executor create the exchange files and directories group-accessible
+   * (SHARED_CLAIM_FILE_MODE / SHARED_CLAIM_DIR_MODE in paths.ts); absent
+   * means the single-uid exchange (0o600/0o700). The executor that sets
+   * this field owns making the group actually shared (it pins the worker's
+   * runAsGroup/fsGroup to the same value). Never credential material. */
+  readonly sharedGroupId?: number;
 }
 
 /** Lifecycle phase of an in-flight execution. */
@@ -845,6 +854,7 @@ const REQUEST_KEYS = [
   "jobId", "runId", "attempt", "kind", "platform", "forgeApiUrl", "repoFullName",
   "prNumber", "headSha", "baseSha", "deadlineAtMs", "workspace", "profiles",
   "modelSelection", "credentials", "runDir", "requestPath", "resultPath",
+  "sharedGroupId",
 ] as const;
 
 /** Fail-closed validation of an execution request — the ONE definition of
@@ -892,6 +902,12 @@ export function validateExecutionRequest(value: unknown): ExecutionRequest {
   if (!EXECUTION_ID_RE.test(runId)) {
     throw new ExecutionRequestError(`execution request.runId must match ${EXECUTION_ID_RE.source}`);
   }
+  // The shared-claim group id is OPTIONAL: absent stays absent (the
+  // single-uid exchange), and `requireInteger` throws for a missing key,
+  // so absence is handled explicitly before the integer check.
+  const sharedGroupId = value["sharedGroupId"] === undefined
+    ? undefined
+    : requireInteger(value, "sharedGroupId", "execution request", 1);
 
   const request: ExecutionRequest = Object.freeze({
     jobId,
@@ -915,6 +931,7 @@ export function validateExecutionRequest(value: unknown): ExecutionRequest {
     runDir: requireString(value, "runDir", "execution request", { nonEmpty: true }),
     requestPath: requireString(value, "requestPath", "execution request", { nonEmpty: true }),
     resultPath: requireString(value, "resultPath", "execution request", { nonEmpty: true }),
+    ...(sharedGroupId === undefined ? {} : { sharedGroupId }),
   });
   requireStrictPath(request.runDir, "execution request.runDir");
   requireStrictPath(request.requestPath, "execution request.requestPath");

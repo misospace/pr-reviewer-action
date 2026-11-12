@@ -252,8 +252,10 @@ export function computeReviewAttestation(signals: ReviewAttestationSignals): Rev
   const native = publication.native;
   // A REQUEST_CHANGES verdict-bearing review that actually landed is a
   // block on the pull request itself — it outranks a contradicting verdict
-  // field (defensive: the publish seam derives the event FROM the verdict,
-  // so this stays fail-closed for any caller with inconsistent inputs).
+  // field. The publish seam derives the event from the disposition (#1596),
+  // so this mismatch is a live path: a still-open blocker/major finding
+  // under a non-strict approve verdict publishes REQUEST_CHANGES, and the
+  // attestation reads the landed block, never the stale verdict field.
   if (native !== undefined && native.event === "REQUEST_CHANGES" && native.submitted === true) {
     return finish("blocked", "request_changes");
   }

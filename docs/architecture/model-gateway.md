@@ -1,11 +1,12 @@
 # Optional model gateway with run-scoped budgets and provider-key isolation (#765)
 
 Design of `src/gateway/`: the controller-side boundary one review run's
-model traffic flows through when an operator enables gateway mode. Like
+model traffic flows through when an operator enables gateway mode. Unlike
 the queue (#731), acquisition (#732), executor (#733), credential (#735),
-and state (#736) layers before it, this is **a library for the future
-self-hosted controller daemon — it is not wired into the running action
-pipeline**. Parent: #725 (post-v3 self-hosted); builds on #735 (credential
+and state (#736) layers before it — which the controller daemon (#1348)
+now consumes — this library is **not yet wired into the daemon composition
+or the running action pipeline**. Parent: #725 (post-v3 self-hosted);
+builds on #735 (credential
 broker) and #736 (durable control-plane state); composes with the shared
 transport (#677).
 

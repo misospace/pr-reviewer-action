@@ -4,8 +4,8 @@ The guardrails are two operator-applied `ValidatingAdmissionPolicy`
 manifests under [`deploy/admission/`](../../deploy/admission/). They reject
 controller-created worker Jobs and per-run credential Secrets that violate
 the executor contract, at the moment Kubernetes accepts the object. They
-are defense-in-depth over the executor's in-code security defaults, and a
-library for the future controller daemon. Nothing in the Action runtime
+are defense-in-depth over the executor's in-code security defaults, for the
+controller daemon's Kubernetes workers (#1348). Nothing in the Action runtime
 reads or applies them. The in-code side lives in
 [`src/executor/admission-policy.ts`](../../src/executor/admission-policy.ts),
 and the executor contract itself lives in

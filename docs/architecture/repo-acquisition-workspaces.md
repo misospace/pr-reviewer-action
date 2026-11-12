@@ -6,8 +6,9 @@ controller prepares before running the review engine.
 
 This layer is **not wired into the Action runtime** — `action.yml` is
 unchanged and Action mode behaves exactly as before. It is operator-mode
-(#725) infrastructure for the future executor/worker (#733): the controller
-imports `src/acquisition/` (via its barrel) and owns the lifecycle.
+(#725) infrastructure consumed live by the controller daemon (#1348) and
+its executor backends (#733): the daemon imports `src/acquisition/` (via
+its barrel) and owns the lifecycle.
 
 ## Module map
 

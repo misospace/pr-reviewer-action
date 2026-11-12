@@ -123,6 +123,15 @@ import { buildTrackedIndex, executeToolRequest, type ToolContext, type TrackedIn
 import { runProcess } from "../runtime/subprocess.js";
 import { gitEnv } from "../acquisition/git-env.js";
 import { decodeUtf8Ignore } from "../corpus/truncate.js";
+// #1464: the deadline-clamp marker texts and their predicate live in
+// `execution-counts.ts` — the ONE leaf module owning the harness artifact's
+// execution meaning — so the tool-error fallback trigger here and the #1606
+// all-failed overlay can never disagree about what a tool failure IS.
+import {
+  TOOL_LOOP_DEADLINE_ERROR,
+  TOOL_LOOP_EXPLORATION_DEADLINE_ERROR,
+  isToolLoopDeadlineError,
+} from "./execution-counts.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -141,12 +150,6 @@ export const TRACE_REPAIR_EXTRA_REQUESTS = 4;
  * rides the `failure` field; the flat `planning_error`/`error` keys keep
  * their historical content for the run log. */
 export const PRE_LOOP_STOP_REASON = "harness-abort";
-// #1464 (review): the synthetic executor error an exploration-clamped tool
-// execution returns when the reserved slice's boundary is already behind it.
-// Exported so the smart-tier tool-error fallback can tell this BOUNDARY
-// marker (which must not trigger the fallback — the closing verdict is about
-// to run in the reserved slice) apart from a real tool failure.
-export const TOOL_LOOP_EXPLORATION_DEADLINE_ERROR = "tool-loop exploration deadline exceeded";
 
 export const NATIVE_LOOP_SYSTEM =
   "You are a pull request evidence gatherer with read-only tools. " +
@@ -3557,7 +3560,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     const effective = explorationDeadlineSec ?? deadline;
     const expiredError = explorationDeadlineSec !== undefined
       ? TOOL_LOOP_EXPLORATION_DEADLINE_ERROR
-      : "tool-loop deadline exceeded";
+      : TOOL_LOOP_DEADLINE_ERROR;
     if (timeFn() >= effective) {
       return { tool: toolName, status: "error", result: { error: expiredError } };
     }
@@ -3871,7 +3874,7 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   input.result.native_loop_unrecorded_usage = unrecordedUsageRecord();
   input.result.native_loop_error = outcome.error
     ? maskKnownSecrets(outcome.error, harnessSecrets)
-    : "tool-loop deadline exceeded";
+    : TOOL_LOOP_DEADLINE_ERROR;
   return false;
 }
   if (outcome.degraded) {
@@ -3905,13 +3908,14 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // the closing verdict is about to run in the reserved slice. Triggering the
   // standard-review fallback on it would waste exactly the verdict the
   // reserve exists to protect (the #1459 shape), so the fallback trigger
-  // ignores executed calls whose failure IS the boundary marker; any other
+  // ignores executed calls whose failure IS the deadline marker (the shared
+  // #1606 predicate, the same one the all-failed overlay consults); any other
   // error still triggers it unchanged.
   if (
     input.tier === "smart"
     && outcome.executed.some((c) =>
       c.result.status !== "ok"
-      && (c.result.result as { error?: unknown } | undefined)?.error !== TOOL_LOOP_EXPLORATION_DEADLINE_ERROR)
+      && !isToolLoopDeadlineError((c.result.result as { error?: unknown } | undefined)?.error))
   ) {
     input.result.native_loop_verdict_status = "fallback";
     input.result.native_loop_verdict_reason = "tool-error";

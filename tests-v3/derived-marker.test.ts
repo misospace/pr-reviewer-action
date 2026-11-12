@@ -188,7 +188,7 @@ test("#1449: a run without the feature publishes byte-identical output", async (
   assert.equal(withoutPayload.review_result, markerReviewResult(withoutBody), "the handoff payload agrees with the marker");
   // The recommendation header agrees too: an unfinished review never reads
   // as an approval.
-  assert.ok(enabledBody.includes("🟡 **Automated recommendation: INCOMPLETE — not an approval**"));
+  assert.ok(enabledBody.includes("🟡 **Automated recommendation: INCOMPLETE — no blocking code defect proven; approval withheld (review coverage incomplete)**"));
   assert.ok(withoutBody.includes("✅ **Automated recommendation: APPROVE**"));
 });
 

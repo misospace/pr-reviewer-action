@@ -67,11 +67,12 @@
  */
 
 import { statSync } from "node:fs";
+import { chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { runReviewEngine, type RunReviewResult } from "../engine/review.js";
 import type { ReviewDependencies, ReviewRequest } from "../engine/types.js";
 import { EXECUTION_REQUEST_ENV_KEY } from "./local.js";
-import { ensureContained, readBoundedFileNoFollow, writeFileNoFollow } from "./paths.js";
+import { ensureContained, readBoundedFileNoFollow, SHARED_CLAIM_DIR_MODE, SHARED_CLAIM_FILE_MODE, writeFileNoFollow } from "./paths.js";
 import { boundedFailureMessage } from "./result-file.js";
 import {
   executionCredentialEnvName,
@@ -202,6 +203,18 @@ const MAX_DIAGNOSTIC_LINE_CHARS = 2_000;
 function boundedLine(message: string): string {
   if (message.length <= MAX_DIAGNOSTIC_LINE_CHARS) return message;
   return `${message.slice(0, MAX_DIAGNOSTIC_LINE_CHARS - 1)}…`;
+}
+
+/** Make an engine-written file group-readable for the shared-claim
+ * exchange (#1631): `chmod` to `SHARED_CLAIM_FILE_MODE`. Returns whether
+ * the file is now group-readable. */
+async function makeGroupReadable(path: string): Promise<boolean> {
+  try {
+    await chmod(path, SHARED_CLAIM_FILE_MODE);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -398,6 +411,13 @@ export async function workerMain(
     }, request.deadlineAtMs - nowMs());
   }
 
+  // ── The shared-claim ownership model rides the envelope (#1631): a
+  // request carrying a shared group id exchanges files across a uid
+  // boundary, so every file this worker hands back (the result and the
+  // engine's publication artifact) is made group-readable, and any
+  // directory it creates is group-accessible.
+  const shared = request.sharedGroupId !== undefined;
+
   // ── The engine request, mapped the way `engine/cli.ts` maps its request
   // file's fields onto the engine's contract.
   const tail: string[] = [];
@@ -535,6 +555,18 @@ export async function workerMain(
               "worker_error",
               `the engine run left no ${ENGINE_ARTIFACT_NAME} artifact in the run directory`,
             );
+          } else if (
+            shared &&
+            !(await makeGroupReadable(join(request.runDir, ENGINE_ARTIFACT_NAME)))
+          ) {
+            // The publication artifact is the controller's read target; under
+            // the shared model it must be group-readable whatever umask the
+            // engine inherited (the engine's own writes are umask-dependent).
+            candidate = failedResult(
+              context("the publication artifact could not be made group-readable"),
+              "worker_error",
+              `the ${ENGINE_ARTIFACT_NAME} artifact could not be made group-readable for the shared claim`,
+            );
           } else {
             await attestPrimaryUsage(request.runDir, request.profiles.model);
             candidate = completedResult(context("the engine run completed"), outcome.reviewedHeadSha);
@@ -579,8 +611,15 @@ export async function workerMain(
   // the parent path is proven contained in the run directory on disk (a
   // planted symlink is refused, never followed) and the write itself is
   // no-follow. Nothing outside the controller-owned run directory is ever
-  // created.
-  const proof = await ensureContained(request.runDir, request.resultPath);
+  // created. When the envelope names a shared group (#1631) the exchange
+  // crosses a uid boundary, so the result is written group-readable
+  // (0o640) and any created directories are setgid group-rwx (0o2770) —
+  // otherwise the single-uid defaults apply.
+  const proof = await ensureContained(
+    request.runDir,
+    request.resultPath,
+    shared ? { dirMode: SHARED_CLAIM_DIR_MODE } : {},
+  );
   if (!proof.contained) {
     process.stderr.write(
       `${boundedLine(`worker: the result path is not contained in the run directory: ${proof.problem}`)}\n`,
@@ -588,7 +627,11 @@ export async function workerMain(
     return 1;
   }
   try {
-    await writeFileNoFollow(request.resultPath, JSON.stringify(settled, null, 2));
+    await writeFileNoFollow(
+      request.resultPath,
+      JSON.stringify(settled, null, 2),
+      shared ? { mode: SHARED_CLAIM_FILE_MODE } : {},
+    );
   } catch (error) {
     process.stderr.write(
       `${boundedLine(`worker: the result file ${request.resultPath} could not be written: ${errorMessage(error)}`)}\n`,

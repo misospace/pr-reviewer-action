@@ -424,6 +424,13 @@ A consumer MUST:
   `*_source_total` means that the document discloses no count, so the shared
   20-entry id cap could have shortened that list. A consumer MUST NOT read
   `null` as zero, and MUST NOT read it as "the list is the whole set".
+- Read `verdict` and `review_result` as the authoritative disposition's own
+  words (#1596). The handoff is built from the same disposition the native
+  review event and the published recommendation follow: when a blocking
+  defect is proven — the final `request_changes` verdict or a still-open
+  blocker/major finding — the handoff states `request_changes`/`issues` even
+  when the raw model verdict was an approve, so the machine-readable
+  document can never contradict the published blocking request.
 
 ### Document shape
 

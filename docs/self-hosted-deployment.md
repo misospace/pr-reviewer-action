@@ -156,6 +156,18 @@ The chart's defaults reproduce the hardening properties the issue asks for:
 - separate webhook and admin listeners, never one shared surface;
 - a JSON Schema that validates values (`helm lint` enforces it).
 
+The Kubernetes worker executor pins worker pods to uid/gid 65532, so the
+controller deployment must share group 65532 with the worker pin (the
+chart sets `fsGroup: 65532`; operators running the controller outside the
+chart must apply an equivalent group) — the shared claims' exchanged
+envelope/result files are group-readable `0640` (#1631). Two further
+obligations: roll worker images together with the controller (an old
+worker image refuses the new envelope's `sharedGroupId` field as
+unknown), and mount the shared claims on storage whose driver honors
+`fsGroupPolicy: File` (standard PVC CSI drivers do; hostPath and
+`None`-policy drivers get no group application and the exchange fails
+closed).
+
 External secret handling is the operator's choice: every secret can come
 from an `existingSecret`, so External Secrets, Sealed Secrets, or your vault
 controller all work.

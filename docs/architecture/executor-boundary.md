@@ -3,9 +3,10 @@
 Design of `src/executor/`: the seam that lets the durable review-queue
 controller (#731) run each review without knowing whether it executes as a
 local child process, in an OCI container, or as a Kubernetes Job (#734).
-Like the event/job, queue, and acquisition layers before it, this is **a
-library for the future self-hosted controller daemon — it is not wired
-into the running action pipeline**. Kubernetes is first-class as an
+It is consumed live by the controller daemon (#1348): the
+`execution.ts` profile→executor selector runs every queued attempt through
+`LocalExecutor` or `KubernetesExecutor`; the Action runtime launches reviews
+directly, never through this seam. Kubernetes is first-class as an
 executor ADAPTER: it contributes no Kubernetes-specific field to any
 engine or scheduler contract, and consumes the same `ExecutionRequest`
 contract and the OCI worker-image contract defined here.
@@ -448,8 +449,38 @@ fail-closed, so an unlistable cluster refuses the launch.
   service-account name; resource requests AND limits required;
   deadline REQUIRED (`activeDeadlineSeconds` from the request, plus an
   executor-side timer that settles `deadline` and deletes the Job);
-  `ttlSecondsAfterFinished` required (1..604800); termination grace 30s
-  is the worker's engine-cancellation window.
+   `ttlSecondsAfterFinished` required (1..604800); termination grace 30s
+   is the worker's engine-cancellation window.
+- **Shared-claim file ownership (#1631).** The envelope/result exchange
+  crosses a uid boundary (the controller pod runs as uid 1000, the
+  worker pod as uid 65532), so both sides share group 65532: the worker
+  pod pins `fsGroup: 65532` (`fsGroupChangePolicy: "OnRootMismatch"`,
+  the kubelet applies the group and the setgid bit to every mapped claim
+  at mount), and the chart pins the controller's `fsGroup` to the same
+  value. The modes are made deterministic and umask-proof with explicit
+  `fchmod`/`chmod`:
+  - exchanged FILES (envelope, result) are group-readable `0640`
+    (`SHARED_CLAIM_FILE_MODE`); the single-uid (local) exchange stays
+    `0600`;
+  - shared-claim DIRECTORIES are setgid + group-rwx `2770`
+    (`SHARED_CLAIM_DIR_MODE`; setgid keeps group inheritance), and the
+    executor chmod-walks the run directory's components below the
+    covering claim root so pre-existing and umask-filtered components
+    end up group-accessible too; the single-uid model stays `0700`.
+  No-follow discipline is unchanged: the same `O_NOFOLLOW` opens and
+  containment proofs, with the mode applied to the already-open
+  descriptor (no path re-resolution). The chmod walk refuses what it
+  `lstat`s as a symlink or a non-directory (nothing is chmod-ed through
+  a link) and refuses a run directory no mapping covers — a directory
+  outside the shared claim is never restyled. The envelope carries
+  `sharedGroupId` — its one executor-added field — so the worker selects
+  the shared modes; absent means the single-uid exchange. Two operator
+  obligations complete the model: worker images roll together with the
+  controller (an old worker image refuses the new envelope's
+  `sharedGroupId` field as unknown), and the shared claims must sit on
+  storage whose driver honors `fsGroupPolicy: File` (standard PVC CSI
+  drivers do; `None`-policy drivers and hostPath mappings get no group
+  application, and the exchange fails closed as a missing result).
 - **RuntimeClass pinning (#1422) is an operator-trusted setting.** The
   spec's optional `runtime-class-name` (a DNS-1123 label, the same
   grammar as the namespace/service account) is the ONE pod-infrastructure

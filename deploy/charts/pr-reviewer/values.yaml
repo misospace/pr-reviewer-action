@@ -119,7 +119,12 @@ controller:
       runAsNonRoot: true
       runAsUser: 1000
       runAsGroup: 1000
-      fsGroup: 1000
+      # The worker executor pins worker pods to uid/gid 65532
+      # (WORKER_RUN_AS_ID); sharing group 65532 via fsGroup (setgid
+      # propagation on the shared claims) is what lets the controller read
+      # the worker's result file and the worker read the controller's
+      # envelope across the uid boundary (#1631).
+      fsGroup: 65532
       fsGroupChangePolicy: OnRootMismatch
       seccompProfile:
         type: RuntimeDefault

@@ -2,6 +2,7 @@ import { appendFileSync } from "node:fs";
 import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js";
 import { renderStepSummary, type ReviewStepOutputs } from "../publish/outputs.js";
 import { aspectStatusLookup, describeDependencyCoverageRollup, type DependencyCoverageRollup } from "../model/dependency-coverage.js";
+import { harnessExecutionCounts } from "../tools/execution-counts.js";
 import { publicAnalysisEngine } from "../prompt/index.js";
 import { resolveTierBudgets } from "../corpus/budgets.js";
 import type { HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
@@ -45,8 +46,10 @@ export function writeStepSummary(stepSummaryPath: string, input: SummaryInput): 
   const fallbackHarness = input.fallbackHarness ?? null;
   const toolMode = (env.TOOL_MODE ?? "off").toLowerCase();
   const findings = Array.isArray(reviewRecord.findings) ? reviewRecord.findings as unknown[] : [];
-  const toolCalls = Array.isArray(primaryHarness?.tool_calls) ? primaryHarness?.tool_calls as unknown[] : [];
-  const okCalls = toolCalls.filter((call) => (call as { status?: string }).status === "ok").length;
+  // #1606: one shared reader for the execution counters, so the summary row
+  // and the enforcement overlay can never read the same artifact differently.
+  const primaryCounts = harnessExecutionCounts(primaryHarness);
+  const smartCounts = harnessExecutionCounts(smartHarness);
   const coverageSummary = (input.coverage?.summary ?? {}) as Record<string, unknown>;
   const total = typeof coverageSummary.total === "number" ? coverageSummary.total : 0;
   const unknown = typeof coverageSummary.unknown === "number" ? coverageSummary.unknown : 0;
@@ -120,8 +123,15 @@ export function writeStepSummary(stepSummaryPath: string, input: SummaryInput): 
       }
       : {}),
     primaryTools: {
-      executedRequestCount: typeof primaryHarness?.executed_request_count === "number" ? primaryHarness.executed_request_count : 0,
-      successfulToolCalls: okCalls,
+      // #1597/#1606: the two counts carry their OWN meanings — "executed"
+      // is every call that reached an executor (successful OR failed) and
+      // "successful" is the ok-status subset — so a run whose call failed
+      // renders two DIFFERENT numbers instead of one count that can never
+      // show the failure. One shared reader
+      // (`src/tools/execution-counts.ts`) supplies both, so the row can
+      // never contradict the enforcement overlay.
+      executedRequestCount: primaryCounts.attempted ?? 0,
+      successfulToolCalls: primaryCounts.succeeded ?? 0,
       rounds: typeof primaryHarness?.rounds === "number" ? primaryHarness.rounds : 0,
       stopReason: String(primaryHarness?.stop_reason ?? primaryHarness?.skip_reason ?? (toolMode === "native_loop" ? "unknown" : "disabled")),
     },
@@ -131,10 +141,9 @@ export function writeStepSummary(stepSummaryPath: string, input: SummaryInput): 
           // #1597: the same distinct counts the primary row (and the marker)
           // carries: executed = attempted executions, successful = the ok
           // subset, issued = everything the model asked for.
-          executedRequestCount: typeof smartHarness.executed_request_count === "number" ? smartHarness.executed_request_count : 0,
-          successfulToolCalls: Array.isArray(smartHarness.tool_calls)
-            ? (smartHarness.tool_calls as unknown[]).filter((call) => (call as { status?: string }).status === "ok").length
-            : 0,
+          executedRequestCount: smartCounts.attempted ?? 0,
+          // #1606: the same shared reader as the primary row.
+          successfulToolCalls: smartCounts.succeeded ?? 0,
           issuedToolCalls: typeof smartHarness.planned_request_count === "number" ? smartHarness.planned_request_count : 0,
           rounds: typeof smartHarness.rounds === "number" ? smartHarness.rounds : 0,
           requests: numberAt(smartHarness.usage, "requests") ?? numberAt(smartHarness.native_loop_usage, "requests") ?? 0,

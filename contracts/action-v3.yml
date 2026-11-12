@@ -797,7 +797,7 @@ inputs:
     v2_id: tool_failure_enforcement
     required: false
     default: "false"
-    description: "If true, force request_changes when tool harness planning fails"
+    description: "If true, force request_changes when the tool harness reports a failure, or when every executed tool call failed"
   - id: tool-min-successful-requests
     v2_id: tool_min_successful_requests
     required: false
