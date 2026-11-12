@@ -9,9 +9,9 @@
  * true` plus one round total. This module turns each discarded attempt into
  * one bounded record: a closed reason enum, the HTTP status when the failure
  * carried one, the attempt's own elapsed time, how far the wire got before it
- * failed (first byte / first content event, null when never observed or not
- * measurable), the retry's elapsed time, and the route identity that made the
- * call (primary | smart | fallback).
+ * failed (first byte / first SSE event / first content event, null when never
+ * observed or not measurable), the retry's elapsed time, and the route
+ * identity that made the call (primary | smart | fallback).
  *
  * Content-free BY CONSTRUCTION, like every other artifact this loop persists:
  * every field is a number, a boolean, or one of this module's own enum
@@ -81,7 +81,13 @@ export interface StreamedAttemptFailureRecord {
   /** Wall-clock seconds the discarded streamed attempt spent. */
   elapsed_sec: number;
   /** Seconds to the first response byte (null: never observed/measured). */
-  first_event_sec: number | null;
+  first_byte_sec: number | null;
+  /** #1628: seconds to the first SSE data event — any complete `data:`
+   * payload, including a non-content one (null: no data event was observed
+   * before the attempt died, or the instant was unmeasurable). Distinct
+   * from `first_byte_sec` (#1628): a body's bytes can start long before
+   * its first event, and the issue requires the two to be distinguishable. */
+  first_sse_event_sec: number | null;
   /** Seconds to the first content-bearing frame (null: never observed). */
   first_content_sec: number | null;
   /** Wall-clock seconds the non-streamed retry spent; null when the recovery
@@ -97,8 +103,23 @@ export interface StreamedAttemptFailureRecord {
 export interface StreamedAttemptClassification {
   reason: StreamedAttemptFailureReason;
   status: number | null;
-  first_event_sec: number | null;
+  first_byte_sec: number | null;
+  first_sse_event_sec: number | null;
   first_content_sec: number | null;
+}
+
+/** The wire instants one timing probe carries, in the record's own naming:
+ * first byte, first SSE data event, first content event. */
+function wireInstants(timing: ReturnType<typeof readTransportTiming>): {
+  first_byte_sec: number | null;
+  first_sse_event_sec: number | null;
+  first_content_sec: number | null;
+} {
+  return {
+    first_byte_sec: timing === null ? null : timing.firstEventSec,
+    first_sse_event_sec: timing === null ? null : timing.firstSseEventSec,
+    first_content_sec: timing === null ? null : timing.firstContentSec,
+  };
 }
 
 /**
@@ -109,27 +130,25 @@ export interface StreamedAttemptClassification {
  * than a guessed shape.
  */
 export function classifyThrownStreamedAttempt(error: unknown): StreamedAttemptClassification {
-  const timing = readTransportTiming(error);
-  const firstEventSec = timing === null ? null : timing.firstEventSec;
-  const firstContentSec = timing === null ? null : timing.firstContentSec;
+  const wire = wireInstants(readTransportTiming(error));
   if (error instanceof TransportFailure) {
     switch (error.kind) {
       case "http_status":
-        return { reason: "http_status", status: error.status ?? null, first_event_sec: firstEventSec, first_content_sec: firstContentSec };
+        return { reason: "http_status", status: error.status ?? null, ...wire };
       case "connect_timeout":
       case "request_timeout":
-        return { reason: "transport_timeout", status: null, first_event_sec: firstEventSec, first_content_sec: firstContentSec };
+        return { reason: "transport_timeout", status: null, ...wire };
       case "network":
-        return { reason: "connection_closed", status: null, first_event_sec: firstEventSec, first_content_sec: firstContentSec };
+        return { reason: "connection_closed", status: null, ...wire };
       case "cancelled":
-        return { reason: "cancelled", status: null, first_event_sec: firstEventSec, first_content_sec: firstContentSec };
+        return { reason: "cancelled", status: null, ...wire };
       case "response_too_large":
         // Our own byte cap tore the response down mid-receipt: an OBSERVED
         // truncation, not a guess.
-        return { reason: "sse_malformed", status: error.status ?? null, first_event_sec: firstEventSec, first_content_sec: firstContentSec };
+        return { reason: "sse_malformed", status: error.status ?? null, ...wire };
     }
   }
-  return { reason: "unknown", status: null, first_event_sec: null, first_content_sec: null };
+  return { reason: "unknown", status: null, first_byte_sec: null, first_sse_event_sec: null, first_content_sec: null };
 }
 
 /**
@@ -150,19 +169,17 @@ export function classifyThrownStreamedAttempt(error: unknown): StreamedAttemptCl
  * claim malformed framing, so it reads as an empty completion.
  */
 export function classifyUnusableStreamedBody(body: unknown, apiFormat: string): StreamedAttemptClassification | null {
-  const timing = readTransportTiming(body);
-  const firstEventSec = timing === null ? null : timing.firstEventSec;
-  const firstContentSec = timing === null ? null : timing.firstContentSec;
+  const wire = wireInstants(readTransportTiming(body));
   const record = body !== null && typeof body === "object" ? body as Record<string, unknown> : null;
   if (record !== null && record.error !== undefined && record.error !== null) {
-    return { reason: "provider_error_object", status: null, first_event_sec: firstEventSec, first_content_sec: firstContentSec };
+    return { reason: "provider_error_object", status: null, ...wire };
   }
   const { calls, text } = extractToolCalls(body, apiFormat);
   if (calls.length > 0 || text !== "") return null;
   const quality = readSseReassemblyQuality(body);
   const reason: StreamedAttemptFailureReason =
     quality !== null && (quality.malformedFrames > 0 || !quality.sawTermination) ? "sse_malformed" : "empty_completion";
-  return { reason, status: null, first_event_sec: firstEventSec, first_content_sec: firstContentSec };
+  return { reason, status: null, ...wire };
 }
 
 /** A measured duration token: `12.3s`, or `-` for "not measured". */
@@ -193,7 +210,8 @@ export function sanitizeStreamedAttemptFailure(value: unknown): StreamedAttemptF
     reason: v.reason as StreamedAttemptFailureReason,
     status,
     elapsed_sec: elapsed,
-    first_event_sec: dur(v.first_event_sec),
+    first_byte_sec: dur(v.first_byte_sec),
+    first_sse_event_sec: dur(v.first_sse_event_sec),
     first_content_sec: dur(v.first_content_sec),
     retry_elapsed_sec: retry,
     route,
@@ -202,18 +220,22 @@ export function sanitizeStreamedAttemptFailure(value: unknown): StreamedAttemptF
 
 /**
  * The concise log tokens for one discarded attempt:
- * `reason=http_status status=524 elapsed=133.1s first_event=0.4s
- * first_content=- retry=- route=primary`. Every value is a number or one of
- * this module's own tokens, so a log line built here cannot carry response
- * content, arguments, or credentials. The `status` token is omitted when the
- * failure carried none.
+ * `reason=http_status status=524 elapsed=133.1s first_byte=0.4s
+ * first_sse_event=0.9s first_content=- retry=- route=primary`. Every value is
+ * a number or one of this module's own tokens, so a log line built here cannot
+ * carry response content, arguments, or credentials. The `status` token is
+ * omitted when the failure carried none. The SSE-event token is spelled out
+ * (`first_sse_event=`) so it can never be confused with the ACCEPTED round's
+ * `first_event=` heartbeat token, which keeps its released first-BYTE
+ * meaning (#1466).
  */
 export function formatStreamedAttemptFailure(rec: StreamedAttemptFailureRecord): string {
   const parts = [
     `reason=${rec.reason}`,
     ...(rec.status !== null ? [`status=${rec.status}`] : []),
     `elapsed=${fmtSec(rec.elapsed_sec)}`,
-    `first_event=${fmtSec(rec.first_event_sec)}`,
+    `first_byte=${fmtSec(rec.first_byte_sec)}`,
+    `first_sse_event=${fmtSec(rec.first_sse_event_sec)}`,
     `first_content=${fmtSec(rec.first_content_sec)}`,
     `retry=${fmtSec(rec.retry_elapsed_sec)}`,
     `route=${rec.route}`,

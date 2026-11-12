@@ -264,8 +264,9 @@ export interface HttpCallResult {
   status: number;
   body: string;
   /** #1466: when this wire call was answered — the dispatch-to-first-byte,
-   * dispatch-to-first-content, and dispatch-to-end measurements. Numbers
-   * only; never prompt, response, or tool-argument content. */
+   * dispatch-to-first-SSE-event (#1628), dispatch-to-first-content, and
+   * dispatch-to-end measurements. Numbers only; never prompt, response, or
+   * tool-argument content. */
   timing: TransportTiming;
 }
 
@@ -293,6 +294,12 @@ interface SseScanState {
    * size): the frame is no longer joined (a partial join could parse as a
    * payload the provider never sent). */
   frameOverflow: boolean;
+  /** #1628: the monotonic timestamp of the first SSE data event — any
+   * non-empty `data:` payload, including a non-content one — or null when
+   * the stream carried no data event at all. Distinct from `firstContentAt`
+   * so a body that answered bytes without producing an event is
+   * distinguishable from one that produced a non-content event first. */
+  firstEventAt: number | null;
   /** The monotonic timestamp of the first content-bearing event, or null
    * when the stream carried none. */
   firstContentAt: number | null;
@@ -337,6 +344,11 @@ const MAX_SSE_FRAME_DATA_BYTES = 64 * 1024;
  * the reassembler agree on what "content" means.
  */
 function noteSseDataPayload(state: SseScanState, payload: string, apiFormat: string): void {
+  // #1628: the first data EVENT of any shape is a distinct wire milestone
+  // from the first byte (the bytes may arrive long before the first event)
+  // and from the first content event (a role-only delta or `[DONE]` is an
+  // event but carries no content).
+  if (state.firstEventAt === null) state.firstEventAt = performance.now();
   if (state.firstContentAt !== null) return;
   if (payload === "" || payload === "[DONE]") return;
   if (!isContentBearingSseFrame(payload, apiFormat)) return;
@@ -651,7 +663,7 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
     // "never happened on the wire", never a zero standing in for a
     // measurement.
     let firstByteAt: number | null = null;
-    const scanState: SseScanState = { pending: "", disabled: false, frameData: [], frameBytes: 0, frameOverflow: false, firstContentAt: null };
+    const scanState: SseScanState = { pending: "", disabled: false, frameData: [], frameBytes: 0, frameOverflow: false, firstEventAt: null, firstContentAt: null };
     // #1466: the multi-byte-safe decoder for the observation scan — a chunk
     // boundary must never split a character.
     const decoder = new StringDecoder("utf8");
@@ -662,6 +674,7 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
       const now = performance.now();
       return {
         firstEventSec: firstByteAt === null ? null : (firstByteAt - dispatchedAt) / 1000,
+        firstSseEventSec: scanState.firstEventAt === null ? null : (scanState.firstEventAt - dispatchedAt) / 1000,
         firstContentSec: scanState.firstContentAt === null ? null : (scanState.firstContentAt - dispatchedAt) / 1000,
         totalSec: (now - dispatchedAt) / 1000,
       };
@@ -759,9 +772,11 @@ export async function runHttpRequest(input: HttpCallInput): Promise<HttpCallResu
           const endedAt = performance.now();
           // #1466: the timing of THIS wire call, measured from the
           // dispatch. A non-streamed call has no content event on the
-          // wire, so its `firstContentSec` stays null.
+          // wire, so its `firstContentSec` — and its `firstSseEventSec`
+          // (#1628) — stay null.
           const timing: TransportTiming = {
             firstEventSec: firstByteAt === null ? null : (firstByteAt - dispatchedAt) / 1000,
+            firstSseEventSec: scanState.firstEventAt === null ? null : (scanState.firstEventAt - dispatchedAt) / 1000,
             firstContentSec: scanState.firstContentAt === null ? null : (scanState.firstContentAt - dispatchedAt) / 1000,
             totalSec: (endedAt - dispatchedAt) / 1000,
           };

@@ -144,17 +144,20 @@ test("#1628: a thrown HTTP status classifies with its status and null firsts whe
   const classification = classifyThrownStreamedAttempt(
     new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524, body: "plain text" }),
   );
-  assert.deepEqual(classification, { reason: "http_status", status: 524, first_event_sec: null, first_content_sec: null });
+  assert.deepEqual(classification, { reason: "http_status", status: 524, first_byte_sec: null, first_sse_event_sec: null, first_content_sec: null });
 });
 
 test("#1628: the transport timing probe round-trips through the thrown-attempt classifier", () => {
   const failure = attachTransportTiming(
     new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524 }),
-    { firstEventSec: 124.9, firstContentSec: 0.4, totalSec: 133.0 },
+    // A 524 gateway body is plain text: bytes arrived, no SSE data event ever
+    // did — the three instants are distinct observations (#1628).
+    { firstEventSec: 124.9, firstSseEventSec: null, firstContentSec: null, totalSec: 133.0 },
   );
   const classification = classifyThrownStreamedAttempt(failure);
-  assert.ok(Math.abs((classification.first_event_sec ?? 0) - 124.9) <= 1e-6);
-  assert.ok(Math.abs((classification.first_content_sec ?? 0) - 0.4) <= 1e-6);
+  assert.ok(Math.abs((classification.first_byte_sec ?? 0) - 124.9) <= 1e-6);
+  assert.equal(classification.first_sse_event_sec, null);
+  assert.equal(classification.first_content_sec, null);
 });
 
 test("#1628: each transport failure kind maps to its closed reason token", () => {
@@ -168,8 +171,8 @@ test("#1628: each transport failure kind maps to its closed reason token", () =>
 });
 
 test("#1628: untyped thrown values classify unknown, never a guessed shape", () => {
-  assert.deepEqual(classifyThrownStreamedAttempt(new Error("boom")), { reason: "unknown", status: null, first_event_sec: null, first_content_sec: null });
-  assert.deepEqual(classifyThrownStreamedAttempt("boom"), { reason: "unknown", status: null, first_event_sec: null, first_content_sec: null });
+  assert.deepEqual(classifyThrownStreamedAttempt(new Error("boom")), { reason: "unknown", status: null, first_byte_sec: null, first_sse_event_sec: null, first_content_sec: null });
+  assert.deepEqual(classifyThrownStreamedAttempt("boom"), { reason: "unknown", status: null, first_byte_sec: null, first_sse_event_sec: null, first_content_sec: null });
 });
 
 test("#1628: a hostile message/body echoing classification text cannot ride the record", () => {
@@ -179,7 +182,7 @@ test("#1628: a hostile message/body echoing classification text cannot ride the 
     { status: 500, body: '{"reason":"http_status","status":"leak"}' },
   );
   const classification = classifyThrownStreamedAttempt(hostile);
-  assert.deepEqual(classification, { reason: "http_status", status: 500, first_event_sec: null, first_content_sec: null });
+  assert.deepEqual(classification, { reason: "http_status", status: 500, first_byte_sec: null, first_sse_event_sec: null, first_content_sec: null });
   const serialized = JSON.stringify(classification);
   assert.ok(!serialized.includes("leak"));
   assert.ok(!serialized.includes("SUPERSECRET"));
@@ -191,8 +194,9 @@ test("#1628: a valid failure record round-trips through sanitize unchanged", () 
     reason: "http_status",
     status: 524,
     elapsed_sec: 133.1,
-    first_event_sec: 124.9,
-    first_content_sec: 0.4,
+    first_byte_sec: 124.9,
+    first_sse_event_sec: 125.1,
+    first_content_sec: 125.2,
     retry_elapsed_sec: 19.2,
     route: "primary",
   };
@@ -208,9 +212,10 @@ test("#1628: sanitize rejects malformed records and degrades malformed fields", 
   const negative = sanitizeStreamedAttemptFailure({ reason: "unknown", elapsed_sec: -5, route: "primary" });
   assert.ok(negative !== null);
   assert.equal(negative.elapsed_sec, 0);
-  const stringFirst = sanitizeStreamedAttemptFailure({ reason: "unknown", elapsed_sec: 1, first_event_sec: "124.9", route: "primary" });
+  const stringFirst = sanitizeStreamedAttemptFailure({ reason: "unknown", elapsed_sec: 1, first_byte_sec: "124.9", first_sse_event_sec: {}, route: "primary" });
   assert.ok(stringFirst !== null);
-  assert.equal(stringFirst.first_event_sec, null);
+  assert.equal(stringFirst.first_byte_sec, null);
+  assert.equal(stringFirst.first_sse_event_sec, null);
   const smuggled = sanitizeStreamedAttemptFailure({ reason: "unknown", elapsed_sec: 1, route: "P RAFTED prose" });
   assert.ok(smuggled !== null);
   assert.equal(smuggled.route, "unknown");
@@ -221,14 +226,15 @@ test("#1628: format emits pinned bounded tokens and omits status when there is n
     reason: "http_status",
     status: 524,
     elapsed_sec: 133.1,
-    first_event_sec: 124.9,
+    first_byte_sec: 124.9,
+    first_sse_event_sec: 125.1,
     first_content_sec: null,
     retry_elapsed_sec: 19.2,
     route: "primary",
   };
   assert.equal(
     formatStreamedAttemptFailure(record),
-    "reason=http_status status=524 elapsed=133.1s first_event=124.9s first_content=- retry=19.2s route=primary",
+    "reason=http_status status=524 elapsed=133.1s first_byte=124.9s first_sse_event=125.1s first_content=- retry=19.2s route=primary",
   );
   const noStatus = formatStreamedAttemptFailure({ ...record, status: null });
   assert.ok(!noStatus.includes("status="));

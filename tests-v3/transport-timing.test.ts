@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { runHttpRequest } from "../src/transport/http.js";
 import { runChatRequest } from "../src/transport/transport.js";
-import { readTransportTiming, TRANSPORT_TIMING, type TransportTiming } from "../src/transport/timing.js";
+import { attachTransportTiming, readTransportTiming, TRANSPORT_TIMING, type TransportTiming } from "../src/transport/timing.js";
 import { startMockServer, type MockServer } from "./helpers.js";
 import type { TransportWirePayload } from "../src/model/types.js";
 
@@ -91,6 +91,12 @@ test("#1466: a streamed call reports when the first byte and the first content e
     // The content frame was written ~150ms after the envelope frame.
     assert.ok(timing.firstContentSec >= 0.1, `the first content event must be delayed, got ${timing.firstContentSec}`);
     assert.ok(timing.firstEventSec < timing.firstContentSec, "the envelope frame arrived before the content frame");
+    // #1628: the envelope event is an SSE data event but carries no content,
+    // so the first-SSE-event instant sits between the first byte and the
+    // first content — a distinct observation, not a copy of either.
+    assert.ok(timing.firstSseEventSec !== null, "the first SSE data event was measured");
+    assert.ok(timing.firstEventSec <= timing.firstSseEventSec, "the first byte precedes (or meets) the first data event");
+    assert.ok(timing.firstSseEventSec < timing.firstContentSec, "the first data event precedes the first content");
     assert.ok(timing.totalSec >= 0.15, "the response end is after the delayed content frame");
   } finally {
     await server.close();
@@ -118,6 +124,7 @@ test("#1466: the timing is readable from the returned response and stays out of 
     // property enumeration may ever see it.
     const serialized = JSON.stringify(outcome.response);
     assert.equal(serialized.includes("firstEventSec"), false);
+    assert.equal(serialized.includes("firstSseEventSec"), false);
     assert.equal(serialized.includes("firstContentSec"), false);
     assert.equal(serialized.includes("totalSec"), false);
     assert.equal(Object.keys(outcome.response).includes("firstEventSec"), false);
@@ -151,6 +158,7 @@ test("#1466: a non-streamed call reports a first byte but no content event", asy
     const timing = outcome.timing;
     assert.ok(timing !== undefined);
     assert.ok(timing.firstEventSec !== null, "the body byte was measured");
+    assert.equal(timing.firstSseEventSec, null, "a non-streamed body carries no SSE event on the wire");
     assert.equal(timing.firstContentSec, null, "a non-streamed body carries no content event on the wire");
     assert.ok(timing.totalSec >= 0);
     // The parsed provider body carries the probe too.
@@ -178,6 +186,7 @@ test("#1466: the HTTP call itself reports its timing", async () => {
     assert.equal(result.status, 200);
     const timing: TransportTiming = result.timing;
     assert.ok(timing.firstEventSec !== null);
+    assert.ok(timing.firstSseEventSec !== null);
     assert.ok(timing.firstContentSec !== null);
     assert.ok(timing.firstEventSec < timing.firstContentSec);
     assert.ok(timing.firstContentSec <= timing.totalSec);
@@ -267,6 +276,54 @@ test("#1466: readTransportTiming returns null for a value that carries no timing
   assert.equal(readTransportTiming("text"), null);
   assert.equal(readTransportTiming({}), null);
   assert.equal(readTransportTiming({ firstEventSec: 1, firstContentSec: 2, totalSec: 3 }), null);
+});
+
+test("#1628: bytes without any SSE data event report a first byte and a null first event", async () => {
+  // A body that streams keepalive COMMENTS only: its bytes arrive, but no
+  // `data:` event ever does. The two observations must stay distinguishable
+  // — exactly the distinction #1628 requires for an ambiguous discard.
+  const server = await startMockServer((_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/event-stream");
+    res.write(": keepalive\n\n");
+    setTimeout(() => {
+      res.write(": keepalive\n\n");
+      res.end();
+    }, 100);
+  });
+  try {
+    const result = await runHttpRequest({
+      baseUrl: server.url,
+      apiFormat: "anthropic",
+      bodyText: JSON.stringify({ model: "m", stream: true, max_tokens: 64 }),
+      apiKey: "",
+      anthropicVersion: "2023-06-01",
+      requestTimeoutSec: 10,
+      connectTimeoutSec: 5,
+      stream: true,
+    });
+    assert.equal(result.status, 200);
+    assert.ok(result.timing.firstEventSec !== null, "the keepalive bytes were measured");
+    assert.equal(result.timing.firstSseEventSec, null, "no data event ever arrived");
+    assert.equal(result.timing.firstContentSec, null, "no content event ever arrived");
+  } finally {
+    await server.close();
+  }
+});
+
+test("#1628: an older probe without the first-SSE-event field reads as null; a malformed one fails closed", () => {
+  const legacy = attachTransportTiming(
+    { body: true },
+    { firstEventSec: 1, firstContentSec: 2, totalSec: 3 } as unknown as TransportTiming,
+  );
+  const legacyTiming = readTransportTiming(legacy);
+  assert.ok(legacyTiming !== null, "a probe from before the field still reads");
+  assert.equal(legacyTiming.firstSseEventSec, null, "the absent instant reads as unavailable, not a rejection");
+  const malformed = attachTransportTiming(
+    { body: true },
+    { firstEventSec: 1, firstSseEventSec: "later", firstContentSec: 2, totalSec: 3 } as unknown as TransportTiming,
+  );
+  assert.equal(readTransportTiming(malformed), null, "a present-but-malformed instant rejects the whole probe");
 });
 
 test("#1466: a stream that ends its event lines with a single LF still reports its first content event", async () => {

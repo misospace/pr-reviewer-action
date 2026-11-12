@@ -4106,6 +4106,7 @@ test("#1466: the #1459 MiniMax/LiteLLM streamed body reports its real prompt and
   // The transport probe rides the body (the production adapter attaches it).
   attachTransportTiming(projection, {
     firstEventSec: 0.3,
+    firstSseEventSec: 0.5,
     firstContentSec: 2.5,
     totalSec: 14.2,
     wireCalls: 1,
@@ -4170,6 +4171,7 @@ test("#1466: the verdict record carries the turn's token counts and the accepted
       // The transport probe rides the body the transport returned.
       return attachTransportTiming(body as Record<string, unknown>, {
         firstEventSec: 0.4,
+        firstSseEventSec: null,
         firstContentSec: 1.1,
         totalSec: 3.6,
         wireCalls: 1,
@@ -4230,8 +4232,8 @@ test("#1466: a verdict turn whose streamed attempt failed reports the accepted (
       // did not (a non-streamed answer has no content event on the wire).
       const streamed = n === 3;
       return attachTransportTiming(body as Record<string, unknown>, streamed
-        ? { firstEventSec: 0.2, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
-        : { firstEventSec: 0.6, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
+        ? { firstEventSec: 0.2, firstSseEventSec: 0.25, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
+        : { firstEventSec: 0.6, firstSseEventSec: null, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
     },
   }));
   assert.equal(result.native_loop_verdict_retried, true);
@@ -4283,8 +4285,8 @@ test("#1466: a retried verdict turn sums its token counts over BOTH attempts and
       // did not (a non-streamed answer has no content event on the wire).
       const streamed = n === 3;
       return attachTransportTiming(body as Record<string, unknown>, streamed
-        ? { firstEventSec: 0.2, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
-        : { firstEventSec: 0.6, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
+        ? { firstEventSec: 0.2, firstSseEventSec: 0.25, firstContentSec: 0.9, totalSec: 1.4, wireCalls: 1 }
+        : { firstEventSec: 0.6, firstSseEventSec: null, firstContentSec: null, totalSec: 2.6, wireCalls: 1 });
     },
   }));
   assert.equal(result.native_loop_verdict_retried, true);
@@ -4588,7 +4590,7 @@ test("#1628: a pair of fallback rounds reports their own reasons and times, not 
         await sleepMs(60);
         throw attachTransportTiming(
           new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524, body: "gateway timed out" }),
-          { firstEventSec: 0.05, firstContentSec: null, totalSec: 0.06 },
+          { firstEventSec: 0.05, firstSseEventSec: null, firstContentSec: null, totalSec: 0.06 },
         );
       }
       if (turn === 1) { await sleepMs(40); return openAiCall("c1", "read_file", '{"path":"src.ts"}'); }
@@ -4609,7 +4611,8 @@ test("#1628: a pair of fallback rounds reports their own reasons and times, not 
   assert.equal(first.reason, "http_status");
   assert.equal(first.status, 524);
   assert.ok(first.elapsed_sec >= 0.05 && first.elapsed_sec < 2, `elapsed must be the attempt's own time, got ${first.elapsed_sec}`);
-  assert.equal(first.first_event_sec, 0.05);
+  assert.equal(first.first_byte_sec, 0.05);
+  assert.equal(first.first_sse_event_sec, null, "a 524 body carries no SSE data event");
   assert.equal(first.first_content_sec, null);
   assert.ok(first.retry_elapsed_sec !== null && first.retry_elapsed_sec >= 0.03, "the recovery's own time rides the record");
   assert.equal(first.route, "primary");
