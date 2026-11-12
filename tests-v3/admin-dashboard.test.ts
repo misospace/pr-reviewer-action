@@ -6,6 +6,8 @@
  * just by grepping the source. */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import vm from "node:vm";
@@ -13,7 +15,12 @@ import { createAdminHost } from "../src/admin/server.js";
 import { DASHBOARD_HTML, DASHBOARD_JS, serveDashboard } from "../src/admin/dashboard.js";
 import type { ControllerAdminDeps } from "../src/admin/types.js";
 
-const CSP = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+/** The pinned dashboard CSP (#1641). The `style-src` source is the SHA-256
+ * hash of the shell's own style block, computed from the same constant the
+ * shell serves. Pinning the whole header here means any change to the
+ * style block, or any regression back to `'unsafe-inline'`, fails this
+ * suite. */
+const CSP = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-rONVvIFCCcUKe79zLNUofwEI2VTQb/s419LLyrxm4tQ='; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 const deps: ControllerAdminDeps = {
   readiness: async () => ({ components: [{ name: "store", ok: true }] }),
   listRuns: async () => ({ runs: [] }),
@@ -82,6 +89,56 @@ test("enabled dashboard serves the shell and script with fixed security headers"
     assert.equal(response.headers.get("cache-control"), "no-store", path);
     assert.equal(await response.text(), body, path);
   }
+});
+
+// ── the CSP style fence (#1641) ──────────────────────────────────────────
+
+/** The exact bytes a browser hashes for an inline `<style>` element: the
+ * text content between the tags, leading and trailing newline included. */
+function servedStyleBlock(): string {
+  const open = DASHBOARD_HTML.indexOf("<style>");
+  assert.notEqual(open, -1, "the shell must ship a style block");
+  const from = open + "<style>".length;
+  const close = DASHBOARD_HTML.indexOf("</style>", from);
+  assert.notEqual(close, -1, "the style block must be closed");
+  return DASHBOARD_HTML.slice(from, close);
+}
+
+test("style-src pins the hash of the served style block and allows no other inline style", () => {
+  const digest = createHash("sha256").update(servedStyleBlock(), "utf8").digest("base64");
+  // The pinned header is the header built from the served bytes: the hash
+  // covers exactly the style block the shell ships.
+  assert.equal(CSP, `default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'sha256-${digest}'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
+  assert.doesNotMatch(CSP, /unsafe-inline/);
+  assert.equal(CSP.match(/style-src/g)?.length, 1);
+  assert.match(CSP, /style-src 'sha256-[A-Za-z0-9+/=]+'; frame-ancestors 'none'/);
+  // Both served routes carry exactly the pinned header.
+  assert.equal(serveDashboard("/dashboard")?.headers["Content-Security-Policy"], CSP);
+  assert.equal(serveDashboard("/dashboard/app.js")?.headers["Content-Security-Policy"], CSP);
+  // The authorised set is read back from the SERVED header: exactly one
+  // hash source, and it is the hash of the style block the shell ships.
+  const authorised = [...CSP.matchAll(/'sha256-([^']+)'/g)].map((match) => match[1]!);
+  assert.deepEqual(authorised, [digest]);
+  // Adversarial (#252): the boundary token itself. A hostile injected style
+  // block is not the served block, so the served header must not authorise it.
+  const hostile = "body { display: none; }";
+  const hostileDigest = createHash("sha256").update(hostile, "utf8").digest("base64");
+  assert.notEqual(hostileDigest, digest);
+  assert.ok(!authorised.includes(hostileDigest), "the served header must not authorise a style block the shell does not serve");
+  // The shell carries one style element, no inline style attribute, and no
+  // external stylesheet: with 'unsafe-inline' gone, any of those would be
+  // blocked by the browser with no test failure otherwise.
+  assert.equal(DASHBOARD_HTML.match(/<style\b/gi)?.length, 1);
+  assert.doesNotMatch(DASHBOARD_HTML, /\sstyle\s*=/i);
+  assert.doesNotMatch(DASHBOARD_HTML, /<link\b/i);
+  assert.doesNotMatch(DASHBOARD_JS, /\.style\b/);
+});
+
+test("the dashboard doc shows the served CSP header, not a stale one", () => {
+  const doc = readFileSync("docs/architecture/operations-dashboard.md", "utf8");
+  const line = doc.split("\n").find((candidate) => candidate.startsWith("Content-Security-Policy:"));
+  assert.ok(line !== undefined, "the doc must show the CSP header");
+  assert.equal(line.slice("Content-Security-Policy:".length).trim(), CSP);
 });
 
 test("method and path discipline: only the two GET routes exist", async (t) => {

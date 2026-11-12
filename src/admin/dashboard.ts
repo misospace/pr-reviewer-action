@@ -10,13 +10,42 @@
  * lives OUTSIDE the `/admin/` namespace so the every-admin-route-is-
  * authenticated invariant stays structurally intact.
  */
-const CSP = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+import { createHash } from "node:crypto";
+
+/** The shell's inline style block (#1641).
+ *
+ * ONE source of truth for two things: the bytes the shell serves inside
+ * the `<style>` element, and the CSP style hash that authorises exactly
+ * those bytes. The block is a module constant, so the served text and the
+ * hash that covers it can never drift apart. */
+const DASHBOARD_CSS = `
+body { font-family: system-ui, sans-serif; margin: 1.5rem; color: #1a1a2e; }
+h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+table { border-collapse: collapse; margin-top: 0.5rem; }
+th, td { border: 1px solid #ccc; padding: 0.25rem 0.5rem; text-align: left; font-size: 0.85rem; }
+button { margin: 0.25rem 0; }
+section { margin-bottom: 1rem; }
+.muted { color: #666; }
+`;
+
+/** The CSP3 style hash of `DASHBOARD_CSS` (#1641).
+ *
+ * A browser hashes the EXACT text content of a `<style>` element — the
+ * bytes between the tags, leading and trailing newline included — so the
+ * digest is computed over the very constant the shell serves. `style-src`
+ * names this hash source instead of `'unsafe-inline'`: the browser applies
+ * THIS style block and refuses every other inline style. */
+const STYLE_HASH = `sha256-${createHash("sha256").update(DASHBOARD_CSS, "utf8").digest("base64")}`;
+
+const CSP = `default-src 'none'; script-src 'self'; connect-src 'self'; style-src '${STYLE_HASH}'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
 /** Every dashboard response carries the same fixed security headers. The
  * CSP's `connect-src 'self'` is the structural guarantee that the UI can
  * only talk to the same origin (the controller API): it can never reach a
  * database, the Kubernetes API, or a forge API directly (#742).
  * `frame-ancestors 'none'` plus `X-Frame-Options: DENY` keep the shell out
- * of any framing host (clickjacking). */
+ * of any framing host (clickjacking). The CSP's `style-src` names the
+ * hash of the shell's own style block, so no inline style other than the
+ * one the shell ships can ever be applied (#1641). */
 const DASHBOARD_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   "Content-Security-Policy": CSP,
   "X-Content-Type-Options": "nosniff",
@@ -30,15 +59,7 @@ export const DASHBOARD_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <title>pr-reviewer controller dashboard</title>
-<style>
-body { font-family: system-ui, sans-serif; margin: 1.5rem; color: #1a1a2e; }
-h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
-table { border-collapse: collapse; margin-top: 0.5rem; }
-th, td { border: 1px solid #ccc; padding: 0.25rem 0.5rem; text-align: left; font-size: 0.85rem; }
-button { margin: 0.25rem 0; }
-section { margin-bottom: 1rem; }
-.muted { color: #666; }
-</style>
+<style>${DASHBOARD_CSS}</style>
 </head>
 <body>
 <h1>Controller dashboard</h1>
