@@ -340,6 +340,30 @@ test("#1577: an unparsable risk artifact contributes no steering block", () => {
   });
 });
 
+test("#1577: an incomplete scan with zero rows still discloses the coverage gap", () => {
+  withWorkspace({
+    "classification.json": JSON.stringify({ pr_kind: "app_code" }),
+    "risk-obligations.json": JSON.stringify(scanRecord({ status: "empty", obligations: [], input_complete: false })),
+  }, (dir) => {
+    const message = buildUserMessage(workspaceAt(dir));
+    assert.match(message, /Risk-evidence coverage for this run is incomplete \(reason: input-incomplete\)/);
+    assert.match(message, /no risk rows were emitted/);
+    assert.match(message, /state the unavailable coverage in review_markdown instead of certifying a clean review/);
+    assert.ok(!message.includes("Risk evidence obligations —"), "zero rows carry no row-list preamble");
+  });
+});
+
+test("#1577: a complete empty scan keeps the steering block silent", () => {
+  withWorkspace({
+    "classification.json": JSON.stringify({ pr_kind: "app_code" }),
+    "risk-obligations.json": JSON.stringify(scanRecord({ status: "empty", obligations: [] })),
+  }, (dir) => {
+    const message = buildUserMessage(workspaceAt(dir));
+    assert.ok(!message.includes("Risk evidence obligations"));
+    assert.ok(!message.includes("coverage for this run is incomplete"));
+  });
+});
+
 // ── (d) the fold: risk rows keep the #1449 discharge rules ─────────────
 
 const riskRow: ReviewObligation = {

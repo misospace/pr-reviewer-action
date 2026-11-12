@@ -138,18 +138,23 @@ const RISK_EVIDENCE_PREAMBLE =
   + "property holds under it. An obligation you could not verify stays unresolved: it withholds a clean review "
   + "instead of being silently certified. A real counterexample is an ordinary evidence-backed finding.";
 
-/** #1577 review follow-up: when the scan's coverage is incomplete but rows
- * still rendered, the block says so — a partial row list must never read to
- * the model as the full risk picture while the publish boundary withholds
- * the trusted approval on the synthetic `risk-coverage` marker. The reason
- * comes from the resolver's closed set and is re-checked here as data. */
-function riskCoverageNote(reason: string | null): string {
+/** #1577 review follow-up: when the scan's coverage is incomplete the block
+ * says so — with rows, a partial row list must never read to the model as
+ * the full risk picture; with NO rows (round 4), silence would read the same
+ * way while the publish boundary withholds the trusted approval on the
+ * synthetic `risk-coverage` marker. The reason comes from the resolver's
+ * closed set and is re-checked here as data. */
+function riskCoverageNote(reason: string | null, hasRows: boolean): string {
   const safe = reason !== null && /^[a-z0-9_-]{1,80}$/.test(reason) ? reason : "unknown";
+  const detail = hasRows
+    ? "the rows below may be partial, and the synthetic risk-coverage marker keeps the "
+      + "trusted approval withheld regardless of these rows' dispositions"
+    : "no risk rows were emitted, which does NOT mean this change is risk-free, and the "
+      + "synthetic risk-coverage marker keeps the trusted approval withheld";
   return " Risk-evidence coverage for this run is incomplete (reason: " + safe + "): the "
-    + "deterministic scan could not certify the whole risk picture of this change, so the rows "
-    + "below may be partial, and the synthetic risk-coverage marker keeps the trusted approval "
-    + "withheld regardless of these rows' dispositions — state the unavailable coverage in "
-    + "review_markdown instead of certifying a clean review.";
+    + "deterministic scan could not certify the whole risk picture of this change, so "
+    + detail + " — state the unavailable coverage in review_markdown instead of certifying "
+    + "a clean review.";
 }
 
 function riskEvidenceBlock(workspace: PromptWorkspace): { rows: string[]; coverageNote: string | null } {
@@ -170,7 +175,10 @@ function riskEvidenceBlock(workspace: PromptWorkspace): { rows: string[]; covera
       : "none listed — enumerate the locations yourself";
     rows.push(`- ${row.id} (risk): ${redactText(row.text)} — locations: ${locations}`);
   }
-  return { rows, coverageNote: resolution.coverage === "incomplete" ? riskCoverageNote(resolution.reason) : null };
+  return {
+    rows,
+    coverageNote: resolution.coverage === "incomplete" ? riskCoverageNote(resolution.reason, rows.length > 0) : null,
+  };
 }
 
 /** Read the candidates artifact tolerantly: absent, unparsable, or
@@ -362,6 +370,12 @@ export function buildUserMessage(workspace: PromptWorkspace, classificationFile:
     const preamble = RISK_EVIDENCE_PREAMBLE + (risk.coverageNote ?? "");
     message = `${message}\n\n${preamble}\n\n${fenceDelimiterFor(rows)}text\n${rows}\n${fenceDelimiterFor(rows)}`;
     if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(message)) throw new UserMessageBuildError("output holds a lone surrogate (UnicodeEncodeError)");
+  } else if (risk.coverageNote !== null) {
+    // #1577 review follow-up (round 4): an incomplete scan that raised zero
+    // rows still reaches the model as a static note — no fenced content, so
+    // nothing untrusted is carried, mirroring the corpus section's
+    // unavailable note. Silence here would read as a clean risk picture.
+    message = `${message}\n\n${risk.coverageNote.trim()}`;
   }
   return bashCapture(message);
 }
