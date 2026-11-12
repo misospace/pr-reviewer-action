@@ -239,8 +239,26 @@ const SLUG_STOPWORDS: ReadonlySet<string> = new Set([
 
 /** Exact version token (x.y.z with optional pre-release/build suffix).
  * Two-segment versions (`7.4`) are deliberately NOT identity: too
- * collidable with ordinary numbers. */
-const EXACT_VERSION_RE = /\b\d+\.\d+\.\d+(?:[-+][0-9a-z.-]+)?\b/gi;
+ * collidable with ordinary numbers.
+ *
+ * #1634 (re-review, round 5): the run is the FULL dotted-numeric version —
+ * `(?:\.\d+){2,}` greedily takes every segment, so a four-segment
+ * `1.2.3.4` extracts as the one exact token `1.2.3.4`, never the
+ * truncating `1.2.3` the three-segment cap produced. The optional `v` is
+ * a tag CONVENTION marker, not part of the identity: it is consumed only
+ * when itself boundary-delimited (`\b`), and capture group 1 — the token
+ * rowEvidenceTokens keeps — never carries it, so `v1.2.3.4` extracts
+ * `1.2.3.4`, not the off-by-one `2.3.4` the old leading `\b` produced by
+ * being unable to start at the digit after the word-char `v`. The
+ * `(?<![0-9]\.)` lookbehind refuses a start INSIDE a longer dotted-numeric
+ * run (`dev1.2.3.4` yields NOTHING rather than the mid-run `2.3.4`): a
+ * version-looking run the regex cannot take as one exact token is a
+ * fail-closed row, never an approximation. The forge compare RANGE
+ * `1.2.3...4.5.6` still extracts as the two clean tokens `1.2.3` and
+ * `4.5.6`: the greedy run stops naturally at a dot followed by another
+ * dot (not digit-dot), and the second number's start follows `..`, which
+ * the lookbehind does not read as a run continuation. */
+const EXACT_VERSION_RE = /\bv?(?<![0-9]\.)(\d+(?:\.\d+){2,}(?:[-+][0-9a-z.-]+)?)\b/gi;
 
 /** Exact head/commit sha: full 40- or 64-hex, word-bounded. Short shas are
  * deliberately NOT identity (a 7-hex run collides with ordinary words). */
@@ -278,7 +296,10 @@ function rowEvidenceTokens(checkKey: string): string[] | null {
     if (SLUG_STOPWORDS.has(owner.toLowerCase()) || SLUG_STOPWORDS.has(repo.toLowerCase())) continue;
     tokens.add(`${owner}/${repo}`.toLowerCase());
   }
-  for (const match of stripped.matchAll(EXACT_VERSION_RE)) tokens.add(match[0]!.toLowerCase());
+  // #1634 (re-review, round 5): capture group 1 — the version without the
+  // tag-convention `v` marker — is the token; group 1 always participates
+  // when the regex matched, the `??` only satisfying the matcher's type.
+  for (const match of stripped.matchAll(EXACT_VERSION_RE)) tokens.add((match[1] ?? match[0])!.toLowerCase());
   for (const match of stripped.matchAll(HEAD_SHA_RE)) tokens.add(match[0]!.toLowerCase());
   for (const match of stripped.matchAll(FILE_PATH_RE)) tokens.add(match[0]!.toLowerCase());
   return [...tokens];
@@ -291,7 +312,7 @@ function rowEvidenceTokens(checkKey: string): string[] | null {
  * under that kind's boundary ALONE (authoritative — the generic segment
  * rule must not weaken version/SHA semantics), and only a kindless token
  * (slug/path) falls to the segment boundary. */
-const VERSION_TOKEN_SHAPE_RE = /^\d+\.\d+\.\d+(?:[-+][0-9a-z.-]+)?$/;
+const VERSION_TOKEN_SHAPE_RE = /^\d+(?:\.\d+){2,}(?:[-+][0-9a-z.-]+)?$/;
 const HEAD_SHA_TOKEN_SHAPE_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /** Characters that EXTEND a version token flush against it: digits and
@@ -338,23 +359,32 @@ function shaBoundaryHolds(text: string, start: number, end: number): boolean {
  * round-4 re-review — a `.` that continues another numeric version segment
  * (`1.2.3.4` → the token's trailing `3` is flush against `.4`): bare
  * `1.2.3` there is a TRUNCATION of a different identity, never the
- * identity the check names. A `.` whose next char is NOT a digit is not a
- * segment continuation — in particular the forge compare range
- * `1.2.3...4.5.6`, where the separator's first dot is followed by the
- * range's second dot — so compare-URL exact positives still carry. The
- * lead side additionally admits the forge tag convention `v1.2.3`: a bare
- * `v` flush against the token is a version marker, but only when the `v`
- * is itself boundary-delimited (`releases/tag/v1.2.3` yes; `dev1.2.3` no). */
+ * identity the check names. The rule is segment-count-agnostic — the same
+ * dot test equally refuses a `1.2.3.4` token flush against a fifth
+ * segment — and a `.` whose next char is NOT a digit is not a segment
+ * continuation (in particular the forge compare range `1.2.3...4.5.6`,
+ * where the separator's first dot is followed by the range's second dot),
+ * so compare-URL exact positives still carry. The lead side additionally
+ * admits the forge tag convention `v1.2.3`: a bare `v` flush against the
+ * token is a version marker, but only when the `v` is itself
+ * boundary-delimited (`releases/tag/v1.2.3` yes; `dev1.2.3` no) — which is
+ * also what lets a four-segment `1.2.3.4` token extracted from a
+ * `v1.2.3.4` check text (#1634 re-review, round 5) carry from a
+ * `releases/tag/v1.2.3.4` target. Extraction (EXACT_VERSION_RE) and this
+ * target-side boundary are ONE identity contract: the round-4 residual
+ * where the extractor truncated a check's `1.2.3.4` to token `1.2.3` is
+ * fixed at the extractor, so a check naming `1.2.3.4` can only be
+ * discharged by evidence carrying the exact four-segment identity. */
 function versionBoundaryHolds(text: string, start: number, end: number): boolean {
   const after = end === text.length ? "" : text[end]!;
   if (VERSION_EXTEND_RE.test(after)) return false;
   // #1634 (re-review, round 4): a following `.` is a version-segment
   // continuation exactly when the next char after the dot is a digit —
   // `1.2.3.4` puts `.4` flush against the token, the git range
-  // `1.2.3...4.5.6` puts `..` (dot followed by dot, not digit). The
-  // extraction-side counterpart (EXACT_VERSION_RE truncating a check's
-  // `1.2.3.4` to token `1.2.3` at that same dot's word boundary) is
-  // deliberately left pinned as residual, not widened here.
+  // `1.2.3...4.5.6` puts `..` (dot followed by dot, not digit). Since
+  // round 5 the extraction-side counterpart is the same rule at
+  // EXACT_VERSION_RE (`(?<![0-9]\.)` refusing a mid-run start), so both
+  // halves refuse the same shapes.
   if (after === "." && end + 1 < text.length && /\d/.test(text[end + 1]!)) return false;
   const before = start === 0 ? "" : text[start - 1]!;
   if (before === "" || !SHA_EXTEND_RE.test(before)) return true;

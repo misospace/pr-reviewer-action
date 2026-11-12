@@ -1282,7 +1282,7 @@ test("#1634 (re-review): identity tokens match as EXACT identities, not substrin
   }
 });
 
-test("#1634 (re-review, round 4): a following '.' that continues a numeric segment is a version EXTENSION — exact 1.2.3 never carries from a 1.2.3.4 target in BOTH folds, while the forge compare RANGE separator (1.2.3...4.5.6, dot followed by dot) stays admissible; the extraction half is pinned as documented residual", () => {
+test("#1634 (re-review, round 5): a following '.' that continues a numeric segment is a version EXTENSION — exact 1.2.3 never carries from a 1.2.3.4 target in BOTH folds, while the forge compare RANGE separator (1.2.3...4.5.6, dot followed by dot) stays admissible; extraction is the full dotted-numeric run, so a 1.2.3.4 (or v1.2.3.4) check text is discharged ONLY by exact four-segment evidence, never by 1.2.3 or the off-by-one 2.3.4, in BOTH folds — the round-4 residual pin inverted to fail closed", () => {
   const versionCheck = "verify lodash/lodash 1.2.3 provenance";
   const dispositionsFor = (check: string, rationale: string) => [{ check, status: "satisfied", rationale }];
 
@@ -1337,17 +1337,15 @@ test("#1634 (re-review, round 4): a following '.' that continues a numeric segme
   const coverageRange = evaluateRequiredCheckCoverage([versionCheck], dispositionsFor(versionCheck, rangeRationale) as never, range);
   assert.deepEqual(coverageRange.checks.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
 
-  // HONEST RESIDUAL (extraction half — deliberately NOT widened): the
-  // prescribed boundary fix makes a 1.2.3.4 TARGET stop certifying token
-  // 1.2.3 (the negatives above), but EXACT_VERSION_RE still reduces a
-  // check text that literally names 1.2.3.4 to the token 1.2.3 (its \b
-  // word boundary sits at the inter-segment dot), so a target carrying
-  // EXACTLY 1.2.3 still certifies a check asking for 1.2.3.4. This pin
-  // documents today's behavior — which token discharges the four-segment
-  // check — for the operator to decide whether to widen EXACT_VERSION_RE
-  // in a follow-up; widening it would change token semantics for every
-  // identity class, so this round does not do it unilaterally.
+  // INVERTED CONTRACT (round-5 re-review; the round-4 "documented residual"
+  // was itself the bug): the extraction half is FIXED, so a check text
+  // naming 1.2.3.4 extracts the ONE exact token 1.2.3.4 — never the
+  // truncating 1.2.3 — and exactly-1.2.3 evidence therefore does NOT
+  // discharge it. The row fails closed as unrelated-executed-call in BOTH
+  // folds. This is the direct inversion of the round-4 pin, which asserted
+  // satisfied/ok here and certified the wrong release.
   const fourSegmentCheck = "verify lodash/lodash 1.2.3.4 provenance";
+  const taggedFourSegmentCheck = "verify lodash/lodash v1.2.3.4 provenance";
   const exactShorter: ExecutedCallEvidenceIndex = {
     gate: true,
     refused: false,
@@ -1355,42 +1353,96 @@ test("#1634 (re-review, round 4): a following '.' that continues a numeric segme
       { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3" },
     ],
   };
-  const residualRationale = "the release fetch at call-1 confirms 1.2.3.4";
-  const foldedResidual = foldObligationDispositions(
-    candidateRowsToObligations([], [fourSegmentCheck]),
-    dispositionsFor(fourSegmentCheck, residualRationale),
-    exactShorter,
+  for (const [check, label] of [
+    [fourSegmentCheck, "a 1.2.3.4 check text is NOT discharged by exactly-1.2.3 evidence"],
+    [taggedFourSegmentCheck, "a v1.2.3.4 check text is NOT discharged by exactly-1.2.3 evidence"],
+  ] as const) {
+    const foldedFourShorter = foldObligationDispositions(
+      candidateRowsToObligations([], [check]),
+      dispositionsFor(check, "the release fetch at call-1 confirms 1.2.3.4"),
+      exactShorter,
+    );
+    assert.deepEqual(
+      foldedFourShorter.map((row) => [row.status, row.reason]),
+      [["unresolved", "unrelated-executed-call"]],
+      label,
+    );
+    const coverageFourShorter = evaluateRequiredCheckCoverage(
+      [check],
+      dispositionsFor(check, "the release fetch at call-1 confirms 1.2.3.4") as never,
+      exactShorter,
+    );
+    assert.deepEqual(
+      coverageFourShorter.checks.map((row) => [row.status, row.reason]),
+      [["unresolved", "unrelated-executed-call"]],
+      `${label} (required-checks fold)`,
+    );
+  }
+
+  // The now-exact match: a four-segment check IS discharged by evidence
+  // carrying the exact four-segment identity — the SAME targets that stay
+  // unrelated for the 1.2.3 check above (releases/1.2.3.4, tags/v1.2.3.4),
+  // in BOTH folds. A v1.2.3.4 check text extracts 1.2.3.4 (the tag `v` is
+  // a convention marker, excluded from the token) and matches the
+  // v1.2.3.4 tag target exactly.
+  const fourSegmentCases: Array<[string, string, string]> = [
+    [fourSegmentCheck, "the release fetch at call-1 confirms 1.2.3.4", "bare 1.2.3.4 target carries the four-segment check"],
+    [fourSegmentCheck, "the tag fetch at call-2 confirms 1.2.3.4", "tagged v1.2.3.4 target carries the four-segment check"],
+    [taggedFourSegmentCheck, "the tag fetch at call-2 confirms 1.2.3.4", "v1.2.3.4 check text extracts 1.2.3.4 and matches the v1.2.3.4 tag target"],
+  ];
+  for (const [check, rationale, label] of fourSegmentCases) {
+    const foldedExactFour = foldObligationDispositions(
+      candidateRowsToObligations([], [check]),
+      dispositionsFor(check, rationale),
+      truncated,
+    );
+    assert.deepEqual(
+      foldedExactFour.map((row) => [row.status, row.reason]),
+      [["satisfied", "ok"]],
+      label,
+    );
+    const coverageExactFour = evaluateRequiredCheckCoverage(
+      [check],
+      dispositionsFor(check, rationale) as never,
+      truncated,
+    );
+    assert.deepEqual(
+      coverageExactFour.checks.map((row) => [row.status, row.reason]),
+      [["satisfied", "ok"]],
+      `${label} (required-checks fold)`,
+    );
+  }
+
+  // The v-prefix off-by-one is dead: the extractor no longer mis-splits
+  // v1.2.3.4 into the mid-run 2.3.4, so a v2.3.4 tag target — which WOULD
+  // carry the off-by-one token — is unrelated for the tagged check in BOTH
+  // folds.
+  const offByOne: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v2.3.4" },
+    ],
+  };
+  const foldedOffByOne = foldObligationDispositions(
+    candidateRowsToObligations([], [taggedFourSegmentCheck]),
+    dispositionsFor(taggedFourSegmentCheck, "the release fetch at call-1 confirms 1.2.3.4"),
+    offByOne,
   );
   assert.deepEqual(
-    foldedResidual.map((row) => [row.status, row.reason]),
-    [["satisfied", "ok"]],
-    "residual: a 1.2.3.4 check text is reduced to token 1.2.3 and discharged by exactly-1.2.3 evidence",
-  );
-  const coverageResidual = evaluateRequiredCheckCoverage(
-    [fourSegmentCheck],
-    dispositionsFor(fourSegmentCheck, residualRationale) as never,
-    exactShorter,
-  );
-  assert.deepEqual(
-    coverageResidual.checks.map((row) => [row.status, row.reason]),
-    [["satisfied", "ok"]],
-    "residual in the required-checks fold: identical truncation semantics",
-  );
-  // And the mirror half of the residual: the four-segment check is NOT
-  // discharged by a target carrying only the four-segment version any more
-  // (the boundary rejects the token's occurrence inside it), so the ONLY
-  // thing that discharges it is evidence for the truncated token — the
-  // residual above — which is exactly the wrong-release bind the re-review
-  // flags for the extraction half.
-  const foldedFourTarget = foldObligationDispositions(
-    candidateRowsToObligations([], [fourSegmentCheck]),
-    dispositionsFor(fourSegmentCheck, "the release fetch at call-1 confirms 1.2.3.4"),
-    truncated,
-  );
-  assert.deepEqual(
-    foldedFourTarget.map((row) => [row.status, row.reason]),
+    foldedOffByOne.map((row) => [row.status, row.reason]),
     [["unresolved", "unrelated-executed-call"]],
-    "the four-segment check is not discharged by the 1.2.3.4 target either — token 1.2.3 never carries from it post-fix",
+    "v1.2.3.4 never extracts the off-by-one 2.3.4 (a v2.3.4 target does not discharge it)",
+  );
+  const coverageOffByOne = evaluateRequiredCheckCoverage(
+    [taggedFourSegmentCheck],
+    dispositionsFor(taggedFourSegmentCheck, "the release fetch at call-1 confirms 1.2.3.4") as never,
+    offByOne,
+  );
+  assert.deepEqual(
+    coverageOffByOne.checks.map((row) => [row.status, row.reason]),
+    [["unresolved", "unrelated-executed-call"]],
+    "v-prefix off-by-one dead in the required-checks fold",
   );
 });
 
