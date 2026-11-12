@@ -4654,6 +4654,32 @@ test("#1628: a proven terminal failure bounds the non-streamed retry to the turn
   assert.equal(timeouts[1], 1);
 });
 
+test("#1628: the terminal-class bound floors at 1s when the discarded attempt overspent the turn", async () => {
+  const { root, deps } = workspace();
+  fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
+  const timeouts: number[] = [];
+  let n = 0;
+  await runToolHarness(deps({
+    env: { ...withPrompt.env, AI_STREAM: "true", TOOL_TURN_TIMEOUT_SEC: "2" },
+    transport: async (_baseUrl, _apiFormat, payload, _apiKey, timeoutSec) => {
+      timeouts.push(timeoutSec);
+      const turn = n++;
+      if (turn === 0) {
+        await sleepMs(2100);
+        throw new TransportFailure("http_status", "model endpoint returned HTTP 524", { status: 524 });
+      }
+      if (turn === 1) return openAiText("done");
+      return validVerdict();
+    },
+  }));
+  // The discarded attempt spent MORE than the whole 2s turn budget, so the
+  // pair's remaining figure (2 − ~2.1) is NEGATIVE: the max(1, ...) floor is
+  // the only thing between the recovery and a zero/negative timeout. Without
+  // the guard this asserts against −0, not 1.
+  assert.equal(timeouts[0], 2);
+  assert.equal(timeouts[1], 1);
+});
+
 test("#1628: an ambiguous timeout keeps the configured deadline for the retry", async () => {
   const { root, deps } = workspace();
   fs.writeFileSync(path.join(root, "review-corpus.truncated.md"), "# PR Diff\n+ change\n");
