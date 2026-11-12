@@ -43,7 +43,11 @@
  *   row — the source/tool (a bounded set of repository/forge read tools),
  *   the call's bounded target (its identity args), and the exact
  *   head/version/package tokens the check text itself names, where
- *   applicable. A successful `gh_api` call (or any successful call) about
+ *   applicable — matched AS IDENTITIES with kind-appropriate token
+ *   boundaries, never as bare substrings of the flattened target (#1634
+ *   re-review: `includes()` let `1.2.3` certify from a `1.2.30` target and
+ *   `owner/repo` from `owner/repository`). A successful `gh_api` call (or
+ *   any successful call) about
  *   an unrelated target never discharges a row; suite/test-run asks
  *   reconcile ONLY through the merged #1612 head-bound CI matcher
  *   (`reconcileObligationsWithCiEvidence` / `reconcileRequiredCheckRows`),
@@ -280,6 +284,87 @@ function rowEvidenceTokens(checkKey: string): string[] | null {
   return [...tokens];
 }
 
+/** #1634 (re-review): the required tokens are EXACT identities, so the
+ * target-side match is boundary-aware per identity kind, never a bare
+ * substring of the flattened target. The shapes re-used here mirror the
+ * extractor regexes above (a token can only be verified under the kinds it
+ * could have been extracted from). */
+const VERSION_TOKEN_SHAPE_RE = /^\d+\.\d+\.\d+(?:[-+][0-9a-z.-]+)?$/;
+const HEAD_SHA_TOKEN_SHAPE_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** Characters that EXTEND a version token flush against it: digits and
+ * letters (`1.2.3` → `1.2.30`, the re-review's named collision) and the
+ * pre-release/build markers `-`/`+` (`1.2.3` → `1.2.3-beta`). A `.` does
+ * NOT extend a version — the forge compare separator (`1.2.3...4.5.6`) and
+ * the extractor's own word-boundary semantics keep it outside the token. */
+const VERSION_EXTEND_RE = /[0-9a-z_+-]/;
+
+/** Word characters that extend a hex identity: a 40-hex head flush against
+ * further hex characters (a prefix/substring of a 64-hex run) is a
+ * different identity, not the head the check names. */
+const SHA_EXTEND_RE = /[0-9a-z_]/;
+
+/** Name characters that extend a slug/path segment: `owner/repo` flush
+ * against a letter (`owner/repository`, the re-review's named collision), a
+ * digit (`owner/repo2`), or a segment-internal `.`/`-`/`_` (`owner/repo.git`,
+ * `my-owner/repo`) is a different identity. `/` is deliberately NOT an
+ * extender: `repos/owner/repo/compare/...` and
+ * `.../contents/package-lock.json` carry the slug/path mid-endpoint. */
+const SEGMENT_EXTEND_RE = /[0-9a-z_.-]/;
+
+/** Segment (repo-slug / file-path) boundary: the token must be flush only
+ * against non-name characters (start/end, `/`, `:`, `=`, `?`, whitespace). */
+function segmentBoundaryHolds(text: string, start: number, end: number): boolean {
+  const before = start === 0 ? "" : text[start - 1]!;
+  const after = end === text.length ? "" : text[end]!;
+  return !SEGMENT_EXTEND_RE.test(before) && !SEGMENT_EXTEND_RE.test(after);
+}
+
+/** Head-sha boundary: flush against any word character — in particular any
+ * further hex digit — and the token is a substring of a longer hex run. */
+function shaBoundaryHolds(text: string, start: number, end: number): boolean {
+  const before = start === 0 ? "" : text[start - 1]!;
+  const after = end === text.length ? "" : text[end]!;
+  return !SHA_EXTEND_RE.test(before) && !SHA_EXTEND_RE.test(after);
+}
+
+/** Version boundary. The follow side refuses every version-extending char
+ * (`1.2.3` never carries from a `1.2.30` or `1.2.3-beta` target). The lead
+ * side additionally admits the forge tag convention `v1.2.3`: a bare `v`
+ * flush against the token is a version marker, but only when the `v` is
+ * itself boundary-delimited (`releases/tag/v1.2.3` yes; `dev1.2.3` no). */
+function versionBoundaryHolds(text: string, start: number, end: number): boolean {
+  const after = end === text.length ? "" : text[end]!;
+  if (VERSION_EXTEND_RE.test(after)) return false;
+  const before = start === 0 ? "" : text[start - 1]!;
+  if (before === "" || !SHA_EXTEND_RE.test(before)) return true;
+  return before === "v" && (start - 1 === 0 || !SHA_EXTEND_RE.test(text[start - 2]!));
+}
+
+/** Whether the bounded target carries `token` as an EXACT identity: some
+ * occurrence of the token is boundary-delimited under one of the identity
+ * kinds the token could have been extracted as (slug/path always; version
+ * and sha when shaped so). A token that appears only inside a longer
+ * identity — `1.2.3` in `1.2.30`, `owner/repo` in `owner/repository`, a
+ * head sha embedded in a longer hex run — is NOT carried, and the row
+ * fails closed as `unrelated`. Empty target or token carries nothing. */
+function targetCarriesIdentity(target: string, token: string): boolean {
+  if (target === "" || token === "") return false;
+  const haystack = target.toLowerCase();
+  const needle = token.toLowerCase();
+  const asVersion = VERSION_TOKEN_SHAPE_RE.test(needle);
+  const asSha = HEAD_SHA_TOKEN_SHAPE_RE.test(needle);
+  let at = haystack.indexOf(needle);
+  while (at !== -1) {
+    const end = at + needle.length;
+    if (segmentBoundaryHolds(haystack, at, end)) return true;
+    if (asVersion && versionBoundaryHolds(haystack, at, end)) return true;
+    if (asSha && shaBoundaryHolds(haystack, at, end)) return true;
+    at = haystack.indexOf(needle, at + 1);
+  }
+  return false;
+}
+
 /**
  * Deterministic CHECK-SPECIFIC one-to-one citation allocation (the review
  * fix on #1634, tightened per the human review of #1634/#1627):
@@ -294,13 +379,17 @@ function rowEvidenceTokens(checkKey: string): string[] | null {
  * 2. the citation must be CHECK-SPECIFIC: a cited call is only a
  *    candidate when it is a repository/forge read (`SOURCE_EVIDENCE_TOOLS`)
  *    whose bounded target carries EVERY identity token the check text
- *    names (package slug, exact version, head sha, named file). A
- *    successful call about an unrelated target never discharges — the row
- *    is `unrelated` (reason `unrelated-executed-call` in both folds).
- *    Suite/CI asks (`null` identity) reconcile only through the merged
- *    #1612 head-bound CI matcher, and absence asks are never citable; a
- *    check naming no identity at all is also `unrelated` — the
- *    deterministic layer cannot establish that any call proves it.
+ *    names (package slug, exact version, head sha, named file) as an EXACT
+ *    identity — kind-appropriate token boundaries, never a bare substring
+ *    (#1634 re-review: a target naming `1.2.30` does not carry the version
+ *    `1.2.3`; `owner/repository` does not carry `owner/repo`; a longer hex
+ *    run containing the head sha is not the head). A successful call about
+ *    an unrelated target never discharges — the row is `unrelated` (reason
+ *    `unrelated-executed-call` in both folds). Suite/CI asks (`null`
+ *    identity) reconcile only through the merged #1612 head-bound CI
+ *    matcher, and absence asks are never citable; a check naming no
+ *    identity at all is also `unrelated` — the deterministic layer cannot
+ *    establish that any call proves it.
  *
  * A row citing no successful call at all is still `uncited`; a row whose
  * matching calls another row already took is `shared`. Neither discharges.
@@ -333,11 +422,15 @@ export function allocateCallCitations(
     // the deterministic evidence identity admit as PROBATIVE for THIS row?
     // A row with NO bindable identity (`null` class or zero tokens) admits
     // NOTHING — an empty requirement must never vacuously match every call.
+    // Each required token is matched as an exact identity (kind-appropriate
+    // boundaries — #1634 re-review), never as an arbitrary substring of the
+    // flattened target: an identity the bounded target cannot prove exactly
+    // leaves the row `unrelated` (fail closed).
     const required = rowEvidenceTokens(row.key);
     const matching = required === null || required.length === 0 ? [] : cited
       .map((id) => successful.find((entry) => entry.id === id)!)
       .filter((entry) => SOURCE_EVIDENCE_TOOLS.has(entry.tool)
-        && required.every((token) => entry.target.toLowerCase().includes(token)))
+        && required.every((token) => targetCarriesIdentity(entry.target, token)))
       .map((entry) => entry.id)
       .sort((a, b) => Number(a.slice("call-".length)) - Number(b.slice("call-".length)));
     if (matching.length === 0) {

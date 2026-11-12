@@ -1205,6 +1205,70 @@ test("#1634 (human review): the stale-head, wrong-package/version distinctions s
   assert.deepEqual(foldedExact.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
 });
 
+test("#1634 (re-review): identity tokens match as EXACT identities, not substrings — the version prefix (1.2.3 vs 1.2.30), the repo-slug prefix (owner/repo vs owner/repository), and a head sha embedded in a longer hex run stay unrelated-executed-call while the exact-identity positives discharge, in BOTH folds", () => {
+  const head = "a".repeat(40);
+  // A DIFFERENT (longer) hex identity that merely contains the head as a
+  // prefix/substring — the #1634 re-review's SHA boundary collision class.
+  const embedded64 = `${"b".repeat(12)}${head}${"b".repeat(12)}`;
+  const versionCheck = "verify lodash/lodash 1.2.3 provenance";
+  const slugCheck = "review the release automation for owner/repo";
+  const shaCheck = `confirm the audited head ${head} was released`;
+  const dispositionsFor = (check: string, rationale: string) => [{ check, status: "satisfied", rationale }];
+
+  // The prefix-collision targets: each successful forge read carries the
+  // check's tokens only as SUBSTRINGS of a different identity — the version
+  // 1.2.3 inside 1.2.30, the slug owner/repo inside owner/repository, the
+  // head inside a longer hex run. None is the identity the check names, so
+  // every cited row fails closed as unrelated-executed-call in both folds.
+  const collisions: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.30" },
+      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/owner/repository" },
+      { id: "call-3", ok: true, tool: "gh_api", target: `/repos/owner/repo/commits/${embedded64}` },
+    ],
+  };
+  const collisionCases: Array<[string, string]> = [
+    [versionCheck, "the tag fetch at call-1 confirms 1.2.3"],
+    [slugCheck, "the forge read at call-2 confirms it"],
+    [shaCheck, "the commit fetch at call-3 confirms the head"],
+  ];
+  for (const [check, rationale] of collisionCases) {
+    const folded = foldObligationDispositions(
+      candidateRowsToObligations([], [check]),
+      dispositionsFor(check, rationale),
+      collisions,
+    );
+    assert.deepEqual(folded.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]], check);
+    const coverage = evaluateRequiredCheckCoverage([check], dispositionsFor(check, rationale) as never, collisions);
+    assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["unresolved", "unrelated-executed-call"]], check);
+  }
+
+  // The exact-identity positives for the SAME checks: one call per check
+  // carrying the exact named identity (tag v1.2.3, repo owner/repo, the
+  // full head) discharges in both folds.
+  const exact: ExecutedCallEvidenceIndex = {
+    gate: true,
+    refused: false,
+    entries: [
+      { id: "call-1", ok: true, tool: "gh_api", target: "/repos/lodash/lodash/releases/tag/v1.2.3" },
+      { id: "call-2", ok: true, tool: "gh_api", target: "/repos/owner/repo" },
+      { id: "call-3", ok: true, tool: "gh_api", target: `/repos/owner/repo/commits/${head}` },
+    ],
+  };
+  for (const [check, rationale] of collisionCases) {
+    const folded = foldObligationDispositions(
+      candidateRowsToObligations([], [check]),
+      dispositionsFor(check, rationale),
+      exact,
+    );
+    assert.deepEqual(folded.map((row) => [row.status, row.reason]), [["satisfied", "ok"]], check);
+    const coverage = evaluateRequiredCheckCoverage([check], dispositionsFor(check, rationale) as never, exact);
+    assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["satisfied", "ok"]], check);
+  }
+});
+
 test("#1634 (human review): negative-advisory, unrelated/test-only CI, and non-repository tools never discharge — and the suite/CI ask reconciles only through the #1612 head-bound CI matcher", () => {
   // Advisory absence: the check asks for an advisory SEARCH; even a
   // successful forge call naming the exact package+version proves only that
