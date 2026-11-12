@@ -3340,10 +3340,13 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         throw exc;
       }
       // #1628: for a PROVEN terminal failure (an error status, a closed SSE
-      // connection, a malformed/truncated terminal body) the pair of attempts
-      // stays bounded by ONE turn timeout — the recovery may not restart a
-      // full turn wait when the wire already told us the attempt ended, and
-      // the run/exploration deadline above continues to clamp both attempts.
+      // connection, a malformed/truncated terminal body) the recovery is
+      // capped to the turn's REMAINING budget, floored at one second — it may
+      // not restart a full turn wait when the wire already told us the
+      // attempt ended, and the run/exploration deadline above continues to
+      // clamp both attempts. The floor means an attempt that overspent the
+      // whole turn budget still gets a one-second recovery, so the pair is
+      // bounded by one turn timeout plus that guaranteed second.
       // Ambiguous cases (a timeout with nothing observed, an empty or
       // unclassifiable body) keep the configured deadline as their authority.
       if (TERMINAL_STREAMED_FAILURE_REASONS.has(classification.reason)) {
