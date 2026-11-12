@@ -3326,6 +3326,14 @@ scenario_engine_parity_route_c_oci_worker_image() {
   # arguments follow the image — an argv of just the envelope path would
   # run `node /app/dist/index.js /run/request.json`, which the bundle
   # refuses as an unknown command.
+  #
+  # The OCI worker binds route D's harness-owned placeholder, not the
+  # ambient model credential: the `all` family seeds the operator's real
+  # model key here, and the worker image must never hold it. Its model
+  # endpoint is the loopback stub (which never authenticates), so the
+  # placeholder is not a secret and reaches nothing but the stub — the
+  # same material route D names in its executor spec.
+  PR_REVIEWER_CREDENTIAL_MODEL="parity-stub-model-material" \
   PR_REVIEWER_CREDENTIAL_FORGE_PUBLISH="$FORGEJO_TOKEN" \
     docker run --rm --network host \
     --add-host host.docker.internal:host-gateway \
