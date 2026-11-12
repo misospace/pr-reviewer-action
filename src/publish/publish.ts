@@ -2331,6 +2331,12 @@ export async function publishReview(
   const handoffBlock = renderReviewHandoffBlock(buildReviewHandoff({
     reviewId: input.reviewId ?? "",
     headSha: input.headSha,
+    // #1596: the handoff is built from the AUTHORITATIVE disposition, so the
+    // machine-readable document can never contradict the native event and
+    // the recommendation line (which follow the disposition): an open
+    // blocker/major finding under a non-strict approve publishes
+    // request_changes/issues here too, never the raw approve/clean.
+    disposition,
     verdict: input.verdict,
     reviewResult,
     requiredChecks: input.requiredChecks,
@@ -2376,6 +2382,10 @@ export async function publishReview(
     : renderReviewHandoffBlock(buildReviewHandoff({
       reviewId: input.reviewId ?? "",
       headSha: input.headSha,
+      // #1596: the suggestion-free variant carries the SAME authoritative
+      // disposition as the suggestion-carrying one — the two documents must
+      // never disagree about the verdict-level words either.
+      disposition,
       verdict: input.verdict,
       reviewResult,
       requiredChecks: input.requiredChecks,

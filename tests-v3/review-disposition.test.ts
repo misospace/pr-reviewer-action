@@ -9,6 +9,7 @@ import {
 } from "../src/publish/disposition.js";
 import { publishReview } from "../src/publish/publish.js";
 import { computeReviewAttestation } from "../src/publish/attestation.js";
+import { parseReviewHandoffBlock } from "../src/publish/handoff.js";
 import type { NativeReviewSurface, PublishPlatformApi } from "../src/platform/publish-api.js";
 
 // ---------------------------------------------------------------------------
@@ -601,6 +602,75 @@ test("#1596: an open blocker under a non-strict policy never certifies an approv
     ),
     body,
   );
+});
+
+/** A reviewed diff with one changed file, so the inline-comment build has a
+ * position map to anchor the suggestion-bearing finding against. */
+const SUGGESTION_DIFF = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n old\n+new line\n";
+
+test("#1596: the handoff agrees with a disposition-proven REQUEST CHANGES in both handoff variants", async () => {
+  // The publication-contract blocker: computeReviewDisposition can prove a
+  // blocking defect (an open major) while the raw model verdict stays an
+  // approve, and the native event follows the disposition — so the published
+  // handoff must follow it too, or the machine-readable document would tell
+  // a controller `approve`/`clean` beside a blocking request. BOTH handoff
+  // variants (the suggestion-carrying body and the suggestion-free
+  // fallback/recovery body) are built from the disposition.
+  const findings = [{
+    severity: "major", category: "bug", file: "a.ts", line: 2,
+    message: "A finding", suggestion: "REPL",
+  }];
+  const publishBlocking = (api: MockPublishApi): ReturnType<typeof publishReview> => publishReview(publishInput({
+    mode: "review_verdict",
+    verdictPolicy: "model",
+    verdict: "approve",
+    reviewId: "0123456789abcdef",
+    inlineFindings: true,
+    findings,
+    reviewMarkdown: "## Review\n\nBody.",
+  }), api, { diffText: SUGGESTION_DIFF });
+
+  // (a) The suggestion-carrying variant: the commit-bound batch publishes the
+  // inline comment that carries the replacement, and its body's handoff
+  // states the authoritative words beside the native REQUEST_CHANGES.
+  const carriedApi = new MockPublishApi();
+  const carried = await publishBlocking(carriedApi);
+  assert.equal(carried.status, "published");
+  assert.equal(carriedApi.submitted.length, 1);
+  assert.equal(carriedApi.submitted[0]!.event, "REQUEST_CHANGES");
+  const carriedHandoff = parseReviewHandoffBlock(carriedApi.submitted[0]!.body);
+  assert.ok(carriedHandoff !== null, "the suggestion-carrying body carries a parseable handoff");
+  assert.equal(carriedHandoff.verdict, "request_changes", "the suggestion-carrying handoff states the disposition's verdict");
+  assert.equal(carriedHandoff.review_result, "issues", "the suggestion-carrying handoff states the authoritative review result");
+  assert.equal(carriedHandoff.items[0]!.suggestion, "REPL", "this IS the suggestion-carrying variant: the published replacement rides");
+
+  // (b) The suggestion-free variant: the commit-bound batch is rejected, so
+  // the body-only fallback publishes with the suggestion-free handoff — the
+  // same authoritative words there too. The mock records EVERY createReview
+  // call (a rejected submission still reached the forge), then fails the
+  // first one.
+  const fallbackApi = new MockPublishApi();
+  let fallbackAttempts = 0;
+  fallbackApi.createReview = async (request) => {
+    fallbackApi.submitted.push(request);
+    fallbackAttempts += 1;
+    if (fallbackAttempts === 1) return { ok: false, error: "race" };
+    return { ok: true };
+  };
+  const fellBack = await publishBlocking(fallbackApi);
+  assert.equal(fellBack.status, "published");
+  assert.equal(fallbackApi.submitted.length, 2, "the rejected commit-bound batch falls back body-only");
+  assert.equal(fallbackApi.submitted[0]!.event, "REQUEST_CHANGES");
+  const rejectedHandoff = parseReviewHandoffBlock(fallbackApi.submitted[0]!.body);
+  assert.ok(rejectedHandoff !== null, "the rejected batch body carries a parseable handoff");
+  assert.equal(rejectedHandoff.verdict, "request_changes");
+  assert.equal(rejectedHandoff.review_result, "issues");
+  assert.equal(rejectedHandoff.items[0]!.suggestion, "REPL");
+  const fallbackHandoff = parseReviewHandoffBlock(fallbackApi.submitted[1]!.body);
+  assert.ok(fallbackHandoff !== null, "the fallback body carries a parseable handoff");
+  assert.equal(fallbackHandoff.verdict, "request_changes", "the suggestion-free handoff states the disposition's verdict");
+  assert.equal(fallbackHandoff.review_result, "issues", "the suggestion-free handoff states the authoritative review result");
+  assert.equal(fallbackHandoff.items[0]!.suggestion, undefined, "this IS the suggestion-free variant: no unbacked replacement rides");
 });
 
 test("#1596: a blocking disposition suppresses the advisory withholding notices", async () => {

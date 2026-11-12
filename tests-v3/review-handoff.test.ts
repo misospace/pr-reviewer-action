@@ -65,6 +65,7 @@ REVIEW_HANDOFF_MAX_IDS,
 import { actionMain } from "../src/run/action.js";
 import { buildPublishApi } from "../src/run/entrypoints.js";
 import { buildComments, prescriptionKey, prescriptionKeyDigest } from "../src/publish/inline-findings.js";
+import { computeReviewDisposition } from "../src/publish/disposition.js";
 import { publishReview, renderOutsideDiffSection } from "../src/publish/publish.js";
 import { redactText } from "../src/context/redact.js";
 import { isManagedBody } from "../src/metadata/markers.js";
@@ -696,6 +697,76 @@ test("#1518: a clean review produces a valid handoff with no items", () => {
   assert.equal(doc.items_truncated, false);
   assert.equal(doc.verdict, "approve");
   assert.equal(doc.review_result, "clean");
+});
+
+test("#1596: a disposition-proven blocker owns the handoff's verdict and review_result", () => {
+  // The non-strict approve + open major shape: the raw model verdict is an
+  // approve and the marker review_result is clean, but the disposition
+  // proved a blocking defect — the native event is REQUEST_CHANGES, so the
+  // handoff must state the authoritative words, never approve/clean.
+  const blocking = computeReviewDisposition({
+    verdict: "approve",
+    validVerdict: true,
+    reviewResult: "clean",
+    coverageIncomplete: false,
+    approvalCertified: false,
+    verdictBearing: true,
+    incompleteReason: "none",
+    blockingFindingOpen: true,
+  });
+  assert.equal(blocking.kind, "request_changes");
+  const doc = parseReviewHandoff(buildReviewHandoff(baseInput({
+    verdict: "approve",
+    reviewResult: "clean",
+    disposition: blocking,
+  })))!;
+  assert.equal(doc.verdict, "request_changes", "the handoff states the disposition's verdict word");
+  assert.equal(doc.review_result, "issues", "the handoff states the authoritative review-result semantics");
+
+  // The via-verdict path is a no-op: the disposition proved the blocker
+  // THROUGH the verdict, so the authoritative words are already the raw ones.
+  const viaVerdict = parseReviewHandoff(buildReviewHandoff(baseInput({
+    verdict: "request_changes",
+    reviewResult: "issues",
+    disposition: computeReviewDisposition({
+      verdict: "request_changes",
+      validVerdict: true,
+      reviewResult: "issues",
+      coverageIncomplete: false,
+      approvalCertified: false,
+      verdictBearing: true,
+      incompleteReason: "none",
+      blockingFindingOpen: false,
+    }),
+  })))!;
+  assert.equal(viaVerdict.verdict, "request_changes");
+  assert.equal(viaVerdict.review_result, "issues");
+
+  // A disposition that proves no blocker leaves the run's own words: the
+  // incomplete abstention is DERIVED from the approve/partial pair, so the
+  // pair already agrees with the disposition.
+  const abstained = parseReviewHandoff(buildReviewHandoff(baseInput({
+    verdict: "approve",
+    reviewResult: "partial",
+    disposition: computeReviewDisposition({
+      verdict: "approve",
+      validVerdict: true,
+      reviewResult: "partial",
+      coverageIncomplete: true,
+      approvalCertified: false,
+      verdictBearing: true,
+      incompleteReason: "execution",
+      blockingFindingOpen: false,
+    }),
+  })))!;
+  assert.equal(abstained.verdict, "approve");
+  assert.equal(abstained.review_result, "partial");
+
+  // Without a disposition the document is unchanged — the raw pass-through
+  // the handoff has always published (#1518 consumers rely on it).
+  const raw = parseReviewHandoff(buildReviewHandoff(baseInput({ verdict: "approve", reviewResult: "clean" })))!;
+  assert.equal(raw.verdict, "approve");
+  assert.equal(raw.review_result, "clean");
 });
 
 test("#1518: the unresolved ids ride the handoff independently of the items", () => {
