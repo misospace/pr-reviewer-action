@@ -12,7 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -1943,4 +1943,120 @@ test("the composed GitHub mint is repository-scoped and speaks epoch-ms expiry (
   assert.match(urls[0] ?? "", /\/app\/installations\/4242\/access_tokens$/);
   const scope = JSON.parse(bodies[0] ?? "{}") as { repositories?: unknown };
   assert.deepEqual(scope.repositories, ["repo"]);
+});
+
+// ── #1624: the reconcile composition binds the App poll's installation id ──
+
+test("the reconcile composition mints the poll job with the App installation id (#1624)", async (t) => {
+  // The re-review blocker: controllerMain's reconcile composition called
+  // reconcileRepositories WITHOUT the startup's poll installation id, so the
+  // canonical poll event minted jobs carrying installationId "" — and the
+  // #1624 minting broker refuses a forge-publish request whose installation
+  // identity is empty, withholding the WHOLE worker credential set on the
+  // exact GitHub self-hosted path this PR unlocks. The REAL composition runs
+  // here (an injected forge fake never builds the mint-backed broker): the
+  // lister authenticates as the configured App installation over a scripted
+  // transport, and the durable queue snapshot's job payload — the record the
+  // late forge-publish mint reads its installation identity from — must
+  // carry the EXACT env id. No env-defined GitHub forge material exists in
+  // this boot: the App mint is the composition's only forge credential
+  // source. The job→plan→mint chain itself is pinned by the binding tests
+  // above (the plan embeds the job's installation id; the mint receives it).
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const dir = mkdtempSync(join(tmpdir(), "ctl-gh-reconcile-"));
+  const configPath = join(dir, "instance.yaml");
+  writeFileSync(configPath, GITHUB_INSTANCE_CONFIG, "utf8");
+  const env = baseEnv(configPath);
+  env.PR_REVIEWER_GITHUB_APP_ID = "12345";
+  env.PR_REVIEWER_GITHUB_APP_PRIVATE_KEY = privateKeyPem;
+  env.PR_REVIEWER_GITHUB_APP_INSTALLATION_ID = "4242";
+  env.PR_REVIEWER_RECONCILE_INTERVAL_MS = "100";
+  env.PR_REVIEWER_RECONCILE_REPOS = "owner/name";
+
+  const mintInstallations: string[] = [];
+  const fetchImpl: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    const mint = /\/app\/installations\/(\d+)\/access_tokens$/.exec(url.pathname);
+    if (mint !== null) {
+      mintInstallations.push(mint[1]!);
+      return new Response(
+        JSON.stringify({
+          token: "ghs_poll_installation_token",
+          expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+        { status: 201 },
+      );
+    }
+    if (url.pathname === "/repos/owner/name/pulls") {
+      return new Response(
+        JSON.stringify([
+          {
+            number: 7,
+            state: "open",
+            draft: false,
+            head: { sha: HEAD },
+            base: { sha: BASE, repo: { full_name: "owner/name" } },
+          },
+        ]),
+        { status: 200 },
+      );
+    }
+    return new Response("{}", { status: 404 });
+  };
+
+  const handleBox: { handle: ControllerMainHandle | null } = { handle: null };
+  const running = controllerMain([], env, {
+    controlPlane: new InMemoryControlPlaneStore(),
+    executors: { local: () => new FakeExecution() },
+    fetchImpl,
+    onReady: (ready) => {
+      handleBox.handle = ready;
+    },
+  });
+  t.after(async () => {
+    if (handleBox.handle !== null) await handleBox.handle.stop().catch(() => undefined);
+    await running.catch(() => undefined);
+    rmSync(dir, { recursive: true, force: true });
+    cleanupDirs(env);
+  });
+  await waitFor(() => handleBox.handle !== null);
+
+  // The poll authenticates AS the configured installation: the lister's own
+  // App mint carries the exact env id in the mint URL.
+  await waitFor(() => mintInstallations.includes("4242"));
+
+  // The enqueued job's payload — read from the durable queue snapshot the
+  // way a restart would — carries the same installation identity. Before the
+  // composition wiring this job minted with installationId "".
+  interface SnapshotJob {
+    readonly platform?: string;
+    readonly repoFullName?: string;
+    readonly prNumber?: number;
+    readonly headSha?: string;
+    readonly installationId?: string;
+  }
+  let reconciled: SnapshotJob | null = null;
+  await waitFor(() => {
+    try {
+      const snapshot = JSON.parse(
+        readFileSync(join(env.PR_REVIEWER_DURABLE_STATE_DIR!, "queue-snapshot.json"), "utf8"),
+      ) as { records?: ReadonlyArray<{ job?: SnapshotJob }> };
+      reconciled =
+        snapshot.records?.find(
+          (record) => record.job?.platform === "github" && record.job?.repoFullName === "owner/name",
+        )?.job ?? null;
+    } catch {
+      return false;
+    }
+    return reconciled !== null;
+  });
+  assert.equal(reconciled!.installationId, "4242");
+  assert.equal(reconciled!.prNumber, 7);
+  assert.equal(reconciled!.headSha, HEAD);
+
+  // Credential-free App deployment: no env-defined forge material anywhere —
+  // the mint-backed broker is the composition's only forge credential source.
+  assert.equal(env.PR_REVIEWER_CREDENTIAL_FORGE_CRED, undefined);
+  assert.equal(env.PR_REVIEWER_CREDENTIAL_GITHUB, undefined);
 });

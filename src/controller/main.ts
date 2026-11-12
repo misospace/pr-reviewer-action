@@ -1394,6 +1394,16 @@ export async function controllerMain(
           if (daemon === null || startup.reconcile === null) return;
           await reconcileRepositories({
             platform: startup.platform,
+            // The poll's installation identity rides the canonical event into
+            // the minted job (#1624): the reconciler authenticates and
+            // list-opens AS the configured App installation, so the job's
+            // late forge-publish resolution must mint for THAT installation.
+            // A poll event minted without it carries `installationId: ""`,
+            // and the minting broker refuses the whole worker credential
+            // set — the exact GitHub self-hosted path this wiring unlocks.
+            ...(startup.githubPollInstallationId !== ""
+              ? { installationId: startup.githubPollInstallationId }
+              : {}),
             listOpenPullRequests: (repo) =>
               composedForge === null
                 ? Promise.resolve({ ok: false as const, error: "no reconcile lister is bound" })
