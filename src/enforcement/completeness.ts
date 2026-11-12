@@ -28,6 +28,7 @@ import {
 import { reconcileRequiredCheckRows, type HeadBoundCiEvidence } from "./required-check-ci.js";
 import { boundedIdListWithTotal, type BoundedIdList } from "../context/id-lists.js";
 import type { NormalizedRequiredCheckDisposition } from "../model/types.js";
+import type { ExecutedCallEvidenceEntry } from "./executed-calls.js";
 
 export type RequiredCheckValidationMode = "warn" | "fail" | "metadata_only";
 
@@ -48,13 +49,14 @@ export interface RequiredCheckValidationResult {
 export function structuredCoverage(
   mustCheck: readonly string[],
   artifact: ReviewArtifact,
+  executedCalls?: readonly ExecutedCallEvidenceEntry[],
 ): RequiredCheckCoverage {
   const emitted = Object.prototype.hasOwnProperty.call(artifact, "required_check_dispositions");
   const raw = artifact.required_check_dispositions;
   const dispositions: NormalizedRequiredCheckDisposition[] | null = emitted && Array.isArray(raw)
     ? (raw as unknown as NormalizedRequiredCheckDisposition[])
     : null;
-  return evaluateRequiredCheckCoverage(mustCheck, dispositions);
+  return evaluateRequiredCheckCoverage(mustCheck, dispositions, executedCalls);
 }
 
 /**
@@ -81,6 +83,9 @@ export function applyRequiredCheckValidation(
     ciEvidence?: HeadBoundCiEvidence | null;
     /** The exact head this review is bound to, for the evidence head match. */
     reviewedHeadSha?: string;
+    /** #1627: the executed-call evidence index (native tool-loop surface).
+     * Optional; absent/empty keeps the fold byte-identical to pre-#1627. */
+    executedCalls?: readonly ExecutedCallEvidenceEntry[];
   },
 ): RequiredCheckValidationResult {
   const enabled = (options.enabled || "auto").trim().toLowerCase();
@@ -100,7 +105,15 @@ export function applyRequiredCheckValidation(
     // #750: the structured disposition contract is authoritative. Key
     // absence is no longer a bridge to the legacy keyword match (module
     // docstring): every check is conservatively unresolved.
-    let coverage = structuredCoverage(mustCheck, artifact);
+    // #1627: the citation gate folds FIRST (inside structuredCoverage — the
+    // executed-call evidence index gates the model's satisfied answers), and
+    // the #1594 CI reconciliation runs on the gated rows: a validated
+    // head-bound green test-execution check still discharges a test-run ask
+    // the gate left unresolved (citations never prove a test-run ask), and a
+    // validated failed one still contradicts a model `satisfied`. With no
+    // evidence nothing runs; with no trace the coverage fold is
+    // byte-identical to pre-#1627.
+    let coverage = structuredCoverage(mustCheck, artifact, options.executedCalls);
     // #1594: trusted head-bound CI evidence reconciles the rows BEFORE any
     // derivation: a validated head-bound green test-execution check
     // discharges a test-run ask; a validated failed one contradicts a

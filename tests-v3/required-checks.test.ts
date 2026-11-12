@@ -332,3 +332,58 @@ test("#1379: missing release notes do not block the delta obligation — compare
   // Complete coverage keeps a strict approve clean (never demoted).
   assert.equal(strictReviewResult("approve", [], "complete"), "clean");
 });
+
+// ---------------------------------------------------------------------------
+// #1627: the #750 side of the evidence citation gate. When the executed-call
+// evidence index is present AND non-empty, a `satisfied` disposition is
+// credited only when its rationale cites an executed successful call id;
+// without an index the fold is byte-identical to pre-#1627.
+// ---------------------------------------------------------------------------
+
+const INDEX = [
+  { id: "call-1", ok: true },
+  { id: "call-2", ok: false },
+  { id: "call-3", ok: true },
+];
+
+test("#1627: a satisfied check with a successful-call citation stays ok; uncited, failed-cited, and phantom-cited become uncited-satisfaction", () => {
+  const checks = ["review path traversal vulnerabilities"];
+  const cases: Array<[string, string, string]> = [
+    ["git_grep found no traversal in the changed resolvers; call-1", "satisfied", "ok"],
+    ["verified by reading the diff carefully — 5/5 checks pass", "unresolved", "uncited-satisfaction"],
+    ["the fetch ran as call-2 and came back clean", "unresolved", "uncited-satisfaction"],
+    ["confirmed via call-99 at head", "unresolved", "uncited-satisfaction"],
+  ];
+  for (const [rationale, status, reason] of cases) {
+    const coverage = evaluateRequiredCheckCoverage(checks, [d(checks[0]!, "satisfied", rationale)], INDEX);
+    assert.equal(coverage.status, status === "satisfied" ? "complete" : "incomplete", rationale);
+    assert.equal(coverage.checks[0]!.status, status, rationale);
+    assert.equal(coverage.checks[0]!.reason, reason, rationale);
+    // The rationale is disclosure, never credit — it is kept verbatim.
+    assert.equal(coverage.checks[0]!.rationale, rationale);
+  }
+});
+
+test("#1627: not_applicable and unmet rows are never citation-gated", () => {
+  const checks = PATH_CHECKS;
+  const coverage = evaluateRequiredCheckCoverage(
+    checks,
+    [
+      d(checks[0]!, "not_applicable", "no path handling in the changed surface"),
+      d(checks[1]!, "unmet", "the null-byte test is absent and the risk surface exists"),
+    ],
+    INDEX,
+  );
+  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["not_applicable", "ok"], ["unmet", "ok"]]);
+  // An unmet row is performed-and-failed — never clean coverage.
+  assert.equal(coverage.status, "incomplete");
+});
+
+test("#1627: without an index (or with an empty one) a bare satisfied still discharges — fresh-call regression", () => {
+  const checks = ["review auth flow for regression"];
+  for (const absent of [undefined, []]) {
+    const coverage = evaluateRequiredCheckCoverage(checks, [d(checks[0]!, "satisfied")], absent as never);
+    assert.equal(coverage.status, "complete");
+    assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
+  }
+});

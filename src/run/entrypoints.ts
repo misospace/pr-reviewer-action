@@ -29,6 +29,7 @@ import { confidenceTelemetryFromArtifact, type ConfidenceTelemetry } from "../co
 import { isHumanReviewRoutingStatus, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { blockingReviewObligations, reviewObligationsFromArtifact } from "../enforcement/review-obligations.js";
 import { structuredCoverage } from "../enforcement/completeness.js";
+import { executedCallEvidenceIndex } from "../enforcement/executed-calls.js";
 import { unresolvedTraceRequirementIds } from "../enforcement/requirement-trace.js";
 import { boundedIdList } from "../context/id-lists.js";
 import { MODEL_UNAVAILABLE_ENGINE } from "../prompt/failure.js";
@@ -564,7 +565,22 @@ function mergeGatingFieldsFromRunDir(env: NodeJS.ProcessEnv): Partial<PublishInp
         const mustCheck = Array.isArray(classification.must_check)
           ? classification.must_check.filter((item): item is string => typeof item === "string")
           : [];
-        const checkCoverage = structuredCoverage(mustCheck, output as never);
+        // #1627 (M2, #1388 parity): the engine folds the citation gate WITH the
+        // executed-call evidence index derived from the enforcement harness
+        // artifact's `tool_calls` trace — the recompute here must fold the
+        // SAME inputs, or a native-loop run's `uncited-satisfaction` rows read
+        // as satisfied on this side and silently drop out of the published
+        // handoff. Same artifact selection as `partialCoverageFromRunDir`
+        // above: the coverage record's `enforcement_harness` name, allowlisted
+        // to the exact filenames `review.ts` writes, and the same strict
+        // parser (`executedCallEvidenceIndex`) the engine folds from.
+        const harnessName = typeof coverageRecord?.enforcement_harness === "string"
+          && ENFORCEMENT_HARNESS_NAMES.has(coverageRecord.enforcement_harness)
+          ? coverageRecord.enforcement_harness
+          : undefined;
+        const harness = harnessName === undefined ? null : readJsonObject(join(runDir, harnessName));
+        const executedCalls = executedCallEvidenceIndex(harness?.tool_calls);
+        const checkCoverage = structuredCoverage(mustCheck, output as never, executedCalls);
         fields.unresolvedRequiredChecks = boundedIdList(
           checkCoverage.checks
             .filter((row) => row.status === "unresolved" || row.status === "unmet")

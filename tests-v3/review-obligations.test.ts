@@ -6,6 +6,7 @@ import {
   blockingReviewObligations,
   candidateRowsToObligations,
   deriveUnresolvedCause,
+  dispositionReceiptFromArtifact,
   extractApprovalPrerequisites,
   foldObligationDispositions,
   mustCheckObligationsEnabled,
@@ -218,6 +219,13 @@ test("unresolved cause precedence is deterministic and a planning failure is not
   // A degraded harness that never executed a request stays tool-capability
   // even when the loop finally stopped on a budget-shaped ceiling.
   assert.equal(deriveUnresolvedCause({ stopReason: "max-rounds", harnessError: null, planningError: null, degraded: true }), "tool-capability");
+  // #1627: the obligations-settled early stop is a NORMAL verdict-producing
+  // completion — never a budget or provider failure. A row that still folds
+  // unresolved under it was never established as evidence; the cause says
+  // the source evidence is missing and the row's own #1627 reason receipt
+  // carries the specific why.
+  assert.equal(deriveUnresolvedCause({ stopReason: "obligations-settled", harnessError: null, planningError: null, degraded: false }), "missing-source-evidence");
+  assert.equal(deriveUnresolvedCause({ stopReason: "obligations-settled", harnessError: null, planningError: null, degraded: true }), "tool-capability");
 });
 
 test("#1505: unresolved required-evidence rows are coverage (no block, approval withheld); unmet rows force changes — either source", () => {
@@ -700,8 +708,409 @@ test("#1537: reviewObligationsFromArtifact refuses anything this runtime did not
     { ...base, rationale: "half-trusted" },
     { ...base, id: "" },
     { ...base, anchors: [1] },
+    // #1627: a present reason must be in the closed vocabulary.
+    { ...base, reason: "because-i-said-so" },
+    { ...base, reason: 7 },
     null,
   ]) {
     assert.equal(reviewObligationsFromArtifact({ version: 1, obligations: [base, row] }), null);
   }
+});
+
+// ---------------------------------------------------------------------------
+// #1627: content-free per-row reason receipts for required-check disposition
+// rejection — every unresolved fold path carries one, and the artifact
+// round-trips it (backward compatible with reason-less rows).
+// ---------------------------------------------------------------------------
+
+const reasonRows = candidateRowsToObligations([{ id: "obligation-1", source: "must_check", text: "check one" }], []);
+
+test("#1627: every unresolved fold path carries its content-free reason", () => {
+  // No structured answer at all vs. no matching answer for this identity.
+  assert.deepEqual(foldObligationDispositions(reasonRows, null).map((item) => item.reason), ["no-structured-dispositions"]);
+  assert.deepEqual(foldObligationDispositions(reasonRows, [{ check: "another check", status: "satisfied" }]).map((item) => item.reason), ["no-disposition"]);
+  // Duplicate answers under one alias, and a status disagreement across
+  // aliases, are both conflicting-dispositions.
+  const guidance = candidateRowsToObligations([{ id: "obligation-1", source: "trusted_base_guidance", text: "check one" }], []);
+  assert.deepEqual(foldObligationDispositions(guidance, [
+    { check: "check one", status: "satisfied", rationale: "r" }, { check: " check ONE ", status: "satisfied", rationale: "r again" },
+  ]).map((item) => item.reason), ["conflicting-dispositions"]);
+  assert.deepEqual(foldObligationDispositions(guidance, [
+    { check: "obligation-1", status: "satisfied", rationale: "r" }, { check: "check one", status: "unresolved" },
+  ]).map((item) => item.reason), ["conflicting-dispositions"]);
+  // An attributable but unusable answer (the parser's `status: "invalid"`
+  // marker — e.g. an unknown prose alias) is malformed.
+  assert.deepEqual(foldObligationDispositions(reasonRows, [{ check: "check one", status: "invalid" }]).map((item) => item.reason), ["malformed-disposition"]);
+  // A literal `unresolved` answer is a well-formed non-discharge.
+  assert.deepEqual(foldObligationDispositions(reasonRows, [{ check: "check one", status: "unresolved" }]).map((item) => item.reason), ["unresolved-disposition"]);
+  // Rationale-required shapes without one: unmet, not_applicable, and a
+  // trusted_base_guidance bare satisfied.
+  assert.deepEqual(foldObligationDispositions(reasonRows, [{ check: "check one", status: "unmet", rationale: "   " }]).map((item) => item.reason), ["missing-rationale"]);
+  assert.deepEqual(foldObligationDispositions(reasonRows, [{ check: "check one", status: "not_applicable" }]).map((item) => item.reason), ["missing-rationale"]);
+  const guidanceBare = candidateRowsToObligations([{ id: "obligation-1", source: "trusted_base_guidance", text: "check one" }], []);
+  assert.deepEqual(foldObligationDispositions(guidanceBare, [{ check: "check one", status: "satisfied" }]).map((item) => item.reason), ["missing-rationale"]);
+});
+
+test("#1627: derived-row unresolved paths are ungrounded-derived; the coverage marker restates derivation-incomplete", () => {
+  const derived: ReviewObligation[] = [{ id: "derived-1", source: "derived", text: "check one", status: "unresolved", cause: null, anchors: ["src/ingress/reconcile.ts:mintFoundJob"] }];
+  // not_applicable is not a state a derived row has: ungrounded.
+  assert.deepEqual(foldObligationDispositions(derived, [{ check: "check one", status: "not_applicable", rationale: "n/a" }]).map((item) => item.reason), ["ungrounded-derived"]);
+  // A malformed answer on a derived row is malformed-disposition (the
+  // answer is unusable, not merely ungrounded).
+  assert.deepEqual(foldObligationDispositions(derived, [{ check: "check one", status: "invalid" }]).map((item) => item.reason), ["malformed-disposition"]);
+  // A satisfied answer with no rationale, failure-asserting prose, and an
+  // ungrounded rationale are all ungrounded-derived.
+  assert.deepEqual(foldObligationDispositions(derived, [{ check: "check one", status: "satisfied" }]).map((item) => item.reason), ["ungrounded-derived"]);
+  assert.deepEqual(foldObligationDispositions(derived, [{ check: "check one", status: "satisfied", rationale: "the mint site fails to place the identity" }]).map((item) => item.reason), ["ungrounded-derived"]);
+  assert.deepEqual(foldObligationDispositions(derived, [{ check: "check one", status: "satisfied", rationale: "the daemon passes the identity along" }]).map((item) => item.reason), ["ungrounded-derived"]);
+  // The grounded answer resolves with reason ok.
+  assert.deepEqual(foldObligationDispositions(derived, [{ check: "check one", status: "satisfied", rationale: "src/ingress/reconcile.ts:mintFoundJob places forgeIntegration before hashing" }]).map((item) => [item.status, item.reason]), [["satisfied", "ok"]]);
+  // The pre-caused synthetic coverage marker keeps its cause and restates
+  // it as the reason — on every path, including no structured dispositions.
+  const marker: ReviewObligation = { id: "derived-coverage", source: "derived", text: "coverage unavailable", status: "unresolved", cause: "derivation-incomplete" };
+  assert.deepEqual(foldObligationDispositions([marker], null).map((item) => [item.status, item.cause, item.reason]), [["unresolved", "derivation-incomplete", "derivation-incomplete"]]);
+  assert.deepEqual(foldObligationDispositions([marker], [{ check: "check one", status: "satisfied", rationale: "r" }]).map((item) => [item.status, item.cause, item.reason]), [["unresolved", "derivation-incomplete", "derivation-incomplete"]]);
+});
+
+test("#1627: resolved rows carry reason ok", () => {
+  // A bare satisfied discharges a must_check row (#750 parity).
+  assert.deepEqual(foldObligationDispositions(reasonRows, [{ check: "check one", status: "satisfied" }]).map((item) => [item.status, item.reason]), [["satisfied", "ok"]]);
+  assert.deepEqual(foldObligationDispositions(reasonRows, [{ check: "check one", status: "not_applicable", rationale: "no config in diff" }]).map((item) => [item.status, item.reason]), [["satisfied", "ok"]]);
+  assert.deepEqual(foldObligationDispositions(reasonRows, [{ check: "check one", status: "unmet", rationale: "checked; the requirement does not hold" }]).map((item) => [item.status, item.reason]), [["unmet", "ok"]]);
+});
+
+test("#1627: the artifact writer records reasons and the strict reader round-trips them — and accepts reason-less rows", () => {
+  const rows: ReviewObligation[] = [
+    { id: "mc-1", source: "must_check", text: "Verify the auth path", status: "unresolved", cause: "tool-capability", reason: "no-disposition" },
+    { id: "mc-2", source: "must_check", text: "Discharged", status: "satisfied", cause: null, reason: "ok" },
+    { id: "tb-1", source: "trusted_base_guidance", text: "Confirm the plan", status: "unresolved", cause: null, reason: "missing-rationale" },
+    { id: "dv-1", source: "derived", text: "Cross-path", status: "unresolved", cause: "derivation-incomplete", reason: "derivation-incomplete" },
+  ];
+  assert.deepEqual(reviewObligationsFromArtifact(JSON.parse(JSON.stringify(reviewObligationsToArtifact(rows)))), rows);
+  // Backward compatible: an artifact written before #1627 — no reason keys
+  // — reads back exactly as before, absent reasons and all.
+  const legacy = {
+    version: 1,
+    obligations: [
+      { id: "mc-1", source: "must_check", text: "t", status: "unresolved", cause: null },
+      { id: "dv-1", source: "derived", text: "t", status: "unresolved", cause: "derivation-incomplete", anchors: ["src/a.ts:1"] },
+    ],
+  };
+  assert.deepEqual(reviewObligationsFromArtifact(legacy), legacy.obligations.map((row) => ({ ...row })));
+});
+
+test("#1627: the fold artifact carries the parser drop receipt; the reader parses it fail-closed", () => {
+  // Nothing dropped, nothing truncated: no key at all.
+  const clean = reviewObligationsToArtifact(reasonRows);
+  assert.equal("required_check_disposition_receipt" in clean, false);
+  // Drops ride the fold artifact content-free, at artifact level — never
+  // as per-row reasons (a drop is unattributable by definition).
+  const withDrops = reviewObligationsToArtifact(reasonRows, {
+    dropped: [{ reason: "non-object-entry" }, { reason: "unattributable-check" }, { reason: "unattributable-check" }],
+    capReached: true,
+  });
+  assert.deepEqual(withDrops.required_check_disposition_receipt, {
+    dropped: [{ reason: "non-object-entry" }, { reason: "unattributable-check" }, { reason: "unattributable-check" }],
+    cap_reached: true,
+  });
+  assert.deepEqual(dispositionReceiptFromArtifact(withDrops.required_check_disposition_receipt), {
+    dropped: [{ reason: "non-object-entry" }, { reason: "unattributable-check" }, { reason: "unattributable-check" }],
+    capReached: true,
+  });
+  // Anything this runtime did not write reads as absent — never a guess.
+  for (const bad of [
+    null,
+    "junk",
+    { dropped: "junk", cap_reached: false },
+    { dropped: [], cap_reached: "yes" },
+    { dropped: [{ reason: "because-i-said-so" }], cap_reached: false },
+    { dropped: [null], cap_reached: false },
+    { dropped: [{ reason: "non-object-entry" }, "junk"], cap_reached: false },
+  ]) {
+    assert.equal(dispositionReceiptFromArtifact(bad), null, JSON.stringify(bad));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #1627: the evidence citation gate — when the run executed tool calls, a
+// must_check `satisfied` discharges only by citing an executed successful
+// call id from the proof index; both folds agree on the rule.
+// ---------------------------------------------------------------------------
+
+import { executedCallEvidenceIndex, MAX_EXECUTED_CALL_INDEX, rationaleCitesSuccessfulCall, type ExecutedCallEvidenceEntry } from "../src/enforcement/executed-calls.js";
+
+/** The #1623-shaped surface: 5 must_check obligations, an executed-call
+ * index where only some rows have relevant successful calls, and a verdict
+ * whose PROSE claims "5/5 verified" (prose is never read as credit — only
+ * the structured dispositions' citations are). */
+function citationFixture() {
+  const texts = [
+    "check for breaking API changes in updated dependencies",
+    "run full test suite after upgrade",
+    "establish upstream provenance for the updated dependency: publisher and canonical source repository",
+    "inspect the exact old→new upstream release delta for the updated dependency",
+    "check upstream security advisories for the updated dependency version range, or report the advisory check as not performed",
+  ];
+  const obligations = candidateRowsToObligations([], texts);
+  // call-1 ok, call-2 FAILED, call-3 ok — the shape that separates a cited
+  // successful call from a cited failure and from a fabricated id.
+  const executedCalls = [
+    { id: "call-1", ok: true },
+    { id: "call-2", ok: false },
+    { id: "call-3", ok: true },
+  ];
+  return { texts, obligations, executedCalls };
+}
+
+test("#1627: the #1623-shaped negative — uncited, failed-cited, and phantom-cited satisfactions stay unresolved in BOTH folds, and prose claims never credit", () => {
+  const { texts, obligations, executedCalls } = citationFixture();
+  const dispositions = [
+    // (a) satisfied + cited to a SUCCESSFUL call → discharges.
+    { check: texts[0]!, status: "satisfied", rationale: "git_grep over the lockfile diff found no breaking change; see call-1" },
+    // (b) satisfied with prose-only credit ("5/5 verified") and NO citation.
+    { check: texts[1]!, status: "satisfied", rationale: "I read the changes carefully — 5/5 checks verified with evidence." },
+    // (c) satisfied citing a FAILED call.
+    { check: texts[2]!, status: "satisfied", rationale: "the provenance fetch ran as call-2 and confirmed the publisher" },
+    // (d) satisfied citing a NONEXISTENT call id.
+    { check: texts[3]!, status: "satisfied", rationale: "the delta was inspected as call-99" },
+    // (e) no disposition at all.
+  ];
+  const folded = foldObligationDispositions(obligations, dispositions, executedCalls);
+  assert.deepEqual(folded.map((row) => [row.status, row.reason]), [
+    ["satisfied", "ok"],
+    ["unresolved", "uncited-satisfaction"],
+    ["unresolved", "uncited-satisfaction"],
+    ["unresolved", "uncited-satisfaction"],
+    ["unresolved", "no-disposition"],
+  ]);
+  assert.deepEqual(unresolvedReviewObligations(folded), ["obligation-2", "obligation-3", "obligation-4", "obligation-5"]);
+  // #750 parity: the completeness fold, given the SAME inputs and index,
+  // reports the same set — complete only for the cited row.
+  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, executedCalls);
+  assert.equal(coverage.status, "incomplete");
+  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [
+    ["satisfied", "ok"],
+    ["unresolved", "uncited-satisfaction"],
+    ["unresolved", "uncited-satisfaction"],
+    ["unresolved", "uncited-satisfaction"],
+    ["unresolved", "no-disposition"],
+  ]);
+  // The verdict's prose claim ("5/5 verified") is never read as credit: the
+  // fold consumed only the structured dispositions above, and the native
+  // approval is withheld (partial) with the unresolved rows riding.
+  const artifact = base({
+    verdict: "approve",
+    review_markdown: "Recommendation: Approve\n5/5 verified with evidence — all checks pass.",
+    findings: [],
+  });
+  const enforced = applyAllEnforcement(artifact, {
+    evidenceBlockerEnabled: false,
+    toolFailureEnabled: false,
+    toolMinSuccessful: 0,
+    evidence: null,
+    toolHarness: null,
+    threads: null,
+    humanReviews: null,
+    verdictPolicy: "strict",
+    reviewObligations: folded,
+  } satisfies EnforcementInputs);
+  assert.equal(enforced, 0, "unresolved rows are coverage, never a manufactured block");
+  assert.equal(artifact.verdict, "approve");
+  assert.equal(
+    markerReviewResult({
+      verdictPolicy: "strict",
+      verdict: "approve",
+      findings: [],
+      requiredChecks: "incomplete",
+      requiredEvidenceState: "unresolved",
+    }),
+    "partial",
+    "native approval withheld",
+  );
+});
+
+test("#1627: the paired positive — cited satisfactions discharge in both folds and the strict policy approves natively", () => {
+  const { texts, obligations } = citationFixture();
+  const executedCalls = [
+    { id: "call-1", ok: true },
+    { id: "call-2", ok: true },
+    { id: "call-3", ok: true },
+    { id: "call-4", ok: true },
+    { id: "call-5", ok: true },
+  ];
+  const dispositions = texts.map((text, index) => ({
+    check: text,
+    status: "satisfied",
+    rationale: `verified against the repository state at head — call-${index + 1}`,
+  }));
+  const folded = foldObligationDispositions(obligations, dispositions, executedCalls);
+  assert.deepEqual(folded.map((row) => [row.status, row.reason]), Array.from({ length: 5 }, () => ["satisfied", "ok"]));
+  assert.deepEqual(unresolvedReviewObligations(folded), []);
+  // #750 completeness agrees on the same inputs and index.
+  const coverage = evaluateRequiredCheckCoverage(texts, dispositions as never, executedCalls);
+  assert.equal(coverage.status, "complete");
+  assert.ok(coverage.checks.every((row) => row.reason === "ok" && row.status === "satisfied"));
+  // Native eligibility affirmative: the strict mapping keeps the model's
+  // approve and the marker reads clean (no abstention), with no second
+  // model call in the path — this is the existing in-conversation verdict
+  // surface; only the deterministic folds and the policy run here.
+  const artifact = base({ verdict: "approve", review_markdown: "Recommendation: Approve\nAll required checks verified.", findings: [] });
+  const outcome = applyStrictVerdictPolicy(artifact, { modelVerdict: "approve", forced: false, unmetReviewObligations: [] });
+  assert.equal(outcome.verdict, "approve");
+  assert.equal(outcome.source, "model");
+  assert.equal(
+    markerReviewResult({
+      verdictPolicy: "strict",
+      verdict: "approve",
+      findings: [],
+      requiredChecks: "complete",
+      requiredEvidenceState: "complete",
+    }),
+    "clean",
+  );
+});
+
+test("#1627: only successful executed calls are citable — the citation matcher is word-bounded and content-free", () => {
+  const index = [
+    { id: "call-1", ok: true },
+    { id: "call-10", ok: true },
+    { id: "call-3", ok: false },
+  ];
+  assert.equal(rationaleCitesSuccessfulCall("checked via call-1", index), true);
+  assert.equal(rationaleCitesSuccessfulCall("checked via `call-10` at head", index), true);
+  // call-1 must not match inside call-10, and prose half-echoes fail.
+  assert.equal(rationaleCitesSuccessfulCall("checked via call-10 details", index), true);
+  assert.equal(rationaleCitesSuccessfulCall("checked via call-1 after the fix", index), true);
+  assert.equal(rationaleCitesSuccessfulCall("the failed call-3 attempt shows it", index), false, "a FAILED call is never citable");
+  assert.equal(rationaleCitesSuccessfulCall("call-99 and call-0 are fabricated", index), false);
+  assert.equal(rationaleCitesSuccessfulCall("xcall-1 call-1x", index), false, "word-bounded tokens only");
+  assert.equal(rationaleCitesSuccessfulCall("", index), false);
+});
+
+test("#1627 (m1): the index parser TRUNCATES an over-cap trace to the first MAX_EXECUTED_CALL_INDEX entries — the bounded prefix keeps its 1-based positional alignment and the gate stays live", () => {
+  const trace = Array.from({ length: MAX_EXECUTED_CALL_INDEX + 25 }, (_, position) => ({
+    tool: "read_file",
+    args: {},
+    status: position % 2 === 0 ? "ok" : "error",
+  }));
+  const index = executedCallEvidenceIndex(trace);
+  // Not the old whole-index refusal (fail-open gate): the prefix survives.
+  assert.equal(index.length, MAX_EXECUTED_CALL_INDEX);
+  assert.equal(index[0]!.id, "call-1");
+  assert.equal(index[0]!.ok, true);
+  assert.equal(index[MAX_EXECUTED_CALL_INDEX - 1]!.id, `call-${MAX_EXECUTED_CALL_INDEX}`);
+  assert.equal(index[MAX_EXECUTED_CALL_INDEX - 1]!.ok, false, "positional statuses are preserved exactly");
+  // A malformed entry inside the bounded prefix still refuses the WHOLE
+  // index — the strict no-half-trusted-ids rule is unchanged; only the cap
+  // refusal became a truncation (entries past the cap were never renderable
+  // by the corpus section, which shares the same bound).
+  const malformed = Array.from({ length: MAX_EXECUTED_CALL_INDEX + 25 }, () => ({ tool: "read_file", args: {}, status: "ok" }));
+  malformed[3] = "forged" as never;
+  assert.deepEqual(executedCallEvidenceIndex(malformed), []);
+});
+
+test("#1627: not_applicable and unmet are never citation-gated; guidance and derived rows keep their rules; the gate is inert without an index", () => {
+  const executedCalls = [{ id: "call-1", ok: true }];
+  const rows = candidateRowsToObligations([
+    { id: "obligation-1", source: "must_check", text: "check one" },
+    { id: "obligation-2", source: "trusted_base_guidance", text: "Before approval, verify the matrix." },
+  ], []);
+  // not_applicable and unmet are applicability/negative answers, not
+  // positive evidence claims — they fold exactly as before WITH an index.
+  const na = foldObligationDispositions(
+    candidateRowsToObligations([], ["check one"]),
+    [{ check: "check one", status: "not_applicable", rationale: "no config in diff" }],
+    executedCalls,
+  );
+  assert.deepEqual(na.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
+  const unmet = foldObligationDispositions(
+    candidateRowsToObligations([], ["check one"]),
+    [{ check: "check one", status: "unmet", rationale: "the check was performed and the requirement is absent" }],
+    executedCalls,
+  );
+  assert.deepEqual(unmet.map((row) => [row.status, row.reason]), [["unmet", "ok"]]);
+  // trusted_base_guidance keeps its own rule (non-empty rationale, no
+  // citation demand).
+  const guidance = foldObligationDispositions(
+    [rows[1]!],
+    [{ check: "obligation-2", status: "satisfied", rationale: "matrix read at head" }],
+    executedCalls,
+  );
+  assert.deepEqual(guidance.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
+  // derived rows keep the anchor rule (a location, not a call id).
+  const derived: ReviewObligation[] = [{ id: "derived-1", source: "derived", text: "check one", status: "unresolved", cause: null, anchors: ["src/ingress/reconcile.ts:mintFoundJob"] }];
+  const derivedFold = foldObligationDispositions(
+    derived,
+    [{ check: "derived-1", status: "satisfied", rationale: "src/ingress/reconcile.ts:mintFoundJob places the identity before hashing" }],
+    executedCalls,
+  );
+  assert.deepEqual(derivedFold.map((row) => [row.status, row.reason]), [["satisfied", "ok"]]);
+  // The #750 fold agrees on the ungated statuses too.
+  const coverage = evaluateRequiredCheckCoverage(
+    ["check one"],
+    [{ check: "check one", status: "not_applicable", rationale: "no config in diff" }] as never,
+    executedCalls,
+  );
+  assert.equal(coverage.checks[0]!.reason, "ok");
+
+  // Fresh-call path regression: WITHOUT an index (undefined or empty), a
+  // bare satisfied still discharges — byte-identical to pre-#1627.
+  for (const absent of [undefined, [] as ExecutedCallEvidenceEntry[]]) {
+    const bare = foldObligationDispositions(
+      candidateRowsToObligations([], ["check one"]),
+      [{ check: "check one", status: "satisfied" }],
+      absent,
+    );
+    assert.deepEqual(bare.map((row) => [row.status, row.reason]), [["satisfied", "ok"]], JSON.stringify(absent));
+    const bareCoverage = evaluateRequiredCheckCoverage(
+      ["check one"],
+      [{ check: "check one", status: "satisfied", rationale: null }] as never,
+      absent,
+    );
+    assert.equal(bareCoverage.status, "complete");
+    assert.equal(bareCoverage.checks[0]!.reason, "ok");
+  }
+});
+
+test("#1627: the gate does not disturb the P1 rejection variants — missing entry, malformed status, duplicates, wrong-text echo", () => {
+  const { texts, obligations, executedCalls } = citationFixture();
+  const first = texts[0]!;
+  // Missing entry: everything undisposed.
+  assert.deepEqual(
+    foldObligationDispositions(obligations, [], executedCalls).map((row) => [row.status, row.reason]),
+    Array.from({ length: 5 }, () => ["unresolved", "no-disposition"]),
+  );
+  // Malformed status.
+  assert.deepEqual(
+    foldObligationDispositions(candidateRowsToObligations([], [first]), [{ check: first, status: "invalid" }], executedCalls).map((row) => [row.status, row.reason]),
+    [["unresolved", "malformed-disposition"]],
+  );
+  // Duplicate answers under one alias.
+  assert.deepEqual(
+    foldObligationDispositions(
+      candidateRowsToObligations([{ id: "obligation-1", source: "trusted_base_guidance", text: first }], []),
+      [
+        { check: first, status: "satisfied", rationale: "call-1" },
+        { check: first, status: "satisfied", rationale: "call-1 again" },
+      ],
+      executedCalls,
+    ).map((row) => [row.status, row.reason]),
+    [["unresolved", "conflicting-dispositions"]],
+  );
+  // Wrong-text echo matches no row.
+  assert.deepEqual(
+    foldObligationDispositions(candidateRowsToObligations([], [first]), [{ check: "a different check entirely", status: "satisfied", rationale: "call-1" }], executedCalls).map((row) => [row.status, row.reason]),
+    [["unresolved", "no-disposition"]],
+  );
+  // The #750 fold reports the same shapes on the same inputs.
+  const coverage = evaluateRequiredCheckCoverage(
+    [first],
+    [
+      { check: first, status: "invalid", rationale: null },
+      { check: first, status: "satisfied", rationale: "call-1" },
+      { check: first, status: "satisfied", rationale: "call-1 again" },
+    ] as never,
+    executedCalls,
+  );
+  assert.deepEqual(coverage.checks.map((row) => [row.status, row.reason]), [["unresolved", "duplicate-dispositions"]]);
 });

@@ -257,7 +257,7 @@ test("#1506: a call that discharges the requirement evidence credits the row and
   assert.equal(run.budget.required_evidence_refusals, 0);
 });
 
-test("#1506: once the trace row is discharged the remaining budget is available to normal exploration", async () => {
+test("#1506/#1627: once the trace row is discharged the loop stops settled — the remaining budget is not explored", async () => {
   const { root, deps } = workspace();
   writeCorpus(root);
   const rows = REQUIREMENTS.slice(0, 1);
@@ -273,11 +273,15 @@ test("#1506: once the trace row is discharged the remaining budget is available 
       args: { path: turn === 1 ? rows[0]!.path : `docs/claims-${turn - 1}.md` },
     }),
   });
-  // Every call ran: the release opened the window for the rest of the budget.
-  assert.deepEqual(run.calls.map((call) => call.tool), ["read_file", "read_file", "read_file"]);
-  assert.equal(run.result.executed_request_count, 3);
+  // #1627: the discharging read settles the obligation surface, so the loop
+  // ends there — the rounds the released window used to leave open for
+  // optional exploration are not spent anymore.
+  assert.deepEqual(run.calls.map((call) => call.tool), ["read_file"]);
+  assert.equal(run.result.executed_request_count, 1);
+  assert.equal(run.result.stop_reason, "obligations-settled");
   assert.equal(run.budget.required_evidence_refusals, 0);
   assert.equal(run.budget.required_evidence_released, true);
+  assert.equal(run.budget.required_evidence_settled_stop, true);
 });
 
 test("#1519 (review): a runtime row discharges only on its evidence CATEGORIES — enforcement read, then a TEST read", async () => {
@@ -551,27 +555,28 @@ test("#1506: the requirement evidence is gathered before the claims exploration 
   );
   const run = await runHarness(root, deps, {
     env: { TOOL_MAX_REQUESTS: "24" },
-    turns: 11,
-    call: (turn) => (turn <= REQUIREMENTS.length
-      ? { name: "read_file", args: { path: REQUIREMENTS[turn - 1]!.path } }
-      : { name: "read_file", args: { path: "docs/claims-audit.md" } }),
+    turns: 1,
+    call: (turn) => ({ name: "read_file", args: { path: REQUIREMENTS[turn - 1]!.path } }),
   });
-  // The first verdict was reached with the requirement evidence in hand.
+  // The verdict was reached with the requirement evidence in hand — and the
+  // #1627 settled stop ended the loop the round the surface settled. (The
+  // rows share the requirement files' path vocabulary, so the first
+  // requirement read credits every row — the pre-#1627 loop kept exploring
+  // the remaining rounds on optional claims reads anyway; those rounds are
+  // exactly the spend the settled stop removes.)
   assert.equal(run.result.native_loop_verdict_produced, true);
   assert.equal(run.budget.required_evidence_requests_hint, 10);
   // Every in-scope code-verifiable row was credited — including the eight the
   // pull request never claimed.
   assert.deepEqual(run.budget.required_evidence_credits, REQUIREMENTS.map((row) => `trace:${row.id}`));
   assert.equal(run.budget.required_evidence_released, true);
+  assert.equal(run.budget.required_evidence_settled_stop, true);
   assert.equal(run.budget.required_evidence_refusals, 0);
-  // The evidence calls came first, the claims exploration after them.
-  assert.deepEqual(
-    run.calls.slice(0, REQUIREMENTS.length).map((call) => call.tool),
-    REQUIREMENTS.map(() => "read_file"),
-  );
-  assert.equal(run.calls.length, REQUIREMENTS.length + 1);
+  // The evidence call came first; the loop then stopped settled instead of
+  // spending the released budget on optional exploration.
+  assert.deepEqual(run.calls.map((call) => call.tool), ["read_file"]);
   // The run did not have to exhaust the budget to discover the missing rows.
-  assert.equal(run.result.executed_request_count, REQUIREMENTS.length + 1);
+  assert.equal(run.result.executed_request_count, 1);
   assert.equal(run.result.tool_request_budget, 24);
   assert.notEqual(run.result.stop_reason, "tool-call-budget-exhausted");
 });

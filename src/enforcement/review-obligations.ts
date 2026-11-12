@@ -68,12 +68,54 @@
  * standalone guard for direct callers.
  */
 import type { ReviewArtifact } from "./artifact.js";
+import type { RequiredCheckDispositionReceipt } from "../model/types.js";
 import { forceRequestChanges } from "./enforce.js";
 import { fenceDelimiterFor } from "../context/fence.js";
 import { anchorCoveredBy, namesPathLikeToken, rationaleAssertsFailure } from "./derived-obligations.js";
 import { corpusDiffCoveredFiles, readPathsFromToolLog } from "../tools/coverage.js";
+import { rationaleCitesSuccessfulCall, type ExecutedCallEvidenceEntry } from "./executed-calls.js";
 
 export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "derived" | "risk";
+
+/**
+ * #1627: content-free per-row rejection reason — WHY a row ended in the
+ * status it carries. Kebab-case, mirroring the #750 reason vocabulary in
+ * `required-checks.ts`:
+ * - `ok` — the row RESOLVED (satisfied/unmet); no rejection happened.
+ * - `no-structured-dispositions` — the verdict carried no structured
+ *   dispositions at all (null), so nothing could fold.
+ * - `no-disposition` — the disposition pool was empty for this row's
+ *   identity (the model never answered, or echoed text that matches no
+ *   row); deliberately content-free across both cases.
+ * - `conflicting-dispositions` — duplicate answers under one alias, or a
+ *   status disagreement across aliases.
+ * - `malformed-disposition` — the matched answer carried `status: "invalid"`.
+ * - `missing-rationale` — the answer's status needed a usable rationale
+ *   and had none.
+ * - `ungrounded-derived` — a derived row's answer was not evidence that
+ *   reaches the derivation's declared location.
+ * - `derivation-incomplete` — the synthetic coverage marker: the reason
+ *   restates the row's own pre-set cause.
+ * - `unresolved-disposition` — the model answered, with the literal status
+ *   `unresolved` (a well-formed answer that is not a discharge; #750's
+ *   completeness fold records the same shape as reason `ok`).
+ * - `uncited-satisfaction` — #1627: the model answered `satisfied` for a
+ *   must_check row while the run executed tool calls, but the rationale
+ *   cites no executed successful call id from the proof index (see
+ *   `src/enforcement/executed-calls.ts`); #750's completeness fold records
+ *   the same shape under the same reason.
+ */
+export type ReviewObligationReason =
+  | "ok"
+  | "no-structured-dispositions"
+  | "no-disposition"
+  | "conflicting-dispositions"
+  | "malformed-disposition"
+  | "missing-rationale"
+  | "ungrounded-derived"
+  | "derivation-incomplete"
+  | "unresolved-disposition"
+  | "uncited-satisfaction";
 
 export interface ReviewObligation {
   id: string;
@@ -81,6 +123,14 @@ export interface ReviewObligation {
   text: string;
   status: "satisfied" | "unmet" | "unresolved";
   cause: "tool-capability" | "budget-exhausted" | "provider-failure" | "missing-source-evidence" | "derivation-incomplete" | "scan-incomplete" | null;
+  /**
+   * #1627: the content-free rejection reason above. Always set on a FOLDED
+   * row (the fold assigns it on every return path); optional on the type
+   * because a pre-fold row and an artifact written before #1627 may not
+   * carry one — the strict reader accepts both shapes. Never model text:
+   * a closed vocabulary, one word per row.
+   */
+  reason?: ReviewObligationReason;
   /** #1449: the derivation's declared locations for a `derived` row. A
    * derived obligation may only be discharged by a rationale that names one
    * of them — the evidence must reach the location the derivation flagged.
@@ -341,7 +391,9 @@ function candidateToObligation(row: unknown): ReviewObligation | null {
   const text = typeof record.text === "string" ? record.text : null;
   const id = typeof record.id === "string" ? record.id : null;
   if (source === null || text === null || !text.trim() || id === null || !id.trim()) return null;
-  return { id, source, text: text.trim(), status: "unresolved", cause: null };
+  // #1627: a pre-fold row has no matched disposition yet — the same state
+  // the fold's `no-disposition` path describes, and the fold overwrites it.
+  return { id, source, text: text.trim(), status: "unresolved", cause: null, reason: "no-disposition" };
 }
 
 /**
@@ -364,7 +416,7 @@ export function candidateRowsToObligations(
   if (obligations.length === 0) {
     for (const text of mustCheck) {
       if (typeof text !== "string" || !text.trim()) continue;
-      obligations.push({ id: `obligation-${obligations.length + 1}`, source: "must_check", text: text.trim(), status: "unresolved", cause: null });
+      obligations.push({ id: `obligation-${obligations.length + 1}`, source: "must_check", text: text.trim(), status: "unresolved", cause: null, reason: "no-disposition" });
     }
   }
   return obligations;
@@ -468,6 +520,7 @@ export function riskEvidenceReadPaths(input: {
 export function foldObligationDispositions(
   obligations: readonly ReviewObligation[],
   dispositions: ReadonlyArray<{ check: string; status: string; rationale?: string | null }> | null,
+  executedCalls?: readonly ExecutedCallEvidenceEntry[],
   evidence?: RiskEvidenceReceipt,
 ): ReviewObligation[] {
   return obligations.map((obligation) => {
@@ -500,11 +553,26 @@ export function foldObligationDispositions(
     // and the fold must not erase it. #1577: same for the risk scan's
     // `scan-incomplete` marker.
     const unresolvedCause = obligation.cause ?? null;
-    if (pool.length === 0) return { ...obligation, status: "unresolved", cause: unresolvedCause };
+    // #1627: the pre-caused derived coverage marker restates its own cause
+    // as its rejection reason on EVERY unresolved path — no disposition can
+    // discharge it, so `no-disposition` would misread it as an unanswered
+    // question.
+    const noDispositionReason: ReviewObligationReason =
+      unresolvedCause === "derivation-incomplete" ? "derivation-incomplete" : "no-disposition";
+    if (pool.length === 0) {
+      // #1627: no structured answer at all is a different state from "this
+      // row's identity never matched" — both fail closed, but the receipt
+      // says which one happened. The pre-caused coverage marker restates
+      // its own cause either way.
+      const reason: ReviewObligationReason = dispositions === null
+        ? (unresolvedCause === "derivation-incomplete" ? "derivation-incomplete" : "no-structured-dispositions")
+        : noDispositionReason;
+      return { ...obligation, status: "unresolved", cause: unresolvedCause, reason };
+    }
     const idMatches = pool.filter((entry) => normalized(entry.check) === idAlias);
     const textMatches = pool.filter((entry) => normalized(entry.check) === textAlias);
-    if (idMatches.length > 1 || textMatches.length > 1) return { ...obligation, status: "unresolved", cause: unresolvedCause };
-    if (new Set(pool.map((entry) => entry.status)).size > 1) return { ...obligation, status: "unresolved", cause: unresolvedCause };
+    if (idMatches.length > 1 || textMatches.length > 1) return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "conflicting-dispositions" };
+    if (new Set(pool.map((entry) => entry.status)).size > 1) return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "conflicting-dispositions" };
     const status = pool[0]!.status;
     const rationale = pool
       .map((entry) => (typeof entry.rationale === "string" ? entry.rationale!.trim() : ""))
@@ -518,7 +586,9 @@ export function foldObligationDispositions(
     // check failed" row and contradict the published prose). #1577: the
     // risk scan's coverage marker behaves identically.
     if (obligation.cause === "derivation-incomplete" || obligation.cause === "scan-incomplete") {
-      return { ...obligation, status: "unresolved", cause: unresolvedCause };
+      return obligation.cause === "derivation-incomplete"
+        ? { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "derivation-incomplete" }
+        : { ...obligation, status: "unresolved", cause: unresolvedCause };
     }
     // A confirmed negative (#1381): `unmet` with a usable rationale resolves
     // the row negatively — the check was performed and the requirement is
@@ -526,7 +596,9 @@ export function foldObligationDispositions(
     // hard-force gate still fires; without a usable rationale the answer is
     // unusable and the row stays conservatively unresolved.
     if (status === "unmet") {
-      return rationale !== "" ? { ...obligation, status: "unmet", cause: unresolvedCause } : { ...obligation, status: "unresolved", cause: unresolvedCause };
+      return rationale !== ""
+        ? { ...obligation, status: "unmet", cause: unresolvedCause, reason: "ok" }
+        : { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "missing-rationale" };
     }
     // #1449: a derived row is a VERIFICATION TARGET the reviewer was
     // equipped to discharge, and it may only be discharged by evidence that
@@ -547,13 +619,22 @@ export function foldObligationDispositions(
     // receipt check is risk-only: a derived row's semantic grounding is
     // judged by the #1449 contract, not re-decided here.
     if (obligation.source === "derived" || obligation.source === "risk") {
-      if (status !== "satisfied") return { ...obligation, status: "unresolved", cause: unresolvedCause };
-      if (rationale === "") return { ...obligation, status: "unresolved", cause: unresolvedCause };
+      if (obligation.source === "derived" && status === "invalid") return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "malformed-disposition" };
+      if (status !== "satisfied") {
+        return obligation.source === "derived"
+          ? { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "ungrounded-derived" }
+          : { ...obligation, status: "unresolved", cause: unresolvedCause };
+      }
+      if (rationale === "") {
+        return obligation.source === "derived"
+          ? { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "ungrounded-derived" }
+          : { ...obligation, status: "unresolved", cause: unresolvedCause };
+      }
       // #1449: a `satisfied` rationale that ASSERTS a failure ("the mint
       // site fails to place the identity") is a negative answer dressed as a
       // positive one. The deterministic layer cannot judge semantics, so it
       // refuses the row (fail-closed) instead of discharging it.
-      if (rationaleAssertsFailure(rationale)) return { ...obligation, status: "unresolved", cause: unresolvedCause };
+      if (rationaleAssertsFailure(rationale)) return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "ungrounded-derived" };
       const anchors = obligation.anchors ?? [];
       // A row WITH usable anchors needs one of them named. A row with NO
       // usable anchor (the derivation named nothing checkable — every
@@ -572,8 +653,10 @@ export function foldObligationDispositions(
       const verified = obligation.source !== "risk"
         || riskDischargeEvidencePaths(rationale, anchors).some((path) => readPaths.has(path));
       return grounded && verified
-        ? { ...obligation, status: "satisfied", cause: null }
-        : { ...obligation, status: "unresolved", cause: unresolvedCause };
+        ? { ...obligation, status: "satisfied", cause: null, reason: "ok" }
+        : obligation.source === "derived"
+          ? { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "ungrounded-derived" }
+          : { ...obligation, status: "unresolved", cause: unresolvedCause };
     }
     // Presence-and-shape rule (the #750 baseline): the deterministic layer
     // never judges whether a rationale is semantically grounded. The shape
@@ -583,13 +666,39 @@ export function foldObligationDispositions(
     // never disagree on the same disposition; trusted_base_guidance rows
     // require a non-empty rationale for any discharge, as their section
     // preamble tells the model.
+    // #1627: the evidence citation gate. When the run EXECUTED tool calls
+    // (a non-empty executed-call index — the native-loop surface), a
+    // must_check `satisfied` answer is a positive evidence claim and is
+    // discharged only by a rationale that cites at least one executed
+    // successful call id from the proof index the verdict corpus showed.
+    // Prose-only "verified" claims can no longer produce a false native
+    // approval. `not_applicable` and `unmet` are NOT citation-gated
+    // (applicability and confirmed negatives are not positive evidence
+    // claims; a negative counterexample surfaces as a finding), and the
+    // gate is inert whenever the index is absent or empty (fresh
+    // standard-call and fork paths keep today's behavior byte-identical).
+    // trusted_base_guidance and derived rows keep their existing rules.
+    if (
+      status === "satisfied"
+      && obligation.source === "must_check"
+      && executedCalls !== undefined
+      && executedCalls.length > 0
+      && !rationaleCitesSuccessfulCall(rationale, executedCalls)
+    ) {
+      return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "uncited-satisfaction" };
+    }
     const discharges = status === "satisfied"
       ? obligation.source === "must_check" || rationale !== ""
       : status === "not_applicable" && rationale !== "";
     if (discharges) {
-      return { ...obligation, status: "satisfied", cause: null };
+      return { ...obligation, status: "satisfied", cause: null, reason: "ok" };
     }
-    return { ...obligation, status: "unresolved", cause: unresolvedCause };
+    // #1627: the residual unresolved paths split by WHY the answer failed
+    // its source's shape rule — a malformed answer, a literal
+    // `unresolved` answer, or a missing rationale.
+    if (status === "invalid") return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "malformed-disposition" };
+    if (status === "unresolved") return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "unresolved-disposition" };
+    return { ...obligation, status: "unresolved", cause: unresolvedCause, reason: "missing-rationale" };
   });
 }
 
@@ -609,6 +718,14 @@ export function deriveUnresolvedCause(input: {
   // on refused optional calls inside the reserved window). A degraded loop
   // that never executed anything stays tool-capability above.
   if (input.stopReason === "max-rounds" || input.stopReason === "wall-clock-exceeded" || input.stopReason === "wall-clock-verdict-reserve") return "budget-exhausted";
+  // #1627: the `obligations-settled` early stop is a NORMAL, verdict-producing
+  // completion — the loop's own discharge bookkeeping settled every row
+  // (discharged by an admitted call, or cap-released as unprovable), so it is
+  // neither a budget stop nor a provider failure. A row that still folds
+  // unresolved under it was never established as evidence (an attempt is not
+  // evidence; the window guarantees only the ATTEMPT) — the missing-source
+  // cause with the per-row #1627 reason receipt carrying the specific why.
+  if (input.stopReason === "obligations-settled") return "missing-source-evidence";
   // A planning failure (missing corpus, missing model configuration) is not
   // a provider failure: no evidence gathering was even attempted, which is
   // the missing-source-evidence state.
@@ -884,24 +1001,39 @@ export function applyReviewObligationEnforcement(
   return forceRequestChanges(artifact, sections.join(""), reason);
 }
 
-export function reviewObligationsToArtifact(obligations: readonly ReviewObligation[]): Record<string, unknown> {
-  return {
+export function reviewObligationsToArtifact(
+  obligations: readonly ReviewObligation[],
+  dispositionReceipt?: RequiredCheckDispositionReceipt | null,
+): Record<string, unknown> {
+  const artifact: Record<string, unknown> = {
     version: 1,
     // #1449: `anchors` is additive — it rides only on derived rows, so a
     // run without derived rows keeps the artifact byte-identical.
     // #1594: `resolved_by` follows the same additive pattern — it rides only
     // on CI-evidence-discharged rows, so an unreconciled run keeps the
     // artifact byte-identical.
-    obligations: obligations.map(({ id, source, text, status, cause, anchors, resolvedBy }) => ({
-      id,
-      source,
-      text,
-      status,
-      cause,
-      ...(anchors === undefined ? {} : { anchors }),
-      ...(resolvedBy === undefined ? {} : { resolved_by: { kind: resolvedBy.kind, check: resolvedBy.check, head_sha: resolvedBy.headSha } }),
-    })),
+    // #1627: `reason` rides on every row the #1627 fold produced (a
+    // pre-#1627 caller may pass rows without one; the field is then
+    // omitted, exactly like the pre-#1449 shape).
+    obligations: obligations.map(({ id, source, text, status, cause, reason, anchors, resolvedBy }) => {
+      const row: Record<string, unknown> = { id, source, text, status, cause };
+      if (reason !== undefined) row.reason = reason;
+      if (anchors !== undefined) row.anchors = anchors;
+      if (resolvedBy !== undefined) row.resolved_by = { kind: resolvedBy.kind, check: resolvedBy.check, head_sha: resolvedBy.headSha };
+      return row;
+    }),
   };
+  // #1627: the disposition parser's drop receipt rides the fold artifact
+  // too — the drops are unattributable by definition (no row can carry
+  // them), so the artifact-level field is the only place they can be
+  // explained from. Absent when the parser reported nothing.
+  if (dispositionReceipt && (dispositionReceipt.dropped.length > 0 || dispositionReceipt.capReached)) {
+    artifact.required_check_disposition_receipt = {
+      dropped: dispositionReceipt.dropped.map((drop) => ({ reason: drop.reason })),
+      cap_reached: dispositionReceipt.capReached,
+    };
+  }
+  return artifact;
 }
 
 /** The closed vocabularies `reviewObligationsFromArtifact` validates rows
@@ -913,6 +1045,37 @@ const OBLIGATION_CAUSES: ReadonlySet<string> = new Set([
 ]);
 /** #1594: the head-SHA shape `reconcileObligationsWithCiEvidence` writes. */
 const CI_EVIDENCE_HEAD_SHA_RE = /^[0-9a-f]{7,64}$/i;
+/** #1627: the closed per-row rejection-reason vocabulary (see
+ * `ReviewObligationReason`). */
+const OBLIGATION_REASONS: ReadonlySet<string> = new Set([
+  "ok", "no-structured-dispositions", "no-disposition", "conflicting-dispositions",
+  "malformed-disposition", "missing-rationale", "ungrounded-derived", "derivation-incomplete",
+  "unresolved-disposition", "uncited-satisfaction",
+]);
+
+/**
+ * #1627: read the disposition parser's drop receipt back from a persisted
+ * artifact (`ai-output.json` or the fold's own `review-obligations.json`).
+ * Disclosure only — no policy branch reads it — so anything shaped wrong is
+ * `null` (absent, never a guess), and the bounded list is re-bounded
+ * defensively: a run-dir file is a file any earlier tool could have
+ * written.
+ */
+export function dispositionReceiptFromArtifact(value: unknown): RequiredCheckDispositionReceipt | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as { dropped?: unknown; cap_reached?: unknown };
+  if (!Array.isArray(record.dropped) || typeof record.cap_reached !== "boolean") return null;
+  const dropped: RequiredCheckDispositionReceipt["dropped"] = [];
+  // The parser bounds its receipt list at MAX_REQUIRED_CHECKS (50,
+  // src/model/verdict.ts); this defensive re-read applies the same ceiling.
+  for (const raw of record.dropped.slice(0, 50)) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const reason = (raw as { reason?: unknown }).reason;
+    if (reason !== "non-object-entry" && reason !== "unattributable-check") return null;
+    dropped.push({ reason });
+  }
+  return { dropped, capReached: record.cap_reached };
+}
 
 /**
  * #1537: read `reviewObligationsToArtifact`'s output back into rows. The
@@ -928,13 +1091,19 @@ const CI_EVIDENCE_HEAD_SHA_RE = /^[0-9a-f]{7,64}$/i;
  * parser applies to a published document, so a half-trusted row can never
  * reach the published handoff through this seam. The same rule covers the
  * row's SHAPE: `reviewObligationsToArtifact` writes exactly the keys `id`,
- * `source`, `text`, `status`, `cause` (plus the optional #1449 `anchors` and
- * the optional #1594 `resolved_by`),
+ * `source`, `text`, `status`, `cause` (plus the optional #1449 `anchors`, the
+ * optional #1594 `resolved_by`, and the #1627 `reason` — the reason is
+ * written on every row the #1627 fold produces, and its absence is accepted
+ * for a pre-#1627 artifact),
  * and always records `cause` (a vocabulary string, or `null` for a row with
  * no cause), so a row carrying any other property — or omitting `cause` —
  * is not a row this runtime wrote and refuses the artifact too.
  *
- * `anchors` round-trips when present (the #1449 derived rows). The publish
+ * `anchors` round-trips when present (the #1449 derived rows), and — since
+ * #1627 — so does the per-row rejection `reason`: a row written before
+ * #1627 carries none and is accepted without one (backward compatible),
+ * while a present reason must be in the closed vocabulary or the whole
+ * artifact is refused. The publish
  * layer projects rows through `blockingReviewObligations` before rendering,
  * and that filter drops every `derived` row, so anchors never reach a
  * published document either way.
@@ -948,13 +1117,16 @@ export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
     const row = raw as Record<string, unknown>;
     for (const key of Object.keys(row)) {
-      if (key !== "id" && key !== "source" && key !== "text" && key !== "status" && key !== "cause" && key !== "anchors" && key !== "resolved_by") return null;
+      if (key !== "id" && key !== "source" && key !== "text" && key !== "status" && key !== "cause" && key !== "reason" && key !== "anchors" && key !== "resolved_by") return null;
     }
     if (typeof row.id !== "string" || row.id === "") return null;
     if (typeof row.source !== "string" || !OBLIGATION_SOURCES.has(row.source)) return null;
     if (typeof row.text !== "string") return null;
     if (typeof row.status !== "string" || !OBLIGATION_STATUSES.has(row.status)) return null;
     if (!(row.cause === null || (typeof row.cause === "string" && OBLIGATION_CAUSES.has(row.cause)))) return null;
+    // #1627: a reason may be ABSENT (an artifact written before #1627) or a
+    // closed-vocabulary string — never anything else.
+    if (!(row.reason === undefined || (typeof row.reason === "string" && OBLIGATION_REASONS.has(row.reason)))) return null;
     if (row.anchors !== undefined
       && !(Array.isArray(row.anchors) && row.anchors.every((anchor) => typeof anchor === "string"))) return null;
     // #1594: the resolved_by shape is validated strictly (closed kind, usable
@@ -972,15 +1144,17 @@ export function reviewObligationsFromArtifact(value: unknown): ReviewObligation[
       if (typeof provenance.head_sha !== "string" || !CI_EVIDENCE_HEAD_SHA_RE.test(provenance.head_sha)) return null;
       resolvedBy = { kind: "ci-evidence", check: provenance.check, headSha: provenance.head_sha };
     }
-    rows.push({
+    const entry: ReviewObligation = {
       id: row.id,
       source: row.source as ReviewObligationSource,
       text: row.text,
       status: row.status as ReviewObligation["status"],
       cause: (typeof row.cause === "string" ? row.cause : null) as ReviewObligation["cause"],
-      ...(row.anchors !== undefined ? { anchors: row.anchors as string[] } : {}),
-      ...(resolvedBy === undefined ? {} : { resolvedBy }),
-    });
+    };
+    if (typeof row.reason === "string") entry.reason = row.reason as ReviewObligationReason;
+    if (row.anchors !== undefined) entry.anchors = row.anchors as string[];
+    if (resolvedBy !== undefined) entry.resolvedBy = resolvedBy;
+    rows.push(entry);
   }
   return rows;
 }

@@ -1,4 +1,5 @@
 import type { NormalizedRequiredCheckDisposition, RequiredCheckStatus } from "../model/types.js";
+import { rationaleCitesSuccessfulCall, type ExecutedCallEvidenceEntry } from "./executed-calls.js";
 
 /**
  * #750: deterministic required-check coverage evaluation.
@@ -27,6 +28,17 @@ import type { NormalizedRequiredCheckDisposition, RequiredCheckStatus } from "..
  *   `not_applicable` it needs a usable rationale (else malformed);
  * - missing/malformed coverage fails conservatively (unresolved), and this
  *   module never produces or flips a verdict.
+ *
+ * #1627: when the caller supplies a non-empty executed-call evidence index
+ * (the native tool-loop surface — see `src/enforcement/executed-calls.ts`),
+ * a `satisfied` disposition is a positive evidence claim and is credited
+ * only when its rationale cites at least one executed successful call id
+ * from the index; otherwise the check is conservatively `unresolved` with
+ * reason `uncited-satisfaction` — the same rule, reason, and inputs the
+ * #1381 obligation fold applies (`foldObligationDispositions`), so the two
+ * folds agree on every row. `not_applicable` and `unmet` are never
+ * citation-gated. Without an index (fresh standard-call and fork paths) the
+ * fold is byte-identical to the pre-#1627 semantics.
  *
  * This is a faithful mirror of `pr_reviewer/completeness.py::
  * evaluate_structured_coverage`; its serialized artifact stays byte-identical
@@ -99,6 +111,7 @@ function validateDisposition(
 export function evaluateRequiredCheckCoverage(
   checks: readonly string[],
   dispositions: readonly NormalizedRequiredCheckDisposition[] | null,
+  executedCalls?: readonly ExecutedCallEvidenceEntry[],
 ): RequiredCheckCoverage {
   if (checks.length === 0) {
     return { version: 1, structured: dispositions !== null, status: "none", checks: [], droppedUnknown: [] };
@@ -132,6 +145,22 @@ export function evaluateRequiredCheckCoverage(
         row.status = "unresolved";
         row.rationale = null;
         row.reason = "duplicate-dispositions";
+        continue;
+      }
+      // #1627: the evidence citation gate (see module docstring) — only a
+      // `satisfied` answer is a positive evidence claim, and only when the
+      // executed-call index is present AND non-empty. The uncited row is
+      // conservatively unresolved; the rationale is kept verbatim as
+      // disclosure (it is what the model answered, never credit).
+      if (
+        validated.status === "satisfied"
+        && executedCalls !== undefined
+        && executedCalls.length > 0
+        && !rationaleCitesSuccessfulCall(validated.rationale ?? "", executedCalls)
+      ) {
+        row.status = "unresolved";
+        row.rationale = validated.rationale;
+        row.reason = "uncited-satisfaction";
         continue;
       }
       row.status = validated.status;

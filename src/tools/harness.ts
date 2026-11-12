@@ -69,6 +69,7 @@ import {
 import { BUNDLED_PROMPT_ASSETS } from "../prompt/assets.js";
 import { resolveToolMaxRequests, toolBudgetSizeFromArtifacts, type EnvLike } from "./budget.js";
 import { extractApprovalPrerequisites, mustCheckObligationsEnabled, obligationAdmissionTokens, anchorAdmissionTokens, type ReviewObligationSource } from "../enforcement/review-obligations.js";
+import { executedCallId, MAX_EXECUTED_CALL_INDEX } from "../enforcement/executed-calls.js";
 import { resolveDerivedObligations, type DerivedObligationRow } from "../enforcement/derived-obligations.js";
 import { readTracePlan, tracePlanSection, traceAdmissionTokens, parseTracePlanRow, TRACE_PLAN_ARTIFACT, TRACE_PLAN_CANDIDATES_ARTIFACT, TRACE_PLAN_VERSION, TRACE_EVIDENCE_TOOLS, type TracePlanRow } from "../requirements/trace-plan.js";
 import { authorIntentSection } from "../context/author-intent.js";
@@ -2183,6 +2184,140 @@ export function replaceHarnessFindingsSection(corpus: string, body: string): str
   return corpus;
 }
 
+// #1627 bounds for the proof-index section: the executed-call list uses the
+// SAME cap as the enforcement-side evidence index (the loop budget bounds
+// real runs far below it), and the must_check row list matches the
+// disposition parser's own answer cap (MAX_REQUIRED_CHECKS = 50,
+// src/model/verdict.ts — rows beyond it could never all be answered, so
+// showing them buys nothing).
+const PROOF_INDEX_MAX_CALLS = MAX_EXECUTED_CALL_INDEX;
+const PROOF_INDEX_MAX_ROWS = 50;
+/** Same bounded args digest the harness findings body renders. */
+const PROOF_INDEX_MAX_ARGS_CHARS = 300;
+
+/** The #1627 proof-index preamble + citation instruction, byte-for-byte.
+ * Carries its OWN instruction (the shared VERDICT_CLOSING_INSTRUCTION is
+ * never touched — paths without the index must not promise one). */
+const PROOF_INDEX_INSTRUCTION =
+  "A `satisfied` disposition for a must_check check listed above is accepted "
+  + "only when that disposition's `rationale` cites, by id, at least one "
+  + "executed call from the index whose status is ok (for example: `call-7`). "
+  + "A `satisfied` rationale that cites no executed successful call id does "
+  + "not discharge the check — the deterministic fold will keep it unresolved. "
+  + "Cite call ids exactly as rendered; do not invent, renumber, or guess ids. "
+  + "Keep the citation inside the rationale's bounded length: a rationale is "
+  + "truncated at 500 characters, so place the `call-<n>` id early enough "
+  + "(for example, in the first sentence) that the citation survives the cap "
+  + "— a citation past 500 characters is silently lost.";
+
+/**
+ * #1627: the compact proof index injected into the verdict-turn corpus when
+ * the native tool-loop surface exists. Deterministic and content-free:
+ *  - each must_check obligation row, verbatim (id + exact check text — the
+ *    identity the #1388 folds match on), inside a fence like the planning
+ *    section's (untrusted repository data, never instructions);
+ *  - the executed-call identity list (`call-<n>` ids in execution order,
+ *    tool name, executor status, bounded args digest — no model prose, no
+ *    tool result bodies);
+ *  - the citation instruction above.
+ *
+ * Returns "" when the loop executed nothing (the gate and the section are
+ * inert on every path without executed calls) and when no must_check rows
+ * gate (#1627 n2: the calls-only case — an index with nothing to discharge
+ * renders a citation instruction with no subject; the section stays
+ * byte-absent there). The ids are assigned by
+ * `executedCallId` — the exact scheme the engine's enforcement-side index
+ * parses back from the harness artifact's `tool_calls` trace, so what the
+ * model saw is exactly what the folds verify.
+ */
+export function verdictProofIndexSection(
+  mustCheckRows: ReadonlyArray<{ id: string; text: string }>,
+  outcome: LoopOutcome,
+): string {
+  if (outcome.executed.length === 0) return "";
+  // #1627 (n2): no must_check rows to gate — no section. The citation
+  // instruction only makes sense against a listed row set.
+  if (mustCheckRows.length === 0) return "";
+  // The call lines are model-influenced (tool names/args), so they take the
+  // same redaction pass the harness findings body applies; the must_check
+  // row block takes the PLANNING section's treatment instead (fenced, never
+  // redacted) — the rows are the exact-text identity the #1388 folds match
+  // on, and redaction could corrupt the echo the folds require.
+  const callLines = outcome.executed
+    .slice(0, PROOF_INDEX_MAX_CALLS)
+    .map((executed, index) => {
+      const status = (executed.result.status as string) ?? "error";
+      let args = pyDumps(executed.args);
+      if (args.length > PROOF_INDEX_MAX_ARGS_CHARS) args = args.slice(0, PROOF_INDEX_MAX_ARGS_CHARS) + "…";
+      return `- ${executedCallId(index + 1)} — \`${executed.tool}\` (${status}) — ${args}`;
+    });
+  callLines.forEach((line, index) => {
+    callLines[index] = redactText(line);
+  });
+  const rows = mustCheckRows.slice(0, PROOF_INDEX_MAX_ROWS).map((row) => `- ${row.id} (must_check): ${row.text}`);
+  const rowBlock = rows.length > 0
+    ? `Required checks (must_check) — echo the exact text as the disposition's \`check\`:\n${fenceDelimiterFor(rows.join("\n"))}text\n${rows.join("\n")}\n${fenceDelimiterFor(rows.join("\n"))}\n\n`
+    : "";
+  const body = [
+    "Deterministic proof index for the closing verdict's required_check_dispositions.",
+    "",
+    rowBlock
+    + `Executed tool calls (the evidence surface a satisfied must_check answer may cite):\n${callLines.join("\n")}`,
+    "",
+    PROOF_INDEX_INSTRUCTION,
+  ].join("\n");
+  return `# Required-Check Proof Index\n${body}`;
+}
+
+/** Insert the #1627 proof-index section AFTER the corpus's Tool Harness
+ * Findings section (the same level-1 ATX section splitting
+ * `replaceHarnessFindingsSection` uses); at the top when that section is
+ * absent. An empty section leaves the corpus byte-identical. */
+export function insertProofIndexSection(corpus: string, section: string): string {
+  if (section === "") return corpus;
+  const lines = corpus.split("\n");
+  const starts = lines
+    .map((ln, i) => (ln.startsWith("# ") ? i : -1))
+    .filter((i) => i >= 0);
+  if (starts.length === 0) return `${section}\n\n${corpus}`;
+  const bounds = [...starts, lines.length];
+  for (let idx = 0; idx < starts.length; idx++) {
+    const start = starts[idx]!;
+    if ((lines[start] ?? "").slice(2).trim().startsWith("Tool Harness Findings")) {
+      const next = bounds[idx + 1] ?? lines.length;
+      return [...lines.slice(0, next), ...section.split("\n"), "", ...lines.slice(next)].join("\n");
+    }
+  }
+  return `${section}\n\n${corpus}`;
+}
+
+/** #1627: the must_check rows the planner was actually SHOWN, parsed from
+ * the harness-authored candidates artifact (the same artifact the engine's
+ * enforcement contract folds — one row set end to end). Defensive like
+ * `traceAdmissionRows`: a malformed, not-injected, or half-read artifact
+ * contributes NOTHING (never a throw, never a repaired row) — the section
+ * then lists only the executed calls, and no identity is invented here. */
+function proofIndexMustCheckRows(candidatesText: string | null): Array<{ id: string; text: string }> {
+  if (typeof candidatesText !== "string" || candidatesText.trim() === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(candidatesText);
+  } catch {
+    return [];
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+  const record = parsed as { injected?: unknown; obligations?: unknown };
+  if (record.injected !== true || !Array.isArray(record.obligations)) return [];
+  const rows: Array<{ id: string; text: string }> = [];
+  for (const raw of record.obligations) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const row = raw as { id?: unknown; source?: unknown; text?: unknown };
+    if (row.source !== "must_check" || typeof row.id !== "string" || row.id === "" || typeof row.text !== "string" || !row.text.trim()) continue;
+    rows.push({ id: row.id, text: row.text });
+  }
+  return rows;
+}
+
 /** Markdown lines for a single tool result (port of `tool_result_md_lines`). */
 export function toolResultMdLines(index: number, toolName: string, args: unknown, toolResult: Record<string, unknown>): string[] {
   const lines = [
@@ -2392,6 +2527,9 @@ export function buildToolLoopTelemetry(result: HarnessResult): Record<string, un
         ...(meta.required_evidence_attempts !== undefined ? { required_evidence_attempts: meta.required_evidence_attempts } : {}),
         ...(meta.required_evidence_credits !== undefined ? { required_evidence_credits: meta.required_evidence_credits } : {}),
         ...(meta.required_evidence_released !== undefined ? { required_evidence_released: meta.required_evidence_released } : {}),
+        // #1627: the deterministic obligations-settled early stop, mirrored
+        // from the raw meta when it carries it.
+        ...(meta.required_evidence_settled_stop !== undefined ? { required_evidence_settled_stop: meta.required_evidence_settled_stop } : {}),
         // #1595 (review): the scoped plan's first claim, mirrored from the raw
         // meta when it carries it (absent for every tail-only/full-set run).
         ...(meta.required_evidence_lead_claim !== undefined ? { required_evidence_lead_claim: meta.required_evidence_lead_claim } : {}),
@@ -3768,6 +3906,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
     required_evidence_attempts: outcome.requiredEvidenceAttempts,
     required_evidence_credits: outcome.requiredEvidenceCredits,
     required_evidence_released: outcome.requiredEvidenceReleased,
+    // #1627: whether the deterministic obligations-settled early stop fired —
+    // the loop stopped exploring because every tracked row had settled with
+    // budget still unspent.
+    required_evidence_settled_stop: outcome.requiredEvidenceSettledStop,
     // #1595 (review): the scoped plan's first claim — the obligation window
     // was enforced from the loop's first request, not only the reserved tail.
     ...(input.requiredEvidenceLeadClaim === true ? { required_evidence_lead_claim: true } : {}),
@@ -3930,6 +4072,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
   // message as the trailing tool_result blocks (adjacent user turns are a
   // 400). Skipped when no reviewer prompt resolved.
   if (reviewSystem) {
+    // #1627: the must_check rows the planner was shown — the proof index's
+    // identity block. Read once from the harness-authored candidates
+    // artifact (empty on every path that never injected the rows).
+    const proofIndexRows = proofIndexMustCheckRows(deps.readText("review-obligations-candidates.json"));
     // The in-conversation verdict turn. #1503: the #1145 full-verdict REFRESH
     // re-run of this body was removed — the post-repair turn is now trace-only
     // (`runTraceOnlyRepairTurn` below), so this owns exactly one verdict: the
@@ -3952,6 +4098,10 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
         // (tierRequestShape has no fallback override).
         const shape = tierRequestShape(input.tier === "smart" ? "smart" : input.tier === "fallback" ? "fallback" : "primary", env);
         verdictCorpus = replaceHarnessFindingsSection(verdictCorpus, verdictHarnessFindingsBody(outcome));
+        // #1627: the compact proof index — must_check identity rows, the
+        // executed-call id list, and the citation instruction. Inert (the
+        // corpus is byte-identical) unless the loop executed calls.
+        verdictCorpus = insertProofIndexSection(verdictCorpus, verdictProofIndexSection(proofIndexRows, outcome));
         // #372/#398: drop the byte-duplicate sections the planning context
         // already carries (section-exact and conservative).
         const deduped = dedupeVerdictCorpus(verdictCorpus, input.corpusText);
@@ -4475,6 +4625,9 @@ export async function runNativeLoop(input: RunNativeLoopInput): Promise<boolean>
               // the seeded prior would double-count here.
               evidenceMeta.required_evidence_attempts = repair.requiredEvidenceAttempts;
               if (repair.requiredEvidenceReleased) evidenceMeta.required_evidence_released = true;
+              // #1627: the continuation's own settled early stop counts for
+              // the run too — its rows are the same obligation surface.
+              if (repair.requiredEvidenceSettledStop) evidenceMeta.required_evidence_settled_stop = true;
               const runCredits = new Set<string>([
                 ...(Array.isArray(evidenceMeta.required_evidence_credits)
                   ? (evidenceMeta.required_evidence_credits as unknown[]).filter(

@@ -229,6 +229,33 @@ export interface NormalizedHumanReviewDisposition {
   evidence: string | null;
 }
 
+/**
+ * #1627: content-free receipt for a disposition entry the parser DROPPED
+ * (an entry that cannot be attributed to any check identity, so no row can
+ * ever fold from it). The reason vocabulary mirrors the fold's own: a
+ * non-object array element, or an object whose check text is missing,
+ * non-string, empty after sanitization, or over the echo cap.
+ */
+export type RequiredCheckDispositionDropReason = "non-object-entry" | "unattributable-check";
+
+export interface RequiredCheckDispositionDrop {
+  reason: RequiredCheckDispositionDropReason;
+}
+
+/**
+ * #1627: bounded, content-free accounting of the parser's silent drops —
+ * the receipt that makes a "5 total, 5 unresolved" run explainable from the
+ * artifacts. `dropped` is capped (a hostile model answer can carry any
+ * number of junk entries); `capReached` records that the
+ * MAX_REQUIRED_CHECKS truncation actually dropped trailing entries. Absent
+ * (null) when nothing was dropped and the cap never bound — a well-formed
+ * answer keeps the artifact byte-identical.
+ */
+export interface RequiredCheckDispositionReceipt {
+  dropped: RequiredCheckDispositionDrop[];
+  capReached: boolean;
+}
+
 export interface ParsedReviewVerdict {
   verdict: VerdictValue;
   reviewMarkdown: string;
@@ -245,6 +272,14 @@ export interface ParsedReviewVerdict {
   requiredCheckDispositions: NormalizedRequiredCheckDisposition[] | null;
   /** True iff the model emitted the `required_check_dispositions` key at all. */
   requiredCheckDispositionsEmitted: boolean;
+  /**
+   * #1627: bounded content-free receipt of the entries the disposition
+   * parser dropped (plus the MAX_REQUIRED_CHECKS truncation flag), so a
+   * silently-unanswered check is explainable from the artifacts. Null when
+   * nothing was dropped and the cap never bound. Preserved entries —
+   * including `status: "invalid"` ones — are never drops.
+   */
+  requiredCheckDispositionReceipt?: RequiredCheckDispositionReceipt | null;
   /** #766: same tri-state as the required-check dispositions. */
   threadDispositions: NormalizedThreadDisposition[] | null;
   threadDispositionsEmitted: boolean;

@@ -85,7 +85,7 @@ import { formatResponseDiagnosticsLine } from "../model/response-diagnostics.js"
 import { maskDiagnostic, maskKnownSecrets, redactTextDeep } from "../context/redact.js";
 import { parseVerdictResponse } from "../model/verdict.js";
 import { resolveReviewTriageDecision } from "../model/triage.js";
-import type { ReviewTriageDecision } from "../model/types.js";
+import type { RequiredCheckDispositionReceipt, ReviewTriageDecision } from "../model/types.js";
 import { resolveReviewerRouting } from "../config/reviewer-routing.js";
 import { resolveHumanReviewRouting, type HumanReviewRoutingMode, type HumanReviewRoutingPlan } from "../routing/human-review-routing.js";
 import { buildConfidencePrompt, unresolvedConfidencePins } from "../confidence/prompt.js";
@@ -108,12 +108,13 @@ import type { PartialCoverage } from "../tools/coverage.js";
 import { applyRequiredCheckValidation, unresolvedRequiredCheckIds } from "../enforcement/completeness.js";
 import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type HeadBoundCiEvidence } from "../enforcement/required-check-ci.js";
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
-import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, riskEvidenceReadPaths, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
+import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, dispositionReceiptFromArtifact, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, riskEvidenceReadPaths, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
 import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obligations.js";
 import { scanRiskObligations } from "../risk/classify.js";
 import { DEFAULT_RISK_SECTION_MAX_BYTES } from "../risk/types.js";
 import { renderRiskUnavailable, riskCorpusSection } from "../risk/render.js";
+import { executedCallEvidenceIndex, type ExecutedCallEvidenceEntry } from "../enforcement/executed-calls.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, finalTraceFailureLog, parseChangedFileLines, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type ChangedFileLines, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { classifyTraceRepairRows, createTraceGapProbe, traceGapContinuationSummary, type TraceRepairRowClassification } from "../requirements/trace-gap-probe.js";
@@ -550,11 +551,7 @@ function resolveReviewObligations(
   ciEvidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
   riskEnabled: boolean,
-): {
-  obligations: ReviewObligation[];
-  derived: DerivedObligationResolution;
-  contractActive: boolean;
-} {
+): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean; dispositionReceipt: RequiredCheckDispositionReceipt | null; executedCalls: ExecutedCallEvidenceEntry[] } {
   const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
   const includeMustCheck = mustCheckObligationsEnabled(validateRequiredChecks);
   const candidateRows = (candidates?.injected === true && Array.isArray(candidates.obligations)
@@ -571,6 +568,9 @@ function resolveReviewObligations(
     text: row.text,
     status: "unresolved",
     cause: null,
+    // #1627: a pre-fold row has matched no disposition yet; the fold
+    // assigns the final reason on every path.
+    reason: "no-disposition",
     anchors: row.anchors,
   }));
   if (derived.coverage === "incomplete") {
@@ -582,6 +582,8 @@ function resolveReviewObligations(
         text: coverageRow.text,
         status: "unresolved",
         cause: coverageRow.cause,
+        // #1627: the marker's reason restates its own pre-set cause.
+        reason: "derivation-incomplete",
       });
     }
   }
@@ -623,7 +625,18 @@ function resolveReviewObligations(
   // credit lookup: a path with no chunk in the raw diff earns nothing, so
   // widening it with the dispositions' cited paths can never credit a path
   // the run did not actually carry.
-  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown } | null;
+  // #1627: the disposition parser's drop receipt rides the review artifact
+  // (`ai-output.json`) and joins the fold's own disclosure — the drops are
+  // unattributable by definition, so they are never per-row reasons.
+  const dispositionReceipt = dispositionReceiptFromArtifact(review.required_check_disposition_receipt);
+  // #1627: the executed-call evidence index — derived STRICTLY from the
+  // enforcement harness artifact's `tool_calls` trace (the executed-call
+  // records the native loop already persists in execution order; the same
+  // surface `verdictHarnessFindingsBody` renders from). Empty when the
+  // artifact is absent (fresh standard-call and fork paths) or carries no
+  // executed calls, which leaves the #1627 citation gate inert.
+  const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown; tool_calls?: unknown } | null;
+  const executedCalls = executedCallEvidenceIndex(harness?.tool_calls);
   const riskAnchorPaths = new Set<string>();
   for (const row of riskRows) {
     for (const anchor of row.anchors ?? []) {
@@ -652,7 +665,7 @@ function resolveReviewObligations(
     ].filter((payload): payload is string => payload !== null && payload !== ""),
     candidatePaths,
   });
-  const folded = foldObligationDispositions([...obligations, ...derivedRows, ...riskRows], dispositions, { readPaths });
+  const folded = foldObligationDispositions([...obligations, ...derivedRows, ...riskRows], dispositions, executedCalls, { readPaths });
   const cause = deriveUnresolvedCause({
     stopReason: typeof harness?.stop_reason === "string" ? harness.stop_reason : null,
     harnessError: harness?.error != null ? String(harness.error) : null,
@@ -691,6 +704,13 @@ function resolveReviewObligations(
     // #1577: the risk rows already ride `obligations` and the
     // required-evidence state; the scan's own coverage answer needs no
     // separate field on the result.
+    // #1627: the parser's drop receipt, re-recorded on the fold artifact
+    // and in the log line (null when the parser reported nothing).
+    dispositionReceipt,
+    // #1627: the executed-call evidence index the fold was given, so the
+    // #750 completeness fold (applied later, over the same artifact) can
+    // gate the very same satisfied answers — the two folds agree.
+    executedCalls,
     // #1505: whether the review-owned required-evidence contract was ACTIVE
     // this run (the must_check checklist enabled, or trusted-base rows were
     // injected). The required-evidence state and its publish sentinel exist
@@ -701,21 +721,50 @@ function resolveReviewObligations(
   };
 }
 
-function persistReviewObligations(ws: RunWorkspace, obligations: ReviewObligation[], log: (line: string) => void): void {
+function persistReviewObligations(
+  ws: RunWorkspace,
+  obligations: ReviewObligation[],
+  dispositionReceipt: RequiredCheckDispositionReceipt | null,
+  log: (line: string) => void,
+): void {
   if (obligations.length === 0) return;
-  ws.write("review-obligations.json", pyJsonDumps(reviewObligationsToArtifact(obligations)));
-  const unmet = obligations.filter((item) => item.status === "unmet").map((item) => `${item.id}=unmet`);
-  const unresolved = obligations.filter((item) => item.status === "unresolved").map((item) => `${item.id}=unresolved`);
-  const satisfied = obligations.filter((item) => item.status === "satisfied").length;
-  const notClean = [...unmet, ...unresolved];
-  const detail = notClean.length > 0 ? ` (${notClean.join(", ")})` : "";
+  ws.write("review-obligations.json", pyJsonDumps(reviewObligationsToArtifact(obligations, dispositionReceipt)));
+  const unmet = obligations.filter((item) => item.status === "unmet");
+  const unresolved = obligations.filter((item) => item.status === "unresolved");
+  const satisfied = obligations.length - unmet.length - unresolved.length;
+  // #1627: the reason summary replaces the per-id detail — the ids are
+  // persisted in review-obligations.json, and the log only needs the
+  // content-free counts of WHY rows stayed unresolved. Bounded by the
+  // closed reason vocabulary; a pre-#1627 row without a reason reads as
+  // `unknown`.
+  const reasonCounts = new Map<string, number>();
+  for (const item of unresolved) {
+    const reason = item.reason ?? "unknown";
+    reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+  }
+  const reasonDetail = unresolved.length > 0
+    ? ` (${[...reasonCounts.entries()].map(([reason, count]) => `${reason}=${count}`).join(", ")})`
+    : "";
   // #1449: the derived counts ride the same line, and only when derived rows
   // exist — a run without them keeps the #1381 line byte-for-byte.
   const derived = obligations.filter((item) => item.source === "derived");
   const derivedDetail = derived.length > 0
     ? ` | derived: ${derived.length} total, ${derived.filter((item) => item.status === "satisfied").length} satisfied, ${derived.filter((item) => item.status === "unmet").length} unmet, ${derived.filter((item) => item.status === "unresolved").length} unresolved`
     : "";
-  log(`Review obligations: ${obligations.length} total, ${satisfied} satisfied, ${unmet.length} unmet, ${unresolved.length} unresolved${detail}${derivedDetail}`);
+  // #1627: the disposition parser's drop receipt — counts by drop reason
+  // plus the truncation flag — rides the same line only when the parser
+  // reported something. Content-free counts, never check text.
+  const dropCounts = new Map<string, number>();
+  for (const drop of dispositionReceipt?.dropped ?? []) {
+    dropCounts.set(drop.reason, (dropCounts.get(drop.reason) ?? 0) + 1);
+  }
+  const dropDetail = dispositionReceipt !== null
+    ? ` | disposition-drops: ${[
+        ...[...dropCounts.entries()].map(([reason, count]) => `${reason}=${count}`),
+        ...(dispositionReceipt.capReached ? ["cap-reached"] : []),
+      ].join(", ")}`
+    : "";
+  log(`Review obligations: ${obligations.length} total, ${satisfied} satisfied, ${unmet.length} unmet, ${unresolved.length} unresolved${reasonDetail}${derivedDetail}${dropDetail}`);
 }
 
 /**
@@ -2670,13 +2719,16 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // Captured before any layer mutates it: the strict mapping (#811) takes the
   // model verdict as an input, not as the final answer.
   const modelVerdict = String(reviewRecord.verdict ?? "");
-  const completenessOptions = {
+  // #1594: the CI gate's head-bound evidence reconciles test-run asks in
+  // both enforcement layers. Null without a gate run (or without a usable
+  // evidence line) keeps every output byte-identical to pre-#1594. The
+  // executed-call citation gate (#1627) joins this object AFTER the
+  // obligation resolution below (it needs the resolved rows' index), so the
+  // pre-resolution fields live on the base object.
+  const completenessBaseOptions = {
     enabled: env.VALIDATE_REQUIRED_CHECKS ?? "auto",
     mode: env.REQUIRED_CHECK_VALIDATION_MODE ?? "warn",
     mustCheck: stringList(classificationArtifact.must_check),
-    // #1594: the CI gate's head-bound evidence reconciles test-run asks in
-    // both enforcement layers. Null without a gate run (or without a usable
-    // evidence line) keeps every output byte-identical to pre-#1594.
     ciEvidence: ciGateEvidence,
     reviewedHeadSha: context.headSha || String(pr.headRefOid ?? ""),
   };
@@ -2708,11 +2760,19 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     env.VALIDATE_REQUIRED_CHECKS,
     derivedObligationsEnabled,
     ciGateEvidence,
-    completenessOptions.reviewedHeadSha,
+    completenessBaseOptions.reviewedHeadSha,
     riskObligationsEnabled,
   );
+  // #1627: the #750 completeness fold gates the SAME satisfied answers with
+  // the SAME executed-call index the #1381 fold was given, so the two folds
+  // can never disagree on a cited satisfaction. When no index exists (no
+  // executed calls) the option is omitted and the fold is byte-identical.
+  const completenessOptions = {
+    ...completenessBaseOptions,
+    ...(resolvedObligations.executedCalls.length > 0 ? { executedCalls: resolvedObligations.executedCalls } : {}),
+  };
   enforcementInputs.reviewObligations = resolvedObligations.obligations;
-  persistReviewObligations(ws, resolvedObligations.obligations, log);
+  persistReviewObligations(ws, resolvedObligations.obligations, resolvedObligations.dispositionReceipt, log);
   // #1449: the run's derived-obligation state — "" when the feature is off,
   // so a disabled run's coverage record and marker keep their pre-#1449
   // bytes exactly.

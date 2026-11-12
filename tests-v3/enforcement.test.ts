@@ -70,6 +70,38 @@ test("artifact maps verdict, tri-state dispositions, findings, and extra fields"
   assert.equal(result.review_triage_reason, "");
 });
 
+test("#1627: the artifact carries the disposition parser's drop receipt in snake_case, only when there is one", () => {
+  const clean = reviewArtifactFromParsed(parsed({
+    requiredCheckDispositionsEmitted: true,
+    requiredCheckDispositions: [{ check: "check a", status: "satisfied", rationale: "ok" }],
+  }));
+  assert.equal("required_check_disposition_receipt" in clean, false);
+  const dropped = reviewArtifactFromParsed(parsed({
+    requiredCheckDispositionsEmitted: true,
+    requiredCheckDispositions: [{ check: "check a", status: "satisfied", rationale: "ok" }],
+    requiredCheckDispositionReceipt: { dropped: [{ reason: "non-object-entry" }, { reason: "unattributable-check" }], capReached: true },
+  }));
+  assert.deepEqual(dropped.required_check_disposition_receipt, {
+    dropped: [{ reason: "non-object-entry" }, { reason: "unattributable-check" }],
+    cap_reached: true,
+  });
+  // A model-supplied extra with the same name can never overwrite it — the
+  // receipt is deterministic parser state, never model input.
+  const forged = reviewArtifactFromParsed(parsed({
+    requiredCheckDispositionsEmitted: true,
+    requiredCheckDispositions: [{ check: "check a", status: "satisfied", rationale: "ok" }],
+    requiredCheckDispositionReceipt: { dropped: [{ reason: "non-object-entry" }], capReached: false },
+    extra: { required_check_disposition_receipt: { dropped: "junk", cap_reached: false } },
+  }));
+  assert.deepEqual(forged.required_check_disposition_receipt, { dropped: [{ reason: "non-object-entry" }], cap_reached: false });
+  // …and when the parser reported nothing, no receipt exists at all — a
+  // model extra cannot fabricate one either.
+  const fabricated = reviewArtifactFromParsed(parsed({
+    extra: { required_check_disposition_receipt: { dropped: [{ reason: "non-object-entry" }], cap_reached: true } },
+  }));
+  assert.equal("required_check_disposition_receipt" in fabricated, false);
+});
+
 test("#1003: the artifact carries the normalized triage decision and reason in snake_case", () => {
   const result = reviewArtifactFromParsed(parsed({
     reviewTriageDecision: "required",
