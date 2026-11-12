@@ -628,9 +628,10 @@ export function buildReviewCorpus(
   // Advisory leads appended after the truncated body and after the ledger,
   // never truncated themselves (whole-section granularity). Authority order
   // is deliberate: standards (first) > explicit requirement ledger > claims
-  // to falsify > derived architectural obligations > advisory leads (last),
-  // so specialist content can never evict higher-authority
-  // standards/ledger/claims/derived material. The same fits-sanity the
+  // to falsify > derived architectural obligations > risk evidence
+  // obligations > advisory leads (last), so specialist content can never
+  // evict higher-authority standards/ledger/claims/derived/risk material.
+  // The same fits-sanity the
   // ledger applies (drop when it cannot fit a sane reservation) keeps this
   // assembly and the specialist runner's presence signal in lockstep.
   let specialistBytes = 0;

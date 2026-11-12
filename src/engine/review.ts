@@ -109,8 +109,9 @@ import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type Head
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
-import { riskCoverageRow, resolveRiskObligations, type RiskObligationResolution } from "../enforcement/risk-obligations.js";
+import { riskCoverageRow, resolveRiskObligations } from "../enforcement/risk-obligations.js";
 import { scanRiskObligations } from "../risk/classify.js";
+import { DEFAULT_RISK_SECTION_MAX_BYTES } from "../risk/types.js";
 import { renderRiskSection, renderRiskUnavailable } from "../risk/render.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, finalTraceFailureLog, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
@@ -551,7 +552,6 @@ function resolveReviewObligations(
 ): {
   obligations: ReviewObligation[];
   derived: DerivedObligationResolution;
-  risk: RiskObligationResolution;
   contractActive: boolean;
 } {
   const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
@@ -649,7 +649,9 @@ function resolveReviewObligations(
   return {
     obligations: reconcileObligationsWithCiEvidence(annotated, ciEvidence, reviewedHeadSha),
     derived,
-    risk,
+    // #1577: the risk rows already ride `obligations` and the
+    // required-evidence state; the scan's own coverage answer needs no
+    // separate field on the result.
     // #1505: whether the review-owned required-evidence contract was ACTIVE
     // this run (the must_check checklist enabled, or trusted-base rows were
     // injected). The required-evidence state and its publish sentinel exist
@@ -1543,12 +1545,19 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     const riskDiff = riskDiffFull ?? ws.readText("pr.diff.truncated") ?? "";
     let riskRecord: Record<string, unknown>;
     try {
-      const artifact = scanRiskObligations(riskDiff, riskDiffSource === "full");
-      const section = renderRiskSection(artifact, Number(env.RISK_OBLIGATIONS_SECTION_MAX_BYTES ?? "8000") || 8000);
+      const artifact = scanRiskObligations(riskDiff);
+      const failed = artifact.errors.length > 0;
+      // A scan that recorded an internal error must render the visible
+      // unavailable note AND record a non-`ok` status, so the enforcement
+      // half reads incomplete coverage and the corpus never reads as "no
+      // risk obligations" (#1449 discipline).
+      const section = failed
+        ? renderRiskUnavailable(artifact.errors[0] ?? "scan-failed")
+        : renderRiskSection(artifact, Number(env.RISK_OBLIGATIONS_SECTION_MAX_BYTES ?? DEFAULT_RISK_SECTION_MAX_BYTES) || DEFAULT_RISK_SECTION_MAX_BYTES);
       riskRecord = {
         version: 1,
-        status: artifact.obligations.length > 0 ? "ok" : "empty",
-        error_kind: null,
+        status: failed ? "error" : artifact.obligations.length > 0 ? "ok" : "empty",
+        error_kind: failed ? (artifact.errors[0] ?? "scan-failed") : null,
         diff_source: riskDiffSource,
         input_complete: riskDiffSource === "full",
         method: artifact.method,

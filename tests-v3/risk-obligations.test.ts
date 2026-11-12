@@ -114,6 +114,16 @@ test("#1577: docs-only and comment-only risk mentions never fire", () => {
   assert.deepEqual(scanRiskObligations(comments).obligations, []);
 });
 
+test("#1577: style/validation vocabulary does not fake a risk category", () => {
+  // The context scoping the categories need to stay usable opt-ins.
+  assert.deepEqual(scanRiskObligations(fileDiff("src/ui/box.ts", ["  const style = { overflow: \"hidden\", textOverflow: \"ellipsis\" };"])).obligations, []);
+  assert.deepEqual(scanRiskObligations(fileDiff("src/api/validate.ts", ["  const parsed = requestSchema.parse(body);"])).obligations, []);
+  assert.deepEqual(scanRiskObligations(fileDiff("src/ledger/counter.ts", ["  // watch for integer overflow"])).obligations, [], "comment-only stays comment-only");
+  // And the real ones still fire.
+  assert.deepEqual(scanRiskObligations(fileDiff("src/ledger/counter.ts", ["  if (counter + 1 > CAP) overflow = true;"])).obligations.map((row) => row.category), ["bounded_state"]);
+  assert.deepEqual(scanRiskObligations(fileDiff("src/db/store.ts", ["  return schema.load(db);"])).obligations.map((row) => row.category), ["persisted_state"]);
+});
+
 test("#1577: ordinary code and lockfiles never fire", () => {
   const refactor = fileDiff("src/util/format.ts", [
     "  const label = `${name.trim()} (${count})`;",

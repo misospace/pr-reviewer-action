@@ -1,6 +1,6 @@
 # Opt-in features
 
-Five features default to `false`. None change the verdict policy on their own; each adds context or coverage the final reviewer can use, and fails soft on error.
+The features below default to `false`. None change the verdict policy on their own; each adds context or coverage the final reviewer can use, and fails soft on error.
 
 ## `claim-falsification`
 

@@ -114,11 +114,16 @@ function obligationRows(value: unknown): RiskObligationRow[] {
 export function resolveRiskObligations(record: unknown, enabled: boolean): RiskObligationResolution {
   if (!enabled) return { enabled: false, coverage: "disabled", reason: null, rows: [] };
   if (!isRecord(record)) return { enabled: true, coverage: "incomplete", reason: "artifact-missing", rows: [] };
-  const rows = obligationRows(record.obligations);
   const status = statusToken(record.status);
   if (status !== "ok" && status !== "empty") {
-    return { enabled: true, coverage: "incomplete", reason: `scan-${status}`, rows };
+    return { enabled: true, coverage: "incomplete", reason: `scan-${status}`, rows: obligationRows(record.obligations) };
   }
+  // A record whose obligation list is not even an array is malformed, not
+  // empty: it must never resolve as clean coverage with zero rows.
+  if (!Array.isArray(record.obligations)) {
+    return { enabled: true, coverage: "incomplete", reason: "scan-malformed", rows: [] };
+  }
+  const rows = obligationRows(record.obligations);
   if (record.input_complete !== true) {
     return { enabled: true, coverage: "incomplete", reason: "input-incomplete", rows };
   }

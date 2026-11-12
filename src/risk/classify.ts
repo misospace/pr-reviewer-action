@@ -13,10 +13,16 @@
  * - `persisted_state`      — code over data that already exists persisted.
  * - `credential_boundary`  — credential handling / trust boundaries.
  *
- * The #749 discipline applies: only the changed (+/-) lines of CODE files
- * count; docs, lockfiles, vendor output, and mentions that survive only
- * inside a recognized comment never fire. A real mode/typechange header
- * (`old mode 100644` → `new mode 120000`) is itself a trigger. The scan is
+ * The #749 discipline applies with bounded string-awareness: only the
+ * changed (+/-) lines of files whose extension is in the closed CODE set
+ * count (an unknown extension is NOT scanned at all — a deliberate coverage
+ * bound, not a blind spot inside a scanned file), whole-line and
+ * whitespace-preceded trailing comments are blanked, and a real
+ * mode/typechange header (`old mode 100644` → `new mode 120000`) is itself
+ * a trigger. The residues are deliberately asymmetric: a quoted comment
+ * marker can cut a line early (missing a fire) and a mid-block-comment line
+ * that starts with code still scans (firing), because a false obligation
+ * costs one disposition while a false silence costs trust. The scan is
  * pure, deterministic, and never throws. */
 
 import {
@@ -46,9 +52,11 @@ const EXCLUDED_PATH_PATTERNS: readonly RegExp[] = [
   /\.min\.(js|css)$/i,
 ];
 
-/** Per-language line-comment markers used to blank comment lines. A chunk's
- * language is the extension; an unknown extension gets no comment markers
- * (everything scans as code — erring toward firing, never silently blind). */
+/** Per-language line-comment markers used to blank comment lines. Every
+ * extension in CODE_EXTENSIONS has its markers; the empty fallback in
+ * `stripLineComment` is defensive only — a file whose extension is not in
+ * CODE_EXTENSIONS never reaches it (see the coverage bound in the module
+ * header). */
 const LINE_COMMENT_MARKERS: Readonly<Record<string, string[]>> = Object.freeze({
   ts: ["//"], tsx: ["//"], mts: ["//"], cts: ["//"], js: ["//"], jsx: ["//"],
   mjs: ["//"], cjs: ["//"], go: ["//"], java: ["//"], kt: ["//"], kts: ["//"],
@@ -87,13 +95,20 @@ const BOUNDED_STATE_PATTERNS: readonly RegExp[] = [
   /\block\(\s*\)/i,
   /\bunlock\(\s*\)/i,
   /\bdeadlock\b/i,
-  /\boverflow\b/i,
+  // "overflow" alone fires on ordinary CSS-in-JS and style strings; the
+  // bounded-state category means NUMERIC/counter overflow, so require the
+  // state context on the same line.
+  /\b(?:integer|int32|int64|counter|index|capacity|heap|stack|arithmetic|numeric|wrap[_-]?around)[\w-]*[^\n]{0,40}\boverflow\b/i,
+  /\boverflow\b[^\n]{0,40}\b(?:integer|counter|index|capacity|wrap[_-]?around)\b/i,
   /\bgoroutine\b/i,
 ];
 
 const PERSISTED_STATE_PATTERNS: readonly RegExp[] = [
   /\bmigrations?\b/i,
-  /\bschema\b/i,
+  // A bare "schema" is zod/JSON validation, not persisted state: require a
+  // persistence context on the same line (table/column/db/migration/version).
+  /\b(?:db|database|table|column|sql|sqlite3?|postgres(?:sql)?|mysql|migrat\w+)[^\n]{0,40}\bschema\b/i,
+  /\bschema\b[^\n]{0,40}\b(?:db|database|table|column|sql|migration|version)\b/i,
   /\bsqlite3?\b/i,
   /\bleveldb\b/i,
   /\brocksdb\b/i,
@@ -234,6 +249,12 @@ function splitChunks(diff: string): DiffChunk[] {
   return chunks;
 }
 
+/** A usable anchor: flattened, nonempty, no embedded space (a `diff --git`
+ * header with spaced paths cannot be parsed unambiguously, and a spaced
+ * anchor could not be cited token-wise by a rationale). A trigger whose
+ * only path is unanchorable still RAISES the category: the row then keeps
+ * the no-anchor discharge rule (rationale must name a path-like token),
+ * which is the conservative fallback, never a silently dropped obligation. */
 function boundedPath(path: string): string | null {
   const flat = path.replace(/[\x00-\x1f\x7f]/g, " ").trim();
   if (flat === "" || flat.includes(" ")) return null;
@@ -242,9 +263,10 @@ function boundedPath(path: string): string | null {
 
 /** Scan the diff and build the risk-obligations artifact. Deterministic;
  * never throws. One row per tripped category, in RISK_CATEGORIES order.
- * `inputComplete` false means the scan did not see the whole diff, which
- * the enforcement half reads as INCOMPLETE coverage, never clean. */
-export function scanRiskObligations(diff: string, inputComplete = true): RiskObligationsArtifact {
+ * Input completeness is the CALLER's record (the engine writes
+ * `input_complete` from where it read the diff) — the scan cannot know it,
+ * so it never claims it. */
+export function scanRiskObligations(diff: string): RiskObligationsArtifact {
   const triggered = new Map<RiskCategory, Set<string>>();
   const truncatedPaths = new Set<RiskCategory>();
   const trip = (category: RiskCategory, path: string | null): void => {
