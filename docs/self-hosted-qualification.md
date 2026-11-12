@@ -36,6 +36,15 @@ yet: only a dispatched run makes one happen. A run now spends roughly
 one model call per scenario on the disposable Forgejo instance (a
 cancelled, superseded-in-queue, or failed-model scenario spends none).
 
+The engine-parity family also runs on its own. The
+`SELF_HOSTED_QUALIFICATION_FAMILY` setting selects the scenario family:
+`all` (the default) runs every scenario the harness owns, `parity` runs
+only the engine-parity family. The parity family reads no operator
+credential, so the workflow's `self-hosted-qualification-parity` job
+runs it with no secret and checks out the ref it was dispatched on. The
+qualification stays an operator-dispatched run: the credential-free job
+is dispatched like the credentialed one.
+
 The qualification program is issue #739. This page covers the harness and
 its run steps only. The deployment of the controller and the worker is
 covered by [Self-hosted deployment](self-hosted-deployment.md).
@@ -222,6 +231,44 @@ adversarial-boundary suite whose file name carries one of the gate's
 vocabulary tokens, fails the gate instead of silently narrowing the
 qualification.
 
+## The credential-free parity family
+
+`SELF_HOSTED_QUALIFICATION_FAMILY=parity` runs only the engine-parity
+family: scenarios 17 to 25 — the four routes over one head compared
+byte for byte, and the offline eval-suite re-runs against the same
+engine build. The default family, `all`, runs every scenario the
+harness owns.
+
+The parity family reads no operator credential. Its model calls reach
+the harness-owned stub model server, and its forge is the disposable
+instance the harness starts, so the run needs neither the operator's
+model key nor the GitHub App material. That is what lets it qualify
+any ref, a pull-request head included: no credential reaches the
+unreviewed branch code.
+
+Run it locally:
+
+```bash
+make self-hosted-qualification-parity
+```
+
+The target builds the v3 runtime bundle when `dist/index.js` is missing,
+then runs the harness with `SELF_HOSTED_QUALIFICATION=true` and
+`SELF_HOSTED_QUALIFICATION_FAMILY=parity`. It needs Docker and nothing
+else.
+
+Run it in CI: dispatch the `self-hosted-qualification` workflow, choose
+the `self-hosted-qualification-parity` job, and pick the ref to
+qualify. The job checks out the dispatched ref's head, holds no secret,
+and runs the parity family only. The dispatch form still asks for the
+model settings the credentialed job needs; the parity job ignores them.
+
+The two jobs are not interchangeable. The credentialed
+`self-hosted-qualification` job still pins the default branch, still
+reads the operator's model credential and the GitHub App material, and
+still runs the `all` family. The parity job qualifies the ref it was
+dispatched on; the credentialed job qualifies the default branch.
+
 ## Run the harness locally
 
 1. Install Docker and start the Docker daemon.
@@ -245,6 +292,10 @@ qualification.
 
 The make target builds the v3 runtime bundle when `dist/index.js` is
 missing. The build needs Node and the packages in `package-lock.json`.
+
+The `make self-hosted-qualification-parity` target runs the
+credential-free parity family instead. See
+[The credential-free parity family](#the-credential-free-parity-family).
 
 ## Run the harness in CI
 
@@ -271,18 +322,24 @@ App installation id from the repository variables
 `SELF_HOSTED_GITHUB_REPOSITORY` and
 `SELF_HOSTED_GITHUB_APP_INSTALLATION_ID`.
 
+The same workflow declares the credential-free
+`self-hosted-qualification-parity` job. It holds no secret, checks out
+the dispatched ref's head, and runs the parity family only. See
+[The credential-free parity family](#the-credential-free-parity-family).
+
 ## Settings the harness reads
 
 | Variable | Meaning | Required |
 |---|---|---|
 | `SELF_HOSTED_QUALIFICATION` | Opt-in gate. The harness runs only when the value is `true`. | Yes |
-| `AI_BASE_URL` | Base URL of the model endpoint. | Yes |
-| `AI_MODEL` | Name of the model. | Yes |
-| `AI_API_KEY` | Credential for the model endpoint. | Yes |
+| `SELF_HOSTED_QUALIFICATION_FAMILY` | Which scenario family the harness runs: `all` (the default, every scenario the harness owns) or `parity` (only the engine-parity family, scenarios 17 to 25). | No |
+| `AI_BASE_URL` | Base URL of the model endpoint. | Yes, except in the parity family |
+| `AI_MODEL` | Name of the model. Defaults to `parity-stub-model` in the parity family. | Yes, except in the parity family |
+| `AI_API_KEY` | Credential for the model endpoint. | Yes, except in the parity family |
 | `PR_REVIEWER_GITHUB_APP_ID` | Numeric id of the GitHub App that the controller uses. | Only for the GitHub scenarios |
 | `PR_REVIEWER_GITHUB_APP_PRIVATE_KEY` | PEM private key of that GitHub App. | Only for the GitHub scenarios |
 | `PR_REVIEWER_GITHUB_APP_INSTALLATION_ID` | Installation id of that App on the test repository's owner. The controller mints the installation token itself. | Only for the GitHub scenarios |
-| `SELF_HOSTED_GITHUB_REPOSITORY` | `owner/name` of the GitHub test repository. It must hold exactly one open pull request. | Yes |
+| `SELF_HOSTED_GITHUB_REPOSITORY` | `owner/name` of the GitHub test repository. It must hold exactly one open pull request. | Yes, except in the parity family |
 | `GITHUB_API_URL` | Base URL of the GitHub API. The default is `https://api.github.com`. Set the repository variable `SELF_HOSTED_GITHUB_API_URL` when the GitHub side is not `https://api.github.com`. | No |
 | `FORGEJO_TOKEN` | Credential for the Forgejo side. The harness mints its own token when it provisions the disposable instance, as it does today; the controller reads this name for that token. | Only when the harness drives an existing Forgejo |
 | `PR_REVIEWER_CREDENTIAL_GITHUB` | The GitHub forge integration's credential material (`#735` reference `github`): the forge-read material the review run's worker projects. When it is absent, the GitHub review scenario skips with that reason (see Known limits). | Only for the GitHub review scenario |
@@ -307,6 +364,9 @@ installation token for each repository. See
 
 ## Known limits
 
+- The credential-free parity job qualifies a chosen ref, but no parity
+  run has happened yet: the Docker-backed harness has never run in CI.
+  The qualification remains an operator-dispatched run.
 - The execution envelope carries the forge platform, its API base URL, and
   the operator's model settings (#1496 landed): the AI base URL, the wire
   model id, and the wire format ride the envelope, and the model

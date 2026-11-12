@@ -128,6 +128,36 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# ── qualification family (#1484) ──
+# `all` (the default) runs every scenario the harness owns. `parity`
+# runs only the engine-parity family: scenarios 17 to 21 (the four
+# routes over one head, compared byte for byte) and scenarios 22 to 25
+# (the offline eval-suite re-runs against the same engine build).
+#
+# The parity family needs NO operator credential: its model calls reach
+# the harness-owned stub model server, and its forge is the disposable
+# instance this harness starts. So it can qualify any ref — including a
+# pull-request head — without handing unreviewed branch code a model
+# key or App material. The `all` family drives the operator's model
+# endpoint and the GitHub App material, so it needs both.
+QUALIFICATION_FAMILY="${SELF_HOSTED_QUALIFICATION_FAMILY:-all}"
+case "$QUALIFICATION_FAMILY" in
+  all | parity) ;;
+  *)
+    echo "SELF_HOSTED_QUALIFICATION_FAMILY must be 'all' or 'parity', got '$QUALIFICATION_FAMILY'" >&2
+    exit 1
+    ;;
+esac
+PARITY_ONLY=0
+if [[ "$QUALIFICATION_FAMILY" == "parity" ]]; then
+  PARITY_ONLY=1
+fi
+if [[ "$PARITY_ONLY" == "1" ]]; then
+  echo "RUN: qualification family 'parity' — the engine-parity family (scenarios 17 to 25) runs without an operator credential"
+else
+  echo "RUN: qualification family 'all' — every scenario the harness owns"
+fi
+
 # ── input-validation gates (tests/test_forgejo_e2e_smoke_safety.sh) ──
 # These run before any Docker or network call so bad values fail fast.
 
@@ -205,18 +235,32 @@ repository_value() {
 # Required settings and credentials (the model key and the App private
 # key are only shape-checked for presence: their material is opaque and
 # must never be printed or interpolated).
-require_env AI_BASE_URL
-require_env AI_MODEL
-require_env AI_API_KEY
-require_env PR_REVIEWER_GITHUB_APP_ID
-require_env PR_REVIEWER_GITHUB_APP_PRIVATE_KEY
-require_env PR_REVIEWER_GITHUB_APP_INSTALLATION_ID
-require_env SELF_HOSTED_GITHUB_REPOSITORY
-endpoint_value AI_BASE_URL "$AI_BASE_URL"
-safe_value AI_MODEL "$AI_MODEL"
-id_value PR_REVIEWER_GITHUB_APP_ID "$PR_REVIEWER_GITHUB_APP_ID"
-id_value PR_REVIEWER_GITHUB_APP_INSTALLATION_ID "$PR_REVIEWER_GITHUB_APP_INSTALLATION_ID"
-repository_value SELF_HOSTED_GITHUB_REPOSITORY "$SELF_HOSTED_GITHUB_REPOSITORY"
+#
+# The parity family (#1484) reads no operator setting: the stub model
+# server answers every model call and the disposable instance is the
+# harness's own. Only the `all` family drives the operator's model
+# endpoint and the GitHub App material, so only it requires them.
+if [[ "$PARITY_ONLY" == "0" ]]; then
+  require_env AI_BASE_URL
+  require_env AI_MODEL
+  require_env AI_API_KEY
+  require_env PR_REVIEWER_GITHUB_APP_ID
+  require_env PR_REVIEWER_GITHUB_APP_PRIVATE_KEY
+  require_env PR_REVIEWER_GITHUB_APP_INSTALLATION_ID
+  require_env SELF_HOSTED_GITHUB_REPOSITORY
+  endpoint_value AI_BASE_URL "$AI_BASE_URL"
+  safe_value AI_MODEL "$AI_MODEL"
+  id_value PR_REVIEWER_GITHUB_APP_ID "$PR_REVIEWER_GITHUB_APP_ID"
+  id_value PR_REVIEWER_GITHUB_APP_INSTALLATION_ID "$PR_REVIEWER_GITHUB_APP_INSTALLATION_ID"
+  repository_value SELF_HOSTED_GITHUB_REPOSITORY "$SELF_HOSTED_GITHUB_REPOSITORY"
+else
+  # The stub profile names a model id. The stub answers every request
+  # with a fixed verdict, so the id is a label, not a route: both
+  # routes must carry the SAME id, or the compared artifacts would
+  # differ on a field the harness chose.
+  AI_MODEL="${AI_MODEL:-parity-stub-model}"
+  safe_value AI_MODEL "$AI_MODEL"
+fi
 
 # Optional GitHub API base (a non-github.com GitHub side names it; the
 # instance config then carries it as the forge endpoint).
@@ -391,7 +435,17 @@ if [[ -z "$FORGEJO_TOKEN" || "$FORGEJO_TOKEN" == "null" ]]; then
   exit 1
 fi
 export FORGEJO_TOKEN
-export PR_REVIEWER_CREDENTIAL_MODEL="$AI_API_KEY"
+# The model profile's credential material (#735). The controller refuses
+# startup when a model profile's reference carries no material
+# (`unknown_reference`), so the parity family seeds a harness-owned
+# placeholder: its model endpoint is the loopback stub, which never
+# authenticates, so the placeholder is not a secret and reaches nothing
+# but the stub. The `all` family seeds the operator's model key.
+if [[ "$PARITY_ONLY" == "1" ]]; then
+  export PR_REVIEWER_CREDENTIAL_MODEL="parity-stub-model-material"
+else
+  export PR_REVIEWER_CREDENTIAL_MODEL="$AI_API_KEY"
+fi
 # The forge integration's #735 credential material (#1484): the instance
 # configs name `credential: forgejo`, and the controller collects this
 # env-defined material opportunistically so the worker credential plan's
@@ -477,7 +531,12 @@ MODEEOF
 }
 : > "$TMP/evidence-providers.yml"
 
-cat > "$TMP/instance-forgejo.yaml" <<CFGEOF
+# The operator instance configs belong to the `all` family: they name
+# the operator's model endpoint and the GitHub App material. The parity
+# family writes only the parity config below, so it never expands
+# $AI_BASE_URL and needs no operator setting at all.
+if [[ "$PARITY_ONLY" == "0" ]]; then
+  cat > "$TMP/instance-forgejo.yaml" <<CFGEOF
 version: 1
 forges:
   - name: qualification-forgejo
@@ -495,7 +554,7 @@ adoption:
   discovered-default: adopt
 CFGEOF
 
-cat > "$TMP/instance-github.yaml" <<CFGEOF
+  cat > "$TMP/instance-github.yaml" <<CFGEOF
 version: 1
 forges:
   - name: qualification-github
@@ -510,6 +569,7 @@ adoption:
   allowlist: ["$SELF_HOSTED_GITHUB_REPOSITORY"]
   discovered-default: adopt
 CFGEOF
+fi
 
 # ── engine parity instance config (#1484) ──
 # Same shape as instance-forgejo.yaml, but the model profile points at
@@ -1076,114 +1136,121 @@ normalize_parity_artifact() {
 }
 
 
-# ── scenario 1: normal Forgejo review through the webhook intake ──
-# One forge kind per controller process ("the controller serves one
-# forge per instance"), so each scenario gets its own daemon, roots, and
-# admin port over the same disposable PostgreSQL.
-export PR_REVIEWER_WEBHOOK_PORT="$WEBHOOK_PORT"
-export PR_REVIEWER_WEBHOOK_SECRET="$WEBHOOK_SECRET"
-start_controller "$TMP/instance-forgejo.yaml" "$TMP/forgejo-controller.log" \
-  "$FORGEJO_ADMIN_PORT" "$FORGEJO_ADMIN_TOKEN" "$TMP/forgejo"
-FORGEJO_CONTROLLER_PID="${CONTROLLER_PIDS[-1]}"
-wait_controller_ready "$FORGEJO_ADMIN_PORT" forgejo "$TMP/forgejo-controller.log" "$FORGEJO_CONTROLLER_PID"
+# ── operator scenario family (scenarios 1 to 16) ──
+# The operator family drives the operator model endpoint and the
+# GitHub App material, so it belongs to the `all` family only. The
+# parity family (#1484) reaches the harness-owned stub model server
+# and the disposable instance, and needs neither.
+if [[ "$PARITY_ONLY" == "0" ]]; then
+  # ── scenario 1: normal Forgejo review through the webhook intake ──
+  # One forge kind per controller process ("the controller serves one
+  # forge per instance"), so each scenario gets its own daemon, roots, and
+  # admin port over the same disposable PostgreSQL.
+  export PR_REVIEWER_WEBHOOK_PORT="$WEBHOOK_PORT"
+  export PR_REVIEWER_WEBHOOK_SECRET="$WEBHOOK_SECRET"
+  start_controller "$TMP/instance-forgejo.yaml" "$TMP/forgejo-controller.log" \
+    "$FORGEJO_ADMIN_PORT" "$FORGEJO_ADMIN_TOKEN" "$TMP/forgejo"
+  FORGEJO_CONTROLLER_PID="${CONTROLLER_PIDS[-1]}"
+  wait_controller_ready "$FORGEJO_ADMIN_PORT" forgejo "$TMP/forgejo-controller.log" "$FORGEJO_CONTROLLER_PID"
 
-jq -n \
-  --arg repo "reviewer/sample" \
-  --argjson number "$PR_NUMBER" \
-  --argjson prId "$PR_ID" \
-  --arg sha "$HEAD_SHA" \
-  --arg baseSha "$BASE_SHA" \
-  --arg html "$FORGEJO_API_URL/reviewer/sample/pulls/${PR_NUMBER}" \
-  --arg clone "$FORGEJO_API_URL/reviewer/sample.git" \
-  '{
-    action: "opened",
-    number: $number,
-    title: "Self-hosted qualification PR",
-    body: "normal review scenario",
-    draft: false,
-    merged: false,
-    merged_at: null,
-    head_sha: $sha,
-    base_sha: $baseSha,
-    head: { label: "reviewer:feature", ref: "feature", sha: $sha, repo: { full_name: $repo } },
-    base: { label: "reviewer:main", ref: "main", sha: $baseSha, repo: { full_name: $repo } },
-    pull_request: {
-      id: $prId,
+  jq -n \
+    --arg repo "reviewer/sample" \
+    --argjson number "$PR_NUMBER" \
+    --argjson prId "$PR_ID" \
+    --arg sha "$HEAD_SHA" \
+    --arg baseSha "$BASE_SHA" \
+    --arg html "$FORGEJO_API_URL/reviewer/sample/pulls/${PR_NUMBER}" \
+    --arg clone "$FORGEJO_API_URL/reviewer/sample.git" \
+    '{
+      action: "opened",
       number: $number,
       title: "Self-hosted qualification PR",
       body: "normal review scenario",
       draft: false,
       merged: false,
       merged_at: null,
+      head_sha: $sha,
+      base_sha: $baseSha,
       head: { label: "reviewer:feature", ref: "feature", sha: $sha, repo: { full_name: $repo } },
       base: { label: "reviewer:main", ref: "main", sha: $baseSha, repo: { full_name: $repo } },
+      pull_request: {
+        id: $prId,
+        number: $number,
+        title: "Self-hosted qualification PR",
+        body: "normal review scenario",
+        draft: false,
+        merged: false,
+        merged_at: null,
+        head: { label: "reviewer:feature", ref: "feature", sha: $sha, repo: { full_name: $repo } },
+        base: { label: "reviewer:main", ref: "main", sha: $baseSha, repo: { full_name: $repo } },
+        user: { login: "reviewer" }
+      },
+      repository: {
+        id: 1,
+        name: "sample",
+        full_name: $repo,
+        private: false,
+        fork: false,
+        html_url: $html,
+        clone_url: $clone,
+        owner: { login: "reviewer" }
+      },
+      sender: { login: "reviewer" },
       user: { login: "reviewer" }
-    },
-    repository: {
-      id: 1,
-      name: "sample",
-      full_name: $repo,
-      private: false,
-      fork: false,
-      html_url: $html,
-      clone_url: $clone,
-      owner: { login: "reviewer" }
-    },
-    sender: { login: "reviewer" },
-    user: { login: "reviewer" }
-  }' > "$TMP/webhook.json"
+    }' > "$TMP/webhook.json"
 
-# The webhook secret rides the node process environment, never argv.
-WEBHOOK_SIGNATURE="$(WEBHOOK_SECRET="$WEBHOOK_SECRET" "$NODE_BIN" -e '
-const fs = require("fs");
-const crypto = require("crypto");
-console.log(crypto.createHmac("sha256", process.env.WEBHOOK_SECRET).update(fs.readFileSync(process.argv[1])).digest("hex"));
-' "$TMP/webhook.json")"
+  # The webhook secret rides the node process environment, never argv.
+  WEBHOOK_SIGNATURE="$(WEBHOOK_SECRET="$WEBHOOK_SECRET" "$NODE_BIN" -e '
+  const fs = require("fs");
+  const crypto = require("crypto");
+  console.log(crypto.createHmac("sha256", process.env.WEBHOOK_SECRET).update(fs.readFileSync(process.argv[1])).digest("hex"));
+  ' "$TMP/webhook.json")"
 
-WEBHOOK_STATUS="$(curl -sS -o "$TMP/webhook-response.json" -w '%{http_code}' \
-  -X POST \
-  -H "Content-Type: application/json" \
-  -H "X-Gitea-Event: pull_request" \
-  -H "X-Gitea-Signature: $WEBHOOK_SIGNATURE" \
-  --data-binary "@$TMP/webhook.json" \
-  "http://127.0.0.1:${WEBHOOK_PORT}/")"
-if [[ "$WEBHOOK_STATUS" != 202 ]]; then
-  echo "webhook intake did not accept the signed delivery (HTTP $WEBHOOK_STATUS)" >&2
-  cat "$TMP/webhook-response.json" >&2 || true
-  tail -n 30 "$TMP/forgejo-controller.log" >&2 || true
-  exit 1
-fi
-jq -e '.status == "accepted" and .kind == "pr_opened"' "$TMP/webhook-response.json" >/dev/null
-
-FORGEJO_DEST="forgejo:reviewer/sample#${PR_NUMBER}"
-if ! wait_published "p.destination = '$FORGEJO_DEST'" \
-  "Forgejo normal review" "$TMP/forgejo-controller.log"; then
-  exit 1
-fi
-case "$PUBLICATION_ID" in
-  forgejo-comment:*) FORGEJO_COMMENT_ID="${PUBLICATION_ID#forgejo-comment:}" ;;
-  *)
-    echo "Forgejo publication id did not carry the forge-confirmed comment identity: $PUBLICATION_ID" >&2
+  WEBHOOK_STATUS="$(curl -sS -o "$TMP/webhook-response.json" -w '%{http_code}' \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -H "X-Gitea-Event: pull_request" \
+    -H "X-Gitea-Signature: $WEBHOOK_SIGNATURE" \
+    --data-binary "@$TMP/webhook.json" \
+    "http://127.0.0.1:${WEBHOOK_PORT}/")"
+  if [[ "$WEBHOOK_STATUS" != 202 ]]; then
+    echo "webhook intake did not accept the signed delivery (HTTP $WEBHOOK_STATUS)" >&2
+    cat "$TMP/webhook-response.json" >&2 || true
+    tail -n 30 "$TMP/forgejo-controller.log" >&2 || true
     exit 1
-    ;;
-esac
-case "$FORGEJO_COMMENT_ID" in
-  ''|*[!0-9]*)
-    echo "unexpected Forgejo comment id shape" >&2
+  fi
+  jq -e '.status == "accepted" and .kind == "pr_opened"' "$TMP/webhook-response.json" >/dev/null
+
+  FORGEJO_DEST="forgejo:reviewer/sample#${PR_NUMBER}"
+  if ! wait_published "p.destination = '$FORGEJO_DEST'" \
+    "Forgejo normal review" "$TMP/forgejo-controller.log"; then
     exit 1
-    ;;
-esac
-# Exact-head publication: the durable guard published against this head,
-# and the forge-confirmed comment exists on the disposable instance.
-if [[ "$RESULT_HEAD_SHA" != "$HEAD_SHA" || "$RUN_HEAD_SHA" != "$HEAD_SHA" ]]; then
-  echo "Forgejo publication did not carry the event head as the result head" >&2
-  exit 1
+  fi
+  case "$PUBLICATION_ID" in
+    forgejo-comment:*) FORGEJO_COMMENT_ID="${PUBLICATION_ID#forgejo-comment:}" ;;
+    *)
+      echo "Forgejo publication id did not carry the forge-confirmed comment identity: $PUBLICATION_ID" >&2
+      exit 1
+      ;;
+  esac
+  case "$FORGEJO_COMMENT_ID" in
+    ''|*[!0-9]*)
+      echo "unexpected Forgejo comment id shape" >&2
+      exit 1
+      ;;
+  esac
+  # Exact-head publication: the durable guard published against this head,
+  # and the forge-confirmed comment exists on the disposable instance.
+  if [[ "$RESULT_HEAD_SHA" != "$HEAD_SHA" || "$RUN_HEAD_SHA" != "$HEAD_SHA" ]]; then
+    echo "Forgejo publication did not carry the event head as the result head" >&2
+    exit 1
+  fi
+  fapi_get "/api/v1/repos/reviewer/sample/issues/comments/${FORGEJO_COMMENT_ID}" |
+    jq -e --argjson commentId "$FORGEJO_COMMENT_ID" '.id == $commentId and (.body | length > 0)' >/dev/null
+  assert_usage_counted "$RUN_ID"
+  assert_admin_reports_publication "$FORGEJO_ADMIN_PORT" "$FORGEJO_ADMIN_TOKEN" "$TMP/admin-forgejo.cfg" "$RUN_ID"
+  echo "PASS: self-hosted Forgejo normal review qualified end-to-end through the canonical job and engine boundary (repo reviewer/sample, PR ${PR_NUMBER}, head ${HEAD_SHA}, publication ${PUBLICATION_ID})"
 fi
-fapi_get "/api/v1/repos/reviewer/sample/issues/comments/${FORGEJO_COMMENT_ID}" |
-  jq -e --argjson commentId "$FORGEJO_COMMENT_ID" '.id == $commentId and (.body | length > 0)' >/dev/null
-assert_usage_counted "$RUN_ID"
-assert_admin_reports_publication "$FORGEJO_ADMIN_PORT" "$FORGEJO_ADMIN_TOKEN" "$TMP/admin-forgejo.cfg" "$RUN_ID"
-echo "PASS: self-hosted Forgejo normal review qualified end-to-end through the canonical job and engine boundary (repo reviewer/sample, PR ${PR_NUMBER}, head ${HEAD_SHA}, publication ${PUBLICATION_ID})"
 
 # ── scenario 2: normal GitHub review with no per-repository workflow ──
 # The reconciler discovers the operator's open test PR through the
@@ -1229,7 +1296,9 @@ scenario_github_normal_review() {
   assert_admin_reports_publication "$GITHUB_ADMIN_PORT" "$GITHUB_ADMIN_TOKEN" "$TMP/admin-github.cfg" "$RUN_ID"
   echo "PASS: self-hosted GitHub normal review qualified end-to-end with no per-repository workflow (repo ${SELF_HOSTED_GITHUB_REPOSITORY}, publication ${PUBLICATION_ID})"
 }
-if [[ -z "${PR_REVIEWER_CREDENTIAL_GITHUB:-}" ]]; then
+if [[ "$PARITY_ONLY" == "1" ]]; then
+  echo "SKIP: the operator scenario family (scenarios 1 to 16) is not part of the 'parity' family; the engine-parity family (17 to 25) runs credential-free"
+elif [[ -z "${PR_REVIEWER_CREDENTIAL_GITHUB:-}" ]]; then
   echo "SKIP: GitHub normal review is not drivable without the forge credential material (set PR_REVIEWER_CREDENTIAL_GITHUB; an App-only deployment's worker forge reads fail closed until the installation-token projection lands, #1484-split); see docs/self-hosted-qualification.md known limits"
 else
   scenario_github_normal_review
@@ -2015,52 +2084,56 @@ CFGEOF
   echo "PASS: missed webhook discovered by reconciliation reviewed exactly once (repo ${repo}, PR ${pr_number}, head ${head_sha}, no duplicate work on later passes)"
 }
 
-# ── scenario runner ──
-# Scenario 1's Forgejo webhook controller is still serving; the
-# webhook-driven scenarios reuse it, and each daemon-owned scenario
-# stops it before binding the intake port itself.
-echo "RUN: duplicate webhook produces exactly one review"
-scenario_duplicate_webhook_produces_exactly_one_review
+# The failure/restart/supersession/idempotency scenarios (#1483) are
+# the operator family too: they read the operator model endpoint.
+if [[ "$PARITY_ONLY" == "0" ]]; then
+  # ── scenario runner ──
+  # Scenario 1's Forgejo webhook controller is still serving; the
+  # webhook-driven scenarios reuse it, and each daemon-owned scenario
+  # stops it before binding the intake port itself.
+  echo "RUN: duplicate webhook produces exactly one review"
+  scenario_duplicate_webhook_produces_exactly_one_review
 
-echo "RUN: webhook burst settles into one paid newest-head review"
-scenario_webhook_burst_settles_to_one_paid_newest_head_review
+  echo "RUN: webhook burst settles into one paid newest-head review"
+  scenario_webhook_burst_settles_to_one_paid_newest_head_review
 
-echo "RUN: new head while the old review waits in the queue"
-scenario_new_head_while_old_review_queued_supersedes_without_spend
+  echo "RUN: new head while the old review waits in the queue"
+  scenario_new_head_while_old_review_queued_supersedes_without_spend
 
-echo "RUN: new head while the old review runs"
-scenario_new_head_while_old_review_running_supersedes_without_spend
+  echo "RUN: new head while the old review runs"
+  scenario_new_head_while_old_review_running_supersedes_without_spend
 
-echo "RUN: stale result attempts publication"
-scenario_stale_result_publication_is_refused_and_newest_head_publishes
+  echo "RUN: stale result attempts publication"
+  scenario_stale_result_publication_is_refused_and_newest_head_publishes
 
-echo "RUN: worker timeout"
-scenario_worker_timeout
+  echo "RUN: worker timeout"
+  scenario_worker_timeout
 
-echo "RUN: worker crash requeues without a duplicate counted model call"
-scenario_worker_crash_requeues_without_duplicate_spend
+  echo "RUN: worker crash requeues without a duplicate counted model call"
+  scenario_worker_crash_requeues_without_duplicate_spend
 
-echo "RUN: controller restart while a worker runs resumes without duplicate work"
-scenario_controller_restart_with_running_worker_resumes_without_rerun
+  echo "RUN: controller restart while a worker runs resumes without duplicate work"
+  scenario_controller_restart_with_running_worker_resumes_without_rerun
 
-echo "RUN: operator restart with queued settle-window work"
-scenario_operator_restart_with_queued_settle_window_work
+  echo "RUN: operator restart with queued settle-window work"
+  scenario_operator_restart_with_queued_settle_window_work
 
-echo "RUN: cancelled review"
-scenario_cancellation_cancels_the_review_without_publication
+  echo "RUN: cancelled review"
+  scenario_cancellation_cancels_the_review_without_publication
 
-echo "RUN: failed publication followed by a retry with no second model call"
-scenario_publication_retry_without_model_rerun
+  echo "RUN: failed publication followed by a retry with no second model call"
+  scenario_publication_retry_without_model_rerun
 
-echo "RUN: usage and cost accounting single-counted across retries and restarts"
-scenario_usage_accounting_single_counted_across_retries_and_restarts
+  echo "RUN: usage and cost accounting single-counted across retries and restarts"
+  scenario_usage_accounting_single_counted_across_retries_and_restarts
 
-echo "RUN: primary model failure and fallback"
-scenario_model_primary_failure_and_fallback
+  echo "RUN: primary model failure and fallback"
+  scenario_model_primary_failure_and_fallback
 
-echo "RUN: missed webhook discovered by reconciliation without duplicate work"
-scenario_missed_webhook_reconciliation_reviews_once
+  echo "RUN: missed webhook discovered by reconciliation without duplicate work"
+  scenario_missed_webhook_reconciliation_reviews_once
 
+fi
 # ══ engine parity and eval-qualification scenarios (#1484) ══
 #
 # One dedicated parity pull request, one head, and the harness-owned

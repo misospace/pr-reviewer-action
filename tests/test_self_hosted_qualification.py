@@ -11,6 +11,10 @@ The harness script (tests/self_hosted_e2e_qualification.sh) landed with
 - the workflow and the harness script route every forge read and write
   through the configured forge capability, never through a forge CLI or
   a raw HTTP client that reaches a remote forge;
+- the credential-free parity job (#1484) is a job of its own, holds no
+  secret, checks out the dispatched ref's head and drives the parity
+  family only, while the harness's `parity` family reads no operator
+  credential at all;
 - the docs describe the harness as landed and point at the runbook,
   never claiming a qualification that did not run;
 - every disposable instance config adopts its allowlist
@@ -43,6 +47,14 @@ DEPLOYMENT_DOC = ROOT / "docs" / "self-hosted-deployment.md"
 DAEMON_DOC = ROOT / "docs" / "architecture" / "controller-daemon.md"
 HARNESS_PATH = "tests/self_hosted_e2e_qualification.sh"
 TARGET_NAME = "self-hosted-qualification"
+
+# The credential-free parity family (#1484). The workflow job and the make
+# target that drive it carry the same name; the harness's scenario-family
+# selector and its two accepted values sit next to them.
+PARITY_NAME = "self-hosted-qualification-parity"
+FAMILY_SETTING = "SELF_HOSTED_QUALIFICATION_FAMILY"
+FAMILY_ALL = "all"
+FAMILY_PARITY = "parity"
 
 # A forge CLI call: the binary, then one of its subcommands. The shared
 # guard (tests/test_forge_cli.py) watches `gh` only, so the harness path
@@ -86,6 +98,34 @@ def _triggers(workflow: dict) -> dict:
 
 def _steps() -> list[dict]:
     return _workflow(QUALIFICATION_WORKFLOW)["jobs"][TARGET_NAME]["steps"]
+
+
+def _job(name: str) -> dict:
+    return _workflow(QUALIFICATION_WORKFLOW)["jobs"][name]
+
+
+def _job_steps(name: str) -> list[dict]:
+    return _job(name)["steps"]
+
+
+def _mapping_value(node, key: str):
+    """The value node of one key of a mapping node."""
+    for key_node, value_node in node.value:
+        if key_node.value == key:
+            return value_node
+    raise AssertionError(f"the workflow declares no {key} block")
+
+
+def _job_source(name: str) -> str:
+    """The raw YAML text of one job, sliced out of the parsed node graph.
+
+    The slice keeps the job's comments and its exact text, so a gate can
+    read what the job says, not only what the parser made of it.
+    """
+    text = QUALIFICATION_WORKFLOW.read_text(encoding="utf-8")
+    root = yaml.compose(text)
+    node = _mapping_value(_mapping_value(root, "jobs"), name)
+    return text[node.start_mark.index : node.end_mark.index]
 
 
 def _forge_cli_calls(path: Path) -> list[tuple[int, str]]:
@@ -152,6 +192,143 @@ def _instance_config_heredocs(script: str) -> dict[str, str]:
             re.DOTALL,
         )
     }
+
+
+# ── the harness's family gate (#1484) ──
+# The harness splits its scenarios into two families with a top-level
+# bash `if [[ "$PARITY_ONLY" == "0" ]]; then` / `== "1"` block. The
+# block's span is found structurally: the opener sits at column zero and
+# the matching `fi` is the next column-zero `fi` after it (every nested
+# `if` inside the block is indented).
+_PARITY_GATE_OPEN_RE = re.compile(
+    r'^if \[\[ "\$PARITY_ONLY" == "(?P<value>[01])" \]\]; then$'
+)
+
+# The `case` statement that selects the family, and the shape of one of
+# its pattern groups.
+_FAMILY_CASE_RE = re.compile(r'^case "\$QUALIFICATION_FAMILY" in$')
+_CASE_PATTERN_RE = re.compile(r"^[ \t]*([A-Za-z0-9_*?!\[\]\- |]+)\)[ \t]*(;;.*)?$")
+
+
+def _parity_gated_blocks(script: str, value: str) -> list[tuple[int, int]]:
+    """The line spans of every `PARITY_ONLY == "<value>"` block."""
+    lines = script.splitlines()
+    spans: list[tuple[int, int]] = []
+    for index, line in enumerate(lines):
+        match = _PARITY_GATE_OPEN_RE.match(line)
+        if not match or match.group("value") != value:
+            continue
+        for end in range(index + 1, len(lines)):
+            if lines[end] == "fi":
+                spans.append((index, end))
+                break
+    return spans
+
+
+def _family_arms(script: str, value: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """The then-arm spans and the else-arm spans of every family block.
+
+    The block's then-arm runs when the family matches, its else-arm runs
+    when it does not: the `all` block's else-arm is the parity arm, and
+    the `parity` block's else-arm is the operator arm.
+    """
+    lines = script.splitlines()
+    then_spans: list[tuple[int, int]] = []
+    else_spans: list[tuple[int, int]] = []
+    for start, end in _parity_gated_blocks(script, value):
+        then_start = start + 1
+        for index in range(start + 1, end):
+            line = lines[index]
+            if line == "else" or line.startswith("elif "):
+                then_spans.append((then_start, index))
+                else_spans.append((index + 1, end))
+                break
+        else:
+            then_spans.append((then_start, end))
+    return then_spans, else_spans
+
+
+def _operator_spans(script: str) -> list[tuple[int, int]]:
+    """The lines that run only in the operator (`all`) family."""
+    then_spans, _ = _family_arms(script, "0")
+    _, else_spans = _family_arms(script, "1")
+    return then_spans + else_spans
+
+
+def _parity_spans(script: str) -> list[tuple[int, int]]:
+    """The lines that run only in the credential-free (`parity`) family."""
+    then_spans, _ = _family_arms(script, "1")
+    _, else_spans = _family_arms(script, "0")
+    return then_spans + else_spans
+
+
+def _within(spans: list[tuple[int, int]], index: int) -> bool:
+    """True when the line sits inside one of the spans."""
+    return any(start <= index < end for start, end in spans)
+
+
+def _call_lines(script: str, pattern: str) -> list[int]:
+    """The line indices of every call matching the pattern."""
+    return [
+        index
+        for index, line in enumerate(script.splitlines())
+        if re.search(pattern, line)
+    ]
+
+
+def _line_of(script: str, pattern: str) -> int | None:
+    """The index of the first line matching the pattern."""
+    lines = _call_lines(script, pattern)
+    return lines[0] if lines else None
+
+
+def _family_case(script: str) -> list[tuple[set[str], list[str]]]:
+    """The case groups of the family selector, as (patterns, body lines)."""
+    lines = script.splitlines()
+    start = next(
+        (index for index, line in enumerate(lines) if _FAMILY_CASE_RE.match(line)),
+        None,
+    )
+    assert start is not None, (
+        "the harness must select the qualification family with a case statement"
+    )
+    groups: list[tuple[set[str], list[str]]] = []
+    patterns: set[str] | None = None
+    body: list[str] = []
+    for line in lines[start + 1 :]:
+        if line == "esac":
+            break
+        match = _CASE_PATTERN_RE.match(line)
+        if match:
+            if patterns is not None:
+                groups.append((patterns, body))
+            patterns = {
+                entry.strip()
+                for entry in match.group(1).split("|")
+                if entry.strip()
+            }
+            body = []
+            continue
+        if patterns is not None:
+            body.append(line)
+    if patterns is not None:
+        groups.append((patterns, body))
+    return groups
+
+
+def _make_recipe(text: str, target: str) -> list[str]:
+    """The tab-indented recipe lines of one make target."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not re.match(rf"^{re.escape(target)}:", line):
+            continue
+        recipe: list[str] = []
+        for candidate in lines[index + 1 :]:
+            if not candidate.startswith("\t"):
+                break
+            recipe.append(candidate)
+        return recipe
+    return []
 
 
 def test_the_qualification_workflow_runs_on_a_manual_dispatch_only() -> None:
@@ -489,6 +666,7 @@ RUNBOOK_SCENARIOS = (
 # The settings table of the runbook, one name per row.
 RUNBOOK_SETTINGS = (
     "SELF_HOSTED_QUALIFICATION",
+    FAMILY_SETTING,
     "AI_BASE_URL",
     "AI_MODEL",
     "AI_API_KEY",
@@ -815,3 +993,300 @@ def test_the_daemon_doc_does_not_reserve_the_harness() -> None:
         "issue number"
     )
     assert "self-hosted-qualification.md" in text, text
+
+
+# ── the credential-free parity family (#1484) ──
+# The engine-parity family needs no operator credential: its model calls
+# reach the harness-owned stub model server and its forge is the
+# disposable instance the harness starts. That is what lets it qualify
+# any ref, a pull-request head included, without handing unreviewed
+# branch code a model key or App material. The gates below pin both
+# halves of that claim: the workflow job holds no secret and checks out
+# the dispatched ref's head, and the harness's `parity` family reads no
+# operator setting.
+
+
+def test_the_qualification_workflow_declares_the_parity_job() -> None:
+    """The parity run must be a job of its own, not a mode of the
+    credentialed job: the credentialed job pins the default branch."""
+    jobs = _workflow(QUALIFICATION_WORKFLOW)["jobs"]
+    assert PARITY_NAME in jobs, sorted(jobs)
+    assert PARITY_NAME != TARGET_NAME, (
+        "the parity job must not be the credentialed job: that job holds a "
+        "credential and checks out the default branch"
+    )
+    assert TARGET_NAME in jobs, sorted(jobs)
+
+
+def test_the_parity_job_holds_no_secret() -> None:
+    """A credential in the parity job would reach the ref it checks out."""
+    raw = _job_source(PARITY_NAME)
+    assert "secrets." not in raw, (
+        "the parity job must hold no secret: the parity family reads no "
+        "operator credential"
+    )
+    assert "vars." not in raw, (
+        "the parity job must bind no repository variable either: it needs "
+        "no operator setting at all"
+    )
+    job_env = yaml.safe_dump(_job(PARITY_NAME).get("env") or {})
+    assert "secrets." not in job_env, (
+        "the parity job must not bind a secret at job level"
+    )
+    assert "vars." not in job_env, (
+        "the parity job must not bind a repository variable at job level"
+    )
+    for step in _job_steps(PARITY_NAME):
+        dumped = yaml.safe_dump(step)
+        assert "secrets." not in dumped, (
+            f"the step {step.get('name')!r} must hold no secret"
+        )
+        assert "vars." not in dumped, (
+            f"the step {step.get('name')!r} must bind no repository variable"
+        )
+
+
+def test_the_parity_job_checks_out_the_dispatched_ref() -> None:
+    """The parity job qualifies the ref it was dispatched on, so a pull
+    request's head can be qualified without a credential."""
+    checkouts = [
+        step
+        for step in _job_steps(PARITY_NAME)
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    ]
+    assert len(checkouts) == 1, checkouts
+    with_block = checkouts[0].get("with") or {}
+    assert with_block.get("ref") == "${{ github.sha }}", with_block
+    assert with_block.get("persist-credentials") is False, with_block
+    assert "github.event.repository.default_branch" not in _job_source(PARITY_NAME), (
+        "the parity job must qualify the dispatched ref, not the default "
+        "branch: that is the credentialed job's boundary"
+    )
+
+
+def test_the_parity_job_drives_the_parity_family_once() -> None:
+    """The parity job runs the harness exactly once, unconditionally, as
+    its final step, and it asks for the parity family."""
+    steps = _job_steps(PARITY_NAME)
+    harness_steps = [
+        step for step in steps if f"bash {HARNESS_PATH}" in str(step.get("run", ""))
+    ]
+    assert len(harness_steps) == 1, harness_steps
+    harness_step = harness_steps[0]
+    assert "if" not in harness_step, (
+        "the harness run step must be unconditional: the job must execute "
+        "the harness and report its pass/fail, never skip it"
+    )
+    assert steps[-1] == harness_step, (
+        "the harness run must be the job's final step so its exit status "
+        "reports the qualification pass/fail"
+    )
+    env = harness_step.get("env") or {}
+    assert env.get("SELF_HOSTED_QUALIFICATION") == "true", env
+    assert env.get(FAMILY_SETTING) == FAMILY_PARITY, env
+
+
+def test_the_two_qualification_jobs_qualify_different_refs() -> None:
+    """The credentialed job keeps its default-branch checkout; the parity
+    job qualifies the dispatched ref. The two jobs are not
+    interchangeable."""
+    refs = {}
+    for name in (TARGET_NAME, PARITY_NAME):
+        checkout = next(
+            step
+            for step in _job_steps(name)
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+        refs[name] = str((checkout.get("with") or {}).get("ref"))
+    assert refs[TARGET_NAME] == "${{ github.event.repository.default_branch }}", refs
+    assert refs[PARITY_NAME] == "${{ github.sha }}", refs
+    assert refs[TARGET_NAME] != refs[PARITY_NAME], (
+        "the credentialed job pins the default branch and the parity job "
+        "qualifies the dispatched ref: they must not collapse into one"
+    )
+
+
+def test_the_harness_selects_the_qualification_family() -> None:
+    """The family selector accepts exactly `all` and `parity`, defaults to
+    `all`, and fails on anything else."""
+    script = _harness_script()
+    assert re.search(
+        rf'^QUALIFICATION_FAMILY="\$\{{{FAMILY_SETTING}:-{FAMILY_ALL}\}}"$',
+        script,
+        re.MULTILINE,
+    ), f"{FAMILY_SETTING} must default to {FAMILY_ALL}"
+    groups = _family_case(script)
+    literal = {pattern for patterns, _ in groups for pattern in patterns if pattern != "*"}
+    assert literal == {FAMILY_ALL, FAMILY_PARITY}, (
+        "the family selector must accept exactly `all` and `parity`: "
+        + ", ".join(sorted(literal))
+    )
+    catch_all = [body for patterns, body in groups if "*" in patterns]
+    assert catch_all, (
+        f"an unknown family must fail, not fall through to the operator "
+        f"family: {FAMILY_SETTING} accepts exactly {FAMILY_ALL} and "
+        f"{FAMILY_PARITY}"
+    )
+    assert any("exit 1" in line for line in catch_all[0]), (
+        "an unknown family must exit non-zero"
+    )
+    assert re.search(r"RUN: qualification family", script), (
+        "the harness must print the selected family: the run says which "
+        "scenarios it qualified"
+    )
+
+
+# The operator settings the `all` family needs and the `parity` family
+# must not read: the model endpoint, the model credential, the GitHub App
+# material and the GitHub test repository.
+OPERATOR_CREDENTIAL_CHECKS = (
+    ("require_env", "AI_BASE_URL"),
+    ("require_env", "AI_API_KEY"),
+    ("require_env", "PR_REVIEWER_GITHUB_APP_ID"),
+    ("require_env", "PR_REVIEWER_GITHUB_APP_PRIVATE_KEY"),
+    ("require_env", "PR_REVIEWER_GITHUB_APP_INSTALLATION_ID"),
+    ("require_env", "SELF_HOSTED_GITHUB_REPOSITORY"),
+    ("endpoint_value", "AI_BASE_URL"),
+    ("id_value", "PR_REVIEWER_GITHUB_APP_ID"),
+    ("id_value", "PR_REVIEWER_GITHUB_APP_INSTALLATION_ID"),
+    ("repository_value", "SELF_HOSTED_GITHUB_REPOSITORY"),
+)
+
+
+def test_the_parity_family_requires_no_operator_credential() -> None:
+    """Every operator-credential check sits inside the operator-family
+    arm: the parity family must run without any of them."""
+    script = _harness_script()
+    operator = _operator_spans(script)
+    parity = _parity_spans(script)
+    assert operator, (
+        "the harness must gate the operator settings on the qualification "
+        "family"
+    )
+    for function, name in OPERATOR_CREDENTIAL_CHECKS:
+        pattern = rf"^\s*{function} {name}\b"
+        calls = _call_lines(script, pattern)
+        assert calls, f"the harness must check {name} for the operator family"
+        for line in calls:
+            assert _within(operator, line), (
+                f"{function} {name} must sit inside the operator-family arm: "
+                "the parity family reads no operator credential"
+            )
+            assert not _within(parity, line), (
+                f"{function} {name} must not run in the parity family"
+            )
+
+
+def test_the_parity_family_exports_a_harness_owned_model_credential() -> None:
+    """The parity family seeds a harness-owned placeholder, never the
+    operator's model key: the key is a credential and the parity family
+    needs none."""
+    script = _harness_script()
+    lines = script.splitlines()
+    parity = _parity_spans(script)
+    operator = _operator_spans(script)
+    exports = [
+        (index, line)
+        for index, line in enumerate(lines)
+        if "PR_REVIEWER_CREDENTIAL_MODEL=" in line
+    ]
+    parity_exports = [line for index, line in exports if _within(parity, index)]
+    assert parity_exports, (
+        "the parity family must export the model profile's credential "
+        "material: the controller refuses a profile whose reference carries "
+        "none"
+    )
+    assert all("$AI_API_KEY" not in line for line in parity_exports), (
+        "the parity family must not export the operator's model key:\n"
+        + "\n".join(parity_exports)
+    )
+    assert any("parity-stub-model-material" in line for line in parity_exports), (
+        "the parity family must export the harness-owned placeholder: its "
+        "model endpoint is the loopback stub, which never authenticates"
+    )
+    operator_exports = [
+        line
+        for index, line in exports
+        if _within(operator, index) and not _within(parity, index)
+    ]
+    assert any('"$AI_API_KEY"' in line for line in operator_exports), (
+        "the operator family must keep exporting the operator's model key"
+    )
+
+
+def test_the_operator_instance_configs_are_written_outside_the_parity_family() -> None:
+    """The operator instance configs name the operator's model endpoint and
+    the GitHub App material, so the parity family must not write them; the
+    parity config points at the stub model server and is always written."""
+    script = _harness_script()
+    operator = _operator_spans(script)
+    assert operator, "the harness must gate the instance configs"
+    for target in ("$TMP/instance-forgejo.yaml", "$TMP/instance-github.yaml"):
+        index = _line_of(script, rf'cat > "{re.escape(target)}"')
+        assert index is not None, f"the harness must write {target}"
+        assert _within(operator, index), (
+            f"{target} names the operator's model endpoint and the GitHub "
+            "App material: it must be written only outside the parity family"
+        )
+    parity_target = "$TMP/instance-parity.yaml"
+    index = _line_of(script, rf'cat > "{re.escape(parity_target)}"')
+    assert index is not None, f"the harness must write {parity_target}"
+    assert not _within(operator, index), (
+        f"{parity_target} points at the harness-owned stub model server: it "
+        "must be written in the parity family too"
+    )
+
+
+def test_the_make_target_drives_the_parity_family() -> None:
+    """The make target runs the same harness path with the parity family
+    selected."""
+    text = MAKEFILE.read_text(encoding="utf-8")
+    assert re.search(
+        rf"^\.PHONY: {re.escape(PARITY_NAME)}$", text, re.MULTILINE
+    ), f"the Makefile must declare {PARITY_NAME} phony"
+    recipe = _make_recipe(text, PARITY_NAME)
+    assert recipe, f"the Makefile must declare the {PARITY_NAME} target"
+    joined = "\n".join(recipe)
+    assert f"bash {HARNESS_PATH}" in joined, joined
+    assert "SELF_HOSTED_QUALIFICATION=true" in joined, joined
+    assert f"{FAMILY_SETTING}={FAMILY_PARITY}" in joined, joined
+    operator_recipe = "\n".join(_make_recipe(text, TARGET_NAME))
+    assert f"bash {HARNESS_PATH}" in operator_recipe, operator_recipe
+    assert f"bash {HARNESS_PATH}" in joined, (
+        "the parity target must drive the same harness path as the "
+        "credentialed target"
+    )
+
+
+def test_the_runbook_documents_the_credential_free_parity_family() -> None:
+    """The runbook must describe the parity family, its scenario range, how
+    to run it, and that no parity run has happened yet."""
+    text = re.sub(r"\s+", " ", RUNBOOK.read_text(encoding="utf-8"))
+    assert "## The credential-free parity family" in text, (
+        "the runbook must carry the parity-family section"
+    )
+    assert FAMILY_SETTING in text, text
+    assert "17 to 25" in text, (
+        "the runbook must state which scenarios the parity family covers"
+    )
+    assert f"make {PARITY_NAME}" in text, (
+        f"the runbook must name the local parity target: make {PARITY_NAME}"
+    )
+    assert PARITY_NAME in text, (
+        f"the runbook must name the credential-free CI job: {PARITY_NAME}"
+    )
+    assert "no operator credential" in text.lower(), (
+        "the runbook must state that the parity family reads no operator "
+        "credential"
+    )
+    assert "still pins the default branch" in text, (
+        "the runbook must state that the credentialed job keeps its "
+        "default-branch checkout"
+    )
+    assert "not interchangeable" in text, (
+        "the runbook must state that the two jobs are not interchangeable"
+    )
+    assert "no parity run" in text.lower(), (
+        "the runbook must state that no parity run has happened yet"
+    )
+
