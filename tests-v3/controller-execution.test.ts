@@ -216,7 +216,6 @@ test("the builder materializes the mirror before the workspace extraction (#1484
   // first parity qualification run observed, invisible to fakes that
   // overrode the workspace step.
   const h = setup();
-  const job = makeJob("job-2");
   await h.builder.build(makeRecord("job-2", 1));
   assert.deepEqual(h.acquisitionCalls, ["ensure", "create"]);
   await h.builder.build(makeRecord("job-3", 1));
