@@ -1,6 +1,6 @@
 # Opt-in features
 
-Five features default to `false`. None change the verdict policy on their own; each adds context or coverage the final reviewer can use, and fails soft on error.
+The features below default to `false`. None change the verdict policy on their own; each adds context or coverage the final reviewer can use, and fails soft on error.
 
 ## `claim-falsification`
 
@@ -40,6 +40,23 @@ Five features default to `false`. None change the verdict policy on their own; e
 | `DERIVED_OBLIGATIONS_SECTION_MAX_BYTES` (env) | `8000` | Corpus section cap |
 
 **Status:** default off, experimental; the derived obligations now take part in the authoritative coverage/enforcement path (#1449) — an unresolved one withholds a trusted approve and is reported as incomplete coverage.
+
+## `risk-obligations`
+
+**What it does:** a deterministic, model-free scan (`src/risk/classify.ts`) over the PR's complete diff raises one evidence obligation per risk category the CHANGED CODE itself touches: file identity/path mode, bounded state/counters/concurrency, persisted state, and credential/security boundaries. The first target case is mode-aware file identity: a `git ls-tree` blob-equality proof cannot distinguish regular-file mode 100644/100755 from symlink mode 120000 (the symlink blob stores only its target pathname), so changed tree-parsing/mode-handling code — and real mode flips (`old mode 100644` → `new mode 120000`) — must be met with the symlink counterexample. Like the #749 classification discipline, only changed lines of code files count: docs, lockfiles, vendor output and mentions that survive only inside a recognized comment never fire. The obligation statements are closed static text naming the counterexample class and the source/test evidence that discharges it; the triggering paths ride as anchors. The review corpus gets a `Risk Evidence Obligations` section and the review call's steering block lists the rows.
+
+**Enforcement:** the risk obligations join the same review-owned obligation contract as derived rows (#1381/#1449 semantics): each row (`risk-<n>`) is echoed in `required_check_dispositions`, and a `satisfied` row's rationale must name one of the flagged locations (a `satisfied` rationale that asserts failure keeps the row open). The named location is additionally checked against the run's own evidence receipt — a successful tool read of it in the harness result's executed-call log, or its complete head diff carried byte-exact by the assembler-certified corpus payload (#921's rule) — so a path-only assertion with neither record on the run stays unresolved. An unverified risk obligation withholds a trusted approve and marks the review `partial` with its own disclosure section — never a fabricated blocker finding, and a risk row never forces `request_changes`; a real counterexample is reported as an ordinary evidence-backed finding. A scan that did not run over the complete diff leaves risk coverage unknown: one synthetic `risk-coverage` row (cause `scan-incomplete`, never dischargeable by a disposition) withholds the approval the same way.
+
+**Enable:** `risk-obligations: true` (workflow input only — not repository-configurable; it can withhold a trusted approve, so it stays operator-only). No model call is added and no tool budget changes. The rows reach the reviewer through the corpus section and the steering block, and a row is discharged only through `required_check_dispositions`. Unlike derived rows (#1449), risk rows are not wired into the tool harness: `src/tools/harness.ts` reads only `derived-obligations.json`, so risk anchors are not part of the required-evidence planning section or the enforced-window admission vocabulary.
+
+**Artifacts:**
+
+| Name | Default | Notes |
+| --- | --- | --- |
+| `risk-obligations.json` / `risk-obligations.md` | — | Per-run scan artifacts (both written only when the scan is enabled) |
+| `RISK_OBLIGATIONS_SECTION_MAX_BYTES` (env) | `8000` | Corpus section cap |
+
+**Status:** default off; deterministic scan, model-free by construction (#1577).
 
 ## `requirement-trace`
 

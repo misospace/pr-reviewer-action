@@ -117,7 +117,7 @@ export const OPENAI_VERDICT_JSON_SCHEMA: Record<string, unknown> = {
           // only — the schema's shape (properties, enum, required) is
           // unchanged.
           description:
-            "One disposition per listed obligation: must_check rows by the exact check text, trusted_base_guidance rows by 'obligation-<n>' or the exact text, and derived architectural obligation rows by their row id ('derived-<n>') — a satisfied derived row's rationale must name one of that row's listed locations.",
+            "One disposition per listed obligation: must_check rows by the exact check text, trusted_base_guidance rows by 'obligation-<n>' or the exact text, derived architectural obligation rows by their row id ('derived-<n>') — a satisfied derived row's rationale must name one of that row's listed locations — and risk evidence obligation rows by their row id ('risk-<n>') — a satisfied risk row's rationale must name one of that row's listed locations and state the risk-specific counterexample considered with its source or test evidence.",
           items: {
             type: "object",
             properties: {

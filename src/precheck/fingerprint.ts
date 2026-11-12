@@ -405,6 +405,12 @@ export function collectConfigLines(env: Record<string, string>): string[] {
   // configuration contributes nothing and keeps the pre-feature hash.
   const conversationTokens = (env.TOOL_MAX_CONVERSATION_TOKENS ?? "").trim();
   if (conversationTokens !== "") lines.push(`TOOL_MAX_CONVERSATION_TOKENS=${conversationTokens}`);
+  // RISK_OBLIGATIONS (#1577): only an enabled scan changes the corpus and
+  // the obligation contract, so only "true" contributes and the default
+  // leaves existing fingerprints valid (same rule as above).
+  if ((env.RISK_OBLIGATIONS ?? "").trim().toLowerCase() === "true") {
+    lines.push("RISK_OBLIGATIONS=true");
+  }
   // #1003/#1005: human-review triage and its routing layer only run when
   // opted in, so only the enabled state contributes and the defaults leave
   // existing fingerprints valid (same rule as CLAIM_FALSIFICATION above).

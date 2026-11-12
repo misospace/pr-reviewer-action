@@ -37,6 +37,7 @@ import { PROMPT_PRESENCE_FILES } from "./system-prompt.js";
 import { fenceDelimiterFor } from "../context/fence.js";
 import { redactText } from "../context/redact.js";
 import { resolveDerivedObligations } from "../enforcement/derived-obligations.js";
+import { resolveRiskObligations } from "../enforcement/risk-obligations.js";
 
 export const USER_MESSAGE_BASE =
   "Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Mark a requirement unknown unless the supplied corpus proves it satisfied or violated.";
@@ -115,6 +116,74 @@ function derivedEvidenceRows(workspace: PromptWorkspace): string[] {
     rows.push(`- ${row.id} (derived): ${redactText(row.text)} — locations: ${locations}`);
   }
   return rows;
+}
+
+/** #1577: the deterministic risk-obligation scan artifact. Its presence IS
+ * the feature being on for this run — the action writes it only when the
+ * operator enabled `risk-obligations`. The rows render through the SAME
+ * resolver the enforcement contract uses, so the steering block and the
+ * gate always name the same obligations. */
+const RISK_EVIDENCE_FILE = "risk-obligations.json";
+
+/** #1577: the risk rows ride their own steering block. The preamble states
+ * how a risk row is discharged: the row id, a rationale that NAMES one of
+ * the row's flagged locations, and the risk-specific counterexample
+ * considered with its source or test evidence — checked against the run's
+ * own evidence receipt (a location the run never actually read and whose
+ * changed content the review corpus does not carry cannot discharge a row,
+ * #1577 review). */
+const RISK_EVIDENCE_PREAMBLE =
+  "Risk evidence obligations — deterministic counterexample-evidence targets raised because this change's code "
+  + "touches a high-risk surface (file identity/path mode, bounded state/concurrency, persisted state, or a "
+  + "credential/security boundary). Disposition each one in the structured 'required_check_dispositions' array "
+  + "by echoing the row id (risk-<n>); a satisfied risk row's rationale MUST name one of that row's listed "
+  + "locations and state the risk-specific counterexample considered and the source or test evidence that the "
+  + "property holds under it. A location this run never actually read — no tool read of it and its changed "
+  + "content not carried by the review corpus — cannot discharge the row: an assertion without evidence on "
+  + "record stays unresolved. An obligation you could not verify stays unresolved: it withholds a clean review "
+  + "instead of being silently certified. A real counterexample is an ordinary evidence-backed finding.";
+
+/** #1577 review follow-up: when the scan's coverage is incomplete the block
+ * says so — with rows, a partial row list must never read to the model as
+ * the full risk picture; with NO rows (round 4), silence would read the same
+ * way while the publish boundary withholds the trusted approval on the
+ * synthetic `risk-coverage` marker. The reason comes from the resolver's
+ * closed set and is re-checked here as data. */
+function riskCoverageNote(reason: string | null, hasRows: boolean): string {
+  const safe = reason !== null && /^[a-z0-9_-]{1,80}$/.test(reason) ? reason : "unknown";
+  const detail = hasRows
+    ? "the rows below may be partial, and the synthetic risk-coverage marker keeps the "
+      + "trusted approval withheld regardless of these rows' dispositions"
+    : "no risk rows were emitted, which does NOT mean this change is risk-free, and the "
+      + "synthetic risk-coverage marker keeps the trusted approval withheld";
+  return " Risk-evidence coverage for this run is incomplete (reason: " + safe + "): the "
+    + "deterministic scan could not certify the whole risk picture of this change, so "
+    + detail + " — state the unavailable coverage in review_markdown instead of certifying "
+    + "a clean review.";
+}
+
+function riskEvidenceBlock(workspace: PromptWorkspace): { rows: string[]; coverageNote: string | null } {
+  const bytes = workspace.readBytes(RISK_EVIDENCE_FILE);
+  if (bytes === null) return { rows: [], coverageNote: null };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decodeUtf8(bytes) ?? "");
+  } catch {
+    return { rows: [], coverageNote: null };
+  }
+  const resolution = resolveRiskObligations(parsed, true);
+  const rows: string[] = [];
+  for (const row of resolution.rows) {
+    if (rows.length >= REQUIRED_EVIDENCE_MAX_ROWS) break;
+    const locations = row.anchors.length > 0
+      ? row.anchors.map((anchor) => redactText(anchor)).join(", ")
+      : "none listed — enumerate the locations yourself";
+    rows.push(`- ${row.id} (risk): ${redactText(row.text)} — locations: ${locations}`);
+  }
+  return {
+    rows,
+    coverageNote: resolution.coverage === "incomplete" ? riskCoverageNote(resolution.reason, rows.length > 0) : null,
+  };
 }
 
 /** Read the candidates artifact tolerantly: absent, unparsable, or
@@ -296,6 +365,22 @@ export function buildUserMessage(workspace: PromptWorkspace, classificationFile:
     const rows = derivedRows.join("\n");
     message = `${message}\n\n${DERIVED_EVIDENCE_PREAMBLE}\n\n${fenceDelimiterFor(rows)}text\n${rows}\n${fenceDelimiterFor(rows)}`;
     if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(message)) throw new UserMessageBuildError("output holds a lone surrogate (UnicodeEncodeError)");
+  }
+  // #1577: the risk obligations ride their own fenced block, so the bytes
+  // of every earlier block stay exactly as they were for a run without them
+  // (and for a complete-coverage run with them).
+  const risk = riskEvidenceBlock(workspace);
+  if (risk.rows.length > 0) {
+    const rows = risk.rows.join("\n");
+    const preamble = RISK_EVIDENCE_PREAMBLE + (risk.coverageNote ?? "");
+    message = `${message}\n\n${preamble}\n\n${fenceDelimiterFor(rows)}text\n${rows}\n${fenceDelimiterFor(rows)}`;
+    if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(message)) throw new UserMessageBuildError("output holds a lone surrogate (UnicodeEncodeError)");
+  } else if (risk.coverageNote !== null) {
+    // #1577 review follow-up (round 4): an incomplete scan that raised zero
+    // rows still reaches the model as a static note — no fenced content, so
+    // nothing untrusted is carried, mirroring the corpus section's
+    // unavailable note. Silence here would read as a clean risk picture.
+    message = `${message}\n\n${risk.coverageNote.trim()}`;
   }
   return bashCapture(message);
 }
