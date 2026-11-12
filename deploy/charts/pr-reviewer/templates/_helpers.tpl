@@ -139,6 +139,13 @@ NetworkPolicy bounds ingress, so the pod-wide wildcard is what makes
 /healthz, /readyz and /metrics reachable by kubelet and Prometheus */}}
 - name: PR_REVIEWER_ADMIN_BIND
   value: "0.0.0.0"
+{{- if $v.admin.dashboard }}
+{{/* #742 dashboard: rendered only when the knob is on, with the exact ON
+spelling the lexical check in src/controller/main.ts accepts; OFF stays
+genuinely absent — an empty value is never emitted (unset is OFF) */}}
+- name: PR_REVIEWER_ADMIN_DASHBOARD
+  value: "true"
+{{- end }}
 {{- end }}
 {{- if $v.reconcile.enabled }}
 - name: PR_REVIEWER_RECONCILE_INTERVAL_MS
@@ -255,6 +262,9 @@ dict "ctx" <component context> "workerExecutorKubernetes" <bool>.
 {{- if and (empty $v.admin.token) (empty $v.admin.existingSecret.name) -}}
 {{- fail "controller.admin.token or controller.admin.existingSecret.name is required when the admin listener is enabled" -}}
 {{- end -}}
+{{- end -}}
+{{- if and $v.admin.dashboard (not $v.admin.enabled) -}}
+{{- fail "controller.admin.dashboard requires controller.admin.enabled (the dashboard is served on the admin listener)" -}}
 {{- end -}}
 {{- if $v.reconcile.enabled -}}
 {{- if and (eq $v.forgeAuth.platform "github") (empty $v.reconcile.githubInstallationId) -}}

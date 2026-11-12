@@ -151,6 +151,52 @@ test("admin bind: chart sets the pod-wide wildcard, entrypoint allowlists litera
   );
 });
 
+test("admin dashboard knob: default off, on renders an accepted spelling, requires the admin listener", () => {
+  const values = parse(read("deploy/charts/pr-reviewer/values.yaml")) as {
+    controller: { admin: Record<string, unknown> };
+  };
+  assert.equal(values.controller.admin.dashboard, false, "the dashboard must default off");
+
+  const helpers = read("deploy/charts/pr-reviewer/templates/_helpers.tpl");
+  // The env entry renders only under its own knob, INSIDE the
+  // admin-enabled block (the trailing double `end` pins the nesting), and
+  // OFF stays genuinely absent: no else branch emits the variable.
+  assert.match(
+    helpers,
+    /\{\{- if \$v\.admin\.dashboard \}\}\n\{\{\/\*[\s\S]*?\*\/\}\}\n- name: PR_REVIEWER_ADMIN_DASHBOARD\n {2}value: "true"\n\{\{- end \}\}\n\{\{- end \}\}/,
+    "PR_REVIEWER_ADMIN_DASHBOARD must render value \"true\" under admin.dashboard inside the admin block",
+  );
+  // "true" must stay an accepted ON spelling of the controller's lexical
+  // check (#1621 keeps chart and entrypoint from drifting apart).
+  const mainSource = read("src/controller/main.ts");
+  const onSpellings = /const DASHBOARD_ON = \[([^\]]+)\]/.exec(mainSource)?.[1] ?? "";
+  assert.ok(
+    onSpellings.includes('"true"'),
+    'src/controller/main.ts must keep "true" an accepted ON spelling of PR_REVIEWER_ADMIN_DASHBOARD',
+  );
+  // Fail closed at render time: the knob without the admin listener is a
+  // contradiction, never a silently dropped setting.
+  assert.match(
+    helpers,
+    /\{\{- if and \$v\.admin\.dashboard \(not \$v\.admin\.enabled\) -\}\}\n\{\{- fail "controller\.admin\.dashboard requires controller\.admin\.enabled/,
+    "admin.dashboard without admin.enabled must fail the render",
+  );
+  // The closed admin schema must admit the boolean knob.
+  const schema = JSON.parse(read("deploy/charts/pr-reviewer/values.schema.json")) as {
+    properties: {
+      controller: {
+        properties: {
+          admin: { additionalProperties: boolean; properties: Record<string, unknown> };
+        };
+      };
+    };
+  };
+  assert.equal(schema.properties.controller.properties.admin.additionalProperties, false);
+  assert.deepEqual(schema.properties.controller.properties.admin.properties.dashboard, {
+    type: "boolean",
+  });
+});
+
 test("worker-executor Role grants the Secret verbs the credential projection path needs", () => {
   const template = read("deploy/charts/pr-reviewer/templates/worker-rbac.yaml");
   // (a) the Job lifecycle verbs, exactly.

@@ -214,7 +214,11 @@ the admin surface is enabled so kubelet probes and Prometheus can reach it;
 the token and the NetworkPolicy remain the guards. Set
 `serviceMonitor.enabled: true` (requires the admin surface) for the
 ServiceMonitor resource; `admin.enabled: false` keeps the listener
-loopback-only and off the network.
+loopback-only and off the network. The #742 operations dashboard
+(`GET /dashboard`) is served only when `PR_REVIEWER_ADMIN_DASHBOARD` is
+ON; the chart exposes it as `controller.admin.dashboard` (default
+`false`, which leaves the flag unset; `true` requires the admin surface)
+— see `docs/architecture/operations-dashboard.md`.
 
 ## Upgrades
 
