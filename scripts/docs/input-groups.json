@@ -166,7 +166,8 @@
       "deep-review-max-tokens",
       "deep-review-corpus-max-bytes",
       "claim-falsification",
-      "derived-obligations"
+      "derived-obligations",
+      "risk-obligations"
     ]
   },
   {

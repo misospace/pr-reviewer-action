@@ -115,6 +115,11 @@ export interface CorpusWorkspace {
    * visible unavailable note). Optional so existing fixtures need no
    * update: an absent field behaves like `null`. */
   derivedObligationsMd?: Uint8Array | null;
+  /** #1577: the "Risk Evidence Obligations" section rendered by the
+   * deterministic risk scan (empty/absent unless `risk-obligations` is
+   * enabled and the scan raised at least one obligation). Optional so
+   * existing fixtures need no update: an absent field behaves like `null`. */
+  riskObligationsMd?: Uint8Array | null;
   specialistsMd: Uint8Array | null;
   requirementLedgerPresent: Uint8Array | null;
   specialistLeadsPresent: Uint8Array | null;
@@ -606,6 +611,19 @@ export function buildReviewCorpus(
     }
   }
 
+  // ── Risk Evidence Obligations (#1577) — reserved, after derived ─────────
+  // risk-obligations.md is empty unless risk_obligations is on and the
+  // deterministic scan raised at least one obligation, so a disabled run is
+  // byte-identical to a pre-#1577 build. Same fits-sanity: dropped rather
+  // than truncated when it cannot fit a sane reservation.
+  let riskBytes = 0;
+  if (nonEmpty(ws.riskObligationsMd)) {
+    const candidate = bytes(ws.riskObligationsMd).length;
+    if (candidate < maxCorpus - standardsBytes - ledgerBytes - claimsBytes - derivedBytes - BODY_FLOOR) {
+      riskBytes = candidate;
+    }
+  }
+
   // ── Specialist Review Leads (#609) — reserved, but LAST ─────────────────
   // Advisory leads appended after the truncated body and after the ledger,
   // never truncated themselves (whole-section granularity). Authority order
@@ -618,20 +636,21 @@ export function buildReviewCorpus(
   let specialistBytes = 0;
   if (nonEmpty(ws.specialistsMd)) {
     const candidate = bytes(ws.specialistsMd).length;
-    if (candidate < maxCorpus - standardsBytes - ledgerBytes - claimsBytes - derivedBytes - BODY_FLOOR) {
+    if (candidate < maxCorpus - standardsBytes - ledgerBytes - claimsBytes - derivedBytes - riskBytes - BODY_FLOOR) {
       specialistBytes = candidate;
     }
   }
 
   // The header and separators are outside the truncated body; reserve their
   // exact bytes, including the newline after an appended
-  // claims/derived/specialist section.
+  // claims/derived/risk/specialist section.
   const framingBytes =
     Buffer.byteLength(`# Repository Standards and Conventions (${opts.standardsFile})\n\n`, "utf8") +
     (claimsBytes > 0 ? 1 : 0) +
     (derivedBytes > 0 ? 1 : 0) +
+    (riskBytes > 0 ? 1 : 0) +
     (specialistBytes > 0 ? 1 : 0);
-  let bodyBudget = maxCorpus - standardsBytes - ledgerBytes - claimsBytes - derivedBytes - specialistBytes - framingBytes;
+  let bodyBudget = maxCorpus - standardsBytes - ledgerBytes - claimsBytes - derivedBytes - riskBytes - specialistBytes - framingBytes;
   if (bodyBudget < 0) bodyBudget = 0;
   const bodyTruncated = truncateClean(bodyMd, bodyBudget, BODY_MARKER);
   write("review-corpus.body.truncated.md", bodyTruncated);
@@ -660,6 +679,7 @@ export function buildReviewCorpus(
     artifacts.get("requirement-ledger.section.md")!,
     claimsBytes > 0 ? concat(bytes(ws.claimFalsificationMd), enc("\n")) : new Uint8Array(0),
     derivedBytes > 0 ? concat(bytes(ws.derivedObligationsMd), enc("\n")) : new Uint8Array(0),
+    riskBytes > 0 ? concat(bytes(ws.riskObligationsMd), enc("\n")) : new Uint8Array(0),
     specialistBytes > 0 ? concat(bytes(ws.specialistsMd), enc("\n")) : new Uint8Array(0),
   );
   write(outputName, output);

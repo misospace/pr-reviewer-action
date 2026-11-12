@@ -37,6 +37,7 @@ import { PROMPT_PRESENCE_FILES } from "./system-prompt.js";
 import { fenceDelimiterFor } from "../context/fence.js";
 import { redactText } from "../context/redact.js";
 import { resolveDerivedObligations } from "../enforcement/derived-obligations.js";
+import { resolveRiskObligations } from "../enforcement/risk-obligations.js";
 
 export const USER_MESSAGE_BASE =
   "Analyze this pull request corpus and return STRICT JSON. Emit 'requirement_coverage' as null unless a Requirement Ledger section appears in the context; then one coverage entry per ledger requirement with status satisfied, violated, or unknown and concrete evidence entries (kind file, test, tool, ci, or diff, ref, detail). Mark a requirement unknown unless the supplied corpus proves it satisfied or violated.";
@@ -113,6 +114,47 @@ function derivedEvidenceRows(workspace: PromptWorkspace): string[] {
       ? row.anchors.map((anchor) => redactText(anchor)).join(", ")
       : "none listed — enumerate the locations yourself";
     rows.push(`- ${row.id} (derived): ${redactText(row.text)} — locations: ${locations}`);
+  }
+  return rows;
+}
+
+/** #1577: the deterministic risk-obligation scan artifact. Its presence IS
+ * the feature being on for this run — the action writes it only when the
+ * operator enabled `risk-obligations`. The rows render through the SAME
+ * resolver the enforcement contract uses, so the steering block and the
+ * gate always name the same obligations. */
+const RISK_EVIDENCE_FILE = "risk-obligations.json";
+
+/** #1577: the risk rows ride their own steering block. The preamble states
+ * how a risk row is discharged: the row id, a rationale that NAMES one of
+ * the row's flagged locations, and the risk-specific counterexample
+ * considered with its source or test evidence. */
+const RISK_EVIDENCE_PREAMBLE =
+  "Risk evidence obligations — deterministic counterexample-evidence targets raised because this change's code "
+  + "touches a high-risk surface (file identity/path mode, bounded state/concurrency, persisted state, or a "
+  + "credential/security boundary). Disposition each one in the structured 'required_check_dispositions' array "
+  + "by echoing the row id (risk-<n>); a satisfied risk row's rationale MUST name one of that row's listed "
+  + "locations and state the risk-specific counterexample considered and the source or test evidence that the "
+  + "property holds under it. An obligation you could not verify stays unresolved: it withholds a clean review "
+  + "instead of being silently certified. A real counterexample is an ordinary evidence-backed finding.";
+
+function riskEvidenceRows(workspace: PromptWorkspace): string[] {
+  const bytes = workspace.readBytes(RISK_EVIDENCE_FILE);
+  if (bytes === null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decodeUtf8(bytes) ?? "");
+  } catch {
+    return [];
+  }
+  const resolution = resolveRiskObligations(parsed, true);
+  const rows: string[] = [];
+  for (const row of resolution.rows) {
+    if (rows.length >= REQUIRED_EVIDENCE_MAX_ROWS) break;
+    const locations = row.anchors.length > 0
+      ? row.anchors.map((anchor) => redactText(anchor)).join(", ")
+      : "none listed — enumerate the locations yourself";
+    rows.push(`- ${row.id} (risk): ${redactText(row.text)} — locations: ${locations}`);
   }
   return rows;
 }
@@ -295,6 +337,14 @@ export function buildUserMessage(workspace: PromptWorkspace, classificationFile:
   if (derivedRows.length > 0) {
     const rows = derivedRows.join("\n");
     message = `${message}\n\n${DERIVED_EVIDENCE_PREAMBLE}\n\n${fenceDelimiterFor(rows)}text\n${rows}\n${fenceDelimiterFor(rows)}`;
+    if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(message)) throw new UserMessageBuildError("output holds a lone surrogate (UnicodeEncodeError)");
+  }
+  // #1577: the risk obligations ride their own fenced block, so the bytes
+  // of every earlier block stay exactly as they were for a run without them.
+  const riskRows = riskEvidenceRows(workspace);
+  if (riskRows.length > 0) {
+    const rows = riskRows.join("\n");
+    message = `${message}\n\n${RISK_EVIDENCE_PREAMBLE}\n\n${fenceDelimiterFor(rows)}text\n${rows}\n${fenceDelimiterFor(rows)}`;
     if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(message)) throw new UserMessageBuildError("output holds a lone surrogate (UnicodeEncodeError)");
   }
   return bashCapture(message);

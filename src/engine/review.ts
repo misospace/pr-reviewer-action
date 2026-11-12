@@ -109,6 +109,9 @@ import { parseHeadBoundCiEvidence, reconcileObligationsWithCiEvidence, type Head
 import { applyAllEnforcement, failClosedEnforcementFired, reconcileEnforcedReviewMarkdown, type EnforcementInputs } from "../enforcement/enforce.js";
 import { blockingReviewObligations, candidateRowsToObligations, deriveUnresolvedCause, foldObligationDispositions, isForcingObligation, mustCheckObligationsEnabled, reviewObligationsToArtifact, unresolvedReviewObligations, type ReviewObligation } from "../enforcement/review-obligations.js";
 import { derivedCoverageRow, derivedObligationStateReason, resolveDerivedObligations, type DerivedObligationResolution } from "../enforcement/derived-obligations.js";
+import { riskCoverageRow, resolveRiskObligations, type RiskObligationResolution } from "../enforcement/risk-obligations.js";
+import { scanRiskObligations } from "../risk/classify.js";
+import { renderRiskSection, renderRiskUnavailable } from "../risk/render.js";
 import { normalizeRequirementCoverage } from "../enforcement/requirement-coverage.js";
 import { applyConfirmedUnmetEscalation, applyRequirementTraceEnforcement, changedSubjectText, distributedRequirementHints, distributedRequirementWarnings, ledgerRequirementsById, MAX_TRACE_REPAIR_SUMMARY_IDS, mergeTraceRepairClaims, missingTraceRequirementIds, finalTraceFailureLog, requirementTraceScope, unresolvedTraceRequirementIds, validateRequirementTrace, type RequirementTraceRepairOutcome, type TraceGapContinuationSummary } from "../enforcement/requirement-trace.js";
 import { classifyTraceRepairRows, createTraceGapProbe, traceGapContinuationSummary, type TraceRepairRowClassification } from "../requirements/trace-gap-probe.js";
@@ -544,7 +547,13 @@ function resolveReviewObligations(
   derivedEnabled: boolean,
   ciEvidence: HeadBoundCiEvidence | null,
   reviewedHeadSha: string,
-): { obligations: ReviewObligation[]; derived: DerivedObligationResolution; contractActive: boolean } {
+  riskEnabled: boolean,
+): {
+  obligations: ReviewObligation[];
+  derived: DerivedObligationResolution;
+  risk: RiskObligationResolution;
+  contractActive: boolean;
+} {
   const candidates = safeJson(ws.read("review-obligations-candidates.json")) as { injected?: unknown; obligations?: unknown } | null;
   const includeMustCheck = mustCheckObligationsEnabled(validateRequiredChecks);
   const candidateRows = (candidates?.injected === true && Array.isArray(candidates.obligations)
@@ -575,10 +584,35 @@ function resolveReviewObligations(
       });
     }
   }
+  // #1577: the deterministic risk-evidence rows join the SAME contract
+  // before the fold, with the #1449 coverage semantics: an undischargeable
+  // scan-coverage marker on incomplete scan coverage, and rows the fold can
+  // close only with a rationale that names a flagged path.
+  const risk = resolveRiskObligations(safeJson(ws.read("risk-obligations.json")), riskEnabled);
+  const riskRows: ReviewObligation[] = risk.rows.map((row) => ({
+    id: row.id,
+    source: "risk",
+    text: row.text,
+    status: "unresolved",
+    cause: null,
+    anchors: row.anchors,
+  }));
+  if (risk.coverage === "incomplete") {
+    const coverageRow = riskCoverageRow(risk);
+    if (coverageRow !== null) {
+      riskRows.push({
+        id: coverageRow.id,
+        source: "risk",
+        text: coverageRow.text,
+        status: "unresolved",
+        cause: coverageRow.cause,
+      });
+    }
+  }
   const dispositions = Array.isArray(review.required_check_dispositions)
     ? review.required_check_dispositions as Array<{ check: string; status: string; rationale?: string | null }>
     : null;
-  const folded = foldObligationDispositions([...obligations, ...derivedRows], dispositions);
+  const folded = foldObligationDispositions([...obligations, ...derivedRows, ...riskRows], dispositions);
   const harness = safeJson(ws.read(harnessArtifactName)) as { stop_reason?: unknown; planning_error?: unknown; error?: unknown; successful_request_count?: unknown } | null;
   const cause = deriveUnresolvedCause({
     stopReason: typeof harness?.stop_reason === "string" ? harness.stop_reason : null,
@@ -615,12 +649,14 @@ function resolveReviewObligations(
   return {
     obligations: reconcileObligationsWithCiEvidence(annotated, ciEvidence, reviewedHeadSha),
     derived,
+    risk,
     // #1505: whether the review-owned required-evidence contract was ACTIVE
     // this run (the must_check checklist enabled, or trusted-base rows were
     // injected). The required-evidence state and its publish sentinel exist
     // only for an active contract — an inactive run keeps its bytes
-    // exactly.
-    contractActive: includeMustCheck || candidates?.injected === true,
+    // exactly. #1577: an enabled risk-obligation scan activates the
+    // contract too, so the withhold cannot be opted out of implicitly.
+    contractActive: includeMustCheck || candidates?.injected === true || risk.enabled,
   };
 }
 
@@ -1488,6 +1524,60 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
   // discussion sections exist (the fragments phase runs before this stage).
   promptState = applySupersededDiscussionFragment(promptState, ws);
   env.SYSTEM_PROMPT = `${promptState.systemPrompt}${env.REPOSITORY_SKILLS_CATALOG ?? ""}`;
+
+  // ── Risk-evidence obligations pre-pass (#1577) ─────────────────────────
+  // DETERMINISTIC: no model call, one bounded scan of the complete diff.
+  // Written BEFORE corpus build #1 so the section rides every corpus of the
+  // run (no rebuild trigger needed). Fail-soft: a scan failure writes an
+  // explicit error record the enforcement half reads as INCOMPLETE coverage
+  // — a scan that never completed must never read as "no risk obligations".
+  const riskObligationsEnabled = (env.RISK_OBLIGATIONS ?? "false").trim().toLowerCase() === "true";
+  ws.write("risk-obligations.md", new Uint8Array(0));
+  if (riskObligationsEnabled) {
+    const riskDiffFull = ws.readText("pr.diff");
+    const riskDiffSource: "full" | "truncated" | "none" = riskDiffFull !== null
+      ? "full"
+      : ws.readText("pr.diff.truncated") !== null
+      ? "truncated"
+      : "none";
+    const riskDiff = riskDiffFull ?? ws.readText("pr.diff.truncated") ?? "";
+    let riskRecord: Record<string, unknown>;
+    try {
+      const artifact = scanRiskObligations(riskDiff, riskDiffSource === "full");
+      const section = renderRiskSection(artifact, Number(env.RISK_OBLIGATIONS_SECTION_MAX_BYTES ?? "8000") || 8000);
+      riskRecord = {
+        version: 1,
+        status: artifact.obligations.length > 0 ? "ok" : "empty",
+        error_kind: null,
+        diff_source: riskDiffSource,
+        input_complete: riskDiffSource === "full",
+        method: artifact.method,
+        obligations: artifact.obligations,
+        truncated: artifact.truncated,
+        errors: artifact.errors,
+        section_bytes: Buffer.byteLength(section, "utf8"),
+      };
+      ws.write("risk-obligations.md", Buffer.from(section, "utf8"));
+    } catch (cause) {
+      log(`WARNING: risk-obligations scan failed; risk coverage marked incomplete: ${cause instanceof Error ? cause.message : String(cause)}`);
+      // The enforcement half withholds on the error record; the corpus must
+      // not silently read as "no risk obligations" (#1449 discipline).
+      ws.write("risk-obligations.md", Buffer.from(renderRiskUnavailable("internal"), "utf8"));
+      riskRecord = {
+        version: 1,
+        status: "error",
+        error_kind: "internal",
+        diff_source: riskDiffSource,
+        input_complete: false,
+        method: "none",
+        obligations: [],
+        truncated: false,
+        errors: ["scan-failed"],
+        section_bytes: 0,
+      };
+    }
+    ws.write("risk-obligations.json", Buffer.from(`${pyJsonDumps(riskRecord)}\n`, "utf8"));
+  }
 
   // Corpus build #1 (initial review owns the primary artifact slot).
   // #965: the first pass is always the primary profile — the smart tier is
@@ -2550,6 +2640,7 @@ async function runReviewStages(request: ReviewRequest, dependencies: ReviewDepen
     derivedObligationsEnabled,
     ciGateEvidence,
     completenessOptions.reviewedHeadSha,
+    riskObligationsEnabled,
   );
   enforcementInputs.reviewObligations = resolvedObligations.obligations;
   persistReviewObligations(ws, resolvedObligations.obligations, log);

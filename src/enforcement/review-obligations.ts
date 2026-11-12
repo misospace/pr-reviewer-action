@@ -38,6 +38,15 @@
  *   claim (#1447): it withholds the trusted approval at the publish boundary
  *   and marks the review partial, but it never manufactures a blocking
  *   request (see `isForcingObligation`).
+ * - `risk` — the risk-specific EVIDENCE obligations the deterministic scan
+ *   of `src/risk/classify.ts` raised because the changed code touches file
+ *   identity/path mode, bounded state/concurrency, persisted state, or a
+ *   credential/security boundary (#1577). Like the derived rows these carry
+ *   the flagged paths as `anchors` and are discharged only by a rationale
+ *   that names one of them AND states the risk-specific counterexample
+ *   considered; an undischarged risk row is coverage (approval withheld,
+ *   review partial), never a fabricated blocker, and a real counterexample
+ *   belongs in the ordinary findings.
  *
  * The deterministic layer enforces presence and shape only (matching the
  * #750 baseline): a disposition discharges an obligation when its identity
@@ -59,18 +68,19 @@ import { forceRequestChanges } from "./enforce.js";
 import { fenceDelimiterFor } from "../context/fence.js";
 import { anchorCoveredBy, namesPathLikeToken, rationaleAssertsFailure } from "./derived-obligations.js";
 
-export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "derived";
+export type ReviewObligationSource = "must_check" | "trusted_base_guidance" | "derived" | "risk";
 
 export interface ReviewObligation {
   id: string;
   source: ReviewObligationSource;
   text: string;
   status: "satisfied" | "unmet" | "unresolved";
-  cause: "tool-capability" | "budget-exhausted" | "provider-failure" | "missing-source-evidence" | "derivation-incomplete" | null;
+  cause: "tool-capability" | "budget-exhausted" | "provider-failure" | "missing-source-evidence" | "derivation-incomplete" | "scan-incomplete" | null;
   /** #1449: the derivation's declared locations for a `derived` row. A
    * derived obligation may only be discharged by a rationale that names one
    * of them — the evidence must reach the location the derivation flagged.
-   * Absent on every other source (their rows carry no location). */
+   * #1577: the `risk` source carries the scan's flagged paths the same way.
+   * Absent on the other sources (their rows carry no location). */
   anchors?: string[];
   /** #1594: deterministic CI-evidence provenance for a row the CI gate's
    * head-bound test-execution evidence discharged. Set only by
@@ -390,7 +400,8 @@ export function foldObligationDispositions(
         );
     // #1449: a row that already carries its own cause keeps it — the
     // synthetic derived coverage marker is born with `derivation-incomplete`
-    // and the fold must not erase it.
+    // and the fold must not erase it. #1577: same for the risk scan's
+    // `scan-incomplete` marker.
     const unresolvedCause = obligation.cause ?? null;
     if (pool.length === 0) return { ...obligation, status: "unresolved", cause: unresolvedCause };
     const idMatches = pool.filter((entry) => normalized(entry.check) === idAlias);
@@ -407,8 +418,9 @@ export function foldObligationDispositions(
     // disposition can argue away. The guard runs BEFORE the `unmet` branch
     // below, so no status can discharge the marker NOR re-label it (an
     // `unmet` answer would otherwise turn the coverage marker into a "the
-    // check failed" row and contradict the published prose).
-    if (obligation.source === "derived" && obligation.cause === "derivation-incomplete") {
+    // check failed" row and contradict the published prose). #1577: the
+    // risk scan's coverage marker behaves identically.
+    if (obligation.cause === "derivation-incomplete" || obligation.cause === "scan-incomplete") {
       return { ...obligation, status: "unresolved", cause: unresolvedCause };
     }
     // A confirmed negative (#1381): `unmet` with a usable rationale resolves
@@ -429,7 +441,10 @@ export function foldObligationDispositions(
     // so the negative answer needs no location to be truthful. There is no
     // "not applicable" state for a derived obligation (the derivation named
     // a concrete relationship to check), so anything else stays unresolved.
-    if (obligation.source === "derived") {
+    // #1577: the `risk` source shares these rules exactly — the scan flagged
+    // concrete changed paths, and a satisfied risk row is discharged only by
+    // evidence that names one of them.
+    if (obligation.source === "derived" || obligation.source === "risk") {
       if (status !== "satisfied") return { ...obligation, status: "unresolved", cause: unresolvedCause };
       if (rationale === "") return { ...obligation, status: "unresolved", cause: unresolvedCause };
       // #1449: a `satisfied` rationale that ASSERTS a failure ("the mint
@@ -507,6 +522,14 @@ function derivedObligationAttribution(ids: string[]): string {
   return `derived architectural obligation unresolved: ${ids.join(", ")} (derived obligation not discharged; #1449)`;
 }
 
+/** #1577: the risk rows get their own attribution: they are unresolved
+ * risk-evidence obligations — the risk-specific counterexample evidence the
+ * changed code requires was not discharged, so the review is partial and
+ * the trusted approval is withheld. Never a defect claim. */
+function riskObligationAttribution(ids: string[]): string {
+  return `risk evidence obligation unresolved: ${ids.join(", ")} (risk-specific counterexample evidence not discharged; review partial, trusted approval withheld; #1577)`;
+}
+
 /**
  * Does an undischarged row FORCE a verdict, or is it only COVERAGE?
  *
@@ -533,10 +556,13 @@ function derivedObligationAttribution(ids: string[]): string {
  * The `derived` source stays outside forcing entirely: an undischarged
  * derived row is missing COVERAGE, never a defect claim (#1449), and an
  * `unmet` derived row's counterexample belongs in the ordinary findings,
- * where the normal findings rules carry it.
+ * where the normal findings rules carry it. The `risk` source does too
+ * (#1577): a risk obligation never manufactures a blocking request — an
+ * unverified one withholds the trusted approval, and a real counterexample
+ * is reported as an ordinary evidence-backed finding.
  */
 export function isForcingObligation(obligation: ReviewObligation): boolean {
-  return obligation.source !== "derived" && obligation.status === "unmet";
+  return obligation.source !== "derived" && obligation.source !== "risk" && obligation.status === "unmet";
 }
 
 /**
@@ -601,11 +627,14 @@ export function applyReviewObligationEnforcement(
     return { applied: false, reason: "" };
   }
   const derived = unresolved.filter((obligation) => obligation.source === "derived");
+  // #1577: risk rows are coverage too — they keep their own disclosure
+  // section and never join the required-evidence or forcing groups.
+  const risk = unresolved.filter((obligation) => obligation.source === "risk");
   // #1505: status-based forcing. Only a confirmed negative (`unmet`) forces
   // a blocking request; an `unresolved` row is disclosed as coverage and
   // withholds the trusted approval at the publish boundary instead.
   const unmet = unresolved.filter((obligation) => isForcingObligation(obligation));
-  const ungathered = unresolved.filter((obligation) => obligation.source !== "derived" && obligation.status === "unresolved");
+  const ungathered = unresolved.filter((obligation) => obligation.source !== "derived" && obligation.source !== "risk" && obligation.status === "unresolved");
   // #1449: the reason is the BLOCKING reason, so it names the FORCING rows
   // only. A derived row or an unresolved required row is a coverage gap, not
   // a block: naming either here would tell the reader the PR was blocked by
@@ -691,6 +720,43 @@ export function applyReviewObligationEnforcement(
       + `${prose.join(" ")}\n${delimiter}text\n${rows}\n${delimiter}\n\n_${derivedObligationAttribution(ids)}._`,
     );
   }
+  if (risk.length > 0) {
+    // #1577: the risk rows disclose with the same coverage semantics: an
+    // `unresolved` row is the review not establishing the risk-specific
+    // counterexample evidence (no defect claimed, approval withheld, review
+    // partial); an `unmet` row means the reviewer FOUND the counterexample,
+    // which belongs in the ordinary findings, so the row alone must not
+    // read as "no defect is claimed".
+    const ids = risk.map((obligation) => obligation.id);
+    const rows = risk.map((obligation) =>
+      `- ${obligation.id} (${obligation.source}, ${obligation.status}${obligation.status === "unresolved" ? `, cause: ${obligation.cause ?? "unknown"}` : ""}): ${obligation.text}`,
+    ).join("\n");
+    const delimiter = fenceDelimiterFor(rows);
+    const unresolvedRisk = risk.filter((obligation) => obligation.status === "unresolved");
+    const unmetRisk = risk.filter((obligation) => obligation.status === "unmet");
+    const riskProse: string[] = [];
+    if (unresolvedRisk.length > 0) {
+      riskProse.push(
+        "Risk-evidence coverage is incomplete: one or more risk-specific evidence obligations "
+        + "raised by the changed code were not discharged with a counterexample considered against "
+        + "source or test evidence. No defect is claimed here (an unresolved risk obligation is a "
+        + "coverage marker, not a finding). The review is partial and trusted approval is withheld "
+        + "until the evidence is gathered.",
+      );
+    }
+    if (unmetRisk.length > 0) {
+      riskProse.push(
+        "The reviewer checked one or more risk obligations and the counterexample DID break the "
+        + "property. A counterexample belongs in the ordinary findings, where the normal findings "
+        + "rules carry it; this row records that the obligation was not discharged. Trusted "
+        + "approval is withheld.",
+      );
+    }
+    sections.push(
+      `\n\n## Unresolved Risk Evidence Obligations\n`
+      + `${riskProse.join(" ")}\n${delimiter}text\n${rows}\n${delimiter}\n\n_${riskObligationAttribution(ids)}._`,
+    );
+  }
   if (unmet.length === 0) {
     // #1449/#1505: COVERAGE ONLY — no confirmed negative is present, so
     // nothing here may manufacture a blocking request out of a coverage gap
@@ -728,10 +794,10 @@ export function reviewObligationsToArtifact(obligations: readonly ReviewObligati
 
 /** The closed vocabularies `reviewObligationsFromArtifact` validates rows
  * against — the exact value sets the `ReviewObligation` type declares. */
-const OBLIGATION_SOURCES: ReadonlySet<string> = new Set(["must_check", "trusted_base_guidance", "derived"]);
+const OBLIGATION_SOURCES: ReadonlySet<string> = new Set(["must_check", "trusted_base_guidance", "derived", "risk"]);
 const OBLIGATION_STATUSES: ReadonlySet<string> = new Set(["satisfied", "unmet", "unresolved"]);
 const OBLIGATION_CAUSES: ReadonlySet<string> = new Set([
-  "tool-capability", "budget-exhausted", "provider-failure", "missing-source-evidence", "derivation-incomplete",
+  "tool-capability", "budget-exhausted", "provider-failure", "missing-source-evidence", "derivation-incomplete", "scan-incomplete",
 ]);
 /** #1594: the head-SHA shape `reconcileObligationsWithCiEvidence` writes. */
 const CI_EVIDENCE_HEAD_SHA_RE = /^[0-9a-f]{7,64}$/i;
