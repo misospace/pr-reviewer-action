@@ -92,6 +92,11 @@ interface BuilderHarness {
   readonly builder: ReturnType<typeof createControllerRequestBuilder>;
   readonly closed: boolean[];
   readonly mirrorForCalls: ReviewJob[];
+  /** The acquisition-order record: "ensure" before every "create" is the
+   * #1484 parity regression guard — the workspace extraction reads the
+   * mirror (`git cat-file` in the mirror path), so a build that skips the
+   * mirror materialization spawns git into a path that does not exist. */
+  readonly acquisitionCalls: string[];
   readonly profileCalls: ReviewJob[];
   readonly credentialCalls: Array<{ job: ReviewJob; runId: string }>;
 }
@@ -107,13 +112,19 @@ function setup(overrides: {
 } = {}): BuilderHarness {
   const ws = fakeWorkspace();
   const mirrorForCalls: ReviewJob[] = [];
+  const acquisitionCalls: string[] = [];
   const profileCalls: ReviewJob[] = [];
   const credentialCalls: Array<{ job: ReviewJob; runId: string }> = [];
   const builder = createControllerRequestBuilder({
     runsRoot: overrides.runsRoot ?? "/srv/runs",
     mirrorFor: async (job) => {
       mirrorForCalls.push(job);
-      return {} as MirrorCache;
+      return {
+        ensureMirror: async () => {
+          acquisitionCalls.push("ensure");
+          return {} as never;
+        },
+      } as unknown as MirrorCache;
     },
     resolveProfiles: async (job) => {
       profileCalls.push(job);
@@ -138,12 +149,16 @@ function setup(overrides: {
           { name: "model", reference: "ref-model-1" },
         ] as readonly CredentialRef[]);
       }),
-    createWorkspace: async () => ws.handle,
+    createWorkspace: async () => {
+      acquisitionCalls.push("create");
+      return ws.handle;
+    },
   });
   return {
     builder,
     closed: ws.closed,
     mirrorForCalls,
+    acquisitionCalls,
     profileCalls,
     credentialCalls,
   };
@@ -190,6 +205,22 @@ test("build composes the execution request from the dispatched record", async ()
   assert.equal(request.resultPath, "/srv/runs/job-1/3/result.json");
   assert.equal(h.mirrorForCalls.length, 1);
   assert.equal(h.credentialCalls[0]!.runId, "job-1-a3");
+});
+
+test("the builder materializes the mirror before the workspace extraction (#1484)", async () => {
+  // The request builder is the ONLY caller of the acquisition stage in the
+  // dispatch path: the workspace extraction verifies the head commit inside
+  // the mirror (`git cat-file` against the mirror path) but never runs the
+  // mirror acquisition itself. A build that skips `ensureMirror` fails every
+  // first dispatch with `git cat-file: spawn_error` — the exact failure the
+  // first parity qualification run observed, invisible to fakes that
+  // overrode the workspace step.
+  const h = setup();
+  const job = makeJob("job-2");
+  await h.builder.build(makeRecord("job-2", 1));
+  assert.deepEqual(h.acquisitionCalls, ["ensure", "create"]);
+  await h.builder.build(makeRecord("job-3", 1));
+  assert.deepEqual(h.acquisitionCalls, ["ensure", "create", "ensure", "create"]);
 });
 
 test("workspace handles are registered per attempt and released idempotently", async () => {

@@ -446,7 +446,7 @@ async function bootWithAdmin(env: NodeJS.ProcessEnv, t: { after: (fn: () => Prom
     controlPlane: new InMemoryControlPlaneStore(),
     executors: { local: () => new FakeExecution() },
     forge: {
-      mirrorFor: async () => ({}) as MirrorCache,
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
       publish: async () => ({ publicationId: "github-comment:1" }),
     },
@@ -535,7 +535,7 @@ test("the dashboard flag without an admin listener boots and serves nothing", as
     controlPlane: new InMemoryControlPlaneStore(),
     executors: { local: () => new FakeExecution() },
     forge: {
-      mirrorFor: async () => ({}) as MirrorCache,
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
       publish: async () => ({ publicationId: "github-comment:1" }),
     },
@@ -843,7 +843,7 @@ test("a minimal composition starts, serves the webhook intake, and stops gracefu
     controlPlane,
     executors: { local: () => fake },
     forge: {
-      mirrorFor: async () => ({}) as MirrorCache,
+      mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
       currentHeadSha: async () => HEAD,
       publish: async (input) => {
         publishes.push({ job: input.job, resultPayload: input.resultPayload });
@@ -954,7 +954,7 @@ default-executor-profile: k8s`,
       controlPlane: new InMemoryControlPlaneStore(),
       executors: { local: () => new FakeExecution() },
       forge: {
-        mirrorFor: async () => ({}) as MirrorCache,
+        mirrorFor: async () => ({ ensureMirror: async () => undefined }) as unknown as MirrorCache,
         currentHeadSha: async () => HEAD,
         publish: async () => ({ publicationId: "x" }),
       },
